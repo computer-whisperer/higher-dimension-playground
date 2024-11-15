@@ -268,7 +268,7 @@ fn do_zw_raycast(v0: vec2<f32>, v1: vec2<f32>, i: u32) -> vec2<f32>
     //https://gamedev.stackexchange.com/questions/116422/best-way-to-find-line-segment-intersection
     let pi = 3.14159;
     let angle_ratio = ((f32(i)/f32(screen_dims.depth_factor)) - 0.5);
-    let theta = angle_ratio*(pi/8.0) + (pi/4.0);
+    let theta = angle_ratio*(pi/2.0) + (pi/4.0);
     //let theta = angle_ratio*(pi/2.0) + (pi/4.0);
     //let theta = pi/4.0;
     let sample_ray_y = sin(theta);

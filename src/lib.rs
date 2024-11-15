@@ -82,9 +82,9 @@ pub fn create_depth_buffer(device: &wgpu::Device, width: u32, height: u32, depth
     })
 }
 
-const MAX_RENDER_WIDTH : u32 = 1920/2;
-const MAX_RENDER_HEIGHT : u32 = 1080/2;
-const DEPTH_FACTOR: u32 = 64;
+const MAX_RENDER_WIDTH : u32 = 1920/4;
+const MAX_RENDER_HEIGHT : u32 = 1080/4;
+const DEPTH_FACTOR: u32 = 128;
 
 async fn arun() {
 
@@ -282,9 +282,10 @@ async fn arun() {
                 let model_angle = time_elapsed/2.0;
 
                 let model_scale = 2.0;
-                //let model_transform = matrix_multiply(rotation_matrix_4d_rotate_0(model_angle), scale_matrix_4d(model_scale));
-                let model_transform = matrix_multiply(rotation_matrix_4d_rotate_1(model_angle), scale_matrix_4d(model_scale));
-                //let model_transform = scale_matrix_4d(model_scale);
+                let model_transform = scale_matrix_4d(model_scale);
+                let model_transform = matrix_multiply(rotation_matrix_4d_rotate_0(model_angle), model_transform);
+                let model_transform = matrix_multiply(rotation_matrix_4d_rotate_3(model_angle), model_transform);
+                let model_transform = matrix_multiply(rotation_matrix_4d_rotate_4(model_angle), model_transform);
 
                 let view_transform =  translate_matrix_4d(0.0, -4.0, 13.0, 14.0);
 
