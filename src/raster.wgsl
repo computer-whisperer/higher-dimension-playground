@@ -247,13 +247,13 @@ fn draw_triangle(v1: vec2<f32>, v2: vec2<f32>, v3: vec2<f32>) {
 fn sample_texture(texture_id: u32, texture_pos: vec3<f32>) -> vec3<f32> {
     let color_array = array<vec3<f32>, 8>(
         vec3<f32>(1.0, 0.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 0.0, 1.0),
-        vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0)
+        vec3<f32>(1.0, 0.8, 0.0),
+        vec3<f32>(0.5, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.2),
+        vec3<f32>(0.0, 1.0, 1.0),
+        vec3<f32>(0.0, 0.2, 1.0),
+        vec3<f32>(0.5, 0.0, 1.0),
+        vec3<f32>(1.0, 0.0, 0.8)
     );
     return color_array[texture_id%8];
 }
@@ -292,7 +292,7 @@ fn depth_zw_line(vs: vec2<i32>, v0: vec4<f32>, v1: vec4<f32>){
 }
 
 fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture_id: u32){
-
+/*
     if (false)
     {
         // Wrong, but simple
@@ -304,7 +304,7 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
             color_pixel(u32(vs.x), u32(vs.y), u32(color.r*256.0), u32(color.g*256.0), u32(color.b*256.0));
         }
     }
-    else if (true){
+    else if (false){
         // 4-d appropriate volumetric shading
         var occlusion_numerator = 0.0;
         var occlusion_denominator = 0.1;
@@ -333,7 +333,7 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
             atomicAdd(&color_buffer.values[pixelID + 2u], u32(color.b*256.0*intensity));
         }
     }
-    else {
+    else {*/
         // 4-d appropriate volumetric shading
         let color = sample_texture(texture_id, v0.texture_pos);
         var color_added = vec3<f32>(0.0, 0.0, 0.0);
@@ -352,11 +352,11 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
         atomicAdd(&color_buffer.values[pixelID + 0u], u32(color_added.r*256.0));
         atomicAdd(&color_buffer.values[pixelID + 1u], u32(color_added.g*256.0));
         atomicAdd(&color_buffer.values[pixelID + 2u], u32(color_added.b*256.0));
-    }
+   // }
 }
 
-const SLICE_COUNT_X: u32 = 64u;
-const SLICE_COUNT_Y: u32 = 1u;
+const SLICE_COUNT_X: u32 = 16u;
+const SLICE_COUNT_Y: u32 = 16u;
 const SLICE_COUNT_TOTAL: u32 = SLICE_COUNT_X*SLICE_COUNT_Y;
 
 @compute @workgroup_size(256, 1)
@@ -501,6 +501,16 @@ fn raster_pixel_shader(@builtin(global_invocation_id) global_id: vec3<u32>){
     let v1_s = FragmentVertex(transform_to_screen_coords_4(v1.pos), v1.texture_pos);
     let v2_s = FragmentVertex(transform_to_screen_coords_4(v2.pos), v2.texture_pos);
     let v3_s = FragmentVertex(transform_to_screen_coords_4(v3.pos), v3.texture_pos);
+
+    if (true)
+    {
+        draw_line(v0.pos.xy, v1.pos.xy, color);
+        draw_line(v0.pos.xy, v2.pos.xy, color);
+        draw_line(v0.pos.xy, v3.pos.xy, color);
+        draw_line(v1.pos.xy, v2.pos.xy, color);
+        draw_line(v1.pos.xy, v3.pos.xy, color);
+        draw_line(v2.pos.xy, v3.pos.xy, color);
+    }
 
     let min_xy = vec2<i32>(
         i32(min(min(min(v0_s.pos.x, v1_s.pos.x), v2_s.pos.x), v3_s.pos.x)),
