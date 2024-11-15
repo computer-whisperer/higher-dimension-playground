@@ -268,7 +268,7 @@ fn do_zw_raycast(v0: vec2<f32>, v1: vec2<f32>, i: u32) -> vec2<f32>
     //https://gamedev.stackexchange.com/questions/116422/best-way-to-find-line-segment-intersection
     let pi = 3.14159;
     let angle_ratio = ((f32(i)/f32(screen_dims.depth_factor)) - 0.5);
-    let theta = angle_ratio*(pi/6.0) + (pi/4.0);
+    let theta = angle_ratio*(pi/8.0) + (pi/4.0);
     //let theta = angle_ratio*(pi/2.0) + (pi/4.0);
     //let theta = pi/4.0;
     let sample_ray_y = sin(theta);
@@ -278,12 +278,14 @@ fn do_zw_raycast(v0: vec2<f32>, v1: vec2<f32>, i: u32) -> vec2<f32>
     return vec2<f32>(r, s);
 }
 
+const DEPTH_DIVISOR : f32 = 1000.0;
+
 fn depth_zw_line(vs: vec2<i32>, v0: vec4<f32>, v1: vec4<f32>){
     for (var i = 0u; i < screen_dims.depth_factor; i += 1u) {
         let res = do_zw_raycast(v0.zw, v1.zw, i);
-        if (res.y > 0 && res.y < 1) {
+        if (res.y >= 0 && res.y <= 1) {
             let depth_index = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * screen_dims.depth_factor + i;
-            let depth_value = u32(res.x*10000.0);
+            let depth_value = u32(res.x*DEPTH_DIVISOR);
             atomicMin(&depth_buffer[depth_index], depth_value);
         }
     }
@@ -302,7 +304,7 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
             color_pixel(u32(vs.x), u32(vs.y), u32(color.r*256.0), u32(color.g*256.0), u32(color.b*256.0));
         }
     }
-    else {
+    else if (false){
         // 4-d appropriate volumetric shading
         var occlusion_numerator = 0.0;
         var occlusion_denominator = 0.1;
@@ -311,18 +313,18 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
             let res = do_zw_raycast(v0.pos.zw, v1.pos.zw, i);
             if (res.y > 0 && res.y < 1) {
                 let depth_index = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * screen_dims.depth_factor + i;
-                let depth_value = u32(res.x*10000.0);
-                if depth_value > depth_buffer[depth_index] + 10u {
+                let depth_value = u32(res.x*DEPTH_DIVISOR);
+                if depth_value == depth_buffer[depth_index] {
                     occlusion_numerator += 1.0;
                 }
                 occlusion_denominator += 1.0;
             }
         }
         let occlusion_ratio = occlusion_numerator/occlusion_denominator;
-        if occlusion_ratio < 0.9 && occlusion_denominator >= 1.0 {
+        if occlusion_ratio < 0.5 && occlusion_denominator >= 1.0 {
             let delta = v0.pos.zw - v1.pos.zw;
             let dist = sqrt(delta.x*delta.x + delta.y*delta.y);
-            let intensity = 1.0;
+            let intensity = dist*0.5;
             //let dist=1.0;
             let pixelID = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * 3u;
 
@@ -331,9 +333,29 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
             atomicAdd(&color_buffer.values[pixelID + 2u], u32(color.b*256.0*intensity));
         }
     }
+    else {
+        // 4-d appropriate volumetric shading
+        let color = sample_texture(texture_id, v0.texture_pos);
+        var color_added = vec3<f32>(0.0, 0.0, 0.0);
+        for (var i = 0u; i < screen_dims.depth_factor; i += 1u) {
+            let res = do_zw_raycast(v0.pos.zw, v1.pos.zw, i);
+            if (res.y > 0 && res.y < 1) {
+                let depth_index = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * screen_dims.depth_factor + i;
+                let depth_value = u32(res.x*DEPTH_DIVISOR);
+                if depth_value == depth_buffer[depth_index] {
+                    let intensity = 1.0;
+                    color_added = color_added + color*intensity/f32(screen_dims.depth_factor);
+                }
+            }
+        }
+        let pixelID = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * 3u;
+        atomicAdd(&color_buffer.values[pixelID + 0u], u32(color_added.r*256.0));
+        atomicAdd(&color_buffer.values[pixelID + 1u], u32(color_added.g*256.0));
+        atomicAdd(&color_buffer.values[pixelID + 2u], u32(color_added.b*256.0));
+    }
 }
 
-const SLICE_COUNT_X: u32 = 256u;
+const SLICE_COUNT_X: u32 = 64u;
 const SLICE_COUNT_Y: u32 = 1u;
 const SLICE_COUNT_TOTAL: u32 = SLICE_COUNT_X*SLICE_COUNT_Y;
 
@@ -605,6 +627,6 @@ fn clear(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     for (var i: u32 = 0u; i <= screen_dims.depth_factor; i = i + 1u)
     {
-        atomicStore(&depth_buffer[index*screen_dims.depth_factor + i], 0xFFFFFFFFu);
+        atomicStore(&depth_buffer[global_id.x*screen_dims.depth_factor + i], 0xFFFFFFFFu);
     }
 }

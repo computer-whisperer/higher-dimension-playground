@@ -82,18 +82,9 @@ pub fn create_depth_buffer(device: &wgpu::Device, width: u32, height: u32, depth
     })
 }
 
-
-pub(crate) const WORKGROUP_SIZE: u32 = 256;
-pub(crate) const fn dispatch_size(len: u32) -> u32 {
-    let subgroup_size = WORKGROUP_SIZE;
-    let padded_size = (subgroup_size - len % subgroup_size) % subgroup_size;
-    (len + padded_size) / subgroup_size
-}
-
-
-const MAX_RENDER_WIDTH : u32 = 1920;
-const MAX_RENDER_HEIGHT : u32 = 1080;
-const DEPTH_FACTOR: u32 = 32;
+const MAX_RENDER_WIDTH : u32 = 1920/2;
+const MAX_RENDER_HEIGHT : u32 = 1080/2;
+const DEPTH_FACTOR: u32 = 64;
 
 async fn arun() {
 
