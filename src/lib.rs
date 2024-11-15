@@ -287,7 +287,7 @@ async fn arun() {
                 let model_transform = matrix_multiply(rotation_matrix_4d_rotate_3(model_angle), model_transform);
                 let model_transform = matrix_multiply(rotation_matrix_4d_rotate_4(model_angle), model_transform);
 
-                let view_transform =  translate_matrix_4d(0.0, 0.0, 10.0, 10.0);
+                let view_transform =  translate_matrix_4d(5.0, 6.0, 15.0, 15.0);
 
                 queue.write_buffer(&camera_uniform_buffer, 0, bytemuck::cast_slice(&[CameraUniformBufferInput {
                     view_transform: flatten_5x5_matrix_for_wgpu(view_transform),

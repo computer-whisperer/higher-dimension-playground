@@ -245,7 +245,7 @@ fn draw_triangle(v1: vec2<f32>, v2: vec2<f32>, v3: vec2<f32>) {
 */
 
 fn sample_texture(texture_id: u32, texture_pos: vec3<f32>) -> vec3<f32> {
-    let color_array = array<vec3<f32>, 8>(
+    let color_array = array<vec3<f32>, 9>(
         vec3<f32>(1.0, 0.0, 0.0),
         vec3<f32>(1.0, 0.8, 0.0),
         vec3<f32>(0.5, 1.0, 0.0),
@@ -253,9 +253,10 @@ fn sample_texture(texture_id: u32, texture_pos: vec3<f32>) -> vec3<f32> {
         vec3<f32>(0.0, 1.0, 1.0),
         vec3<f32>(0.0, 0.2, 1.0),
         vec3<f32>(0.5, 0.0, 1.0),
-        vec3<f32>(1.0, 0.0, 0.8)
+        vec3<f32>(1.0, 0.0, 0.8),
+        texture_pos
     );
-    return color_array[texture_id%8];
+    return color_array[texture_id%9];
 }
 
 struct FragmentVertex {
@@ -335,7 +336,6 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
     }
     else {*/
         // 4-d appropriate volumetric shading
-        let color = sample_texture(texture_id, v0.texture_pos);
         var color_added = vec3<f32>(0.0, 0.0, 0.0);
         for (var i = 0u; i < screen_dims.depth_factor; i += 1u) {
             let res = do_zw_raycast(v0.pos.zw, v1.pos.zw, i);
@@ -344,6 +344,8 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
                 let depth_value = u32(res.x*DEPTH_DIVISOR);
                 if depth_value == depth_buffer[depth_index] {
                     let intensity = 1.0;
+                    let texture_pos = v0.texture_pos*(1.0 - res.y) + v1.texture_pos*res.y;
+                    let color = sample_texture(texture_id, texture_pos);
                     color_added = color_added + color*intensity/f32(screen_dims.depth_factor);
                 }
             }
@@ -392,7 +394,17 @@ fn raster_vertex_shader(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let cell = vertex_input_buffer.values[index].cell;
 
     // For now:
-    let texture_id = cell;
+    let texture_id_array = array<u32, 8>(
+        0,
+        8,
+        8,
+        0,
+        0,
+        0,
+        0,
+        0,
+    );
+    let texture_id = texture_id_array[cell];
 
     vertex_output_buffer.values[index] = VertexOutput(
                                           clip_position,
@@ -502,7 +514,7 @@ fn raster_pixel_shader(@builtin(global_invocation_id) global_id: vec3<u32>){
     let v2_s = FragmentVertex(transform_to_screen_coords_4(v2.pos), v2.texture_pos);
     let v3_s = FragmentVertex(transform_to_screen_coords_4(v3.pos), v3.texture_pos);
 
-    if (true)
+    if (false)
     {
         draw_line(v0.pos.xy, v1.pos.xy, color);
         draw_line(v0.pos.xy, v2.pos.xy, color);
