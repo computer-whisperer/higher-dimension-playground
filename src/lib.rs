@@ -6,11 +6,8 @@ mod tesseract;
 #[cfg(target_arch="wasm32")]
 use wasm_bindgen::prelude::*;
 
-
-use std::borrow::Cow;
-use web_time::{Instant, SystemTime};
+use web_time::{Instant};
 use bytemuck::{Pod, Zeroable};
-use wgpu::Face;
 use wgpu::util::DeviceExt;
 use winit::{
     event::{Event, WindowEvent},
@@ -20,7 +17,7 @@ use winit::{
 use winit::window::WindowBuilder;
 use crate::present_pass::{PresentBindings, PresentPass};
 use crate::matrix_operations::*;
-use crate::raster_pass::{ClearPass, RasterBindings, RasterPass};
+use crate::raster_pass::{RasterBindings, RasterPipelines};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -40,31 +37,10 @@ struct CameraUniformBufferInput {
 pub struct ScreenUniformBufferInput {
     screen_width: f32,
     screen_height: f32,
+    render_width: f32,
+    render_height: f32,
+    depth_factor: u32
 }
-
-/*
-// Cube
-const MODEL_COLOR: [f32; 3] = [0.0, 0.0, 1.0];
-const VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0, -1.0, -1.0], color: MODEL_COLOR },
-    Vertex { position: [1.0, -1.0, -1.0], color: MODEL_COLOR },
-    Vertex { position: [1.0, 1.0, -1.0], color: MODEL_COLOR },
-    Vertex { position: [-1.0, 1.0, -1.0], color: MODEL_COLOR },
-    Vertex { position: [-1.0, -1.0, 1.0], color: MODEL_COLOR },
-    Vertex { position: [1.0, -1.0, 1.0], color: MODEL_COLOR },
-    Vertex { position: [1.0, 1.0, 1.0], color: MODEL_COLOR },
-    Vertex { position: [-1.0, 1.0, 1.0], color: MODEL_COLOR },
-];
-
-const INDICES: &[u16] = &[
-    0, 1, 3, 3, 1, 2,
-    1, 5, 2, 2, 5, 6,
-    5, 4, 6, 6, 4, 7,
-    4, 0, 7, 7, 0, 3,
-    3, 2, 7, 7, 2, 6,
-    4, 5, 0, 0, 5, 1
-];
-*/
 
 
 const MODEL_COLOR: [f32; 3] = [0.0, 0.0, 1.0];
@@ -92,6 +68,20 @@ pub fn create_color_buffer(device: &wgpu::Device, width: u32, height: u32) -> wg
     })
 }
 
+pub fn create_depth_buffer(device: &wgpu::Device, width: u32, height: u32, depth_factor: u32) -> wgpu::Buffer {
+
+    let pixel_size :u64 = 4*(depth_factor as u64);
+    //let pixel_size :u64 = 1;
+    let size = pixel_size * width as u64 * height as u64;
+
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Depth Buffer"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    })
+}
+
 
 pub(crate) const WORKGROUP_SIZE: u32 = 256;
 pub(crate) const fn dispatch_size(len: u32) -> u32 {
@@ -100,6 +90,10 @@ pub(crate) const fn dispatch_size(len: u32) -> u32 {
     (len + padded_size) / subgroup_size
 }
 
+
+const MAX_RENDER_WIDTH : u32 = 1920;
+const MAX_RENDER_HEIGHT : u32 = 1080;
+const DEPTH_FACTOR: u32 = 32;
 
 async fn arun() {
 
@@ -141,7 +135,7 @@ async fn arun() {
     let surface = instance.create_surface(&window).unwrap();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
+            power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             // Request an adapter which can render to our surface
             compatible_surface: Some(&surface),
@@ -153,14 +147,17 @@ async fn arun() {
     let mut required_limits = wgpu::Limits::downlevel_defaults();
     required_limits.max_texture_dimension_1d = 4096;
     required_limits.max_texture_dimension_2d = 4096;
-    /*
-    required_limits.max_storage_buffers_per_shader_stage = 1;
-    required_limits.max_storage_buffer_binding_size = 0x40000000;
-    required_limits.max_compute_workgroup_size_x = 256;
+    required_limits.max_bind_groups = 8;
+    required_limits.max_buffer_size = 1024*1024*1024;
+    required_limits.max_storage_buffer_binding_size = 1024*1024*1024;
+
+    //required_limits.max_storage_buffers_per_shader_stage = 2;
+    //required_limits.max_storage_buffer_binding_size = 0x40000000;
+    required_limits.max_compute_workgroup_size_x = 1024;
     required_limits.max_compute_workgroup_size_y = 1;
     required_limits.max_compute_workgroup_size_z = 1;
-    required_limits.max_compute_invocations_per_workgroup = 256;
-    required_limits.max_compute_workgroups_per_dimension = 2048;*/
+    required_limits.max_compute_invocations_per_workgroup = 1024;
+    //required_limits.max_compute_workgroups_per_dimension = 2048;
 
     // Create the logical device and command queue
     let (device, queue) = adapter
@@ -179,10 +176,17 @@ async fn arun() {
     let model_vertex_buffer = device.create_buffer_init(
         &wgpu::util::BufferInitDescriptor {
             label: Some("Model Vertex Buffer"),
-            contents: bytemuck::cast_slice(&tesseract::VERTICES),
+            contents: bytemuck::cast_slice(&tesseract::TET_VERTICES),
             usage: wgpu::BufferUsages::STORAGE,
         }
     );
+
+    let vertex_output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Vertex Output Buffer"),
+        size: (tesseract::TET_VERTICES.len()*32) as u64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
 
     let screen_uniform_buffer = device.create_buffer_init(
         &wgpu::util::BufferInitDescriptor {
@@ -190,6 +194,9 @@ async fn arun() {
             contents: bytemuck::cast_slice(&[ScreenUniformBufferInput {
                 screen_width: 1024.0,
                 screen_height: 1024.0,
+                render_width: 1024.0,
+                render_height: 1024.0,
+                depth_factor: DEPTH_FACTOR
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -204,7 +211,11 @@ async fn arun() {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-    let mut color_buffer = create_color_buffer(&device, 1024, 1024);
+    let mut render_width: u32 = 1920;
+    let mut render_height: u32 = 1080;
+
+    let mut depth_buffer = create_depth_buffer(&device, render_width, render_height, DEPTH_FACTOR);
+    let mut color_buffer = create_color_buffer(&device, render_width, render_height);
 
     let swapchain_capabilities = surface.get_capabilities(&adapter);
     let swapchain_format = swapchain_capabilities.formats[0];
@@ -212,10 +223,11 @@ async fn arun() {
     let present_pass = PresentPass::new(&device, swapchain_format);
     let mut present_bindings = PresentBindings::new(&device, &present_pass, &color_buffer, &screen_uniform_buffer);
 
-    let raster_pass = RasterPass::new(&device);
-    let mut raster_bindings = RasterBindings::new(&device, &raster_pass, &color_buffer, &model_vertex_buffer, &screen_uniform_buffer, &camera_uniform_buffer);
-
-    let clear_pass = ClearPass::new(&device);
+    let raster_pipelines = RasterPipelines::new(&device);
+    let mut raster_bindings = RasterBindings::new(
+        &device, &raster_pipelines, &color_buffer,
+        &model_vertex_buffer, &vertex_output_buffer, &screen_uniform_buffer,
+        &camera_uniform_buffer, &depth_buffer);
 
     let mut config = surface
         .get_default_config(&adapter, size.width, size.height)
@@ -235,6 +247,66 @@ async fn arun() {
             // the resources are properly cleaned up.
             let _ = (&instance, &adapter, &present_pass, &present_bindings);
 
+            if let Event::AboutToWait = event {
+                let frame = surface
+                    .get_current_texture()
+                    .expect("Failed to acquire next swap chain texture");
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: None,
+                });
+                {
+                    {
+                        let mut cpass =
+                            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: None,
+                                timestamp_writes: None,
+                            });
+                        raster_pipelines.record(&mut cpass, &raster_bindings, render_width, render_height, tesseract::TET_VERTICES.len());
+                    }
+                    {
+                        let mut rpass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: None,
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                        present_pass.record(&mut rpass, &present_bindings);
+                    }
+                }
+
+                let time_elapsed = start_time.elapsed().as_secs_f32();
+                let model_angle = time_elapsed/2.0;
+
+                let model_scale = 2.0;
+                //let model_transform = matrix_multiply(rotation_matrix_4d_rotate_0(model_angle), scale_matrix_4d(model_scale));
+                let model_transform = matrix_multiply(rotation_matrix_4d_rotate_1(model_angle), scale_matrix_4d(model_scale));
+                //let model_transform = scale_matrix_4d(model_scale);
+
+                let view_transform =  translate_matrix_4d(0.0, -4.0, 13.0, 14.0);
+
+                queue.write_buffer(&camera_uniform_buffer, 0, bytemuck::cast_slice(&[CameraUniformBufferInput {
+                    view_transform: flatten_5x5_matrix_for_wgpu(view_transform),
+                    model_transform: flatten_5x5_matrix_for_wgpu(model_transform),
+                }]));
+                queue.submit(Some(encoder.finish()));
+                frame.present();
+
+                window.request_redraw();
+            };
+
             if let Event::WindowEvent {
                 window_id: _,
                 event,
@@ -245,15 +317,27 @@ async fn arun() {
                         // Reconfigure the surface with the new size
                         config.width = new_size.width.max(1);
                         config.height = new_size.height.max(1);
+                        render_width = config.width.min(MAX_RENDER_WIDTH);
+                        render_height = config.height.min(MAX_RENDER_HEIGHT);
+
                         surface.configure(&device, &config);
                         queue.write_buffer(&screen_uniform_buffer, 0, bytemuck::cast_slice(&[ScreenUniformBufferInput {
                             screen_width: config.width as f32,
                             screen_height: config.height as f32,
+                            render_width: render_width as f32,
+                            render_height: render_height as f32,
+                            depth_factor: DEPTH_FACTOR
                         }]));
                         color_buffer = create_color_buffer(
                             &device,
-                            config.width,
-                            config.height
+                            render_width,
+                            render_height
+                        );
+                        depth_buffer = create_depth_buffer(
+                            &device,
+                            render_width,
+                            render_height,
+                            DEPTH_FACTOR
                         );
                         present_bindings.update_color_buffer(
                             &device,
@@ -262,80 +346,18 @@ async fn arun() {
                         );
                         raster_bindings.update_color_buffer(
                             &device,
-                            &raster_pass,
+                            &raster_pipelines,
                             &color_buffer
+                        );
+                        raster_bindings.update_depth_buffer(
+                            &device,
+                            &raster_pipelines,
+                            &depth_buffer
                         );
                         // On macos the window needs to be redrawn manually after resizing
                         window.request_redraw();
                     }
-                    WindowEvent::RedrawRequested => {
-                        let frame = surface
-                            .get_current_texture()
-                            .expect("Failed to acquire next swap chain texture");
-                        let view = frame
-                            .texture
-                            .create_view(&wgpu::TextureViewDescriptor::default());
-                        let mut encoder =
-                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: None,
-                            });
-                        {
-                            {
-                                let mut cpass =
-                                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                        label: None,
-                                        timestamp_writes: None,
-                                    });
-                                clear_pass.record(&mut cpass, &raster_bindings, dispatch_size(config.width * config.height));
-                                raster_pass.record(&mut cpass, &raster_bindings, dispatch_size((tesseract::VERTICES.len() as u32)/3));
-                            }
-                            {
-                                let mut rpass =
-                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: None,
-                                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                            view: &view,
-                                            resolve_target: None,
-                                            ops: wgpu::Operations {
-                                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                                store: wgpu::StoreOp::Store,
-                                            },
-                                        })],
-                                        depth_stencil_attachment: None,
-                                        timestamp_writes: None,
-                                        occlusion_query_set: None,
-                                    });
-                                present_pass.record(&mut rpass, &present_bindings);
-                            }
-
-
-                            /*
-                            rpass.set_pipeline(&render_pipeline);
-                            rpass.set_vertex_buffer(0, model_vertex_buffer.slice(..));
-                            rpass.set_index_buffer(model_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                            rpass.set_bind_group(0, &uniform_buffer_bind_group, &[]);
-                            rpass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);*/
-                        }
-
-                        let time_elapsed = start_time.elapsed().as_secs_f32();
-                        let model_angle = time_elapsed/2.0;
-
-                        let model_scale = 2.0;
-                        let model_transform = matrix_multiply(rotation_matrix_4d_rotate_3(model_angle), scale_matrix_4d(model_scale));
-                        //let model_transform = matrix_multiply(rotation_matrix_4d_rotate_1(0.3), scale_matrix_4d(model_scale));
-                        //let model_transform = scale_matrix_4d(model_scale);
-
-                        let view_transform =  translate_matrix_4d(0.0, -3.0, 7.0, 7.0);
-
-                        queue.write_buffer(&camera_uniform_buffer, 0, bytemuck::cast_slice(&[CameraUniformBufferInput {
-                            view_transform: flatten_5x5_matrix_for_wgpu(view_transform),
-                            model_transform: flatten_5x5_matrix_for_wgpu(model_transform),
-                        }]));
-                        queue.submit(Some(encoder.finish()));
-                        frame.present();
-
-                        window.request_redraw();
-                    }
+                    WindowEvent::RedrawRequested => {},
                     WindowEvent::CloseRequested => target.exit(),
                     _ => {}
                 };

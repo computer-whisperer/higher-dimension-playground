@@ -2,15 +2,33 @@ struct ColorBuffer {
   values: array<atomic<u32>>,
 }
 
-struct VertexBuffer {
-  values: array<vec4<f32>>,
+struct VertexInput {
+    pos: vec4<f32>,
+    tex_pos: vec3<f32>,
+    cell: u32
+}
+
+struct VertexInputBuffer {
+  values: array<VertexInput>,
+}
+
+struct VertexOutput {
+    pos: vec4<f32>,
+    tex_pos: vec3<f32>,
+    tex_id: u32
+}
+
+struct VertexOutputBuffer {
+  values: array<VertexOutput>,
 }
 
 struct ScreenUniform {
-  width: f32,
-  height: f32,
+    window_width: f32,
+    window_height: f32,
+    render_width: f32,
+    render_height: f32,
+    depth_factor: u32
 }
-
 
 struct Camera {
     view_transform: array<vec4<f32>, 8>,
@@ -18,9 +36,11 @@ struct Camera {
 }
 
 @group(0) @binding(0) var<storage, read_write> color_buffer : ColorBuffer;
-@group(1) @binding(0) var<storage, read> vertex_buffer : VertexBuffer;
-@group(2) @binding(0) var<uniform> screen_dims : ScreenUniform;
-@group(3) @binding(0) var<uniform> camera : Camera;
+@group(1) @binding(0) var<storage, read_write> depth_buffer : array<atomic<u32>>;
+@group(2) @binding(0) var<storage, read> vertex_input_buffer : VertexInputBuffer;
+@group(3) @binding(0) var<uniform> screen_dims : ScreenUniform;
+@group(4) @binding(0) var<uniform> camera : Camera;
+@group(5) @binding(0) var<storage, read_write> vertex_output_buffer : VertexOutputBuffer;
 
 
 struct Mat5x5 {
@@ -136,74 +156,67 @@ fn mat5x5_unpack(arr: array<vec4<f32>, 8>) -> Mat5x5 {
     return m;
 }
 
-
-fn project(v: vec4<f32>) -> vec2<f32> {
-
-    var model_vertex_position = array<f32, 5>(v.x, v.y, v.z, v.w, 1.0);
-
-    var view_transform = mat5x5_unpack(camera.view_transform);
-    var model_transform = mat5x5_unpack(camera.model_transform);
-
-    var pre_camera_transform = mat5x5_mul_vec5(model_transform, model_vertex_position);
-
-    var view_vector = mat5x5_mul_vec5(view_transform, pre_camera_transform);
-
-    // Perspective scaling
-    let focal_length = 1.0;
-    let near = 0.1;
-    let far = 100.0;
-    let projected_distance = sqrt(view_vector[2]*view_vector[2] + view_vector[3]*view_vector[3]);
-
-    var clip_position = vec2<f32>(
-        view_vector[0] / projected_distance/focal_length,
-        -view_vector[1] / projected_distance/focal_length
-    );
-
-    clip_position[0] = ((clip_position[0] + 1)/2)*screen_dims.width;
-    clip_position[1] = ((clip_position[1] + 1)/2)*screen_dims.height;
-
-    return clip_position.xy;
-}
-
 fn color_pixel(x: u32, y: u32, r: u32, g: u32, b: u32) {
-  let pixelID = u32(x + y * u32(screen_dims.width)) * 3u;
+  let pixelID = u32(x + y * u32(screen_dims.render_width)) * 3u;
 
   atomicMax(&color_buffer.values[pixelID + 0u], r);
   atomicMax(&color_buffer.values[pixelID + 1u], g);
   atomicMax(&color_buffer.values[pixelID + 2u], b);
 }
 
-fn draw_line(v1: vec2<f32>, v2: vec2<f32>, r: u32, g: u32, b: u32) {
-  let dist = i32(distance(v1.xy, v2.xy));
-  for (var i = 0; i < dist; i = i + 1) {
-    let x = v1.x + (v2.x - v1.x) * (f32(i) / f32(dist));
-    let y = v1.y + (v2.y - v1.y) * (f32(i) / f32(dist));
-    // color_pixel(u32(x), u32(y), vec3<f32>(1.0, 1.0, 1.0));
-    color_pixel(u32(x), u32(y), r, g, b);
-  }
+fn transform_to_screen_coords(v: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(
+        ((v[0] + 1)/2)*screen_dims.render_width,
+        ((v[1] + 1)/2)*screen_dims.render_height
+    );
+};
+
+fn transform_to_screen_coords_4(v: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(
+        ((v[0] + 1)/2)*screen_dims.render_width,
+        ((v[1] + 1)/2)*screen_dims.render_height,
+        v[2],
+        v[3]
+    );
+};
+
+fn draw_line(v1: vec2<f32>, v2: vec2<f32>, color: vec3<f32>) {
+    let v1_s = transform_to_screen_coords(v1);
+    let v2_s = transform_to_screen_coords(v2);
+    let dist = i32(distance(v1_s.xy, v2_s.xy));
+    for (var i = 0; i < dist; i = i + 1) {
+        let x = v1_s.x + (v2_s.x - v1_s.x) * (f32(i) / f32(dist));
+        let y = v1_s.y + (v2_s.y - v1_s.y) * (f32(i) / f32(dist));
+        // color_pixel(u32(x), u32(y), vec3<f32>(1.0, 1.0, 1.0));
+        if (x > 0 && x < screen_dims.render_width && y > 0 && y < screen_dims.render_height)
+        {
+            color_pixel(u32(x), u32(y), u32(color.r*256.0), u32(color.g*256.0), u32(color.b*256.0));
+        }
+    }
 }
 
 // From: https://github.com/ssloy/tinyrenderer/wiki/Lesson-2:-Triangle-rasterization-and-back-face-culling
-fn barycentric(v1: vec3<f32>, v2: vec3<f32>, v3: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
-  let u = cross(vec3<f32>(v3.x - v1.x, v2.x - v1.x, v1.x - p.x),
+fn barycentric(v1: vec2<f32>, v2: vec2<f32>, v3: vec2<f32>, p: vec2<f32>) -> vec3<f32> {
+    let u = cross(vec3<f32>(v3.x - v1.x, v2.x - v1.x, v1.x - p.x),
                 vec3<f32>(v3.y - v1.y, v2.y - v1.y, v1.y - p.y));
 
-  if (abs(u.z) < 1.0) {
-    return vec3<f32>(-1.0, 1.0, 1.0);
-  }
+    if (abs(u.z) < 1.0) {
+        return vec3<f32>(-1.0, 1.0, 1.0);
+    }
 
-  return vec3<f32>(1.0 - (u.x + u.y) / u.z, u.y / u.z, u.x / u.z);
+    return vec3<f32>(1.0 - (u.x + u.y) / u.z, u.y / u.z, u.x / u.z);
 }
 
 fn get_min_max(v1: vec2<f32>, v2: vec2<f32>, v3: vec2<f32>) -> vec4<f32> {
-  var min_max = vec4<f32>(0.);
-  min_max.x = min(min(v1.x, v2.x), v3.x);
-  min_max.y = min(min(v1.y, v2.y), v3.y);
-  min_max.z = max(max(v1.x, v2.x), v3.x);
-  min_max.w = max(max(v1.y, v2.y), v3.y);
+    var min_max = vec4<f32>(0.);
+    min_max.x = min(min(v1.x, v2.x), v3.x);
+    min_max.y = min(min(v1.y, v2.y), v3.y);
+    min_max.z = max(max(v1.x, v2.x), v3.x);
+    min_max.w = max(max(v1.y, v2.y), v3.y);
 
-  return min_max;
+    return min_max;
 }
+
 
 /*
 fn draw_triangle(v1: vec2<f32>, v2: vec2<f32>, v3: vec2<f32>) {
@@ -230,40 +243,356 @@ fn draw_triangle(v1: vec2<f32>, v2: vec2<f32>, v3: vec2<f32>) {
   }
 }
 */
-// move it inside the color pix function
-fn is_off_screen(v: vec2<f32>) -> bool {
-    if (v.x < 0.0 || v.x > screen_dims.width || v.y < 0.0 ||
-      v.y > screen_dims.height) {
-        return true;
-    }
 
-    return false;
+fn sample_texture(texture_id: u32, texture_pos: vec3<f32>) -> vec3<f32> {
+    let color_array = array<vec3<f32>, 8>(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0)
+    );
+    return color_array[texture_id%8];
 }
 
-@compute @workgroup_size(256, 1)
-fn raster(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let index = global_id.x * 3u;
+struct FragmentVertex {
+    pos: vec4<f32>,
+    texture_pos: vec3<f32>
+}
 
-    let v1 = project(vertex_buffer.values[index + 0u]);
-    let v2 = project(vertex_buffer.values[index + 1u]);
-    let v3 = project(vertex_buffer.values[index + 2u]);
+fn do_zw_raycast(v0: vec2<f32>, v1: vec2<f32>, i: u32) -> vec2<f32>
+{
+    //https://gamedev.stackexchange.com/questions/116422/best-way-to-find-line-segment-intersection
+    let pi = 3.14159;
+    let angle_ratio = ((f32(i)/f32(screen_dims.depth_factor)) - 0.5);
+    let theta = angle_ratio*(pi/6.0) + (pi/4.0);
+    //let theta = angle_ratio*(pi/2.0) + (pi/4.0);
+    //let theta = pi/4.0;
+    let sample_ray_y = sin(theta);
+    let sample_ray_x = cos(theta);
+    let r = ((-v0.y)*(v1.x - v0.x) - (-v0.x)*(v1.y - v0.y)) / ((sample_ray_x)*(v1.y - v0.y) - (sample_ray_y)*(v1.x - v0.x));
+    let s = ((-v0.y)*(sample_ray_x) - (-v0.x)*(sample_ray_y))/((sample_ray_x)*(v1.y - v0.y) - (sample_ray_y)*(v1.x - v0.x));
+    return vec2<f32>(r, s);
+}
 
-    if (is_off_screen(v1) || is_off_screen(v2) || is_off_screen(v3)) {
-       return;
+fn depth_zw_line(vs: vec2<i32>, v0: vec4<f32>, v1: vec4<f32>){
+    for (var i = 0u; i < screen_dims.depth_factor; i += 1u) {
+        let res = do_zw_raycast(v0.zw, v1.zw, i);
+        if (res.y > 0 && res.y < 1) {
+            let depth_index = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * screen_dims.depth_factor + i;
+            let depth_value = u32(res.x*10000.0);
+            atomicMin(&depth_buffer[depth_index], depth_value);
+        }
     }
+}
 
-    //color_pixel(u32(screen_dims.width*1/4), u32(screen_dims.height/2), 255u, 0u, 0u);
-    //color_pixel(u32(v2.x), u32(v2.y), 255u, 0u, 0u);
-    //color_pixel(u32(v3.x), u32(v3.y), 255u, 0u, 0u);
+fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture_id: u32){
 
-    //draw_line(vec2<f32>(0, screen_dims.height/2), vec2<f32>(screen_dims.width, screen_dims.height/2), 0u, 255u, 0u);
-    //draw_line(vec2<f32>(screen_dims.width/2, 0), vec2<f32>(screen_dims.width/2, screen_dims.height), 0u, 0u, 255u);
+    if (false)
+    {
+        // Wrong, but simple
+        let color = sample_texture(texture_id, v0.texture_pos);
+        let x = v0.pos.x;
+        let y = v0.pos.y;
+        if (x > 0 && x < screen_dims.render_width && y > 0 && y < screen_dims.render_height)
+        {
+            color_pixel(u32(vs.x), u32(vs.y), u32(color.r*256.0), u32(color.g*256.0), u32(color.b*256.0));
+        }
+    }
+    else {
+        // 4-d appropriate volumetric shading
+        var occlusion_numerator = 0.0;
+        var occlusion_denominator = 0.1;
+        let color = sample_texture(texture_id, v0.texture_pos);
+        for (var i = 0u; i < screen_dims.depth_factor; i += 1u) {
+            let res = do_zw_raycast(v0.pos.zw, v1.pos.zw, i);
+            if (res.y > 0 && res.y < 1) {
+                let depth_index = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * screen_dims.depth_factor + i;
+                let depth_value = u32(res.x*10000.0);
+                if depth_value > depth_buffer[depth_index] + 10u {
+                    occlusion_numerator += 1.0;
+                }
+                occlusion_denominator += 1.0;
+            }
+        }
+        let occlusion_ratio = occlusion_numerator/occlusion_denominator;
+        if occlusion_ratio < 0.9 && occlusion_denominator >= 1.0 {
+            let delta = v0.pos.zw - v1.pos.zw;
+            let dist = sqrt(delta.x*delta.x + delta.y*delta.y);
+            let intensity = 1.0;
+            //let dist=1.0;
+            let pixelID = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * 3u;
 
-    draw_line(v1, v2, 0u, 0u, 255u);
-    draw_line(v1, v3, 0u, 0u, 255u);
-    draw_line(v2, v3, 0u, 0u, 255u);
+            atomicAdd(&color_buffer.values[pixelID + 0u], u32(color.r*256.0*intensity));
+            atomicAdd(&color_buffer.values[pixelID + 1u], u32(color.g*256.0*intensity));
+            atomicAdd(&color_buffer.values[pixelID + 2u], u32(color.b*256.0*intensity));
+        }
+    }
+}
 
-    //draw_triangle(v1, v2, v3);
+const SLICE_COUNT_X: u32 = 256u;
+const SLICE_COUNT_Y: u32 = 1u;
+const SLICE_COUNT_TOTAL: u32 = SLICE_COUNT_X*SLICE_COUNT_Y;
+
+@compute @workgroup_size(256, 1)
+fn raster_vertex_shader(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+
+    let vertex_input = vertex_input_buffer.values[index];
+    let model_vertex_position = array<f32, 5>(vertex_input.pos.x, vertex_input.pos.y, vertex_input.pos.z, vertex_input.pos.w, 1.0);
+
+    let view_transform = mat5x5_unpack(camera.view_transform);
+    let model_transform = mat5x5_unpack(camera.model_transform);
+
+    let pre_camera_transform = mat5x5_mul_vec5(model_transform, model_vertex_position);
+
+    let view_vector = mat5x5_mul_vec5(view_transform, pre_camera_transform);
+
+    // Perspective scaling
+    let focal_length = 1.0;
+    let near = 0.1;
+    let far = 100.0;
+    let projected_distance = sqrt(view_vector[2]*view_vector[2] + view_vector[3]*view_vector[3]);
+
+    let aspect_ratio = screen_dims.render_width/screen_dims.render_height;
+
+    var clip_position = vec4<f32>(
+        view_vector[0] / projected_distance/focal_length,
+        aspect_ratio * (-view_vector[1]) / projected_distance/focal_length,
+        view_vector[2],
+        view_vector[3]
+    );
+
+    let v0_t = vertex_input_buffer.values[index].tex_pos;
+    let cell = vertex_input_buffer.values[index].cell;
+
+    // For now:
+    let texture_id = cell;
+
+    vertex_output_buffer.values[index] = VertexOutput(
+                                          clip_position,
+                                          v0_t,
+                                          texture_id
+                                      );
+}
+
+@compute @workgroup_size(SLICE_COUNT_TOTAL, 1)
+fn raster_depth_shader(@builtin(global_invocation_id) global_id: vec3<u32>){
+    let tet_index = global_id.x/(SLICE_COUNT_X*SLICE_COUNT_Y);
+    let slice_index = global_id.x%(SLICE_COUNT_X*SLICE_COUNT_Y);
+    let slice_index_x = slice_index%SLICE_COUNT_X;
+    let slice_index_y = slice_index/SLICE_COUNT_X;
+    let v0 = transform_to_screen_coords_4(vertex_output_buffer.values[tet_index*4u + 0u].pos);
+    let v1 = transform_to_screen_coords_4(vertex_output_buffer.values[tet_index*4u + 1u].pos);
+    let v2 = transform_to_screen_coords_4(vertex_output_buffer.values[tet_index*4u + 2u].pos);
+    let v3 = transform_to_screen_coords_4(vertex_output_buffer.values[tet_index*4u + 3u].pos);
+
+    let min_xy = vec2<i32>(
+        i32(min(min(min(v0.x, v1.x), v2.x), v3.x)),
+        i32(min(min(min(v0.y, v1.y), v2.y), v3.y))
+    );
+    let max_xy = vec2<i32>(
+        i32(max(max(max(v0.x, v1.x), v2.x), v3.x)),
+        i32(max(max(max(v0.y, v1.y), v2.y), v3.y))
+    );
+
+    for (var x: i32 = min_xy.x + i32(slice_index_x); x <= max_xy.x; x = x + i32(SLICE_COUNT_X)) {
+        for (var y : i32 = min_xy.y + i32(slice_index_y); y <= max_xy.y; y = y + i32(SLICE_COUNT_Y)) {
+            let screen_v = vec2<i32>(x, y);
+            let bc_a = barycentric(v0.xy, v1.xy, v2.xy, vec2<f32>(f32(x), f32(y)));
+            let bc_b = barycentric(v0.xy, v1.xy, v3.xy, vec2<f32>(f32(x), f32(y)));
+            let bc_c = barycentric(v0.xy, v2.xy, v3.xy, vec2<f32>(f32(x), f32(y)));
+            let bc_d = barycentric(v1.xy, v2.xy, v3.xy, vec2<f32>(f32(x), f32(y)));
+
+            let in_a: bool = (bc_a.x > 0.0 && bc_a.y > 0.0 && bc_a.z > 0.0);
+            let in_b: bool = (bc_b.x > 0.0 && bc_b.y > 0.0 && bc_b.z > 0.0);
+            let in_c: bool = (bc_c.x > 0.0 && bc_c.y > 0.0 && bc_c.z > 0.0);
+            let in_d: bool = (bc_d.x > 0.0 && bc_d.y > 0.0 && bc_d.z > 0.0);
+
+            if (!in_a && !in_b && !in_c && !in_d)
+            {
+                continue;
+            }
+
+            let vertex_a = v0*bc_a.x + v1*bc_a.y + v2*bc_a.z;
+            let vertex_b = v0*bc_b.x + v1*bc_b.y + v3*bc_b.z;
+            let vertex_c = v0*bc_c.x + v2*bc_c.y + v3*bc_c.z;
+            let vertex_d = v1*bc_d.x + v2*bc_d.y + v3*bc_d.z;
+
+            let vertex_result_a =
+                select(
+                    select(
+                        vertex_c,
+                        vertex_b,
+                        in_b
+                    ),
+                    vertex_a,
+                    in_a
+                );
+
+            let vertex_result_b =
+                select(
+                    select(
+                        vertex_d,
+                        select(
+                            vertex_d,
+                            vertex_c,
+                            in_c
+                        ),
+                        in_b
+                    ),
+                    select(
+                        select(
+                            vertex_d,
+                            vertex_c,
+                            in_c
+                        ),
+                        vertex_b,
+                        in_b
+                    ),
+                    in_a
+                );
+
+            depth_zw_line(screen_v, vertex_result_a, vertex_result_b);
+        }
+    }
+}
+
+
+@compute @workgroup_size(SLICE_COUNT_TOTAL, 1)
+fn raster_pixel_shader(@builtin(global_invocation_id) global_id: vec3<u32>){
+    let tet_index = global_id.x/(SLICE_COUNT_X*SLICE_COUNT_Y);
+    let slice_index = global_id.x%(SLICE_COUNT_X*SLICE_COUNT_Y);
+    let slice_index_x = slice_index%SLICE_COUNT_X;
+    let slice_index_y = slice_index/SLICE_COUNT_X;
+    let v0 = FragmentVertex(vertex_output_buffer.values[tet_index*4u + 0u].pos, vertex_output_buffer.values[tet_index*4u + 0u].tex_pos);
+    let v1 = FragmentVertex(vertex_output_buffer.values[tet_index*4u + 1u].pos, vertex_output_buffer.values[tet_index*4u + 1u].tex_pos);
+    let v2 = FragmentVertex(vertex_output_buffer.values[tet_index*4u + 2u].pos, vertex_output_buffer.values[tet_index*4u + 2u].tex_pos);
+    let v3 = FragmentVertex(vertex_output_buffer.values[tet_index*4u + 3u].pos, vertex_output_buffer.values[tet_index*4u + 3u].tex_pos);
+    let texture_id = vertex_output_buffer.values[tet_index*4u + 0u].tex_id;
+    let color = sample_texture(texture_id, vec3<f32>(0.0, 0.0, 0.0));
+
+    let v0_s = FragmentVertex(transform_to_screen_coords_4(v0.pos), v0.texture_pos);
+    let v1_s = FragmentVertex(transform_to_screen_coords_4(v1.pos), v1.texture_pos);
+    let v2_s = FragmentVertex(transform_to_screen_coords_4(v2.pos), v2.texture_pos);
+    let v3_s = FragmentVertex(transform_to_screen_coords_4(v3.pos), v3.texture_pos);
+
+    let min_xy = vec2<i32>(
+        i32(min(min(min(v0_s.pos.x, v1_s.pos.x), v2_s.pos.x), v3_s.pos.x)),
+        i32(min(min(min(v0_s.pos.y, v1_s.pos.y), v2_s.pos.y), v3_s.pos.y))
+    );
+    let max_xy = vec2<i32>(
+        i32(max(max(max(v0_s.pos.x, v1_s.pos.x), v2_s.pos.x), v3_s.pos.x)),
+        i32(max(max(max(v0_s.pos.y, v1_s.pos.y), v2_s.pos.y), v3_s.pos.y))
+    );
+
+    for (var x: i32 = min_xy.x + i32(slice_index_x); x <= max_xy.x; x = x + i32(SLICE_COUNT_X)) {
+        for (var y : i32 = min_xy.y + i32(slice_index_y); y <= max_xy.y; y = y + i32(SLICE_COUNT_Y)) {
+            let screen_v = vec2<i32>(x, y);
+            let bc_a = barycentric(v0_s.pos.xy, v1_s.pos.xy, v2_s.pos.xy, vec2<f32>(f32(x), f32(y)));
+            let bc_b = barycentric(v0_s.pos.xy, v1_s.pos.xy, v3_s.pos.xy, vec2<f32>(f32(x), f32(y)));
+            let bc_c = barycentric(v0_s.pos.xy, v2_s.pos.xy, v3_s.pos.xy, vec2<f32>(f32(x), f32(y)));
+            let bc_d = barycentric(v1_s.pos.xy, v2_s.pos.xy, v3_s.pos.xy, vec2<f32>(f32(x), f32(y)));
+
+            let in_a: bool = (bc_a.x > 0.0 && bc_a.y > 0.0 && bc_a.z > 0.0);
+            let in_b: bool = (bc_b.x > 0.0 && bc_b.y > 0.0 && bc_b.z > 0.0);
+            let in_c: bool = (bc_c.x > 0.0 && bc_c.y > 0.0 && bc_c.z > 0.0);
+            let in_d: bool = (bc_d.x > 0.0 && bc_d.y > 0.0 && bc_d.z > 0.0);
+
+            if (!in_a && !in_b && !in_c && !in_d)
+            {
+                continue;
+            }
+
+            let vertex_a = FragmentVertex(
+                v0_s.pos*bc_a.x + v1_s.pos*bc_a.y + v2_s.pos*bc_a.z,
+                v0_s.texture_pos*bc_a.x + v1_s.texture_pos*bc_a.y + v2_s.texture_pos*bc_a.z
+            );
+            let vertex_b = FragmentVertex(
+                v0_s.pos*bc_b.x + v1_s.pos*bc_b.y + v3_s.pos*bc_b.z,
+                v0_s.texture_pos*bc_b.x + v1_s.texture_pos*bc_b.y + v3_s.texture_pos*bc_b.z
+            );
+            let vertex_c = FragmentVertex(
+                v0_s.pos*bc_c.x + v2_s.pos*bc_c.y + v3_s.pos*bc_c.z,
+                v0_s.texture_pos*bc_c.x + v2_s.texture_pos*bc_c.y + v3_s.texture_pos*bc_c.z
+            );
+            let vertex_d = FragmentVertex(
+                v1_s.pos*bc_d.x + v2_s.pos*bc_d.y + v3_s.pos*bc_d.z,
+                v1_s.texture_pos*bc_d.x + v2_s.texture_pos*bc_d.y + v3_s.texture_pos*bc_d.z
+            );
+
+            let vertex_result_a = FragmentVertex(
+                select(
+                    select(
+                        vertex_c.pos,
+                        vertex_b.pos,
+                        in_b
+                    ),
+                    vertex_a.pos,
+                    in_a
+                ),
+                select(
+                    select(
+                        vertex_c.texture_pos,
+                        vertex_b.texture_pos,
+                        in_b
+                    ),
+                    vertex_a.texture_pos,
+                    in_a
+                )
+            );
+
+            let vertex_result_b = FragmentVertex(
+                select(
+                    select(
+                        vertex_d.pos,
+                        select(
+                            vertex_d.pos,
+                            vertex_c.pos,
+                            in_c
+                        ),
+                        in_b
+                    ),
+                    select(
+                        select(
+                            vertex_d.pos,
+                            vertex_c.pos,
+                            in_c
+                        ),
+                        vertex_b.pos,
+                        in_b
+                    ),
+                    in_a
+                ),
+                select(
+                    select(
+                        vertex_d.texture_pos,
+                        select(
+                            vertex_d.texture_pos,
+                            vertex_c.texture_pos,
+                            in_c
+                        ),
+                        in_b
+                    ),
+                    select(
+                        select(
+                            vertex_d.texture_pos,
+                            vertex_c.texture_pos,
+                            in_c
+                        ),
+                        vertex_b.texture_pos,
+                        in_b
+                    ),
+                    in_a
+                )
+            );
+
+            render_zw_line(screen_v, vertex_result_a, vertex_result_b, texture_id);
+        }
+    }
 }
 
 @compute @workgroup_size(256, 1)
@@ -273,4 +602,9 @@ fn clear(@builtin(global_invocation_id) global_id: vec3<u32>) {
     atomicStore(&color_buffer.values[index + 0u], 0u);
     atomicStore(&color_buffer.values[index + 1u], 0u);
     atomicStore(&color_buffer.values[index + 2u], 0u);
+
+    for (var i: u32 = 0u; i <= screen_dims.depth_factor; i = i + 1u)
+    {
+        atomicStore(&depth_buffer[index*screen_dims.depth_factor + i], 0xFFFFFFFFu);
+    }
 }

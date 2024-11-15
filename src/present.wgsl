@@ -5,7 +5,7 @@ struct Pixel {
 }
 
 fn pixel_to_vec(p: Pixel) -> vec3<f32> {
-    return vec3<f32>(f32(p.r), f32(p.g), f32(p.b)) / 255.0;
+    return vec3<f32>(f32(p.r), f32(p.g), f32(p.b)) / (256.0);
 }
 
 struct ColorBuffer {
@@ -13,8 +13,11 @@ struct ColorBuffer {
 }
 
 struct ScreenUniform {
-    screen_width: f32,
-    screen_height: f32,
+    window_width: f32,
+    window_height: f32,
+    render_width: f32,
+    render_height: f32,
+    depth_factor: u32
 }
 
 @group(0) @binding(0) var<storage, read> color_buffer: ColorBuffer;
@@ -41,9 +44,13 @@ fn vs_main_trig(@builtin(vertex_index) vertex_idx: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let x = floor(in.pos.x);
-    let y = floor(in.pos.y);
-    let index = u32(x + y * screen_dims.screen_width);
+    let normalized_x = in.pos.x/screen_dims.window_width;
+    let normalized_y = in.pos.y/screen_dims.window_height;
+    let render_x = normalized_x*screen_dims.render_width;
+    let render_y = normalized_y*screen_dims.render_height;
+    let x = floor(render_x);
+    let y = floor(render_y);
+    let index = u32(x + y * screen_dims.render_width);
     let p = color_buffer.value[index];
 
     let pixel = pixel_to_vec(p);

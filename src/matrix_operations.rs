@@ -103,6 +103,18 @@ pub fn rotation_matrix_4d_rotate_3(angle: f32) -> [[f32; 5]; 5] {
     ]
 }
 
+pub fn rotation_matrix_4d_rotate_4(angle: f32) -> [[f32; 5]; 5] {
+    let cos_theta = angle.cos();
+    let sin_theta = angle.sin();
+    [
+        [1.0,       0.0, 0.0,    0.0, 0.0],
+        [0.0,       1.0, 0.0,    0.0, 0.0],
+        [0.0,       0.0, cos_theta,    -sin_theta, 0.0],
+        [0.0,       0.0, sin_theta,    cos_theta, 0.0],
+        [0.0,       0.0, 0.0,    0.0, 1.0]
+    ]
+}
+
 pub fn matrix_multiply<const N: usize> (a: [[f32; N]; N], b: [[f32; N]; N]) -> [[f32; N]; N] {
     let mut result = [[0.0; N]; N];
     for i in 0..N {
