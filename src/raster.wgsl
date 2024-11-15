@@ -304,7 +304,7 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
             color_pixel(u32(vs.x), u32(vs.y), u32(color.r*256.0), u32(color.g*256.0), u32(color.b*256.0));
         }
     }
-    else if (false){
+    else if (true){
         // 4-d appropriate volumetric shading
         var occlusion_numerator = 0.0;
         var occlusion_denominator = 0.1;
@@ -314,7 +314,7 @@ fn render_zw_line(vs: vec2<i32>, v0: FragmentVertex, v1: FragmentVertex, texture
             if (res.y > 0 && res.y < 1) {
                 let depth_index = (u32(vs.x) + u32(vs.y) * u32(screen_dims.render_width)) * screen_dims.depth_factor + i;
                 let depth_value = u32(res.x*DEPTH_DIVISOR);
-                if depth_value == depth_buffer[depth_index] {
+                if depth_value > depth_buffer[depth_index] {
                     occlusion_numerator += 1.0;
                 }
                 occlusion_denominator += 1.0;
