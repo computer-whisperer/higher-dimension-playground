@@ -5,13 +5,37 @@ pub struct RasterPipelines {
     pixel_pipeline: wgpu::ComputePipeline
 }
 
+const RENDER_BUFFER_GROUP_ID: u32 = 0;
+const COLOR_BUFFER_IDX: u32 = 0;
+const DEPTH_BUFFER_IDX: u32 = 1;
+
+const ONETIME_BUFFER_GROUP_ID: u32 = 1;
+const VERTEX_BUFFER_IDX: u32 = 0;
+
+const LIVE_BUFFER_GROUP_ID: u32 = 2;
+const INTERMEDIATE_VERTEX_BUFFER_IDX: u32 = 0;
+const INSTANCE_BUFFER_IDX: u32 = 1;
+const RENDER_META_BUFFER_IDX: u32 = 2;
+const CAMERA_BUFFER_IDX: u32 = 3;
+
 impl RasterPipelines {
     pub fn new(device: &wgpu::Device) -> Self {
-        let output_color_bind_group_layout =
+        let render_buffers_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Raster: Uniform Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                label: Some("Render Buffers Bind Group Layout"),
+                entries: &[
+                wgpu::BindGroupLayoutEntry { // Render Buffer
+                    binding: COLOR_BUFFER_IDX,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // Depth Buffer
+                    binding: DEPTH_BUFFER_IDX,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -21,11 +45,12 @@ impl RasterPipelines {
                     count: None,
                 }],
             });
-        let vertex_input_bind_group_layout =
+        let one_time_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Raster: Vertex Input Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                label: Some("Raster: One Time Bind Group Layout"),
+                entries: &[
+                wgpu::BindGroupLayoutEntry { // Tesseract Vertex Buffer
+                    binding: VERTEX_BUFFER_IDX,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -35,11 +60,12 @@ impl RasterPipelines {
                     count: None,
                 }],
             });
-        let vertex_output_bind_group_layout =
+        let live_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Raster: Vertex Output Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                label: Some("Raster: Intermediate Bind Group Layout"),
+                entries: &[
+                wgpu::BindGroupLayoutEntry { // Intermediate Vertex Buffer
+                    binding: INTERMEDIATE_VERTEX_BUFFER_IDX,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -47,27 +73,19 @@ impl RasterPipelines {
                         min_binding_size: None,
                     },
                     count: None,
-                }],
-            });
-        let depth_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Raster: Depth Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                },
+                wgpu::BindGroupLayoutEntry { // Instance Buffer
+                    binding: INSTANCE_BUFFER_IDX,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
                     count: None,
-                }],
-            });
-        let screen_uniform_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Raster: Uniform Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                },
+                wgpu::BindGroupLayoutEntry { // Camera
+                    binding: CAMERA_BUFFER_IDX,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -75,13 +93,9 @@ impl RasterPipelines {
                         min_binding_size: None,
                     },
                     count: None,
-                }],
-            });
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Raster: Camera Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                },
+                wgpu::BindGroupLayoutEntry { // Screen
+                    binding: RENDER_META_BUFFER_IDX,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -95,12 +109,9 @@ impl RasterPipelines {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Raster Pipeline Layout"),
             bind_group_layouts: &[
-                &output_color_bind_group_layout,
-                &depth_bind_group_layout,
-                &vertex_input_bind_group_layout,
-                &screen_uniform_bind_group_layout,
-                &camera_bind_group_layout,
-                &vertex_output_bind_group_layout,
+                &render_buffers_bind_group_layout,
+                &one_time_bind_group_layout,
+                &live_bind_group_layout
             ],
             push_constant_ranges: &[],
         });
@@ -146,6 +157,129 @@ impl RasterPipelines {
     }
 }
 
+pub struct RasterBindings {
+    render_bind_group: wgpu::BindGroup,
+    one_time_bind_group: wgpu::BindGroup,
+    live_bind_group: wgpu::BindGroup,
+}
+
+impl RasterBindings {
+    pub fn new(
+        device: &wgpu::Device,
+        raster_pipelines: &RasterPipelines,
+        color_buffer: &wgpu::Buffer,
+        depth_buffer: &wgpu::Buffer,
+        vertex_input_buffer: &wgpu::Buffer,
+        vertex_intermediate_buffer: &wgpu::Buffer,
+        instance_buffer: &wgpu::Buffer,
+        render_meta_uniform: &wgpu::Buffer,
+        camera_uniform: &wgpu::Buffer,
+    ) -> Self {
+        let render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raster: Output Buffer Bind Group"),
+            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(RENDER_BUFFER_GROUP_ID),
+            entries: &[
+            wgpu::BindGroupEntry {
+                binding: COLOR_BUFFER_IDX,
+                resource: color_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: DEPTH_BUFFER_IDX,
+                resource: depth_buffer.as_entire_binding(),
+            }],
+        });
+        let one_time_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raster: One Time Buffer Bind Group"),
+            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(ONETIME_BUFFER_GROUP_ID),
+            entries: &[wgpu::BindGroupEntry {
+                binding: VERTEX_BUFFER_IDX,
+                resource: vertex_input_buffer.as_entire_binding(),
+            }],
+        });
+        let live_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raster: Live Buffer Bind Group"),
+            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(LIVE_BUFFER_GROUP_ID),
+            entries: &[
+            wgpu::BindGroupEntry {
+                binding: RENDER_META_BUFFER_IDX,
+                resource: render_meta_uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: CAMERA_BUFFER_IDX,
+                resource: camera_uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: INSTANCE_BUFFER_IDX,
+                resource: instance_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: INTERMEDIATE_VERTEX_BUFFER_IDX,
+                resource: vertex_intermediate_buffer.as_entire_binding(),
+            }],
+        });
+
+        Self {
+            render_bind_group,
+            one_time_bind_group,
+            live_bind_group,
+        }
+    }
+
+    pub fn update_render_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        pipelines: &RasterPipelines,
+        color_buffer: &wgpu::Buffer,
+        depth_buffer: &wgpu::Buffer,
+    ) {
+        self.render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raster: Output Buffer Bind Group"),
+            layout: &pipelines.vertex_pipeline.get_bind_group_layout(RENDER_BUFFER_GROUP_ID),
+            entries: &[
+            wgpu::BindGroupEntry {
+                binding: COLOR_BUFFER_IDX,
+                resource: color_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: DEPTH_BUFFER_IDX,
+                resource: depth_buffer.as_entire_binding(),
+            }],
+        });
+    }
+
+    pub fn update_live_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        pipelines: &RasterPipelines,
+        render_meta_uniform: &wgpu::Buffer,
+        camera_uniform: &wgpu::Buffer,
+        instance_buffer: &wgpu::Buffer,
+        vertex_intermediate_buffer: &wgpu::Buffer
+    ) {
+        self.live_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raster: Live Buffer Bind Group"),
+            layout: &pipelines.vertex_pipeline.get_bind_group_layout(LIVE_BUFFER_GROUP_ID),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: RENDER_META_BUFFER_IDX,
+                    resource: render_meta_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: CAMERA_BUFFER_IDX,
+                    resource: camera_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: INSTANCE_BUFFER_IDX,
+                    resource: instance_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: INTERMEDIATE_VERTEX_BUFFER_IDX,
+                    resource: vertex_intermediate_buffer.as_entire_binding(),
+                }],
+        });
+    }
+}
+
 impl<'a> RasterPipelines {
     pub fn record<'pass>(
         &'a self,
@@ -162,155 +296,32 @@ impl<'a> RasterPipelines {
         let padded_size = (subgroup_size - len % subgroup_size) % subgroup_size;
 
         cpass.set_pipeline(&self.clear_pipeline);
-        cpass.set_bind_group(0, &bindings.color_buffer, &[]);
-        cpass.set_bind_group(1, &bindings.depth_buffer, &[]);
-        cpass.set_bind_group(2, &bindings.vertex_input_buffer, &[]);
-        cpass.set_bind_group(3, &bindings.screen_uniform, &[]);
-        cpass.set_bind_group(4, &bindings.camera_uniform, &[]);
-        cpass.set_bind_group(5, &bindings.vertex_output_buffer, &[]);
+        cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.render_bind_group, &[]);
+        cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
         cpass.dispatch_workgroups((len + padded_size) / subgroup_size, 1, 1);
 
         let subgroup_size = 256;
         let padded_size = (subgroup_size - (num_vertices % subgroup_size)) % subgroup_size;
         let dispatch_size = (num_vertices + padded_size) / subgroup_size;
         cpass.set_pipeline(&self.vertex_pipeline);
-        cpass.set_bind_group(0, &bindings.color_buffer, &[]);
-        cpass.set_bind_group(1, &bindings.depth_buffer, &[]);
-        cpass.set_bind_group(2, &bindings.vertex_input_buffer, &[]);
-        cpass.set_bind_group(3, &bindings.screen_uniform, &[]);
-        cpass.set_bind_group(4, &bindings.camera_uniform, &[]);
-        cpass.set_bind_group(5, &bindings.vertex_output_buffer, &[]);
+        cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.render_bind_group, &[]);
+        cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
         cpass.dispatch_workgroups(dispatch_size as u32, 1, 1);
 
         let num_tets = num_vertices/4;
 
         cpass.set_pipeline(&self.depth_pipeline);
-        cpass.set_bind_group(0, &bindings.color_buffer, &[]);
-        cpass.set_bind_group(1, &bindings.depth_buffer, &[]);
-        cpass.set_bind_group(2, &bindings.vertex_input_buffer, &[]);
-        cpass.set_bind_group(3, &bindings.screen_uniform, &[]);
-        cpass.set_bind_group(4, &bindings.camera_uniform, &[]);
-        cpass.set_bind_group(5, &bindings.vertex_output_buffer, &[]);
+        cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.render_bind_group, &[]);
+        cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
         cpass.dispatch_workgroups((num_tets) as u32, 1, 1);
 
         cpass.set_pipeline(&self.pixel_pipeline);
-        cpass.set_bind_group(0, &bindings.color_buffer, &[]);
-        cpass.set_bind_group(1, &bindings.depth_buffer, &[]);
-        cpass.set_bind_group(2, &bindings.vertex_input_buffer, &[]);
-        cpass.set_bind_group(3, &bindings.screen_uniform, &[]);
-        cpass.set_bind_group(4, &bindings.camera_uniform, &[]);
-        cpass.set_bind_group(5, &bindings.vertex_output_buffer, &[]);
+        cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.render_bind_group, &[]);
+        cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
         cpass.dispatch_workgroups((num_tets) as u32, 1, 1);
-    }
-}
-
-pub struct RasterBindings {
-    pub color_buffer: wgpu::BindGroup,
-    vertex_input_buffer: wgpu::BindGroup,
-    vertex_output_buffer: wgpu::BindGroup,
-    depth_buffer: wgpu::BindGroup,
-    screen_uniform: wgpu::BindGroup,
-    camera_uniform: wgpu::BindGroup,
-}
-
-impl RasterBindings {
-    pub fn new(
-        device: &wgpu::Device,
-        raster_pipelines: &RasterPipelines,
-        color_buffer: &wgpu::Buffer,
-        vertex_input_buffer: &wgpu::Buffer,
-        vertex_output_buffer: &wgpu::Buffer,
-        screen_uniform: &wgpu::Buffer,
-        camera_uniform: &wgpu::Buffer,
-        depth_buffer: &wgpu::Buffer
-    ) -> Self {
-        let color_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Output Buffer Bind Group"),
-            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: color_buffer.as_entire_binding(),
-            }],
-        });
-        let depth_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Depth Buffer Bind Group"),
-            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(1),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: depth_buffer.as_entire_binding(),
-            }],
-        });
-        let vertex_input_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Vertex Input Buffer Bind Group"),
-            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(2),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: vertex_input_buffer.as_entire_binding(),
-            }],
-        });
-        let screen_uniform = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Uniform Bind Group"),
-            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(3),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: screen_uniform.as_entire_binding(),
-            }],
-        });
-        let camera_uniform = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Camera Uniform Bind Group"),
-            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(4),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_uniform.as_entire_binding(),
-            }],
-        });
-        let vertex_output_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Vertex Output Buffer Bind Group"),
-            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(5),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: vertex_output_buffer.as_entire_binding(),
-            }],
-        });
-        Self {
-            color_buffer,
-            vertex_input_buffer,
-            vertex_output_buffer,
-            screen_uniform,
-            camera_uniform,
-            depth_buffer
-        }
-    }
-
-    pub fn update_color_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        pipelines: &RasterPipelines,
-        color_buffer: &wgpu::Buffer,
-    ) {
-        self.color_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Output Buffer Bind Group"),
-            layout: &pipelines.vertex_pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: color_buffer.as_entire_binding(),
-            }],
-        });
-    }
-
-    pub fn update_depth_buffer(
-        &mut self,
-        device: &wgpu::Device,
-        pipelines: &RasterPipelines,
-        depth_buffer: &wgpu::Buffer,
-    ) {
-        self.depth_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Depth Buffer Bind Group"),
-            layout: &pipelines.vertex_pipeline.get_bind_group_layout(1),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: depth_buffer.as_entire_binding(),
-            }],
-        });
     }
 }

@@ -1,27 +1,20 @@
-struct Pixel {
-    r: u32,
-    g: u32,
-    b: u32,
+
+
+fn pixel_to_vec(p: u32) -> vec3<f32> {
+    return vec3<f32>(f32((p>>16)&0xFF), f32((p>>8)&0xFF), f32((p>>0)&0xFF)) / (256.0);
 }
 
-fn pixel_to_vec(p: Pixel) -> vec3<f32> {
-    return vec3<f32>(f32(p.r), f32(p.g), f32(p.b)) / (256.0);
-}
 
-struct ColorBuffer {
-    value: array<Pixel>,
-}
-
-struct ScreenUniform {
-    window_width: f32,
-    window_height: f32,
-    render_width: f32,
-    render_height: f32,
+struct RenderMetadata {
+    window_width: u32,
+    window_height: u32,
+    render_width: u32,
+    render_height: u32,
     depth_factor: u32
 }
 
-@group(0) @binding(0) var<storage, read> color_buffer: ColorBuffer;
-@group(1) @binding(0) var<uniform> screen_dims : ScreenUniform;
+@group(0) @binding(0) var<storage, read> color_buffer: array<u32>;
+@group(1) @binding(0) var<uniform> render_metadata : RenderMetadata;
 
 struct VertexOutput {
     @builtin(position) pos: vec4<f32>,
@@ -44,17 +37,22 @@ fn vs_main_trig(@builtin(vertex_index) vertex_idx: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let normalized_x = in.pos.x/screen_dims.window_width;
-    let normalized_y = in.pos.y/screen_dims.window_height;
-    let render_x = normalized_x*screen_dims.render_width;
-    let render_y = normalized_y*screen_dims.render_height;
-    let x = floor(render_x);
-    let y = floor(render_y);
-    let index = u32(x + y * screen_dims.render_width);
-    let p = color_buffer.value[index];
+    let normalized_x = in.pos.x/f32(render_metadata.window_width);
+    let normalized_y = in.pos.y/f32(render_metadata.window_height);
+    let render_x = normalized_x*f32(render_metadata.render_width);
+    let render_y = normalized_y*f32(render_metadata.render_height);
+    let x = u32(floor(render_x));
+    let y = u32(floor(render_y));
+    var accumulated_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    for (var i = 0u; i < render_metadata.depth_factor; i += 1u)
+    {
+        let index = (x + y * render_metadata.render_width)*render_metadata.depth_factor + i;
+        let p = color_buffer[index];
 
-    let pixel = pixel_to_vec(p);
 
-    let col = vec4<f32>(pixel, 1.0);
-    return col;
+        let pixel = pixel_to_vec(p);
+
+        accumulated_color += vec4<f32>(pixel/f32(render_metadata.depth_factor), 0.0);
+    }
+    return accumulated_color;
 }

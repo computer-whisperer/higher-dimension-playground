@@ -6,7 +6,8 @@ pub fn identity_matrix<const N: usize>() -> [[f32; N]; N] {
     result
 }
 
-pub fn flatten_5x5_matrix_for_wgpu(matrix: [[f32; 5]; 5]) -> [f32; 32] {
+/*
+pub const fn flatten_5x5_matrix_for_wgpu(matrix: [[f32; 5]; 5]) -> [f32; 32] {
     let mut result = [0.0; 32];
     for i in 0..5 {
         for j in 0..5 {
@@ -14,6 +15,43 @@ pub fn flatten_5x5_matrix_for_wgpu(matrix: [[f32; 5]; 5]) -> [f32; 32] {
         }
     }
     result
+}*/
+
+pub const fn flatten_5x5_matrix_for_wgpu(matrix: [[f32; 5]; 5]) -> [f32; 32] {
+    [
+        matrix[0][0],
+        matrix[1][0],
+        matrix[2][0],
+        matrix[3][0],
+        matrix[4][0],
+        matrix[0][1],
+        matrix[1][1],
+        matrix[2][1],
+        matrix[3][1],
+        matrix[4][1],
+        matrix[0][2],
+        matrix[1][2],
+        matrix[2][2],
+        matrix[3][2],
+        matrix[4][2],
+        matrix[0][3],
+        matrix[1][3],
+        matrix[2][3],
+        matrix[3][3],
+        matrix[4][3],
+        matrix[0][4],
+        matrix[1][4],
+        matrix[2][4],
+        matrix[3][4],
+        matrix[4][4],
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
 }
 
 fn scale_matrix_3d(scale: f32) -> [[f32; 4]; 4] {
@@ -31,7 +69,15 @@ pub fn scale_matrix_4d(scale: f32) -> [[f32; 5]; 5] {
         [0.0,   0.0,   0.0,   0.0,   1.0]]
 }
 
-pub fn translate_matrix_4d(x: f32, y: f32, z: f32, w: f32) -> [[f32; 5]; 5] {
+pub fn scale_matrix_4d_elementwise(x: f32, y: f32, z: f32, w: f32) -> [[f32; 5]; 5] {
+    [   [x,     0.0,   0.0,   0.0,   0.0],
+        [0.0,   y,     0.0,   0.0,   0.0],
+        [0.0,   0.0,   z,     0.0,   0.0],
+        [0.0,   0.0,   0.0,   w,     0.0],
+        [0.0,   0.0,   0.0,   0.0,   1.0]]
+}
+
+pub const fn translate_matrix_4d(x: f32, y: f32, z: f32, w: f32) -> [[f32; 5]; 5] {
     [[1.0, 0.0, 0.0, 0.0, x],
      [0.0, 1.0, 0.0, 0.0, y],
      [0.0, 0.0, 1.0, 0.0, z],
