@@ -1,7 +1,7 @@
 
 
-fn pixel_to_vec(p: u32) -> vec3<f32> {
-    return vec3<f32>(f32((p>>16)&0xFF), f32((p>>8)&0xFF), f32((p>>0)&0xFF)) / (256.0);
+fn pixel_to_vec(p: u32) -> vec4<f32> {
+    return vec4<f32>(f32((p>>16)&0xFF), f32((p>>8)&0xFF), f32((p>>0)&0xFF), f32((p>>24)&0xFF)) / (256.0);
 }
 
 
@@ -14,7 +14,8 @@ struct RenderMetadata {
 }
 
 @group(0) @binding(0) var<storage, read> color_buffer: array<u32>;
-@group(1) @binding(0) var<uniform> render_metadata : RenderMetadata;
+@group(0) @binding(2) var<storage, read> overlay_buffer : array<u32>;
+@group(0) @binding(3) var<uniform> render_metadata : RenderMetadata;
 
 struct VertexOutput {
     @builtin(position) pos: vec4<f32>,
@@ -43,7 +44,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let render_y = normalized_y*f32(render_metadata.render_height);
     let x = u32(floor(render_x));
     let y = u32(floor(render_y));
-    var accumulated_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var accumulated_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    /*
     for (var i = 0u; i < render_metadata.depth_factor; i += 1u)
     {
         let index = (x + y * render_metadata.render_width)*render_metadata.depth_factor + i;
@@ -52,7 +54,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let pixel = pixel_to_vec(p);
 
-        accumulated_color += vec4<f32>(pixel/f32(render_metadata.depth_factor), 0.0);
-    }
-    return accumulated_color;
+        accumulated_color += pixel/f32(render_metadata.depth_factor);
+    }*/
+    let overlay_color = pixel_to_vec(overlay_buffer[x + y * render_metadata.render_width]);
+
+    return accumulated_color*(1.0-overlay_color.w) + overlay_color;
 }

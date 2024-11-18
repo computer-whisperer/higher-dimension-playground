@@ -16,6 +16,16 @@ impl PresentPass {
                         min_binding_size: None,
                     },
                     count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 }],
             });
         let uniform_bind_group =
@@ -83,6 +93,7 @@ impl PresentBindings {
         PresentPass { pipeline }: &PresentPass,
         color_buffer: &wgpu::Buffer,
         screen_uniform: &wgpu::Buffer,
+        overlay_buffer: &wgpu::Buffer
     ) -> Self {
         let color_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Present: Output Buffer Bind Group"),
@@ -90,6 +101,10 @@ impl PresentBindings {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: color_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: overlay_buffer.as_entire_binding(),
             }],
         });
         let screen_uniform = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -111,6 +126,7 @@ impl PresentBindings {
         device: &wgpu::Device,
         PresentPass { pipeline }: &PresentPass,
         color_buffer: &wgpu::Buffer,
+        overlay_buffer: &wgpu::Buffer,
     ) {
         self.color_buffer = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Present: Output Buffer Bind Group"),
@@ -118,22 +134,12 @@ impl PresentBindings {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: color_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: overlay_buffer.as_entire_binding(),
             }],
         });
     }
 }
 
-impl<'a> PresentPass {
-    pub fn record<'pass>(
-        &'a self,
-        rpass: &mut wgpu::RenderPass<'pass>,
-        bindings: &'a PresentBindings,
-    ) where
-        'a: 'pass,
-    {
-        rpass.set_pipeline(&self.pipeline);
-        rpass.set_bind_group(0, &bindings.color_buffer, &[]);
-        rpass.set_bind_group(1, &bindings.screen_uniform, &[]);
-        rpass.draw(0..6, 0..1);
-    }
-}
