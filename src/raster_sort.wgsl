@@ -3,8 +3,7 @@ struct RenderMetadata {
     window_height: u32,
     render_width: u32,
     render_height: u32,
-    depth_factor: u32,
-    input_tetrahedrons: u32
+    depth_factor: u32
 }
 
 struct Tetrahedron {
@@ -21,28 +20,29 @@ struct Tetrahedron {
 
 struct TetrahedronMetadata {
     tet_count: u32,
+    tets_processed: atomic<u32>
 }
 
-const MAX_BUCKET_SIZE: u32 = 1024u;
+const MAX_BUCKET_SIZE: u32 = 512u;
 struct OutputBucket {
+    tetrahedrons: array<Tetrahedron, MAX_BUCKET_SIZE>,
     num_filled: u32,
-    tetrahedrons: array<Tetrahedron, MAX_BUCKET_SIZE>
 }
 
 const NULL_TEXTURE_ID: u32 = 0u;
 
-@group(2) @binding(1) var<storage, read_write> incoming_tet_buffer : array<Tetrahedron>;
-@group(2) @binding(3) var<storage, read_write> tet_metadata : TetrahedronMetadata;
-@group(2) @binding(4) var<storage, read_write> output_tet_buckets : array<OutputBucket>;
 @group(0) @binding(3) var<uniform> render_metadata : RenderMetadata;
 
-const WORKGROUP_SIZE: u32 = 512u;
-const READ_BATCH_SIZE: u32 = 1024;
-const OUTPUT_CHANNELS: u32 = 512u;
+@group(2) @binding(4) var<storage, read_write> incoming_tet_buffer : array<Tetrahedron>;
+@group(2) @binding(5) var<storage, read_write> output_tet_buckets : array<OutputBucket>;
+@group(2) @binding(7) var<storage, read_write> tet_metadata : TetrahedronMetadata;
 
-var<storage, read_write> tets_processed: atomic<u32> = 0.0;
-var<workgroup> batch_head: u32 = 0;
-var<workgroup> batch_end: u32 = 0;
+const WORKGROUP_SIZE: u32 = 256u;
+const READ_BATCH_SIZE: u32 = 1024;
+const OUTPUT_CHANNELS: u32 = 256u;
+
+var<workgroup> batch_head: u32; // Automatically initializes to 0
+var<workgroup> batch_end: u32; // Automatically initializes to 0
 
 const PRESENCE_TABLE_SIZE = WORKGROUP_SIZE * OUTPUT_CHANNELS/32;
 var<workgroup> presence_table: array<u32, PRESENCE_TABLE_SIZE>;
@@ -63,16 +63,16 @@ fn bucket_to_output_queue_idx(pos: vec3<u32>, dispatch_id: u32, group_count: u32
     return (((dispatch_id)*group_count + pos.x)*BUCKETS_X + pos.y)*BUCKETS_Y + pos.z;
 }
 
-fn bucket_to_presence_idx(bucket: vec3<u32>, idx: u32) {
+fn bucket_to_presence_idx(bucket: vec3<u32>, idx: u32) -> u32 {
     return ((((idx*BUCKETS_Y + bucket.y)*BUCKETS_X + bucket.x)*BUCKETS_Z + bucket.z));
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
-fn raster_sort_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) group_counts: vec3<u32>) {
-    let instance_id = global_id.x % WORKGROUP_SIZE;
+fn raster_sort_main(@builtin(workgroup_id) workgroup_ida: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>, @builtin(num_workgroups) group_counts: vec3<u32>) {
+    let instance_id = local_id.x;
     let group_count = group_counts.x;
-    let workgroup_id = global_id.x / WORKGROUP_SIZE;
-    let lead = (instance_id % WORKGROUP_SIZE) == 0;
+    let workgroup_id = workgroup_ida.x;
+    let lead = instance_id == 0;
 
     loop {
         // Input phase
@@ -81,13 +81,14 @@ fn raster_sort_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builti
             batch_head += READ_BATCH_SIZE;
             if (batch_head > batch_end)
             {
-                batch_head = atomicAdd(&tets_processed, READ_BATCH_SIZE);
+                batch_head = atomicAdd(&tet_metadata.tets_processed, READ_BATCH_SIZE);
                 batch_end = batch_head + READ_BATCH_SIZE;
-                batch_end = max(batch_end, tet_metadata.tet_count);
-                if (batch_head == batch_end) {
-                    return;
-                }
+                batch_end = min(batch_end, tet_metadata.tet_count);
             }
+        }
+        workgroupBarrier();
+        if (batch_head >= batch_end) {
+            return;
         }
         // Clear tet buffer
         for (var i = 0u; i < PRESENCE_TABLE_SIZE/WORKGROUP_SIZE; i++) {
@@ -111,15 +112,17 @@ fn raster_sort_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builti
                 for (var x = vmin.x; x < vmax.x; x++) {
                     for (var y = vmin.y; y < vmax.y; y++) {
                         for (var z = vmin.z; z < vmax.z; z++) {
+                            let bucket = vec3<u32>(x, y, z);
                             // TODO: Clip to tetrahedron's actual bound (don't pass empty corners)
 
                             let full_idx = bucket_to_presence_idx(bucket, instance_id);
-                            presence_table[full_idx/32u] |= 1<<full_idx%32u;
+                            presence_table[full_idx/32u] |= 1u<<full_idx%32u;
                         }
                     }
                 }
             }
         }
+
 
 
         // Output phase
@@ -131,10 +134,10 @@ fn raster_sort_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builti
             var num_filled = 0u;
 
             for (var tet_id = 0u; tet_id < WORKGROUP_SIZE; tet_id++) {
-                let full_idx = bucket_to_presence_idx(bucket, i);
-                if ((presence_table[full_idx/32u] & 1<<full_idx%32u) != 0) {
+                let full_idx = bucket_to_presence_idx(bucket, tet_id);
+                if ((presence_table[full_idx/32u] & 1u<<full_idx%32u) != 0) {
                     let tet = incoming_tet_buffer[batch_head + tet_id];
-                    output_tet_buckets[output_queue_idx].tets[num_filled] = tet;
+                    output_tet_buckets[output_queue_idx].tetrahedrons[num_filled] = tet;
                     num_filled++;
                 }
             }

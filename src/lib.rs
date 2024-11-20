@@ -6,8 +6,6 @@ mod tesseract;
 use wasm_bindgen::prelude::*;
 
 use web_time::{Instant};
-use bytemuck::{Pod, Zeroable};
-use wgpu::util::DeviceExt;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
@@ -20,7 +18,7 @@ const MAX_RENDER_WIDTH : u32 = 1920;
 const MAX_RENDER_HEIGHT : u32 = 1080;
 const MAX_SCREEN_WIDTH : u32 = 3840;
 const MAX_SCREEN_HEIGHT : u32 = 2160;
-const DEPTH_FACTOR: u32 = 128;
+const DEPTH_FACTOR: u32 = 8;
 
 async fn arun() {
 
@@ -55,7 +53,7 @@ async fn arun() {
             .expect("Couldn't append canvas to document body.");
     }
 
-    let mut size = window.inner_size();
+    let initial_size = window.inner_size();
 
     let instance = wgpu::Instance::default();
 
@@ -70,13 +68,13 @@ async fn arun() {
         .await
         .expect("Failed to find an appropriate adapter");
 
-    let mut required_features = wgpu::Features::empty();
+    let required_features = wgpu::Features::empty();
     let mut required_limits = wgpu::Limits::downlevel_defaults();
     required_limits.max_texture_dimension_1d = 4096;
     required_limits.max_texture_dimension_2d = 4096;
     //required_limits.max_bind_groups = 8;
-    required_limits.max_buffer_size = 1073741824;
-    required_limits.max_storage_buffer_binding_size = 1073741824;
+    //required_limits.max_buffer_size = 1073741824;
+    //required_limits.max_storage_buffer_binding_size = 1073741824;
 
     //required_limits.max_storage_buffers_per_shader_stage = 2;
     //required_limits.max_storage_buffer_binding_size = 0x40000000;
@@ -101,8 +99,8 @@ async fn arun() {
         .expect("Failed to create device");
 
     let mut render_metadata = RenderMetadata {
-        screen_width: size.width.min(MAX_SCREEN_WIDTH),
-        screen_height: size.height.min(MAX_SCREEN_HEIGHT),
+        screen_width: initial_size.width.min(MAX_SCREEN_WIDTH),
+        screen_height: initial_size.height.min(MAX_SCREEN_HEIGHT),
         render_width: MAX_RENDER_WIDTH,
         render_height: MAX_RENDER_HEIGHT,
         depth_factor: DEPTH_FACTOR

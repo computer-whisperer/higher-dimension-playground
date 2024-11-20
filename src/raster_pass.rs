@@ -26,6 +26,12 @@ pub struct ModelInstance {
     pub(crate) cell_texture_ids: [u32; 8]
 }
 
+#[repr(C)]
+#[derive(Default, Copy, Clone, Debug, Pod, Zeroable)]
+struct TetrahedronMetadataInput {
+    tetrahedron_count: u32,
+    processed_tet_count: u32
+}
 
 const RENDER_BUFFER_GROUP_ID: u32 = 0;
 const COLOR_BUFFER_IDX: u32 = 0;
@@ -42,6 +48,8 @@ const INTERMEDIATE_VERTEX_BUFFER_IDX: u32 = 0;
 const INSTANCE_BUFFER_IDX: u32 = 1;
 const CAMERA_BUFFER_IDX: u32 = 3;
 const TET_BUFFER_0_IDX: u32 = 4;
+const TET_BUFFER_1_IDX: u32 = 5;
+const TET_METADATA_BUFFER_IDX: u32 = 7;
 
 
 const MAX_INSTANCES : usize = 1000;
@@ -52,11 +60,13 @@ pub struct RasterPipelines {
     vertex_pipeline: wgpu::ComputePipeline,
     lines_pipeline: wgpu::ComputePipeline,
     tet_pre_pipeline: wgpu::ComputePipeline,
+    sort_0_pipeline: wgpu::ComputePipeline,
     present_pipeline: wgpu::RenderPipeline,
     render_buffers_bind_group_raster_layout: wgpu::BindGroupLayout,
     render_buffers_bind_group_present_layout: wgpu::BindGroupLayout,
     one_time_buffers_bind_group_layout: wgpu::BindGroupLayout,
-    live_buffers_bind_group_layout: wgpu::BindGroupLayout
+    live_buffers_bind_group_layout_a: wgpu::BindGroupLayout,
+    live_buffers_bind_group_layout_b: wgpu::BindGroupLayout
 }
 
 
@@ -169,9 +179,9 @@ impl RasterPipelines {
 
                 ],
             });
-        let live_buffers_bind_group_layout =
+        let live_buffers_bind_group_layout_a =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Raster: Intermediate Bind Group Layout"),
+                label: Some("Raster: Live Bind Group Layout A"),
                 entries: &[
                 wgpu::BindGroupLayoutEntry { // Intermediate Vertex Buffer
                     binding: INTERMEDIATE_VERTEX_BUFFER_IDX,
@@ -212,16 +222,61 @@ impl RasterPipelines {
                         min_binding_size: None,
                     },
                     count: None,
-                }
+                },
+                ],
+            });
+        let live_buffers_bind_group_layout_b =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Raster: Live Bind Group Layout B"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry { // Tetrahedron Buffer 0
+                        binding: TET_BUFFER_0_IDX,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry { // Tetrahedron Buffer 1
+                        binding: TET_BUFFER_1_IDX,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry { // Tetrahedron Metadata Buffer
+                        binding: TET_METADATA_BUFFER_IDX,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }
                 ],
             });
 
-        let raster_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Raster Pipeline Layout"),
+        let raster_layout_a = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Raster Pipeline Layout A"),
             bind_group_layouts: &[
                 &render_buffers_bind_group_raster_layout,
                 &one_time_buffers_bind_group_layout,
-                &live_buffers_bind_group_layout
+                &live_buffers_bind_group_layout_a
+            ],
+            push_constant_ranges: &[],
+        });
+        let raster_layout_b = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Raster Pipeline Layout B"),
+            bind_group_layouts: &[
+                &render_buffers_bind_group_raster_layout,
+                &one_time_buffers_bind_group_layout,
+                &live_buffers_bind_group_layout_b
             ],
             push_constant_ranges: &[],
         });
@@ -234,7 +289,7 @@ impl RasterPipelines {
         });
         let vertex_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Raster Vertex Pipeline"),
-            layout: Some(&raster_layout),
+            layout: Some(&raster_layout_a),
             module: &device.create_shader_module(wgpu::include_wgsl!("raster_vertex.wgsl")),
             entry_point: Some("raster_vertex_main"),
             compilation_options: Default::default(),
@@ -242,7 +297,7 @@ impl RasterPipelines {
         });
         let lines_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Raster Lines Pipeline"),
-            layout: Some(&raster_layout),
+            layout: Some(&raster_layout_a),
             module: &device.create_shader_module(wgpu::include_wgsl!("raster_lines.wgsl")),
             entry_point: Some("raster_lines_main"),
             compilation_options: Default::default(),
@@ -250,7 +305,7 @@ impl RasterPipelines {
         });
         let clear_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Clear Pipeline"),
-            layout: Some(&raster_layout),
+            layout: Some(&raster_layout_a),
             module: &device.create_shader_module(wgpu::include_wgsl!("raster_clear.wgsl")),
             entry_point: Some("raster_clear_main"),
             compilation_options: Default::default(),
@@ -258,9 +313,17 @@ impl RasterPipelines {
         });
         let tet_pre_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Raster Pre Tetrahedron Pipeline"),
-            layout: Some(&raster_layout),
+            layout: Some(&raster_layout_a),
             module: &device.create_shader_module(wgpu::include_wgsl!("raster_tet_pre.wgsl")),
             entry_point: Some("raster_tet_pre_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let sort_0_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Raster Sort Pipeline"),
+            layout: Some(&raster_layout_b),
+            module: &device.create_shader_module(wgpu::include_wgsl!("raster_sort.wgsl")),
+            entry_point: Some("raster_sort_main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -300,7 +363,9 @@ impl RasterPipelines {
             lines_pipeline,
             tet_pre_pipeline,
             present_pipeline,
-            live_buffers_bind_group_layout,
+            sort_0_pipeline,
+            live_buffers_bind_group_layout_a,
+            live_buffers_bind_group_layout_b,
             one_time_buffers_bind_group_layout,
             render_buffers_bind_group_raster_layout,
             render_buffers_bind_group_present_layout,
@@ -320,20 +385,21 @@ struct LiveBuffers {
     instance_buffer: wgpu::Buffer,
     camera_uniform_buffer: wgpu::Buffer,
     tet_buffer_0: wgpu::Buffer,
+    tet_buffer_1: wgpu::Buffer,
+    tet_metadata_buffer: wgpu::Buffer,
 }
 
 pub struct RasterBindings {
     render_buffers: RenderBuffers,
 
     model_vertex_buffer: wgpu::Buffer,
-
-
     live_buffers: LiveBuffers,
 
     raster_render_bind_group: wgpu::BindGroup,
     present_render_bind_group: wgpu::BindGroup,
     one_time_bind_group: wgpu::BindGroup,
-    live_bind_group: wgpu::BindGroup,
+    live_bind_group_a: wgpu::BindGroup,
+    live_bind_group_b: wgpu::BindGroup,
 
     latest_render_metadata: RenderMetadata,
 }
@@ -430,21 +496,35 @@ impl RasterBindings {
 
 
         let tet_buffer_0 = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Tetrahedron Output Buffer"),
+            label: Some("Tetrahedron Buffer 0"),
             size: MAX_INTERMEDIATE_VERTICES*32,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
-        LiveBuffers {instance_buffer, vertex_intermediate_buffer, camera_uniform_buffer, tet_buffer_0}
+        let tet_buffer_1 = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Tetrahedron Buffer 1"),
+            size: 512*(512*32 + 16),
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let tet_metadata_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Tetrahedron Metadata Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        LiveBuffers {instance_buffer, vertex_intermediate_buffer, camera_uniform_buffer, tet_buffer_0, tet_buffer_1, tet_metadata_buffer}
     }
 
-    fn create_live_bind_group(device: &wgpu::Device,
-                              pipelines: &RasterPipelines,
+    fn create_live_bind_group_a(device: &wgpu::Device,
+                                layout: &wgpu::BindGroupLayout,
                               live_buffers: &LiveBuffers) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raster: Live Bind Group"),
-            layout: &pipelines.vertex_pipeline.get_bind_group_layout(LIVE_BUFFER_GROUP_ID),
+            label: Some("Raster: Live Bind Group A"),
+            layout: &layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: CAMERA_BUFFER_IDX,
@@ -461,6 +541,29 @@ impl RasterBindings {
                 wgpu::BindGroupEntry {
                     binding: TET_BUFFER_0_IDX,
                     resource: live_buffers.tet_buffer_0.as_entire_binding(),
+                }
+            ],
+        })
+    }
+
+    fn create_live_bind_group_b(device: &wgpu::Device,
+                                layout: &wgpu::BindGroupLayout,
+                                live_buffers: &LiveBuffers) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raster: Live Bind Group B"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: TET_BUFFER_0_IDX,
+                    resource: live_buffers.tet_buffer_0.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: TET_BUFFER_1_IDX,
+                    resource: live_buffers.tet_buffer_1.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: TET_METADATA_BUFFER_IDX,
+                    resource: live_buffers.tet_metadata_buffer.as_entire_binding(),
                 }
             ],
         })
@@ -485,7 +588,7 @@ impl RasterBindings {
         );
         let one_time_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Raster: One Time Buffer Bind Group"),
-            layout: &raster_pipelines.vertex_pipeline.get_bind_group_layout(ONETIME_BUFFER_GROUP_ID),
+            layout: &raster_pipelines.one_time_buffers_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: VERTEX_BUFFER_IDX,
                 resource: model_vertex_buffer.as_entire_binding(),
@@ -493,14 +596,16 @@ impl RasterBindings {
         });
 
         let live_buffers = Self::create_live_buffers(&device);
-        let live_bind_group = Self::create_live_bind_group(&device, &raster_pipelines, &live_buffers);
+        let live_bind_group_a = Self::create_live_bind_group_a(&device, &raster_pipelines.live_buffers_bind_group_layout_a, &live_buffers);
+        let live_bind_group_b = Self::create_live_bind_group_b(&device, &raster_pipelines.live_buffers_bind_group_layout_b, &live_buffers);
 
         Self {
             render_buffers,
             live_buffers,
             model_vertex_buffer,
             one_time_bind_group,
-            live_bind_group,
+            live_bind_group_a,
+            live_bind_group_b,
             raster_render_bind_group,
             present_render_bind_group,
             latest_render_metadata
@@ -527,10 +632,9 @@ impl RasterBindings {
         device: &wgpu::Device,
         pipelines: &RasterPipelines
     ) {
-        let live_buffers = Self::create_live_buffers(&device);
-        let live_bind_group = Self::create_live_bind_group(&device, &pipelines, &live_buffers);
-        self.live_buffers = live_buffers;
-        self.live_bind_group = live_bind_group;
+        self.live_buffers = Self::create_live_buffers(&device);
+        self.live_bind_group_a = Self::create_live_bind_group_a(&device, &pipelines.live_buffers_bind_group_layout_a, &self.live_buffers);
+        self.live_bind_group_b = Self::create_live_bind_group_b(&device, &pipelines.live_buffers_bind_group_layout_b, &self.live_buffers);
     }
 }
 
@@ -550,7 +654,7 @@ impl<'a> RasterPipelines {
         cpass.set_pipeline(&self.clear_pipeline);
         cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.raster_render_bind_group, &[]);
         cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
-        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group_a, &[]);
         cpass.dispatch_workgroups((len + padded_size) / subgroup_size, 1, 1);
 
         let subgroup_size = 256;
@@ -559,7 +663,7 @@ impl<'a> RasterPipelines {
         cpass.set_pipeline(&self.vertex_pipeline);
         cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.raster_render_bind_group, &[]);
         cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
-        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group_a, &[]);
         cpass.dispatch_workgroups(dispatch_size as u32, 1, 1);
 
 
@@ -567,14 +671,20 @@ impl<'a> RasterPipelines {
         cpass.set_pipeline(&self.lines_pipeline);
         cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.raster_render_bind_group, &[]);
         cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
-        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group_a, &[]);
         cpass.dispatch_workgroups(num_tets as u32, 1, 1);
 
         cpass.set_pipeline(&self.tet_pre_pipeline);
         cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.raster_render_bind_group, &[]);
         cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
-        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group, &[]);
-        cpass.dispatch_workgroups((num_tets as u32)/256, 1, 1);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group_a, &[]);
+        cpass.dispatch_workgroups(((num_tets as u32)/256) + 1, 1, 1);
+
+        cpass.set_pipeline(&self.sort_0_pipeline);
+        cpass.set_bind_group(RENDER_BUFFER_GROUP_ID, &bindings.raster_render_bind_group, &[]);
+        cpass.set_bind_group(ONETIME_BUFFER_GROUP_ID, &bindings.one_time_bind_group, &[]);
+        cpass.set_bind_group(LIVE_BUFFER_GROUP_ID, &bindings.live_bind_group_b, &[]);
+        cpass.dispatch_workgroups(160, 1, 1);
 
     }
 
@@ -597,8 +707,15 @@ impl<'a> RasterPipelines {
                      camera_state: &CameraState) {
 
 
+        let vertex_count = tesseract::TET_VERTICES.len()*model_instances.len();
+        let tetrahedron_count = vertex_count/4;
+
         queue.write_buffer(&raster_bindings.live_buffers.instance_buffer, 0, bytemuck::cast_slice(model_instances));
         queue.write_buffer(&raster_bindings.live_buffers.camera_uniform_buffer, 0, bytemuck::cast_slice(&[*camera_state]));
+        queue.write_buffer(&raster_bindings.live_buffers.tet_metadata_buffer, 0, bytemuck::cast_slice(&[TetrahedronMetadataInput{
+            tetrahedron_count: tetrahedron_count as u32,
+            processed_tet_count: 0
+        }]));
 
         {
             let mut cpass =
@@ -606,7 +723,7 @@ impl<'a> RasterPipelines {
                     label: None,
                     timestamp_writes: None,
                 });
-            self.record_cpass(&mut cpass, &raster_bindings, tesseract::TET_VERTICES.len()*model_instances.len());
+            self.record_cpass(&mut cpass, &raster_bindings, vertex_count);
         }
 
         {

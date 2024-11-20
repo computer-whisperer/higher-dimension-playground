@@ -26,7 +26,7 @@ const V_PNPP: [f32; 4] = [1.0, -1.0, 1.0, 1.0];
 const V_PPPP: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const V_NPPP: [f32; 4] = [-1.0, 1.0, 1.0, 1.0];
 
-
+/*
 pub const TRI_VERTICES: &[[f32; 4]] = &[
 
     // Cell 0 PXXX
@@ -140,6 +140,7 @@ pub const TRI_VERTICES: &[[f32; 4]] = &[
     V_NNNN, V_PNPN, V_PNNN,
 
 ];
+*/
 
 const V_PPP: [f32; 3] = [1.0, 1.0, 1.0];
 const V_PPN: [f32; 3] = [1.0, 1.0, -1.0];

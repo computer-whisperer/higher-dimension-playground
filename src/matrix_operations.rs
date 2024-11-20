@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub fn identity_matrix<const N: usize>() -> [[f32; N]; N] {
     let mut result = [[0.0; N]; N];
     for i in 0..N {
@@ -17,6 +18,7 @@ pub const fn flatten_5x5_matrix_for_wgpu(matrix: [[f32; 5]; 5]) -> [f32; 32] {
     result
 }*/
 
+#[allow(dead_code)]
 pub const fn flatten_5x5_matrix_for_wgpu(matrix: [[f32; 5]; 5]) -> [f32; 32] {
     [
         matrix[0][0],
@@ -54,6 +56,7 @@ pub const fn flatten_5x5_matrix_for_wgpu(matrix: [[f32; 5]; 5]) -> [f32; 32] {
     ]
 }
 
+#[allow(dead_code)]
 fn scale_matrix_3d(scale: f32) -> [[f32; 4]; 4] {
     [[scale, 0.0, 0.0, 0.0],
      [0.0, scale, 0.0, 0.0],
@@ -61,6 +64,7 @@ fn scale_matrix_3d(scale: f32) -> [[f32; 4]; 4] {
      [0.0, 0.0,   0.0,  1.0]]
 }
 
+#[allow(dead_code)]
 pub fn scale_matrix_4d(scale: f32) -> [[f32; 5]; 5] {
     [   [scale, 0.0,   0.0,   0.0,   0.0],
         [0.0,   scale, 0.0,   0.0,   0.0],
@@ -69,6 +73,7 @@ pub fn scale_matrix_4d(scale: f32) -> [[f32; 5]; 5] {
         [0.0,   0.0,   0.0,   0.0,   1.0]]
 }
 
+#[allow(dead_code)]
 pub fn scale_matrix_4d_elementwise(x: f32, y: f32, z: f32, w: f32) -> [[f32; 5]; 5] {
     [   [x,     0.0,   0.0,   0.0,   0.0],
         [0.0,   y,     0.0,   0.0,   0.0],
@@ -77,6 +82,7 @@ pub fn scale_matrix_4d_elementwise(x: f32, y: f32, z: f32, w: f32) -> [[f32; 5];
         [0.0,   0.0,   0.0,   0.0,   1.0]]
 }
 
+#[allow(dead_code)]
 pub const fn translate_matrix_4d(x: f32, y: f32, z: f32, w: f32) -> [[f32; 5]; 5] {
     [[1.0, 0.0, 0.0, 0.0, x],
      [0.0, 1.0, 0.0, 0.0, y],
@@ -86,6 +92,7 @@ pub const fn translate_matrix_4d(x: f32, y: f32, z: f32, w: f32) -> [[f32; 5]; 5
     ]
 }
 
+#[allow(dead_code)]
 pub fn rotation_matrix_3d_yaw(angle: f32) -> [[f32; 4]; 4] {
     let cos_theta = angle.cos();
     let sin_theta = angle.sin();
@@ -95,6 +102,7 @@ pub fn rotation_matrix_3d_yaw(angle: f32) -> [[f32; 4]; 4] {
      [0.0, 0.0, 0.0, 1.0]]
 }
 
+#[allow(dead_code)]
 pub fn rotation_matrix_3d_pitch(angle: f32) -> [[f32; 4]; 4] {
     let cos_theta = angle.cos();
     let sin_theta = angle.sin();
@@ -104,6 +112,7 @@ pub fn rotation_matrix_3d_pitch(angle: f32) -> [[f32; 4]; 4] {
      [0.0, 0.0, 0.0, 1.0]]
 }
 
+#[allow(dead_code)]
 pub fn rotation_matrix_3d_roll(angle: f32) -> [[f32; 4]; 4] {
     let cos_theta = angle.cos();
     let sin_theta = angle.sin();
@@ -113,6 +122,7 @@ pub fn rotation_matrix_3d_roll(angle: f32) -> [[f32; 4]; 4] {
      [0.0, 0.0, 0.0, 1.0]]
 }
 
+#[allow(dead_code)]
 pub fn rotation_matrix_4d_rotate_0(angle: f32) -> [[f32; 5]; 5] {
     let cos_theta = angle.cos();
     let sin_theta = angle.sin();
@@ -125,6 +135,7 @@ pub fn rotation_matrix_4d_rotate_0(angle: f32) -> [[f32; 5]; 5] {
     ]
 }
 
+#[allow(dead_code)]
 pub fn rotation_matrix_4d_rotate_1(angle: f32) -> [[f32; 5]; 5] {
     let cos_theta = angle.cos();
     let sin_theta = angle.sin();
@@ -137,6 +148,7 @@ pub fn rotation_matrix_4d_rotate_1(angle: f32) -> [[f32; 5]; 5] {
     ]
 }
 
+#[allow(dead_code)]
 pub fn rotation_matrix_4d_rotate_3(angle: f32) -> [[f32; 5]; 5] {
     let cos_theta = angle.cos();
     let sin_theta = angle.sin();
@@ -149,6 +161,7 @@ pub fn rotation_matrix_4d_rotate_3(angle: f32) -> [[f32; 5]; 5] {
     ]
 }
 
+#[allow(dead_code)]
 pub fn rotation_matrix_4d_rotate_4(angle: f32) -> [[f32; 5]; 5] {
     let cos_theta = angle.cos();
     let sin_theta = angle.sin();
@@ -161,6 +174,7 @@ pub fn rotation_matrix_4d_rotate_4(angle: f32) -> [[f32; 5]; 5] {
     ]
 }
 
+#[allow(dead_code)]
 pub fn matrix_multiply<const N: usize> (a: [[f32; N]; N], b: [[f32; N]; N]) -> [[f32; N]; N] {
     let mut result = [[0.0; N]; N];
     for i in 0..N {
