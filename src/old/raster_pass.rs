@@ -2,7 +2,6 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use crate::tesseract;
 
-
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug, Pod, Zeroable)]
 pub struct RenderMetadata {

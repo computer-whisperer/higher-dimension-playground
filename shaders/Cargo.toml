@@ -1,0 +1,20 @@
+[package]
+name = "shaders"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+spirv-std = {git = "https://github.com/rust-gpu/rust-gpu.git"}
+
+bytemuck = { version = "1.18", features=["derive"] }
+glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
+
+
+ndarray = {version="0.16.1", default-features=false, optional=true}
+
+[features]
+default = []
+ndarray = ["dep:ndarray"]

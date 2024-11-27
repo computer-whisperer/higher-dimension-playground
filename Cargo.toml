@@ -3,35 +3,24 @@ name = "higher-dimension-playground"
 version = "0.1.0"
 edition = "2021"
 
-#[lib]
-#crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-cgmath = "0.18.0"
-winit = "0.29"
-pollster = "0.4.0"
-wgpu = { version = "23.0.0", features = ["webgpu"]}
-env_logger = "0.11.5"
-log = "0.4.22"
+# The `vulkano` crate is the main crate that you must use to use Vulkan.
+vulkano = {git = "https://github.com/vulkano-rs/vulkano.git"}
+# Provides the `shader!` macro that is used to generate code for using shaders.
+vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano.git"}
 
-bytemuck = { version = "1.19", features=["derive"] }
-cfg-if = "1"
-wasm-bindgen = "0.2.95"
-web-sys = "0.3.72"
-wasm-bindgen-futures = "0.4.45"
+shaders = {path="shaders", features=["ndarray"]}
 
-web-time = "1.1.0"
+ndarray = {version="0.16.1"}
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = "0.1.6"
-console_log = "1.0"
-wasm-bindgen-futures = "0.4.45"
-wasm-bindgen = "0.2.95"
-web-sys = { version = "0.3.72", features = [
-    "Document",
-    "Window",
-    "Element",
-]}
+bytemuck = { version = "1.18", features=["derive"] }
 
+# The Vulkan library doesn't provide any functionality to create and handle windows, as
+# this would be out of scope. In order to open a window, we are going to use the `winit` crate.
+winit = "0.30"
+glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
 
+[build-dependencies]
+spirv-builder = {git = "https://github.com/rust-gpu/rust-gpu.git"}
 
