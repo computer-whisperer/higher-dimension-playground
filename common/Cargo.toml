@@ -1,19 +1,16 @@
 [package]
-name = "shaders"
+name = "common"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-path = "src/shaders.rs"
-crate-type = ["dylib"]
-
 [dependencies]
 spirv-std = {git = "https://github.com/rust-gpu/rust-gpu.git"}
-
-common = {path="../common"}
-
 bytemuck = { version = "1.18", features=["derive"] }
 glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
 
+
+ndarray = {version="0.16.1", default-features=false, optional=true}
+
 [features]
 default = []
+ndarray = ["dep:ndarray"]

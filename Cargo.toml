@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 
+
 [dependencies]
 # The `vulkano` crate is the main crate that you must use to use Vulkan.
 vulkano = {git = "https://github.com/vulkano-rs/vulkano.git"}
 # Provides the `shader!` macro that is used to generate code for using shaders.
 vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano.git"}
 
-shaders = {path="shaders", features=["ndarray"]}
+common = {path="common", features=["ndarray"]}
 
 ndarray = {version="0.16.1"}
 

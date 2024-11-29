@@ -251,6 +251,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "common"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "ndarray",
+ "spirv-std",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -505,9 +515,9 @@ name = "higher-dimension-playground"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "common",
  "glam",
  "ndarray",
- "shaders",
  "spirv-builder",
  "vulkano",
  "vulkano-shaders",
@@ -1412,16 +1422,6 @@ dependencies = [
  "cmake",
  "libc",
  "roxmltree",
-]
-
-[[package]]
-name = "shaders"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "ndarray",
- "spirv-std",
 ]
 
 [[package]]

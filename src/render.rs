@@ -1,21 +1,22 @@
 use std::collections::BTreeMap;
+use std::f32::consts::PI;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use winit::window::Window;
 use vulkano::swapchain::{acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
-use vulkano::descriptor_set::allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo};
+use vulkano::descriptor_set::allocator::{DescriptorSetAllocator, StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo};
 use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType};
 use vulkano::device::{Device, Queue};
 use vulkano::image::{Image, ImageUsage};
 use vulkano::image::view::ImageView;
 use vulkano::instance::Instance;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::{DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{ComputePipeline, DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
-use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
 use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::{PolygonMode, RasterizationState};
 use vulkano::pipeline::graphics::vertex_input::VertexInputState;
@@ -23,19 +24,87 @@ use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::shader::{ShaderModule, ShaderStages};
 use vulkano::{sync, Validated, VulkanError};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::sync::GpuFuture;
 use bytemuck::{Zeroable};
-
+use vulkano::pipeline::compute::ComputePipelineCreateInfo;
+use common::ModelTetrahedron;
 use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
+use crate::matrix_operations::{rotation_matrix_4d_rotate_1, scale_matrix_4d, translate_matrix_4d};
+use glam::{Vec3, vec4, Vec4};
+
+pub fn generate_tesseract_tetrahedrons() -> Vec<common::ModelTetrahedron> {
+    let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
+    let cube_vertexes = Hypercube::<3, usize>::generate_vertices();
+    let tetrahedron_cells = Hypercube::<4, usize>::generate_k_faces::<3>();
+
+    let mut output_tetrahedrons = Vec::new();
+    let texture_position_simplexes = generate_simplexes_for_k_face::<3, 3>([0b000, 0b001, 0b010, 0b100]);
+
+    for cell_id in 0..tetrahedron_cells.len() {
+        //for cell_id in 0..1 {
+        let position_simplexes = generate_simplexes_for_k_face::<4, 3>(tetrahedron_cells[cell_id]);
+
+
+        for simplex_id in 0..position_simplexes.len() {
+            let texture_simplex = texture_position_simplexes[simplex_id];
+            // Convert arrays to vec4
+            let vertex_positions = position_simplexes[simplex_id].map(|i| {
+                let vertex = tesseract_vertexes[i];
+                glam::Vec4::new(vertex[0] as f32, vertex[1] as f32, vertex[2] as f32, vertex[3] as f32)
+            });
+
+            let texture_positions = texture_simplex.map(|i| {
+                let vertex = cube_vertexes[i];
+                glam::Vec4::new(vertex[0] as f32, vertex[1] as f32, vertex[2] as f32, 1.0)
+            });
+
+            output_tetrahedrons.push(
+                common::ModelTetrahedron {
+                    vertex_positions,
+                    texture_positions,
+                    cell_id: cell_id as u32,
+                    padding: [0; 3],
+                }
+            )
+        }
+    }
+
+    output_tetrahedrons
+}
+
+pub fn generate_tesseract_edges() -> Vec<common::ModelEdge> {
+    let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
+    let tesseract_edges = Hypercube::<4, usize>::generate_k_faces::<1>();
+
+    let mut output_edges = Vec::new();
+    
+    for edge in tesseract_edges {
+        let vertex_positions = edge.map(|i| {
+            let vertex = tesseract_vertexes[i];
+            glam::Vec4::new(vertex[0] as f32, vertex[1] as f32, vertex[2] as f32, vertex[3] as f32)
+        });        
+        
+        output_edges.push(common::ModelEdge { vertex_positions});
+    }
+
+    output_edges
+}
+
 
 pub struct OneTimeBuffers {
-    model_tetrahedron_buffer: Subbuffer<[shaders::ModelTetrahedron]>
+    model_tetrahedron_count: usize,
+    model_tetrahedron_buffer: Subbuffer<[common::ModelTetrahedron]>,
+    model_edge_count: usize,
+    model_edge_buffer: Subbuffer<[common::ModelEdge]>,
+    descriptor_set: Arc<DescriptorSet>
 }
 
 impl OneTimeBuffers {
-    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>) -> Self {
+    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>, descriptor_set_layout: Arc<DescriptorSetLayout>) -> Self {
+        let model_tetrahedrons = generate_tesseract_tetrahedrons();
+        let model_tetrahedron_count = model_tetrahedrons.len();
         let model_tetrahedron_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -46,17 +115,52 @@ impl OneTimeBuffers {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            generate_tesseract_tetrahedrons()
+            model_tetrahedrons
+        ).unwrap();
+
+        let model_edges = generate_tesseract_edges();
+        let model_edge_count = model_edges.len();
+        let model_edge_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                .. Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            model_edges
+        ).unwrap();
+        
+        let descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator,
+            descriptor_set_layout,
+            [
+                WriteDescriptorSet::buffer(0, model_tetrahedron_buffer.clone()),
+                WriteDescriptorSet::buffer(1, model_edge_buffer.clone()),
+            ],
+            [],
         ).unwrap();
         Self {
             model_tetrahedron_buffer,
+            model_tetrahedron_count,
+            model_edge_buffer,
+            model_edge_count,
+            descriptor_set,
         }
     }
-    
+
     pub fn create_descriptor_set_layout(device: Arc<Device>) -> Arc<DescriptorSetLayout> {
         let mut bindings = BTreeMap::new();
         bindings.insert(
             0,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        bindings.insert(
+            1,
             DescriptorSetLayoutBinding {
                 stages: ShaderStages::COMPUTE,
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
@@ -73,62 +177,98 @@ impl OneTimeBuffers {
 
 pub struct SizedBuffers {
     line_vertexes_buffer: Subbuffer<[glam::Vec2]>,
-    output_tetrahedron_buffer: Subbuffer<[shaders::Tetrahedron]>,
+    output_tetrahedron_buffer: Subbuffer<[common::Tetrahedron]>,
+    descriptor_set: Arc<DescriptorSet>
 }
 
 impl SizedBuffers {
-    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>) -> Self {
+    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>, descriptor_set_layout: Arc<DescriptorSetLayout>) -> Self {
         let line_vertexes_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER,
                 .. Default::default()
             },
             AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                ..Default::default()
             },
-            vec![glam::Vec2::new(0.0, 0.0); 1000]
+            vec![glam::Vec2::new(0.0, 0.0); 10000]
         ).unwrap();
 
         let output_tetrahedron_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER,
                 .. Default::default()
             },
             AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![shaders::Tetrahedron::zeroed(); 1000]
+            vec![common::Tetrahedron::zeroed(); 1000]
         ).unwrap();
         
+        let descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator,
+            descriptor_set_layout,
+            [
+                WriteDescriptorSet::buffer(0, line_vertexes_buffer.clone()),
+                WriteDescriptorSet::buffer(1, output_tetrahedron_buffer.clone())
+            ],
+            []
+        ).unwrap();
         Self {
             line_vertexes_buffer,
             output_tetrahedron_buffer,
+            descriptor_set
         }
     }
+
+    pub fn create_descriptor_set_layout(device: Arc<Device>) -> Arc<DescriptorSetLayout> {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            0,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE | ShaderStages::VERTEX,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        bindings.insert(
+            1,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        DescriptorSetLayout::new(
+            device.clone(),
+            DescriptorSetLayoutCreateInfo {
+                bindings,
+                ..Default::default()
+            }
+        ).unwrap()
+    }
+    
 }
 
 pub struct LiveBuffers {
-    model_instance_buffer: Subbuffer<[shaders::ModelInstance]>,
-    working_data_buffer: Subbuffer<shaders::WorkingData>,
+    model_instance_buffer: Subbuffer<[common::ModelInstance]>,
+    working_data_buffer: Subbuffer<common::WorkingData>,
+    descriptor_set: Arc<DescriptorSet>
 }
 
 impl LiveBuffers {
-    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>) -> Self {
+    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>, descriptor_set_layout: Arc<DescriptorSetLayout>) -> Self {
         let model_instance_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER,
                 .. Default::default()
             },
             AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                ..Default::default()
             },
-            vec![shaders::ModelInstance::zeroed(); 1000]
+            vec![common::ModelInstance::zeroed(); 1000]
         ).unwrap();
 
         let working_data_buffer = Buffer::from_data(
@@ -141,13 +281,45 @@ impl LiveBuffers {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                ..Default::default()
             },
-            shaders::WorkingData::zeroed()
+            common::WorkingData::zeroed()
         ).unwrap();
-        
+        let descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator,
+            descriptor_set_layout,
+            [
+                WriteDescriptorSet::buffer(0, model_instance_buffer.clone()),
+                WriteDescriptorSet::buffer(1, working_data_buffer.clone())
+            ],
+            [],
+        ).unwrap();
         Self {
             model_instance_buffer,
             working_data_buffer,
+            descriptor_set
         }
+    }
+
+    pub fn create_descriptor_set_layout(device: Arc<Device>) -> Arc<DescriptorSetLayout> {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            0,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        bindings.insert(
+            1,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        DescriptorSetLayout::new(
+            device.clone(),
+            DescriptorSetLayoutCreateInfo {
+                bindings,
+                ..Default::default()
+            }
+        ).unwrap()
     }
 }
 
@@ -184,7 +356,7 @@ impl PresentPipelineContext {
 
             // Automatically generate a vertex input state from the vertex shader's input
             // interface, that takes a single vertex buffer containing `Vertex` structs.
-
+            
             // Finally, create the pipeline.
             GraphicsPipeline::new(
                 device.clone(),
@@ -195,7 +367,11 @@ impl PresentPipelineContext {
                     vertex_input_state: Some(VertexInputState::new()),
                     // How vertices are arranged into primitive shapes. The default primitive shape
                     // is a triangle.
-                    input_assembly_state: Some(InputAssemblyState::default()),
+                    input_assembly_state: Some(InputAssemblyState { 
+                        topology: PrimitiveTopology::LineList,
+                        primitive_restart_enable: false,
+                       ..Default::default()
+                    }),
                     // How primitives are transformed and clipped to fit the framebuffer. We use a
                     // resizable viewport, set to draw over the entire window.
                     viewport_state: Some(ViewportState::default()),
@@ -234,9 +410,31 @@ impl PresentPipelineContext {
             )
                 .unwrap()
         };
-        
+
         Self {
             pipeline,
+            pipeline_layout
+        }
+    }
+}
+
+struct ComputePipelineContext {
+    tetrahedron_pipeline: Arc<ComputePipeline>,
+    edge_pipeline: Arc<ComputePipeline>,
+    pipeline_layout: Arc<PipelineLayout>
+}
+
+impl ComputePipelineContext {
+    pub fn new(device: Arc<Device>, loaded_shader: Arc<ShaderModule>, pipeline_layout: Arc<PipelineLayout>) -> Self {
+        Self {
+            tetrahedron_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("main_tetrahedron_cs").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            edge_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("main_edge_cs").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
             pipeline_layout
         }
     }
@@ -247,56 +445,17 @@ pub struct RenderContext {
     swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
     framebuffers: Vec<Arc<Framebuffer>>,
-    descriptor_set: Arc<DescriptorSet>,
     present_pipeline: PresentPipelineContext,
+    compute_pipeline: ComputePipelineContext,
     viewport: Viewport,
     recreate_swapchain: bool,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
-    test_buffer: Subbuffer<shaders::StructTest>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     one_time_buffers: OneTimeBuffers,
     sized_buffers: SizedBuffers,
     live_buffers: LiveBuffers,
 }
 
-pub fn generate_tesseract_tetrahedrons() -> Vec<shaders::ModelTetrahedron> {
-    let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
-    let cube_vertexes = Hypercube::<3, usize>::generate_vertices();
-    let tetrahedron_cells = Hypercube::<4, usize>::generate_k_faces::<3>();
-    
-    let mut output_tetrahedrons = Vec::new();
-    let texture_position_simplexes = generate_simplexes_for_k_face::<3, 3>([0b000, 0b001, 0b010, 0b100]);
-    
-    for cell_id in 0..tetrahedron_cells.len() {
-        let position_simplexes = generate_simplexes_for_k_face::<4, 3>(tetrahedron_cells[cell_id]);
-        
-        
-        for simplex_id in 0..position_simplexes.len() {
-            let texture_simplex = texture_position_simplexes[simplex_id];
-            // Convert arrays to vec4
-            let vertex_positions = position_simplexes[simplex_id].map(|i| {
-                let vertex = tesseract_vertexes[i];
-                glam::Vec4::new(vertex[0] as f32, vertex[1] as f32, vertex[2] as f32, vertex[3] as f32)
-            });
-
-            let texture_positions = texture_simplex.map(|i| {
-                let vertex = cube_vertexes[i];
-                glam::Vec3::new(vertex[0] as f32, vertex[1] as f32, vertex[2] as f32)
-            });
-            
-            output_tetrahedrons.push(
-                shaders::ModelTetrahedron {
-                    vertex_positions,
-                    texture_positions,
-                    cell_id: cell_id as u32,
-                    padding: [0; 3],
-                }
-            )
-        }
-    }
-    
-    output_tetrahedrons
-}
 
 impl RenderContext {
     pub fn new(device: Arc<Device>, instance: Arc<Instance>, window: Arc<Window>) -> RenderContext {
@@ -382,22 +541,6 @@ impl RenderContext {
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
-        let test_value = shaders::StructTest {
-            color: glam::Vec3::new(1.0, 0.0, 0.0),
-        };
-
-        let test_buffer = Buffer::from_data(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                .. Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            test_value
-        ).unwrap();
         
         mod shader_loader {
             vulkano_shaders::shader! {
@@ -453,26 +596,14 @@ impl RenderContext {
             StandardDescriptorSetAllocatorCreateInfo::default()
         ));
 
-        let mut bindings = BTreeMap::new();
-        bindings.insert(
-            0,
-            DescriptorSetLayoutBinding {
-                stages: ShaderStages::FRAGMENT,
-                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
-            });
-        let descriptor_set_layout = DescriptorSetLayout::new(
-            device.clone(),
-            DescriptorSetLayoutCreateInfo {
-                bindings,
-                ..Default::default()
-            }
-        ).unwrap();
-        let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator,
-            descriptor_set_layout.clone(),
-            [WriteDescriptorSet::buffer(0, test_buffer.clone())],
-            [],
-        ).unwrap();
+        let one_time_descriptor_set_layout = OneTimeBuffers::create_descriptor_set_layout(device.clone());
+        let one_time_buffers = OneTimeBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), one_time_descriptor_set_layout.clone());
+        
+        let sized_descriptor_set_layout = SizedBuffers::create_descriptor_set_layout(device.clone());
+        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), sized_descriptor_set_layout.clone());
+        
+        let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
+        let live_buffers = LiveBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), live_descriptor_set_layout.clone());
 
         // We must now create a **pipeline layout** object, which describes the locations and
         // types of descriptor sets and push constants used by the shaders in the pipeline.
@@ -486,7 +617,11 @@ impl RenderContext {
         let pipeline_layout = PipelineLayout::new(
             device.clone(),
             PipelineLayoutCreateInfo{
-                set_layouts: Vec::from([descriptor_set_layout.clone()]),
+                set_layouts: Vec::from([
+                    one_time_descriptor_set_layout.clone(),
+                    sized_descriptor_set_layout.clone(),
+                    live_descriptor_set_layout.clone()
+                ]),
                 ..Default::default()
             }
         ).unwrap();
@@ -494,6 +629,7 @@ impl RenderContext {
 
         let loaded_shader = shader_loader::load(device.clone()).unwrap();
         let present_pipeline = PresentPipelineContext::new(device.clone(), render_pass.clone(), loaded_shader.clone(), pipeline_layout.clone());
+        let compute_pipeline = ComputePipelineContext::new(device.clone(), loaded_shader.clone(), pipeline_layout.clone());
         
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
         // Otherwise we would have to recreate the whole pipeline.
@@ -521,23 +657,18 @@ impl RenderContext {
         // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to
         // avoid that, we store the submission of the previous frame here.
         let previous_frame_end = Some(sync::now(device.clone()).boxed());
-        
-        let one_time_buffers = OneTimeBuffers::new(memory_allocator.clone());
-        let sized_buffers = SizedBuffers::new(memory_allocator.clone());
-        let live_buffers = LiveBuffers::new(memory_allocator.clone());
-        
+
         
         RenderContext {
             window,
             swapchain,
             render_pass,
             framebuffers,
-            descriptor_set,
             present_pipeline,
+            compute_pipeline,
             viewport,
             recreate_swapchain,
             previous_frame_end,
-            test_buffer,
             command_buffer_allocator,
             one_time_buffers,
             sized_buffers,
@@ -549,7 +680,7 @@ impl RenderContext {
         self.recreate_swapchain = true;
     }
     
-    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>) {
+    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance]) {
         let window_size = self.window.inner_size();
 
         // Do not draw the frame when the screen size is zero. On Windows, this can occur
@@ -632,45 +763,137 @@ impl RenderContext {
             CommandBufferUsage::OneTimeSubmit,
         )
             .unwrap();
+        
+        
+        
+        {
+            let mut writer = self.live_buffers.model_instance_buffer.write().unwrap();
+            for i in 0..model_instances.len() {
+                writer[i] = model_instances[i];
+            }
+        }
+        
+        {
+            let mut writer = self.live_buffers.working_data_buffer.write().unwrap();
+            writer.view_matrix = view_matrix.into();
+            writer.render_dimensions = glam::UVec2::new(window_size.width, window_size.height);
+        }
+        
+        // Do compute stage
+        
+        // Do tetrahedrons?
+        if false {
+            builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone()).unwrap();
+            builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.present_pipeline.pipeline_layout.clone(), 0,
+                                         vec![
+                                             self.one_time_buffers.descriptor_set.clone(),
+                                             self.sized_buffers.descriptor_set.clone(),
+                                             self.live_buffers.descriptor_set.clone()
+                                         ]).unwrap();
+            let total_tetrahedron_count = self.one_time_buffers.model_tetrahedron_count*model_instances.len();
+            unsafe {builder.dispatch([total_tetrahedron_count as u32, 1, 1])}.unwrap() ; // Do compute stage
 
-        builder
-            // Before we can draw, we have to *enter a render pass*.
-            .begin_render_pass(
-                RenderPassBeginInfo {
-                    // A list of values to clear the attachments with. This list contains
-                    // one item for each attachment in the render pass. In this case, there
-                    // is only one attachment, and we clear it with a blue color.
-                    //
-                    // Only attachments that have `AttachmentLoadOp::Clear` are provided
-                    // with clear values, any others should use `None` as the clear value.
-                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+            // Do present stage
+            builder
+                // Before we can draw, we have to *enter a render pass*.
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        // A list of values to clear the attachments with. This list contains
+                        // one item for each attachment in the render pass. In this case, there
+                        // is only one attachment, and we clear it with a blue color.
+                        //
+                        // Only attachments that have `AttachmentLoadOp::Clear` are provided
+                        // with clear values, any others should use `None` as the clear value.
+                        clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
 
-                    ..RenderPassBeginInfo::framebuffer(
-                        self.framebuffers[image_index as usize].clone(),
-                    )
-                },
-                SubpassBeginInfo {
-                    // The contents of the first (and only) subpass. This can be either
-                    // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
-                    // advanced and is not covered here.
-                    contents: SubpassContents::Inline,
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            // We are now inside the first subpass of the render pass.
-            //
-            // TODO: Document state setting and how it affects subsequent draw commands.
-            .set_viewport(0, [self.viewport.clone()].into_iter().collect())
-            .unwrap()
-            .bind_pipeline_graphics(self.present_pipeline.pipeline.clone())
-            .unwrap()
-            .bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0, self.descriptor_set.clone())
-            .unwrap()
-        ;
+                        ..RenderPassBeginInfo::framebuffer(
+                            self.framebuffers[image_index as usize].clone(),
+                        )
+                    },
+                    SubpassBeginInfo {
+                        // The contents of the first (and only) subpass. This can be either
+                        // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
+                        // advanced and is not covered here.
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                // We are now inside the first subpass of the render pass.
+                //
+                // TODO: Document state setting and how it affects subsequent draw commands.
+                .set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap()
+                .bind_pipeline_graphics(self.present_pipeline.pipeline.clone()).unwrap()
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
+                                      vec![
+                                          self.one_time_buffers.descriptor_set.clone(),
+                                          self.sized_buffers.descriptor_set.clone(),
+                                          self.live_buffers.descriptor_set.clone()
+                                      ]).unwrap();
 
-        // We add a draw command.
-        unsafe { builder.draw(3u32, 1, 0, 0) }.unwrap();
+            let total_line_vertex_count = total_tetrahedron_count*12;
+
+            // We add a draw command.
+            unsafe { builder.draw(total_line_vertex_count as u32, 1, 0, 0) }.unwrap();
+        }
+
+        // Do edges?
+        if true {
+            builder.bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone()).unwrap();
+            builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.present_pipeline.pipeline_layout.clone(), 0,
+                                         vec![
+                                             self.one_time_buffers.descriptor_set.clone(),
+                                             self.sized_buffers.descriptor_set.clone(),
+                                             self.live_buffers.descriptor_set.clone()
+                                         ]).unwrap();
+            let total_edge_count = self.one_time_buffers.model_edge_count*model_instances.len();
+            unsafe {builder.dispatch([total_edge_count as u32, 1, 1])}.unwrap() ; // Do compute stage
+
+            // Do present stage
+            builder
+                // Before we can draw, we have to *enter a render pass*.
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        // A list of values to clear the attachments with. This list contains
+                        // one item for each attachment in the render pass. In this case, there
+                        // is only one attachment, and we clear it with a blue color.
+                        //
+                        // Only attachments that have `AttachmentLoadOp::Clear` are provided
+                        // with clear values, any others should use `None` as the clear value.
+                        clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+
+                        ..RenderPassBeginInfo::framebuffer(
+                            self.framebuffers[image_index as usize].clone(),
+                        )
+                    },
+                    SubpassBeginInfo {
+                        // The contents of the first (and only) subpass. This can be either
+                        // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
+                        // advanced and is not covered here.
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                // We are now inside the first subpass of the render pass.
+                //
+                // TODO: Document state setting and how it affects subsequent draw commands.
+                .set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap()
+                .bind_pipeline_graphics(self.present_pipeline.pipeline.clone()).unwrap()
+                .bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
+                                      vec![
+                                          self.one_time_buffers.descriptor_set.clone(),
+                                          self.sized_buffers.descriptor_set.clone(),
+                                          self.live_buffers.descriptor_set.clone()
+                                      ]).unwrap();
+
+            let total_line_vertex_count = total_edge_count*2;
+
+            // We add a draw command.
+            unsafe { builder.draw(total_line_vertex_count as u32, 1, 0, 0) }.unwrap();
+        }
+
+
 
         builder
             // We leave the render pass. Note that if we had multiple subpasses we could

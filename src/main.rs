@@ -7,9 +7,11 @@
 
 mod render;
 mod hypercube;
+mod matrix_operations;
 
 use std::{error::Error, sync::Arc};
 use std::default::Default;
+use std::time::Instant;
 use vulkano::{buffer::{Buffer, BufferContents}, command_buffer::{
     allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
     RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
@@ -32,6 +34,7 @@ use vulkano::{buffer::{Buffer, BufferContents}, command_buffer::{
     acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
 }, sync::{self, GpuFuture}, Validated, VulkanError, VulkanLibrary};
 use vulkano::device::DeviceFeatures;
+use vulkano::instance::debug::{DebugUtilsMessenger, DebugUtilsMessengerCallback};
 use vulkano::pipeline::PipelineBindPoint;
 use vulkano::shader::ShaderStages;
 use winit::{
@@ -41,6 +44,7 @@ use winit::{
     window::{Window, WindowId},
 };
 use render::RenderContext;
+use crate::matrix_operations::{rotation_matrix_4d_rotate_1, rotation_matrix_one_angle, scale_matrix_4d, translate_matrix_4d};
 
 fn main() -> Result<(), impl Error> {
     let event_loop = EventLoop::new().unwrap();
@@ -54,12 +58,14 @@ struct App {
     device: Arc<Device>,
     queue: Arc<Queue>,
     rcx: Option<RenderContext>,
+    start_time: Instant,
+    _callback: Option<DebugUtilsMessenger>
 }
 
 impl App {
     fn new(event_loop: &EventLoop<()>) -> Self {
         let library = VulkanLibrary::new().unwrap();
-
+        
         // The first step of any Vulkan program is to create an instance.
         //
         // When we create an instance, we have to pass a list of extensions that we want to enable.
@@ -80,6 +86,21 @@ impl App {
                 ..Default::default()
             },
         ).unwrap();
+
+        use vulkano::instance::debug::{
+            DebugUtilsMessenger, DebugUtilsMessengerCallback, DebugUtilsMessengerCreateInfo,
+        };
+
+        let _callback = unsafe {
+            DebugUtilsMessenger::new(
+                instance.clone(),
+                DebugUtilsMessengerCreateInfo::user_callback(
+                    DebugUtilsMessengerCallback::new(|message_severity, message_type, callback_data| {
+                        println!("Debug callback: {:?}", callback_data.message);
+                    }),
+                ),
+            ).ok()
+        };
 
         // Choose device extensions that we're going to use. In order to present images to a
         // surface, we need a `Swapchain`, which is provided by the `khr_swapchain` extension.
@@ -203,10 +224,12 @@ impl App {
         let rcx = None;
 
         App {
+            _callback,
             instance,
             device,
             queue,
             rcx,
+            start_time: Instant::now()
         }
     }
 }
@@ -219,6 +242,7 @@ impl ApplicationHandler for App {
                 .unwrap(),
         );
         self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window));
+        let start_time = Instant::now();
     }
 
     fn window_event(
@@ -237,7 +261,63 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                rcx.render(self.device.clone(), self.queue.clone());
+                let time_elapsed = self.start_time.elapsed().as_secs_f32();
+
+                let view_matrix = translate_matrix_4d(0.0, 0.0, 4.0, 4.0);
+                //let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, time_elapsed / 3.0));
+                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, time_elapsed / 4.0));
+                //let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, time_elapsed / 5.0));
+
+                let mut instances = Vec::<common::ModelInstance>::new();
+
+                let block_textures = [
+                    [10, 10, 11, 10, 10, 10, 10, 10], // 0
+                    [1, 1, 1, 1, 1, 1, 1, 1], // 1
+                    [2, 2, 2, 2, 2, 2, 2, 2], // 2
+                    [1, 2, 3, 4, 5, 6, 7, 8], // 3
+                    [9, 9, 4, 4, 9, 9, 9, 9], // 4
+                    [12, 12, 12, 12, 12, 12, 12, 12] // 5
+                ];
+
+                struct Block {
+                    position: [i32; 4],
+                    texture: usize
+                }
+
+                let mut blocks = Vec::<Block>::new();
+
+                for x in 0..2 {
+                    for y in 0..2 {
+                        for z in 0..2 {
+                            blocks.push(
+                                Block{
+                                    position: [x*2 - 1, y*2 - 1, z*2 - 1, 0],
+                                    texture: 1
+                                }
+                            );
+                        }
+                    }
+                }
+
+                for block in blocks {
+                    let model_scale = 1.0;
+                    let model_transform = 
+                        translate_matrix_4d(
+                            (block.position[0] as f32 - 0.5)*model_scale,
+                            (block.position[1] as f32 - 0.5)*model_scale,
+                            (block.position[2] as f32 - 0.5)*model_scale,
+                            (block.position[3] as f32 - 0.5)*model_scale)
+                        .dot(&scale_matrix_4d(model_scale));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_texture_ids: block_textures[block.texture],
+                        }
+                    );
+                }
+                
+                
+                rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances);
             }
             _ => {}
         }

@@ -1,3 +1,5 @@
+
+
 use glam::{vec4, Vec4, Mat4};
 #[cfg(feature = "ndarray")]
 use glam::{mat4};
@@ -51,6 +53,18 @@ pub struct Mat5GPU {
     last_row: Vec4,
     last_value: f32,
     padding: [u32; 3]
+}
+
+impl Mat5GPU {
+    pub fn identity() -> Self {
+        Self {
+            first: Mat4::IDENTITY,
+            last_col: Vec4::ZERO,
+            last_row: Vec4::ZERO,
+            last_value: 1.0,
+            padding: [0; 3]
+        }
+    }
 }
 
 impl core::ops::Index<u32> for Vec5GPU {
