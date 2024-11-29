@@ -11,7 +11,7 @@ mod matmul_5_gpu;
 mod utils;
 mod linalg_n;
 
-use glam::{Vec4, Vec2, UVec2};
+use glam::{Vec4, UVec2};
 pub use matmul_5_gpu::{Mat5GPU, Vec5GPU};
 pub use utils::{factorial, binomial, generate_combinations, generate_permutations};
 pub use linalg_n::{VecN, MatN};
@@ -54,5 +54,7 @@ pub struct ModelInstance {
 pub struct WorkingData {
     pub view_matrix: Mat5GPU,
     pub render_dimensions: UVec2,
-    pub padding: [u32; 2]
+    pub present_dimensions: UVec2,
+    pub total_num_tetrahedrons: u32,
+    pub padding: [u32; 3]
 }

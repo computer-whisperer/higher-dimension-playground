@@ -1,11 +1,16 @@
 
-use glam::{Vec4, Mat4};
-
+use glam::{Vec4, Mat4, Vec3, Vec2};
 
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct VecN<const N: usize> where [(); (N+3)/4]: {
     sub_vecs: [Vec4; (N+3)/4]
+}
+
+unsafe impl<const N: usize> bytemuck::Zeroable for VecN<N> where [(); (N+3)/4]: {
+}
+
+unsafe impl<const N: usize> bytemuck::Pod for VecN<N> where [(); (N+3)/4]: {
 }
 
 impl<const N: usize> VecN<N> where [(); (N+3)/4]: {
@@ -20,6 +25,8 @@ impl<const N: usize> VecN<N> where [(); (N+3)/4]: {
             sub_vecs
         }
     }
+    
+
 
     pub fn x(&self) -> f32 {self[0]}
     pub fn y(&self) -> f32 {self[1]}
@@ -28,6 +35,22 @@ impl<const N: usize> VecN<N> where [(); (N+3)/4]: {
     pub fn v(&self) -> f32 {self[4]}
 }
 
+impl<const N: usize> VecN<N> 
+where 
+    [(); (N+3)/4]:,
+    [(); ({N+1}+3)/4]:
+{
+    pub fn extend(&self, v: f32) -> VecN<{N+1}> {
+        let mut output = VecN::<{N+1}>::ZERO;
+        
+        for i in 0..N {
+            output[i] = self[i];
+        }
+        output[N] = v;
+        
+        output
+    }
+}
 
 impl <const N: usize> core::ops::Index<usize> for VecN<N> where [(); (N+3)/4]: {
     type Output = f32;
@@ -53,6 +76,12 @@ impl <const N: usize> core::ops::IndexMut<usize> for VecN<N> where [(); (N+3)/4]
 #[repr(transparent)]
 pub struct MatN<const N: usize> where [(); (N+3)/4]: {
     sub_mats: [[Mat4; (N+3)/4]; (N+3)/4] // [row][col]
+}
+
+unsafe impl<const N: usize> bytemuck::Zeroable for MatN<N> where [(); (N+3)/4]: {
+}
+
+unsafe impl<const N: usize> bytemuck::Pod for MatN<N> where [(); (N+3)/4]: {
 }
 
 impl <const N: usize> MatN<N> where [(); (N+3)/4]: {
@@ -137,6 +166,62 @@ impl <const N: usize> core::ops::Mul<MatN<N>> for MatN<N> where [(); (N+3)/4]: {
         MatN {
             sub_mats
         }
+    }
+}
+
+impl From<Vec4> for VecN<4> {
+    fn from(value: Vec4) -> Self {
+        Self {
+            sub_vecs: [value]
+        }
+    }
+}
+
+impl From<Vec3> for VecN<3> {
+    fn from(value: Vec3) -> Self {
+        Self::new(&[value.x, value.y, value.z])
+    }
+}
+
+impl From<Vec2> for VecN<2> {
+    fn from(value: Vec2) -> Self {
+        Self::new(&[value.x, value.y])
+    }
+}
+
+impl From<VecN<4>> for Vec4 {
+    fn from(value: VecN<4>) -> Self {
+        value.sub_vecs[0]
+    }
+}
+
+impl From<VecN<3>> for Vec3 {
+    fn from(value: VecN<3>) -> Self {
+        Self::new(value.x(), value.y(), value.z())
+    }
+}
+
+impl From<VecN<2>> for Vec2 {
+    fn from(value: VecN<2>) -> Self {
+        Self::new(value.x(), value.y())
+    }
+}
+
+impl From<&VecN<4>> for Vec4 {
+    fn from(value: &VecN<4>) -> Self {
+        value.sub_vecs[0]
+    }
+}
+
+impl From<&VecN<3>> for Vec3 {
+    fn from(value: &VecN<3>) -> Self {
+        Self::new(value.x(), value.y(), value.z())
+    }
+}
+
+impl From<&VecN<2>> for Vec2 {
+    fn from(value: &VecN<2>) -> Self {
+        Self::new(value.x(), value.y())
     }
 }
 

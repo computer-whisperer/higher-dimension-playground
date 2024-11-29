@@ -271,7 +271,7 @@ impl ApplicationHandler for App {
                 let mut instances = Vec::<common::ModelInstance>::new();
 
                 let block_textures = [
-                    [10, 10, 11, 10, 10, 10, 10, 10], // 0
+                    [10, 10, 10, 10, 10, 10, 11, 10], // 0
                     [1, 1, 1, 1, 1, 1, 1, 1], // 1
                     [2, 2, 2, 2, 2, 2, 2, 2], // 2
                     [1, 2, 3, 4, 5, 6, 7, 8], // 3
@@ -286,18 +286,28 @@ impl ApplicationHandler for App {
 
                 let mut blocks = Vec::<Block>::new();
 
+                
                 for x in 0..2 {
                     for y in 0..2 {
                         for z in 0..2 {
-                            blocks.push(
-                                Block{
-                                    position: [x*2 - 1, y*2 - 1, z*2 - 1, 0],
-                                    texture: 1
-                                }
-                            );
+                            for w in 0..2 {
+                                blocks.push(
+                                    Block{
+                                        position: [x*2 - 1, y*2 - 1, z*2 - 1, w*2 - 1],
+                                        texture: 5
+                                    }
+                                );
+                            }
                         }
                     }
                 }
+                
+                blocks.push(
+                    Block{
+                        position: [0, 0, 0, 0],
+                        texture: 3
+                    }
+                );
 
                 for block in blocks {
                     let model_scale = 1.0;

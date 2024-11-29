@@ -25,3 +25,4 @@ glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = fa
 [build-dependencies]
 spirv-builder = {git = "https://github.com/rust-gpu/rust-gpu.git"}
 
+

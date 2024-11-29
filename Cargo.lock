@@ -1261,7 +1261,7 @@ checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 [[package]]
 name = "rustc_codegen_spirv"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d5d347b0fbd7a81a862057233812a7800f94e483"
+source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
 dependencies = [
  "ar",
  "either",
@@ -1286,7 +1286,7 @@ dependencies = [
 [[package]]
 name = "rustc_codegen_spirv-types"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d5d347b0fbd7a81a862057233812a7800f94e483"
+source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
 dependencies = [
  "rspirv",
  "serde",
@@ -1521,7 +1521,7 @@ dependencies = [
 [[package]]
 name = "spirv-builder"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d5d347b0fbd7a81a862057233812a7800f94e483"
+source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
 dependencies = [
  "memchr",
  "raw-string",
@@ -1534,7 +1534,7 @@ dependencies = [
 [[package]]
 name = "spirv-std"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d5d347b0fbd7a81a862057233812a7800f94e483"
+source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
 dependencies = [
  "bitflags 1.3.2",
  "glam",
@@ -1546,7 +1546,7 @@ dependencies = [
 [[package]]
 name = "spirv-std-macros"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d5d347b0fbd7a81a862057233812a7800f94e483"
+source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1557,7 +1557,7 @@ dependencies = [
 [[package]]
 name = "spirv-std-types"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d5d347b0fbd7a81a862057233812a7800f94e483"
+source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
 
 [[package]]
 name = "spirv-tools"
