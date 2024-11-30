@@ -1,72 +1,43 @@
-#![cfg_attr(target_arch = "spirv", no_std)]
-#![allow(incomplete_features)]
-#![feature(generic_const_exprs)]
-
+use glam::{UVec3, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use common::{ModelEdge, ModelInstance, ModelTetrahedron, Tetrahedron, Vec5GPU, WorkingData};
 use spirv_std::spirv;
-
-pub use spirv_std::glam;
-use glam::{vec4, Vec4, Vec2, UVec3, Vec3Swizzles, Vec3, Vec4Swizzles, UVec2, vec3};
-
-use common::*;
+use bytemuck::{Pod, Zeroable};
+use crate::textures::sample_texture;
 
 // Note: This cfg is incorrect on its surface, it really should be "are we compiling with std", but
 // we tie #[no_std] above to the same condition, so it's fine.
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-#[spirv(vertex)]
-pub fn main_line_vs(
-    #[spirv(position)] out_pos: &mut Vec4,
-    #[spirv(vertex_index)] vert_id: i32,
-    #[spirv(storage_buffer, descriptor_set = 1, binding = 0)] output_line_vertices: &mut [Vec2],) {
-    // Do nothing for now
-    *out_pos = vec4(
-        output_line_vertices[vert_id as usize].x,
-        output_line_vertices[vert_id as usize].y,
-        0.0,
-        1.0,
-    );
-}
+fn sample_texture_integral(line: ZWLine) -> Vec3 {
+    const STEP_SIZE: f32 = VIEW_ANGLE/128.0;
+    let mut output_accumulation = Vec3::ZERO;
 
-#[spirv(vertex)]
-pub fn main_buffer_vs(
-    #[spirv(position)] out_pos: &mut Vec4,
-    #[spirv(vertex_index)] vert_id: i32) {
-    let vertices = [
-        Vec4::new(-1.0, -1.0, 0.0, 1.0),
-        Vec4::new( 1.0, -1.0, 0.0, 1.0),
-        Vec4::new( 1.0,  1.0, 0.0, 1.0),
-        Vec4::new(-1.0, -1.0, 0.0, 1.0),
-        Vec4::new(-1.0,  1.0, 0.0, 1.0),
-        Vec4::new( 1.0,  1.0, 0.0, 1.0),
-    ];
-    *out_pos = vertices[vert_id as usize];
-}
+    let angle_a = f32::atan2(line.zw_positions[0].x, line.zw_positions[0].y).max(ANGLE_MIN).min(ANGLE_MAX);
+    let angle_b = f32::atan2(line.zw_positions[1].x, line.zw_positions[1].y).max(ANGLE_MIN).min(ANGLE_MAX);
 
-#[spirv(fragment)]
-pub fn main_line_fs(output: &mut glam::Vec4) {
-    *output = glam::vec4(0.0, 0.0, 1.0, 1.0);
-}
+    let (start_angle, end_angle) = if angle_a > angle_b {
+        (angle_b, angle_a)
+    }
+    else {
+        (angle_a, angle_b)
+    };
 
+    let mut angle = start_angle;
+    loop {
+        if angle > end_angle {
+            break;
+        }
 
+        let intersection = get_intersection(&[Vec2::ZERO, Vec2::new(angle.cos(), angle.sin())], &line.zw_positions);
+        let texture_pos = line.texture_positions[0]*intersection.y + line.texture_positions[1]*(1.0-intersection.y);
+        let texture_color = sample_texture(line.texture_id, texture_pos.xyz());
+        output_accumulation += texture_color*STEP_SIZE/VIEW_ANGLE;
 
-#[spirv(fragment)]
-pub fn main_buffer_fs(
-    #[spirv(frag_coord)] in_frag_coord: Vec4,
-    #[spirv(storage_buffer, descriptor_set = 2, binding = 1)] working_data: &WorkingData,
-    #[spirv(storage_buffer, descriptor_set = 1, binding = 2)] pixel_buffer: &[Vec4],
-    output: &mut glam::Vec4,
-) {
-    *output = Vec4::new(0.0, 0.0, 0.0, 1.0); // Default color
-    let normal_pos = Vec2::new(
-        in_frag_coord.x/(working_data.present_dimensions.x as f32),
-        in_frag_coord.y/(working_data.present_dimensions.y as f32)); // Normalized to 0..1
-    let pixel_pos = Vec2::new(
-        working_data.render_dimensions.x as f32*normal_pos.x,
-        working_data.render_dimensions.y as f32*normal_pos.y
-    );
-    let u_pixel_pos = UVec2::new(pixel_pos.x as u32, pixel_pos.y as u32);
-    *output += pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize];
+        angle += STEP_SIZE;
+    }
+
+    output_accumulation
 }
 
 
@@ -93,7 +64,7 @@ fn cs_vertex_shader(
     //var projection_divisor = view_vector[2]/focal_length;
     let aspect_ratio = working_data.present_dimensions.x as f32 / working_data.present_dimensions.y as f32;
 
-    let theta = (f32::atan2(view_position.z(), view_position.w())/3.14159)/2.0;
+    //let theta = (f32::atan2(view_position.z(), view_position.w())/3.14159)/2.0;
     let depth = f32::sqrt(view_position.z()*view_position.z() + view_position.w()*view_position.w());
     //let depth = view_position.z() + view_position.w();
     let projection_divisor = depth/focal_length;
@@ -118,7 +89,7 @@ fn project_4d_vertex(v: Vec5GPU) -> Vec4 {
     //Vec4::new(v.x(), v.y(), v.z(), v.w())
 }
 
-#[spirv(compute(threads(1)))]
+#[spirv(compute(threads(64)))]
 pub fn main_tetrahedron_cs(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] model_tetrahedrons: &[ModelTetrahedron],
     #[spirv(storage_buffer, descriptor_set = 2, binding = 0)] instances: &[ModelInstance],
@@ -213,7 +184,7 @@ pub fn main_tetrahedron_cs(
     output_line_vertices[(output_index*12) + 11] = line_vertices[3];
 }
 
-#[spirv(compute(threads(1)))]
+#[spirv(compute(threads(64)))]
 pub fn main_edge_cs(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] model_edges: &[ModelEdge],
     #[spirv(storage_buffer, descriptor_set = 2, binding = 0)] instances: &[ModelInstance],
@@ -271,7 +242,7 @@ pub fn main_edge_cs(
     output_line_vertices[(output_index*2) + 1] = line_vertices[1];
 }
 
-fn get_barycentric(vertices: &[Vec2; 3], point: Vec2) -> Vec3 {
+pub fn get_barycentric(vertices: &[Vec2; 3], point: Vec2) -> Vec3 {
     let u = Vec3::new(
         vertices[2].x - vertices[0].x,
         vertices[1].x - vertices[0].x,
@@ -295,20 +266,22 @@ fn get_barycentric(vertices: &[Vec2; 3], point: Vec2) -> Vec3 {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
-struct ZWLine {
+pub struct ZWLine {
     zw_positions: [Vec2; 2],
-    texture_positions: [Vec3; 2],
-    texture_id: u32
+    texture_positions: [Vec4; 2],
+    texture_id: u32,
+    padding: [u32; 3],
 }
 
 impl Default for ZWLine {
     fn default() -> Self {
         Self {
             zw_positions: [Vec2::ZERO, Vec2::ZERO],
-            texture_positions: [Vec3::ZERO, Vec3::ZERO],
-            texture_id: 0
+            texture_positions: [Vec4::ZERO, Vec4::ZERO],
+            texture_id: 0,
+            padding: [0; 3]
         }
     }
 }
@@ -324,12 +297,13 @@ impl ZWLine {
                 self.texture_positions[0]*(1.0 - start) + self.texture_positions[1]*(start),
                 self.texture_positions[0]*(1.0 - end) + self.texture_positions[1]*(end),
             ],
-            texture_id: self.texture_id
+            texture_id: self.texture_id,
+            padding: [0; 3]
         }
     }
 }
 
-fn get_intersection(line_a: &[Vec2; 2], line_b: &[Vec2; 2]) -> Vec2
+pub fn get_intersection(line_a: &[Vec2; 2], line_b: &[Vec2; 2]) -> Vec2
 {
     //https://gamedev.stackexchange.com/questions/116422/best-way-to-find-line-segment-intersection
     let r_num = (line_a[0].y - line_b[0].y)*(line_b[1].x - line_b[0].x) - (line_a[0].x - line_b[0].x)*(line_b[1].y - line_b[0].y);
@@ -349,77 +323,21 @@ fn test_intersection(line_a: &[Vec2; 2], line_b: &[Vec2; 2]) -> bool
     res.x > 0.0 && res.x < 1.0 && res.y > 0.0 && res.y < 1.0
 }
 
-fn sample_texture(texture_id: u32, texture_pos: Vec3) -> Vec3 {
-    match texture_id {
-        1 => {vec3(1.0, 0.0, 0.0)}
-        2 => {vec3(1.0, 0.8, 0.0)}
-        3 => {vec3(0.5, 1.0, 0.0)}
-        4 => {vec3(0.0, 1.0, 0.2)}
-        5 => {vec3(0.0, 1.0, 1.0)}
-        6 => {vec3(0.0, 0.2, 1.0)}
-        7 => {vec3(0.5, 0.0, 1.0)}
-        8 => {vec3(1.0, 0.0, 0.8)}
-        9 => {(texture_pos+vec3(1.0, 1.0, 1.0))/2.0}
-        10 => {vec3(139.0, 69.0, 19.8)/256.0}
-        11 => {vec3(34.0, 139.0, 34.0)/256.0}
-        12=> {vec3(0.0, 0.0, 1.0)}
-        _ => {vec3(0.0, 0.0, 0.0)}
-    }
 
-    /*
-            vec3<f32>(1.0, 0.0, 0.0), //0
-        vec3<f32>(1.0, 0.0, 0.0), //1
-        vec3<f32>(1.0, 0.8, 0.0), //2
-        vec3<f32>(0.5, 1.0, 0.0), //3
-        vec3<f32>(0.0, 1.0, 0.2), //4
-        vec3<f32>(0.0, 1.0, 1.0), //5
-        vec3<f32>(0.0, 0.2, 1.0), //6
-        vec3<f32>(0.5, 0.0, 1.0), //7
-        vec3<f32>(1.0, 0.0, 0.8), //8
-        (texture_pos+vec3<f32>(1.0, 1.0, 1.0))/2.0,  // 9
-        vec3<f32>(139.0, 69.0, 19.8)/256.0, // 10
-        vec3<f32>(34.0, 139.0, 34.0)/256.0, // 11
-        vec3<f32>(0.0, 0.0, 1.0), // 12
-    */
-}
 
-fn sample_texture_integral(line: ZWLine) -> Vec3 {
-    const PI: f32 = 3.14159;
-    const VIEW_ANGLE: f32 = PI/4.0;
-    const ANGLE_MIN: f32 = PI/4.0 - VIEW_ANGLE/2.0;
-    const ANGLE_MAX: f32 = PI/4.0 + VIEW_ANGLE/2.0;
-    const STEP_SIZE: f32 = VIEW_ANGLE/128.0;
-    let mut output_accumulation = Vec3::ZERO;
-
-    let start_angle = f32::atan2(line.zw_positions[0].x, line.zw_positions[0].y).max(ANGLE_MIN).min(ANGLE_MAX);
-    let end_angle = f32::atan2(line.zw_positions[1].x, line.zw_positions[1].y).max(ANGLE_MIN).min(ANGLE_MAX);
-
-    let mut angle = start_angle;
-    loop {
-        if angle > end_angle {
-            break;
-        }
-
-        let intersection = get_intersection(&[Vec2::ZERO, Vec2::new(angle.cos(), angle.sin())], &line.zw_positions);
-        let texture_pos = line.texture_positions[0]*intersection.y + line.texture_positions[1]*(1.0-intersection.y);
-        let texture_color = sample_texture(line.texture_id, texture_pos);
-        output_accumulation += texture_color*STEP_SIZE/VIEW_ANGLE;
-
-        angle += STEP_SIZE;
-    }
-
-    output_accumulation
-}
+const PI: f32 = 3.14159;
+pub const VIEW_ANGLE: f32 = PI/2.0;
+pub const ANGLE_MIN: f32 = PI/4.0 - VIEW_ANGLE/2.0;
+pub const ANGLE_MAX: f32 = PI/4.0 + VIEW_ANGLE/2.0;
 
 fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
-    const DEPTH_FACTOR: u32 = 256;
+    const DEPTH_FACTOR: u32 = 512;
 
     let mut output_accumulation = Vec3::ZERO;
 
     for i in 0..DEPTH_FACTOR {
-        let pi = 3.14159;
-        let angle_ratio = (((i as f32)/(DEPTH_FACTOR as f32)) - 0.5);
-        let theta = angle_ratio*(pi/4.0) + (pi/4.0);
+        let angle_ratio = (i as f32)/(DEPTH_FACTOR as f32);
+        let theta = angle_ratio*(ANGLE_MAX - ANGLE_MIN) + ANGLE_MIN;
         let sample_ray = Vec2::new(theta.cos(), theta.sin());
 
         let mut closest_line: Option<usize> = None;
@@ -427,6 +345,10 @@ fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
         let mut closest_val: Option<f32> = None;
 
         for j in 0..num_lines {
+            if lines[j].texture_id == 0 {
+                continue;
+            }
+            
             let intersection = get_intersection(
                 &[Vec2::ZERO, sample_ray],
                 &lines[j].zw_positions
@@ -449,47 +371,47 @@ fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
         if let Some(closest_line_index) = closest_line {
             let val = closest_val.unwrap();
             let texture_pos = lines[closest_line_index].texture_positions[0]*val + lines[closest_line_index].texture_positions[0]*(1.0-val);
-            let sample = sample_texture(lines[closest_line_index].texture_id, texture_pos);
+            let sample = sample_texture(lines[closest_line_index].texture_id, texture_pos.xyz());
             output_accumulation += sample/DEPTH_FACTOR as f32;
         }
     }
 
-    if true
-    {
-        Vec4::new(output_accumulation.x, output_accumulation.y, output_accumulation.z, 1.0)
-    }
-    else
-    {
-        if num_lines != 0 {
-            Vec4::new(0.0, 0.0, 1.0, 1.0)
-        }
-        else {
-            Vec4::ZERO
-        }
-    }
-
+    Vec4::new(output_accumulation.x, output_accumulation.y, output_accumulation.z, 1.0)
 }
 
-fn render_zw_lines_2(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
-
-    let mut output_accumulation = Vec3::ZERO;
-
+fn condense_zw_lines(lines: &mut [ZWLine; 96], num_lines: usize) -> usize {
+    // Remove lines with texture_id == 0, returning the new count of good lines
+    let mut count = 0;
     for i in 0..num_lines {
-        let mut current_line = lines[i];
+        if lines[i].texture_id!= 0 {
+            lines[count] = lines[i];
+            count += 1;
+        }
+    }
+    count
+}
 
-        // Check for any complete occlusions
+fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
+    
+    // Scan for complete occlusions
+    for i in 0..num_lines {
+        
+        if lines[i].texture_id == 0 {
+            continue;
+        }
         let mut complete_occlusion = false;
-        let mut simple_occlusion = false;
 
         for j in 0..num_lines {
             if j == i {
                 continue;
             }
+            if lines[j].texture_id == 0 {
+                continue;
+            }
             let mut local_full_occlusion = true;
             for k in 0..2 {
-                let intersection = get_intersection(&[Vec2::ZERO, current_line.zw_positions[k]], &lines[j].zw_positions);
-                let does_occlude = intersection.x > 0.0 && intersection.x < 1.0 && intersection.y > 0.0 && intersection.y < 1.0;
-                simple_occlusion |= does_occlude;
+                let intersection = get_intersection(&[Vec2::ZERO, lines[i].zw_positions[k]], &lines[j].zw_positions);
+                let does_occlude = intersection.x >= 0.0 && intersection.x <= 1.0 && intersection.y >= 0.0 && intersection.y <= 1.0;
                 if !does_occlude {
                     local_full_occlusion = false;
                     break;
@@ -500,46 +422,148 @@ fn render_zw_lines_2(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
                 break;
             }
         }
-
         if complete_occlusion {
+            lines[i].texture_id = 0;
             continue;
         }
+    }
 
-        // Check for complex occlusions
-        let mut complex_occlusion = false;
-
+    let num_lines = condense_zw_lines(lines, num_lines);
+    
+    // Scan for full line intersections
+    let mut full_intersection = false;
+    for i in 0..num_lines {
+        if lines[i].texture_id == 0 {
+            continue;
+        }
         for j in 0..num_lines {
             if j == i {
                 continue;
             }
-            for k in 0..2 {
-                let intersection = get_intersection(&[Vec2::ZERO, lines[j].zw_positions[k]], &lines[i].zw_positions);
-                if intersection.y > 0.0 && intersection.y < 1.0 && intersection.x > 1.0 {
-                    complex_occlusion = true;
-                    break;
-                }
+            if lines[j].texture_id == 0 {
+                continue;
             }
-            if complex_occlusion {
+            if test_intersection(&lines[i].zw_positions, &lines[j].zw_positions)
+            {
+                full_intersection = true;
                 break;
             }
         }
-
-        if false {
-
+        if full_intersection {
+            break;
         }
-        else {
-            output_accumulation += sample_texture_integral(lines[i]);
+    }
+    if full_intersection {
+        //working_data.shader_fault = 1;
+    }
+    
+    // Scan for intermittent occlusions
+    
+    let mut intermittent_occlusion = false;
+    if !full_intersection {
+        for i in 0..num_lines {
+            if lines[i].texture_id == 0 {
+                continue;
+            }
+            for j in 0..num_lines {
+                if j == i {
+                    continue;
+                }
+                if lines[j].texture_id == 0 {
+                    continue;
+                }
+                let mut local_intermittent_occlusion = true;
+                for k in 0..2 {
+                    let intersection = get_intersection(&[Vec2::ZERO, lines[j].zw_positions[k]], &lines[i].zw_positions);
+                    let does_occlude = intersection.x > 1.0 && intersection.y > 0.0 && intersection.y < 1.0;
+                    if !does_occlude {
+                        local_intermittent_occlusion = false;
+                        break;
+                    }
+                }
+                if local_intermittent_occlusion {
+                    intermittent_occlusion = true;
+                    break;
+                }
+            }
+            if intermittent_occlusion {
+                break;
+            }
         }
     }
 
-    Vec4::new(output_accumulation.x, output_accumulation.y, output_accumulation.z, 1.0)
+    
+    if intermittent_occlusion || full_intersection {
+        // Must revert to simple algorithm
+        render_zw_lines_simple(&lines, num_lines)
+    }
+    else
+    {
+        let mut output_accumulation = Vec3::ZERO;
+        
+        let mut late_fail = false;
+        
+        // Only simple occlusions or no occlusions, so render quickly
+        for i in 0..num_lines {
+            if lines[i].texture_id == 0 {
+                continue;
+            }
+            
+            // Scan for simple occlusions and trim appropriately
+            for j in 0..num_lines {
+                if j == i {
+                    continue;
+                }
+                if lines[j].texture_id == 0 {
+                    continue;
+                }
+                let intersection_a = get_intersection(&[Vec2::ZERO, lines[j].zw_positions[0]], &lines[i].zw_positions);
+                let intersection_b = get_intersection(&[Vec2::ZERO, lines[j].zw_positions[1]], &lines[i].zw_positions);
+                let intersection_c = get_intersection(&[Vec2::ZERO, lines[i].zw_positions[0]], &lines[j].zw_positions);
+                let does_a_clip = intersection_a.x > 1.0 && intersection_a.y > 0.0 && intersection_a.y < 1.0;
+                let does_b_clip = intersection_b.x > 1.0 && intersection_b.y > 0.0 && intersection_b.y < 1.0;
+                let does_c_clip = intersection_c.x > 0.0 && intersection_c.x < 1.0 && intersection_c.y > 0.0 && intersection_c.y < 1.0;
+                
+                if does_a_clip || does_b_clip {
+                    
+                    if does_a_clip && does_b_clip {
+                        late_fail = true;
+                        break;
+                    }
+                    
+                    let split = if does_a_clip {intersection_a.y} else {intersection_b.y};
+                    
+                    // Something needs to be trimmed, but we need to figure out if it's the start or end of the line. c_clip should tell us
+                    if does_c_clip {
+                        lines[i] = lines[i].get_segment(split, 1.0);
+                    }
+                    else {
+                        lines[i] = lines[i].get_segment(0.0, split);
+                    }
+                }
+            }
+            
+            if late_fail {
+                break;
+            }
+            
+            // All occlusions should have been resolved
+            output_accumulation += sample_texture_integral(lines[i]);
+        }
+        if late_fail {
+            render_zw_lines_simple(&lines, num_lines)
+        }
+        else {
+            Vec4::new(output_accumulation.x, output_accumulation.y, output_accumulation.z, 1.0)
+        }
+    }
 }
 
 #[spirv(compute(threads(8, 8)))]
 pub fn main_tetrahedron_pixel_cs(
     #[spirv(storage_buffer, descriptor_set = 1, binding = 1)] input_tetrahedrons: &[Tetrahedron],
     #[spirv(global_invocation_id)] global_invocation_id: UVec3,
-    #[spirv(storage_buffer, descriptor_set = 2, binding = 1)] working_data: &WorkingData,
+    #[spirv(storage_buffer, descriptor_set = 2, binding = 1)] working_data: &mut WorkingData,
     #[spirv(storage_buffer, descriptor_set = 1, binding = 2)] pixel_buffer: &mut [Vec4]
 )
 {
@@ -640,7 +664,7 @@ pub fn main_tetrahedron_pixel_cs(
         ZWLine::default(),
         ZWLine::default(),
         ZWLine::default(),
-        ZWLine::default(),
+        ZWLine::default(),        
     ];
 
     let u_pixel_pos = global_invocation_id.xy();
@@ -735,9 +759,9 @@ pub fn main_tetrahedron_pixel_cs(
             ];
 
             let tex_vertices = [
-                tetrahedron.texture_positions[combinations_4_3[tri_indexes[j]][0]].xyz(),
-                tetrahedron.texture_positions[combinations_4_3[tri_indexes[j]][1]].xyz(),
-                tetrahedron.texture_positions[combinations_4_3[tri_indexes[j]][2]].xyz(),
+                tetrahedron.texture_positions[combinations_4_3[tri_indexes[j]][0]],
+                tetrahedron.texture_positions[combinations_4_3[tri_indexes[j]][1]],
+                tetrahedron.texture_positions[combinations_4_3[tri_indexes[j]][2]],
             ];
 
             let zw_value = bary.x*zw_vertices[0] + bary.y*zw_vertices[1] + bary.z*zw_vertices[2];
@@ -749,7 +773,13 @@ pub fn main_tetrahedron_pixel_cs(
         num_zw_lines += 1;
     }
 
-    let output = render_zw_lines_simple(&current_zw_lines, num_zw_lines);
+    let output = if false {
+        render_zw_lines_2(&mut current_zw_lines, num_zw_lines)
+    }
+    else {
+        render_zw_lines_simple(&mut current_zw_lines, num_zw_lines)
+    };
+    
     if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {
 
         pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = output;
@@ -758,6 +788,7 @@ pub fn main_tetrahedron_pixel_cs(
 
 #[cfg(test)]
 mod tests {
+    use crate::rasterizer::{get_barycentric, get_intersection};
     use super::*;
 
     #[test]

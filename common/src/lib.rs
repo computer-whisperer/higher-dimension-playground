@@ -56,5 +56,6 @@ pub struct WorkingData {
     pub render_dimensions: UVec2,
     pub present_dimensions: UVec2,
     pub total_num_tetrahedrons: u32,
-    pub padding: [u32; 3]
+    pub shader_fault: u32,
+    pub padding: [u32; 2]
 }

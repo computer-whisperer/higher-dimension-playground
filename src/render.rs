@@ -363,8 +363,8 @@ impl PresentPipelineContext {
             // A Vulkan shader can in theory contain multiple entry points, so we have to specify
             // which one.
 
-            let vs = loaded_shader.entry_point("main_line_vs").unwrap();
-            let fs = loaded_shader.entry_point("main_line_fs").unwrap();
+            let vs = loaded_shader.entry_point("present::main_line_vs").unwrap();
+            let fs = loaded_shader.entry_point("present::main_line_fs").unwrap();
 
             // Make a list of the shader stages that the pipeline will have.
             let stages = [
@@ -440,8 +440,8 @@ impl PresentPipelineContext {
             // A Vulkan shader can in theory contain multiple entry points, so we have to specify
             // which one.
 
-            let vs = loaded_shader.entry_point("main_buffer_vs").unwrap();
-            let fs = loaded_shader.entry_point("main_buffer_fs").unwrap();
+            let vs = loaded_shader.entry_point("present::main_buffer_vs").unwrap();
+            let fs = loaded_shader.entry_point("present::main_buffer_fs").unwrap();
 
             // Make a list of the shader stages that the pipeline will have.
             let stages = [
@@ -524,15 +524,15 @@ impl ComputePipelineContext {
     pub fn new(device: Arc<Device>, loaded_shader: Arc<ShaderModule>, pipeline_layout: Arc<PipelineLayout>) -> Self {
         Self {
             tetrahedron_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("main_tetrahedron_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("rasterizer::main_tetrahedron_cs").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             edge_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("main_edge_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("rasterizer::main_edge_cs").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             tetrahedron_pixel_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("main_tetrahedron_pixel_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("rasterizer::main_tetrahedron_pixel_cs").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             pipeline_layout
@@ -699,7 +699,7 @@ impl RenderContext {
         let one_time_buffers = OneTimeBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), one_time_descriptor_set_layout.clone());
         
         let sized_descriptor_set_layout = SizedBuffers::create_descriptor_set_layout(device.clone());
-        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), sized_descriptor_set_layout.clone(), [1920, 1080]);
+        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), sized_descriptor_set_layout.clone(), [1920/2, 1080/2]);
         
         let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
         let live_buffers = LiveBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), live_descriptor_set_layout.clone());
@@ -880,6 +880,7 @@ impl RenderContext {
             writer.present_dimensions = glam::UVec2::new(window_size.width, window_size.height);
             writer.render_dimensions = glam::UVec2::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1]);
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
+            writer.shader_fault = 0;
         }
         
         // Do compute stage
@@ -894,7 +895,7 @@ impl RenderContext {
                                              self.live_buffers.descriptor_set.clone()
                                          ]).unwrap();
             
-            unsafe {builder.dispatch([total_tetrahedron_count as u32, 1, 1])}.unwrap() ; // Do compute stage
+            unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
             builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone()).unwrap();
             builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
                                          vec![
@@ -1015,7 +1016,7 @@ impl RenderContext {
                                              self.live_buffers.descriptor_set.clone()
                                          ]).unwrap();
             let total_edge_count = self.one_time_buffers.model_edge_count*model_instances.len();
-            unsafe {builder.dispatch([total_edge_count as u32, 1, 1])}.unwrap() ; // Do compute stage
+            unsafe {builder.dispatch([(total_edge_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
 
             // Do present stage
             builder

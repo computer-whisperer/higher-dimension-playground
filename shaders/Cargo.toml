@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-path = "src/shaders.rs"
 crate-type = ["dylib"]
 
 [dependencies]
-spirv-std = {git = "https://github.com/rust-gpu/rust-gpu.git"}
+#spirv-std = {git = "https://github.com/rust-gpu/rust-gpu.git"}
+spirv-std = {git = "https://github.com/Firestar99/rust-gpu-new.git", branch="linker-speedup"}
 
 common = {path="../common"}
 

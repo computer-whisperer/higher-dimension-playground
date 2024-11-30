@@ -264,19 +264,21 @@ impl ApplicationHandler for App {
                 let time_elapsed = self.start_time.elapsed().as_secs_f32();
 
                 let view_matrix = translate_matrix_4d(0.0, 0.0, 4.0, 4.0);
-                //let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, time_elapsed / 3.0));
-                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, time_elapsed / 4.0));
-                //let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, time_elapsed / 5.0));
+                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, time_elapsed / 3.0));
+                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, time_elapsed / 3.0));
+                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, time_elapsed / 5.0));
 
                 let mut instances = Vec::<common::ModelInstance>::new();
 
                 let block_textures = [
-                    [10, 10, 10, 10, 10, 10, 11, 10], // 0
-                    [1, 1, 1, 1, 1, 1, 1, 1], // 1
-                    [2, 2, 2, 2, 2, 2, 2, 2], // 2
-                    [1, 2, 3, 4, 5, 6, 7, 8], // 3
-                    [9, 9, 4, 4, 9, 9, 9, 9], // 4
-                    [12, 12, 12, 12, 12, 12, 12, 12] // 5
+                    [1; 8], // 0
+                    [2; 8], // 1
+                    [3; 8], // 2
+                    [4; 8], // 3
+                    [5; 8], // 4
+                    [6; 8], // 5
+                    [1, 2, 3, 4, 5, 6, 7, 8], // 6
+                    [10, 10, 10, 10, 10, 10, 11, 10], // 7
                 ];
 
                 struct Block {
@@ -286,7 +288,7 @@ impl ApplicationHandler for App {
 
                 let mut blocks = Vec::<Block>::new();
 
-                
+                let mut texture_rot = 0;
                 for x in 0..2 {
                     for y in 0..2 {
                         for z in 0..2 {
@@ -294,9 +296,10 @@ impl ApplicationHandler for App {
                                 blocks.push(
                                     Block{
                                         position: [x*2 - 1, y*2 - 1, z*2 - 1, w*2 - 1],
-                                        texture: 5
+                                        texture: texture_rot
                                     }
                                 );
+                                texture_rot = (texture_rot + 1)%5;
                             }
                         }
                     }
@@ -305,7 +308,7 @@ impl ApplicationHandler for App {
                 blocks.push(
                     Block{
                         position: [0, 0, 0, 0],
-                        texture: 3
+                        texture: 6
                     }
                 );
 

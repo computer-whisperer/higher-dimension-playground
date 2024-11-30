@@ -23,6 +23,6 @@ winit = "0.30"
 glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
 
 [build-dependencies]
-spirv-builder = {git = "https://github.com/rust-gpu/rust-gpu.git"}
-
+#spirv-builder = {git = "https://github.com/rust-gpu/rust-gpu.git"}
+spirv-builder = {git = "https://github.com/Firestar99/rust-gpu-new.git", branch="linker-speedup"}
 

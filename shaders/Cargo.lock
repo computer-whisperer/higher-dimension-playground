@@ -100,7 +100,7 @@ dependencies = [
 [[package]]
 name = "spirv-std"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
+source = "git+https://github.com/Firestar99/rust-gpu-new.git?branch=linker-speedup#6dbfe05400a3bbd5b02a5d711e1a05c50128c3da"
 dependencies = [
  "bitflags",
  "glam",
@@ -112,7 +112,7 @@ dependencies = [
 [[package]]
 name = "spirv-std-macros"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
+source = "git+https://github.com/Firestar99/rust-gpu-new.git?branch=linker-speedup#6dbfe05400a3bbd5b02a5d711e1a05c50128c3da"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -123,7 +123,7 @@ dependencies = [
 [[package]]
 name = "spirv-std-types"
 version = "0.9.0"
-source = "git+https://github.com/rust-gpu/rust-gpu.git#d3f9af7bd4339e24eaf2984609936a5e1aa67fc6"
+source = "git+https://github.com/Firestar99/rust-gpu-new.git?branch=linker-speedup#6dbfe05400a3bbd5b02a5d711e1a05c50128c3da"
 
 [[package]]
 name = "syn"
