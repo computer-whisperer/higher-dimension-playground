@@ -101,7 +101,7 @@ pub fn main_tetrahedron_cs(
     let output_index = global_invocation_id.x as usize;
     let model_index = output_index%model_tetrahedrons.len();
     let instance_index = output_index/model_tetrahedrons.len();
-    
+
     let input_instance = &instances[instance_index];
     let input_tetrahedron = &model_tetrahedrons[model_index];
 
@@ -118,7 +118,7 @@ pub fn main_tetrahedron_cs(
         Vec4::ZERO,
         Vec4::ZERO,
         Vec4::ZERO];
-    
+
     for i in 0..4 {
         let vertex_result = cs_vertex_shader(
             input_tetrahedron.vertex_positions[i],
@@ -128,7 +128,7 @@ pub fn main_tetrahedron_cs(
         output_vertex_positions[i] = vertex_result.vertex_position;
         output_texture_positions[i] = vertex_result.texture_position;
     }
-    
+
     // Perspective scaling
     let output_vertex_positions_projected = [
         project_4d_vertex(output_vertex_positions[0]),
@@ -348,7 +348,7 @@ fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
             if lines[j].texture_id == 0 {
                 continue;
             }
-            
+
             let intersection = get_intersection(
                 &[Vec2::ZERO, sample_ray],
                 &lines[j].zw_positions
@@ -392,10 +392,10 @@ fn condense_zw_lines(lines: &mut [ZWLine; 96], num_lines: usize) -> usize {
 }
 
 fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
-    
+
     // Scan for complete occlusions
     for i in 0..num_lines {
-        
+
         if lines[i].texture_id == 0 {
             continue;
         }
@@ -429,7 +429,7 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
     }
 
     let num_lines = condense_zw_lines(lines, num_lines);
-    
+
     // Scan for full line intersections
     let mut full_intersection = false;
     for i in 0..num_lines {
@@ -456,9 +456,9 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
     if full_intersection {
         //working_data.shader_fault = 1;
     }
-    
+
     // Scan for intermittent occlusions
-    
+
     let mut intermittent_occlusion = false;
     if !full_intersection {
         for i in 0..num_lines {
@@ -492,7 +492,7 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
         }
     }
 
-    
+
     if intermittent_occlusion || full_intersection {
         // Must revert to simple algorithm
         render_zw_lines_simple(&lines, num_lines)
@@ -500,15 +500,15 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
     else
     {
         let mut output_accumulation = Vec3::ZERO;
-        
+
         let mut late_fail = false;
-        
+
         // Only simple occlusions or no occlusions, so render quickly
         for i in 0..num_lines {
             if lines[i].texture_id == 0 {
                 continue;
             }
-            
+
             // Scan for simple occlusions and trim appropriately
             for j in 0..num_lines {
                 if j == i {
@@ -523,16 +523,16 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
                 let does_a_clip = intersection_a.x > 1.0 && intersection_a.y > 0.0 && intersection_a.y < 1.0;
                 let does_b_clip = intersection_b.x > 1.0 && intersection_b.y > 0.0 && intersection_b.y < 1.0;
                 let does_c_clip = intersection_c.x > 0.0 && intersection_c.x < 1.0 && intersection_c.y > 0.0 && intersection_c.y < 1.0;
-                
+
                 if does_a_clip || does_b_clip {
-                    
+
                     if does_a_clip && does_b_clip {
                         late_fail = true;
                         break;
                     }
-                    
+
                     let split = if does_a_clip {intersection_a.y} else {intersection_b.y};
-                    
+
                     // Something needs to be trimmed, but we need to figure out if it's the start or end of the line. c_clip should tell us
                     if does_c_clip {
                         lines[i] = lines[i].get_segment(split, 1.0);
@@ -542,11 +542,11 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
                     }
                 }
             }
-            
+
             if late_fail {
                 break;
             }
-            
+
             // All occlusions should have been resolved
             output_accumulation += sample_texture_integral(lines[i]);
         }
@@ -664,7 +664,7 @@ pub fn main_tetrahedron_pixel_cs(
         ZWLine::default(),
         ZWLine::default(),
         ZWLine::default(),
-        ZWLine::default(),        
+        ZWLine::default(),
     ];
 
     let u_pixel_pos = global_invocation_id.xy();
@@ -779,7 +779,7 @@ pub fn main_tetrahedron_pixel_cs(
     else {
         render_zw_lines_simple(&mut current_zw_lines, num_zw_lines)
     };
-    
+
     if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {
 
         pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = output;

@@ -882,11 +882,12 @@ impl RenderContext {
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
             writer.shader_fault = 0;
         }
+
+        let mut line_render_count = 0;
         
         // Do compute stage
-        
-        // Do tetrahedrons?
-        if true {
+
+        { // Tetrahedron pre-raster
             builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone()).unwrap();
             builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
                                          vec![
@@ -894,8 +895,14 @@ impl RenderContext {
                                              self.sized_buffers.descriptor_set.clone(),
                                              self.live_buffers.descriptor_set.clone()
                                          ]).unwrap();
-            
             unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
+
+            if false {
+                line_render_count = total_tetrahedron_count*6;
+            }
+        }
+
+        { // Tetrahedron pixel raster
             builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone()).unwrap();
             builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
                                          vec![
@@ -904,110 +911,9 @@ impl RenderContext {
                                              self.live_buffers.descriptor_set.clone()
                                          ]).unwrap();
             unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
-            
-            // Render tetrahedrons volumetrically
-            if true {
-                builder
-                    // Before we can draw, we have to *enter a render pass*.
-                    .begin_render_pass(
-                        RenderPassBeginInfo {
-                            // A list of values to clear the attachments with. This list contains
-                            // one item for each attachment in the render pass. In this case, there
-                            // is only one attachment, and we clear it with a blue color.
-                            //
-                            // Only attachments that have `AttachmentLoadOp::Clear` are provided
-                            // with clear values, any others should use `None` as the clear value.
-                            clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-
-                            ..RenderPassBeginInfo::framebuffer(
-                                self.framebuffers[image_index as usize].clone(),
-                            )
-                        },
-                        SubpassBeginInfo {
-                            // The contents of the first (and only) subpass. This can be either
-                            // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
-                            // advanced and is not covered here.
-                            contents: SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap()
-                    // We are now inside the first subpass of the render pass.
-                    //
-                    // TODO: Document state setting and how it affects subsequent draw commands.
-                    .set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap()
-                    .bind_pipeline_graphics(self.present_pipeline.buffer_pipeline.clone()).unwrap()
-                    .bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
-                                          vec![
-                                              self.one_time_buffers.descriptor_set.clone(),
-                                              self.sized_buffers.descriptor_set.clone(),
-                                              self.live_buffers.descriptor_set.clone()
-                                          ]).unwrap();
-
-                // We add a draw command.
-                unsafe { builder.draw(6, 1, 0, 0) }.unwrap();
-
-                builder
-                    // We leave the render pass. Note that if we had multiple subpasses we could
-                    // have called `next_subpass` to jump to the next subpass.
-                    .end_render_pass(Default::default())
-                    .unwrap();
-            }
-            
-            // Render tetrahedrons as lines
-            if false {
-                builder
-                    // Before we can draw, we have to *enter a render pass*.
-                    .begin_render_pass(
-                        RenderPassBeginInfo {
-                            // A list of values to clear the attachments with. This list contains
-                            // one item for each attachment in the render pass. In this case, there
-                            // is only one attachment, and we clear it with a blue color.
-                            //
-                            // Only attachments that have `AttachmentLoadOp::Clear` are provided
-                            // with clear values, any others should use `None` as the clear value.
-                            clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-
-                            ..RenderPassBeginInfo::framebuffer(
-                                self.framebuffers[image_index as usize].clone(),
-                            )
-                        },
-                        SubpassBeginInfo {
-                            // The contents of the first (and only) subpass. This can be either
-                            // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
-                            // advanced and is not covered here.
-                            contents: SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap()
-                    // We are now inside the first subpass of the render pass.
-                    //
-                    // TODO: Document state setting and how it affects subsequent draw commands.
-                    .set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap()
-                    .bind_pipeline_graphics(self.present_pipeline.line_pipeline.clone()).unwrap()
-                    .bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
-                                          vec![
-                                              self.one_time_buffers.descriptor_set.clone(),
-                                              self.sized_buffers.descriptor_set.clone(),
-                                              self.live_buffers.descriptor_set.clone()
-                                          ]).unwrap();
-
-                let total_line_vertex_count = total_tetrahedron_count*12;
-
-                // We add a draw command.
-                unsafe { builder.draw(total_line_vertex_count as u32, 1, 0, 0) }.unwrap();
-
-                builder
-                    // We leave the render pass. Note that if we had multiple subpasses we could
-                    // have called `next_subpass` to jump to the next subpass.
-                    .end_render_pass(Default::default())
-                    .unwrap();
-            }
         }
 
-        // Do edges?
-        if false {
+        {   // Tetrahedron edge pre-raster
             builder.bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone()).unwrap();
             builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.present_pipeline.pipeline_layout.clone(), 0,
                                          vec![
@@ -1018,56 +924,68 @@ impl RenderContext {
             let total_edge_count = self.one_time_buffers.model_edge_count*model_instances.len();
             unsafe {builder.dispatch([(total_edge_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
 
-            // Do present stage
-            builder
-                // Before we can draw, we have to *enter a render pass*.
-                .begin_render_pass(
-                    RenderPassBeginInfo {
-                        // A list of values to clear the attachments with. This list contains
-                        // one item for each attachment in the render pass. In this case, there
-                        // is only one attachment, and we clear it with a blue color.
-                        //
-                        // Only attachments that have `AttachmentLoadOp::Clear` are provided
-                        // with clear values, any others should use `None` as the clear value.
-                        clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+            line_render_count = total_edge_count;
+        }
+        
+        // Begin render pass
+        builder
+            // Before we can draw, we have to *enter a render pass*.
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    // A list of values to clear the attachments with. This list contains
+                    // one item for each attachment in the render pass. In this case, there
+                    // is only one attachment, and we clear it with a blue color.
+                    //
+                    // Only attachments that have `AttachmentLoadOp::Clear` are provided
+                    // with clear values, any others should use `None` as the clear value.
+                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
 
-                        ..RenderPassBeginInfo::framebuffer(
-                            self.framebuffers[image_index as usize].clone(),
-                        )
-                    },
-                    SubpassBeginInfo {
-                        // The contents of the first (and only) subpass. This can be either
-                        // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
-                        // advanced and is not covered here.
-                        contents: SubpassContents::Inline,
-                        ..Default::default()
-                    },
-                )
-                .unwrap()
-                // We are now inside the first subpass of the render pass.
-                //
-                // TODO: Document state setting and how it affects subsequent draw commands.
-                .set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap()
-                .bind_pipeline_graphics(self.present_pipeline.line_pipeline.clone()).unwrap()
-                .bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
-                                      vec![
-                                          self.one_time_buffers.descriptor_set.clone(),
-                                          self.sized_buffers.descriptor_set.clone(),
-                                          self.live_buffers.descriptor_set.clone()
-                                      ]).unwrap();
+                    ..RenderPassBeginInfo::framebuffer(
+                        self.framebuffers[image_index as usize].clone(),
+                    )
+                },
+                SubpassBeginInfo {
+                    // The contents of the first (and only) subpass. This can be either
+                    // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
+                    // advanced and is not covered here.
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            ).unwrap();
+        
+        builder.set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap();
+        
+        // Render from compute shader buffer
+        {
+            builder.bind_pipeline_graphics(self.present_pipeline.buffer_pipeline.clone()).unwrap();
+            builder.bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
+                                         vec![
+                                             self.one_time_buffers.descriptor_set.clone(),
+                                             self.sized_buffers.descriptor_set.clone(),
+                                             self.live_buffers.descriptor_set.clone()
+                                         ]).unwrap();
+            unsafe { builder.draw(6, 1, 0, 0) }.unwrap();
+        }
+        
+        // Render the edge lines
+        {
+            builder.bind_pipeline_graphics(self.present_pipeline.line_pipeline.clone()).unwrap();
+            builder.bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
+                                  vec![
+                                      self.one_time_buffers.descriptor_set.clone(),
+                                      self.sized_buffers.descriptor_set.clone(),
+                                      self.live_buffers.descriptor_set.clone()
+                                  ]).unwrap();
 
-            let total_line_vertex_count = total_edge_count*2;
-
-            // We add a draw command.
-            unsafe { builder.draw(total_line_vertex_count as u32, 1, 0, 0) }.unwrap();
-            builder
-                // We leave the render pass. Note that if we had multiple subpasses we could
-                // have called `next_subpass` to jump to the next subpass.
-                .end_render_pass(Default::default())
-                .unwrap();
+            unsafe { builder.draw(line_render_count as u32*2, 1, 0, 0) }.unwrap();
         }
 
-
+        // End render pass
+        builder
+            // We leave the render pass. Note that if we had multiple subpasses we could
+            // have called `next_subpass` to jump to the next subpass.
+            .end_render_pass(Default::default())
+            .unwrap();
 
 
         // Finish recording the command buffer by calling `end`.
