@@ -1,32 +1,34 @@
 
-use glam::{Vec4, Mat4, Vec3, Vec2};
+use glam::{Vec4, Mat4, Vec3, Vec2, Mat3, Mat2};
+use crate::factorial;
 
-#[derive(Copy, Clone)]
+// Note: This cfg is incorrect on its surface, it really should be "are we compiling with std", but
+// we tie #[no_std] above to the same condition, so it's fine.
+#[cfg(target_arch = "spirv")]
+use spirv_std::num_traits::Float;
+
+#[derive(Copy, Clone, PartialEq, Debug)]
 #[repr(transparent)]
-pub struct VecN<const N: usize> where [(); (N+3)/4]: {
-    sub_vecs: [Vec4; (N+3)/4]
+pub struct VecN<const N: usize> {
+    values: [f32; N]
 }
 
-unsafe impl<const N: usize> bytemuck::Zeroable for VecN<N> where [(); (N+3)/4]: {
-}
+unsafe impl<const N: usize> bytemuck::Zeroable for VecN<N> {}
 
-unsafe impl<const N: usize> bytemuck::Pod for VecN<N> where [(); (N+3)/4]: {
-}
+unsafe impl<const N: usize> bytemuck::Pod for VecN<N> {}
 
-impl<const N: usize> VecN<N> where [(); (N+3)/4]: {
-    const ZERO: Self = Self {sub_vecs: [Vec4::ZERO; (N+3)/4]};
+impl<const N: usize> VecN<N> {
+    pub const ZERO: Self = Self {values: [0f32; N]};
 
-    pub fn new(v: &[f32]) -> Self {
-        let mut sub_vecs = [Vec4::ZERO; (N+3)/4];
+    pub fn new(v: [f32; N]) -> Self {
+        let mut values = [0f32; N];
         for i in 0..N {
-            sub_vecs[i/4][i%4] = v[i];
+            values[i] = v[i];
         }
         Self {
-            sub_vecs
+            values
         }
     }
-    
-
 
     pub fn x(&self) -> f32 {self[0]}
     pub fn y(&self) -> f32 {self[1]}
@@ -35,10 +37,9 @@ impl<const N: usize> VecN<N> where [(); (N+3)/4]: {
     pub fn v(&self) -> f32 {self[4]}
 }
 
-impl<const N: usize> VecN<N> 
-where 
-    [(); (N+3)/4]:,
-    [(); ({N+1}+3)/4]:
+impl<const N: usize> VecN<N>
+where
+    [(); N+1]:
 {
     pub fn extend(&self, v: f32) -> VecN<{N+1}> {
         let mut output = VecN::<{N+1}>::ZERO;
@@ -52,40 +53,40 @@ where
     }
 }
 
-impl <const N: usize> core::ops::Index<usize> for VecN<N> where [(); (N+3)/4]: {
+impl <const N: usize> core::ops::Index<usize> for VecN<N> {
     type Output = f32;
     fn index(&self, index: usize) -> &Self::Output {
-        &self.sub_vecs[index/4][index%4]
+        &self.values[index]
     }
 }
 
-impl <const N: usize> core::ops::Index<usize> for &VecN<N> where [(); (N+3)/4]: {
+impl <const N: usize> core::ops::Index<usize> for &VecN<N> {
     type Output = f32;
     fn index(&self, index: usize) -> &Self::Output {
-        &self.sub_vecs[index/4][index%4]
+        &self.values[index]
     }
 }
 
-impl <const N: usize> core::ops::IndexMut<usize> for VecN<N> where [(); (N+3)/4]: {
+impl <const N: usize> core::ops::IndexMut<usize> for VecN<N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.sub_vecs[index/4][index%4]
+        &mut self.values[index]
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 #[repr(transparent)]
-pub struct MatN<const N: usize> where [(); (N+3)/4]: {
-    sub_mats: [[Mat4; (N+3)/4]; (N+3)/4] // [row][col]
+pub struct MatN<const N: usize> {
+    values: [[f32; N]; N] // [row][col]
 }
 
-unsafe impl<const N: usize> bytemuck::Zeroable for MatN<N> where [(); (N+3)/4]: {
+unsafe impl<const N: usize> bytemuck::Zeroable for MatN<N> {
 }
 
-unsafe impl<const N: usize> bytemuck::Pod for MatN<N> where [(); (N+3)/4]: {
+unsafe impl<const N: usize> bytemuck::Pod for MatN<N> {
 }
 
-impl <const N: usize> MatN<N> where [(); (N+3)/4]: {
-    const ZERO: Self = Self{sub_mats: [[Mat4::ZERO; (N+3)/4]; (N+3)/4]};
+impl <const N: usize> MatN<N> {
+    pub const ZERO: Self = Self{ values: [[0f32; N]; N]};
 
     pub fn new(v: &[&[f32]]) -> Self {
         let mut output = Self::ZERO;
@@ -96,102 +97,268 @@ impl <const N: usize> MatN<N> where [(); (N+3)/4]: {
         }
         output
     }
-}
 
-impl <const N: usize> core::ops::Index<[usize; 2]> for MatN<N> where [(); (N+3)/4]: {
-    type Output = f32;
-    fn index(&self, index: [usize; 2]) -> &Self::Output {
-        let sub_mat = &self.sub_mats[index[0]/4][index[1]/4];
-        &(match index[1]%4 {
-            0 => &sub_mat.x_axis,
-            1 => &sub_mat.y_axis,
-            2 => &sub_mat.z_axis,
-            3 => &sub_mat.w_axis,
-            _ => {unreachable!()}
-        })[index[0]%4]
+
+
+    pub fn determinant_basic(&self) -> f32 {
+        // Compute determinant
+        match N {
+            1 => self.values[0][0],
+            2 => self.values[0][0] * self.values[1][1] - self.values[0][1] * self.values[1][0],
+            3 => self.values[0][0] * (self.values[1][1] * self.values[2][2] - self.values[1][2] * self.values[2][1])
+                - self.values[0][1] * (self.values[1][0] * self.values[2][2] - self.values[1][2] * self.values[2][0])
+                + self.values[0][2] * (self.values[1][0] * self.values[2][1] - self.values[1][1] * self.values[2][0]),
+            _ => {unimplemented!()}
+        }
+    }
+ }
+
+impl <const N: usize> MatN<N> where [[(); N-1]; N-1]: {
+    pub fn minor(&self, row: usize, col: usize) -> MatN<{N-1}> {
+        let mut output = MatN::<{N-1}>::ZERO;
+
+        let mut output_row = 0;
+        for j in 0..N {
+            if j == row {
+                continue;
+            }
+            let mut output_col = 0;
+            for k in 0..N {
+                if k == col {
+                    continue;
+                }
+                output[[output_row, output_col]] = self[[j, k]];
+                output_col += 1;
+            }
+            output_row += 1;
+        }
+        output
     }
 }
 
-impl <const N: usize> core::ops::Index<[usize; 2]> for &MatN<N> where [(); (N+3)/4]: {
-    type Output = f32;
-    fn index(&self, index: [usize; 2]) -> &Self::Output {
-        let sub_mat = &self.sub_mats[index[0]/4][index[1]/4];
-        &(match index[1]%4 {
-            0 => &sub_mat.x_axis,
-            1 => &sub_mat.y_axis,
-            2 => &sub_mat.z_axis,
-            3 => &sub_mat.w_axis,
-            _ => {unreachable!()}
-        })[index[0]%4]
+impl MatN<2> {
+    pub fn determinant_native(&self) -> f32 {
+        Mat2::from(self).determinant()
     }
 }
 
-impl <const N: usize> core::ops::IndexMut<[usize; 2]> for MatN<N> where [(); (N+3)/4]: {
+impl MatN<3> {
+    pub fn determinant_native(&self) -> f32 {
+        Mat3::from(self).determinant()
+    }
+}
+
+impl MatN<4> {
+    pub fn determinant_native(&self) -> f32 {
+        Mat4::from(self).determinant()
+    }
+}
+
+impl <const N: usize> core::ops::Index<[usize; 2]> for MatN<N> {
+    type Output = f32;
+    fn index(&self, index: [usize; 2]) -> &Self::Output {
+        &self.values[index[0]][index[1]]
+    }
+}
+
+impl <const N: usize> core::ops::Index<[usize; 2]> for &MatN<N> {
+    type Output = f32;
+    fn index(&self, index: [usize; 2]) -> &Self::Output {
+        &self.values[index[0]][index[1]]
+    }
+}
+
+impl <const N: usize> core::ops::IndexMut<[usize; 2]> for MatN<N> {
     fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
-        &mut self.sub_mats[index[0]/4][index[1]/4].col_mut(index[1]%4)[index[0]%4]
+        &mut self.values[index[0]][index[1]]
     }
 }
 
-impl <const N: usize> core::ops::Mul<VecN<N>> for MatN<N> where [(); (N+3)/4]: {
+impl <const N: usize> core::ops::Mul<VecN<N>> for MatN<N> {
     type Output = VecN<N>;
 
     fn mul(self, rhs: VecN<N>) -> Self::Output {
-        let mut outputs = [Vec4::ZERO; (N+3)/4];
+        let mut outputs = [0f32; N];
 
-        for i in 0..(N+3)/4 {
-            for j in 0..(N+3)/4 {
-                outputs[i] += self.sub_mats[i][j] * rhs.sub_vecs[j];
+        for i in 0..N {
+            for j in 0..N {
+                outputs[i] += self.values[i][j] * rhs.values[j];
             }
         }
 
         VecN {
-            sub_vecs: outputs
+            values: outputs
         }
     }
+}
+
+impl <const N: usize> core::ops::Mul<VecN<N>> for VecN<N> {
+    type Output = f32;
+
+    fn mul(self, rhs: VecN<N>) -> Self::Output {
+        let mut output = 0.0;
+
+        for i in 0..N {
+            output += self.values[i] * rhs.values[i];
+        }
+        
+        output
+    }
+}
+
+impl <const N: usize> core::ops::Add<&VecN<N>> for &VecN<N> {
+    type Output = VecN<N>;
+
+    fn add(self, rhs: &VecN<N>) -> Self::Output {
+        let mut output = VecN::<N>::ZERO;
+        for i in 0..N {
+            output[i] = self.values[i] + rhs.values[i];
+        }
+        output
+    }
+}
+
+impl <const N: usize> core::ops::Sub<&VecN<N>> for &VecN<N> {
+    type Output = VecN<N>;
+
+    fn sub(self, rhs: &VecN<N>) -> Self::Output {
+        let mut output = VecN::<N>::ZERO;
+        for i in 0..N {
+            output[i] = self.values[i] - rhs.values[i];
+        }
+        output
+    }
+}
+
+impl <const N: usize> core::ops::Add<VecN<N>> for VecN<N> {
+    type Output = VecN<N>;
+
+    fn add(self, rhs: VecN<N>) -> Self::Output {&self + &rhs}
+}
+
+impl <const N: usize> core::ops::Sub<VecN<N>> for VecN<N> {
+    type Output = VecN<N>;
+
+    fn sub(self, rhs: VecN<N>) -> Self::Output {&self - &rhs}
 }
 
 impl <const N: usize> core::ops::Mul<MatN<N>> for MatN<N> where [(); (N+3)/4]: {
     type Output = MatN<N>;
     fn mul(self, rhs: MatN<N>) -> Self::Output {
-        let mut sub_mats = [[Mat4::ZERO; (N+3)/4]; (N+3)/4];
+        let mut values = [[0f32; N]; N];
 
-        for i in 0..(N+3)/4 {
-            for j in 0..(N+3)/4 {
-                for k in 0..(N+3)/4 {
-                    sub_mats[i][j] += self.sub_mats[i][k] * rhs.sub_mats[k][j];
+        for i in 0..N {
+            for j in 0..N {
+                for k in 0..N {
+                    values[i][j] += self.values[i][k] * rhs.values[k][j];
                 }
             }
         }
 
         MatN {
-            sub_mats
+            values
         }
     }
 }
 
 impl From<Vec4> for VecN<4> {
     fn from(value: Vec4) -> Self {
-        Self {
-            sub_vecs: [value]
-        }
+        Self::new([value.x, value.y, value.z, value.w])
     }
 }
 
 impl From<Vec3> for VecN<3> {
     fn from(value: Vec3) -> Self {
-        Self::new(&[value.x, value.y, value.z])
+        Self::new([value.x, value.y, value.z])
     }
 }
 
-impl From<Vec2> for VecN<2> {
-    fn from(value: Vec2) -> Self {
-        Self::new(&[value.x, value.y])
+impl From<Vec2> for VecN<2> {fn from(value: Vec2) -> Self {
+        Self::new([value.x, value.y])
+    } }
+
+impl From<&Mat4> for MatN<4> {
+    fn from(value: &Mat4) -> Self {
+        let mut values = [[0f32; 4]; 4];
+
+        for i in 0..4 {
+            for j in 0..4 {
+                values[i][j] = value.col(j)[i];
+            }
+        }
+
+        MatN {
+            values
+        }
     }
 }
+
+impl From<&Mat3> for MatN<3> {
+    fn from(value: &Mat3) -> Self {
+        let mut values = [[0f32; 3]; 3];
+
+        for i in 0..3 {
+            for j in 0..3 {
+                values[i][j] = value.col(j)[i];
+            }
+        }
+
+        MatN {
+            values
+        }
+    }
+}
+
+impl From<&Mat2> for MatN<2> {
+    fn from(value: &Mat2) -> Self {
+        let mut values = [[0f32; 2]; 2];
+
+        for i in 0..2 {
+            for j in 0..2 {
+                values[i][j] = value.col(j)[i];
+            }
+        }
+
+        MatN {
+            values
+        }
+    }
+}
+
+impl From<Mat4> for MatN<4> { fn from(value: Mat4) -> Self {value.into()} }
+
+impl From<Mat3> for MatN<3> { fn from(value: Mat3) -> Self {value.into()} }
+
+impl From<Mat2> for MatN<2> { fn from(value: Mat2) -> Self {value.into()} }
+
+impl From<&MatN::<2>> for Mat2 {
+    fn from(value: &MatN<2>) -> Self {
+        Mat2::from_cols_array_2d(&value.values)
+    }
+}
+
+impl From<&MatN::<3>> for Mat3 {
+    fn from(value: &MatN<3>) -> Self {
+        Mat3::from_cols_array_2d(&value.values)
+    }
+}
+
+impl From<&MatN::<4>> for Mat4 {
+    fn from(value: &MatN<4>) -> Self {
+        Mat4::from_cols_array_2d(&value.values)
+    }
+}
+
+impl From<MatN::<4>> for Mat4 {
+    fn from(value: MatN<4>) -> Self {
+        value.into()
+    }
+}
+
 
 impl From<VecN<4>> for Vec4 {
     fn from(value: VecN<4>) -> Self {
-        value.sub_vecs[0]
+        Self::new(value[0], value[1], value[2], value[3])
     }
 }
 
@@ -209,7 +376,7 @@ impl From<VecN<2>> for Vec2 {
 
 impl From<&VecN<4>> for Vec4 {
     fn from(value: &VecN<4>) -> Self {
-        value.sub_vecs[0]
+        Self::new(value[0], value[1], value[2], value[3])
     }
 }
 
@@ -363,6 +530,66 @@ impl<const N: usize> From<MatN<N>> for ndarray::Array2<f32> where [(); (N+3)/4]:
     }
 }
 
+// An N-1 blade in an N space, the dot product with this vector should give the magnitude of the external product of this blade and the vector
+pub fn get_normal<const N: usize>(components: &[VecN::<N>; N-1]) -> VecN::<N> where [(); N-1]:{
+    let mut output = VecN::<N>::ZERO;
+    for i in 0..N {
+        let mut sub_matrix = MatN::<{N-1}>::ZERO;
+        let mut output_row = 0;
+        for j in 0..N {
+            if j == i {
+                continue;
+            }
+            for k in 0..N-1 {
+                sub_matrix[[output_row, k]] = components[k][j]
+            }
+            output_row += 1;
+        }
+        output[i] = sub_matrix.determinant_basic();
+    }
+
+    output
+}
+
+fn get_gram_matrix<const N: usize, const K: usize>(vertices: &[VecN::<N>; K]) -> MatN::<{K-1}> {
+    let mut output = MatN::<{K-1}>::ZERO;
+    
+    for i in 0..K-1 {
+        for j in 0..K-1 {
+            output[[i, j]] = (vertices[i+1] - vertices[0]) * (vertices[j+1] - vertices[0]);
+        }
+    }
+    
+    output
+}
+
+pub fn get_simplex_volume<const N: usize, const K: usize>(vertices: &[VecN::<N>; K]) -> f32 where [(); K-1]: {
+    get_gram_matrix::<N, K>(vertices).determinant_basic().sqrt()/factorial(N) as f32
+}
+
+pub fn get_pseudo_barycentric<const N: usize, const K: usize>(vertices: &[VecN::<N>; K], point: VecN::<N>) -> VecN::<K> where [(); K-1]: {
+    let full_simplex_volume = get_simplex_volume(vertices);
+    let mut components = VecN::<K>::ZERO;
+    let mut volume_sum = 0.0;
+    
+    for i in 0..N {
+        let mut local_vertices = vertices.clone();
+        local_vertices[i] = point;
+        components[i] = get_simplex_volume(&local_vertices);
+        volume_sum += components[i];
+    }
+    
+    if volume_sum - full_simplex_volume > 0.01 {
+        VecN::<K>::ZERO
+    }
+    else {
+        let mut output = VecN::<K>::ZERO;
+        for i in 0..N {
+            output[i] = components[i]/volume_sum;
+        }
+        output
+    }
+}
 
 #[cfg(feature = "ndarray")]
 #[cfg(test)]
@@ -445,5 +672,88 @@ mod tests {
         let back_converted_result = ndarray::Array2::from(result_mat);
         let expected_result = nd_mat1.dot(&nd_mat2);
         assert_eq!(expected_result, back_converted_result);
+    }
+
+    #[test]
+    fn test_get_normal() {
+        let components = [
+            VecN::<4>::new([1.0, 0.0, 0.0, 0.0]),
+            VecN::<4>::new([0.0, 1.0, 0.0, 0.0]),
+            VecN::<4>::new([0.0, 0.0, 1.0, 0.0])
+        ];
+        let result = get_normal(&components);
+        let expected_result = VecN::<4>::new([0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(result, expected_result);
+
+        let components = [
+            VecN::<4>::new([1.0, 1.0, 0.0, 0.0]),
+            VecN::<4>::new([0.0, 1.0, 1.0, 0.0]),
+            VecN::<4>::new([1.0, 0.0, 1.0, 0.0])
+        ];
+        let result = get_normal(&components);
+        let expected_result = VecN::<4>::new([0.0, 0.0, 0.0, 2.0]);
+        assert_eq!(result, expected_result);
+
+        let components = [
+            VecN::<4>::new([1.0, 1.0, 0.0, 0.0]),
+            VecN::<4>::new([0.0, 1.0, 1.0, 0.0]),
+            VecN::<4>::new([0.0, 0.0, 1.0, 1.0])
+        ];
+        let result = get_normal(&components);
+        let expected_result = VecN::<4>::new([1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(result, expected_result);
+    }
+    
+    #[test]
+    fn test_get_simplex_volume() {
+        let vertices = [
+            VecN::<4>::new([0.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([1.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 1.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 0.0, 1.0, 1.0])
+        ];
+        let result = get_simplex_volume::<4, 4>(&vertices);
+        assert_eq!(result, 1.0/24.0);
+
+        let vertices = [
+            VecN::<4>::new([0.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([1.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 2.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 0.0, 1.0, 1.0])
+        ];
+        let result = get_simplex_volume::<4, 4>(&vertices);
+        assert_eq!(result, 2.0/24.0);
+
+        let vertices = [
+            VecN::<4>::new([0.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 1.0, 0.0, 1.0]),
+            VecN::<4>::new([1.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 0.0, 1.0, 1.0])
+        ];
+        let result = get_simplex_volume::<4, 4>(&vertices);
+        assert_eq!(result, 1.0/24.0);
+    }
+    
+    #[test]
+    fn test_get_pseudo_barycentric() {
+        let vertices = [
+            VecN::<4>::new([0.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([1.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 1.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 0.0, 1.0, 1.0])
+        ];
+        let pixel_pos = VecN::<4>::new([0.2, 0.2, 0.2, 1.0]);
+        let result = get_pseudo_barycentric(&vertices, pixel_pos);
+        assert_eq!(result, VecN::<4>::new([0.40000007, 0.19999999, 0.19999999, 0.19999999]));
+
+        let vertices = [
+            VecN::<4>::new([0.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([1.0, 0.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 1.0, 0.0, 1.0]),
+            VecN::<4>::new([0.0, 0.0, 1.0, 1.0])
+        ];
+        let pixel_pos = VecN::<4>::new([0.5, 0.9, 0.5, 1.0]);
+        let result = get_pseudo_barycentric(&vertices, pixel_pos);
+        assert_eq!(result, VecN::<4>::ZERO);
     }
 }

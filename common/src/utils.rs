@@ -1,9 +1,23 @@
 // compiler go brr
 pub const fn factorial(n: usize) -> usize {
+    /*
     if n == 0 || n == 1 {
         1
     } else {
         n * factorial(n-1)
+    }*/
+    match n {
+        0 => 1,
+        1 => 1,
+        2 => 2,
+        3 => 6,
+        4 => 24,
+        5 => 120,
+        6 => 720,
+        7 => 5040,
+        8 => 40320,
+        9 => 362880,
+        _ => {unimplemented!()}
     }
 }
 

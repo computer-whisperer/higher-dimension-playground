@@ -29,12 +29,11 @@ use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::sync::GpuFuture;
 use bytemuck::{Zeroable};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
-use common::ModelTetrahedron;
+use common::{get_normal, ModelTetrahedron, VecN};
 use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
-use crate::matrix_operations::{rotation_matrix_4d_rotate_1, scale_matrix_4d, translate_matrix_4d};
-use glam::{Vec3, vec4, Vec4, Vec2};
+use glam::{Vec4, Vec2};
 
-pub fn generate_tesseract_tetrahedrons() -> Vec<common::ModelTetrahedron> {
+pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
     let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
     let cube_vertexes = Hypercube::<3, usize>::generate_vertices();
     let tetrahedron_cells = Hypercube::<4, usize>::generate_k_faces::<3>();
@@ -49,17 +48,37 @@ pub fn generate_tesseract_tetrahedrons() -> Vec<common::ModelTetrahedron> {
 
         for simplex_id in 0..position_simplexes.len() {
             let texture_simplex = texture_position_simplexes[simplex_id];
+            
             // Convert arrays to vec4
-            let vertex_positions = position_simplexes[simplex_id].map(|i| {
+            let mut vertex_positions = position_simplexes[simplex_id].map(|i| {
                 let vertex = tesseract_vertexes[i];
                 glam::Vec4::new(vertex[0] as f32, vertex[1] as f32, vertex[2] as f32, vertex[3] as f32)
             });
 
-            let texture_positions = texture_simplex.map(|i| {
+            let mut texture_positions = texture_simplex.map(|i| {
                 let vertex = cube_vertexes[i];
                 glam::Vec4::new(vertex[0] as f32, vertex[1] as f32, vertex[2] as f32, 1.0)
             });
 
+            // HACK!!! Fix this later with better math in the face/simplex generation
+            // Determine if we need to re-order to flip normal
+            let normal: Vec4 = get_normal(&[
+                (vertex_positions[1] - vertex_positions[0]).into(),
+                (vertex_positions[2] - vertex_positions[0]).into(),
+                (vertex_positions[3] - vertex_positions[0]).into()
+            ]).into();
+            let test_vector = Vec4::new(1.0, 1.0, 1.0, 1.0);
+            let is_normal_flipped = test_vector.dot(normal.into()) < 0.0;
+            let should_be_flipped = tetrahedron_cells[cell_id].contains(&0);
+            if should_be_flipped != is_normal_flipped {
+                let temp = vertex_positions[1];
+                vertex_positions[1] = vertex_positions[2];
+                vertex_positions[2] = temp;
+                let temp = texture_positions[1];
+                texture_positions[1] = texture_positions[2];
+                texture_positions[2] = temp;
+            }
+            
             output_tetrahedrons.push(
                 common::ModelTetrahedron {
                     vertex_positions,
@@ -517,6 +536,8 @@ struct ComputePipelineContext {
     tetrahedron_pipeline: Arc<ComputePipeline>,
     edge_pipeline: Arc<ComputePipeline>,
     tetrahedron_pixel_pipeline: Arc<ComputePipeline>,
+    raytrace_pre_pipeline: Arc<ComputePipeline>,
+    raytrace_pixel_pipeline: Arc<ComputePipeline>,
     pipeline_layout: Arc<PipelineLayout>
 }
 
@@ -533,6 +554,14 @@ impl ComputePipelineContext {
             )).unwrap(),
             tetrahedron_pixel_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
                 PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("rasterizer::main_tetrahedron_pixel_cs").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            raytrace_pre_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("raytracer::main_raytracer_tetrahedron_preprocessor_cs").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            raytrace_pixel_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("raytracer::main_raytracer_pixel_cs").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             pipeline_layout
@@ -886,45 +915,47 @@ impl RenderContext {
         let mut line_render_count = 0;
         
         // Do compute stage
+        
+        let enable_tetrahedron_raster = true;
+        let enable_tetrahedron_edges = false;
+        let enable_model_edges = false;
+        let enable_raytrace = false;
 
-        { // Tetrahedron pre-raster
+        builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
+                                     vec![
+                                         self.one_time_buffers.descriptor_set.clone(),
+                                         self.sized_buffers.descriptor_set.clone(),
+                                         self.live_buffers.descriptor_set.clone()
+                                     ]).unwrap();
+
+        if enable_tetrahedron_raster || enable_tetrahedron_edges { // Tetrahedron pre-raster
             builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone()).unwrap();
-            builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
-                                         vec![
-                                             self.one_time_buffers.descriptor_set.clone(),
-                                             self.sized_buffers.descriptor_set.clone(),
-                                             self.live_buffers.descriptor_set.clone()
-                                         ]).unwrap();
             unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
 
-            if false {
+            if enable_tetrahedron_edges {
                 line_render_count = total_tetrahedron_count*6;
             }
         }
 
-        { // Tetrahedron pixel raster
+        if enable_tetrahedron_raster { // Tetrahedron pixel raster
             builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone()).unwrap();
-            builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
-                                         vec![
-                                             self.one_time_buffers.descriptor_set.clone(),
-                                             self.sized_buffers.descriptor_set.clone(),
-                                             self.live_buffers.descriptor_set.clone()
-                                         ]).unwrap();
             unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
         }
 
-        {   // Tetrahedron edge pre-raster
+        if enable_model_edges {   // Tetrahedron edge pre-raster
             builder.bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone()).unwrap();
-            builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.present_pipeline.pipeline_layout.clone(), 0,
-                                         vec![
-                                             self.one_time_buffers.descriptor_set.clone(),
-                                             self.sized_buffers.descriptor_set.clone(),
-                                             self.live_buffers.descriptor_set.clone()
-                                         ]).unwrap();
             let total_edge_count = self.one_time_buffers.model_edge_count*model_instances.len();
             unsafe {builder.dispatch([(total_edge_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
 
             line_render_count = total_edge_count;
+        }
+        
+        if enable_raytrace { 
+            builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone()).unwrap();
+            unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+
+            builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone()).unwrap();
+            unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ;
         }
         
         // Begin render pass
@@ -952,31 +983,24 @@ impl RenderContext {
                     ..Default::default()
                 },
             ).unwrap();
-        
         builder.set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap();
+        builder.bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
+                                     vec![
+                                         self.one_time_buffers.descriptor_set.clone(),
+                                         self.sized_buffers.descriptor_set.clone(),
+                                         self.live_buffers.descriptor_set.clone()
+                                     ]).unwrap();
+        
         
         // Render from compute shader buffer
         {
             builder.bind_pipeline_graphics(self.present_pipeline.buffer_pipeline.clone()).unwrap();
-            builder.bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
-                                         vec![
-                                             self.one_time_buffers.descriptor_set.clone(),
-                                             self.sized_buffers.descriptor_set.clone(),
-                                             self.live_buffers.descriptor_set.clone()
-                                         ]).unwrap();
             unsafe { builder.draw(6, 1, 0, 0) }.unwrap();
         }
         
         // Render the edge lines
         {
             builder.bind_pipeline_graphics(self.present_pipeline.line_pipeline.clone()).unwrap();
-            builder.bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
-                                  vec![
-                                      self.one_time_buffers.descriptor_set.clone(),
-                                      self.sized_buffers.descriptor_set.clone(),
-                                      self.live_buffers.descriptor_set.clone()
-                                  ]).unwrap();
-
             unsafe { builder.draw(line_render_count as u32*2, 1, 0, 0) }.unwrap();
         }
 

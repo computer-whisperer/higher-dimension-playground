@@ -263,10 +263,15 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let time_elapsed = self.start_time.elapsed().as_secs_f32();
 
-                let view_matrix = translate_matrix_4d(0.0, 0.0, 4.0, 4.0);
-                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, time_elapsed / 3.0));
-                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, time_elapsed / 3.0));
-                let view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, time_elapsed / 5.0));
+                let mut view_matrix = translate_matrix_4d(0.0, 0.0, 4.0, 4.0);
+                
+                let do_spin = true;
+                
+                if do_spin {
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, time_elapsed / 3.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, time_elapsed / 3.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, time_elapsed / 5.0));
+                }
 
                 let mut instances = Vec::<common::ModelInstance>::new();
 
@@ -287,7 +292,7 @@ impl ApplicationHandler for App {
                 }
 
                 let mut blocks = Vec::<Block>::new();
-
+/*
                 let mut texture_rot = 0;
                 for x in 0..2 {
                     for y in 0..2 {
@@ -304,7 +309,7 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
-                
+                */
                 blocks.push(
                     Block{
                         position: [0, 0, 0, 0],

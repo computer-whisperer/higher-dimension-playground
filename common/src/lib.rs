@@ -14,7 +14,7 @@ mod linalg_n;
 use glam::{Vec4, UVec2};
 pub use matmul_5_gpu::{Mat5GPU, Vec5GPU};
 pub use utils::{factorial, binomial, generate_combinations, generate_permutations};
-pub use linalg_n::{VecN, MatN};
+pub use linalg_n::*;
 use bytemuck::{Pod, Zeroable};
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -22,6 +22,7 @@ use bytemuck::{Pod, Zeroable};
 pub struct Tetrahedron {
     pub vertex_positions: [Vec4; 4],
     pub texture_positions: [Vec4; 4],
+    pub normal: Vec4,
     pub texture_id: u32,
     pub padding: [u32; 3]
 }

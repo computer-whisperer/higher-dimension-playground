@@ -1,5 +1,5 @@
 use glam::{UVec3, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
-use common::{ModelEdge, ModelInstance, ModelTetrahedron, Tetrahedron, Vec5GPU, WorkingData};
+use common::{get_normal, ModelEdge, ModelInstance, ModelTetrahedron, Tetrahedron, Vec5GPU, WorkingData};
 use spirv_std::spirv;
 use bytemuck::{Pod, Zeroable};
 use crate::textures::sample_texture;
@@ -106,6 +106,8 @@ pub fn main_tetrahedron_cs(
     let input_tetrahedron = &model_tetrahedrons[model_index];
 
     let output_tetrahedron = &mut output_tetrahedrons[output_index];
+    
+    let texture_id = input_instance.cell_texture_ids[input_tetrahedron.cell_id as usize];
 
     let mut output_vertex_positions = [
         Vec5GPU::zero(),
@@ -149,11 +151,28 @@ pub fn main_tetrahedron_cs(
             return;
         }
     }*/
+    
+    let normal: Vec4 = get_normal(&[
+            (output_vertex_positions_projected[1] - output_vertex_positions_projected[0]).into(),
+            (output_vertex_positions_projected[2] - output_vertex_positions_projected[0]).into(),
+            (output_vertex_positions_projected[3] - output_vertex_positions_projected[0]).into()
+        ]).into();
+
+    // Back-face culling
+    /*
+    if normal.dot(Vec4::new(0.0, 0.0, 1.0, 1.0)) > 0.0 {
+        output_tetrahedron.texture_id = 0;
+        for i in 0..12 {
+            output_line_vertices[output_index*12 + i] = Vec2::new(0.0, 0.0);
+        }
+        return;
+    }*/
 
     *output_tetrahedron = Tetrahedron{
         vertex_positions: output_vertex_positions_projected,
         texture_positions: output_texture_positions,
-        texture_id: input_instance.cell_texture_ids[input_tetrahedron.cell_id as usize],
+        texture_id,
+        normal,
         padding: input_tetrahedron.padding,
     };
 
@@ -326,7 +345,7 @@ fn test_intersection(line_a: &[Vec2; 2], line_b: &[Vec2; 2]) -> bool
 
 
 const PI: f32 = 3.14159;
-pub const VIEW_ANGLE: f32 = PI/2.0;
+pub const VIEW_ANGLE: f32 = PI/4.0;
 pub const ANGLE_MIN: f32 = PI/4.0 - VIEW_ANGLE/2.0;
 pub const ANGLE_MAX: f32 = PI/4.0 + VIEW_ANGLE/2.0;
 
