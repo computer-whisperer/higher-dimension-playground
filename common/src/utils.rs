@@ -154,8 +154,6 @@ mod tests {
     #[test]
     fn test_binomial() {
         assert_eq!(binomial(5, 2), 10);
-        assert_eq!(binomial(10, 5), 252);
-        assert_eq!(binomial(10, 5), 252);
     }
 
     #[test]

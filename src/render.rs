@@ -24,7 +24,7 @@ use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::shader::{ShaderModule, ShaderStages};
 use vulkano::{sync, Validated, VulkanError};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::sync::GpuFuture;
 use bytemuck::{Zeroable};
@@ -32,6 +32,9 @@ use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use common::{get_normal, ModelTetrahedron, VecN};
 use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
 use glam::{Vec4, Vec2};
+use image::{ImageBuffer, Rgba};
+use vulkano::format::ClearColorValue;
+use vulkano::format::Format::{R16G16B16A16_UNORM, R8G8B8A8_UNORM};
 
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
     let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
@@ -199,7 +202,7 @@ pub struct SizedBuffers {
     line_vertexes_buffer: Subbuffer<[Vec2]>,
     output_tetrahedron_buffer: Subbuffer<[common::Tetrahedron]>,
     output_pixel_buffer: Subbuffer<[Vec4]>,
-    descriptor_set: Arc<DescriptorSet>
+    descriptor_set: Arc<DescriptorSet>,
 }
 
 impl SizedBuffers {
@@ -583,11 +586,14 @@ pub struct RenderContext {
     one_time_buffers: OneTimeBuffers,
     sized_buffers: SizedBuffers,
     live_buffers: LiveBuffers,
+    cpu_screen_capture_buffer: Subbuffer<[u8]>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    frames_rendered: usize
 }
 
 
 impl RenderContext {
-    pub fn new(device: Arc<Device>, instance: Arc<Instance>, window: Arc<Window>) -> RenderContext {
+    pub fn new(device: Arc<Device>, instance: Arc<Instance>, window: Arc<Window>, render_width: u32, render_height: u32) -> RenderContext {
 
         // Before we can start creating and recording command buffers, we need a way of allocating
         // them. Vulkano provides a command buffer allocator, which manages raw Vulkan command
@@ -618,11 +624,13 @@ impl RenderContext {
                 .unwrap();
 
             // Choosing the internal format that the images will have.
-            let (image_format, _) = device
+            let image_formats = device
                 .physical_device()
                 .surface_formats(&surface, Default::default())
-                .unwrap()[0];
+                .unwrap();
 
+            let image_format = image_formats[0].0;
+            let image_format = R8G8B8A8_UNORM;
             // Please take a look at the docs for the meaning of the parameters we didn't mention.
             Swapchain::new(
                 device.clone(),
@@ -650,7 +658,7 @@ impl RenderContext {
                     // use that.
                     image_extent: window_size.into(),
 
-                    image_usage: ImageUsage::COLOR_ATTACHMENT,
+                    image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
 
                     // The alpha mode indicates how the alpha value of the final image will behave.
                     // For example, you can choose whether the window will be
@@ -728,7 +736,7 @@ impl RenderContext {
         let one_time_buffers = OneTimeBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), one_time_descriptor_set_layout.clone());
         
         let sized_descriptor_set_layout = SizedBuffers::create_descriptor_set_layout(device.clone());
-        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), sized_descriptor_set_layout.clone(), [1920/2, 1080/2]);
+        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), sized_descriptor_set_layout.clone(), [render_width, render_height]);
         
         let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
         let live_buffers = LiveBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), live_descriptor_set_layout.clone());
@@ -766,6 +774,8 @@ impl RenderContext {
             extent: window_size.into(),
             depth_range: 0.0..=1.0,
         };
+
+        let cpu_screen_capture_buffer = create_cpu_screencapture_buffer(memory_allocator.clone(), window_size.width, window_size.height);
         
         // In some situations, the swapchain will become invalid by itself. This includes for
         // example when the window is resized (as the images of the swapchain will no longer match
@@ -798,9 +808,12 @@ impl RenderContext {
             recreate_swapchain,
             previous_frame_end,
             command_buffer_allocator,
+            memory_allocator,
             one_time_buffers,
             sized_buffers,
-            live_buffers
+            live_buffers,
+            cpu_screen_capture_buffer,
+            frames_rendered: 0,
         }
     }
     
@@ -808,7 +821,7 @@ impl RenderContext {
         self.recreate_swapchain = true;
     }
     
-    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance]) {
+    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance], take_screenshot: bool) {
         let window_size = self.window.inner_size();
 
         // Do not draw the frame when the screen size is zero. On Windows, this can occur
@@ -822,6 +835,8 @@ impl RenderContext {
         // Calling this function polls various fences in order to determine what the GPU
         // has already processed, and frees the resources that are no longer needed.
         self.previous_frame_end.as_mut().unwrap().cleanup_finished();
+
+
 
         // Whenever the window resizes we need to recreate everything dependent on the
         // window size. In this example that includes the swapchain, the framebuffers and
@@ -846,6 +861,8 @@ impl RenderContext {
             self.viewport.extent = window_size.into();
 
             self.recreate_swapchain = false;
+
+            self.cpu_screen_capture_buffer = create_cpu_screencapture_buffer(self.memory_allocator.clone(), window_size.width, window_size.height);
         }
 
         // Before we can draw on the output, we have to *acquire* an image from the
@@ -999,6 +1016,7 @@ impl RenderContext {
         }
         
         // Render the edge lines
+        if line_render_count > 0
         {
             builder.bind_pipeline_graphics(self.present_pipeline.line_pipeline.clone()).unwrap();
             unsafe { builder.draw(line_render_count as u32*2, 1, 0, 0) }.unwrap();
@@ -1010,6 +1028,15 @@ impl RenderContext {
             // have called `next_subpass` to jump to the next subpass.
             .end_render_pass(Default::default())
             .unwrap();
+        if take_screenshot {
+            builder
+                .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+                    self.framebuffers[image_index as usize].attachments()[0].image().clone(),
+                    self.cpu_screen_capture_buffer.clone(),
+                ))
+                .unwrap();
+        }
+
 
 
         // Finish recording the command buffer by calling `end`.
@@ -1052,6 +1079,29 @@ impl RenderContext {
                 // previous_frame_end = Some(sync::now(device.clone()).boxed());
             }
         }
+
+        // Save frame
+        if self.frames_rendered > 3 && take_screenshot {
+            let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+            fence.wait(None).unwrap();
+            self.previous_frame_end = Some(sync::now(device.clone()).boxed());
+
+            let result = self.cpu_screen_capture_buffer.read();
+            match result {
+                Ok(buffer_content) => {
+                    let screenshot_path = format!("../../frames/screenshot_{}.webp", self.frames_rendered-3);
+
+                    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(window_size.width, window_size.height, &buffer_content[..]).unwrap();
+                    image.save(screenshot_path.clone()).unwrap();
+                    println!("Saved screenshot to {}", screenshot_path);
+                }
+                Err(error) => {
+                    eprintln!("Error saving screenshot: {:?}", error);
+                }
+            };
+        }
+
+        self.frames_rendered += 1;
     }
 }
 
@@ -1075,4 +1125,21 @@ fn window_size_dependent_setup(
                 .unwrap()
         })
         .collect::<Vec<_>>()
+}
+
+fn create_cpu_screencapture_buffer(memory_allocator: Arc<dyn MemoryAllocator>, width: u32, height: u32) -> Subbuffer<[u8]>
+{
+    Buffer::from_iter(
+        memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            ..Default::default()
+        },
+        vec![0; (width*height*4) as usize]
+    ).unwrap()
 }

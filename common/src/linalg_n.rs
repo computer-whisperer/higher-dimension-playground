@@ -564,7 +564,7 @@ fn get_gram_matrix<const N: usize, const K: usize>(vertices: &[VecN::<N>; K]) ->
 }
 
 pub fn get_simplex_volume<const N: usize, const K: usize>(vertices: &[VecN::<N>; K]) -> f32 where [(); K-1]: {
-    get_gram_matrix::<N, K>(vertices).determinant_basic().sqrt()/factorial(N) as f32
+    get_gram_matrix::<N, K>(vertices).determinant_basic().sqrt()/factorial(K-1) as f32
 }
 
 pub fn get_pseudo_barycentric<const N: usize, const K: usize>(vertices: &[VecN::<N>; K], point: VecN::<N>) -> VecN::<K> where [(); K-1]: {
@@ -572,19 +572,19 @@ pub fn get_pseudo_barycentric<const N: usize, const K: usize>(vertices: &[VecN::
     let mut components = VecN::<K>::ZERO;
     let mut volume_sum = 0.0;
     
-    for i in 0..N {
+    for i in 0..K {
         let mut local_vertices = vertices.clone();
         local_vertices[i] = point;
         components[i] = get_simplex_volume(&local_vertices);
         volume_sum += components[i];
     }
     
-    if volume_sum - full_simplex_volume > 0.01 {
+    if volume_sum - full_simplex_volume > 0.1 {
         VecN::<K>::ZERO
     }
     else {
         let mut output = VecN::<K>::ZERO;
-        for i in 0..N {
+        for i in 0..K {
             output[i] = components[i]/volume_sum;
         }
         output
@@ -755,5 +755,6 @@ mod tests {
         let pixel_pos = VecN::<4>::new([0.5, 0.9, 0.5, 1.0]);
         let result = get_pseudo_barycentric(&vertices, pixel_pos);
         assert_eq!(result, VecN::<4>::ZERO);
+        
     }
 }

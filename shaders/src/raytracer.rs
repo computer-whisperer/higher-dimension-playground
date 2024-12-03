@@ -41,7 +41,7 @@ fn cs_vertex_shader(
 
     let vertex_position = Vec4::new(
         view_position.x(),
-        aspect_ratio * (-view_position.y()),
+        view_position.y(),
         view_position.z(),
         view_position.w(),
     );
@@ -91,14 +91,16 @@ pub fn main_raytracer_tetrahedron_preprocessor_cs(
         output_texture_positions[i] = vertex_result.texture_position;
     }
     
-    let normal = get_normal(&[
+    let normal: Vec4 = get_normal(&[
         (output_vertex_positions[1] - output_vertex_positions[0]).into(),
         (output_vertex_positions[2] - output_vertex_positions[0]).into(),
         (output_vertex_positions[3] - output_vertex_positions[0]).into()
     ]).into();
+    
+    let normal = normal.normalize();
 
     *output_tetrahedron = Tetrahedron{
-        vertex_positions: output_texture_positions,
+        vertex_positions: output_vertex_positions,
         texture_positions: output_texture_positions,
         texture_id: input_instance.cell_texture_ids[input_tetrahedron.cell_id as usize],
         padding: input_tetrahedron.padding,
@@ -138,11 +140,11 @@ fn raycast(start: Vec4, direction: Vec4, tetrahedrons: &[Tetrahedron], num_tetra
         
         let value = tetrahedrons[i].normal.dot(direction);
         
-        if value.abs() > 0.00001 {
+        if value.abs() < 0.00001 {
             continue; // Only handle tets that are facing the right way
         }
         
-        let intercept_distance = tetrahedrons[i].normal.dot(start - tetrahedrons[i].vertex_positions[0])/value;
+        let intercept_distance = tetrahedrons[i].normal.dot(tetrahedrons[i].vertex_positions[0] - start)/value;
         //let intercept_distance = 10f32; 
         
         if closest_hit.tetrahedron_index < num_tetrahedrons as u32 && closest_hit.hit_distance < intercept_distance {
@@ -191,7 +193,7 @@ pub fn main_raytracer_pixel_cs(
     let mut output_pixel = Vec4::new(0.0, 0.0, 0.0, 1.0);
     
     let view_origin = Vec4::ZERO;
-    let view_direction = Vec4::new(0.0, 0.0, 1.0, 1.0);
+    let view_direction = Vec4::new(pixel_pos.x*1.0, pixel_pos.y*1.0, 1.0, 0.0).normalize();
 
     
     let ray_hit = raycast(view_origin, view_direction, &input_tetrahedrons, working_data.total_num_tetrahedrons as usize);
@@ -202,14 +204,115 @@ pub fn main_raytracer_pixel_cs(
         let mut texture_coordinates = Vec4::ZERO;
         
         for i in 0..4 {
-            texture_coordinates += ray_hit.barycentric_coordinates[i]*tetrahedron.texture_positions[i];
+            //texture_coordinates += ray_hit.barycentric_coordinates[i]*tetrahedron.texture_positions[i];
         }
         
         let color = sample_texture(tetrahedron.texture_id, texture_coordinates.xyz());
-        output_pixel = Vec4::new(color.x, color.y, color.z, 1.0);
+        //output_pixel = Vec4::new(color.x, color.y, color.z, 1.0);
+        output_pixel = Vec4::new(0.0, 0.0, 1.0, 1.0);
     }
      
     if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {
         pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = output_pixel;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::UVec2;
+    use common::Mat5GPU;
+    use super::*;
+
+    #[test]
+    fn test_raycast() {
+        let model_tetrahedrons = [
+            ModelTetrahedron {
+                vertex_positions: [
+                    Vec4::new(1.0, 0.0, 2.0, 0.0),
+                    Vec4::new(0.0, 0.0, 2.0, 0.0),
+                    Vec4::new(0.0, 1.0, 2.0, 0.0),
+                    Vec4::new(0.0, 0.0, 2.0, 1.0),
+                ],
+                texture_positions: [Vec4::ZERO; 4],
+                cell_id: 0,
+                padding: [0; 3],
+            }
+        ];
+        let instances = [
+            ModelInstance {
+                model_transform: Mat5GPU::identity(),
+                cell_texture_ids: [1, 1, 1, 1, 1, 1, 1, 1],
+            }
+        ];
+        const WIDTH: u32 = 512;
+        const HEIGHT: u32 = 512;
+        let mut working_data = WorkingData {
+            view_matrix: Mat5GPU::identity(),
+            total_num_tetrahedrons: (model_tetrahedrons.len()*instances.len()) as u32,
+            shader_fault: 0,
+            render_dimensions: UVec2::new(WIDTH, HEIGHT),
+            present_dimensions: UVec2::new(WIDTH, HEIGHT),
+            padding: Default::default(),
+        };
+        
+        let mut output_tetrahedrons = [Tetrahedron {
+            vertex_positions: [Vec4::ZERO; 4],
+            texture_positions: [Vec4::ZERO; 4],
+            texture_id: 0,
+            normal: Vec4::new(0.0, 0.0, 1.0, 0.0),
+            padding: [0; 3],
+        }; 10];
+        
+        main_raytracer_tetrahedron_preprocessor_cs(
+            &model_tetrahedrons,
+            &instances,
+            &mut output_tetrahedrons,
+            UVec3::new(0, 0, 0),
+            &mut working_data
+        );
+        
+        assert_eq!(output_tetrahedrons[0].texture_id, 1);
+        assert_eq!(output_tetrahedrons[0].normal, Vec4::new(0.0, 0.0, -1.0, 0.0));
+        
+        let mut pixel_buffer = vec![Vec4::ZERO; (WIDTH*HEIGHT) as usize];
+        
+        let sample = UVec2::new(WIDTH/2, HEIGHT/2);
+        
+        // Test dead center
+        main_raytracer_pixel_cs(
+            &output_tetrahedrons,
+            UVec3::new(sample.x, sample.y, 0),
+            &mut working_data,
+            &mut pixel_buffer
+        );
+        let color = pixel_buffer[(sample.y*working_data.render_dimensions.x + sample.x) as usize];
+        
+        assert_eq!(color, Vec4::new(0.0, 0.0, 1.0, 1.0));
+
+        let sample = UVec2::new(WIDTH/2, HEIGHT/8);
+
+        // Test dead center
+        main_raytracer_pixel_cs(
+            &output_tetrahedrons,
+            UVec3::new(sample.x, sample.y, 0),
+            &mut working_data,
+            &mut pixel_buffer
+        );
+        let color = pixel_buffer[(sample.y*working_data.render_dimensions.x + sample.x) as usize];
+
+        assert_eq!(color, Vec4::new(0.0, 0.0, 0.0, 1.0));
+
+        let sample = UVec2::new(10, 0);
+
+        // Test dead center
+        main_raytracer_pixel_cs(
+            &output_tetrahedrons,
+            UVec3::new(sample.x, sample.y, 0),
+            &mut working_data,
+            &mut pixel_buffer
+        );
+        let color = pixel_buffer[(sample.y*working_data.render_dimensions.x + sample.x) as usize];
+
+        assert_eq!(color, Vec4::new(0.0, 0.0, 0.0, 1.0));
     }
 }

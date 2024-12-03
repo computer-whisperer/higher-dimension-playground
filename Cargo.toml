@@ -16,6 +16,7 @@ common = {path="common", features=["ndarray"]}
 ndarray = {version="0.16.1"}
 
 bytemuck = { version = "1.18", features=["derive"] }
+image = { version="0.24.9", features=["rayon"] }
 
 # The Vulkan library doesn't provide any functionality to create and handle windows, as
 # this would be out of scope. In order to open a window, we are going to use the `winit` crate.

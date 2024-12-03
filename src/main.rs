@@ -4,6 +4,7 @@
 #![feature(const_for)]
 #![feature(effects)]
 #![feature(const_mut_refs)]
+#![feature(inline_const)]
 
 mod render;
 mod hypercube;
@@ -11,6 +12,7 @@ mod matrix_operations;
 
 use std::{error::Error, sync::Arc};
 use std::default::Default;
+use std::f32::consts::PI;
 use std::time::Instant;
 use vulkano::{buffer::{Buffer, BufferContents}, command_buffer::{
     allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
@@ -59,6 +61,7 @@ struct App {
     queue: Arc<Queue>,
     rcx: Option<RenderContext>,
     start_time: Instant,
+    frame_count: u32,
     _callback: Option<DebugUtilsMessenger>
 }
 
@@ -229,7 +232,8 @@ impl App {
             device,
             queue,
             rcx,
-            start_time: Instant::now()
+            start_time: Instant::now(),
+            frame_count: 0,
         }
     }
 }
@@ -241,7 +245,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window));
+        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840, 2160));
         let start_time = Instant::now();
     }
 
@@ -261,16 +265,23 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                let time_elapsed = self.start_time.elapsed().as_secs_f32();
-
                 let mut view_matrix = translate_matrix_4d(0.0, 0.0, 4.0, 4.0);
                 
                 let do_spin = true;
+                let do_outer_blocks = true;
+                let do_render_mode = true;
+                
+                let time_elapsed = if do_render_mode {
+                    self.frame_count as f32/60.0
+                }
+                else {
+                    self.start_time.elapsed().as_secs_f32()
+                };
                 
                 if do_spin {
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, time_elapsed / 3.0));
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, time_elapsed / 3.0));
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, time_elapsed / 5.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*2.0*time_elapsed/25.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/35.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/30.0));
                 }
 
                 let mut instances = Vec::<common::ModelInstance>::new();
@@ -292,24 +303,27 @@ impl ApplicationHandler for App {
                 }
 
                 let mut blocks = Vec::<Block>::new();
-/*
-                let mut texture_rot = 0;
-                for x in 0..2 {
-                    for y in 0..2 {
-                        for z in 0..2 {
-                            for w in 0..2 {
-                                blocks.push(
-                                    Block{
-                                        position: [x*2 - 1, y*2 - 1, z*2 - 1, w*2 - 1],
-                                        texture: texture_rot
-                                    }
-                                );
-                                texture_rot = (texture_rot + 1)%5;
+                
+                if do_outer_blocks {
+                    let mut texture_rot = 0;
+                    for x in 0..2 {
+                        for y in 0..2 {
+                            for z in 0..2 {
+                                for w in 0..2 {
+                                    blocks.push(
+                                        Block{
+                                            position: [x*2 - 1, y*2 - 1, z*2 - 1, w*2 - 1],
+                                            texture: texture_rot
+                                        }
+                                    );
+                                    texture_rot = (texture_rot + 1)%5;
+                                }
                             }
                         }
                     }
                 }
-                */
+
+                
                 blocks.push(
                     Block{
                         position: [0, 0, 0, 0],
@@ -335,7 +349,8 @@ impl ApplicationHandler for App {
                 }
                 
                 
-                rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances);
+                rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances, do_render_mode);
+                self.frame_count += 1;
             }
             _ => {}
         }
