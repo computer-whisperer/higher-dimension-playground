@@ -130,6 +130,7 @@ impl App {
                 // Some devices may not support the extensions or features that your application,
                 // or report properties and limits that are not sufficient for your application.
                 // These should be filtered out here.
+                //p.properties().device_name != "AMD Radeon RX 6900 XT (RADV NAVI21)" &&
                 p.supported_extensions().contains(&device_extensions) &&
                 p.supported_features().contains(&device_features)
             })
@@ -245,7 +246,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840, 2160));
+        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840/4, 2160/4));
         let start_time = Instant::now();
     }
 
@@ -269,19 +270,19 @@ impl ApplicationHandler for App {
                 
                 let do_spin = true;
                 let do_outer_blocks = true;
-                let do_render_mode = true;
+                let do_render_mode = false;
                 
                 let time_elapsed = if do_render_mode {
-                    self.frame_count as f32/60.0
+                    self.frame_count as f32/30.0
                 }
                 else {
                     self.start_time.elapsed().as_secs_f32()
                 };
                 
                 if do_spin {
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*2.0*time_elapsed/25.0));
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/35.0));
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/30.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*2.0*time_elapsed/20.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/28.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/32.0));
                 }
 
                 let mut instances = Vec::<common::ModelInstance>::new();

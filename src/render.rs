@@ -933,10 +933,10 @@ impl RenderContext {
         
         // Do compute stage
         
-        let enable_tetrahedron_raster = true;
+        let enable_tetrahedron_raster = false;
         let enable_tetrahedron_edges = false;
         let enable_model_edges = false;
-        let enable_raytrace = false;
+        let enable_raytrace = true;
 
         builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
                                      vec![
@@ -1089,7 +1089,7 @@ impl RenderContext {
             let result = self.cpu_screen_capture_buffer.read();
             match result {
                 Ok(buffer_content) => {
-                    let screenshot_path = format!("../../frames/screenshot_{}.webp", self.frames_rendered-3);
+                    let screenshot_path = format!("frames/screenshot_{}.webp", self.frames_rendered-3);
 
                     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(window_size.width, window_size.height, &buffer_content[..]).unwrap();
                     image.save(screenshot_path.clone()).unwrap();
