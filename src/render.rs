@@ -643,7 +643,7 @@ impl RenderContext {
                 .surface_formats(&surface, Default::default())
                 .unwrap();
 
-            let image_format = image_formats[0].0;
+            //let image_format = image_formats[0].0;
             let image_format = R8G8B8A8_UNORM;
             // Please take a look at the docs for the meaning of the parameters we didn't mention.
             Swapchain::new(
@@ -947,7 +947,8 @@ impl RenderContext {
             writer.present_dimensions = glam::UVec2::new(window_size.width, window_size.height);
             writer.render_dimensions = glam::UVec2::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1]);
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
-            writer.raytrace_seed = (self.frames_rendered*211) as u32;
+            writer.raytrace_seed = 6364136223846793005u64.wrapping_mul(self.frames_rendered as u64).wrapping_add(1442695040888963407);
+            writer.focal_length = 1.0;
            // writer.total_num_tetrahedrons = 1;
             writer.shader_fault = 0;
         }

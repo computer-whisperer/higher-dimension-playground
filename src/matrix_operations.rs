@@ -11,6 +11,17 @@ pub fn scale_matrix_4d(scale: f32) -> Array2<f32> {
 }
 
 #[allow(dead_code)]
+pub fn scale_matrix_4d_elementwise(x: f32, y: f32, z: f32, w: f32) -> Array2<f32> {
+    Array2::from_shape_vec( (5, 5),
+                            vec![x, 0.0,   0.0,   0.0,   0.0,
+                                 0.0,   y, 0.0,   0.0,   0.0,
+                                 0.0,   0.0,   z, 0.0,   0.0,
+                                 0.0,   0.0,   0.0,   w, 0.0,
+                                 0.0,   0.0,   0.0,   0.0,   1.0]).unwrap()
+}
+
+
+#[allow(dead_code)]
 pub fn translate_matrix_4d(x: f32, y: f32, z: f32, w: f32) -> Array2<f32> {
     Array2::from_shape_vec( (5, 5),
         vec![1.0,   0.0,   0.0,   0.0,   x,

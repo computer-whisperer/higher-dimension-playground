@@ -5,7 +5,7 @@
 mod raytracer;
 mod present;
 mod rasterizer;
-mod textures;
+mod materials;
 
 pub use spirv_std::glam;
 

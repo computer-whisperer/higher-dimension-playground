@@ -46,7 +46,7 @@ use winit::{
     window::{Window, WindowId},
 };
 use render::RenderContext;
-use crate::matrix_operations::{rotation_matrix_4d_rotate_1, rotation_matrix_one_angle, scale_matrix_4d, translate_matrix_4d};
+use crate::matrix_operations::{rotation_matrix_4d_rotate_1, rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
 use crate::render::RenderOptions;
 
 fn main() -> Result<(), impl Error> {
@@ -118,6 +118,7 @@ impl App {
             vulkan_memory_model: true,
             variable_pointers: true,
             variable_pointers_storage_buffer: true,
+            shader_int64: true,
             .. Default::default()
         };
 
@@ -248,7 +249,6 @@ impl ApplicationHandler for App {
                 .unwrap(),
         );
         self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840/2, 2160/2));
-        let start_time = Instant::now();
     }
 
     fn window_event(
@@ -267,11 +267,12 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                let mut view_matrix = translate_matrix_4d(0.0, 0.0, 5.0, 5.0);
+                let mut view_matrix = translate_matrix_4d(0.0, 1.0, 10.0, 10.0);
                 
                 let do_spin = false;
-                let do_outer_blocks = false;
+                let do_outer_blocks = true;
                 let do_render_mode = false;
+                let do_floor = false;
                 
                 let time_elapsed = if do_render_mode {
                     self.frame_count as f32/60.0
@@ -286,32 +287,18 @@ impl ApplicationHandler for App {
                     view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/38.0));
                 }
                 view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.125));
-                view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*0.0125));
 
                 let mut instances = Vec::<common::ModelInstance>::new();
-
-                let block_textures = [
-                    [1; 8], // 0
-                    [2; 8], // 1
-                    [3; 8], // 2
-                    [4; 8], // 3
-                    [5; 8], // 4
-                    [6; 8], // 5
-                    [1, 2, 3, 4, 5, 6, 7, 8], // 6
-                    [10, 10, 10, 10, 10, 11, 10, 10], // 7
-                    [12; 8], // 8
-                    [13; 8], // 9
-                ];
-
+                
                 struct Block {
                     position: [i32; 4],
-                    texture: usize
+                    materials: [u32; 8]
                 }
 
                 let mut blocks = Vec::<Block>::new();
                 
                 if do_outer_blocks {
-                    let mut texture_rot = 0;
+                    let mut texture_rot = 0u32;
                     for x in 0..2 {
                         for y in 0..2 {
                             for z in 0..2 {
@@ -319,7 +306,7 @@ impl ApplicationHandler for App {
                                     blocks.push(
                                         Block{
                                             position: [x*4 - 2, y*4 - 2, z*4 - 2, w*4 - 2],
-                                            texture: texture_rot
+                                            materials: [texture_rot+1; 8]
                                         }
                                     );
                                     texture_rot = (texture_rot + 1)%5;
@@ -330,24 +317,42 @@ impl ApplicationHandler for App {
                 }
 
 
-                blocks.push(
+               /* blocks.push(
                     Block{
                         position: [0, -2, -1, 0],
-                        texture: 8
+                        materials: [1, 2, 3, 4, 5, 6, 7, 8]
                     }
-                );
+                );*/
                 blocks.push(
                     Block{
                         position: [0, 0, 0, 0],
-                        texture: 9
+                        materials: [13; 8]
                     }
                 );
+                /*
                 blocks.push(
                     Block{
                         position: [1, 1, 1, 0],
-                        texture: 8
+                        materials: [14; 8]
                     }
-                );
+                );*/
+                
+                if do_floor {
+                    let width = 1000.0;
+                    let model_transform =
+                        translate_matrix_4d(
+                            -width/2.0,
+                            -3.5,
+                            -width/2.0,
+                            -width/2.0)
+                            .dot(&scale_matrix_4d_elementwise(width, 1.0, width, width));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [11; 8],
+                        }
+                    );
+                }
 
                 for block in blocks {
                     let model_scale = 1.2;
@@ -361,9 +366,7 @@ impl ApplicationHandler for App {
                     instances.push(
                         common::ModelInstance{
                             model_transform: model_transform.into(),
-                            cell_texture_ids: block_textures[block.texture],
-                            luminance: 0.0,
-                            padding: Default::default()
+                            cell_material_ids: block.materials,
                         }
                     );
                 }
@@ -372,9 +375,9 @@ impl ApplicationHandler for App {
                     do_frame_clear: false,
                     do_raster: false,
                     do_raytrace: true,
-                    do_edges: false,
+                    do_edges: true,
                     do_tetrahedron_edges: false,
-                    take_screenshot: self.frame_count == 500,
+                    take_screenshot: (self.frame_count%500) == 0,
                 };
                 
                 rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances, render_options);

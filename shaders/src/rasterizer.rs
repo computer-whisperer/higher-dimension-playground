@@ -2,19 +2,22 @@ use glam::{UVec3, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use common::{get_normal, ModelEdge, ModelInstance, ModelTetrahedron, Tetrahedron, Vec5GPU, WorkingData};
 use spirv_std::spirv;
 use bytemuck::{Pod, Zeroable};
-use crate::textures::sample_texture;
+use crate::materials::sample_material;
 
 // Note: This cfg is incorrect on its surface, it really should be "are we compiling with std", but
 // we tie #[no_std] above to the same condition, so it's fine.
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-fn sample_texture_integral(line: ZWLine) -> Vec3 {
-    const STEP_SIZE: f32 = VIEW_ANGLE/128.0;
+fn sample_texture_integral(line: ZWLine, working_data: &WorkingData) -> Vec3 {
+    let (min_angle, max_angle) = get_zw_angle_range(working_data);
+    let view_angle = max_angle - min_angle;
+    
+    let step_size = (view_angle)/128.0;
     let mut output_accumulation = Vec3::ZERO;
 
-    let angle_a = f32::atan2(line.zw_positions[0].x, line.zw_positions[0].y).max(ANGLE_MIN).min(ANGLE_MAX);
-    let angle_b = f32::atan2(line.zw_positions[1].x, line.zw_positions[1].y).max(ANGLE_MIN).min(ANGLE_MAX);
+    let angle_a = f32::atan2(line.zw_positions[0].x, line.zw_positions[0].y).max(min_angle).min(max_angle);
+    let angle_b = f32::atan2(line.zw_positions[1].x, line.zw_positions[1].y).max(min_angle).min(max_angle);
 
     let (start_angle, end_angle) = if angle_a > angle_b {
         (angle_b, angle_a)
@@ -31,10 +34,11 @@ fn sample_texture_integral(line: ZWLine) -> Vec3 {
 
         let intersection = get_intersection(&[Vec2::ZERO, Vec2::new(angle.cos(), angle.sin())], &line.zw_positions);
         let texture_pos = line.texture_positions[0]*intersection.y + line.texture_positions[1]*(1.0-intersection.y);
-        let texture_color = sample_texture(line.texture_id, texture_pos.xyz());
-        output_accumulation += texture_color*STEP_SIZE/VIEW_ANGLE;
+        let material = sample_material(line.texture_id, texture_pos.xyz());
+        let texture_color = material.albedo.xyz();
+        output_accumulation += texture_color*step_size/view_angle;
 
-        angle += STEP_SIZE;
+        angle += step_size;
     }
 
     output_accumulation
@@ -56,8 +60,7 @@ fn cs_vertex_shader(
     let vertex_position = Vec5GPU::from_4_and_1(vertex_position, 1.0);
 
     let view_position = working_data.view_matrix * instance.model_transform * vertex_position;
-
-    let focal_length = 1.0;
+    
     //var projection_divisor = sqrt(view_vector[2]*view_vector[2] + view_vector[3]*view_vector[3])/focal_length;
     //var projection_divisor = (view_vector[2] + view_vector[3])/focal_length;
     //var projection_divisor = max(view_vector[2], view_vector[3])/focal_length;
@@ -67,12 +70,12 @@ fn cs_vertex_shader(
     //let theta = (f32::atan2(view_position.z(), view_position.w())/3.14159)/2.0;
     let depth = f32::sqrt(view_position.z()*view_position.z() + view_position.w()*view_position.w());
     //let depth = view_position.z() + view_position.w();
-    let projection_divisor = depth/focal_length;
+    let projection_divisor = depth/working_data.focal_length;
     //let projection_divisor = 1.0;
 
     let vertex_position = Vec5GPU::new(
         view_position.x(),
-        aspect_ratio * (view_position.y()),
+        aspect_ratio * (-view_position.y()),
         view_position.z(),
         view_position.w(),
         projection_divisor
@@ -107,7 +110,7 @@ pub fn main_tetrahedron_cs(
 
     let output_tetrahedron = &mut output_tetrahedrons[output_index];
     
-    let texture_id = input_instance.cell_texture_ids[input_tetrahedron.cell_id as usize];
+    let texture_id = input_instance.cell_material_ids[input_tetrahedron.cell_id as usize];
 
     let mut output_vertex_positions = [
         Vec5GPU::zero(),
@@ -171,10 +174,9 @@ pub fn main_tetrahedron_cs(
     *output_tetrahedron = Tetrahedron{
         vertex_positions: output_vertex_positions_projected,
         texture_positions: output_texture_positions,
-        texture_id,
+        material_id: texture_id,
         normal,
-        luminance: input_instance.luminance,
-        padding: [0; 2]
+        padding: [0; 3]
     };
 
     let line_vertices = [
@@ -343,21 +345,22 @@ fn test_intersection(line_a: &[Vec2; 2], line_b: &[Vec2; 2]) -> bool
     res.x > 0.0 && res.x < 1.0 && res.y > 0.0 && res.y < 1.0
 }
 
+fn get_zw_angle_range(working_data: &WorkingData) -> (f32, f32) {
+    let pi = 3.14159;
+    let view_angle = (pi/2.0) /working_data.focal_length;
+    (pi/4.0 - view_angle/2.0, pi/4.0 + view_angle/2.0)
+}
 
-
-const PI: f32 = 3.14159;
-pub const VIEW_ANGLE: f32 = PI/4.0;
-pub const ANGLE_MIN: f32 = PI/4.0 - VIEW_ANGLE/2.0;
-pub const ANGLE_MAX: f32 = PI/4.0 + VIEW_ANGLE/2.0;
-
-fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
+fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize, working_data: &WorkingData) -> Vec4 {
     const DEPTH_FACTOR: u32 = 2048;
 
+    let (min_angle, max_angle) = get_zw_angle_range(working_data);
+    
     let mut output_accumulation = Vec3::ZERO;
 
     for i in 0..DEPTH_FACTOR {
         let angle_ratio = (i as f32)/(DEPTH_FACTOR as f32);
-        let theta = angle_ratio*(ANGLE_MAX - ANGLE_MIN) + ANGLE_MIN;
+        let theta = angle_ratio*(max_angle - min_angle) + min_angle;
         let sample_ray = Vec2::new(theta.cos(), theta.sin());
 
         let mut closest_line: Option<usize> = None;
@@ -391,7 +394,7 @@ fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
         if let Some(closest_line_index) = closest_line {
             let val = closest_val.unwrap();
             let texture_pos = lines[closest_line_index].texture_positions[0]*val + lines[closest_line_index].texture_positions[0]*(1.0-val);
-            let sample = sample_texture(lines[closest_line_index].texture_id, texture_pos.xyz());
+            let sample = sample_material(lines[closest_line_index].texture_id, texture_pos.xyz()).albedo.xyz();
             output_accumulation += sample/DEPTH_FACTOR as f32;
         }
     }
@@ -411,7 +414,7 @@ fn condense_zw_lines(lines: &mut [ZWLine; 96], num_lines: usize) -> usize {
     count
 }
 
-fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
+fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize, working_data: &WorkingData) -> Vec4 {
 
     // Scan for complete occlusions
     for i in 0..num_lines {
@@ -515,7 +518,7 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
 
     if intermittent_occlusion || full_intersection {
         // Must revert to simple algorithm
-        render_zw_lines_simple(&lines, num_lines)
+        render_zw_lines_simple(&lines, num_lines, working_data)
     }
     else
     {
@@ -568,10 +571,10 @@ fn render_zw_lines_2(lines: &mut [ZWLine; 96], num_lines: usize) -> Vec4 {
             }
 
             // All occlusions should have been resolved
-            output_accumulation += sample_texture_integral(lines[i]);
+            output_accumulation += sample_texture_integral(lines[i], working_data);
         }
         if late_fail {
-            render_zw_lines_simple(&lines, num_lines)
+            render_zw_lines_simple(&lines, num_lines, working_data)
         }
         else {
             Vec4::new(output_accumulation.x, output_accumulation.y, output_accumulation.z, 1.0)
@@ -702,7 +705,7 @@ pub fn main_tetrahedron_pixel_cs(
             .max(tetrahedron.vertex_positions[2])
             .max(tetrahedron.vertex_positions[3]);
 
-        if tetrahedron.texture_id == 0 {
+        if tetrahedron.material_id == 0 {
             continue;
         }
 
@@ -768,7 +771,7 @@ pub fn main_tetrahedron_pixel_cs(
             continue;
         }
 
-        current_zw_lines[num_zw_lines].texture_id = tetrahedron.texture_id;
+        current_zw_lines[num_zw_lines].texture_id = tetrahedron.material_id;
         for j in 0..2 {
             let bary = barycentrics[tri_indexes[j]];
 
@@ -794,10 +797,10 @@ pub fn main_tetrahedron_pixel_cs(
     }
 
     let output = if false {
-        render_zw_lines_2(&mut current_zw_lines, num_zw_lines)
+        render_zw_lines_2(&mut current_zw_lines, num_zw_lines, working_data)
     }
     else {
-        render_zw_lines_simple(&mut current_zw_lines, num_zw_lines)
+        render_zw_lines_simple(&mut current_zw_lines, num_zw_lines, working_data)
     };
 
     if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {

@@ -43,7 +43,7 @@ pub fn main_line_fs(output: &mut glam::Vec4) {
 }
 
 fn exposure_adjust(value: f32) -> f32 {
-    value.sqrt()
+    (value).powf(0.4)
 }
 
 #[spirv(fragment)]

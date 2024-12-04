@@ -24,9 +24,8 @@ pub struct Tetrahedron {
     pub vertex_positions: [Vec4; 4],
     pub texture_positions: [Vec4; 4],
     pub normal: Vec4,
-    pub texture_id: u32,
-    pub luminance: f32,
-    pub padding: [u32; 2]
+    pub material_id: u32,
+    pub padding: [u32; 3]
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -49,9 +48,7 @@ pub struct ModelEdge {
 #[repr(C)]
 pub struct ModelInstance {
     pub model_transform: Mat5GPU,
-    pub cell_texture_ids: [u32; 8],
-    pub luminance: f32,
-    pub padding: [u32; 3]
+    pub cell_material_ids: [u32; 8],
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -60,8 +57,9 @@ pub struct WorkingData {
     pub view_matrix: Mat5GPU,
     pub render_dimensions: UVec2,
     pub present_dimensions: UVec2,
+    pub raytrace_seed: u64,
     pub total_num_tetrahedrons: u32,
-    pub raytrace_seed: u32,
     pub shader_fault: u32,
-    pub padding: [u32; 1]
+    pub focal_length: f32,
+    pub padding: [u32; 3]
 }

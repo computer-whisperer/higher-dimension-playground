@@ -141,14 +141,14 @@ const fn next_permutation(perm: &mut [usize]) -> bool {
     true
 }
 
-// Output value in range [0, 32767]
-pub fn basic_rand(working_value: &mut u32) -> u32 {
-    *working_value = (214013* *working_value+2531011);
-    (*working_value >> 16) & 0x7FFF
+// Output value in range [0, 0xFFFFFF]
+pub fn basic_rand(working_value: &mut u64) -> u32 {
+    *working_value = (6364136223846793005* *working_value+1442695040888963407);
+    (*working_value >> 16) as u32
 }
 
-pub fn basic_rand_f32(working_value: &mut u32) -> f32 {
-    basic_rand(working_value) as f32 / 32767.0
+pub fn basic_rand_f32(working_value: &mut u64) -> f32 {
+    basic_rand(working_value) as f32 / 0xFFFFFFFFu32 as f32
 }
 
 #[cfg(test)]
