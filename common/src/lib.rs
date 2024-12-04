@@ -15,6 +15,7 @@ use glam::{Vec4, UVec2};
 pub use matmul_5_gpu::{Mat5GPU, Vec5GPU};
 pub use utils::{factorial, binomial, generate_combinations, generate_permutations};
 pub use linalg_n::*;
+pub use utils::{basic_rand, basic_rand_f32};
 use bytemuck::{Pod, Zeroable};
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -24,7 +25,8 @@ pub struct Tetrahedron {
     pub texture_positions: [Vec4; 4],
     pub normal: Vec4,
     pub texture_id: u32,
-    pub padding: [u32; 3]
+    pub luminance: f32,
+    pub padding: [u32; 2]
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -47,7 +49,9 @@ pub struct ModelEdge {
 #[repr(C)]
 pub struct ModelInstance {
     pub model_transform: Mat5GPU,
-    pub cell_texture_ids: [u32; 8]
+    pub cell_texture_ids: [u32; 8],
+    pub luminance: f32,
+    pub padding: [u32; 3]
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -57,6 +61,7 @@ pub struct WorkingData {
     pub render_dimensions: UVec2,
     pub present_dimensions: UVec2,
     pub total_num_tetrahedrons: u32,
+    pub raytrace_seed: u32,
     pub shader_fault: u32,
-    pub padding: [u32; 2]
+    pub padding: [u32; 1]
 }

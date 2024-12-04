@@ -621,6 +621,7 @@ dependencies = [
  "glam",
  "image",
  "ndarray",
+ "shaders",
  "spirv-builder",
  "vulkano",
  "vulkano-shaders",
@@ -1621,6 +1622,16 @@ dependencies = [
  "cmake",
  "libc",
  "roxmltree",
+]
+
+[[package]]
+name = "shaders"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "common",
+ "glam",
+ "spirv-std",
 ]
 
 [[package]]

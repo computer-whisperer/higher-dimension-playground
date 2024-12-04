@@ -72,7 +72,7 @@ fn cs_vertex_shader(
 
     let vertex_position = Vec5GPU::new(
         view_position.x(),
-        aspect_ratio * (-view_position.y()),
+        aspect_ratio * (view_position.y()),
         view_position.z(),
         view_position.w(),
         projection_divisor
@@ -173,7 +173,8 @@ pub fn main_tetrahedron_cs(
         texture_positions: output_texture_positions,
         texture_id,
         normal,
-        padding: input_tetrahedron.padding,
+        luminance: input_instance.luminance,
+        padding: [0; 2]
     };
 
     let line_vertices = [
@@ -350,7 +351,7 @@ pub const ANGLE_MIN: f32 = PI/4.0 - VIEW_ANGLE/2.0;
 pub const ANGLE_MAX: f32 = PI/4.0 + VIEW_ANGLE/2.0;
 
 fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize) -> Vec4 {
-    const DEPTH_FACTOR: u32 = 512;
+    const DEPTH_FACTOR: u32 = 2048;
 
     let mut output_accumulation = Vec3::ZERO;
 

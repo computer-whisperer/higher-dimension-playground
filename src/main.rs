@@ -47,6 +47,7 @@ use winit::{
 };
 use render::RenderContext;
 use crate::matrix_operations::{rotation_matrix_4d_rotate_1, rotation_matrix_one_angle, scale_matrix_4d, translate_matrix_4d};
+use crate::render::RenderOptions;
 
 fn main() -> Result<(), impl Error> {
     let event_loop = EventLoop::new().unwrap();
@@ -246,7 +247,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840/4, 2160/4));
+        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840/2, 2160/2));
         let start_time = Instant::now();
     }
 
@@ -266,14 +267,14 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                let mut view_matrix = translate_matrix_4d(0.0, 0.0, 4.0, 4.0);
+                let mut view_matrix = translate_matrix_4d(0.0, 0.0, 5.0, 5.0);
                 
-                let do_spin = true;
-                let do_outer_blocks = true;
+                let do_spin = false;
+                let do_outer_blocks = false;
                 let do_render_mode = false;
                 
                 let time_elapsed = if do_render_mode {
-                    self.frame_count as f32/30.0
+                    self.frame_count as f32/60.0
                 }
                 else {
                     self.start_time.elapsed().as_secs_f32()
@@ -282,8 +283,10 @@ impl ApplicationHandler for App {
                 if do_spin {
                     view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*2.0*time_elapsed/20.0));
                     view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/28.0));
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/32.0));
+                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/38.0));
                 }
+                view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.125));
+                view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*0.0125));
 
                 let mut instances = Vec::<common::ModelInstance>::new();
 
@@ -295,7 +298,9 @@ impl ApplicationHandler for App {
                     [5; 8], // 4
                     [6; 8], // 5
                     [1, 2, 3, 4, 5, 6, 7, 8], // 6
-                    [10, 10, 10, 10, 10, 10, 11, 10], // 7
+                    [10, 10, 10, 10, 10, 11, 10, 10], // 7
+                    [12; 8], // 8
+                    [13; 8], // 9
                 ];
 
                 struct Block {
@@ -313,7 +318,7 @@ impl ApplicationHandler for App {
                                 for w in 0..2 {
                                     blocks.push(
                                         Block{
-                                            position: [x*2 - 1, y*2 - 1, z*2 - 1, w*2 - 1],
+                                            position: [x*4 - 2, y*4 - 2, z*4 - 2, w*4 - 2],
                                             texture: texture_rot
                                         }
                                     );
@@ -324,16 +329,28 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                
+
+                blocks.push(
+                    Block{
+                        position: [0, -2, -1, 0],
+                        texture: 8
+                    }
+                );
                 blocks.push(
                     Block{
                         position: [0, 0, 0, 0],
-                        texture: 6
+                        texture: 9
+                    }
+                );
+                blocks.push(
+                    Block{
+                        position: [1, 1, 1, 0],
+                        texture: 8
                     }
                 );
 
                 for block in blocks {
-                    let model_scale = 1.0;
+                    let model_scale = 1.2;
                     let model_transform = 
                         translate_matrix_4d(
                             (block.position[0] as f32 - 0.5)*model_scale,
@@ -345,12 +362,22 @@ impl ApplicationHandler for App {
                         common::ModelInstance{
                             model_transform: model_transform.into(),
                             cell_texture_ids: block_textures[block.texture],
+                            luminance: 0.0,
+                            padding: Default::default()
                         }
                     );
                 }
                 
+                let render_options = RenderOptions {
+                    do_frame_clear: false,
+                    do_raster: false,
+                    do_raytrace: true,
+                    do_edges: false,
+                    do_tetrahedron_edges: false,
+                    take_screenshot: self.frame_count == 500,
+                };
                 
-                rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances, do_render_mode);
+                rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances, render_options);
                 self.frame_count += 1;
             }
             _ => {}

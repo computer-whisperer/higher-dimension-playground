@@ -3,6 +3,11 @@ use spirv_std::spirv;
 use glam::{vec4, Vec4, Vec2, UVec2};
 use common::*;
 
+// Note: This cfg is incorrect on its surface, it really should be "are we compiling with std", but
+// we tie #[no_std] above to the same condition, so it's fine.
+#[cfg(target_arch = "spirv")]
+use spirv_std::num_traits::Float;
+
 #[spirv(vertex)]
 pub fn main_line_vs(
     #[spirv(position)] out_pos: &mut Vec4,
@@ -37,6 +42,9 @@ pub fn main_line_fs(output: &mut glam::Vec4) {
     *output = glam::vec4(0.0, 0.0, 1.0, 1.0);
 }
 
+fn exposure_adjust(value: f32) -> f32 {
+    value.sqrt()
+}
 
 #[spirv(fragment)]
 pub fn main_buffer_fs(
@@ -45,7 +53,7 @@ pub fn main_buffer_fs(
     #[spirv(storage_buffer, descriptor_set = 1, binding = 2)] pixel_buffer: &[Vec4],
     output: &mut glam::Vec4,
 ) {
-    *output = Vec4::new(0.0, 0.0, 0.0, 1.0); // Default color
+    *output = Vec4::new(0.0, 0.0, 0.0, 0.0); // Default color
     let normal_pos = Vec2::new(
         in_frag_coord.x/(working_data.present_dimensions.x as f32),
         in_frag_coord.y/(working_data.present_dimensions.y as f32)); // Normalized to 0..1
@@ -54,5 +62,16 @@ pub fn main_buffer_fs(
         working_data.render_dimensions.y as f32*normal_pos.y
     );
     let u_pixel_pos = UVec2::new(pixel_pos.x as u32, pixel_pos.y as u32);
-    *output += pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize];
+    let mut cs_result = pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize];
+    
+    let cs_result_adjusted = Vec4::new(
+        exposure_adjust(cs_result[0]/cs_result[3]),
+        exposure_adjust(cs_result[1]/cs_result[3]),
+        exposure_adjust(cs_result[2]/cs_result[3]),
+        1.0
+    );
+    
+    if cs_result[3] > 0.0 {
+        *output += cs_result_adjusted;
+    }
 }

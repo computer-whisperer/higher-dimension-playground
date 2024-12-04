@@ -567,6 +567,10 @@ pub fn get_simplex_volume<const N: usize, const K: usize>(vertices: &[VecN::<N>;
     get_gram_matrix::<N, K>(vertices).determinant_basic().sqrt()/factorial(K-1) as f32
 }
 
+fn is_normal(value: f32) -> bool {
+    value == value
+}
+
 pub fn get_pseudo_barycentric<const N: usize, const K: usize>(vertices: &[VecN::<N>; K], point: VecN::<N>) -> VecN::<K> where [(); K-1]: {
     let full_simplex_volume = get_simplex_volume(vertices);
     let mut components = VecN::<K>::ZERO;
@@ -579,7 +583,7 @@ pub fn get_pseudo_barycentric<const N: usize, const K: usize>(vertices: &[VecN::
         volume_sum += components[i];
     }
     
-    if volume_sum - full_simplex_volume > 0.1 {
+    if volume_sum - full_simplex_volume > 0.1 || !is_normal(volume_sum) || !is_normal(full_simplex_volume) {
         VecN::<K>::ZERO
     }
     else {

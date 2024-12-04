@@ -31,10 +31,19 @@ use bytemuck::{Zeroable};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use common::{get_normal, ModelTetrahedron, VecN};
 use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
-use glam::{Vec4, Vec2};
+use glam::{Vec4, Vec2, UVec3};
 use image::{ImageBuffer, Rgba};
 use vulkano::format::ClearColorValue;
 use vulkano::format::Format::{R16G16B16A16_UNORM, R8G8B8A8_UNORM};
+
+pub struct RenderOptions {
+    pub do_frame_clear: bool,
+    pub do_raster: bool,
+    pub do_raytrace: bool,
+    pub do_edges: bool,
+    pub do_tetrahedron_edges: bool,
+    pub take_screenshot: bool
+}
 
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
     let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
@@ -541,6 +550,7 @@ struct ComputePipelineContext {
     tetrahedron_pixel_pipeline: Arc<ComputePipeline>,
     raytrace_pre_pipeline: Arc<ComputePipeline>,
     raytrace_pixel_pipeline: Arc<ComputePipeline>,
+    raytrace_clear_pipeline: Arc<ComputePipeline>,
     pipeline_layout: Arc<PipelineLayout>
 }
 
@@ -565,6 +575,10 @@ impl ComputePipelineContext {
             )).unwrap(),
             raytrace_pixel_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
                 PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("raytracer::main_raytracer_pixel_cs").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            raytrace_clear_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("raytracer::main_raytracer_clear_cs").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             pipeline_layout
@@ -794,7 +808,7 @@ impl RenderContext {
         //
         // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to
         // avoid that, we store the submission of the previous frame here.
-        let previous_frame_end = Some(sync::now(device.clone()).boxed());
+        let previous_frame_end = None;
 
         
         RenderContext {
@@ -821,7 +835,7 @@ impl RenderContext {
         self.recreate_swapchain = true;
     }
     
-    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance], take_screenshot: bool) {
+    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance], render_options: RenderOptions) {
         let window_size = self.window.inner_size();
 
         // Do not draw the frame when the screen size is zero. On Windows, this can occur
@@ -830,12 +844,17 @@ impl RenderContext {
             return;
         }
 
-        // It is important to call this function from time to time, otherwise resources
-        // will keep accumulating and you will eventually reach an out of memory error.
-        // Calling this function polls various fences in order to determine what the GPU
-        // has already processed, and frees the resources that are no longer needed.
-        self.previous_frame_end.as_mut().unwrap().cleanup_finished();
+        
+        if self.previous_frame_end.is_some() {
+            // It is important to call this function from time to time, otherwise resources
+            // will keep accumulating and you will eventually reach an out of memory error.
+            // Calling this function polls various fences in order to determine what the GPU
+            // has already processed, and frees the resources that are no longer needed.
+            self.previous_frame_end.as_mut().unwrap().cleanup_finished();
+        }
 
+        
+        let mut force_clear = false;
 
 
         // Whenever the window resizes we need to recreate everything dependent on the
@@ -843,6 +862,8 @@ impl RenderContext {
         // the dynamic state viewport.
         if self.recreate_swapchain {
             // Use the new dimensions of the window.
+
+            force_clear = true;
 
             let (new_swapchain, new_images) = self
                 .swapchain
@@ -926,6 +947,8 @@ impl RenderContext {
             writer.present_dimensions = glam::UVec2::new(window_size.width, window_size.height);
             writer.render_dimensions = glam::UVec2::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1]);
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
+            writer.raytrace_seed = (self.frames_rendered*211) as u32;
+           // writer.total_num_tetrahedrons = 1;
             writer.shader_fault = 0;
         }
 
@@ -933,47 +956,102 @@ impl RenderContext {
         
         // Do compute stage
         
-        let enable_tetrahedron_raster = false;
-        let enable_tetrahedron_edges = false;
-        let enable_model_edges = false;
-        let enable_raytrace = true;
+        let cpu_mode = false;
+        
+        if cpu_mode {
+            if self.previous_frame_end.is_some() {
+                let previous_frame = self.previous_frame_end.take().unwrap();
+                if previous_frame.queue().is_some()
+                {
+                    let fence =  previous_frame.then_signal_fence_and_flush().unwrap();
+                    fence.wait(None).unwrap();
+                }
+                self.previous_frame_end = None;
+            }
+        }
+        
+        if cpu_mode {
+            if render_options.do_raster || render_options.do_tetrahedron_edges { // Tetrahedron pre-raster
+                unimplemented!();
+            }
+            
+            if render_options.do_raster {
+                unimplemented!();
+            }
+            
+            if render_options.do_edges {
+                unimplemented!();
+            }
+            
+            if render_options.do_raytrace {
+                for i in 0..total_tetrahedron_count {
+                    shaders::main_raytracer_tetrahedron_preprocessor_cs(
+                        &self.one_time_buffers.model_tetrahedron_buffer.read().unwrap(),
+                        &self.live_buffers.model_instance_buffer.read().unwrap(),
+                        self.sized_buffers.output_tetrahedron_buffer.write().unwrap().as_mut(),
+                        UVec3::new(i as u32, 0, 0),
+                        &self.live_buffers.working_data_buffer.read().unwrap(),
+                    )
+                }
 
-        builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
-                                     vec![
-                                         self.one_time_buffers.descriptor_set.clone(),
-                                         self.sized_buffers.descriptor_set.clone(),
-                                         self.live_buffers.descriptor_set.clone()
-                                     ]).unwrap();
+                for x in 0..self.sized_buffers.render_dimensions[0] {
+                    for y in 0..self.sized_buffers.render_dimensions[1] {
+                        shaders::main_raytracer_pixel_cs(
+                            self.sized_buffers.output_tetrahedron_buffer.write().unwrap().as_mut(),
+                            UVec3::new(x, y, 0),
+                            self.live_buffers.working_data_buffer.write().as_mut().unwrap(),
+                            self.sized_buffers.output_pixel_buffer.write().unwrap().as_mut()
+                        )
+                    }
+                }
+            }
+            
+        }
+        else {
+            
+            builder.bind_descriptor_sets(PipelineBindPoint::Compute, self.compute_pipeline.pipeline_layout.clone(), 0,
+                                         vec![
+                                             self.one_time_buffers.descriptor_set.clone(),
+                                             self.sized_buffers.descriptor_set.clone(),
+                                             self.live_buffers.descriptor_set.clone()
+                                         ]).unwrap();
+            
+            if render_options.do_frame_clear || force_clear {
+                builder.bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone()).unwrap();
+                unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
+            }
 
-        if enable_tetrahedron_raster || enable_tetrahedron_edges { // Tetrahedron pre-raster
-            builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone()).unwrap();
-            unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
+            if render_options.do_raster || render_options.do_tetrahedron_edges { // Tetrahedron pre-raster
+                builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone()).unwrap();
+                unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
 
-            if enable_tetrahedron_edges {
-                line_render_count = total_tetrahedron_count*6;
+                if render_options.do_tetrahedron_edges {
+                    line_render_count = total_tetrahedron_count*6;
+                }
+            }
+
+            if render_options.do_raster { // Tetrahedron pixel raster
+                builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone()).unwrap();
+                unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
+            }
+
+            if render_options.do_edges || render_options.do_tetrahedron_edges {   // Tetrahedron edge pre-raster
+                builder.bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone()).unwrap();
+                let total_edge_count = self.one_time_buffers.model_edge_count*model_instances.len();
+                unsafe {builder.dispatch([(total_edge_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
+
+                line_render_count = total_edge_count;
+            }
+
+            if render_options.do_raytrace {
+                builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone()).unwrap();
+                unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+
+                builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone()).unwrap();
+                unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ;
             }
         }
 
-        if enable_tetrahedron_raster { // Tetrahedron pixel raster
-            builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone()).unwrap();
-            unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
-        }
-
-        if enable_model_edges {   // Tetrahedron edge pre-raster
-            builder.bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone()).unwrap();
-            let total_edge_count = self.one_time_buffers.model_edge_count*model_instances.len();
-            unsafe {builder.dispatch([(total_edge_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
-
-            line_render_count = total_edge_count;
-        }
-        
-        if enable_raytrace { 
-            builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone()).unwrap();
-            unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
-
-            builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone()).unwrap();
-            unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ;
-        }
         
         // Begin render pass
         builder
@@ -1028,7 +1106,7 @@ impl RenderContext {
             // have called `next_subpass` to jump to the next subpass.
             .end_render_pass(Default::default())
             .unwrap();
-        if take_screenshot {
+        if render_options.take_screenshot {
             builder
                 .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
                     self.framebuffers[image_index as usize].attachments()[0].image().clone(),
@@ -1042,10 +1120,15 @@ impl RenderContext {
         // Finish recording the command buffer by calling `end`.
         let command_buffer = builder.build().unwrap();
 
-        let future = self
-            .previous_frame_end
-            .take()
-            .unwrap()
+        let frame_end = match self.previous_frame_end.take() {
+            Some(f) => f,
+            None => {
+                sync::now(device.clone()).boxed()
+            }
+        };
+        self.previous_frame_end = None;
+        
+        let future = frame_end
             .join(acquire_future)
             .then_execute(queue.clone(), command_buffer)
             .unwrap()
@@ -1072,7 +1155,7 @@ impl RenderContext {
             }
             Err(VulkanError::OutOfDate) => {
                 self.recreate_swapchain = true;
-                self.previous_frame_end = Some(sync::now(device.clone()).boxed());
+                self.previous_frame_end = None;
             }
             Err(e) => {
                 panic!("failed to flush future: {e}");
@@ -1081,10 +1164,12 @@ impl RenderContext {
         }
 
         // Save frame
-        if self.frames_rendered > 3 && take_screenshot {
-            let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
-            fence.wait(None).unwrap();
-            self.previous_frame_end = Some(sync::now(device.clone()).boxed());
+        if self.frames_rendered > 3 && render_options.take_screenshot {
+            if self.previous_frame_end.is_some() {
+                let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+                fence.wait(None).unwrap();
+                self.previous_frame_end = None;
+            }
 
             let result = self.cpu_screen_capture_buffer.read();
             match result {

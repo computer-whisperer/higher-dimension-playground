@@ -1,3 +1,5 @@
+use glam::Vec4;
+
 // compiler go brr
 pub const fn factorial(n: usize) -> usize {
     /*
@@ -139,6 +141,15 @@ const fn next_permutation(perm: &mut [usize]) -> bool {
     true
 }
 
+// Output value in range [0, 32767]
+pub fn basic_rand(working_value: &mut u32) -> u32 {
+    *working_value = (214013* *working_value+2531011);
+    (*working_value >> 16) & 0x7FFF
+}
+
+pub fn basic_rand_f32(working_value: &mut u32) -> f32 {
+    basic_rand(working_value) as f32 / 32767.0
+}
 
 #[cfg(test)]
 mod tests {

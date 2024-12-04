@@ -13,6 +13,8 @@ vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano.git"}
 
 common = {path="common", features=["ndarray"]}
 
+shaders = {path="shaders"}
+
 ndarray = {version="0.16.1"}
 
 bytemuck = { version = "1.18", features=["derive"] }
