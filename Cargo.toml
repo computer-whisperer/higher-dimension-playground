@@ -11,11 +11,12 @@ vulkano = {git = "https://github.com/vulkano-rs/vulkano.git"}
 # Provides the `shader!` macro that is used to generate code for using shaders.
 vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano.git"}
 
-common = {path="common", features=["ndarray"]}
+common = {path="common", features=["ndarray", "nalgebra"]}
 
 shaders = {path="shaders"}
 
-ndarray = {version="0.16.1"}
+ndarray = {version="0.16.0"}
+nalgebra = {version="0.33.2"}
 
 bytemuck = { version = "1.18", features=["derive"] }
 image = { version="0.24.9", features=["rayon"] }

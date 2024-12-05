@@ -55,6 +55,7 @@ pub struct ModelInstance {
 #[repr(C)]
 pub struct WorkingData {
     pub view_matrix: Mat5GPU,
+    pub view_matrix_inverse: Mat5GPU,
     pub render_dimensions: UVec2,
     pub present_dimensions: UVec2,
     pub raytrace_seed: u64,

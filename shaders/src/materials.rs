@@ -32,9 +32,9 @@ pub fn sample_material(texture_id: u32, texture_pos: Vec3) -> MaterialProperties
         8 => {MaterialProperties::new(vec3(1.0, 0.0, 0.8), 0.0, 0.0, 0.0)}
         9 => {MaterialProperties::new((texture_pos+vec3(1.0, 1.0, 1.0))/2.0, 0.0, 0.0, 0.0)}
         10 => {MaterialProperties::new(vec3(39.0, 69.0, 19.8)/256.0, 0.0, 0.0, 0.0)}
-        11 => {MaterialProperties::new(vec3(34.0/256.0, 139.0/256.0, 34.0/256.0)*0.4, 0.0, 0.3, 0.0)}
+        11 => {MaterialProperties::new(vec3(0.1, 0.1, 0.1)*0.4, 0.2, 0.3, 0.0)}
         12 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 0.0, 0.0, 0.0)}
-        13 => {MaterialProperties::new(vec3(0.2, 0.2, 1.0), 0.0, 0.0, 10.0)}
+        13 => {MaterialProperties::new(vec3(0.2, 0.2, 1.0), 0.0, 0.0, 20.0)}
         14 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 1.0, 0.0, 0.0)}
         _ => {MaterialProperties::new(vec3(0.0, 0.0, 0.0), 0.0, 0.0, 0.0)}
     }

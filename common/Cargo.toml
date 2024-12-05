@@ -10,8 +10,10 @@ bytemuck = { version = "1.18", features=["derive"] }
 glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
 
 
-ndarray = {version="0.16.1", default-features=false, optional=true}
+ndarray = {version="0.16.0", default-features=false, optional=true}
+nalgebra = {version="0.33.2", default-features=false, optional=true}
 
 [features]
 default = []
 ndarray = ["dep:ndarray"]
+nalgebra = ["dep:nalgebra"]

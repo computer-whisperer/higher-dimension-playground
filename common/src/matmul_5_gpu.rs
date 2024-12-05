@@ -9,6 +9,9 @@ use core::convert::From;
 
 use bytemuck::{Pod, Zeroable};
 
+#[cfg(feature = "nalgebra")]
+use nalgebra::Matrix5;
+
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct Vec5GPU {
@@ -239,6 +242,24 @@ impl From<&Mat5GPU> for ndarray::Array2<f32> {
 impl From<Mat5GPU> for ndarray::Array2<f32> {
     fn from(value: Mat5GPU) -> Self {
         Self::from(&value)
+    }
+}
+
+#[cfg(feature = "nalgebra")]
+impl From<nalgebra::Matrix5<f32>> for Mat5GPU {
+    fn from(value: Matrix5<f32>) -> Self {
+        Mat5GPU {
+            first: mat4(
+                vec4(value[(0, 0)], value[(1, 0)], value[(2, 0)], value[(3, 0)]),
+                vec4(value[(0, 1)], value[(1, 1)], value[(2, 1)], value[(3, 1)]),
+                vec4(value[(0, 2)], value[(1, 2)], value[(2, 2)], value[(3, 2)]),
+                vec4(value[(0, 3)], value[(1, 3)], value[(2, 3)], value[(3, 3)]),
+            ),
+            last_row: vec4(value[(4, 0)], value[(4, 1)], value[(4, 2)], value[(4, 3)]),
+            last_col: vec4(value[(0, 4)], value[(1, 4)], value[(2, 4)], value[(3, 4)]),
+            last_value: value[(4, 4)],
+            padding: [0; 3]
+        }
     }
 }
 

@@ -32,7 +32,7 @@ use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use common::{get_normal, ModelTetrahedron, VecN};
 use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
 use glam::{Vec4, Vec2, UVec3};
-use image::{ImageBuffer, Rgba};
+use image::{ImageBuffer, Rgb, Rgba};
 use vulkano::format::ClearColorValue;
 use vulkano::format::Format::{R16G16B16A16_UNORM, R8G8B8A8_UNORM};
 
@@ -42,7 +42,22 @@ pub struct RenderOptions {
     pub do_raytrace: bool,
     pub do_edges: bool,
     pub do_tetrahedron_edges: bool,
-    pub take_screenshot: bool
+    pub take_framebuffer_screenshot: bool,
+    pub take_render_screenshot: bool
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            do_frame_clear: false,
+            do_raster: true,
+            do_raytrace: false,
+            do_edges: false,
+            do_tetrahedron_edges: false,
+            take_framebuffer_screenshot: false,
+            take_render_screenshot: false,
+        }
+    }
 }
 
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
@@ -212,6 +227,7 @@ pub struct SizedBuffers {
     output_tetrahedron_buffer: Subbuffer<[common::Tetrahedron]>,
     output_pixel_buffer: Subbuffer<[Vec4]>,
     descriptor_set: Arc<DescriptorSet>,
+    output_cpu_pixel_buffer: Subbuffer<[Vec4]>
 }
 
 impl SizedBuffers {
@@ -226,7 +242,7 @@ impl SizedBuffers {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                ..Default::default()
             },
-            vec![glam::Vec2::new(0.0, 0.0); 10000]
+            vec![glam::Vec2::new(0.0, 0.0); 100000]
         ).unwrap();
 
         let output_tetrahedron_buffer = Buffer::from_iter(
@@ -239,13 +255,13 @@ impl SizedBuffers {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![common::Tetrahedron::zeroed(); 1000]
+            vec![common::Tetrahedron::zeroed(); 10000]
         ).unwrap();
 
         let output_pixel_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
                 .. Default::default()
             },
             AllocationCreateInfo {
@@ -254,7 +270,21 @@ impl SizedBuffers {
             },
             vec![Vec4::ZERO; (render_dimensions[0]*render_dimensions[1]) as usize]
         ).unwrap();
-        
+
+        let output_cpu_pixel_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            vec![Vec4::ZERO; (render_dimensions[0]*render_dimensions[1]) as usize]
+        ).unwrap();
+
         let descriptor_set = DescriptorSet::new(
             descriptor_set_allocator,
             descriptor_set_layout,
@@ -270,6 +300,7 @@ impl SizedBuffers {
             line_vertexes_buffer,
             output_tetrahedron_buffer,
             output_pixel_buffer,
+            output_cpu_pixel_buffer,
             descriptor_set
         }
     }
@@ -837,6 +868,11 @@ impl RenderContext {
     
     pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance], render_options: RenderOptions) {
         let window_size = self.window.inner_size();
+        let view_matrix_view = view_matrix.into_owned();
+
+        let slice = view_matrix_view.view().to_slice().unwrap();
+        let view_matrix_nalgebra: nalgebra::OMatrix<f32, nalgebra::U5, nalgebra::U5> = nalgebra::Matrix5::from_column_slice(slice).transpose();
+        let view_matrix_nalgebra_inv = view_matrix_nalgebra.try_inverse().unwrap();
 
         // Do not draw the frame when the screen size is zero. On Windows, this can occur
         // when minimizing the application.
@@ -943,7 +979,8 @@ impl RenderContext {
         let total_tetrahedron_count = self.one_time_buffers.model_tetrahedron_count*model_instances.len();
         {
             let mut writer = self.live_buffers.working_data_buffer.write().unwrap();
-            writer.view_matrix = view_matrix.into();
+            writer.view_matrix = view_matrix_nalgebra.into();
+            writer.view_matrix_inverse = view_matrix_nalgebra_inv.into();
             writer.present_dimensions = glam::UVec2::new(window_size.width, window_size.height);
             writer.render_dimensions = glam::UVec2::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1]);
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
@@ -1107,11 +1144,19 @@ impl RenderContext {
             // have called `next_subpass` to jump to the next subpass.
             .end_render_pass(Default::default())
             .unwrap();
-        if render_options.take_screenshot {
+        if render_options.take_framebuffer_screenshot {
             builder
                 .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
                     self.framebuffers[image_index as usize].attachments()[0].image().clone(),
                     self.cpu_screen_capture_buffer.clone(),
+                ))
+                .unwrap();
+        }
+        if render_options.take_render_screenshot {
+            builder
+                .copy_buffer(CopyBufferInfo::buffers(
+                    self.sized_buffers.output_pixel_buffer.clone(),
+                    self.sized_buffers.output_cpu_pixel_buffer.clone(),
                 ))
                 .unwrap();
         }
@@ -1165,7 +1210,7 @@ impl RenderContext {
         }
 
         // Save frame
-        if self.frames_rendered > 3 && render_options.take_screenshot {
+        if self.frames_rendered > 3 && render_options.take_framebuffer_screenshot {
             if self.previous_frame_end.is_some() {
                 let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
                 fence.wait(None).unwrap();
@@ -1175,9 +1220,37 @@ impl RenderContext {
             let result = self.cpu_screen_capture_buffer.read();
             match result {
                 Ok(buffer_content) => {
-                    let screenshot_path = format!("frames/screenshot_{}.webp", self.frames_rendered-3);
+                    let screenshot_path = format!("frames/framebuffer_{}.webp", self.frames_rendered-3);
 
                     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(window_size.width, window_size.height, &buffer_content[..]).unwrap();
+                    image.save(screenshot_path.clone()).unwrap();
+                    println!("Saved screenshot to {}", screenshot_path);
+                }
+                Err(error) => {
+                    eprintln!("Error saving screenshot: {:?}", error);
+                }
+            };
+        }
+
+        if render_options.take_render_screenshot {
+            if self.previous_frame_end.is_some() {
+                let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+                fence.wait(None).unwrap();
+                self.previous_frame_end = None;
+            }
+
+            let result = self.sized_buffers.output_cpu_pixel_buffer.read();
+            match result {
+                Ok(buffer_content) => {
+                    let screenshot_path = format!("frames/render_{}.webp", self.frames_rendered);
+                    let mut transformed_pixels = Vec::<u8>::new();
+                    // Divide by w
+                    for i in 0..(self.sized_buffers.render_dimensions[0]*self.sized_buffers.render_dimensions[1]) as usize {
+                        transformed_pixels.push(((buffer_content[i].x/buffer_content[i].w).powf(0.4)*256.0) as u8);
+                        transformed_pixels.push(((buffer_content[i].y/buffer_content[i].w).powf(0.4)*256.0) as u8);
+                        transformed_pixels.push(((buffer_content[i].z/buffer_content[i].w).powf(0.4)*256.0) as u8);
+                    }
+                    let image = ImageBuffer::<Rgb<u8>, _>::from_raw(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1], &transformed_pixels[..]).unwrap();
                     image.save(screenshot_path.clone()).unwrap();
                     println!("Saved screenshot to {}", screenshot_path);
                 }

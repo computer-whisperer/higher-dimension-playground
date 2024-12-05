@@ -267,12 +267,13 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                let mut view_matrix = translate_matrix_4d(0.0, 1.0, 10.0, 10.0);
+                let mut view_matrix = translate_matrix_4d(0.0, 1.0, 15.0, 2.0);
                 
                 let do_spin = false;
                 let do_outer_blocks = true;
                 let do_render_mode = false;
-                let do_floor = false;
+                let do_floor = true;
+                let do_walls = true;
                 
                 let time_elapsed = if do_render_mode {
                     self.frame_count as f32/60.0
@@ -286,7 +287,7 @@ impl ApplicationHandler for App {
                     view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/28.0));
                     view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/38.0));
                 }
-                view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.125));
+                view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.2));
 
                 let mut instances = Vec::<common::ModelInstance>::new();
                 
@@ -329,20 +330,59 @@ impl ApplicationHandler for App {
                         materials: [13; 8]
                     }
                 );
-                /*
-                blocks.push(
-                    Block{
-                        position: [1, 1, 1, 0],
-                        materials: [14; 8]
-                    }
-                );*/
                 
+                if do_walls {
+                    let width = 1000.0;
+                    let model_transform =
+                        translate_matrix_4d(
+                            -10.0,
+                            -width/2.0,
+                            -width/2.0,
+                            -width/2.0)
+                            .dot(&scale_matrix_4d_elementwise(1.0, width, width, width));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );
+
+                    
+                    let model_transform =
+                        translate_matrix_4d(
+                            -width/2.0,
+                            -width/2.0,
+                            10.0,
+                            -width/2.0)
+                            .dot(&scale_matrix_4d_elementwise(width, width, 1.0, width));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );
+                    /*
+                    let model_transform =
+                        translate_matrix_4d(
+                            -width/2.0,
+                            -width/2.0,
+                            -width/2.0,
+                            10.0,)
+                            .dot(&scale_matrix_4d_elementwise(width, width, width, 1.0));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );*/
+                }
+
                 if do_floor {
                     let width = 1000.0;
                     let model_transform =
                         translate_matrix_4d(
                             -width/2.0,
-                            -3.5,
+                            -4.0,
                             -width/2.0,
                             -width/2.0)
                             .dot(&scale_matrix_4d_elementwise(width, 1.0, width, width));
@@ -355,7 +395,7 @@ impl ApplicationHandler for App {
                 }
 
                 for block in blocks {
-                    let model_scale = 1.2;
+                    let model_scale = 1.0;
                     let model_transform = 
                         translate_matrix_4d(
                             (block.position[0] as f32 - 0.5)*model_scale,
@@ -372,12 +412,11 @@ impl ApplicationHandler for App {
                 }
                 
                 let render_options = RenderOptions {
-                    do_frame_clear: false,
                     do_raster: false,
                     do_raytrace: true,
-                    do_edges: true,
-                    do_tetrahedron_edges: false,
-                    take_screenshot: (self.frame_count%500) == 0,
+                    do_edges: false,
+                    take_render_screenshot: (self.frame_count%500) == 0,
+                    ..Default::default()
                 };
                 
                 rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances, render_options);

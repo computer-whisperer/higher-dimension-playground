@@ -24,11 +24,11 @@ fn cs_vertex_shader(
 
     let vertex_position = Vec5GPU::from_4_and_1(vertex_position, 1.0);
 
-    let view_position = working_data.view_matrix * instance.model_transform * vertex_position;
+    let view_position = instance.model_transform * vertex_position;
 
     let vertex_position = Vec4::new(
         view_position.x(),
-        -view_position.y(),
+        view_position.y(),
         view_position.z(),
         view_position.w(),
     );
@@ -239,6 +239,8 @@ fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahed
         RayHit::NONE,
         RayHit::NONE,
         RayHit::NONE,
+        RayHit::NONE,
+        RayHit::NONE,
     ];
     let mut num_hits = 0usize;
 
@@ -267,26 +269,27 @@ fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahed
     }
 
     let mut light_value = Vec3::ZERO;
+    let background_light_direction = Vec4::new(0.0, 1.0, -0.3, 0.0).normalize();
     if num_hits < 4 {
         // We must have hit the sky
-        if -direction.y > 0.95 {
+        if direction.dot(background_light_direction) > 0.95 {
             light_value = Vec3::new(1.0, 1.0, 1.0)*8.0;
         }
         else {
-            let a = 0.5*(-direction.y + 1.0);
-            light_value = ((1.0 - a)*Vec3::new(1.0, 1.0, 1.0) + a*Vec3::new(0.5, 0.7, 1.0))*0.05;
+            let a = 0.5*(direction.y + 1.0);
+            light_value = ((1.0 - a)*Vec3::new(1.0, 1.0, 1.0) + a*Vec3::new(0.5, 0.7, 1.0))*0.02;
         }
     }
     
     if num_hits == 0 {
-        light_value = light_value*0.2;
+        //light_value = light_value*0.8;
     }
 
     for i in 0..num_hits {
         let hit = hit_stack[num_hits - i - 1];
         let material = sample_material(tetrahedrons[hit.tetrahedron_index as usize].material_id, hit.texture_coordinates.xyz());
 
-        light_value = light_value*0.9*material.albedo.xyz() + material.luminance*material.albedo.xyz();
+        light_value = light_value*0.9*material.albedo.xyz() + (material.luminance + 0.00)*material.albedo.xyz();
     }
 
     Vec4::new(light_value.x, light_value.y, light_value.z, 1.0)
@@ -319,12 +322,12 @@ pub fn main_raytracer_pixel_cs(
     
     //let view_origin = Vec4::ZERO;
     //let view_direction = Vec4::new(pixel_pos.x*1.0, pixel_pos.y*1.0, 1.0, 0.0).normalize();
-    let view_origin = Vec4::new(0.0, 0.0, 0.0, 0.0);
+    
 
     //pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = Vec4::ZERO;
     let aspect_ratio = working_data.present_dimensions.x as f32 / working_data.present_dimensions.y as f32;
 
-    let aa_noise = if false {
+    let aa_noise = if true {
         Vec4::new(
             (basic_rand_f32(&mut rng_state)-0.5)*0.01,
             (basic_rand_f32(&mut rng_state)-0.5)*0.01,
@@ -341,12 +344,20 @@ pub fn main_raytracer_pixel_cs(
         let view_angle = (pi/2.0)/working_data.focal_length;
         let zw_angle = (basic_rand_f32(&mut rng_state)-0.5) * view_angle;
 
+        let view_origin = Vec4::new(0.0, 0.0, 0.0, 0.0);
         let view_direction = aa_noise + Vec4::new(
             pixel_pos.x/working_data.focal_length,
             (pixel_pos.y/aspect_ratio)/working_data.focal_length,
             zw_angle.cos(),
             zw_angle.sin()).normalize();
 
+        let new_view_origin = working_data.view_matrix_inverse * Vec5GPU::from_4_and_1(view_origin, 1.0);
+        let new_view_direction = working_data.view_matrix_inverse * Vec5GPU::from_4_and_1(view_origin + view_direction, 1.0);
+        
+        let view_origin = Vec4::new(new_view_origin.x(), new_view_origin.y(), new_view_origin.z(), new_view_origin.w());
+        let mut view_direction = Vec4::new(new_view_direction.x(), new_view_direction.y(), new_view_direction.z(), new_view_direction.w()) - view_origin;
+        
+        view_direction.y = -view_direction.y;
 
         let output_pixel = raycast_sample(view_origin, view_direction, &input_tetrahedrons, working_data.total_num_tetrahedrons as usize, &mut rng_state);
 
@@ -387,6 +398,7 @@ mod tests {
         const HEIGHT: u32 = 512;
         let mut working_data = WorkingData {
             view_matrix: Mat5GPU::identity(),
+            view_matrix_inverse: Mat5GPU::identity(),
             total_num_tetrahedrons: (model_tetrahedrons.len()*instances.len()) as u32,
             shader_fault: 0,
             render_dimensions: UVec2::new(WIDTH, HEIGHT),
