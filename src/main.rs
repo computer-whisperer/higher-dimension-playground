@@ -248,7 +248,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840/2, 2160/2));
+        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840/4, 2160/4));
     }
 
     fn window_event(
@@ -267,7 +267,7 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                let mut view_matrix = translate_matrix_4d(0.0, 1.0, 15.0, 2.0);
+                let mut view_matrix = translate_matrix_4d(0.0, 1.0, 15.0, 10.0);
                 
                 let do_spin = false;
                 let do_outer_blocks = true;
@@ -331,15 +331,82 @@ impl ApplicationHandler for App {
                     }
                 );
                 
+                
                 if do_walls {
+                    let wall_offset = 15.0;
                     let width = 1000.0;
                     let model_transform =
                         translate_matrix_4d(
-                            -10.0,
+                            -wall_offset,
                             -width/2.0,
-                            -width/2.0,
+                            wall_offset,
                             -width/2.0)
-                            .dot(&scale_matrix_4d_elementwise(1.0, width, width, width));
+                            .dot(&scale_matrix_4d_elementwise(1.0, width, 1.0, width));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );
+                    let model_transform =
+                        translate_matrix_4d(
+                            -wall_offset,
+                            -width/2.0,
+                            -width/2.0,
+                            wall_offset)
+                            .dot(&scale_matrix_4d_elementwise(1.0, width, width, 1.0));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );
+                    let model_transform =
+                        translate_matrix_4d(
+                            -width/2.0,
+                            -width/2.0,
+                            wall_offset,
+                            wall_offset)
+                            .dot(&scale_matrix_4d_elementwise(width, width, 1.0, 1.0));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );
+                    let model_transform =
+                        translate_matrix_4d(
+                            wall_offset,
+                            -width/2.0,
+                            -wall_offset,
+                            -width/2.0)
+                            .dot(&scale_matrix_4d_elementwise(1.0, width, 1.0, width));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );
+                    let model_transform =
+                        translate_matrix_4d(
+                            wall_offset,
+                            -width/2.0,
+                            -width/2.0,
+                            -wall_offset)
+                            .dot(&scale_matrix_4d_elementwise(1.0, width, width, 1.0));
+                    instances.push(
+                        common::ModelInstance{
+                            model_transform: model_transform.into(),
+                            cell_material_ids: [14; 8],
+                        }
+                    );
+                    let model_transform =
+                        translate_matrix_4d(
+                            -width/2.0,
+                            -width/2.0,
+                            -wall_offset,
+                            -wall_offset)
+                            .dot(&scale_matrix_4d_elementwise(width, width, 1.0, 1.0));
                     instances.push(
                         common::ModelInstance{
                             model_transform: model_transform.into(),
@@ -347,7 +414,7 @@ impl ApplicationHandler for App {
                         }
                     );
 
-                    
+                    /*
                     let model_transform =
                         translate_matrix_4d(
                             -width/2.0,
@@ -361,7 +428,7 @@ impl ApplicationHandler for App {
                             cell_material_ids: [14; 8],
                         }
                     );
-                    /*
+                    
                     let model_transform =
                         translate_matrix_4d(
                             -width/2.0,

@@ -273,11 +273,11 @@ fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahed
     if num_hits < 4 {
         // We must have hit the sky
         if direction.dot(background_light_direction) > 0.95 {
-            light_value = Vec3::new(1.0, 1.0, 1.0)*8.0;
+            light_value = Vec3::new(1.0, 1.0, 1.0)*0.0;
         }
         else {
             let a = 0.5*(direction.y + 1.0);
-            light_value = ((1.0 - a)*Vec3::new(1.0, 1.0, 1.0) + a*Vec3::new(0.5, 0.7, 1.0))*0.02;
+            light_value = ((1.0 - a)*Vec3::new(1.0, 1.0, 1.0) + a*Vec3::new(0.5, 0.7, 1.0))*0.002;
         }
     }
     
@@ -327,7 +327,7 @@ pub fn main_raytracer_pixel_cs(
     //pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = Vec4::ZERO;
     let aspect_ratio = working_data.present_dimensions.x as f32 / working_data.present_dimensions.y as f32;
 
-    let aa_noise = if true {
+    let aa_noise = if false {
         Vec4::new(
             (basic_rand_f32(&mut rng_state)-0.5)*0.01,
             (basic_rand_f32(&mut rng_state)-0.5)*0.01,

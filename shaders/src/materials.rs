@@ -22,14 +22,14 @@ impl MaterialProperties {
 
 pub fn sample_material(texture_id: u32, texture_pos: Vec3) -> MaterialProperties {
     match texture_id {
-        1 => {MaterialProperties::new(vec3(1.0, 0.0, 0.0), 0.0, 0.0, 0.0)}
-        2 => {MaterialProperties::new(vec3(1.0, 0.8, 0.0), 0.0, 0.0, 0.0)}
-        3 => {MaterialProperties::new(vec3(0.5, 1.0, 0.0), 0.0, 0.0, 0.0)}
-        4 => {MaterialProperties::new(vec3(0.0, 1.0, 0.2), 0.0, 0.0, 0.0)}
-        5 => {MaterialProperties::new(vec3(0.0, 1.0, 1.0), 0.0, 0.0, 0.0)}
-        6 => {MaterialProperties::new(vec3(0.0, 0.2, 1.0), 0.0, 0.0, 0.0)}
-        7 => {MaterialProperties::new(vec3(0.5, 0.0, 1.0), 0.0, 0.0, 0.0)}
-        8 => {MaterialProperties::new(vec3(1.0, 0.0, 0.8), 0.0, 0.0, 0.0)}
+        1 => {MaterialProperties::new(vec3(1.0, 0.0, 0.0), 0.0, 0.0, 0.1)}
+        2 => {MaterialProperties::new(vec3(1.0, 0.8, 0.0), 0.0, 0.0, 0.1)}
+        3 => {MaterialProperties::new(vec3(0.5, 1.0, 0.0), 0.0, 0.0, 0.1)}
+        4 => {MaterialProperties::new(vec3(0.0, 1.0, 0.2), 0.0, 0.0, 0.1)}
+        5 => {MaterialProperties::new(vec3(0.0, 1.0, 1.0), 0.0, 0.0, 0.1)}
+        6 => {MaterialProperties::new(vec3(0.0, 0.2, 1.0), 0.0, 0.0, 0.1)}
+        7 => {MaterialProperties::new(vec3(0.5, 0.0, 1.0), 0.0, 0.0, 0.1)}
+        8 => {MaterialProperties::new(vec3(1.0, 0.0, 0.8), 0.0, 0.0, 0.1)}
         9 => {MaterialProperties::new((texture_pos+vec3(1.0, 1.0, 1.0))/2.0, 0.0, 0.0, 0.0)}
         10 => {MaterialProperties::new(vec3(39.0, 69.0, 19.8)/256.0, 0.0, 0.0, 0.0)}
         11 => {MaterialProperties::new(vec3(0.1, 0.1, 0.1)*0.4, 0.2, 0.3, 0.0)}
