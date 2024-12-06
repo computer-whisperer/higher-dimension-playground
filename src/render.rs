@@ -35,6 +35,7 @@ use glam::{Vec4, Vec2, UVec3};
 use image::{ImageBuffer, Rgb, Rgba};
 use vulkano::format::ClearColorValue;
 use vulkano::format::Format::{R16G16B16A16_UNORM, R8G8B8A8_UNORM};
+use winit::dpi::PhysicalSize;
 
 pub struct RenderOptions {
     pub do_frame_clear: bool,
@@ -617,12 +618,13 @@ impl ComputePipelineContext {
     }
 }
 
+
 pub struct RenderContext {
-    pub(crate) window: Arc<Window>,
-    swapchain: Arc<Swapchain>,
-    render_pass: Arc<RenderPass>,
-    framebuffers: Vec<Arc<Framebuffer>>,
-    present_pipeline: PresentPipelineContext,
+    pub(crate) window: Option<Arc<Window>>,
+    swapchain: Option<Arc<Swapchain>>,
+    render_pass: Option<Arc<RenderPass>>,
+    framebuffers: Option<Vec<Arc<Framebuffer>>>,
+    present_pipeline: Option<PresentPipelineContext>,
     compute_pipeline: ComputePipelineContext,
     viewport: Viewport,
     recreate_swapchain: bool,
@@ -638,7 +640,7 @@ pub struct RenderContext {
 
 
 impl RenderContext {
-    pub fn new(device: Arc<Device>, instance: Arc<Instance>, window: Arc<Window>, render_width: u32, render_height: u32) -> RenderContext {
+    pub fn new(device: Arc<Device>, instance: Arc<Instance>, window: Option<Arc<Window>>, render_width: u32, render_height: u32) -> RenderContext {
 
         // Before we can start creating and recording command buffers, we need a way of allocating
         // them. Vulkano provides a command buffer allocator, which manages raw Vulkan command
@@ -648,76 +650,80 @@ impl RenderContext {
             Default::default(),
         ));
 
-        // The objective of this example is to draw a triangle on a window. To do so, we first need
-        // to create the window. We use the `WindowBuilder` from the `winit` crate to do that here.
-        //
-        // Before we can render to a window, we must first create a `vulkano::swapchain::Surface`
-        // object from it, which represents the drawable surface of a window. For that we must wrap
-        // the `winit::window::Window` in an `Arc`.
-        let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
-        let window_size = window.inner_size();
+        
+        
+        let (surface, window_size) = match window.clone() {
+            Some(window) => (Some(Surface::from_window(instance.clone(), window.clone()).unwrap()), window.inner_size()),
+            None => (None, PhysicalSize{ width: render_width, height: render_height }),
+        };
 
         // Before we can draw on the surface, we have to create what is called a swapchain.
         // Creating a swapchain allocates the color buffers that will contain the image that will
         // ultimately be visible on the screen. These images are returned alongside the swapchain.
-        let (swapchain, images) = {
-            // Querying the capabilities of the surface. When we create the swapchain we can only
-            // pass values that are allowed by the capabilities.
-            let surface_capabilities = device
-                .physical_device()
-                .surface_capabilities(&surface, Default::default())
-                .unwrap();
+        let (swapchain, images) = match surface {
+            Some(surface) => {
+                // Querying the capabilities of the surface. When we create the swapchain we can only
+                // pass values that are allowed by the capabilities.
+                let surface_capabilities = device
+                    .physical_device()
+                    .surface_capabilities(&surface, Default::default())
+                    .unwrap();
 
-            // Choosing the internal format that the images will have.
-            let image_formats = device
-                .physical_device()
-                .surface_formats(&surface, Default::default())
-                .unwrap();
+                // Choosing the internal format that the images will have.
+                let image_formats = device
+                    .physical_device()
+                    .surface_formats(&surface, Default::default())
+                    .unwrap();
 
-            //let image_format = image_formats[0].0;
-            let image_format = R8G8B8A8_UNORM;
-            // Please take a look at the docs for the meaning of the parameters we didn't mention.
-            Swapchain::new(
-                device.clone(),
-                surface,
-                SwapchainCreateInfo {
-                    // Some drivers report an `min_image_count` of 1, but fullscreen mode requires
-                    // at least 2. Therefore we must ensure the count is at least 2, otherwise the
-                    // program would crash when entering fullscreen mode on those drivers.
-                    min_image_count: surface_capabilities.min_image_count.max(2),
+                //let image_format = image_formats[0].0;
+                let image_format = R8G8B8A8_UNORM;
+                // Please take a look at the docs for the meaning of the parameters we didn't mention.
+                let (swapchain, images) = Swapchain::new(
+                    device.clone(),
+                    surface,
+                    SwapchainCreateInfo {
+                        // Some drivers report an `min_image_count` of 1, but fullscreen mode requires
+                        // at least 2. Therefore we must ensure the count is at least 2, otherwise the
+                        // program would crash when entering fullscreen mode on those drivers.
+                        min_image_count: surface_capabilities.min_image_count.max(2),
 
-                    image_format,
+                        image_format,
 
-                    // The size of the window, only used to initially setup the swapchain.
-                    //
-                    // NOTE:
-                    // On some drivers the swapchain extent is specified by
-                    // `surface_capabilities.current_extent` and the swapchain size must use this
-                    // extent. This extent is always the same as the window size.
-                    //
-                    // However, other drivers don't specify a value, i.e.
-                    // `surface_capabilities.current_extent` is `None`. These drivers will allow
-                    // anything, but the only sensible value is the window size.
-                    //
-                    // Both of these cases need the swapchain to use the window size, so we just
-                    // use that.
-                    image_extent: window_size.into(),
+                        // The size of the window, only used to initially setup the swapchain.
+                        //
+                        // NOTE:
+                        // On some drivers the swapchain extent is specified by
+                        // `surface_capabilities.current_extent` and the swapchain size must use this
+                        // extent. This extent is always the same as the window size.
+                        //
+                        // However, other drivers don't specify a value, i.e.
+                        // `surface_capabilities.current_extent` is `None`. These drivers will allow
+                        // anything, but the only sensible value is the window size.
+                        //
+                        // Both of these cases need the swapchain to use the window size, so we just
+                        // use that.
+                        image_extent: window_size.into(),
 
-                    image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                        image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
 
-                    // The alpha mode indicates how the alpha value of the final image will behave.
-                    // For example, you can choose whether the window will be
-                    // opaque or transparent.
-                    composite_alpha: surface_capabilities
-                        .supported_composite_alpha
-                        .into_iter()
-                        .next()
-                        .unwrap(),
+                        // The alpha mode indicates how the alpha value of the final image will behave.
+                        // For example, you can choose whether the window will be
+                        // opaque or transparent.
+                        composite_alpha: surface_capabilities
+                            .supported_composite_alpha
+                            .into_iter()
+                            .next()
+                            .unwrap(),
 
-                    ..Default::default()
-                },
-            )
-                .unwrap()
+                        ..Default::default()
+                    },
+                )
+                    .unwrap();
+                (Some(swapchain), Some(images))
+            }
+            None => {
+                (None, None)
+            }
         };
 
 
@@ -730,47 +736,57 @@ impl RenderContext {
                 root_path_env: "SPIRV_OUT_DIR"
             }
         }
-
-        // The next step is to create a *render pass*, which is an object that describes where the
-        // output of the graphics pipeline will go. It describes the layout of the images where the
-        // colors, depth and/or stencil information will be written.
-        let render_pass = vulkano::single_pass_renderpass!(
-            device.clone(),
-            attachments: {
-                // `color` is a custom name we give to the first and only attachment.
-                color: {
-                    // `format: <ty>` indicates the type of the format of the image. This has to be
-                    // one of the types of the `vulkano::format` module (or alternatively one of
-                    // your structs that implements the `FormatDesc` trait). Here we use the same
-                    // format as the swapchain.
-                    format: swapchain.image_format(),
-                    // `samples: 1` means that we ask the GPU to use one sample to determine the
-                    // value of each pixel in the color attachment. We could use a larger value
-                    // (multisampling) for antialiasing. An example of this can be found in
-                    // msaa-renderpass.rs.
-                    samples: 1,
-                    // `load_op: Clear` means that we ask the GPU to clear the content of this
-                    // attachment at the start of the drawing.
-                    load_op: Clear,
-                    // `store_op: Store` means that we ask the GPU to store the output of the draw
-                    // in the actual image. We could also ask it to discard the result.
-                    store_op: Store,
+        
+        let render_pass = match swapchain.clone() {
+            Some(swapchain) => {
+                    // The next step is to create a *render pass*, which is an object that describes where the
+                    // output of the graphics pipeline will go. It describes the layout of the images where the
+                    // colors, depth and/or stencil information will be written.
+                Some(vulkano::single_pass_renderpass!(
+                device.clone(),
+                attachments: {
+                    // `color` is a custom name we give to the first and only attachment.
+                    color: {
+                        // `format: <ty>` indicates the type of the format of the image. This has to be
+                        // one of the types of the `vulkano::format` module (or alternatively one of
+                        // your structs that implements the `FormatDesc` trait). Here we use the same
+                        // format as the swapchain.
+                        format: swapchain.image_format(),
+                        // `samples: 1` means that we ask the GPU to use one sample to determine the
+                        // value of each pixel in the color attachment. We could use a larger value
+                        // (multisampling) for antialiasing. An example of this can be found in
+                        // msaa-renderpass.rs.
+                        samples: 1,
+                        // `load_op: Clear` means that we ask the GPU to clear the content of this
+                        // attachment at the start of the drawing.
+                        load_op: Clear,
+                        // `store_op: Store` means that we ask the GPU to store the output of the draw
+                        // in the actual image. We could also ask it to discard the result.
+                        store_op: Store,
+                    },
                 },
-            },
-            pass: {
-                // We use the attachment named `color` as the one and only color attachment.
-                color: [color],
-                // No depth-stencil attachment is indicated with empty brackets.
-                depth_stencil: {},
-            },
-        ).unwrap();
+                pass: {
+                    // We use the attachment named `color` as the one and only color attachment.
+                    color: [color],
+                    // No depth-stencil attachment is indicated with empty brackets.
+                    depth_stencil: {},
+                },
+            ).unwrap())
+            }
+            None => {
+                None
+            }
+        };
 
-        // The render pass we created above only describes the layout of our framebuffers. Before
-        // we can draw we also need to create the actual framebuffers.
-        //
-        // Since we need to draw to multiple images, we are going to create a different framebuffer
-        // for each image.
-        let framebuffers = window_size_dependent_setup(&images, &render_pass);
+        let framebuffers = match render_pass.clone() {
+            Some(render_pass) => match images {
+                Some(images) => {
+                    Some(window_size_dependent_setup(&images, &render_pass))
+                },
+                None => None
+            },
+            None => None
+        };
 
         let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
@@ -809,7 +825,13 @@ impl RenderContext {
         
 
         let loaded_shader = shader_loader::load(device.clone()).unwrap();
-        let present_pipeline = PresentPipelineContext::new(device.clone(), render_pass.clone(), loaded_shader.clone(), pipeline_layout.clone());
+        
+        let present_pipeline = match render_pass.clone() {
+            Some(render_pass) => {
+                Some(PresentPipelineContext::new(device.clone(), render_pass.clone(), loaded_shader.clone(), pipeline_layout.clone()))
+            },
+            None => None
+        };
         let compute_pipeline = ComputePipelineContext::new(device.clone(), loaded_shader.clone(), pipeline_layout.clone());
         
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
@@ -867,18 +889,26 @@ impl RenderContext {
     }
     
     pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance], render_options: RenderOptions) {
-        let window_size = self.window.inner_size();
+        
         let view_matrix_view = view_matrix.into_owned();
 
         let slice = view_matrix_view.view().to_slice().unwrap();
         let view_matrix_nalgebra: nalgebra::OMatrix<f32, nalgebra::U5, nalgebra::U5> = nalgebra::Matrix5::from_column_slice(slice).transpose();
         let view_matrix_nalgebra_inv = view_matrix_nalgebra.try_inverse().unwrap();
 
-        // Do not draw the frame when the screen size is zero. On Windows, this can occur
-        // when minimizing the application.
-        if window_size.width == 0 || window_size.height == 0 {
-            return;
-        }
+
+        match self.window.clone() {
+            Some(window) => {
+                let window_size = window.inner_size();
+                // Do not draw the frame when the screen size is zero. On Windows, this can occur
+                // when minimizing the application.
+                if window_size.width == 0 || window_size.height == 0 {
+                    return;
+                }
+            }
+            None => {}
+        };
+        
 
         
         if self.previous_frame_end.is_some() {
@@ -893,63 +923,72 @@ impl RenderContext {
         let mut force_clear = false;
 
 
-        // Whenever the window resizes we need to recreate everything dependent on the
-        // window size. In this example that includes the swapchain, the framebuffers and
-        // the dynamic state viewport.
-        if self.recreate_swapchain {
-            // Use the new dimensions of the window.
+        if let Some(swapchain) = self.swapchain.clone() {
+            if let Some(window) = self.window.clone() {
+                if let Some(render_pass) = self.render_pass.clone() {
+                    let window_size = window.inner_size();
+                    // Whenever the window resizes we need to recreate everything dependent on the
+                    // window size. In this example that includes the swapchain, the framebuffers and
+                    // the dynamic state viewport.
+                    if self.recreate_swapchain {
+                        // Use the new dimensions of the window.
 
-            force_clear = true;
+                        force_clear = true;
 
-            let (new_swapchain, new_images) = self
-                .swapchain
-                .recreate(SwapchainCreateInfo {
-                    image_extent: window_size.into(),
-                    ..self.swapchain.create_info()
-                })
-                .expect("failed to recreate swapchain");
+                        let (new_swapchain, new_images) =
+                            swapchain
+                                .recreate(SwapchainCreateInfo {
+                                    image_extent: window_size.into(),
+                                    ..swapchain.create_info()
+                                })
+                                .expect("failed to recreate swapchain");
 
-            self.swapchain = new_swapchain;
+                        self.swapchain = Some(new_swapchain);
 
-            // Because framebuffers contains a reference to the old swapchain, we need to
-            // recreate framebuffers as well.
-            self.framebuffers = window_size_dependent_setup(&new_images, &self.render_pass);
+                        // Because framebuffers contains a reference to the old swapchain, we need to
+                        // recreate framebuffers as well.
+                        self.framebuffers = Some(window_size_dependent_setup(&new_images, &render_pass));
 
-            self.viewport.extent = window_size.into();
+                        self.viewport.extent = window_size.into();
 
-            self.recreate_swapchain = false;
+                        self.recreate_swapchain = false;
 
-            self.cpu_screen_capture_buffer = create_cpu_screencapture_buffer(self.memory_allocator.clone(), window_size.width, window_size.height);
-        }
-
-        // Before we can draw on the output, we have to *acquire* an image from the
-        // swapchain. If no image is available (which happens if you submit draw commands
-        // too quickly), then the function will block. This operation returns the index of
-        // the image that we are allowed to draw upon.
-        //
-        // This function can block if no image is available. The parameter is an optional
-        // timeout after which the function call will return an error.
-        let (image_index, suboptimal, acquire_future) = match acquire_next_image(
-            self.swapchain.clone(),
-            None,
-        )
-            .map_err(Validated::unwrap)
-        {
-            Ok(r) => r,
-            Err(VulkanError::OutOfDate) => {
-                self.recreate_swapchain = true;
-                return;
+                        self.cpu_screen_capture_buffer = create_cpu_screencapture_buffer(self.memory_allocator.clone(), window_size.width, window_size.height);
+                    }
+                }
             }
-            Err(e) => panic!("failed to acquire next image: {e}"),
-        };
-
-        // `acquire_next_image` can be successful, but suboptimal. This means that the
-        // swapchain image will still work, but it may not display correctly. With some
-        // drivers this can be when the window resizes, but it may not cause the swapchain
-        // to become out of date.
-        if suboptimal {
-            self.recreate_swapchain = true;
         }
+
+        let total_tetrahedron_count = self.one_time_buffers.model_tetrahedron_count*model_instances.len();
+        {
+            let mut writer = self.live_buffers.working_data_buffer.write().unwrap();
+            writer.view_matrix = view_matrix_nalgebra.into();
+            writer.view_matrix_inverse = view_matrix_nalgebra_inv.into();
+            writer.render_dimensions = glam::UVec2::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1]);
+            writer.present_dimensions =  match self.window.clone() {
+                None => {writer.render_dimensions}
+                Some(window) => {
+                    let window_size = window.inner_size();
+                    glam::UVec2::new(window_size.width, window_size.height)
+                }
+            };
+            writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
+            writer.raytrace_seed = 6364136223846793005u64.wrapping_mul(self.frames_rendered as u64).wrapping_add(1442695040888963407);
+            writer.focal_length = 1.0;
+            // writer.total_num_tetrahedrons = 1;
+            writer.shader_fault = 0;
+        }
+
+        {
+            let mut writer = self.live_buffers.model_instance_buffer.write().unwrap();
+            for i in 0..model_instances.len() {
+                writer[i] = model_instances[i];
+            }
+        }
+
+        let mut line_render_count = 0;
+
+        // Do compute stage
 
         // In order to draw, we have to record a *command buffer*. The command buffer
         // object holds the list of commands that are going to be executed.
@@ -963,36 +1002,36 @@ impl RenderContext {
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(), queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
-        )
-            .unwrap();
+        ).unwrap();
+
         
-        
-        
-        {
-            let mut writer = self.live_buffers.model_instance_buffer.write().unwrap();
-            for i in 0..model_instances.len() {
-                writer[i] = model_instances[i];
+        let (image_index, acquire_future) = match self.swapchain.clone() {
+            Some(swapchain) => { 
+                let (image_index, suboptimal, acquire_future) = match acquire_next_image(
+                    swapchain.clone(),
+                    None,
+                ).map_err(Validated::unwrap)
+                {
+                    Ok(r) => r,
+                    Err(VulkanError::OutOfDate) => {
+                        self.recreate_swapchain = true;
+                        return;
+                    }
+                    Err(e) => panic!("failed to acquire next image: {e}"),
+                };
+
+                // `acquire_next_image` can be successful, but suboptimal. This means that the
+                // swapchain image will still work, but it may not display correctly. With some
+                // drivers this can be when the window resizes, but it may not cause the swapchain
+                // to become out of date.
+                if suboptimal {
+                    self.recreate_swapchain = true;
+                }
+
+                (Some(image_index), Some(acquire_future))
             }
-        }
-
-
-        let total_tetrahedron_count = self.one_time_buffers.model_tetrahedron_count*model_instances.len();
-        {
-            let mut writer = self.live_buffers.working_data_buffer.write().unwrap();
-            writer.view_matrix = view_matrix_nalgebra.into();
-            writer.view_matrix_inverse = view_matrix_nalgebra_inv.into();
-            writer.present_dimensions = glam::UVec2::new(window_size.width, window_size.height);
-            writer.render_dimensions = glam::UVec2::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1]);
-            writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
-            writer.raytrace_seed = 6364136223846793005u64.wrapping_mul(self.frames_rendered as u64).wrapping_add(1442695040888963407);
-            writer.focal_length = 1.0;
-           // writer.total_num_tetrahedrons = 1;
-            writer.shader_fault = 0;
-        }
-
-        let mut line_render_count = 0;
-        
-        // Do compute stage
+            None => (None, None)
+        };
         
         let cpu_mode = false;
         
@@ -1091,67 +1130,76 @@ impl RenderContext {
         }
 
         
-        // Begin render pass
-        builder
-            // Before we can draw, we have to *enter a render pass*.
-            .begin_render_pass(
-                RenderPassBeginInfo {
-                    // A list of values to clear the attachments with. This list contains
-                    // one item for each attachment in the render pass. In this case, there
-                    // is only one attachment, and we clear it with a blue color.
-                    //
-                    // Only attachments that have `AttachmentLoadOp::Clear` are provided
-                    // with clear values, any others should use `None` as the clear value.
-                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+        if let Some(image_index) = image_index {
+            if let Some(framebuffers) = self.framebuffers.clone() {
+                if let Some(present_pipeline) = self.present_pipeline.as_ref() {
+                    // Begin render pass
+                    builder
+                        // Before we can draw, we have to *enter a render pass*.
+                        .begin_render_pass(
+                            RenderPassBeginInfo {
+                                // A list of values to clear the attachments with. This list contains
+                                // one item for each attachment in the render pass. In this case, there
+                                // is only one attachment, and we clear it with a blue color.
+                                //
+                                // Only attachments that have `AttachmentLoadOp::Clear` are provided
+                                // with clear values, any others should use `None` as the clear value.
+                                clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
 
-                    ..RenderPassBeginInfo::framebuffer(
-                        self.framebuffers[image_index as usize].clone(),
-                    )
-                },
-                SubpassBeginInfo {
-                    // The contents of the first (and only) subpass. This can be either
-                    // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
-                    // advanced and is not covered here.
-                    contents: SubpassContents::Inline,
-                    ..Default::default()
-                },
-            ).unwrap();
-        builder.set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap();
-        builder.bind_descriptor_sets(PipelineBindPoint::Graphics, self.present_pipeline.pipeline_layout.clone(), 0,
-                                     vec![
-                                         self.one_time_buffers.descriptor_set.clone(),
-                                         self.sized_buffers.descriptor_set.clone(),
-                                         self.live_buffers.descriptor_set.clone()
-                                     ]).unwrap();
-        
-        
-        // Render from compute shader buffer
-        {
-            builder.bind_pipeline_graphics(self.present_pipeline.buffer_pipeline.clone()).unwrap();
-            unsafe { builder.draw(6, 1, 0, 0) }.unwrap();
-        }
-        
-        // Render the edge lines
-        if line_render_count > 0
-        {
-            builder.bind_pipeline_graphics(self.present_pipeline.line_pipeline.clone()).unwrap();
-            unsafe { builder.draw(line_render_count as u32*2, 1, 0, 0) }.unwrap();
-        }
+                                ..RenderPassBeginInfo::framebuffer(
+                                    framebuffers[image_index as usize].clone(),
+                                )
+                            },
+                            SubpassBeginInfo {
+                                // The contents of the first (and only) subpass. This can be either
+                                // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
+                                // advanced and is not covered here.
+                                contents: SubpassContents::Inline,
+                                ..Default::default()
+                            },
+                        ).unwrap();
+                    builder.set_viewport(0, [self.viewport.clone()].into_iter().collect()).unwrap();
+                    builder.bind_descriptor_sets(PipelineBindPoint::Graphics, present_pipeline.pipeline_layout.clone(), 0,
+                                                 vec![
+                                                     self.one_time_buffers.descriptor_set.clone(),
+                                                     self.sized_buffers.descriptor_set.clone(),
+                                                     self.live_buffers.descriptor_set.clone()
+                                                 ]).unwrap();
 
-        // End render pass
-        builder
-            // We leave the render pass. Note that if we had multiple subpasses we could
-            // have called `next_subpass` to jump to the next subpass.
-            .end_render_pass(Default::default())
-            .unwrap();
-        if render_options.take_framebuffer_screenshot {
-            builder
-                .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
-                    self.framebuffers[image_index as usize].attachments()[0].image().clone(),
-                    self.cpu_screen_capture_buffer.clone(),
-                ))
-                .unwrap();
+
+                    // Render from compute shader buffer
+                    {
+                        builder.bind_pipeline_graphics(present_pipeline.buffer_pipeline.clone()).unwrap();
+                        unsafe { builder.draw(6, 1, 0, 0) }.unwrap();
+                    }
+
+                    // Render the edge lines
+                    if line_render_count > 0
+                    {
+                        builder.bind_pipeline_graphics(present_pipeline.line_pipeline.clone()).unwrap();
+                        unsafe { builder.draw(line_render_count as u32*2, 1, 0, 0) }.unwrap();
+                    }
+
+                    // End render pass
+                    builder
+                        // We leave the render pass. Note that if we had multiple subpasses we could
+                        // have called `next_subpass` to jump to the next subpass.
+                        .end_render_pass(Default::default())
+                        .unwrap();
+                    if render_options.take_framebuffer_screenshot {
+                        builder
+                            .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+                                framebuffers[image_index as usize].attachments()[0].image().clone(),
+                                self.cpu_screen_capture_buffer.clone(),
+                            ))
+                            .unwrap();
+                    }
+                }
+
+            }
         }
+        
+
         if render_options.take_render_screenshot {
             builder
                 .copy_buffer(CopyBufferInfo::buffers(
@@ -1174,62 +1222,89 @@ impl RenderContext {
         };
         self.previous_frame_end = None;
         
-        let future = frame_end
-            .join(acquire_future)
-            .then_execute(queue.clone(), command_buffer)
-            .unwrap()
-            // The color output is now expected to contain our triangle. But in order to
-            // show it on the screen, we have to *present* the image by calling
-            // `then_swapchain_present`.
-            //
-            // This function does not actually present the image immediately. Instead it
-            // submits a present command at the end of the queue. This means that it will
-            // only be presented once the GPU has finished executing the command buffer
-            // that draws the triangle.
-            .then_swapchain_present(
-                queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
+        let future = match acquire_future {
+            Some(acquire_future) => {
+                let future = frame_end
+                    .join(acquire_future)
+                    .then_execute(queue.clone(), command_buffer)
+                    .unwrap()
+                    // The color output is now expected to contain our triangle. But in order to
+                    // show it on the screen, we have to *present* the image by calling
+                    // `then_swapchain_present`.
+                    //
+                    // This function does not actually present the image immediately. Instead it
+                    // submits a present command at the end of the queue. This means that it will
+                    // only be presented once the GPU has finished executing the command buffer
+                    // that draws the triangle.
+                    .then_swapchain_present(
+                        queue.clone(),
+                        SwapchainPresentInfo::swapchain_image_index(
+                            self.swapchain.clone().unwrap().clone(),
+                            image_index.unwrap(),
+                        ),
+                    )
+                    .then_signal_fence_and_flush();
 
-        match future.map_err(Validated::unwrap) {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(VulkanError::OutOfDate) => {
-                self.recreate_swapchain = true;
-                self.previous_frame_end = None;
-            }
-            Err(e) => {
-                panic!("failed to flush future: {e}");
-                // previous_frame_end = Some(sync::now(device.clone()).boxed());
-            }
-        }
-
-        // Save frame
-        if self.frames_rendered > 3 && render_options.take_framebuffer_screenshot {
-            if self.previous_frame_end.is_some() {
-                let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
-                fence.wait(None).unwrap();
-                self.previous_frame_end = None;
-            }
-
-            let result = self.cpu_screen_capture_buffer.read();
-            match result {
-                Ok(buffer_content) => {
-                    let screenshot_path = format!("frames/framebuffer_{}.webp", self.frames_rendered-3);
-
-                    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(window_size.width, window_size.height, &buffer_content[..]).unwrap();
-                    image.save(screenshot_path.clone()).unwrap();
-                    println!("Saved screenshot to {}", screenshot_path);
+                match future.map_err(Validated::unwrap) {
+                    Ok(future) => {
+                        self.previous_frame_end = Some(future.boxed());
+                    }
+                    Err(VulkanError::OutOfDate) => {
+                        self.recreate_swapchain = true;
+                        self.previous_frame_end = None;
+                    }
+                    Err(e) => {
+                        panic!("failed to flush future: {e}");
+                        // previous_frame_end = Some(sync::now(device.clone()).boxed());
+                    }
                 }
-                Err(error) => {
-                    eprintln!("Error saving screenshot: {:?}", error);
+            },
+            None => {
+                let future = frame_end
+                    .then_execute(queue.clone(), command_buffer)
+                    .unwrap()
+                    .then_signal_fence_and_flush();
+
+                match future.map_err(Validated::unwrap) {
+                    Ok(future) => {
+                        self.previous_frame_end = Some(future.boxed());
+                    }
+                    Err(VulkanError::OutOfDate) => {
+                        self.recreate_swapchain = true;
+                        self.previous_frame_end = None;
+                    }
+                    Err(e) => {
+                        panic!("failed to flush future: {e}");
+                        // previous_frame_end = Some(sync::now(device.clone()).boxed());
+                    }
                 }
-            };
+            }
+        };
+
+        if let Some(window) = self.window.clone() {
+            let window_size = window.inner_size();
+            // Save frame
+            if self.frames_rendered > 3 && render_options.take_framebuffer_screenshot {
+                if self.previous_frame_end.is_some() {
+                    let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+                    fence.wait(None).unwrap();
+                    self.previous_frame_end = None;
+                }
+
+                let result = self.cpu_screen_capture_buffer.read();
+                match result {
+                    Ok(buffer_content) => {
+                        let screenshot_path = format!("frames/framebuffer_{}.webp", self.frames_rendered-3);
+
+                        let image = ImageBuffer::<Rgba<u8>, _>::from_raw(window_size.width, window_size.height, &buffer_content[..]).unwrap();
+                        image.save(screenshot_path.clone()).unwrap();
+                        println!("Saved screenshot to {}", screenshot_path);
+                    }
+                    Err(error) => {
+                        eprintln!("Error saving screenshot: {:?}", error);
+                    }
+                };
+            }
         }
 
         if render_options.take_render_screenshot {
@@ -1246,9 +1321,9 @@ impl RenderContext {
                     let mut transformed_pixels = Vec::<u8>::new();
                     // Divide by w
                     for i in 0..(self.sized_buffers.render_dimensions[0]*self.sized_buffers.render_dimensions[1]) as usize {
-                        transformed_pixels.push(((buffer_content[i].x/buffer_content[i].w).powf(0.4)*256.0) as u8);
-                        transformed_pixels.push(((buffer_content[i].y/buffer_content[i].w).powf(0.4)*256.0) as u8);
-                        transformed_pixels.push(((buffer_content[i].z/buffer_content[i].w).powf(0.4)*256.0) as u8);
+                        transformed_pixels.push(((buffer_content[i].x/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
+                        transformed_pixels.push(((buffer_content[i].y/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
+                        transformed_pixels.push(((buffer_content[i].z/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
                     }
                     let image = ImageBuffer::<Rgb<u8>, _>::from_raw(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1], &transformed_pixels[..]).unwrap();
                     image.save(screenshot_path.clone()).unwrap();

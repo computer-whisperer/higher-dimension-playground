@@ -46,50 +46,366 @@ use winit::{
     window::{Window, WindowId},
 };
 use render::RenderContext;
+use clap::Parser;
+use vulkano::instance::InstanceExtensions;
 use crate::matrix_operations::{rotation_matrix_4d_rotate_1, rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
 use crate::render::RenderOptions;
 
-fn main() -> Result<(), impl Error> {
-    let event_loop = EventLoop::new().unwrap();
-    let mut app = App::new(&event_loop);
-
-    event_loop.run_app(&mut app)
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    headless: bool
 }
+
+fn main() -> Result<(), impl Error> {
+    let args = Args::parse();
+    
+    if args.headless {
+        run_headless();
+        Ok(())
+    }
+    else {
+        let event_loop = EventLoop::new().unwrap();
+        let mut app = App::new(&event_loop);
+
+        event_loop.run_app(&mut app)
+    }
+    
+
+}
+
+fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Device>, Arc<Queue>) {
+    let library = VulkanLibrary::new().unwrap();
+
+    // The first step of any Vulkan program is to create an instance.
+    //
+    // When we create an instance, we have to pass a list of extensions that we want to enable.
+    //
+    // All the window-drawing functionalities are part of non-core extensions that we need to
+    // enable manually. To do so, we ask `Surface` for the list of extensions required to draw
+    // to a window.
+    let required_extensions = match event_loop {
+        Some(event_loop) => {
+            Surface::required_extensions(event_loop).unwrap()
+        }
+        None => Default::default(),
+    };
+
+    // Now creating the instance.
+    let instance = Instance::new(
+        library,
+        InstanceCreateInfo {
+            // Enable enumerating devices that use non-conformant Vulkan implementations.
+            // (e.g. MoltenVK)
+            flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
+            enabled_extensions: required_extensions,
+            ..Default::default()
+        },
+    ).unwrap();
+
+    // Choose device extensions that we're going to use. In order to present images to a
+    // surface, we need a `Swapchain`, which is provided by the `khr_swapchain` extension.
+    let device_extensions = DeviceExtensions {
+        khr_swapchain: event_loop.is_some(),
+        ..DeviceExtensions::empty()
+    };
+
+    let device_features = DeviceFeatures {
+        fill_mode_non_solid: true,
+        vulkan_memory_model: true,
+        variable_pointers: true,
+        variable_pointers_storage_buffer: true,
+        shader_int64: true,
+        .. Default::default()
+    };
+
+    // We then choose which physical device to use. First, we enumerate all the available
+    // physical devices, then apply filters to narrow them down to those that can support our
+    // needs.
+    let (physical_device, queue_family_index) = instance
+        .enumerate_physical_devices()
+        .unwrap()
+        .filter(|p| {
+            // Some devices may not support the extensions or features that your application,
+            // or report properties and limits that are not sufficient for your application.
+            // These should be filtered out here.
+            //p.properties().device_name != "AMD Radeon RX 6900 XT (RADV NAVI21)" &&
+            p.supported_extensions().contains(&device_extensions) &&
+                p.supported_features().contains(&device_features)
+        })
+        .filter_map(|p| {
+            // For each physical device, we try to find a suitable queue family that will
+            // execute our draw commands.
+            //
+            // Devices can provide multiple queues to run commands in parallel (for example a
+            // draw queue and a compute queue), similar to CPU threads. This is
+            // something you have to have to manage manually in Vulkan. Queues
+            // of the same type belong to the same queue family.
+            //
+            // Here, we look for a single queue family that is suitable for our purposes. In a
+            // real-world application, you may want to use a separate dedicated transfer queue
+            // to handle data transfers in parallel with graphics operations.
+            // You may also need a separate queue for compute operations, if
+            // your application uses those.
+            p.queue_family_properties()
+                .iter()
+                .enumerate()
+                .position(|(i, q)| {
+                    q.queue_flags.intersects(QueueFlags::COMPUTE) &&
+                    match event_loop {
+                        Some(event_loop) => {
+                            // We select a queue family that supports graphics operations. When drawing
+                            // to a window surface, as we do in this example, we also need to check
+                            // that queues in this queue family are capable of presenting images to the
+                            // surface.
+                            q.queue_flags.intersects(QueueFlags::GRAPHICS)
+                                && p.presentation_support(i as u32, event_loop).unwrap()
+                        }
+                        None => true,
+                    }
+
+                })
+                // The code here searches for the first queue family that is suitable. If none
+                // is found, `None` is returned to `filter_map`, which
+                // disqualifies this physical device.
+                .map(|i| (p, i as u32))
+        })
+        // All the physical devices that pass the filters above are suitable for the
+        // application. However, not every device is equal, some are preferred over others.
+        // Now, we assign each physical device a score, and pick the device with the lowest
+        // ("best") score.
+        //
+        // In this example, we simply select the best-scoring device to use in the application.
+        // In a real-world setting, you may want to use the best-scoring device only as a
+        // "default" or "recommended" device, and let the user choose the device themself.
+        .min_by_key(|(p, _)| {
+            // We assign a lower score to device types that are likely to be faster/better.
+            match p.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                PhysicalDeviceType::Other => 4,
+                _ => 5,
+            }
+        })
+        .expect("no suitable physical device found");
+
+    // Some little debug infos.
+    println!(
+        "Using device: {} (type: {:?})",
+        physical_device.properties().device_name,
+        physical_device.properties().device_type,
+    );
+
+    // Now initializing the device. This is probably the most important object of Vulkan.
+    //
+    // An iterator of created queues is returned by the function alongside the device.
+    let (device, mut queues) = Device::new(
+        // Which physical device to connect to.
+        physical_device,
+        DeviceCreateInfo {
+            // A list of optional features and extensions that our program needs to work
+            // correctly. Some parts of the Vulkan specs are optional and must be enabled
+            // manually at device creation. In this example the only thing we are going to need
+            // is the `khr_swapchain` extension that allows us to draw to a window.
+            enabled_extensions: device_extensions,
+
+            enabled_features: device_features,
+
+            // The list of queues that we are going to use. Here we only use one queue, from
+            // the previously chosen queue family.
+            queue_create_infos: vec![QueueCreateInfo {
+                queue_family_index,
+                ..Default::default()
+            }],
+
+            ..Default::default()
+        },
+    )
+        .unwrap();
+
+    // Since we can request multiple queues, the `queues` variable is in fact an iterator. We
+    // only use one queue in this example, so we just retrieve the first and only element of
+    // the iterator.
+    let queue = queues.next().unwrap();
+
+    (instance, device, queue)
+}
+
+fn run_headless() {
+    let (instance, device, queue) = vulkan_setup(None);
+
+    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, 3840/4, 2160/4);
+    
+    let mut demo_scene = DemoScene::new();
+    
+    loop {
+        demo_scene.update(&mut rcx, device.clone(), queue.clone());
+    }
+}
+
+struct DemoScene {
+    start_time: Instant,
+    frame_count: u32
+}
+
+impl DemoScene {
+    fn new() -> DemoScene {
+        DemoScene {
+            start_time: Instant::now(),
+            frame_count: 0
+        }
+    }
+    
+    fn update(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
+        let mut view_matrix = translate_matrix_4d(0.0, 1.0, 11.0, 11.0);
+
+        let do_spin = false;
+        let do_outer_blocks = true;
+        let do_render_mode = false;
+        let do_floor = true;
+        let do_walls = true;
+
+        let time_elapsed = if do_render_mode {
+            self.frame_count as f32/60.0
+        }
+        else {
+            self.start_time.elapsed().as_secs_f32()
+        };
+
+        if do_spin {
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*2.0*time_elapsed/20.0));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/28.0));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/38.0));
+        }
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.25));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.25));
+
+        let mut instances = Vec::<common::ModelInstance>::new();
+
+        struct Block {
+            position: [i32; 4],
+            materials: [u32; 8]
+        }
+
+        let mut blocks = Vec::<Block>::new();
+
+        if do_outer_blocks {
+            let mut texture_rot = 0u32;
+            for x in 0..2 {
+                for y in 0..2 {
+                    for z in 0..2 {
+                        for w in 0..2 {
+                            blocks.push(
+                                Block{
+                                    position: [x*4 - 2, y*4 - 2, z*4 - 2, w*4 - 2],
+                                    materials: [texture_rot+1; 8]
+                                }
+                            );
+                            texture_rot = (texture_rot + 1)%5;
+                        }
+                    }
+                }
+            }
+        }
+
+
+        /* blocks.push(
+             Block{
+                 position: [0, -2, -1, 0],
+                 materials: [1, 2, 3, 4, 5, 6, 7, 8]
+             }
+         );*/
+        blocks.push(
+            Block{
+                position: [0, 0, 0, 0],
+                materials: [13; 8]
+            }
+        );
+
+
+        if do_walls {
+            let width = 30.0;
+
+            let model_transform =
+                translate_matrix_4d(
+                    -width/2.0,
+                    -width/2.0,
+                    -width/2.0,
+                    -width/2.0)
+                    .dot(&scale_matrix_4d_elementwise(width, width, width, width));
+            instances.push(
+                common::ModelInstance{
+                    model_transform: model_transform.into(),
+                    cell_material_ids: [14; 8],
+                }
+            );
+        }
+
+        if do_floor {
+            let width = 1000.0;
+            let model_transform =
+                translate_matrix_4d(
+                    -width/2.0,
+                    -4.0,
+                    -width/2.0,
+                    -width/2.0)
+                    .dot(&scale_matrix_4d_elementwise(width, 1.0, width, width));
+            instances.push(
+                common::ModelInstance{
+                    model_transform: model_transform.into(),
+                    cell_material_ids: [11; 8],
+                }
+            );
+        }
+
+        for block in blocks {
+            let model_scale = 1.0;
+            let model_transform =
+                translate_matrix_4d(
+                    (block.position[0] as f32 - 0.5)*model_scale,
+                    (block.position[1] as f32 - 0.5)*model_scale,
+                    (block.position[2] as f32 - 0.5)*model_scale,
+                    (block.position[3] as f32 - 0.5)*model_scale)
+                    .dot(&scale_matrix_4d(model_scale));
+            instances.push(
+                common::ModelInstance{
+                    model_transform: model_transform.into(),
+                    cell_material_ids: block.materials,
+                }
+            );
+        }
+
+        let render_options = RenderOptions {
+            do_raster: false,
+            do_raytrace: true,
+            do_edges: false,
+            take_render_screenshot: (self.frame_count%500) == 0,
+            ..Default::default()
+        };
+
+        rcx.render(device, queue, view_matrix, &instances, render_options);
+        self.frame_count += 1;
+    }
+}
+
 
 struct App {
     instance: Arc<Instance>,
     device: Arc<Device>,
     queue: Arc<Queue>,
     rcx: Option<RenderContext>,
-    start_time: Instant,
-    frame_count: u32,
+    demo_scene: DemoScene,
     _callback: Option<DebugUtilsMessenger>
 }
 
 impl App {
     fn new(event_loop: &EventLoop<()>) -> Self {
-        let library = VulkanLibrary::new().unwrap();
-        
-        // The first step of any Vulkan program is to create an instance.
-        //
-        // When we create an instance, we have to pass a list of extensions that we want to enable.
-        //
-        // All the window-drawing functionalities are part of non-core extensions that we need to
-        // enable manually. To do so, we ask `Surface` for the list of extensions required to draw
-        // to a window.
-        let required_extensions = Surface::required_extensions(event_loop).unwrap();
 
-        // Now creating the instance.
-        let instance = Instance::new(
-            library,
-            InstanceCreateInfo {
-                // Enable enumerating devices that use non-conformant Vulkan implementations.
-                // (e.g. MoltenVK)
-                flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
-                enabled_extensions: required_extensions,
-                ..Default::default()
-            },
-        ).unwrap();
+
+        let (instance, device, queue) = vulkan_setup(Some(event_loop));
 
         use vulkano::instance::debug::{
             DebugUtilsMessenger, DebugUtilsMessengerCallback, DebugUtilsMessengerCreateInfo,
@@ -105,128 +421,9 @@ impl App {
                 ),
             ).ok()
         };
-
-        // Choose device extensions that we're going to use. In order to present images to a
-        // surface, we need a `Swapchain`, which is provided by the `khr_swapchain` extension.
-        let device_extensions = DeviceExtensions {
-            khr_swapchain: true,
-            ..DeviceExtensions::empty()
-        };
         
-        let device_features = DeviceFeatures {
-            fill_mode_non_solid: true,
-            vulkan_memory_model: true,
-            variable_pointers: true,
-            variable_pointers_storage_buffer: true,
-            shader_int64: true,
-            .. Default::default()
-        };
-
-        // We then choose which physical device to use. First, we enumerate all the available
-        // physical devices, then apply filters to narrow them down to those that can support our
-        // needs.
-        let (physical_device, queue_family_index) = instance
-            .enumerate_physical_devices()
-            .unwrap()
-            .filter(|p| {
-                // Some devices may not support the extensions or features that your application,
-                // or report properties and limits that are not sufficient for your application.
-                // These should be filtered out here.
-                //p.properties().device_name != "AMD Radeon RX 6900 XT (RADV NAVI21)" &&
-                p.supported_extensions().contains(&device_extensions) &&
-                p.supported_features().contains(&device_features)
-            })
-            .filter_map(|p| {
-                // For each physical device, we try to find a suitable queue family that will
-                // execute our draw commands.
-                //
-                // Devices can provide multiple queues to run commands in parallel (for example a
-                // draw queue and a compute queue), similar to CPU threads. This is
-                // something you have to have to manage manually in Vulkan. Queues
-                // of the same type belong to the same queue family.
-                //
-                // Here, we look for a single queue family that is suitable for our purposes. In a
-                // real-world application, you may want to use a separate dedicated transfer queue
-                // to handle data transfers in parallel with graphics operations.
-                // You may also need a separate queue for compute operations, if
-                // your application uses those.
-                p.queue_family_properties()
-                    .iter()
-                    .enumerate()
-                    .position(|(i, q)| {
-                        // We select a queue family that supports graphics operations. When drawing
-                        // to a window surface, as we do in this example, we also need to check
-                        // that queues in this queue family are capable of presenting images to the
-                        // surface.
-                        q.queue_flags.intersects(QueueFlags::GRAPHICS)
-                            && p.presentation_support(i as u32, event_loop).unwrap()
-                    })
-                    // The code here searches for the first queue family that is suitable. If none
-                    // is found, `None` is returned to `filter_map`, which
-                    // disqualifies this physical device.
-                    .map(|i| (p, i as u32))
-            })
-            // All the physical devices that pass the filters above are suitable for the
-            // application. However, not every device is equal, some are preferred over others.
-            // Now, we assign each physical device a score, and pick the device with the lowest
-            // ("best") score.
-            //
-            // In this example, we simply select the best-scoring device to use in the application.
-            // In a real-world setting, you may want to use the best-scoring device only as a
-            // "default" or "recommended" device, and let the user choose the device themself.
-            .min_by_key(|(p, _)| {
-                // We assign a lower score to device types that are likely to be faster/better.
-                match p.properties().device_type {
-                    PhysicalDeviceType::DiscreteGpu => 0,
-                    PhysicalDeviceType::IntegratedGpu => 1,
-                    PhysicalDeviceType::VirtualGpu => 2,
-                    PhysicalDeviceType::Cpu => 3,
-                    PhysicalDeviceType::Other => 4,
-                    _ => 5,
-                }
-            })
-            .expect("no suitable physical device found");
-
-        // Some little debug infos.
-        println!(
-            "Using device: {} (type: {:?})",
-            physical_device.properties().device_name,
-            physical_device.properties().device_type,
-        );
-
-        // Now initializing the device. This is probably the most important object of Vulkan.
-        //
-        // An iterator of created queues is returned by the function alongside the device.
-        let (device, mut queues) = Device::new(
-            // Which physical device to connect to.
-            physical_device,
-            DeviceCreateInfo {
-                // A list of optional features and extensions that our program needs to work
-                // correctly. Some parts of the Vulkan specs are optional and must be enabled
-                // manually at device creation. In this example the only thing we are going to need
-                // is the `khr_swapchain` extension that allows us to draw to a window.
-                enabled_extensions: device_extensions,
-                
-                enabled_features: device_features,
-
-                // The list of queues that we are going to use. Here we only use one queue, from
-                // the previously chosen queue family.
-                queue_create_infos: vec![QueueCreateInfo {
-                    queue_family_index,
-                    ..Default::default()
-                }],
-
-                ..Default::default()
-            },
-        )
-            .unwrap();
-
-        // Since we can request multiple queues, the `queues` variable is in fact an iterator. We
-        // only use one queue in this example, so we just retrieve the first and only element of
-        // the iterator.
-        let queue = queues.next().unwrap();
-
-
+        let demo_scene = DemoScene::new();
+        
         let rcx = None;
 
         App {
@@ -235,8 +432,7 @@ impl App {
             device,
             queue,
             rcx,
-            start_time: Instant::now(),
-            frame_count: 0,
+            demo_scene
         }
     }
 }
@@ -248,7 +444,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), window, 3840/4, 2160/4));
+        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), Some(window), 3840/4, 2160/4));
     }
 
     fn window_event(
@@ -267,227 +463,7 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                let mut view_matrix = translate_matrix_4d(0.0, 1.0, 15.0, 10.0);
-                
-                let do_spin = false;
-                let do_outer_blocks = true;
-                let do_render_mode = false;
-                let do_floor = true;
-                let do_walls = true;
-                
-                let time_elapsed = if do_render_mode {
-                    self.frame_count as f32/60.0
-                }
-                else {
-                    self.start_time.elapsed().as_secs_f32()
-                };
-                
-                if do_spin {
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*2.0*time_elapsed/20.0));
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/28.0));
-                    view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/38.0));
-                }
-                view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.2));
-
-                let mut instances = Vec::<common::ModelInstance>::new();
-                
-                struct Block {
-                    position: [i32; 4],
-                    materials: [u32; 8]
-                }
-
-                let mut blocks = Vec::<Block>::new();
-                
-                if do_outer_blocks {
-                    let mut texture_rot = 0u32;
-                    for x in 0..2 {
-                        for y in 0..2 {
-                            for z in 0..2 {
-                                for w in 0..2 {
-                                    blocks.push(
-                                        Block{
-                                            position: [x*4 - 2, y*4 - 2, z*4 - 2, w*4 - 2],
-                                            materials: [texture_rot+1; 8]
-                                        }
-                                    );
-                                    texture_rot = (texture_rot + 1)%5;
-                                }
-                            }
-                        }
-                    }
-                }
-
-
-               /* blocks.push(
-                    Block{
-                        position: [0, -2, -1, 0],
-                        materials: [1, 2, 3, 4, 5, 6, 7, 8]
-                    }
-                );*/
-                blocks.push(
-                    Block{
-                        position: [0, 0, 0, 0],
-                        materials: [13; 8]
-                    }
-                );
-                
-                
-                if do_walls {
-                    let wall_offset = 15.0;
-                    let width = 1000.0;
-                    let model_transform =
-                        translate_matrix_4d(
-                            -wall_offset,
-                            -width/2.0,
-                            wall_offset,
-                            -width/2.0)
-                            .dot(&scale_matrix_4d_elementwise(1.0, width, 1.0, width));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );
-                    let model_transform =
-                        translate_matrix_4d(
-                            -wall_offset,
-                            -width/2.0,
-                            -width/2.0,
-                            wall_offset)
-                            .dot(&scale_matrix_4d_elementwise(1.0, width, width, 1.0));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );
-                    let model_transform =
-                        translate_matrix_4d(
-                            -width/2.0,
-                            -width/2.0,
-                            wall_offset,
-                            wall_offset)
-                            .dot(&scale_matrix_4d_elementwise(width, width, 1.0, 1.0));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );
-                    let model_transform =
-                        translate_matrix_4d(
-                            wall_offset,
-                            -width/2.0,
-                            -wall_offset,
-                            -width/2.0)
-                            .dot(&scale_matrix_4d_elementwise(1.0, width, 1.0, width));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );
-                    let model_transform =
-                        translate_matrix_4d(
-                            wall_offset,
-                            -width/2.0,
-                            -width/2.0,
-                            -wall_offset)
-                            .dot(&scale_matrix_4d_elementwise(1.0, width, width, 1.0));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );
-                    let model_transform =
-                        translate_matrix_4d(
-                            -width/2.0,
-                            -width/2.0,
-                            -wall_offset,
-                            -wall_offset)
-                            .dot(&scale_matrix_4d_elementwise(width, width, 1.0, 1.0));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );
-
-                    /*
-                    let model_transform =
-                        translate_matrix_4d(
-                            -width/2.0,
-                            -width/2.0,
-                            10.0,
-                            -width/2.0)
-                            .dot(&scale_matrix_4d_elementwise(width, width, 1.0, width));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );
-                    
-                    let model_transform =
-                        translate_matrix_4d(
-                            -width/2.0,
-                            -width/2.0,
-                            -width/2.0,
-                            10.0,)
-                            .dot(&scale_matrix_4d_elementwise(width, width, width, 1.0));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [14; 8],
-                        }
-                    );*/
-                }
-
-                if do_floor {
-                    let width = 1000.0;
-                    let model_transform =
-                        translate_matrix_4d(
-                            -width/2.0,
-                            -4.0,
-                            -width/2.0,
-                            -width/2.0)
-                            .dot(&scale_matrix_4d_elementwise(width, 1.0, width, width));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: [11; 8],
-                        }
-                    );
-                }
-
-                for block in blocks {
-                    let model_scale = 1.0;
-                    let model_transform = 
-                        translate_matrix_4d(
-                            (block.position[0] as f32 - 0.5)*model_scale,
-                            (block.position[1] as f32 - 0.5)*model_scale,
-                            (block.position[2] as f32 - 0.5)*model_scale,
-                            (block.position[3] as f32 - 0.5)*model_scale)
-                        .dot(&scale_matrix_4d(model_scale));
-                    instances.push(
-                        common::ModelInstance{
-                            model_transform: model_transform.into(),
-                            cell_material_ids: block.materials,
-                        }
-                    );
-                }
-                
-                let render_options = RenderOptions {
-                    do_raster: false,
-                    do_raytrace: true,
-                    do_edges: false,
-                    take_render_screenshot: (self.frame_count%500) == 0,
-                    ..Default::default()
-                };
-                
-                rcx.render(self.device.clone(), self.queue.clone(), view_matrix, &instances, render_options);
-                self.frame_count += 1;
+                self.demo_scene.update(rcx, self.device.clone(), self.queue.clone());
             }
             _ => {}
         }
@@ -495,7 +471,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         let rcx = self.rcx.as_mut().unwrap();
-        rcx.window.request_redraw();
+        rcx.window.clone().unwrap().request_redraw();
     }
 }
 

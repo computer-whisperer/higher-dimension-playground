@@ -21,21 +21,22 @@ impl MaterialProperties {
 }
 
 pub fn sample_material(texture_id: u32, texture_pos: Vec3) -> MaterialProperties {
+    let basic_luminance = 0.01;
     match texture_id {
-        1 => {MaterialProperties::new(vec3(1.0, 0.0, 0.0), 0.0, 0.0, 0.1)}
-        2 => {MaterialProperties::new(vec3(1.0, 0.8, 0.0), 0.0, 0.0, 0.1)}
-        3 => {MaterialProperties::new(vec3(0.5, 1.0, 0.0), 0.0, 0.0, 0.1)}
-        4 => {MaterialProperties::new(vec3(0.0, 1.0, 0.2), 0.0, 0.0, 0.1)}
-        5 => {MaterialProperties::new(vec3(0.0, 1.0, 1.0), 0.0, 0.0, 0.1)}
-        6 => {MaterialProperties::new(vec3(0.0, 0.2, 1.0), 0.0, 0.0, 0.1)}
-        7 => {MaterialProperties::new(vec3(0.5, 0.0, 1.0), 0.0, 0.0, 0.1)}
-        8 => {MaterialProperties::new(vec3(1.0, 0.0, 0.8), 0.0, 0.0, 0.1)}
+        1 => {MaterialProperties::new(vec3(1.0, 0.0, 0.0), 0.0, 0.0, basic_luminance)}
+        2 => {MaterialProperties::new(vec3(1.0, 0.8, 0.0), 0.0, 0.0, basic_luminance)}
+        3 => {MaterialProperties::new(vec3(0.5, 1.0, 0.0), 0.0, 0.0, basic_luminance)}
+        4 => {MaterialProperties::new(vec3(0.0, 1.0, 0.2), 0.0, 0.0, basic_luminance)}
+        5 => {MaterialProperties::new(vec3(0.0, 1.0, 1.0), 0.0, 0.0, basic_luminance)}
+        6 => {MaterialProperties::new(vec3(0.0, 0.2, 1.0), 0.0, 0.0, basic_luminance)}
+        7 => {MaterialProperties::new(vec3(0.5, 0.0, 1.0), 0.0, 0.0, basic_luminance)}
+        8 => {MaterialProperties::new(vec3(1.0, 0.0, 0.8), 0.0, 0.0, basic_luminance)}
         9 => {MaterialProperties::new((texture_pos+vec3(1.0, 1.0, 1.0))/2.0, 0.0, 0.0, 0.0)}
         10 => {MaterialProperties::new(vec3(39.0, 69.0, 19.8)/256.0, 0.0, 0.0, 0.0)}
-        11 => {MaterialProperties::new(vec3(0.1, 0.1, 0.1)*0.4, 0.2, 0.3, 0.0)}
+        11 => {MaterialProperties::new(vec3(0.1, 0.1, 0.1)*0.4, 0.2, 0.3, 0.0)} // Floor
         12 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 0.0, 0.0, 0.0)}
-        13 => {MaterialProperties::new(vec3(0.2, 0.2, 1.0), 0.0, 0.0, 20.0)}
-        14 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 1.0, 0.0, 0.0)}
+        13 => {MaterialProperties::new(vec3(0.2, 0.2, 1.0), 0.0, 0.0, 40.0)} // Center cube
+        14 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 0.9, 0.1, 0.0)} // Mirror walls
         _ => {MaterialProperties::new(vec3(0.0, 0.0, 0.0), 0.0, 0.0, 0.0)}
     }
 

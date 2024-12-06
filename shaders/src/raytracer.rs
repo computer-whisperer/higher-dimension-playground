@@ -133,12 +133,18 @@ impl RayHit {
 }
 
 pub fn rand_unit_vec4(working_value: &mut u64) -> Vec4 {
-    Vec4::new(
-        basic_rand_f32(working_value)-0.5,
-        basic_rand_f32(working_value)-0.5,
-        basic_rand_f32(working_value)-0.5,
-        basic_rand_f32(working_value)-0.5
-    ).normalize()
+    loop {
+        let value = Vec4::new(
+            basic_rand_f32(working_value)-0.5,
+            basic_rand_f32(working_value)-0.5,
+            basic_rand_f32(working_value)-0.5,
+            basic_rand_f32(working_value)-0.5
+        );
+        if value.length() > 1.0 {
+            continue; // We're dealing with a unit vector, so continue
+        }
+        break value.normalize();
+    }
 }
 
 
@@ -277,7 +283,7 @@ fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahed
         }
         else {
             let a = 0.5*(direction.y + 1.0);
-            light_value = ((1.0 - a)*Vec3::new(1.0, 1.0, 1.0) + a*Vec3::new(0.5, 0.7, 1.0))*0.002;
+            light_value = ((1.0 - a)*Vec3::new(1.0, 1.0, 1.0) + a*Vec3::new(0.5, 0.7, 1.0))*0.01;
         }
     }
     
@@ -316,8 +322,8 @@ pub fn main_raytracer_pixel_cs(
             (global_invocation_id.x as u64) + (global_invocation_id.y as u64*working_data.render_dimensions.x as u64));
 
     // RNG prime
-    for _ in 0..40 {
-        //basic_rand(&mut rng_state);
+    for _ in 0..20 {
+        basic_rand(&mut rng_state);
     }
     
     //let view_origin = Vec4::ZERO;
@@ -328,12 +334,7 @@ pub fn main_raytracer_pixel_cs(
     let aspect_ratio = working_data.present_dimensions.x as f32 / working_data.present_dimensions.y as f32;
 
     let aa_noise = if false {
-        Vec4::new(
-            (basic_rand_f32(&mut rng_state)-0.5)*0.01,
-            (basic_rand_f32(&mut rng_state)-0.5)*0.01,
-            (basic_rand_f32(&mut rng_state)-0.5)*0.01,
-            (basic_rand_f32(&mut rng_state)-0.5)*0.01
-        )
+        rand_unit_vec4(&mut rng_state) * 0.0005
     }
     else {
         Vec4::ZERO

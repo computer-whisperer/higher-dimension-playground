@@ -42,8 +42,10 @@ pub fn main_line_fs(output: &mut glam::Vec4) {
     *output = glam::vec4(0.0, 0.0, 1.0, 1.0);
 }
 
-fn exposure_adjust(value: f32) -> f32 {
-    (value).powf(0.4)
+fn linear_to_gamma(value: f32) -> f32 {
+    // Apply gamma correction
+    let gamma = 2.2;
+    value.powf(1.0/gamma)
 }
 
 #[spirv(fragment)]
@@ -65,9 +67,9 @@ pub fn main_buffer_fs(
     let mut cs_result = pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize];
     
     let cs_result_adjusted = Vec4::new(
-        exposure_adjust(cs_result[0]/cs_result[3]),
-        exposure_adjust(cs_result[1]/cs_result[3]),
-        exposure_adjust(cs_result[2]/cs_result[3]),
+        linear_to_gamma(cs_result[0]/cs_result[3]),
+        linear_to_gamma(cs_result[1]/cs_result[3]),
+        linear_to_gamma(cs_result[2]/cs_result[3]),
         1.0
     );
     
