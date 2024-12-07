@@ -141,15 +141,55 @@ const fn next_permutation(perm: &mut [usize]) -> bool {
     true
 }
 
-// Output value in range [0, 0xFFFFFF]
-pub fn basic_rand(working_value: &mut u64) -> u32 {
-    *working_value = (6364136223846793005* *working_value+1442695040888963407);
-    (*working_value >> 16) as u32
+const PCG32_DEFAULT_STATE: u64 =  0x853c49e6748fea9b; 
+const PCG32_DEFAULT_STREAM: u64 = 0xda3e39cb94b95bdb;
+const PCG32_MULT: u64 =        0x5851f42d4c957f2d;
+
+pub struct BasicRNG {
+    state: u64,
+    inc: u64,
 }
 
-pub fn basic_rand_f32(working_value: &mut u64) -> f32 {
-    basic_rand(working_value) as f32 / 0xFFFFFFFFu32 as f32
+impl BasicRNG {
+    pub fn new(stream: u64) -> Self {
+        Self { 
+            state: PCG32_DEFAULT_STATE,
+            inc: stream
+        }
+    }
+
+    // Output value in range [0, 0xFFFFFFFF]
+    pub fn rand(&mut self) -> u32 {
+        let oldstate = self.state;
+        self.state = oldstate.wrapping_mul(PCG32_MULT).wrapping_add(self.inc);
+        let xorshifted: u32 =  (((oldstate >> 18) ^ oldstate) >> 27) as u32;
+        let rot: u32 = (oldstate >> 59) as u32;
+        (xorshifted >> rot) | (xorshifted << (((!rot).wrapping_add(1)) & 31))
+    }
+    
+    pub fn rand_f32(&mut self) -> f32 {
+        let r = self.rand();
+        r as f32 / 0xFFFFFFFFu32 as f32
+    }
+    
+    pub fn rand_vec4(&mut self) -> Vec4 {
+        loop {
+            let value = Vec4::new(
+                self.rand_f32()-0.5,
+                self.rand_f32()-0.5,
+                self.rand_f32()-0.5,
+                self.rand_f32()-0.5
+            );
+            if value.length() > 1.0 {
+                continue; // We're dealing with a unit vector, so continue
+            }
+            break value.normalize();
+        }
+    }
 }
+
+
+
 
 #[cfg(test)]
 mod tests {

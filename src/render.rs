@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::f32::consts::PI;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use winit::window::Window;
@@ -24,17 +23,16 @@ use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
 use vulkano::shader::{ShaderModule, ShaderStages};
 use vulkano::{sync, Validated, VulkanError};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::sync::GpuFuture;
 use bytemuck::{Zeroable};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
-use common::{get_normal, ModelTetrahedron, VecN};
+use common::{get_normal, ModelTetrahedron};
 use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
 use glam::{Vec4, Vec2, UVec3};
 use image::{ImageBuffer, Rgb, Rgba};
-use vulkano::format::ClearColorValue;
-use vulkano::format::Format::{R16G16B16A16_UNORM, R8G8B8A8_UNORM};
+use vulkano::format::Format::{R8G8B8A8_UNORM};
 use winit::dpi::PhysicalSize;
 
 pub struct RenderOptions {
@@ -44,7 +42,7 @@ pub struct RenderOptions {
     pub do_edges: bool,
     pub do_tetrahedron_edges: bool,
     pub take_framebuffer_screenshot: bool,
-    pub take_render_screenshot: bool
+    pub prepare_render_screenshot: bool
 }
 
 impl Default for RenderOptions {
@@ -56,7 +54,7 @@ impl Default for RenderOptions {
             do_edges: false,
             do_tetrahedron_edges: false,
             take_framebuffer_screenshot: false,
-            take_render_screenshot: false,
+            prepare_render_screenshot: false,
         }
     }
 }
@@ -650,8 +648,8 @@ impl RenderContext {
             Default::default(),
         ));
 
-        
-        
+
+
         let (surface, window_size) = match window.clone() {
             Some(window) => (Some(Surface::from_window(instance.clone(), window.clone()).unwrap()), window.inner_size()),
             None => (None, PhysicalSize{ width: render_width, height: render_height }),
@@ -675,8 +673,8 @@ impl RenderContext {
                     .surface_formats(&surface, Default::default())
                     .unwrap();
 
-                //let image_format = image_formats[0].0;
-                let image_format = R8G8B8A8_UNORM;
+                let image_format = image_formats[0].0;
+                //let image_format = R8G8B8A8_UNORM;
                 // Please take a look at the docs for the meaning of the parameters we didn't mention.
                 let (swapchain, images) = Swapchain::new(
                     device.clone(),
@@ -736,7 +734,7 @@ impl RenderContext {
                 root_path_env: "SPIRV_OUT_DIR"
             }
         }
-        
+
         let render_pass = match swapchain.clone() {
             Some(swapchain) => {
                     // The next step is to create a *render pass*, which is an object that describes where the
@@ -825,7 +823,7 @@ impl RenderContext {
         
 
         let loaded_shader = shader_loader::load(device.clone()).unwrap();
-        
+
         let present_pipeline = match render_pass.clone() {
             Some(render_pass) => {
                 Some(PresentPipelineContext::new(device.clone(), render_pass.clone(), loaded_shader.clone(), pipeline_layout.clone()))
@@ -888,8 +886,8 @@ impl RenderContext {
         self.recreate_swapchain = true;
     }
     
-    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, model_instances: &[common::ModelInstance], render_options: RenderOptions) {
-        
+    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, focal_length: f32, model_instances: &[common::ModelInstance], render_options: RenderOptions) {
+
         let view_matrix_view = view_matrix.into_owned();
 
         let slice = view_matrix_view.view().to_slice().unwrap();
@@ -908,7 +906,7 @@ impl RenderContext {
             }
             None => {}
         };
-        
+
 
         
         if self.previous_frame_end.is_some() {
@@ -974,7 +972,7 @@ impl RenderContext {
             };
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
             writer.raytrace_seed = 6364136223846793005u64.wrapping_mul(self.frames_rendered as u64).wrapping_add(1442695040888963407);
-            writer.focal_length = 1.0;
+            writer.focal_length = focal_length;
             // writer.total_num_tetrahedrons = 1;
             writer.shader_fault = 0;
         }
@@ -1004,9 +1002,9 @@ impl RenderContext {
             CommandBufferUsage::OneTimeSubmit,
         ).unwrap();
 
-        
+
         let (image_index, acquire_future) = match self.swapchain.clone() {
-            Some(swapchain) => { 
+            Some(swapchain) => {
                 let (image_index, suboptimal, acquire_future) = match acquire_next_image(
                     swapchain.clone(),
                     None,
@@ -1032,7 +1030,7 @@ impl RenderContext {
             }
             None => (None, None)
         };
-        
+
         let cpu_mode = false;
         
         if cpu_mode {
@@ -1109,7 +1107,7 @@ impl RenderContext {
 
             if render_options.do_raster { // Tetrahedron pixel raster
                 builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone()).unwrap();
-                unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
+                unsafe {builder.dispatch([(self.sized_buffers.render_dimensions[0]+7)/8, (self.sized_buffers.render_dimensions[1]+7)/8, 1])}.unwrap() ; // Do compute stage
             }
 
             if render_options.do_edges || render_options.do_tetrahedron_edges {   // Tetrahedron edge pre-raster
@@ -1125,11 +1123,11 @@ impl RenderContext {
                 unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
                 builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone()).unwrap();
-                unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ;
+                unsafe {builder.dispatch([(self.sized_buffers.render_dimensions[0]+7)/8, (self.sized_buffers.render_dimensions[1]+7)/8, 1])}.unwrap() ;
             }
         }
 
-        
+
         if let Some(image_index) = image_index {
             if let Some(framebuffers) = self.framebuffers.clone() {
                 if let Some(present_pipeline) = self.present_pipeline.as_ref() {
@@ -1198,9 +1196,9 @@ impl RenderContext {
 
             }
         }
-        
 
-        if render_options.take_render_screenshot {
+
+        if render_options.prepare_render_screenshot {
             builder
                 .copy_buffer(CopyBufferInfo::buffers(
                     self.sized_buffers.output_pixel_buffer.clone(),
@@ -1221,8 +1219,8 @@ impl RenderContext {
             }
         };
         self.previous_frame_end = None;
-        
-        let future = match acquire_future {
+
+        match acquire_future {
             Some(acquire_future) => {
                 let future = frame_end
                     .join(acquire_future)
@@ -1307,35 +1305,34 @@ impl RenderContext {
             }
         }
 
-        if render_options.take_render_screenshot {
-            if self.previous_frame_end.is_some() {
-                let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
-                fence.wait(None).unwrap();
-                self.previous_frame_end = None;
-            }
+        self.frames_rendered += 1;
+    }
 
-            let result = self.sized_buffers.output_cpu_pixel_buffer.read();
-            match result {
-                Ok(buffer_content) => {
-                    let screenshot_path = format!("frames/render_{}.webp", self.frames_rendered);
-                    let mut transformed_pixels = Vec::<u8>::new();
-                    // Divide by w
-                    for i in 0..(self.sized_buffers.render_dimensions[0]*self.sized_buffers.render_dimensions[1]) as usize {
-                        transformed_pixels.push(((buffer_content[i].x/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
-                        transformed_pixels.push(((buffer_content[i].y/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
-                        transformed_pixels.push(((buffer_content[i].z/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
-                    }
-                    let image = ImageBuffer::<Rgb<u8>, _>::from_raw(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1], &transformed_pixels[..]).unwrap();
-                    image.save(screenshot_path.clone()).unwrap();
-                    println!("Saved screenshot to {}", screenshot_path);
-                }
-                Err(error) => {
-                    eprintln!("Error saving screenshot: {:?}", error);
-                }
-            };
+    pub fn save_rendered_frame(&mut self, path: &str) {
+        if self.previous_frame_end.is_some() {
+            let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+            fence.wait(None).unwrap();
+            self.previous_frame_end = None;
         }
 
-        self.frames_rendered += 1;
+        let result = self.sized_buffers.output_cpu_pixel_buffer.read();
+        match result {
+            Ok(buffer_content) => {
+                let mut transformed_pixels = Vec::<u8>::new();
+                // Divide by w
+                for i in 0..(self.sized_buffers.render_dimensions[0]*self.sized_buffers.render_dimensions[1]) as usize {
+                    transformed_pixels.push(((buffer_content[i].x/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
+                    transformed_pixels.push(((buffer_content[i].y/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
+                    transformed_pixels.push(((buffer_content[i].z/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
+                }
+                let image = ImageBuffer::<Rgb<u8>, _>::from_raw(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1], &transformed_pixels[..]).unwrap();
+                image.save(path).unwrap();
+                println!("Saved screenshot to {}", path);
+            }
+            Err(error) => {
+                eprintln!("Error saving screenshot: {:?}", error);
+            }
+        };
     }
 }
 

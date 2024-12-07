@@ -15,7 +15,7 @@ use glam::{Vec4, UVec2};
 pub use matmul_5_gpu::{Mat5GPU, Vec5GPU};
 pub use utils::{factorial, binomial, generate_combinations, generate_permutations};
 pub use linalg_n::*;
-pub use utils::{basic_rand, basic_rand_f32};
+pub use utils::{BasicRNG};
 use bytemuck::{Pod, Zeroable};
 
 #[derive(Copy, Clone, Pod, Zeroable)]

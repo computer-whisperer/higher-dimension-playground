@@ -1,6 +1,6 @@
 
 use spirv_std::spirv;
-use common::{Tetrahedron, WorkingData, ModelInstance, ModelTetrahedron, Vec5GPU, VecN, get_normal, get_pseudo_barycentric, basic_rand, basic_rand_f32};
+use common::{Tetrahedron, WorkingData, ModelInstance, ModelTetrahedron, Vec5GPU, VecN, get_normal, get_pseudo_barycentric, BasicRNG};
 use glam::{Vec4, UVec3, Vec2, Vec3Swizzles, Vec4Swizzles, Mat4, Vec3};
 use bytemuck::{Pod, Zeroable};
 
@@ -132,22 +132,6 @@ impl RayHit {
     };
 }
 
-pub fn rand_unit_vec4(working_value: &mut u64) -> Vec4 {
-    loop {
-        let value = Vec4::new(
-            basic_rand_f32(working_value)-0.5,
-            basic_rand_f32(working_value)-0.5,
-            basic_rand_f32(working_value)-0.5,
-            basic_rand_f32(working_value)-0.5
-        );
-        if value.length() > 1.0 {
-            continue; // We're dealing with a unit vector, so continue
-        }
-        break value.normalize();
-    }
-}
-
-
 fn raycast(start: Vec4, direction: Vec4, tetrahedrons: &[Tetrahedron], num_tetrahedrons: usize) -> RayHit {
     
     let direction = direction.normalize();
@@ -169,9 +153,7 @@ fn raycast(start: Vec4, direction: Vec4, tetrahedrons: &[Tetrahedron], num_tetra
         /*
         let intercept_distance = tetrahedrons[i].normal.dot(tetrahedrons[i].vertex_positions[0] - start)/value;
         
-        if closest_hit.tetrahedron_index < num_tetrahedrons as u32 && closest_hit.hit_distance < intercept_distance {
-            continue;
-        }
+
         
         let vecn_positions: [VecN::<4>; 4] = [
             tetrahedrons[i].vertex_positions[0].into(),
@@ -203,24 +185,26 @@ fn raycast(start: Vec4, direction: Vec4, tetrahedrons: &[Tetrahedron], num_tetra
         let hit_position = hit_distance*direction + start;
 
         if hit_distance > 0.0 && barycentric.x >= 0.0 && barycentric.y >= 0.0 && barycentric.z >= 0.0 && barycentric.w >= 0.0 {
-            let hit_normal = if tetrahedrons[i].normal.dot(direction) < 0.0 {
-                tetrahedrons[i].normal
-            }
-            else {
-                -tetrahedrons[i].normal
-            };
+            if closest_hit.did_hit == 0 || closest_hit.hit_distance > hit_distance {
+                let hit_normal = if tetrahedrons[i].normal.dot(direction) < 0.0 {
+                    tetrahedrons[i].normal
+                }
+                else {
+                    -tetrahedrons[i].normal
+                };
 
-            // We already filtered for distance, so go straight to processing
-            closest_hit = RayHit {
-                tetrahedron_index: i as u32,
-                hit_position,
-                hit_distance,
-                barycentric,
-                hit_normal,
-                texture_coordinates: Vec4::ZERO,
-                did_hit: 1,
-                padding: [0; 1]
-            };
+                // We already filtered for distance, so go straight to processing
+                closest_hit = RayHit {
+                    tetrahedron_index: i as u32,
+                    hit_position,
+                    hit_distance,
+                    barycentric,
+                    hit_normal,
+                    texture_coordinates: Vec4::ZERO,
+                    did_hit: 1,
+                    padding: [0; 1]
+                };
+            }
         }
     }
 
@@ -236,7 +220,7 @@ fn raycast(start: Vec4, direction: Vec4, tetrahedrons: &[Tetrahedron], num_tetra
     closest_hit
 }
 
-fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahedron], num_tetrahedrons: usize, rng_state: &mut u64) -> Vec4 {
+fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahedron], num_tetrahedrons: usize, rng: &mut BasicRNG) -> Vec4 {
 
     direction = direction.normalize();
     
@@ -258,13 +242,16 @@ fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahed
             
             let reflection_vector = direction - 2.0*direction.dot(ray_hit.hit_normal)*ray_hit.hit_normal;
             
-            if basic_rand_f32(rng_state) < material.metallic {
+            if rng.rand_f32() < material.metallic {
                 direction = reflection_vector;
             }
             else {
-                direction = (rand_unit_vec4(rng_state) + ray_hit.hit_normal).normalize();
+                direction = (rng.rand_vec4() + ray_hit.hit_normal).normalize();
             }
-            start = ray_hit.hit_position + 0.001*direction + rand_unit_vec4(rng_state)*material.roughness*0.5;
+            direction += rng.rand_vec4()*material.roughness*0.01;
+            direction = direction.normalize();
+            
+            start = ray_hit.hit_position + 0.001*direction;
 
             hit_stack[num_hits] = ray_hit;
             num_hits += 1;
@@ -275,27 +262,27 @@ fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahed
     }
 
     let mut light_value = Vec3::ZERO;
-    let background_light_direction = Vec4::new(0.0, 1.0, -0.3, 0.0).normalize();
-    if num_hits < 4 {
+    let background_light_direction = Vec4::new(0.3, 1.0, -0.3, 0.0).normalize();
+    if num_hits < hit_stack.len() {
         // We must have hit the sky
         if direction.dot(background_light_direction) > 0.95 {
-            light_value = Vec3::new(1.0, 1.0, 1.0)*0.0;
+            light_value = Vec3::new(1.0, 1.0, 1.0)*1.0;
         }
         else {
             let a = 0.5*(direction.y + 1.0);
-            light_value = ((1.0 - a)*Vec3::new(1.0, 1.0, 1.0) + a*Vec3::new(0.5, 0.7, 1.0))*0.01;
+                light_value = ((1.0 - a)*Vec3::new(0.8, 0.8, 1.0) + a*Vec3::new(0.2, 0.4, 1.0))*0.2;
         }
     }
     
     if num_hits == 0 {
-        //light_value = light_value*0.8;
+        light_value = light_value*0.0;
     }
 
     for i in 0..num_hits {
         let hit = hit_stack[num_hits - i - 1];
         let material = sample_material(tetrahedrons[hit.tetrahedron_index as usize].material_id, hit.texture_coordinates.xyz());
 
-        light_value = light_value*0.9*material.albedo.xyz() + (material.luminance + 0.00)*material.albedo.xyz();
+        light_value = light_value*material.albedo.xyz() + (material.luminance + 0.00)*material.albedo.xyz();
     }
 
     Vec4::new(light_value.x, light_value.y, light_value.z, 1.0)
@@ -317,24 +304,26 @@ pub fn main_raytracer_pixel_cs(
     let mut output_pixel = Vec4::new(0.0, 0.0, 0.0, 1.0);
 
 
-    let mut rng_state: u64 =
-        (working_data.raytrace_seed*(working_data.render_dimensions.x as u64)*(working_data.render_dimensions.y as u64) +
+    let mut rng = BasicRNG::new(
+        working_data.raytrace_seed.wrapping_mul(working_data.render_dimensions.x as u64).wrapping_mul(working_data.render_dimensions.y as u64) +
             (global_invocation_id.x as u64) + (global_invocation_id.y as u64*working_data.render_dimensions.x as u64));
-
+    
     // RNG prime
-    for _ in 0..20 {
-        basic_rand(&mut rng_state);
+    for _ in 0..30 {
+        rng.rand();
+    }
+    for _ in 0..30 {
+        let result = rng.rand();
+        if result%3 == 0 {
+            break;
+        }
     }
     
-    //let view_origin = Vec4::ZERO;
-    //let view_direction = Vec4::new(pixel_pos.x*1.0, pixel_pos.y*1.0, 1.0, 0.0).normalize();
     
-
-    //pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = Vec4::ZERO;
     let aspect_ratio = working_data.present_dimensions.x as f32 / working_data.present_dimensions.y as f32;
 
     let aa_noise = if false {
-        rand_unit_vec4(&mut rng_state) * 0.0005
+        rng.rand_vec4() * 0.0005
     }
     else {
         Vec4::ZERO
@@ -342,13 +331,13 @@ pub fn main_raytracer_pixel_cs(
     
     for i in 0..1 {
         let pi = 3.14159;
-        let view_angle = (pi/2.0)/working_data.focal_length;
-        let zw_angle = (basic_rand_f32(&mut rng_state)-0.5) * view_angle;
+        let view_angle = (pi/2.0)/(working_data.focal_length) + (pi/4.0);
+        let zw_angle = (rng.rand_f32()-0.5) * view_angle;
 
         let view_origin = Vec4::new(0.0, 0.0, 0.0, 0.0);
         let view_direction = aa_noise + Vec4::new(
             pixel_pos.x/working_data.focal_length,
-            (pixel_pos.y/aspect_ratio)/working_data.focal_length,
+            (-pixel_pos.y/aspect_ratio)/working_data.focal_length,
             zw_angle.cos(),
             zw_angle.sin()).normalize();
 
@@ -358,9 +347,9 @@ pub fn main_raytracer_pixel_cs(
         let view_origin = Vec4::new(new_view_origin.x(), new_view_origin.y(), new_view_origin.z(), new_view_origin.w());
         let mut view_direction = Vec4::new(new_view_direction.x(), new_view_direction.y(), new_view_direction.z(), new_view_direction.w()) - view_origin;
         
-        view_direction.y = -view_direction.y;
+        //view_direction.y = -view_direction.y;
 
-        let output_pixel = raycast_sample(view_origin, view_direction, &input_tetrahedrons, working_data.total_num_tetrahedrons as usize, &mut rng_state);
+        let output_pixel = raycast_sample(view_origin, view_direction, &input_tetrahedrons, working_data.total_num_tetrahedrons as usize, &mut rng);
 
         if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {
             pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] += output_pixel;

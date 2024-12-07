@@ -14,31 +14,12 @@ use std::{error::Error, sync::Arc};
 use std::default::Default;
 use std::f32::consts::PI;
 use std::time::Instant;
-use vulkano::{buffer::{Buffer, BufferContents}, command_buffer::{
-    allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
-    RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
-}, device::{
+use vulkano::{device::{
     physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, Queue,
     QueueCreateInfo, QueueFlags,
-}, image::{view::ImageView, Image, ImageUsage}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator}, pipeline::{
-    graphics::{
-        color_blend::{ColorBlendAttachmentState, ColorBlendState},
-        input_assembly::InputAssemblyState,
-        multisample::MultisampleState,
-        rasterization::RasterizationState,
-        vertex_input::{Vertex, VertexDefinition},
-        viewport::{Viewport, ViewportState},
-        GraphicsPipelineCreateInfo,
-    }
-    ,
-    DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
-}, render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}, swapchain::{
-    acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
-}, sync::{self, GpuFuture}, Validated, VulkanError, VulkanLibrary};
+}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, swapchain::{Surface},VulkanLibrary};
 use vulkano::device::DeviceFeatures;
-use vulkano::instance::debug::{DebugUtilsMessenger, DebugUtilsMessengerCallback};
-use vulkano::pipeline::PipelineBindPoint;
-use vulkano::shader::ShaderStages;
+use vulkano::instance::debug::{DebugUtilsMessenger};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -47,8 +28,7 @@ use winit::{
 };
 use render::RenderContext;
 use clap::Parser;
-use vulkano::instance::InstanceExtensions;
-use crate::matrix_operations::{rotation_matrix_4d_rotate_1, rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
+use crate::matrix_operations::{rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
 use crate::render::RenderOptions;
 
 #[derive(Parser, Debug)]
@@ -60,7 +40,7 @@ struct Args {
 
 fn main() -> Result<(), impl Error> {
     let args = Args::parse();
-    
+
     if args.headless {
         run_headless();
         Ok(())
@@ -71,8 +51,6 @@ fn main() -> Result<(), impl Error> {
 
         event_loop.run_app(&mut app)
     }
-    
-
 }
 
 fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Device>, Arc<Queue>) {
@@ -238,9 +216,9 @@ fn run_headless() {
     let (instance, device, queue) = vulkan_setup(None);
 
     let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, 3840/4, 2160/4);
-    
+
     let mut demo_scene = DemoScene::new();
-    
+
     loop {
         demo_scene.update(&mut rcx, device.clone(), queue.clone());
     }
@@ -248,40 +226,54 @@ fn run_headless() {
 
 struct DemoScene {
     start_time: Instant,
-    frame_count: u32
+    frame_num: u32,
+    sub_frame_num: u32
 }
 
 impl DemoScene {
     fn new() -> DemoScene {
         DemoScene {
             start_time: Instant::now(),
-            frame_count: 0
+            frame_num: 0,
+            sub_frame_num: 0
         }
     }
-    
-    fn update(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
-        let mut view_matrix = translate_matrix_4d(0.0, 1.0, 11.0, 11.0);
 
-        let do_spin = false;
+    fn update(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
+        let mut view_matrix = translate_matrix_4d(0.0, 0.0, 12.0, 12.0);
+
+        let do_raytrace = true;
+        let do_edges = false;
+        let do_raster = false;
+
+        let do_animation = false;
+
+        let do_frame_export = true;
+
+        let frame_time_hz = 60.0;
+        let do_spin = true;
+
         let do_outer_blocks = true;
-        let do_render_mode = false;
         let do_floor = true;
         let do_walls = true;
 
-        let time_elapsed = if do_render_mode {
-            self.frame_count as f32/60.0
+        let sub_frames_per_frame = if do_raytrace {
+            2000
         }
         else {
-            self.start_time.elapsed().as_secs_f32()
+            1
         };
+        let sub_frames_per_export = 500;
+
+        let time_elapsed = self.frame_num as f32/frame_time_hz;
 
         if do_spin {
-            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*2.0*time_elapsed/20.0));
-            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*2.0*time_elapsed/28.0));
-            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/38.0));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.25 + PI*2.0*time_elapsed/30.0));
+            //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*0.25 + PI*2.0*time_elapsed/30.0));
+            //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/30.0));
         }
-        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.25));
-        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.25));
+        //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, -PI*0.125));
+        //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.125));
 
         let mut instances = Vec::<common::ModelInstance>::new();
 
@@ -379,15 +371,26 @@ impl DemoScene {
         }
 
         let render_options = RenderOptions {
-            do_raster: false,
-            do_raytrace: true,
-            do_edges: false,
-            take_render_screenshot: (self.frame_count%500) == 0,
+            do_frame_clear: do_raytrace && self.sub_frame_num == 0,
+            do_raster,
+            do_raytrace,
+            do_edges,
+            prepare_render_screenshot: do_frame_export && ((self.sub_frame_num+1) % sub_frames_per_export == 0),
             ..Default::default()
         };
 
-        rcx.render(device, queue, view_matrix, &instances, render_options);
-        self.frame_count += 1;
+        rcx.render(device, queue, view_matrix, 1.0, &instances, render_options);
+
+        self.sub_frame_num += 1;
+
+        if do_frame_export && (self.sub_frame_num % sub_frames_per_export == 0){
+            rcx.save_rendered_frame(&format!("frames/render_{}_{}.webp", self.frame_num, self.sub_frame_num))
+        }
+
+        if do_animation && self.sub_frame_num >= sub_frames_per_frame {
+            self.sub_frame_num = 0;
+            self.frame_num += 1;
+        }
     }
 }
 
@@ -415,15 +418,15 @@ impl App {
             DebugUtilsMessenger::new(
                 instance.clone(),
                 DebugUtilsMessengerCreateInfo::user_callback(
-                    DebugUtilsMessengerCallback::new(|message_severity, message_type, callback_data| {
+                    DebugUtilsMessengerCallback::new(|_message_severity, _message_type, callback_data| {
                         println!("Debug callback: {:?}", callback_data.message);
                     }),
                 ),
             ).ok()
         };
-        
+
         let demo_scene = DemoScene::new();
-        
+
         let rcx = None;
 
         App {
