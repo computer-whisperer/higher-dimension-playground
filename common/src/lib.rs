@@ -7,12 +7,14 @@
 #![feature(effects)]
 #![feature(const_mut_refs)]
 
-mod matmul_5_gpu;
 mod utils;
 mod linalg_n;
+mod vec_n;
+mod mat_n;
 
-use glam::{Vec4, UVec2};
-pub use matmul_5_gpu::{Mat5GPU, Vec5GPU};
+use glam::{Vec4, UVec2, UVec4};
+pub use vec_n::VecN;
+pub use mat_n::MatN;
 pub use utils::{factorial, binomial, generate_combinations, generate_permutations};
 pub use linalg_n::*;
 pub use utils::{BasicRNG};
@@ -47,20 +49,21 @@ pub struct ModelEdge {
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct ModelInstance {
-    pub model_transform: Mat5GPU,
+    pub model_transform: MatN::<5>,
     pub cell_material_ids: [u32; 8],
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct WorkingData {
-    pub view_matrix: Mat5GPU,
-    pub view_matrix_inverse: Mat5GPU,
-    pub render_dimensions: UVec2,
+    pub render_dimensions: UVec4,
     pub present_dimensions: UVec2,
     pub raytrace_seed: u64,
+    pub view_matrix: MatN::<5>,
+    pub view_matrix_inverse: MatN::<5>,
     pub total_num_tetrahedrons: u32,
     pub shader_fault: u32,
-    pub focal_length: f32,
-    pub padding: [u32; 3]
+    pub focal_length_xy: f32,
+    pub focal_length_zw: f32,
+    pub padding: [u32; 2]
 }

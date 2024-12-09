@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tesseract
+  annotations:
+    k8s.v1.cni.cncf.io/networks: mainnet-vlan
+spec:
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: tesseract
+      image: registry.cjbal.com/tesseract
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      command: [/bin/sh, -c, "cargo run -- --headless"]
+      volumeMounts:
+        - name: output
+          mountPath: /usr/src/tesseract/frames
+  volumes:
+    - name: output
+      hostPath:
+        path: /ceph-fuse/christian/Documents/tesseract_images

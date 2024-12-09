@@ -1,5 +1,5 @@
 use glam::{UVec3, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
-use common::{get_normal, ModelEdge, ModelInstance, ModelTetrahedron, Tetrahedron, Vec5GPU, WorkingData};
+use common::{get_normal, ModelEdge, ModelInstance, ModelTetrahedron, Tetrahedron, WorkingData, VecN, PlaneN};
 use spirv_std::spirv;
 use bytemuck::{Pod, Zeroable};
 use crate::materials::sample_material;
@@ -46,7 +46,7 @@ fn sample_texture_integral(line: ZWLine, working_data: &WorkingData) -> Vec3 {
 
 
 struct CSVertexShaderOutput {
-    vertex_position: Vec5GPU,
+    vertex_position: VecN::<5>,
     texture_position: Vec4
 }
 
@@ -57,7 +57,7 @@ fn cs_vertex_shader(
     working_data: &WorkingData
 ) -> CSVertexShaderOutput {
 
-    let vertex_position = Vec5GPU::from_4_and_1(vertex_position, 1.0);
+    let vertex_position = VecN::<5>::new([vertex_position.x, vertex_position.y, vertex_position.z, vertex_position.w, 1.0]);
 
     let view_position = working_data.view_matrix * instance.model_transform * vertex_position;
     
@@ -70,15 +70,15 @@ fn cs_vertex_shader(
     //let theta = (f32::atan2(view_position.z(), view_position.w())/3.14159)/2.0;
     let depth = f32::sqrt(view_position.z()*view_position.z() + view_position.w()*view_position.w());
     //let depth = view_position.z() + view_position.w();
-    let projection_divisor = depth/working_data.focal_length;
+    let projection_divisor = depth/working_data.focal_length_xy;
     //let projection_divisor = 1.0;
 
-    let vertex_position = Vec5GPU::new(
+    let vertex_position = VecN::<5>::new([
         view_position.x(),
         aspect_ratio * (-view_position.y()),
         view_position.z(),
         view_position.w(),
-        projection_divisor
+        projection_divisor]
     );
 
     CSVertexShaderOutput {
@@ -87,7 +87,7 @@ fn cs_vertex_shader(
     }
 }
 
-fn project_4d_vertex(v: Vec5GPU) -> Vec4 {
+fn project_4d_vertex(v: VecN::<5>) -> Vec4 {
     Vec4::new(v.x()/v.v(), v.y()/v.v(), v.z(), v.w())
     //Vec4::new(v.x(), v.y(), v.z(), v.w())
 }
@@ -113,10 +113,10 @@ pub fn main_tetrahedron_cs(
     let texture_id = input_instance.cell_material_ids[input_tetrahedron.cell_id as usize];
 
     let mut output_vertex_positions = [
-        Vec5GPU::zero(),
-        Vec5GPU::zero(),
-        Vec5GPU::zero(),
-        Vec5GPU::zero()
+        VecN::<5>::ZERO,
+        VecN::<5>::ZERO,
+        VecN::<5>::ZERO,
+        VecN::<5>::ZERO
     ];
     let mut output_texture_positions = [
         Vec4::ZERO,
@@ -206,6 +206,51 @@ pub fn main_tetrahedron_cs(
     output_line_vertices[(output_index*12) + 11] = line_vertices[3];
 }
 
+pub fn clip_line_to_frustum(points: [VecN::<4>; 2], focal_length_xy: f32, focal_length_zw: f32) -> [VecN::<4>; 2] {
+    let near_plane = PlaneN::<4>::new([
+        VecN::<4>::new([1.0, 1.0, 0.1, 0.1]),
+        VecN::<4>::new([1.0, -1.0, 0.1, 0.1]),
+        VecN::<4>::new([-1.0, 1.0, 0.1, 0.1]),
+        VecN::<4>::new([1.0, 1.0, 1.1, -0.9])
+    ]);
+    let points = near_plane.clip_line(points);
+    
+    let top_plane = PlaneN::<4>::new([
+        VecN::<4>::new([0.0, 0.0, 0.0, 0.0]),
+        VecN::<4>::new([1.0, 1.0, 1.0, 1.0]),
+        VecN::<4>::new([-1.0, 1.0, 1.0, 1.0]),
+        VecN::<4>::new([0.0, 0.0, -1.0, 1.0])
+    ]);
+    let points = top_plane.clip_line(points);
+    
+    let bottom_plane = PlaneN::<4>::new([
+        VecN::<4>::new([0.0, 0.0, 0.0, 0.0]),
+        VecN::<4>::new([1.0, -1.0, 1.0, 1.0]),
+        VecN::<4>::new([-1.0, -1.0, 1.0, 1.0]),
+        VecN::<4>::new([0.0, 0.0, 1.0, -1.0])
+    ]);
+    let points = bottom_plane.clip_line(points);
+    
+    let left_plane = PlaneN::<4>::new([
+        VecN::<4>::new([0.0, 0.0, 0.0, 0.0]),
+        VecN::<4>::new([1.0, 1.0, 1.0, 1.0]),
+        VecN::<4>::new([1.0, -1.0, 1.0, 1.0]),
+        VecN::<4>::new([0.0, 0.0, 1.0, -1.0])
+    ]);
+    let points = left_plane.clip_line(points);
+    
+    let right_plane = PlaneN::<4>::new([
+        VecN::<4>::new([0.0, 0.0, 0.0, 0.0]),
+        VecN::<4>::new([-1.0, 1.0, 1.0, 1.0]),
+        VecN::<4>::new([-1.0, -1.0, 1.0, 1.0]),
+        VecN::<4>::new([0.0, 0.0, -1.0, 1.0])
+    ]);
+    let points = right_plane.clip_line(points);
+    
+    points
+}
+
+
 #[spirv(compute(threads(64)))]
 pub fn main_edge_cs(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] model_edges: &[ModelEdge],
@@ -222,8 +267,8 @@ pub fn main_edge_cs(
     let input_edge = &model_edges[model_index];
 
     let mut output_vertex_positions = [
-        Vec5GPU::zero(),
-        Vec5GPU::zero()
+        VecN::<5>::ZERO,
+        VecN::<5>::ZERO
     ];
 
     for i in 0..input_edge.vertex_positions.len() {
@@ -234,29 +279,26 @@ pub fn main_edge_cs(
             &working_data);
         output_vertex_positions[i] = vertex_result.vertex_position;
     }
+    // Clip against frustum
+    let clipped_points = clip_line_to_frustum([
+        output_vertex_positions[0].resize(),
+        output_vertex_positions[1].resize()], working_data.focal_length_xy, working_data.focal_length_zw);
 
-
-    // Perspective scaling
-    let output_vertex_positions_projected = [
-        project_4d_vertex(output_vertex_positions[0]),
-        project_4d_vertex(output_vertex_positions[1])
+    // Get depths
+    let depths: [f32; 2] = [
+        (clipped_points[0].z()*clipped_points[0].z() + clipped_points[0].w()*clipped_points[0].w()).sqrt(),
+        (clipped_points[1].z()*clipped_points[1].z() + clipped_points[1].w()*clipped_points[1].w()).sqrt()
     ];
-
-    // Verify tetrahedron is completely in-frame
-    for i in 0..output_vertex_positions_projected.len() {
-        let v = output_vertex_positions_projected[i];
-        if v.x < -1.0 || v.x > 1.0 || v.y < -1.0 || v.y > 1.0  {
-            for i in 0..2 {
-                output_line_vertices[output_index*2 + i] = Vec2::new(0.0, 0.0);
-            }
-            return;
-        }
-    }
+    
+    let output_vertex_positions_projected: [VecN::<4>; 2] = [
+        clipped_points[0] / (depths[0]/working_data.focal_length_xy),
+        clipped_points[1] / (depths[1]/working_data.focal_length_xy)
+    ];
 
 
     let line_vertices = [
-        Vec2::new(output_vertex_positions_projected[0].x, output_vertex_positions_projected[0].y),
-        Vec2::new(output_vertex_positions_projected[1].x, output_vertex_positions_projected[1].y),
+        Vec2::new(output_vertex_positions_projected[0].x(), output_vertex_positions_projected[0].y()),
+        Vec2::new(output_vertex_positions_projected[1].x(), output_vertex_positions_projected[1].y()),
     ];
 
 
@@ -347,12 +389,12 @@ fn test_intersection(line_a: &[Vec2; 2], line_b: &[Vec2; 2]) -> bool
 
 fn get_zw_angle_range(working_data: &WorkingData) -> (f32, f32) {
     let pi = 3.14159;
-    let view_angle = (pi/2.0) /working_data.focal_length;
+    let view_angle = (pi/2.0) /working_data.focal_length_zw;
     (pi/4.0 - view_angle/2.0, pi/4.0 + view_angle/2.0)
 }
 
 fn render_zw_lines_simple(lines: &[ZWLine; 96], num_lines: usize, working_data: &WorkingData) -> Vec4 {
-    const DEPTH_FACTOR: u32 = 2048;
+    const DEPTH_FACTOR: u32 = 256;
 
     let (min_angle, max_angle) = get_zw_angle_range(working_data);
     
@@ -806,6 +848,11 @@ pub fn main_tetrahedron_pixel_cs(
     if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {
 
         pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = output;
+    }
+
+    // For now just clear the other z slices
+    for z in 1..working_data.render_dimensions.z {
+        pixel_buffer[(z*working_data.render_dimensions.x*working_data.render_dimensions.y + u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = Vec4::ZERO;
     }
 }
 

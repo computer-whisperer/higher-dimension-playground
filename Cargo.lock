@@ -730,6 +730,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "common",
+ "exr",
  "glam",
  "image",
  "nalgebra",

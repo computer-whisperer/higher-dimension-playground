@@ -95,6 +95,7 @@ fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Devic
         variable_pointers: true,
         variable_pointers_storage_buffer: true,
         shader_int64: true,
+        shader_int8: true,
         .. Default::default()
     };
 
@@ -215,7 +216,7 @@ fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Devic
 fn run_headless() {
     let (instance, device, queue) = vulkan_setup(None);
 
-    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, 3840/4, 2160/4);
+    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, [3840, 2160, 8]);
 
     let mut demo_scene = DemoScene::new();
 
@@ -240,13 +241,15 @@ impl DemoScene {
     }
 
     fn update(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
-        let mut view_matrix = translate_matrix_4d(0.0, 0.0, 12.0, 12.0);
+        let mut view_matrix = translate_matrix_4d(0.0, 0.0, 7.0, 4.0);
+        let focal_length_xy = 1.0;
+        let focal_length_zw= 1.0;
 
         let do_raytrace = true;
         let do_edges = false;
         let do_raster = false;
 
-        let do_animation = false;
+        let do_animation = true;
 
         let do_frame_export = true;
 
@@ -254,26 +257,27 @@ impl DemoScene {
         let do_spin = true;
 
         let do_outer_blocks = true;
-        let do_floor = true;
-        let do_walls = true;
+        let do_floor = false;
+        let do_walls = false;
 
         let sub_frames_per_frame = if do_raytrace {
-            2000
+            8000
         }
         else {
             1
         };
-        let sub_frames_per_export = 500;
+        let sub_frames_per_export = 2000;
 
         let time_elapsed = self.frame_num as f32/frame_time_hz;
 
         if do_spin {
             view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.25 + PI*2.0*time_elapsed/30.0));
-            //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*0.25 + PI*2.0*time_elapsed/30.0));
-            //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/30.0));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*0.25 + PI*2.0*time_elapsed/30.0));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/30.0));
         }
-        //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, -PI*0.125));
-        //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.125));
+        //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*0.25));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.125));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.125));
 
         let mut instances = Vec::<common::ModelInstance>::new();
 
@@ -313,7 +317,7 @@ impl DemoScene {
         blocks.push(
             Block{
                 position: [0, 0, 0, 0],
-                materials: [13; 8]
+                materials: [1, 2, 3, 4, 5, 6, 7, 8]
             }
         );
 
@@ -324,14 +328,14 @@ impl DemoScene {
             let model_transform =
                 translate_matrix_4d(
                     -width/2.0,
-                    -width/2.0,
+                    -5.0,
                     -width/2.0,
                     -width/2.0)
                     .dot(&scale_matrix_4d_elementwise(width, width, width, width));
             instances.push(
                 common::ModelInstance{
                     model_transform: model_transform.into(),
-                    cell_material_ids: [14; 8],
+                    cell_material_ids: [1, 2, 3, 4, 5, 6, 13, 8],
                 }
             );
         }
@@ -373,18 +377,19 @@ impl DemoScene {
         let render_options = RenderOptions {
             do_frame_clear: do_raytrace && self.sub_frame_num == 0,
             do_raster,
+            do_tetrahedron_edges: false,
             do_raytrace,
             do_edges,
             prepare_render_screenshot: do_frame_export && ((self.sub_frame_num+1) % sub_frames_per_export == 0),
             ..Default::default()
         };
 
-        rcx.render(device, queue, view_matrix, 1.0, &instances, render_options);
+        rcx.render(device, queue, view_matrix, focal_length_xy, focal_length_zw, &instances, render_options);
 
         self.sub_frame_num += 1;
 
         if do_frame_export && (self.sub_frame_num % sub_frames_per_export == 0){
-            rcx.save_rendered_frame(&format!("frames/render_{}_{}.webp", self.frame_num, self.sub_frame_num))
+            rcx.save_rendered_frame(&format!("frames/render_{}_{}.exr", self.frame_num, self.sub_frame_num))
         }
 
         if do_animation && self.sub_frame_num >= sub_frames_per_frame {
@@ -447,7 +452,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), Some(window), 3840/4, 2160/4));
+        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), Some(window), [3840/4, 2160/4, 4]));
     }
 
     fn window_event(

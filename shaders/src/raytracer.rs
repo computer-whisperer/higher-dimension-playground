@@ -1,7 +1,7 @@
 
 use spirv_std::spirv;
-use common::{Tetrahedron, WorkingData, ModelInstance, ModelTetrahedron, Vec5GPU, VecN, get_normal, get_pseudo_barycentric, BasicRNG};
-use glam::{Vec4, UVec3, Vec2, Vec3Swizzles, Vec4Swizzles, Mat4, Vec3};
+use common::{get_normal, BasicRNG, ModelInstance, ModelTetrahedron, Tetrahedron, VecN, WorkingData};
+use glam::{Mat4, UVec3, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use bytemuck::{Pod, Zeroable};
 
 // Note: This cfg is incorrect on its surface, it really should be "are we compiling with std", but
@@ -22,7 +22,7 @@ fn cs_vertex_shader(
     working_data: &WorkingData
 ) -> CSVertexShaderOutput {
 
-    let vertex_position = Vec5GPU::from_4_and_1(vertex_position, 1.0);
+    let vertex_position = VecN::from(vertex_position).extend(1.0);
 
     let view_position = instance.model_transform * vertex_position;
 
@@ -103,7 +103,9 @@ pub fn main_raytracer_clear_cs(
 )
 {
     let u_pixel_pos = global_invocation_id.xy();
-    pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = Vec4::ZERO;
+    for z in 0..working_data.render_dimensions.z {
+        pixel_buffer[(z*working_data.render_dimensions.x*working_data.render_dimensions.y + u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] = Vec4::ZERO;
+    }
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -266,16 +268,16 @@ fn raycast_sample(mut start: Vec4, mut direction: Vec4, tetrahedrons: &[Tetrahed
     if num_hits < hit_stack.len() {
         // We must have hit the sky
         if direction.dot(background_light_direction) > 0.95 {
-            light_value = Vec3::new(1.0, 1.0, 1.0)*1.0;
+            light_value = Vec3::new(1.0, 1.0, 1.0)*5.0;
         }
         else {
             let a = 0.5*(direction.y + 1.0);
-                light_value = ((1.0 - a)*Vec3::new(0.8, 0.8, 1.0) + a*Vec3::new(0.2, 0.4, 1.0))*0.2;
+                light_value = ((1.0 - a)*Vec3::new(0.8, 0.8, 1.0) + a*Vec3::new(0.2, 0.4, 1.0))*0.1;
         }
     }
     
     if num_hits == 0 {
-        light_value = light_value*0.0;
+        //light_value = light_value*0.0;
     }
 
     for i in 0..num_hits {
@@ -328,39 +330,40 @@ pub fn main_raytracer_pixel_cs(
     else {
         Vec4::ZERO
     };
-    
-    for i in 0..1 {
-        let pi = 3.14159;
-        let view_angle = (pi/2.0)/(working_data.focal_length) + (pi/4.0);
-        let zw_angle = (rng.rand_f32()-0.5) * view_angle;
 
-        let view_origin = Vec4::new(0.0, 0.0, 0.0, 0.0);
-        let view_direction = aa_noise + Vec4::new(
-            pixel_pos.x/working_data.focal_length,
-            (-pixel_pos.y/aspect_ratio)/working_data.focal_length,
-            zw_angle.cos(),
-            zw_angle.sin()).normalize();
+    let pi = 3.14159;
+    let view_angle = (pi/2.0)/(working_data.focal_length_zw);
+    let zw_rand = rng.rand_f32();
+    let zw_coord = (zw_rand * working_data.render_dimensions.z as f32).floor() as u32;
+    let zw_angle = (zw_rand-0.5) * view_angle + (pi/4.0);
 
-        let new_view_origin = working_data.view_matrix_inverse * Vec5GPU::from_4_and_1(view_origin, 1.0);
-        let new_view_direction = working_data.view_matrix_inverse * Vec5GPU::from_4_and_1(view_origin + view_direction, 1.0);
-        
-        let view_origin = Vec4::new(new_view_origin.x(), new_view_origin.y(), new_view_origin.z(), new_view_origin.w());
-        let mut view_direction = Vec4::new(new_view_direction.x(), new_view_direction.y(), new_view_direction.z(), new_view_direction.w()) - view_origin;
-        
-        //view_direction.y = -view_direction.y;
+    let view_origin = Vec4::new(0.0, 0.0, 0.0, 0.0);
+    let view_direction = aa_noise + Vec4::new(
+        pixel_pos.x/working_data.focal_length_xy,
+        (-pixel_pos.y/aspect_ratio)/working_data.focal_length_xy,
+        zw_angle.cos(),
+        zw_angle.sin()).normalize();
 
-        let output_pixel = raycast_sample(view_origin, view_direction, &input_tetrahedrons, working_data.total_num_tetrahedrons as usize, &mut rng);
+    let new_view_origin = working_data.view_matrix_inverse * VecN::from(view_origin).extend(1.0);;
+    let new_view_direction = working_data.view_matrix_inverse * VecN::from(view_origin + view_direction).extend(1.0);
 
-        if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {
-            pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] += output_pixel;
-        }
+    let view_origin = Vec4::new(new_view_origin.x(), new_view_origin.y(), new_view_origin.z(), new_view_origin.w());
+    let mut view_direction = Vec4::new(new_view_direction.x(), new_view_direction.y(), new_view_direction.z(), new_view_direction.w()) - view_origin;
+
+    //view_direction.y = -view_direction.y;
+
+    let output_pixel = raycast_sample(view_origin, view_direction, &input_tetrahedrons, working_data.total_num_tetrahedrons as usize, &mut rng);
+
+    if u_pixel_pos.x < working_data.render_dimensions.x && u_pixel_pos.y < working_data.render_dimensions.y {
+        pixel_buffer[(zw_coord*working_data.render_dimensions.x*working_data.render_dimensions.y + u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize] += output_pixel;
     }
+
 }
 
 #[cfg(test)]
 mod tests {
-    use glam::UVec2;
-    use common::Mat5GPU;
+    use glam::{UVec2, UVec4};
+    use common::{MatN};
     use super::*;
 
     #[test]
@@ -380,21 +383,22 @@ mod tests {
         ];
         let instances = [
             ModelInstance {
-                model_transform: Mat5GPU::identity(),
+                model_transform: MatN::<5>::IDENTITY,
                 cell_material_ids: [1, 1, 1, 1, 1, 1, 1, 1],
             }
         ];
         const WIDTH: u32 = 512;
         const HEIGHT: u32 = 512;
         let mut working_data = WorkingData {
-            view_matrix: Mat5GPU::identity(),
-            view_matrix_inverse: Mat5GPU::identity(),
+            view_matrix: MatN::<5>::IDENTITY,
+            view_matrix_inverse: MatN::<5>::IDENTITY,
             total_num_tetrahedrons: (model_tetrahedrons.len()*instances.len()) as u32,
             shader_fault: 0,
-            render_dimensions: UVec2::new(WIDTH, HEIGHT),
+            render_dimensions: UVec4::new(WIDTH, HEIGHT, 1, 0),
             present_dimensions: UVec2::new(WIDTH, HEIGHT),
             raytrace_seed: 0,
-            focal_length: 1.0,
+            focal_length_xy: 1.0,
+            focal_length_zw: 1.0,
             padding: Default::default(),
         };
         

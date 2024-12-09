@@ -27,10 +27,11 @@ use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, Copy
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::sync::GpuFuture;
 use bytemuck::{Zeroable};
+use exr::prelude::{ImageAttributes, WritableImage};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use common::{get_normal, ModelTetrahedron};
 use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
-use glam::{Vec4, Vec2, UVec3};
+use glam::{Vec4, Vec2, UVec3, Vec4Swizzles};
 use image::{ImageBuffer, Rgb, Rgba};
 use vulkano::format::Format::{R8G8B8A8_UNORM};
 use winit::dpi::PhysicalSize;
@@ -221,7 +222,7 @@ impl OneTimeBuffers {
 }
 
 pub struct SizedBuffers {
-    render_dimensions: [u32; 2],
+    render_dimensions: [u32; 3],
     line_vertexes_buffer: Subbuffer<[Vec2]>,
     output_tetrahedron_buffer: Subbuffer<[common::Tetrahedron]>,
     output_pixel_buffer: Subbuffer<[Vec4]>,
@@ -230,7 +231,7 @@ pub struct SizedBuffers {
 }
 
 impl SizedBuffers {
-    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>, descriptor_set_layout: Arc<DescriptorSetLayout>, render_dimensions: [u32; 2]) -> Self {
+    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>, descriptor_set_layout: Arc<DescriptorSetLayout>, render_dimensions: [u32; 3]) -> Self {
         let line_vertexes_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -267,7 +268,7 @@ impl SizedBuffers {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![Vec4::ZERO; (render_dimensions[0]*render_dimensions[1]) as usize]
+            vec![Vec4::ZERO; (render_dimensions[0]*render_dimensions[1]*render_dimensions[2]) as usize]
         ).unwrap();
 
         let output_cpu_pixel_buffer = Buffer::from_iter(
@@ -281,7 +282,7 @@ impl SizedBuffers {
                     | MemoryTypeFilter::HOST_RANDOM_ACCESS,
                 ..Default::default()
             },
-            vec![Vec4::ZERO; (render_dimensions[0]*render_dimensions[1]) as usize]
+            vec![Vec4::ZERO; (render_dimensions[0]*render_dimensions[1]*render_dimensions[2]) as usize]
         ).unwrap();
 
         let descriptor_set = DescriptorSet::new(
@@ -638,7 +639,7 @@ pub struct RenderContext {
 
 
 impl RenderContext {
-    pub fn new(device: Arc<Device>, instance: Arc<Instance>, window: Option<Arc<Window>>, render_width: u32, render_height: u32) -> RenderContext {
+    pub fn new(device: Arc<Device>, instance: Arc<Instance>, window: Option<Arc<Window>>, render_dimensions: [u32; 3]) -> RenderContext {
 
         // Before we can start creating and recording command buffers, we need a way of allocating
         // them. Vulkano provides a command buffer allocator, which manages raw Vulkan command
@@ -652,7 +653,7 @@ impl RenderContext {
 
         let (surface, window_size) = match window.clone() {
             Some(window) => (Some(Surface::from_window(instance.clone(), window.clone()).unwrap()), window.inner_size()),
-            None => (None, PhysicalSize{ width: render_width, height: render_height }),
+            None => (None, PhysicalSize{ width: render_dimensions[0], height: render_dimensions[1] }),
         };
 
         // Before we can draw on the surface, we have to create what is called a swapchain.
@@ -795,7 +796,7 @@ impl RenderContext {
         let one_time_buffers = OneTimeBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), one_time_descriptor_set_layout.clone());
         
         let sized_descriptor_set_layout = SizedBuffers::create_descriptor_set_layout(device.clone());
-        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), sized_descriptor_set_layout.clone(), [render_width, render_height]);
+        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), sized_descriptor_set_layout.clone(), render_dimensions);
         
         let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
         let live_buffers = LiveBuffers::new(memory_allocator.clone(), descriptor_set_allocator.clone(), live_descriptor_set_layout.clone());
@@ -886,7 +887,7 @@ impl RenderContext {
         self.recreate_swapchain = true;
     }
     
-    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, focal_length: f32, model_instances: &[common::ModelInstance], render_options: RenderOptions) {
+    pub fn render(&mut self, device: Arc<Device>, queue: Arc<Queue>, view_matrix: ndarray::Array2<f32>, focal_length_xy: f32, focal_length_zw: f32, model_instances: &[common::ModelInstance], render_options: RenderOptions) {
 
         let view_matrix_view = view_matrix.into_owned();
 
@@ -931,7 +932,7 @@ impl RenderContext {
                     if self.recreate_swapchain {
                         // Use the new dimensions of the window.
 
-                        force_clear = true;
+                        //force_clear = true;
 
                         let (new_swapchain, new_images) =
                             swapchain
@@ -962,9 +963,9 @@ impl RenderContext {
             let mut writer = self.live_buffers.working_data_buffer.write().unwrap();
             writer.view_matrix = view_matrix_nalgebra.into();
             writer.view_matrix_inverse = view_matrix_nalgebra_inv.into();
-            writer.render_dimensions = glam::UVec2::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1]);
+            writer.render_dimensions = glam::UVec4::new(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1], self.sized_buffers.render_dimensions[2], 0);
             writer.present_dimensions =  match self.window.clone() {
-                None => {writer.render_dimensions}
+                None => {writer.render_dimensions.xy()}
                 Some(window) => {
                     let window_size = window.inner_size();
                     glam::UVec2::new(window_size.width, window_size.height)
@@ -972,7 +973,8 @@ impl RenderContext {
             };
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
             writer.raytrace_seed = 6364136223846793005u64.wrapping_mul(self.frames_rendered as u64).wrapping_add(1442695040888963407);
-            writer.focal_length = focal_length;
+            writer.focal_length_xy = focal_length_xy;
+            writer.focal_length_zw = focal_length_zw;
             // writer.total_num_tetrahedrons = 1;
             writer.shader_fault = 0;
         }
@@ -1110,7 +1112,7 @@ impl RenderContext {
                 unsafe {builder.dispatch([(self.sized_buffers.render_dimensions[0]+7)/8, (self.sized_buffers.render_dimensions[1]+7)/8, 1])}.unwrap() ; // Do compute stage
             }
 
-            if render_options.do_edges || render_options.do_tetrahedron_edges {   // Tetrahedron edge pre-raster
+            if render_options.do_edges {   // Tetrahedron edge pre-raster
                 builder.bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone()).unwrap();
                 let total_edge_count = self.one_time_buffers.model_edge_count*model_instances.len();
                 unsafe {builder.dispatch([(total_edge_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
@@ -1276,6 +1278,12 @@ impl RenderContext {
                         // previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                 }
+
+                if self.previous_frame_end.is_some() {
+                    let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+                    fence.wait(None).unwrap();
+                    self.previous_frame_end = None;
+                }
             }
         };
 
@@ -1318,15 +1326,89 @@ impl RenderContext {
         let result = self.sized_buffers.output_cpu_pixel_buffer.read();
         match result {
             Ok(buffer_content) => {
-                let mut transformed_pixels = Vec::<u8>::new();
-                // Divide by w
-                for i in 0..(self.sized_buffers.render_dimensions[0]*self.sized_buffers.render_dimensions[1]) as usize {
-                    transformed_pixels.push(((buffer_content[i].x/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
-                    transformed_pixels.push(((buffer_content[i].y/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
-                    transformed_pixels.push(((buffer_content[i].z/buffer_content[i].w).powf(1.0/2.2)*256.0) as u8);
+                let mut buffer_stored = Vec::new();
+                buffer_stored.extend_from_slice(&buffer_content[..]);
+                let mut buffer_arc = Arc::new(buffer_stored);
+                let buffer_dimensions = self.sized_buffers.render_dimensions;
+                let mut layers = Vec::new();
+                struct HereGetPixel {
+                    buffer_arc: Arc<Vec<Vec4>>,
+                    dimensions: [u32; 3],
+                    z: Option<u32>
                 }
-                let image = ImageBuffer::<Rgb<u8>, _>::from_raw(self.sized_buffers.render_dimensions[0], self.sized_buffers.render_dimensions[1], &transformed_pixels[..]).unwrap();
-                image.save(path).unwrap();
+                impl exr::prelude::GetPixel for HereGetPixel {
+                    type Pixel = (f32, f32, f32, f32);
+
+                    fn get_pixel(&self, position: exr::math::Vec2<usize>) -> Self::Pixel {
+                        // Get cumulative pixel value
+                        let mut full_pixel = Vec4::ZERO;
+                        for z in 0..self.dimensions[2] {
+                            full_pixel += self.buffer_arc[position.x() + position.y()*self.dimensions[0] as usize + (z*self.dimensions[0]*self.dimensions[1]) as usize];
+                        }
+                        if let Some(z) = self.z {
+                            let local_pixel = self.buffer_arc[position.x() + position.y()*self.dimensions[0] as usize + (z*self.dimensions[0]*self.dimensions[1]) as usize];
+                            (
+                                local_pixel.x/local_pixel.w,
+                                local_pixel.y/local_pixel.w,
+                                local_pixel.z/local_pixel.w,
+                                1.0
+                            )
+                        }
+                        else {
+                            (
+                                full_pixel.x/full_pixel.w,
+                                full_pixel.y/full_pixel.w,
+                                full_pixel.z/full_pixel.w,
+                                1.0
+                            )
+                        }
+                    }
+                }
+                // Render the full thing in layer 0 (because apparently support for openexr is rather poor)
+                let pixel_getter = HereGetPixel {
+                    buffer_arc: buffer_arc.clone(),
+                    dimensions: buffer_dimensions,
+                    z: None
+                };
+                layers.push(
+                    exr::prelude::Layer::new(
+                        (buffer_dimensions[0] as usize, buffer_dimensions[1] as usize),
+                        exr::prelude::LayerAttributes{
+                            layer_name: Some(exr::prelude::Text::new_or_panic(format!("Full Render"))),
+                            .. Default::default()
+                        },
+                        exr::prelude::Encoding::SMALL_FAST_LOSSLESS,
+                        exr::prelude::SpecificChannels::rgba(pixel_getter))
+                );
+                for z in 0..self.sized_buffers.render_dimensions[2] {
+                    let pixel_getter = HereGetPixel {
+                        buffer_arc: buffer_arc.clone(),
+                        dimensions: buffer_dimensions,
+                        z: Some(z)
+                    };
+                    let layer = exr::prelude::Layer::new(
+                        (buffer_dimensions[0] as usize, buffer_dimensions[1] as usize),
+                        exr::prelude::LayerAttributes{
+                            layer_name: Some(exr::prelude::Text::new_or_panic(format!("ZW Slice {}/{}", z, buffer_dimensions[2]))),
+                            .. Default::default()
+                        },
+                        exr::prelude::Encoding::SMALL_FAST_LOSSLESS,
+                        exr::prelude::SpecificChannels::rgba(pixel_getter));
+                    layers.push(layer);
+                }
+
+                let image = exr::image::Image::from_layers(
+                    exr::prelude::ImageAttributes {
+                        display_window: exr::prelude::IntegerBounds::new(
+                            (0, 0),
+                            (self.sized_buffers.render_dimensions[0] as usize, self.sized_buffers.render_dimensions[1] as usize)),
+                        pixel_aspect: 1.0,
+                        chromaticities: None,
+                        time_code: None,
+                        other: Default::default()
+                    },
+                    layers);
+                image.write().to_file(path).unwrap();
                 println!("Saved screenshot to {}", path);
             }
             Err(error) => {

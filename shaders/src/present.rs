@@ -64,8 +64,11 @@ pub fn main_buffer_fs(
         working_data.render_dimensions.y as f32*normal_pos.y
     );
     let u_pixel_pos = UVec2::new(pixel_pos.x as u32, pixel_pos.y as u32);
-    let mut cs_result = pixel_buffer[(u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize];
-    
+    let mut cs_result = Vec4::ZERO;
+    for z in 0..working_data.render_dimensions.z {
+        cs_result += pixel_buffer[(z*working_data.render_dimensions.x*working_data.render_dimensions.y + u_pixel_pos.y*working_data.render_dimensions.x + u_pixel_pos.x) as usize];
+    }
+
     let cs_result_adjusted = Vec4::new(
         linear_to_gamma(cs_result[0]/cs_result[3]),
         linear_to_gamma(cs_result[1]/cs_result[3]),
