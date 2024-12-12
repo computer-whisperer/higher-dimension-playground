@@ -3,11 +3,16 @@ name = "higher-dimension-playground"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "exr_converter"
+path = "src/exr_converter.rs"
 
 
 [dependencies]
+
 # The `vulkano` crate is the main crate that you must use to use Vulkan.
 vulkano = {git = "https://github.com/vulkano-rs/vulkano.git"}
+
 # Provides the `shader!` macro that is used to generate code for using shaders.
 vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano.git"}
 

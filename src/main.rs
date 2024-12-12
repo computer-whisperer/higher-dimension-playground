@@ -9,6 +9,7 @@
 mod render;
 mod hypercube;
 mod matrix_operations;
+mod exr_converter;
 
 use std::{error::Error, sync::Arc};
 use std::default::Default;
@@ -249,19 +250,19 @@ impl DemoScene {
         let do_edges = false;
         let do_raster = false;
 
-        let do_animation = true;
+        let do_animation = false;
 
         let do_frame_export = true;
 
-        let frame_time_hz = 60.0;
-        let do_spin = true;
+        let frame_time_hz = 20.0;
+        let do_spin = false;
 
         let do_outer_blocks = true;
         let do_floor = false;
         let do_walls = false;
 
         let sub_frames_per_frame = if do_raytrace {
-            8000
+            2000
         }
         else {
             1

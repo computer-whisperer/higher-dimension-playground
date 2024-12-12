@@ -1,7 +1,6 @@
 FROM nvidia/cuda:12.6.3-base-ubuntu24.04
 
 WORKDIR /usr/src/tesseract
-COPY . .
 
 
 RUN apt update && apt install -y \
@@ -17,6 +16,8 @@ RUN apt update && apt install -y \
     vulkan-tools \
     libnvidia-gl-565
 RUN rustup default nightly-2024-04-24
+
+COPY . .
 RUN cargo build
 
 COPY nvidia_icd.json /etc/vulkan/icd.d
