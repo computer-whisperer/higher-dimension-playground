@@ -21,7 +21,7 @@ impl MaterialProperties {
 }
 
 pub fn sample_material(texture_id: u32, texture_pos: Vec3) -> MaterialProperties {
-    let basic_luminance = 0.1;
+    let basic_luminance = 0.001;
     match texture_id {
         1 => {MaterialProperties::new(vec3(1.0, 0.0, 0.0), 0.0, 0.0, basic_luminance)}
         2 => {MaterialProperties::new(vec3(1.0, 0.8, 0.0), 0.0, 0.0, basic_luminance)}
@@ -35,7 +35,7 @@ pub fn sample_material(texture_id: u32, texture_pos: Vec3) -> MaterialProperties
         10 => {MaterialProperties::new(vec3(39.0, 69.0, 19.8)/256.0, 0.0, 0.0, 0.0)}
         11 => {MaterialProperties::new(vec3(0.1, 0.1, 0.1)*0.4, 0.2, 0.3, 0.0)} // Floor
         12 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 0.0, 0.0, 0.0)}
-        13 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 0.0, 0.0, 4.0)} // Light source
+        13 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 0.0, 0.0, 40.0)} // Light source
         14 => {MaterialProperties::new(vec3(1.0, 1.0, 1.0), 1.0, 0.0, 0.0)} // Mirror walls
         _ => {MaterialProperties::new(vec3(0.0, 0.0, 0.0), 0.0, 0.0, 0.0)}
     }

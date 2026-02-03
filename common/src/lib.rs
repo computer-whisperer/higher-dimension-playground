@@ -32,6 +32,17 @@ pub struct Tetrahedron {
 
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
+pub struct BVHNode {
+    pub min_bounds: Vec4,
+    pub max_bounds: Vec4,
+    pub left_child_index: u32,
+    pub right_child_index: u32,
+    pub tetrahedron_start_index: u32,
+    pub num_tetrahedrons: u32,
+}
+
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
 pub struct ModelTetrahedron {
     pub vertex_positions: [Vec4; 4],
     pub texture_positions: [Vec4; 4],

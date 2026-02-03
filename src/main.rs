@@ -242,7 +242,7 @@ impl DemoScene {
     }
 
     fn update(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
-        let mut view_matrix = translate_matrix_4d(0.0, 0.0, 7.0, 4.0);
+        let mut view_matrix = translate_matrix_4d(0.0, 0.0, 8.0, 4.0);
         let focal_length_xy = 1.0;
         let focal_length_zw= 1.0;
 
@@ -258,8 +258,8 @@ impl DemoScene {
         let do_spin = false;
 
         let do_outer_blocks = true;
-        let do_floor = false;
-        let do_walls = false;
+        let do_floor = true;
+        let do_walls = true;
 
         let sub_frames_per_frame = if do_raytrace {
             2000
@@ -318,7 +318,8 @@ impl DemoScene {
         blocks.push(
             Block{
                 position: [0, 0, 0, 0],
-                materials: [1, 2, 3, 4, 5, 6, 7, 8]
+                //materials: [1, 2, 3, 4, 5, 6, 7, 8]
+                materials: [13; 8]
             }
         );
 
@@ -336,7 +337,8 @@ impl DemoScene {
             instances.push(
                 common::ModelInstance{
                     model_transform: model_transform.into(),
-                    cell_material_ids: [1, 2, 3, 4, 5, 6, 13, 8],
+                    //cell_material_ids: [1, 2, 3, 4, 5, 6, 13, 8],
+                    cell_material_ids: [14; 8],
                 }
             );
         }

@@ -15,7 +15,7 @@ spec:
       resources:
         limits:
           nvidia.com/gpu: 1
-      command: [/bin/sh, -c, "cargo run -- --headless"]
+      command: [/bin/sh, -c, "cargo run --bin higher-dimension-playground -- --headless"]
       volumeMounts:
         - name: output
           mountPath: /usr/src/tesseract/frames
