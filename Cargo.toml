@@ -18,7 +18,7 @@ vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano.git"}
 
 common = {path="common", features=["ndarray", "nalgebra"]}
 
-shaders = {path="shaders"}
+# shaders = {path="shaders"}  # Replaced by Slang shaders
 clap = { version = "4.5", features = ["derive"] }
 exr = "1.73.0"
 
@@ -33,7 +33,7 @@ image = { version="0.24.9", features=["rayon"] }
 winit = "0.30"
 glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
 
-[build-dependencies]
-#spirv-builder = {git = "https://github.com/rust-gpu/rust-gpu.git"}
-spirv-builder = {git = "https://github.com/Firestar99/rust-gpu-new.git", branch="linker-speedup"}
+# Build dependencies removed - using slangc CLI instead
+# [build-dependencies]
+# spirv-builder = {git = "https://github.com/Firestar99/rust-gpu-new.git", branch="linker-speedup"}
 

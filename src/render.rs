@@ -36,6 +36,22 @@ use image::{ImageBuffer, Rgb, Rgba};
 use vulkano::format::Format::{R8G8B8A8_UNORM};
 use winit::dpi::PhysicalSize;
 
+/// Collection of all shader modules loaded from Slang-compiled SPIR-V
+struct ShaderModules {
+    // Present shaders
+    line_vs: Arc<ShaderModule>,
+    line_fs: Arc<ShaderModule>,
+    buffer_vs: Arc<ShaderModule>,
+    buffer_fs: Arc<ShaderModule>,
+    // Compute shaders
+    tetrahedron_cs: Arc<ShaderModule>,
+    edge_cs: Arc<ShaderModule>,
+    tetrahedron_pixel_cs: Arc<ShaderModule>,
+    raytrace_preprocess: Arc<ShaderModule>,
+    raytrace_pixel: Arc<ShaderModule>,
+    raytrace_clear: Arc<ShaderModule>,
+}
+
 pub struct RenderOptions {
     pub do_frame_clear: bool,
     pub do_raster: bool,
@@ -396,7 +412,7 @@ impl LiveBuffers {
         bindings.insert(
             1,
             DescriptorSetLayoutBinding {
-                stages: ShaderStages::COMPUTE,
+                stages: ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             });
         DescriptorSetLayout::new(
@@ -416,17 +432,12 @@ struct PresentPipelineContext {
 }
 
 impl PresentPipelineContext {
-    pub fn new(device: Arc<Device>, render_pass: Arc<RenderPass>, loaded_shader: Arc<ShaderModule>, pipeline_layout: Arc<PipelineLayout>) -> Self {
+    pub fn new(device: Arc<Device>, render_pass: Arc<RenderPass>, shaders: &ShaderModules, pipeline_layout: Arc<PipelineLayout>) -> Self {
 
         let line_pipeline = {
-            // First, we load the shaders that the pipeline will use: the vertex shader and the
-            // fragment shader.
-            //
-            // A Vulkan shader can in theory contain multiple entry points, so we have to specify
-            // which one.
-
-            let vs = loaded_shader.entry_point("present::main_line_vs").unwrap();
-            let fs = loaded_shader.entry_point("present::main_line_fs").unwrap();
+            // Load vertex and fragment shaders for line rendering
+            let vs = shaders.line_vs.entry_point("mainLineVS").unwrap();
+            let fs = shaders.line_fs.entry_point("mainLineFS").unwrap();
 
             // Make a list of the shader stages that the pipeline will have.
             let stages = [
@@ -496,14 +507,9 @@ impl PresentPipelineContext {
         };
 
         let buffer_pipeline = {
-            // First, we load the shaders that the pipeline will use: the vertex shader and the
-            // fragment shader.
-            //
-            // A Vulkan shader can in theory contain multiple entry points, so we have to specify
-            // which one.
-
-            let vs = loaded_shader.entry_point("present::main_buffer_vs").unwrap();
-            let fs = loaded_shader.entry_point("present::main_buffer_fs").unwrap();
+            // Load vertex and fragment shaders for buffer display
+            let vs = shaders.buffer_vs.entry_point("mainBufferVS").unwrap();
+            let fs = shaders.buffer_fs.entry_point("mainBufferFS").unwrap();
 
             // Make a list of the shader stages that the pipeline will have.
             let stages = [
@@ -586,30 +592,30 @@ struct ComputePipelineContext {
 }
 
 impl ComputePipelineContext {
-    pub fn new(device: Arc<Device>, loaded_shader: Arc<ShaderModule>, pipeline_layout: Arc<PipelineLayout>) -> Self {
+    pub fn new(device: Arc<Device>, shaders: &ShaderModules, pipeline_layout: Arc<PipelineLayout>) -> Self {
         Self {
             tetrahedron_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("rasterizer::main_tetrahedron_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(shaders.tetrahedron_cs.entry_point("mainTetrahedronCS").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             edge_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("rasterizer::main_edge_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(shaders.edge_cs.entry_point("mainEdgeCS").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             tetrahedron_pixel_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("rasterizer::main_tetrahedron_pixel_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(shaders.tetrahedron_pixel_cs.entry_point("mainTetrahedronPixelCS").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             raytrace_pre_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("raytracer::main_raytracer_tetrahedron_preprocessor_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(shaders.raytrace_preprocess.entry_point("mainRaytracerTetrahedronPreprocessor").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             raytrace_pixel_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("raytracer::main_raytracer_pixel_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(shaders.raytrace_pixel.entry_point("mainRaytracerPixel").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             raytrace_clear_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(loaded_shader.entry_point("raytracer::main_raytracer_clear_cs").unwrap()),
+                PipelineShaderStageCreateInfo::new(shaders.raytrace_clear.entry_point("mainRaytracerClear").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             pipeline_layout
@@ -729,12 +735,37 @@ impl RenderContext {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
         
-        mod shader_loader {
-            vulkano_shaders::shader! {
-                bytes: "shaders.spv",
-                root_path_env: "SPIRV_OUT_DIR"
+        // Load shaders at runtime from embedded SPIR-V bytes
+        // (vulkano_shaders macro can't parse Slang's SPIR-V 1.4 output)
+        fn load_shader(device: Arc<Device>, spirv: &[u8]) -> Arc<ShaderModule> {
+            unsafe {
+                ShaderModule::from_bytes(device, spirv)
+                    .expect("Failed to load shader module")
             }
         }
+
+        let spirv_dir = std::path::Path::new(env!("SPIRV_OUT_DIR"));
+
+        let raytrace_pixel = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainRaytracerPixel.spv")).expect("Failed to read shader"));
+        let raytrace_preprocess = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainRaytracerTetrahedronPreprocessor.spv")).expect("Failed to read shader"));
+        let raytrace_clear = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainRaytracerClear.spv")).expect("Failed to read shader"));
+        let raster_tet = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainTetrahedronCS.spv")).expect("Failed to read shader"));
+        let raster_edge = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainEdgeCS.spv")).expect("Failed to read shader"));
+        let raster_pixel = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainTetrahedronPixelCS.spv")).expect("Failed to read shader"));
+        let present_line_vs = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainLineVS.spv")).expect("Failed to read shader"));
+        let present_line_fs = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainLineFS.spv")).expect("Failed to read shader"));
+        let present_buffer_vs = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBufferVS.spv")).expect("Failed to read shader"));
+        let present_buffer_fs = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBufferFS.spv")).expect("Failed to read shader"));
 
         let render_pass = match swapchain.clone() {
             Some(swapchain) => {
@@ -823,15 +854,27 @@ impl RenderContext {
         ).unwrap();
         
 
-        let loaded_shader = shader_loader::load(device.clone()).unwrap();
+        // Create ShaderModules struct from individually loaded shaders
+        let shaders = ShaderModules {
+            line_vs: present_line_vs,
+            line_fs: present_line_fs,
+            buffer_vs: present_buffer_vs,
+            buffer_fs: present_buffer_fs,
+            tetrahedron_cs: raster_tet,
+            edge_cs: raster_edge,
+            tetrahedron_pixel_cs: raster_pixel,
+            raytrace_preprocess: raytrace_preprocess,
+            raytrace_pixel: raytrace_pixel,
+            raytrace_clear: raytrace_clear,
+        };
 
         let present_pipeline = match render_pass.clone() {
             Some(render_pass) => {
-                Some(PresentPipelineContext::new(device.clone(), render_pass.clone(), loaded_shader.clone(), pipeline_layout.clone()))
+                Some(PresentPipelineContext::new(device.clone(), render_pass.clone(), &shaders, pipeline_layout.clone()))
             },
             None => None
         };
-        let compute_pipeline = ComputePipelineContext::new(device.clone(), loaded_shader.clone(), pipeline_layout.clone());
+        let compute_pipeline = ComputePipelineContext::new(device.clone(), &shaders, pipeline_layout.clone());
         
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
         // Otherwise we would have to recreate the whole pipeline.
@@ -911,11 +954,14 @@ impl RenderContext {
 
         
         if self.previous_frame_end.is_some() {
-            // It is important to call this function from time to time, otherwise resources
-            // will keep accumulating and you will eventually reach an out of memory error.
-            // Calling this function polls various fences in order to determine what the GPU
-            // has already processed, and frees the resources that are no longer needed.
-            self.previous_frame_end.as_mut().unwrap().cleanup_finished();
+            // Wait for previous frame to complete before updating buffers
+            // This is needed because the working_data_buffer is read by shaders
+            let previous_frame = self.previous_frame_end.take().unwrap();
+            if previous_frame.queue().is_some() {
+                let fence = previous_frame.then_signal_fence_and_flush().unwrap();
+                fence.wait(None).unwrap();
+            }
+            self.previous_frame_end = None;
         }
 
         
@@ -1061,26 +1107,9 @@ impl RenderContext {
             }
             
             if render_options.do_raytrace {
-                for i in 0..total_tetrahedron_count {
-                    shaders::main_raytracer_tetrahedron_preprocessor_cs(
-                        &self.one_time_buffers.model_tetrahedron_buffer.read().unwrap(),
-                        &self.live_buffers.model_instance_buffer.read().unwrap(),
-                        self.sized_buffers.output_tetrahedron_buffer.write().unwrap().as_mut(),
-                        UVec3::new(i as u32, 0, 0),
-                        &self.live_buffers.working_data_buffer.read().unwrap(),
-                    )
-                }
-
-                for x in 0..self.sized_buffers.render_dimensions[0] {
-                    for y in 0..self.sized_buffers.render_dimensions[1] {
-                        shaders::main_raytracer_pixel_cs(
-                            self.sized_buffers.output_tetrahedron_buffer.write().unwrap().as_mut(),
-                            UVec3::new(x, y, 0),
-                            self.live_buffers.working_data_buffer.write().as_mut().unwrap(),
-                            self.sized_buffers.output_pixel_buffer.write().unwrap().as_mut()
-                        )
-                    }
-                }
+                // CPU shader fallback not available with Slang shaders
+                // (Slang compiles to SPIR-V only, not CPU-executable code)
+                unimplemented!("CPU raytracing not available - use GPU mode");
             }
             
         }

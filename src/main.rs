@@ -97,6 +97,7 @@ fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Devic
         variable_pointers_storage_buffer: true,
         shader_int64: true,
         shader_int8: true,
+        shader_draw_parameters: true,
         .. Default::default()
     };
 

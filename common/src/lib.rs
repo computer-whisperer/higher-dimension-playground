@@ -11,6 +11,7 @@ mod utils;
 mod linalg_n;
 mod vec_n;
 mod mat_n;
+mod layout_verify;
 
 use glam::{Vec4, UVec2, UVec4};
 pub use vec_n::VecN;
