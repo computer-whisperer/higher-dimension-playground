@@ -1,7 +1,4 @@
 [toolchain]
 channel = "nightly-2024-04-24"
-components = ["rust-src", "rustc-dev", "llvm-tools"]
-# commit_hash = 244da22fabd9fa677bbd0ac601a88e5ca6917526
-
-# Whenever changing the nightly channel, update the commit hash above, and make
-# sure to change `REQUIRED_TOOLCHAIN` in `crates/rustc_codegen_spirv/build.rs` also.
+# Pinned nightly for const generics features used in common crate
+# Now using Slang for shaders instead of rust-gpu
