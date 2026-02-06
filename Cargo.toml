@@ -11,10 +11,10 @@ path = "src/exr_converter.rs"
 [dependencies]
 
 # The `vulkano` crate is the main crate that you must use to use Vulkan.
-vulkano = {git = "https://github.com/vulkano-rs/vulkano.git"}
+vulkano = "0.35"
 
 # Provides the `shader!` macro that is used to generate code for using shaders.
-vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano.git"}
+vulkano-shaders = "0.35"
 
 common = {path="common", features=["ndarray", "nalgebra"]}
 
@@ -26,12 +26,12 @@ ndarray = {version="0.16.0"}
 nalgebra = {version="0.33.2"}
 
 bytemuck = { version = "1.18", features=["derive"] }
-image = { version="0.24.9", features=["rayon"] }
+image = { version="0.25", features=["rayon"] }
 
 # The Vulkan library doesn't provide any functionality to create and handle windows, as
 # this would be out of scope. In order to open a window, we are going to use the `winit` crate.
 winit = "0.30"
-glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
+glam = {version = "0.24", features=["bytemuck"]}
 
 # Build dependencies removed - using slangc CLI instead
 # [build-dependencies]

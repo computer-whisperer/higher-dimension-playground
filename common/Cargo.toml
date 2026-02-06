@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-#spirv-std = {git = "https://github.com/rust-gpu/rust-gpu.git"}
-spirv-std = {git = "https://github.com/Firestar99/rust-gpu-new.git", branch="linker-speedup"}
 bytemuck = { version = "1.18", features=["derive"] }
-glam = {version = ">=0.22, <=0.29", features=["bytemuck"], default-features = false}
+glam = {version = "0.24", features=["bytemuck"]}
 
 
 ndarray = {version="0.16.0", default-features=false, optional=true}
