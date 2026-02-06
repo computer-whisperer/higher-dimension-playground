@@ -1,11 +1,3 @@
-#![allow(incomplete_features)]
-#![feature(generic_const_exprs)]
-#![feature(const_trait_impl)]
-#![feature(const_for)]
-#![feature(effects)]
-#![feature(const_mut_refs)]
-#![feature(inline_const)]
-
 mod render;
 mod hypercube;
 mod matrix_operations;

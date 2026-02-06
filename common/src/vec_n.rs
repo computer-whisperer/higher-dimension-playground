@@ -38,19 +38,10 @@ impl<const N: usize> VecN<N> {
     }
 }
 
-impl<const N: usize> VecN<N>
-where
-    [(); N+1]:
-{
-    pub fn extend(&self, v: f32) -> VecN<{N+1}> {
-        let mut output = VecN::<{N+1}>::ZERO;
-        
-        for i in 0..N {
-            output[i] = self[i];
-        }
-        output[N] = v;
-        
-        output
+// Specialized extend for VecN<4> -> VecN<5>
+impl VecN<4> {
+    pub fn extend(&self, v: f32) -> VecN<5> {
+        VecN::<5>::new([self[0], self[1], self[2], self[3], v])
     }
 }
 
@@ -83,7 +74,7 @@ impl <const N: usize> core::ops::Mul<VecN<N>> for VecN<N> {
         for i in 0..N {
             output += self.values[i] * rhs.values[i];
         }
-        
+
         output
     }
 }
@@ -202,92 +193,75 @@ impl From<&VecN<2>> for Vec2 {
     }
 }
 
+// Specialized ndarray conversions for VecN<5> (used for 4D homogeneous coordinates)
 #[cfg(feature = "ndarray")]
-impl<'a, const N: usize> From<ndarray::ArrayView1<'a, f32>> for VecN<N> where [(); (N+3)/4]: {
-    fn from(value: ndarray::ArrayView1<'a, f32>) -> Self {
-        assert_eq!(value.shape(), &[N]);
-        let mut output = VecN::ZERO;
-        for i in 0..N {
-            output[i] = value[i];
-        }
-        output
+impl From<ndarray::ArrayView1<'_, f32>> for VecN<5> {
+    fn from(value: ndarray::ArrayView1<'_, f32>) -> Self {
+        assert_eq!(value.shape(), &[5]);
+        VecN::new([value[0], value[1], value[2], value[3], value[4]])
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<&ndarray::Array1<f32>> for VecN<N> where [(); (N+3)/4]: {
+impl From<&ndarray::Array1<f32>> for VecN<5> {
     fn from(value: &ndarray::Array1<f32>) -> Self {
         Self::from(value.view())
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<ndarray::Array1<f32>> for VecN<N> where [(); (N+3)/4]: {
+impl From<ndarray::Array1<f32>> for VecN<5> {
     fn from(value: ndarray::Array1<f32>) -> Self {
         Self::from(value.view())
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<'a, const N: usize> From<ndarray::ArrayView2<'a, f32>> for VecN<N> where [(); (N+3)/4]: {
-    fn from(value: ndarray::ArrayView2<'a, f32>) -> Self {
-        assert_eq!(value.shape(), &[N, 1]);
-        let mut output = VecN::<N>::ZERO;
-
-        for i in 0..N {
-            output[i] = value[[i, 0]];
-        }
-
-        output
+impl From<ndarray::ArrayView2<'_, f32>> for VecN<5> {
+    fn from(value: ndarray::ArrayView2<'_, f32>) -> Self {
+        assert_eq!(value.shape(), &[5, 1]);
+        VecN::new([value[[0, 0]], value[[1, 0]], value[[2, 0]], value[[3, 0]], value[[4, 0]]])
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<&ndarray::Array2<f32>> for VecN<N> where [(); (N+3)/4]: {
+impl From<&ndarray::Array2<f32>> for VecN<5> {
     fn from(value: &ndarray::Array2<f32>) -> Self {
         Self::from(value.view())
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<ndarray::Array2<f32>> for VecN<N> where [(); (N+3)/4]: {
+impl From<ndarray::Array2<f32>> for VecN<5> {
     fn from(value: ndarray::Array2<f32>) -> Self {
         Self::from(value.view())
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<&VecN<N>> for ndarray::Array1<f32> where [(); (N+3)/4]: {
-    fn from(value: &VecN<N>) -> Self {
-        let mut values = Vec::new();
-        for i in 0..N {
-            values.push(value[i]);
-        }
-        ndarray::Array1::from_vec(values)
+impl From<&VecN<5>> for ndarray::Array1<f32> {
+    fn from(value: &VecN<5>) -> Self {
+        ndarray::Array1::from_vec(vec![value[0], value[1], value[2], value[3], value[4]])
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<VecN<N>> for ndarray::Array1<f32> where [(); (N+3)/4]: {
-    fn from(value: VecN<N>) -> Self {
+impl From<VecN<5>> for ndarray::Array1<f32> {
+    fn from(value: VecN<5>) -> Self {
         Self::from(&value)
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<&VecN<N>> for ndarray::Array2<f32> where [(); (N+3)/4]: {
-    fn from(value: &VecN<N>) -> Self {
-        let mut values = Vec::new();
-        for i in 0..N {
-            values.push(value[i]);
-        }
-        Self::from_shape_vec((N, 1), values).unwrap()
+impl From<&VecN<5>> for ndarray::Array2<f32> {
+    fn from(value: &VecN<5>) -> Self {
+        Self::from_shape_vec((5, 1), vec![value[0], value[1], value[2], value[3], value[4]]).unwrap()
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<VecN<N>> for ndarray::Array2<f32> where [(); (N+3)/4]: {
-    fn from(value: VecN<N>) -> Self {
+impl From<VecN<5>> for ndarray::Array2<f32> {
+    fn from(value: VecN<5>) -> Self {
         Self::from(&value)
     }
 }

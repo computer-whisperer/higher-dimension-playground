@@ -30,7 +30,7 @@ use bytemuck::{Zeroable};
 use exr::prelude::{ImageAttributes, WritableImage};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use common::{get_normal, ModelTetrahedron};
-use crate::hypercube::{generate_simplexes_for_k_face, Hypercube};
+use crate::hypercube::{generate_simplexes_for_k_face_3, Hypercube};
 use glam::{Vec4, Vec2, UVec3, Vec4Swizzles};
 use image::{ImageBuffer, Rgb, Rgba};
 use vulkano::format::Format::{R8G8B8A8_UNORM};
@@ -79,14 +79,14 @@ impl Default for RenderOptions {
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
     let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
     let cube_vertexes = Hypercube::<3, usize>::generate_vertices();
-    let tetrahedron_cells = Hypercube::<4, usize>::generate_k_faces::<3>();
+    let tetrahedron_cells = Hypercube::<4, usize>::generate_k_faces_3();
 
     let mut output_tetrahedrons = Vec::new();
-    let texture_position_simplexes = generate_simplexes_for_k_face::<3, 3>([0b000, 0b001, 0b010, 0b100]);
+    let texture_position_simplexes = generate_simplexes_for_k_face_3::<3>([0b000, 0b001, 0b010, 0b100]);
 
     for cell_id in 0..tetrahedron_cells.len() {
         //for cell_id in 0..1 {
-        let position_simplexes = generate_simplexes_for_k_face::<4, 3>(tetrahedron_cells[cell_id]);
+        let position_simplexes = generate_simplexes_for_k_face_3::<4>(tetrahedron_cells[cell_id]);
 
 
         for simplex_id in 0..position_simplexes.len() {
@@ -138,7 +138,7 @@ pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
 
 pub fn generate_tesseract_edges() -> Vec<common::ModelEdge> {
     let tesseract_vertexes = Hypercube::<4, usize>::generate_vertices();
-    let tesseract_edges = Hypercube::<4, usize>::generate_k_faces::<1>();
+    let tesseract_edges = Hypercube::<4, usize>::generate_k_faces_1();
 
     let mut output_edges = Vec::new();
     

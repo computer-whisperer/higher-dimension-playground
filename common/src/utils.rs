@@ -1,13 +1,7 @@
 use glam::Vec4;
 
-// compiler go brr
-pub const fn factorial(n: usize) -> usize {
-    /*
-    if n == 0 || n == 1 {
-        1
-    } else {
-        n * factorial(n-1)
-    }*/
+/// Factorial function
+pub fn factorial(n: usize) -> usize {
     match n {
         0 => 1,
         1 => 1,
@@ -19,78 +13,58 @@ pub const fn factorial(n: usize) -> usize {
         7 => 5040,
         8 => 40320,
         9 => 362880,
-        _ => {unimplemented!()}
+        _ => (1..=n).product()
     }
 }
 
-pub const fn binomial(n: usize, k: usize) -> usize {
+/// Binomial coefficient C(n, k)
+pub fn binomial(n: usize, k: usize) -> usize {
     if k > n {
         0
     } else {
-        factorial(n) / (factorial(k) * factorial(n-k))
+        factorial(n) / (factorial(k) * factorial(n - k))
     }
 }
 
+/// Generates all combinations of K elements from N elements
+/// Returns Vec of combinations, each combination is a Vec of indices
+pub fn generate_combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+    let mut combinations = Vec::with_capacity(binomial(n, k));
+    let mut current: Vec<usize> = (0..k).collect();
 
-pub const fn generate_combinations<const N: usize, const K: usize>() -> [[usize; K]; binomial(N, K)] {
-    let mut combinations = [[0; K]; binomial(N, K)];
-    let mut current_combination_index = 0;
+    loop {
+        combinations.push(current.clone());
 
-    // Initial combination starts with 0, 1, 2, ..., K-1
-    let mut current: [usize; K] = {
-        let mut init = [0; K];
-        for i in 0..K {
-            init[i] = i;
-        }
-        init
-    };
-
-    while current[0] <= N - K {
-        // Store the current combination
-        combinations[current_combination_index] = current;
-        current_combination_index += 1;
-
-        // Generate next combination
-        let mut j = K - 1;
-        while j > 0 && current[j] == N - K + j {
-            j -= 1;
+        // Find rightmost element that can be incremented
+        let mut i = k as isize - 1;
+        while i >= 0 && current[i as usize] == n - k + i as usize {
+            i -= 1;
         }
 
-        current[j] += 1;
-        for k in j+1..K {
-            current[k] = current[k-1] + 1;
+        if i < 0 {
+            break;
+        }
+
+        // Increment and reset elements to the right
+        current[i as usize] += 1;
+        for j in (i as usize + 1)..k {
+            current[j] = current[j - 1] + 1;
         }
     }
 
     combinations
 }
 
-/// Generates all permutations of indices 0 . . K at compile-time
-///
-/// # Type Parameters
-/// - `K`: The number of elements to generate permutations for
-/// - `const N: usize`: The total number of permutations (K!)
-///
-/// # Returns
-/// A const array containing all possible permutations
-pub const fn generate_permutations<const K: usize>() -> [[usize; K]; factorial(K)] {
-    let mut permutations = [[0; K]; factorial(K)];
-    let mut current_perm = [0; K];
-
-    // Initialize first permutation as 0, 1, 2, ...
-    for i in 0..K {
-        current_perm[i] = i;
-    }
-
-    let mut perm_index = 0;
+/// Generates all permutations of K elements (0..K)
+/// Returns Vec of permutations, each permutation is a Vec of indices
+pub fn generate_permutations(k: usize) -> Vec<Vec<usize>> {
+    let mut permutations = Vec::with_capacity(factorial(k));
+    let mut current: Vec<usize> = (0..k).collect();
 
     loop {
-        // Store current permutation
-        permutations[perm_index] = current_perm;
-        perm_index += 1;
+        permutations.push(current.clone());
 
-        // Generate next permutation using Heap's algorithm
-        if !next_permutation(&mut current_perm) {
+        if !next_permutation(&mut current) {
             break;
         }
     }
@@ -99,10 +73,12 @@ pub const fn generate_permutations<const K: usize>() -> [[usize; K]; factorial(K
 }
 
 /// Generates the next lexicographically greater permutation
-///
 /// Returns true if a new permutation was generated, false if no more permutations exist
-const fn next_permutation(perm: &mut [usize]) -> bool {
+fn next_permutation(perm: &mut [usize]) -> bool {
     let k = perm.len();
+    if k <= 1 {
+        return false;
+    }
 
     // Find the largest index i such that perm[i] < perm[i + 1]
     let mut i = k as isize - 2;
@@ -122,28 +98,16 @@ const fn next_permutation(perm: &mut [usize]) -> bool {
     }
 
     // Swap elements at indices i and j
-    let temp = perm[i as usize];
-    perm[i as usize] = perm[j as usize];
-    perm[j as usize] = temp;
+    perm.swap(i as usize, j as usize);
 
     // Reverse the subarray to the right of index i
-    let mut left = (i + 1) as usize;
-    let mut right = k - 1;
-
-    while left < right {
-        let temp = perm[left];
-        perm[left] = perm[right];
-        perm[right] = temp;
-        left += 1;
-        right -= 1;
-    }
+    perm[(i as usize + 1)..].reverse();
 
     true
 }
 
-const PCG32_DEFAULT_STATE: u64 =  0x853c49e6748fea9b; 
-const PCG32_DEFAULT_STREAM: u64 = 0xda3e39cb94b95bdb;
-const PCG32_MULT: u64 =        0x5851f42d4c957f2d;
+const PCG32_DEFAULT_STATE: u64 = 0x853c49e6748fea9b;
+const PCG32_MULT: u64 = 0x5851f42d4c957f2d;
 
 pub struct BasicRNG {
     state: u64,
@@ -152,9 +116,9 @@ pub struct BasicRNG {
 
 impl BasicRNG {
     pub fn new(stream: u64) -> Self {
-        Self { 
+        Self {
             state: PCG32_DEFAULT_STATE,
-            inc: stream
+            inc: stream,
         }
     }
 
@@ -162,34 +126,31 @@ impl BasicRNG {
     pub fn rand(&mut self) -> u32 {
         let oldstate = self.state;
         self.state = oldstate.wrapping_mul(PCG32_MULT).wrapping_add(self.inc);
-        let xorshifted: u32 =  (((oldstate >> 18) ^ oldstate) >> 27) as u32;
+        let xorshifted: u32 = (((oldstate >> 18) ^ oldstate) >> 27) as u32;
         let rot: u32 = (oldstate >> 59) as u32;
         (xorshifted >> rot) | (xorshifted << (((!rot).wrapping_add(1)) & 31))
     }
-    
+
     pub fn rand_f32(&mut self) -> f32 {
         let r = self.rand();
         r as f32 / 0xFFFFFFFFu32 as f32
     }
-    
+
     pub fn rand_vec4(&mut self) -> Vec4 {
         loop {
             let value = Vec4::new(
-                self.rand_f32()-0.5,
-                self.rand_f32()-0.5,
-                self.rand_f32()-0.5,
-                self.rand_f32()-0.5
+                self.rand_f32() - 0.5,
+                self.rand_f32() - 0.5,
+                self.rand_f32() - 0.5,
+                self.rand_f32() - 0.5,
             );
             if value.length() > 1.0 {
-                continue; // We're dealing with a unit vector, so continue
+                continue;
             }
             break value.normalize();
         }
     }
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -209,13 +170,23 @@ mod tests {
 
     #[test]
     fn test_combinations() {
-        assert_eq!(&generate_combinations::<2, 1>(), &[[0], [1]]);
-        assert_eq!(&generate_combinations::<3, 2>(), &[[0, 1], [0, 2], [1, 2]]);
+        assert_eq!(generate_combinations(2, 1), vec![vec![0], vec![1]]);
+        assert_eq!(generate_combinations(3, 2), vec![vec![0, 1], vec![0, 2], vec![1, 2]]);
     }
 
     #[test]
     fn test_permutations() {
-        assert_eq!(&generate_permutations::<2>(), &[[0, 1], [1, 0]]);
-        assert_eq!(&generate_permutations::<3>(), &[[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]);
+        assert_eq!(generate_permutations(2), vec![vec![0, 1], vec![1, 0]]);
+        assert_eq!(
+            generate_permutations(3),
+            vec![
+                vec![0, 1, 2],
+                vec![0, 2, 1],
+                vec![1, 0, 2],
+                vec![1, 2, 0],
+                vec![2, 0, 1],
+                vec![2, 1, 0]
+            ]
+        );
     }
 }

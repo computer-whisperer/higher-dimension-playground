@@ -17,9 +17,8 @@ unsafe impl<const N: usize> bytemuck::Pod for MatN<N> {
 
 impl <const N: usize> MatN<N> {
     pub const ZERO: Self = Self{ values: [[0f32; N]; N]};
-    pub const IDENTITY: Self = Self::build_identity();
-    
-    const fn build_identity() -> Self {
+
+    pub fn identity() -> Self {
         let mut output = Self::ZERO;
         for i in 0..N {
             output[[i, i]] = 1.0;
@@ -70,29 +69,6 @@ impl MatN<4> {
     }
 }
 
-impl <const N: usize> MatN<N> where [[(); N-1]; N-1]: {
-    pub fn minor(&self, row: usize, col: usize) -> MatN<{N-1}> {
-        let mut output = MatN::<{N-1}>::ZERO;
-
-        let mut output_row = 0;
-        for j in 0..N {
-            if j == row {
-                continue;
-            }
-            let mut output_col = 0;
-            for k in 0..N {
-                if k == col {
-                    continue;
-                }
-                output[[output_row, output_col]] = self[[j, k]];
-                output_col += 1;
-            }
-            output_row += 1;
-        }
-        output
-    }
-}
-
 impl <const N: usize> core::ops::Index<[usize; 2]> for &MatN<N> {
     type Output = f32;
     fn index(&self, index: [usize; 2]) -> &Self::Output {
@@ -120,26 +96,27 @@ impl From<&MatN::<4>> for Mat4 {
 
 impl From<MatN::<4>> for Mat4 {
     fn from(value: MatN<4>) -> Self {
-        value.into()
+        Mat4::from(&value)
     }
 }
 
+// Specialized ndarray conversions for MatN<5> (used for 4D homogeneous transforms)
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<&MatN<N>> for ndarray::Array2<f32> where [(); (N+3)/4]: {
-    fn from(value: &MatN<N>) -> Self {
-        let mut values = Vec::new();
-        for i in 0..N {
-            for j in 0..N {
+impl From<&MatN<5>> for ndarray::Array2<f32> {
+    fn from(value: &MatN<5>) -> Self {
+        let mut values = Vec::with_capacity(25);
+        for i in 0..5 {
+            for j in 0..5 {
                 values.push(value[[i, j]]);
             }
         }
-        ndarray::Array2::from_shape_vec((N, N), values).unwrap()
+        ndarray::Array2::from_shape_vec((5, 5), values).unwrap()
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<MatN<N>> for ndarray::Array2<f32> where [(); (N+3)/4]: {
-    fn from(value: MatN<N>) -> Self {
+impl From<MatN<5>> for ndarray::Array2<f32> {
+    fn from(value: MatN<5>) -> Self {
         Self::from(&value)
     }
 }
@@ -174,7 +151,7 @@ impl <const N: usize> core::ops::Mul<VecN<N>> for MatN<N> {
     }
 }
 
-impl <const N: usize> core::ops::Mul<MatN<N>> for MatN<N> where [(); (N+3)/4]: {
+impl <const N: usize> core::ops::Mul<MatN<N>> for MatN<N> {
     type Output = MatN<N>;
     fn mul(self, rhs: MatN<N>) -> Self::Output {
         let mut output = MatN::<N>::ZERO;
@@ -239,11 +216,11 @@ impl From<&Mat2> for MatN<2> {
     }
 }
 
-impl From<Mat4> for MatN<4> { fn from(value: Mat4) -> Self {value.into()} }
+impl From<Mat4> for MatN<4> { fn from(value: Mat4) -> Self { MatN::from(&value) } }
 
-impl From<Mat3> for MatN<3> { fn from(value: Mat3) -> Self {value.into()} }
+impl From<Mat3> for MatN<3> { fn from(value: Mat3) -> Self { MatN::from(&value) } }
 
-impl From<Mat2> for MatN<2> { fn from(value: Mat2) -> Self {value.into()} }
+impl From<Mat2> for MatN<2> { fn from(value: Mat2) -> Self { MatN::from(&value) } }
 
 #[cfg(feature = "nalgebra")]
 use nalgebra::Matrix5;
@@ -252,24 +229,24 @@ use nalgebra::Matrix5;
 impl From<nalgebra::Matrix5<f32>> for MatN::<5> {
     fn from(value: Matrix5<f32>) -> Self {
         let mut output = Self::ZERO;
-        
+
         for x in 0..5 {
             for y in 0..5 {
                 output[[x, y]] = value[(x, y)];
             }
         }
-        
+
         output
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<'a, const N: usize> From<ndarray::ArrayView2<'a, f32>> for MatN<N> where [(); (N+3)/4]: {
-    fn from(value: ndarray::ArrayView2<'a, f32>) -> Self {
-        assert_eq!(value.shape(), &[N, N]);
+impl From<ndarray::ArrayView2<'_, f32>> for MatN<5> {
+    fn from(value: ndarray::ArrayView2<'_, f32>) -> Self {
+        assert_eq!(value.shape(), &[5, 5]);
         let mut output = Self::ZERO;
-        for i in 0..N {
-            for j in 0..N {
+        for i in 0..5 {
+            for j in 0..5 {
                 output[[i, j]] = value[[i, j]];
             }
         }
@@ -278,14 +255,14 @@ impl<'a, const N: usize> From<ndarray::ArrayView2<'a, f32>> for MatN<N> where [(
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<&ndarray::Array2<f32>> for MatN<N> where [(); (N+3)/4]: {
+impl From<&ndarray::Array2<f32>> for MatN<5> {
     fn from(value: &ndarray::Array2<f32>) -> Self {
         Self::from(value.view())
     }
 }
 
 #[cfg(feature = "ndarray")]
-impl<const N: usize> From<ndarray::Array2<f32>> for MatN<N> where [(); (N+3)/4]: {
+impl From<ndarray::Array2<f32>> for MatN<5> {
     fn from(value: ndarray::Array2<f32>) -> Self {
         Self::from(value.view())
     }

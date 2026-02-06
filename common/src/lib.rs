@@ -1,12 +1,5 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
 
-#![allow(incomplete_features)]
-#![feature(generic_const_exprs)]
-#![feature(const_trait_impl)]
-#![feature(const_for)]
-#![feature(effects)]
-#![feature(const_mut_refs)]
-
 mod utils;
 mod linalg_n;
 mod vec_n;
