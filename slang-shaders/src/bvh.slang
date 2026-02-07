@@ -162,13 +162,62 @@ struct BitonicSortParams
 {
     uint stage;     // Current stage of bitonic sort
     uint step;      // Current step within stage
-    uint count;     // Total number of elements
+    uint count;     // Total number of elements (must be power of 2)
     uint padding;
 }
 
 [[vk::push_constant]]
 BitonicSortParams sortParams;
 
+// Shared memory for local sorting (workgroup size = 64)
+groupshared MortonCode sharedMorton[64];
+
+// Phase 3a: Local sort - sort each 64-element block entirely in shared memory
+// Performs stages 0-5 (all steps) without any global memory barriers
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mainBVHBitonicSortLocal(uint3 globalId : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
+{
+    uint gid = globalId.x;
+    uint tid = localId.x;
+
+    // Load from global memory into shared memory
+    sharedMorton[tid] = mortonCodes[gid];
+    GroupMemoryBarrierWithGroupSync();
+
+    // Full bitonic sort for 64 elements (stages 0-5, 21 total steps)
+    // Direction uses global index so blocks alternate ascending/descending
+    for (uint stage = 0; stage <= 5; stage++)
+    {
+        for (int step = int(stage); step >= 0; step--)
+        {
+            uint stepSize = 1u << uint(step);
+            uint partner = tid ^ stepSize;
+
+            if (tid < partner)
+            {
+                bool ascending = ((gid >> (stage + 1)) & 1) == 0;
+                bool needSwap = ascending
+                    ? (sharedMorton[tid].code > sharedMorton[partner].code)
+                    : (sharedMorton[tid].code < sharedMorton[partner].code);
+
+                if (needSwap)
+                {
+                    MortonCode tmp = sharedMorton[tid];
+                    sharedMorton[tid] = sharedMorton[partner];
+                    sharedMorton[partner] = tmp;
+                }
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+
+    // Write back to global memory
+    mortonCodes[gid] = sharedMorton[tid];
+}
+
+// Phase 3b: Global step - one compare-exchange step via global memory
+// Used for steps where stepSize >= 64 (cross-workgroup comparisons)
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mainBVHBitonicSort(uint3 globalId : SV_DispatchThreadID)
@@ -205,6 +254,53 @@ void mainBVHBitonicSort(uint3 globalId : SV_DispatchThreadID)
         mortonCodes[idx] = b;
         mortonCodes[partner] = a;
     }
+}
+
+// Phase 3c: Local merge - perform steps 5-0 of a global stage in shared memory
+// After the global steps (stepSize >= 64) of a stage, the remaining steps
+// (stepSize < 64) can be done in shared memory since both elements of each
+// compare-exchange pair are in the same 64-element block.
+// All elements in a workgroup share the same ascending/descending direction
+// because the direction block size 2^(stage+1) >= 128 > 64 for stage >= 6.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mainBVHBitonicSortLocalMerge(uint3 globalId : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
+{
+    uint gid = globalId.x;
+    uint tid = localId.x;
+    uint stage = sortParams.stage;
+
+    // Load from global memory
+    sharedMorton[tid] = mortonCodes[gid];
+    GroupMemoryBarrierWithGroupSync();
+
+    // Direction is uniform across the workgroup for stage >= 6
+    bool ascending = ((gid >> (stage + 1)) & 1) == 0;
+
+    // Perform steps 5 down to 0
+    for (int step = 5; step >= 0; step--)
+    {
+        uint stepSize = 1u << uint(step);
+        uint partner = tid ^ stepSize;
+
+        if (tid < partner)
+        {
+            bool needSwap = ascending
+                ? (sharedMorton[tid].code > sharedMorton[partner].code)
+                : (sharedMorton[tid].code < sharedMorton[partner].code);
+
+            if (needSwap)
+            {
+                MortonCode tmp = sharedMorton[tid];
+                sharedMorton[tid] = sharedMorton[partner];
+                sharedMorton[partner] = tmp;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // Write back to global memory
+    mortonCodes[gid] = sharedMorton[tid];
 }
 
 // ============================================================================

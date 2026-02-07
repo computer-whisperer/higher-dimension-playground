@@ -53,7 +53,9 @@ struct ShaderModules {
     // BVH compute shaders
     bvh_scene_bounds: Arc<ShaderModule>,
     bvh_morton_codes: Arc<ShaderModule>,
+    bvh_bitonic_sort_local: Arc<ShaderModule>,
     bvh_bitonic_sort: Arc<ShaderModule>,
+    bvh_bitonic_sort_local_merge: Arc<ShaderModule>,
     bvh_init_leaves: Arc<ShaderModule>,
     bvh_build_tree: Arc<ShaderModule>,
     bvh_compute_leaf_aabbs: Arc<ShaderModule>,
@@ -707,7 +709,9 @@ struct ComputePipelineContext {
     // BVH pipelines
     bvh_scene_bounds_pipeline: Arc<ComputePipeline>,
     bvh_morton_codes_pipeline: Arc<ComputePipeline>,
+    bvh_bitonic_sort_local_pipeline: Arc<ComputePipeline>,
     bvh_bitonic_sort_pipeline: Arc<ComputePipeline>,
+    bvh_bitonic_sort_local_merge_pipeline: Arc<ComputePipeline>,
     bvh_init_leaves_pipeline: Arc<ComputePipeline>,
     bvh_build_tree_pipeline: Arc<ComputePipeline>,
     bvh_compute_leaf_aabbs_pipeline: Arc<ComputePipeline>,
@@ -751,8 +755,16 @@ impl ComputePipelineContext {
                 PipelineShaderStageCreateInfo::new(shaders.bvh_morton_codes.entry_point("mainBVHMortonCodes").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
+            bvh_bitonic_sort_local_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_bitonic_sort_local.entry_point("mainBVHBitonicSortLocal").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
             bvh_bitonic_sort_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
                 PipelineShaderStageCreateInfo::new(shaders.bvh_bitonic_sort.entry_point("mainBVHBitonicSort").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_bitonic_sort_local_merge_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_bitonic_sort_local_merge.entry_point("mainBVHBitonicSortLocalMerge").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             bvh_init_leaves_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
@@ -924,8 +936,12 @@ impl RenderContext {
             &std::fs::read(spirv_dir.join("mainBVHSceneBounds.spv")).expect("Failed to read shader"));
         let bvh_morton_codes = load_shader(device.clone(),
             &std::fs::read(spirv_dir.join("mainBVHMortonCodes.spv")).expect("Failed to read shader"));
+        let bvh_bitonic_sort_local = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHBitonicSortLocal.spv")).expect("Failed to read shader"));
         let bvh_bitonic_sort = load_shader(device.clone(),
             &std::fs::read(spirv_dir.join("mainBVHBitonicSort.spv")).expect("Failed to read shader"));
+        let bvh_bitonic_sort_local_merge = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHBitonicSortLocalMerge.spv")).expect("Failed to read shader"));
         let bvh_init_leaves = load_shader(device.clone(),
             &std::fs::read(spirv_dir.join("mainBVHInitLeaves.spv")).expect("Failed to read shader"));
         let bvh_build_tree = load_shader(device.clone(),
@@ -1043,7 +1059,9 @@ impl RenderContext {
             raytrace_clear: raytrace_clear,
             bvh_scene_bounds,
             bvh_morton_codes,
+            bvh_bitonic_sort_local,
             bvh_bitonic_sort,
+            bvh_bitonic_sort_local_merge,
             bvh_init_leaves,
             bvh_build_tree,
             bvh_compute_leaf_aabbs,
@@ -1363,17 +1381,32 @@ impl RenderContext {
                     builder.bind_pipeline_compute(self.compute_pipeline.bvh_morton_codes_pipeline.clone()).unwrap();
                     unsafe {builder.dispatch([(n_pow2 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // 2c. Bitonic sort (log^2(n) dispatches)
+                    // 2c. Bitonic sort using shared memory optimization
                     // Sort all n_pow2 elements (including sentinel-padded entries)
                     let num_stages = n_pow2.trailing_zeros(); // log2(n_pow2)
+                    let local_stages = 6u32.min(num_stages); // stages 0-5 fit in 64-element workgroups
+                    let workgroups = (n_pow2 + 63) / 64;
 
-                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_pipeline.clone()).unwrap();
-                    for stage in 0..num_stages {
-                        for step in (0..=stage).rev() {
+                    // Phase 1: Sort each 64-element block in shared memory (stages 0-5)
+                    let push_data: [u32; 4] = [0, 0, n_pow2, 0];
+                    builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
+                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_local_pipeline.clone()).unwrap();
+                    unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
+
+                    // Phase 2: Global merge stages (stages 6+)
+                    for stage in local_stages..num_stages {
+                        // Global steps: stepSize >= 64 (step >= 6)
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_pipeline.clone()).unwrap();
+                        for step in (local_stages..=stage).rev() {
                             let push_data: [u32; 4] = [stage, step, n_pow2, 0];
                             builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
-                            unsafe {builder.dispatch([(n_pow2 + 63)/64, 1, 1])}.unwrap() ;
+                            unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
                         }
+                        // Local merge: steps 5-0 in shared memory (1 dispatch)
+                        let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
+                        builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_local_merge_pipeline.clone()).unwrap();
+                        unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
                     }
 
                     // 2d. Initialize leaf nodes

@@ -24,7 +24,9 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
     // BVH compute shaders
     ShaderEntry { file: "bvh.slang", entry: "mainBVHSceneBounds", profile: "cs_6_5" },
     ShaderEntry { file: "bvh.slang", entry: "mainBVHMortonCodes", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHBitonicSortLocal", profile: "cs_6_5" },
     ShaderEntry { file: "bvh.slang", entry: "mainBVHBitonicSort", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHBitonicSortLocalMerge", profile: "cs_6_5" },
     ShaderEntry { file: "bvh.slang", entry: "mainBVHInitLeaves", profile: "cs_6_5" },
     ShaderEntry { file: "bvh.slang", entry: "mainBVHBuildTree", profile: "cs_6_5" },
     ShaderEntry { file: "bvh.slang", entry: "mainBVHComputeLeafAABBs", profile: "cs_6_5" },
