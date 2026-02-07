@@ -268,12 +268,12 @@ RayHit raycastLinear(
 }
 
 // 4D ray-tetrahedron intersection using BVH traversal
+// direction must be normalized before calling
 RayHit raycast(
     float4 start,
     float4 direction,
     uint numTetrahedrons)
 {
-    direction = normalize(direction);
     RayHit closestHit = RayHit.none();
 
     // Handle edge cases
@@ -294,66 +294,24 @@ RayHit raycast(
         abs(direction.w) > 1e-8 ? 1.0 / direction.w : (direction.w >= 0.0 ? 1e8 : -1e8)
     );
 
-    // DEBUG: Check root node structure
-    uint numInternalNodes = numTetrahedrons - 1;
-    uint totalNodes = 2 * numTetrahedrons - 1;
-    BVHNode root = bvhNodes[0];
-
-    // Check if root children are valid
-    if (root.leftChild >= totalNodes || root.rightChild >= totalNodes)
-    {
-        // Invalid children - return red with child index encoded
-        closestHit.didHit = 1;
-        closestHit.hitDistance = 1.0;
-        closestHit.tetrahedronIndex = 0xFF000000 | ((root.leftChild & 0xFFF) << 12) | (root.rightChild & 0xFFF);
-        return closestHit;
-    }
-
-    // Check if root AABB is valid (not all zeros)
-    float rootAABBSize = length(root.maxBounds - root.minBounds);
-    if (rootAABBSize < 0.001)
-    {
-        // Root AABB is too small - return green
-        closestHit.didHit = 1;
-        closestHit.hitDistance = 1.0;
-        closestHit.tetrahedronIndex = 0xFF00FF00;
-        return closestHit;
-    }
-
-    // DEBUG: Check if ray hits root AABB
-    float2 rootHitT = rayAABBIntersect4D(start, invDir, root.minBounds, root.maxBounds);
-    if (rootHitT.x < 0.0)
-    {
-        // Ray doesn't hit root AABB - return blue with size indicator
-        // This means either ray is outside scene or AABB is wrong
-        closestHit.didHit = 1;
-        closestHit.hitDistance = 1.0;
-        uint sizeIndicator = uint(clamp(rootAABBSize, 0.0, 255.0));
-        closestHit.tetrahedronIndex = 0xFF0000FF | (sizeIndicator << 8);
-        return closestHit;
-    }
-
-    // BVH traversal
-
     // Stack-based BVH traversal
+    // Uses test-before-push: children are AABB-tested when pushing,
+    // so popped nodes are known to intersect the ray.
     uint stack[BVH_STACK_SIZE];
     int stackPtr = 0;
-    stack[stackPtr++] = 0; // Start at root
+
+    // Test root AABB before entering the loop
+    BVHNode root = bvhNodes[0];
+    float2 rootT = rayAABBIntersect4D(start, invDir, root.minBounds, root.maxBounds);
+    if (rootT.x < 0.0)
+        return closestHit;
+
+    stack[stackPtr++] = 0;
 
     while (stackPtr > 0)
     {
         uint nodeIdx = stack[--stackPtr];
         BVHNode node = bvhNodes[nodeIdx];
-
-        // Test ray against node AABB
-        float2 hitT = rayAABBIntersect4D(start, invDir, node.minBounds, node.maxBounds);
-
-        // Skip if no intersection or if intersection is behind closest hit
-        if (hitT.x < 0.0)
-            continue;
-
-        if (closestHit.didHit != 0 && hitT.x > closestHit.hitDistance)
-            continue;
 
         if (node.isLeaf != 0)
         {
@@ -362,40 +320,36 @@ RayHit raycast(
         }
         else
         {
-            // Internal node - push children to stack
-            // Push farther child first so closer child is processed first
+            // Internal node - test children and push those that intersect
             uint left = node.leftChild;
             uint right = node.rightChild;
 
-            if (left != BVH_INVALID_INDEX && right != BVH_INVALID_INDEX)
+            float2 leftT = rayAABBIntersect4D(start, invDir, bvhNodes[left].minBounds, bvhNodes[left].maxBounds);
+            float2 rightT = rayAABBIntersect4D(start, invDir, bvhNodes[right].minBounds, bvhNodes[right].maxBounds);
+
+            // Filter by closest hit distance
+            bool leftHit = leftT.x >= 0.0 && (closestHit.didHit == 0 || leftT.x <= closestHit.hitDistance);
+            bool rightHit = rightT.x >= 0.0 && (closestHit.didHit == 0 || rightT.x <= closestHit.hitDistance);
+
+            // Push farther child first so closer child is popped first
+            if (leftHit && rightHit)
             {
-                BVHNode leftNode = bvhNodes[left];
-                BVHNode rightNode = bvhNodes[right];
-
-                float2 leftT = rayAABBIntersect4D(start, invDir, leftNode.minBounds, leftNode.maxBounds);
-                float2 rightT = rayAABBIntersect4D(start, invDir, rightNode.minBounds, rightNode.maxBounds);
-
-                // Push in order so closer child is popped first
                 if (leftT.x > rightT.x)
                 {
-                    if (leftT.x >= 0.0 && stackPtr < BVH_STACK_SIZE)
-                        stack[stackPtr++] = left;
-                    if (rightT.x >= 0.0 && stackPtr < BVH_STACK_SIZE)
-                        stack[stackPtr++] = right;
+                    stack[stackPtr++] = left;
+                    stack[stackPtr++] = right;
                 }
                 else
                 {
-                    if (rightT.x >= 0.0 && stackPtr < BVH_STACK_SIZE)
-                        stack[stackPtr++] = right;
-                    if (leftT.x >= 0.0 && stackPtr < BVH_STACK_SIZE)
-                        stack[stackPtr++] = left;
+                    stack[stackPtr++] = right;
+                    stack[stackPtr++] = left;
                 }
             }
-            else if (left != BVH_INVALID_INDEX && stackPtr < BVH_STACK_SIZE)
+            else if (leftHit)
             {
                 stack[stackPtr++] = left;
             }
-            else if (right != BVH_INVALID_INDEX && stackPtr < BVH_STACK_SIZE)
+            else if (rightHit)
             {
                 stack[stackPtr++] = right;
             }
@@ -432,60 +386,6 @@ float4 raycastSample(
     while (numHits < MAX_BOUNCES)
     {
         RayHit hit = raycast(start, direction, numTetrahedrons);
-
-        // DEBUG: Check for debug hit indicating BVH issues
-        // All debug values are >= 0xFF000000 (high bit set)
-        if (hit.didHit != 0 && hit.tetrahedronIndex >= 0xFF000000)
-        {
-            if (hit.tetrahedronIndex == 0xFFFFFFFE)
-                return float4(0.0, 1.0, 0.0, 1.0); // Green = leaf parent not set
-            else if (hit.tetrahedronIndex == 0xFFFFFFFD)
-                return float4(1.0, 1.0, 0.0, 1.0); // Yellow = leaf AABB zero
-            else if (hit.tetrahedronIndex == 0xFFFFFFFC)
-                return float4(0.0, 1.0, 1.0, 1.0); // Cyan = root has no children
-            else if (hit.tetrahedronIndex == 0xFFFFFFFB)
-                return float4(1.0, 0.0, 1.0, 1.0); // Magenta = L's children valid but L not marked
-            else if (hit.tetrahedronIndex == 0xFFFFFFFA)
-                return float4(1.0, 0.5, 0.0, 1.0); // Orange = right child not valid
-            else if (hit.tetrahedronIndex == 0xFFFFFFF9)
-                return float4(0.5, 0.0, 1.0, 1.0); // Purple = left child AABB zero
-            else if (hit.tetrahedronIndex == 0xFFFFFFF8)
-                return float4(0.0, 0.5, 0.5, 1.0); // Dark cyan = right child AABB zero
-            else if (hit.tetrahedronIndex == 0xFFFFFFF7)
-                return float4(1.0, 1.0, 1.0, 1.0); // White = child index out of bounds
-            else if (hit.tetrahedronIndex == 0xFFFFFFF6)
-                return float4(1.0, 0.5, 0.5, 1.0); // Pink = LL has internal children (problem deeper)
-            else if (hit.tetrahedronIndex == 0xFFFFFFF5)
-                return float4(0.5, 0.5, 1.0, 1.0); // Light blue = LR internal and not valid
-            else if (hit.tetrahedronIndex == 0xFFFFFFF4)
-                return float4(0.5, 0.5, 0.5, 1.0); // Gray = L has BVH_INVALID_INDEX children
-            else if (hit.tetrahedronIndex == 0xFFFFFFF3)
-                return float4(1.0, 0.0, 0.5, 1.0); // Bright magenta = L's children are leaves but L not valid
-            else if (hit.tetrahedronIndex == 0xFFFFFFF2)
-                return float4(0.8, 0.4, 0.0, 1.0); // Brown = LL's children are leaves but LL not valid
-            else if (hit.tetrahedronIndex == 0xFFFFFFF1)
-                return float4(0.0, 1.0, 0.5, 1.0); // Bright green = isLeaf NEVER set (critical bug)
-            else if (hit.tetrahedronIndex == 0xFFFFFFF0)
-                return float4(0.0, 0.8, 0.8, 1.0); // Teal = first leaf missing isLeaf
-            else if (hit.tetrahedronIndex == 0xFFFFFFE2)
-                return float4(0.0, 0.0, 0.5, 1.0); // Dark blue = child indices out of range
-            else if (hit.tetrahedronIndex == 0xFFFFFFE1)
-                return float4(0.5, 0.0, 0.0, 1.0); // Dark red = last internal has 2 internal children
-            else if (hit.tetrahedronIndex == 0xFFFFFFE0)
-                return float4(0.0, 0.5, 0.0, 1.0); // Dark green = last internal 2 leaves but not propagated
-            else if (hit.tetrahedronIndex == 0xFFFFFFD0)
-                return float4(1.0, 1.0, 0.5, 1.0); // Light yellow = propagation shader never ran
-            else if (hit.tetrahedronIndex == 0xFF00FFFF)
-                return float4(0.0, 1.0, 1.0, 1.0); // Bright cyan = absolute debug marker
-            else
-            {
-                // Generic debug: decode RGB from the index value
-                float r = float((hit.tetrahedronIndex >> 16) & 0xFF) / 255.0;
-                float g = float((hit.tetrahedronIndex >> 8) & 0xFF) / 255.0;
-                float b = float(hit.tetrahedronIndex & 0xFF) / 255.0;
-                return float4(r, g, b, 1.0);
-            }
-        }
 
         if (hit.didHit != 0)
         {
@@ -573,13 +473,6 @@ void mainRaytracerPixel(uint3 globalId : SV_DispatchThreadID)
         + uint64_t(globalId.y) * uint64_t(workingData.renderDimensions.x);
 
     BasicRNG rng = BasicRNG(seed);
-
-    // Prime RNG
-    for (int i = 0; i < 30; i++) rng.rand();
-    for (int i = 0; i < 30; i++)
-    {
-        if (rng.rand() % 3 == 0) break;
-    }
 
     float aspectRatio = float(workingData.presentDimensions.x) / float(workingData.presentDimensions.y);
 
