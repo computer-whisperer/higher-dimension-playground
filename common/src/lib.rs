@@ -24,15 +24,37 @@ pub struct Tetrahedron {
     pub padding: [u32; 3]
 }
 
+/// Morton code for spatial sorting in LBVH construction
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
+pub struct MortonCode {
+    pub code: u64,
+    pub tetrahedron_index: u32,
+    pub padding: u32,
+}
+
+/// Scene bounding box for Morton code normalization
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
+pub struct SceneBounds {
+    pub min_bounds: Vec4,
+    pub max_bounds: Vec4,
+}
+
+/// BVH node for GPU-based tree traversal
+/// Supports both internal nodes and leaf nodes
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct BVHNode {
     pub min_bounds: Vec4,
     pub max_bounds: Vec4,
-    pub left_child_index: u32,
-    pub right_child_index: u32,
-    pub tetrahedron_start_index: u32,
-    pub num_tetrahedrons: u32,
+    pub left_child: u32,
+    pub right_child: u32,
+    pub parent: u32,
+    pub is_leaf: u32,
+    pub tetrahedron_index: u32,
+    pub atomic_visit_count: u32,
+    pub padding: [u32; 2],
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]

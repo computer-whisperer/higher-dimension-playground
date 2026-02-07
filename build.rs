@@ -21,6 +21,15 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
     ShaderEntry { file: "raytracer.slang", entry: "mainRaytracerTetrahedronPreprocessor", profile: "cs_6_5" },
     ShaderEntry { file: "raytracer.slang", entry: "mainRaytracerClear", profile: "cs_6_5" },
     ShaderEntry { file: "raytracer.slang", entry: "mainRaytracerPixel", profile: "cs_6_5" },
+    // BVH compute shaders
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHSceneBounds", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHMortonCodes", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHBitonicSort", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHInitLeaves", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHBuildTree", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHComputeLeafAABBs", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHPropagateAABBs", profile: "cs_6_5" },
+    ShaderEntry { file: "bvh.slang", entry: "mainBVHComputeAABBs", profile: "cs_6_5" },
     // Rasterizer compute shaders
     ShaderEntry { file: "rasterizer.slang", entry: "mainTetrahedronCS", profile: "cs_6_5" },
     ShaderEntry { file: "rasterizer.slang", entry: "mainEdgeCS", profile: "cs_6_5" },
@@ -97,46 +106,31 @@ fn main() {
         panic!("Shader compilation failed");
     }
 
-    // Link all shader modules into a single shaders.spv
-    let combined_path = spirv_out_dir.join("shaders.spv");
-    print!("Linking {} shaders into shaders.spv... ", spv_files.len());
+    // Validate individual SPIR-V files
+    print!("Validating SPIR-V modules... ");
+    let mut validation_failed = false;
+    for spv_file in &spv_files {
+        let output = Command::new("spirv-val")
+            .args(["--scalar-block-layout", spv_file.to_str().unwrap()])
+            .output()
+            .expect("Failed to execute spirv-val");
 
-    let mut link_args: Vec<&str> = spv_files.iter().map(|p| p.to_str().unwrap()).collect();
-    link_args.push("-o");
-    link_args.push(combined_path.to_str().unwrap());
-
-    let output = Command::new("spirv-link")
-        .args(&link_args)
-        .output()
-        .expect("Failed to execute spirv-link");
-
-    if output.status.success() {
-        println!("ok");
-    } else {
-        println!("FAILED");
-        eprintln!("spirv-link stderr:\n{}", String::from_utf8_lossy(&output.stderr));
-        eprintln!("spirv-link stdout:\n{}", String::from_utf8_lossy(&output.stdout));
-        panic!("Shader linking failed");
+        if !output.status.success() {
+            if !validation_failed {
+                println!("FAILED");
+            }
+            validation_failed = true;
+            eprintln!("spirv-val failed for {}: {}", spv_file.display(), String::from_utf8_lossy(&output.stderr));
+        }
     }
-
-    // Validate the combined SPIR-V
-    print!("Validating combined SPIR-V... ");
-    let output = Command::new("spirv-val")
-        .args(["--scalar-block-layout", combined_path.to_str().unwrap()])
-        .output()
-        .expect("Failed to execute spirv-val");
-
-    if output.status.success() {
-        println!("ok");
-    } else {
-        println!("FAILED");
-        eprintln!("spirv-val stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    if validation_failed {
         panic!("SPIR-V validation failed");
     }
+    println!("ok");
 
     // Export the SPIR-V output directory for the main crate
     println!("cargo:rustc-env=SPIRV_OUT_DIR={}", spirv_out_dir.display());
-    println!("cargo:warning=Slang shaders compiled and linked to {}", combined_path.display());
+    println!("cargo:warning=Slang shaders compiled to {}", spirv_out_dir.display());
 }
 
 fn check_tool(name: &str, error_msg: &str) {

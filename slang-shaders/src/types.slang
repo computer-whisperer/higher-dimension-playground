@@ -125,3 +125,41 @@ struct ZWLine
         return result;
     }
 }
+
+// ============================================================================
+// BVH types for GPU-based LBVH construction and traversal
+// ============================================================================
+
+// Morton code for spatial sorting in LBVH construction
+struct MortonCode
+{
+    uint64_t code;
+    uint tetrahedronIndex;
+    uint padding;
+}
+
+// Scene bounding box for Morton code normalization
+struct SceneBounds
+{
+    float4 minBounds;
+    float4 maxBounds;
+}
+
+// BVH node for GPU-based tree traversal
+// Supports both internal nodes and leaf nodes
+struct BVHNode
+{
+    float4 minBounds;
+    float4 maxBounds;
+    uint leftChild;
+    uint rightChild;
+    uint parent;
+    uint isLeaf;
+    uint tetrahedronIndex;
+    uint atomicVisitCount;
+    uint padding[2];
+}
+
+// Constants for BVH traversal
+static const uint BVH_INVALID_INDEX = 0xFFFFFFFF;
+static const uint BVH_STACK_SIZE = 64;

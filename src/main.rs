@@ -85,6 +85,7 @@ fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Devic
     let device_features = DeviceFeatures {
         fill_mode_non_solid: true,
         vulkan_memory_model: true,
+        vulkan_memory_model_device_scope: true,
         variable_pointers: true,
         variable_pointers_storage_buffer: true,
         shader_int64: true,
@@ -255,12 +256,12 @@ impl DemoScene {
         let do_walls = true;
 
         let sub_frames_per_frame = if do_raytrace {
-            2000
+            100  // Reduced for faster testing
         }
         else {
             1
         };
-        let sub_frames_per_export = 2000;
+        let sub_frames_per_export = 100;  // Reduced for faster testing
 
         let time_elapsed = self.frame_num as f32/frame_time_hz;
 

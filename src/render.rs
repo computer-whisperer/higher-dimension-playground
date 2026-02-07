@@ -20,7 +20,7 @@ use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::{PolygonMode, RasterizationState};
 use vulkano::pipeline::graphics::vertex_input::VertexInputState;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
+use vulkano::pipeline::layout::{PipelineLayoutCreateInfo, PushConstantRange};
 use vulkano::shader::{ShaderModule, ShaderStages};
 use vulkano::{sync, Validated, VulkanError};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
@@ -50,6 +50,15 @@ struct ShaderModules {
     raytrace_preprocess: Arc<ShaderModule>,
     raytrace_pixel: Arc<ShaderModule>,
     raytrace_clear: Arc<ShaderModule>,
+    // BVH compute shaders
+    bvh_scene_bounds: Arc<ShaderModule>,
+    bvh_morton_codes: Arc<ShaderModule>,
+    bvh_bitonic_sort: Arc<ShaderModule>,
+    bvh_init_leaves: Arc<ShaderModule>,
+    bvh_build_tree: Arc<ShaderModule>,
+    bvh_compute_leaf_aabbs: Arc<ShaderModule>,
+    bvh_propagate_aabbs: Arc<ShaderModule>,
+    bvh_compute_aabbs: Arc<ShaderModule>,
 }
 
 pub struct RenderOptions {
@@ -239,15 +248,24 @@ impl OneTimeBuffers {
 
 pub struct SizedBuffers {
     render_dimensions: [u32; 3],
+    max_tetrahedrons: usize,
     line_vertexes_buffer: Subbuffer<[Vec2]>,
     output_tetrahedron_buffer: Subbuffer<[common::Tetrahedron]>,
     output_pixel_buffer: Subbuffer<[Vec4]>,
+    morton_codes_buffer: Subbuffer<[common::MortonCode]>,
+    bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
+    scene_bounds_buffer: Subbuffer<[common::SceneBounds]>,
     descriptor_set: Arc<DescriptorSet>,
-    output_cpu_pixel_buffer: Subbuffer<[Vec4]>
+    output_cpu_pixel_buffer: Subbuffer<[Vec4]>,
+    // Debug readback buffers
+    cpu_bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
+    cpu_morton_codes_buffer: Subbuffer<[common::MortonCode]>,
 }
 
 impl SizedBuffers {
     pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>, descriptor_set_layout: Arc<DescriptorSetLayout>, render_dimensions: [u32; 3]) -> Self {
+        let max_tetrahedrons: usize = 10000;
+
         let line_vertexes_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -271,7 +289,7 @@ impl SizedBuffers {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![common::Tetrahedron::zeroed(); 10000]
+            vec![common::Tetrahedron::zeroed(); max_tetrahedrons]
         ).unwrap();
 
         let output_pixel_buffer = Buffer::from_iter(
@@ -301,6 +319,77 @@ impl SizedBuffers {
             vec![Vec4::ZERO; (render_dimensions[0]*render_dimensions[1]*render_dimensions[2]) as usize]
         ).unwrap();
 
+        // BVH buffers - GPU-only, initialized by compute shaders
+        // Morton codes buffer padded to next power of 2 for bitonic sort
+        let morton_codes_padded_count = max_tetrahedrons.next_power_of_two();
+        let morton_codes_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![common::MortonCode { code: u64::MAX, tetrahedron_index: 0xFFFFFFFF, padding: 0 }; morton_codes_padded_count]
+        ).unwrap();
+
+        // BVH needs 2N-1 nodes (N leaves + N-1 internal nodes)
+        let bvh_node_count = 2 * max_tetrahedrons;
+        let bvh_nodes_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![common::BVHNode::zeroed(); bvh_node_count]
+        ).unwrap();
+
+        let scene_bounds_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![common::SceneBounds::zeroed(); 1]
+        ).unwrap();
+
+        // CPU readback buffers for BVH debugging
+        let cpu_bvh_nodes_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            vec![common::BVHNode::zeroed(); bvh_node_count]
+        ).unwrap();
+
+        let cpu_morton_codes_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            vec![common::MortonCode::zeroed(); morton_codes_padded_count]
+        ).unwrap();
+
         let descriptor_set = DescriptorSet::new(
             descriptor_set_allocator,
             descriptor_set_layout,
@@ -308,15 +397,24 @@ impl SizedBuffers {
                 WriteDescriptorSet::buffer(0, line_vertexes_buffer.clone()),
                 WriteDescriptorSet::buffer(1, output_tetrahedron_buffer.clone()),
                 WriteDescriptorSet::buffer(2, output_pixel_buffer.clone()),
+                WriteDescriptorSet::buffer(3, morton_codes_buffer.clone()),
+                WriteDescriptorSet::buffer(4, bvh_nodes_buffer.clone()),
+                WriteDescriptorSet::buffer(5, scene_bounds_buffer.clone()),
             ],
             []
         ).unwrap();
         Self {
             render_dimensions,
+            max_tetrahedrons,
             line_vertexes_buffer,
             output_tetrahedron_buffer,
             output_pixel_buffer,
+            morton_codes_buffer,
+            bvh_nodes_buffer,
+            scene_bounds_buffer,
             output_cpu_pixel_buffer,
+            cpu_bvh_nodes_buffer,
+            cpu_morton_codes_buffer,
             descriptor_set
         }
     }
@@ -341,6 +439,25 @@ impl SizedBuffers {
                 stages: ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             });
+        // BVH buffers
+        bindings.insert(
+            3,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        bindings.insert(
+            4,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        bindings.insert(
+            5,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
         DescriptorSetLayout::new(
             device.clone(),
             DescriptorSetLayoutCreateInfo {
@@ -349,7 +466,7 @@ impl SizedBuffers {
             }
         ).unwrap()
     }
-    
+
 }
 
 pub struct LiveBuffers {
@@ -588,6 +705,15 @@ struct ComputePipelineContext {
     raytrace_pre_pipeline: Arc<ComputePipeline>,
     raytrace_pixel_pipeline: Arc<ComputePipeline>,
     raytrace_clear_pipeline: Arc<ComputePipeline>,
+    // BVH pipelines
+    bvh_scene_bounds_pipeline: Arc<ComputePipeline>,
+    bvh_morton_codes_pipeline: Arc<ComputePipeline>,
+    bvh_bitonic_sort_pipeline: Arc<ComputePipeline>,
+    bvh_init_leaves_pipeline: Arc<ComputePipeline>,
+    bvh_build_tree_pipeline: Arc<ComputePipeline>,
+    bvh_compute_leaf_aabbs_pipeline: Arc<ComputePipeline>,
+    bvh_propagate_aabbs_pipeline: Arc<ComputePipeline>,
+    bvh_compute_aabbs_pipeline: Arc<ComputePipeline>,
     pipeline_layout: Arc<PipelineLayout>
 }
 
@@ -616,6 +742,39 @@ impl ComputePipelineContext {
             )).unwrap(),
             raytrace_clear_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
                 PipelineShaderStageCreateInfo::new(shaders.raytrace_clear.entry_point("mainRaytracerClear").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            // BVH pipelines
+            bvh_scene_bounds_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_scene_bounds.entry_point("mainBVHSceneBounds").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_morton_codes_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_morton_codes.entry_point("mainBVHMortonCodes").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_bitonic_sort_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_bitonic_sort.entry_point("mainBVHBitonicSort").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_init_leaves_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_init_leaves.entry_point("mainBVHInitLeaves").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_build_tree_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_build_tree.entry_point("mainBVHBuildTree").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_compute_leaf_aabbs_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_compute_leaf_aabbs.entry_point("mainBVHComputeLeafAABBs").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_propagate_aabbs_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_propagate_aabbs.entry_point("mainBVHPropagateAABBs").unwrap()),
+                pipeline_layout.clone(),
+            )).unwrap(),
+            bvh_compute_aabbs_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(shaders.bvh_compute_aabbs.entry_point("mainBVHComputeAABBs").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             pipeline_layout
@@ -766,6 +925,23 @@ impl RenderContext {
             &std::fs::read(spirv_dir.join("mainBufferVS.spv")).expect("Failed to read shader"));
         let present_buffer_fs = load_shader(device.clone(),
             &std::fs::read(spirv_dir.join("mainBufferFS.spv")).expect("Failed to read shader"));
+        // BVH shaders
+        let bvh_scene_bounds = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHSceneBounds.spv")).expect("Failed to read shader"));
+        let bvh_morton_codes = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHMortonCodes.spv")).expect("Failed to read shader"));
+        let bvh_bitonic_sort = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHBitonicSort.spv")).expect("Failed to read shader"));
+        let bvh_init_leaves = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHInitLeaves.spv")).expect("Failed to read shader"));
+        let bvh_build_tree = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHBuildTree.spv")).expect("Failed to read shader"));
+        let bvh_compute_leaf_aabbs = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHComputeLeafAABBs.spv")).expect("Failed to read shader"));
+        let bvh_propagate_aabbs = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHPropagateAABBs.spv")).expect("Failed to read shader"));
+        let bvh_compute_aabbs = load_shader(device.clone(),
+            &std::fs::read(spirv_dir.join("mainBVHComputeAABBs.spv")).expect("Failed to read shader"));
 
         let render_pass = match swapchain.clone() {
             Some(swapchain) => {
@@ -849,6 +1025,13 @@ impl RenderContext {
                     sized_descriptor_set_layout.clone(),
                     live_descriptor_set_layout.clone()
                 ]),
+                push_constant_ranges: vec![
+                    PushConstantRange {
+                        stages: ShaderStages::COMPUTE,
+                        offset: 0,
+                        size: 16, // 4 u32s: stage, step, count, padding
+                    }
+                ],
                 ..Default::default()
             }
         ).unwrap();
@@ -866,6 +1049,14 @@ impl RenderContext {
             raytrace_preprocess: raytrace_preprocess,
             raytrace_pixel: raytrace_pixel,
             raytrace_clear: raytrace_clear,
+            bvh_scene_bounds,
+            bvh_morton_codes,
+            bvh_bitonic_sort,
+            bvh_init_leaves,
+            bvh_build_tree,
+            bvh_compute_leaf_aabbs,
+            bvh_propagate_aabbs,
+            bvh_compute_aabbs,
         };
 
         let present_pipeline = match render_pass.clone() {
@@ -1005,6 +1196,17 @@ impl RenderContext {
         }
 
         let total_tetrahedron_count = self.one_time_buffers.model_tetrahedron_count*model_instances.len();
+
+        // Debug: print scene info on first frame only
+        if self.frames_rendered == 0 {
+            println!("Scene: {} tetrahedrons ({} per instance × {} instances)",
+                     total_tetrahedron_count,
+                     self.one_time_buffers.model_tetrahedron_count,
+                     model_instances.len());
+            println!("BVH: {} internal nodes, {} total nodes",
+                     total_tetrahedron_count.saturating_sub(1),
+                     2 * total_tetrahedron_count.saturating_sub(1) + 1);
+        }
         {
             let mut writer = self.live_buffers.working_data_buffer.write().unwrap();
             writer.view_matrix = view_matrix_nalgebra.into();
@@ -1121,7 +1323,11 @@ impl RenderContext {
                                              self.sized_buffers.descriptor_set.clone(),
                                              self.live_buffers.descriptor_set.clone()
                                          ]).unwrap();
-            
+
+            // Set default push constants (required by pipeline layout even for shaders that don't use them)
+            let dummy_push_data: [u32; 4] = [0, 0, 0, 0];
+            builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, dummy_push_data).unwrap();
+
             if render_options.do_frame_clear || force_clear {
                 builder.bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone()).unwrap();
                 unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
@@ -1150,9 +1356,75 @@ impl RenderContext {
             }
 
             if render_options.do_raytrace {
+                // 1. Tetrahedron preprocessing (transform to view space)
                 builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone()).unwrap();
                 unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
+                // 2. BVH Construction
+                if total_tetrahedron_count > 0 {
+                    // 2a. Compute scene bounds
+                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_scene_bounds_pipeline.clone()).unwrap();
+                    unsafe {builder.dispatch([1, 1, 1])}.unwrap() ;
+
+                    // 2b. Compute Morton codes (dispatch n_pow2 threads to fill sentinels for padding)
+                    let n = total_tetrahedron_count as u32;
+                    let n_pow2 = n.next_power_of_two();
+                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_morton_codes_pipeline.clone()).unwrap();
+                    unsafe {builder.dispatch([(n_pow2 + 63)/64u32, 1, 1])}.unwrap() ;
+
+                    // 2c. Bitonic sort (log^2(n) dispatches)
+                    // Sort all n_pow2 elements (including sentinel-padded entries)
+                    let num_stages = n_pow2.trailing_zeros(); // log2(n_pow2)
+
+                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_pipeline.clone()).unwrap();
+                    for stage in 0..num_stages {
+                        for step in (0..=stage).rev() {
+                            let push_data: [u32; 4] = [stage, step, n_pow2, 0];
+                            builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
+                            unsafe {builder.dispatch([(n_pow2 + 63)/64, 1, 1])}.unwrap() ;
+                        }
+                    }
+
+                    // 2d. Initialize leaf nodes
+                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_init_leaves_pipeline.clone()).unwrap();
+                    unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+
+                    // 2e. Build internal nodes (Karras algorithm)
+                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_build_tree_pipeline.clone()).unwrap();
+                    unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+
+                    // 2f. Compute leaf AABBs (separate dispatch for proper synchronization)
+                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_compute_leaf_aabbs_pipeline.clone()).unwrap();
+                    unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+
+                    // 2g. Propagate AABBs from leaves to root
+                    // Need log2(N) dispatches to propagate from leaves to root
+                    // Each dispatch handles internal nodes whose children are ready
+                    // Use a fixed large number of passes to ensure completion
+                    let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
+                    if num_internal_nodes > 0 {
+                        // Use max of calculated depth and 32 passes to ensure propagation completes
+                        let tree_depth = (2 * (32 - num_internal_nodes.leading_zeros()) as u32).max(32);
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone()).unwrap();
+                        for _ in 0..tree_depth {
+                            unsafe {builder.dispatch([(num_internal_nodes + 63)/64, 1, 1])}.unwrap();
+                        }
+                    }
+                }
+
+                // Debug: copy BVH data to CPU on first frame
+                if self.frames_rendered == 0 {
+                    builder.copy_buffer(CopyBufferInfo::buffers(
+                        self.sized_buffers.bvh_nodes_buffer.clone(),
+                        self.sized_buffers.cpu_bvh_nodes_buffer.clone(),
+                    )).unwrap();
+                    builder.copy_buffer(CopyBufferInfo::buffers(
+                        self.sized_buffers.morton_codes_buffer.clone(),
+                        self.sized_buffers.cpu_morton_codes_buffer.clone(),
+                    )).unwrap();
+                }
+
+                // 3. Raytrace pixels (using BVH)
                 builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone()).unwrap();
                 unsafe {builder.dispatch([(self.sized_buffers.render_dimensions[0]+7)/8, (self.sized_buffers.render_dimensions[1]+7)/8, 1])}.unwrap() ;
             }
@@ -1339,6 +1611,97 @@ impl RenderContext {
                         eprintln!("Error saving screenshot: {:?}", error);
                     }
                 };
+            }
+        }
+
+        // Debug: print BVH diagnostics on first frame
+        if self.frames_rendered == 0 && render_options.do_raytrace {
+            // Ensure GPU work is done
+            if self.previous_frame_end.is_some() {
+                let fence = self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+                fence.wait(None).unwrap();
+                self.previous_frame_end = None;
+            }
+
+            let bvh_nodes = self.sized_buffers.cpu_bvh_nodes_buffer.read().unwrap();
+            let morton_codes = self.sized_buffers.cpu_morton_codes_buffer.read().unwrap();
+            let num_leaves = total_tetrahedron_count;
+            let num_internal = num_leaves.saturating_sub(1);
+            let total_nodes = 2 * num_leaves - 1;
+
+            // Check Morton code sorting
+            let mut sorted = true;
+            for i in 1..num_leaves {
+                if morton_codes[i].code < morton_codes[i-1].code {
+                    println!("  SORT ERROR at {}: code[{}]={} > code[{}]={}",
+                             i, i-1, morton_codes[i-1].code, i, morton_codes[i].code);
+                    sorted = false;
+                }
+            }
+            println!("Morton codes sorted: {}", sorted);
+
+            // Check root node
+            let root = &bvh_nodes[0];
+            println!("Root node: left={}, right={}, isLeaf={}, visitCount={}",
+                     root.left_child, root.right_child, root.is_leaf, root.atomic_visit_count);
+            println!("Root AABB: min=({:.2},{:.2},{:.2},{:.2}) max=({:.2},{:.2},{:.2},{:.2})",
+                     root.min_bounds.x, root.min_bounds.y, root.min_bounds.z, root.min_bounds.w,
+                     root.max_bounds.x, root.max_bounds.y, root.max_bounds.z, root.max_bounds.w);
+
+            // Count valid internal nodes
+            let mut valid_internal = 0;
+            let mut invalid_children = 0;
+            let mut zero_aabb_internal = 0;
+            for i in 0..num_internal {
+                if bvh_nodes[i].atomic_visit_count >= 2 {
+                    valid_internal += 1;
+                }
+                if bvh_nodes[i].left_child >= total_nodes as u32 || bvh_nodes[i].right_child >= total_nodes as u32 {
+                    if bvh_nodes[i].left_child != 0xFFFFFFFF && bvh_nodes[i].right_child != 0xFFFFFFFF {
+                        invalid_children += 1;
+                    }
+                }
+                let aabb_size = (bvh_nodes[i].max_bounds - bvh_nodes[i].min_bounds).length();
+                if aabb_size < 0.001 && bvh_nodes[i].atomic_visit_count >= 2 {
+                    zero_aabb_internal += 1;
+                }
+            }
+            println!("Internal nodes: {}/{} valid (visitCount>=2), {} invalid children, {} zero-AABB",
+                     valid_internal, num_internal, invalid_children, zero_aabb_internal);
+
+            // Count valid leaves
+            let mut zero_aabb_leaves = 0;
+            for i in 0..num_leaves {
+                let leaf_idx = num_internal + i;
+                let aabb_size = (bvh_nodes[leaf_idx].max_bounds - bvh_nodes[leaf_idx].min_bounds).length();
+                if aabb_size < 0.001 {
+                    zero_aabb_leaves += 1;
+                }
+            }
+            println!("Leaves: {}/{} with zero AABB", zero_aabb_leaves, num_leaves);
+
+            // Print first few internal nodes for inspection
+            println!("First 5 internal nodes:");
+            for i in 0..5.min(num_internal) {
+                let n = &bvh_nodes[i];
+                let aabb_size = (n.max_bounds - n.min_bounds).length();
+                println!("  [{}] L={} R={} leaf={} visit={} aabb_size={:.2} min=({:.1},{:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1},{:.1})",
+                         i, n.left_child, n.right_child, n.is_leaf, n.atomic_visit_count,
+                         aabb_size,
+                         n.min_bounds.x, n.min_bounds.y, n.min_bounds.z, n.min_bounds.w,
+                         n.max_bounds.x, n.max_bounds.y, n.max_bounds.z, n.max_bounds.w);
+            }
+
+            // Print a few leaves
+            println!("First 5 leaf nodes:");
+            for i in 0..5.min(num_leaves) {
+                let leaf_idx = num_internal + i;
+                let n = &bvh_nodes[leaf_idx];
+                let aabb_size = (n.max_bounds - n.min_bounds).length();
+                println!("  [{}] tetIdx={} leaf={} aabb_size={:.2} min=({:.1},{:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1},{:.1})",
+                         leaf_idx, n.tetrahedron_index, n.is_leaf, aabb_size,
+                         n.min_bounds.x, n.min_bounds.y, n.min_bounds.z, n.min_bounds.w,
+                         n.max_bounds.x, n.max_bounds.y, n.max_bounds.z, n.max_bounds.w);
             }
         }
 
