@@ -58,7 +58,6 @@ struct ShaderModules {
     bvh_build_tree: Arc<ShaderModule>,
     bvh_compute_leaf_aabbs: Arc<ShaderModule>,
     bvh_propagate_aabbs: Arc<ShaderModule>,
-    bvh_compute_aabbs: Arc<ShaderModule>,
 }
 
 pub struct RenderOptions {
@@ -713,7 +712,6 @@ struct ComputePipelineContext {
     bvh_build_tree_pipeline: Arc<ComputePipeline>,
     bvh_compute_leaf_aabbs_pipeline: Arc<ComputePipeline>,
     bvh_propagate_aabbs_pipeline: Arc<ComputePipeline>,
-    bvh_compute_aabbs_pipeline: Arc<ComputePipeline>,
     pipeline_layout: Arc<PipelineLayout>
 }
 
@@ -771,10 +769,6 @@ impl ComputePipelineContext {
             )).unwrap(),
             bvh_propagate_aabbs_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
                 PipelineShaderStageCreateInfo::new(shaders.bvh_propagate_aabbs.entry_point("mainBVHPropagateAABBs").unwrap()),
-                pipeline_layout.clone(),
-            )).unwrap(),
-            bvh_compute_aabbs_pipeline: ComputePipeline::new(device.clone(), None, ComputePipelineCreateInfo::stage_layout(
-                PipelineShaderStageCreateInfo::new(shaders.bvh_compute_aabbs.entry_point("mainBVHComputeAABBs").unwrap()),
                 pipeline_layout.clone(),
             )).unwrap(),
             pipeline_layout
@@ -940,8 +934,6 @@ impl RenderContext {
             &std::fs::read(spirv_dir.join("mainBVHComputeLeafAABBs.spv")).expect("Failed to read shader"));
         let bvh_propagate_aabbs = load_shader(device.clone(),
             &std::fs::read(spirv_dir.join("mainBVHPropagateAABBs.spv")).expect("Failed to read shader"));
-        let bvh_compute_aabbs = load_shader(device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHComputeAABBs.spv")).expect("Failed to read shader"));
 
         let render_pass = match swapchain.clone() {
             Some(swapchain) => {
@@ -1056,7 +1048,6 @@ impl RenderContext {
             bvh_build_tree,
             bvh_compute_leaf_aabbs,
             bvh_propagate_aabbs,
-            bvh_compute_aabbs,
         };
 
         let present_pipeline = match render_pass.clone() {
@@ -1393,20 +1384,18 @@ impl RenderContext {
                     builder.bind_pipeline_compute(self.compute_pipeline.bvh_build_tree_pipeline.clone()).unwrap();
                     unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // 2f. Compute leaf AABBs (separate dispatch for proper synchronization)
+                    // 2f. Compute leaf AABBs
                     builder.bind_pipeline_compute(self.compute_pipeline.bvh_compute_leaf_aabbs_pipeline.clone()).unwrap();
                     unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // 2g. Propagate AABBs from leaves to root
-                    // Need log2(N) dispatches to propagate from leaves to root
-                    // Each dispatch handles internal nodes whose children are ready
-                    // Use a fixed large number of passes to ensure completion
+                    // 2g. Propagate AABBs from leaves to root (multi-pass)
+                    // Each pass computes AABBs for internal nodes whose children are ready.
+                    // Tree depth is at most ceil(log2(N)), so that many passes suffices.
                     let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
                     if num_internal_nodes > 0 {
-                        // Use max of calculated depth and 32 passes to ensure propagation completes
-                        let tree_depth = (2 * (32 - num_internal_nodes.leading_zeros()) as u32).max(32);
+                        let num_passes = 2 * (32 - num_internal_nodes.leading_zeros()).max(1);
                         builder.bind_pipeline_compute(self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone()).unwrap();
-                        for _ in 0..tree_depth {
+                        for _ in 0..num_passes {
                             unsafe {builder.dispatch([(num_internal_nodes + 63)/64, 1, 1])}.unwrap();
                         }
                     }

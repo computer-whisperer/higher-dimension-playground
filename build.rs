@@ -29,7 +29,6 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
     ShaderEntry { file: "bvh.slang", entry: "mainBVHBuildTree", profile: "cs_6_5" },
     ShaderEntry { file: "bvh.slang", entry: "mainBVHComputeLeafAABBs", profile: "cs_6_5" },
     ShaderEntry { file: "bvh.slang", entry: "mainBVHPropagateAABBs", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHComputeAABBs", profile: "cs_6_5" },
     // Rasterizer compute shaders
     ShaderEntry { file: "rasterizer.slang", entry: "mainTetrahedronCS", profile: "cs_6_5" },
     ShaderEntry { file: "rasterizer.slang", entry: "mainEdgeCS", profile: "cs_6_5" },
