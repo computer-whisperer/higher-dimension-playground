@@ -174,6 +174,9 @@ float2 rayAABBIntersect4D(float4 origin, float4 invDir, float4 minB, float4 maxB
 }
 
 // Test a single tetrahedron for ray intersection
+// Uses the precomputed normal for fast t computation (2 dot products),
+// early rejection on t, then 3x3 Cramer's rule for barycentric coordinates.
+// This avoids the expensive 4x4 matrix inverse.
 bool testTetrahedronHit(
     float4 start,
     float4 direction,
@@ -186,52 +189,81 @@ bool testTetrahedronHit(
         return false;
 
     // Check if ray is parallel to tetrahedron hyperplane
-    float value = dot(tet.normal, direction);
-    if (abs(value) < 0.001)
+    float denom = dot(tet.normal, direction);
+    if (abs(denom) < 0.001)
         return false;
 
-    // Construct matrix for intersection calculation
-    // [d, v1-v0, v2-v0, v3-v0] * [t, u, v, w]^T = start - v0
-    float4x4 mat = float4x4(
-        direction,
-        tet.vertexPositions[1] - tet.vertexPositions[0],
-        tet.vertexPositions[2] - tet.vertexPositions[0],
-        tet.vertexPositions[3] - tet.vertexPositions[0]
-    );
+    // Compute t using the normal (perpendicular to all edge vectors).
+    // Since b = start - v0 decomposes as b = -t*d + u*e1 + v*e2 + w*e3,
+    // and N is perpendicular to e1,e2,e3: dot(b,N) = -t*dot(d,N)
+    float4 b = start - tet.vertexPositions[0];
+    float hitDistance = -dot(b, tet.normal) / denom;
 
-    float4x4 invMat = inverse4x4(mat);
-    float4 result = mul(invMat, start - tet.vertexPositions[0]);
+    // Early rejection: behind ray or farther than closest hit
+    if (hitDistance <= 0.0)
+        return false;
+    if (closestHit.didHit != 0 && closestHit.hitDistance <= hitDistance)
+        return false;
 
-    // Barycentric coordinates
-    float4 barycentric = float4(
-        1.0 - (result[1] + result[2] + result[3]),
-        result[1],
-        result[2],
-        result[3]
-    );
+    // Compute hit point relative to v0
+    float4 q = b + hitDistance * direction;
 
-    float hitDistance = -result[0];
+    // Edge vectors
+    float4 e1 = tet.vertexPositions[1] - tet.vertexPositions[0];
+    float4 e2 = tet.vertexPositions[2] - tet.vertexPositions[0];
+    float4 e3 = tet.vertexPositions[3] - tet.vertexPositions[0];
 
-    // Check if hit is valid (in front of ray, inside tetrahedron)
-    if (hitDistance > 0.0 &&
-        barycentric.x >= 0.0 && barycentric.y >= 0.0 &&
-        barycentric.z >= 0.0 && barycentric.w >= 0.0)
+    // Project 4D system to 3D by dropping the axis with largest normal component.
+    // The 4x3 system q = u*e1 + v*e2 + w*e3 is overdetermined but consistent;
+    // dropping the most-constrained row gives the best-conditioned 3x3 system.
+    float4 absN = abs(tet.normal);
+    float3 e1s, e2s, e3s, qs;
+
+    if (absN.x >= absN.y && absN.x >= absN.z && absN.x >= absN.w)
     {
-        if (closestHit.didHit == 0 || closestHit.hitDistance > hitDistance)
-        {
-            float4 hitPosition = hitDistance * direction + start;
-            float4 hitNormal = dot(tet.normal, direction) < 0.0
-                ? tet.normal
-                : -tet.normal;
+        e1s = e1.yzw; e2s = e2.yzw; e3s = e3.yzw; qs = q.yzw;
+    }
+    else if (absN.y >= absN.z && absN.y >= absN.w)
+    {
+        e1s = float3(e1.x, e1.z, e1.w); e2s = float3(e2.x, e2.z, e2.w);
+        e3s = float3(e3.x, e3.z, e3.w); qs = float3(q.x, q.z, q.w);
+    }
+    else if (absN.z >= absN.w)
+    {
+        e1s = float3(e1.x, e1.y, e1.w); e2s = float3(e2.x, e2.y, e2.w);
+        e3s = float3(e3.x, e3.y, e3.w); qs = float3(q.x, q.y, q.w);
+    }
+    else
+    {
+        e1s = e1.xyz; e2s = e2.xyz; e3s = e3.xyz; qs = q.xyz;
+    }
 
-            closestHit.tetrahedronIndex = tetIndex;
-            closestHit.hitPosition = hitPosition;
-            closestHit.hitDistance = hitDistance;
-            closestHit.barycentric = barycentric;
-            closestHit.hitNormal = hitNormal;
-            closestHit.didHit = 1;
-            return true;
-        }
+    // Solve 3x3 system using Cramer's rule:
+    // [e1s | e2s | e3s] * [u, v, w]^T = qs
+    float3 c23 = cross(e2s, e3s);
+    float det3 = dot(e1s, c23);
+    if (abs(det3) < 1e-10)
+        return false;
+
+    float invDet = 1.0 / det3;
+    float u = dot(qs, c23) * invDet;
+    float v = dot(e1s, cross(qs, e3s)) * invDet;
+    float w = dot(e1s, cross(e2s, qs)) * invDet;
+    float bary0 = 1.0 - u - v - w;
+
+    // Check if inside tetrahedron
+    if (bary0 >= 0.0 && u >= 0.0 && v >= 0.0 && w >= 0.0)
+    {
+        float4 hitPosition = hitDistance * direction + start;
+        float4 hitNormal = denom < 0.0 ? tet.normal : -tet.normal;
+
+        closestHit.tetrahedronIndex = tetIndex;
+        closestHit.hitPosition = hitPosition;
+        closestHit.hitDistance = hitDistance;
+        closestHit.barycentric = float4(bary0, u, v, w);
+        closestHit.hitNormal = hitNormal;
+        closestHit.didHit = 1;
+        return true;
     }
     return false;
 }
