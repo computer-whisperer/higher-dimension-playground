@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use winit::window::Window;
@@ -805,7 +806,8 @@ pub struct RenderContext {
     live_buffers: LiveBuffers,
     cpu_screen_capture_buffer: Subbuffer<[u8]>,
     memory_allocator: Arc<StandardMemoryAllocator>,
-    frames_rendered: usize
+    frames_rendered: usize,
+    bvh_scene_hash: u64,
 }
 
 
@@ -1123,6 +1125,7 @@ impl RenderContext {
             live_buffers,
             cpu_screen_capture_buffer,
             frames_rendered: 0,
+            bvh_scene_hash: 0,
         }
     }
     
@@ -1365,88 +1368,105 @@ impl RenderContext {
             }
 
             if render_options.do_raytrace {
-                // 1. Tetrahedron preprocessing (transform to view space)
-                builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone()).unwrap();
-                unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+                // Compute a hash of the scene inputs that affect the BVH.
+                // If unchanged, skip tetrahedron preprocessing and BVH construction.
+                let scene_hash = {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    for &val in view_matrix_nalgebra.as_slice() {
+                        val.to_bits().hash(&mut hasher);
+                    }
+                    focal_length_xy.to_bits().hash(&mut hasher);
+                    focal_length_zw.to_bits().hash(&mut hasher);
+                    model_instances.len().hash(&mut hasher);
+                    bytemuck::cast_slice::<_, u8>(model_instances).hash(&mut hasher);
+                    hasher.finish()
+                };
+                let bvh_needs_rebuild = scene_hash != self.bvh_scene_hash;
 
-                // 2. BVH Construction
-                if total_tetrahedron_count > 0 {
-                    // 2a. Compute scene bounds
-                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_scene_bounds_pipeline.clone()).unwrap();
-                    unsafe {builder.dispatch([1, 1, 1])}.unwrap() ;
+                if bvh_needs_rebuild {
+                    // 1. Tetrahedron preprocessing (transform to view space)
+                    builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone()).unwrap();
+                    unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // 2b. Compute Morton codes (dispatch n_pow2 threads to fill sentinels for padding)
-                    let n = total_tetrahedron_count as u32;
-                    let n_pow2 = n.next_power_of_two();
-                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_morton_codes_pipeline.clone()).unwrap();
-                    unsafe {builder.dispatch([(n_pow2 + 63)/64u32, 1, 1])}.unwrap() ;
+                    // 2. BVH Construction
+                    if total_tetrahedron_count > 0 {
+                        // 2a. Compute scene bounds
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_scene_bounds_pipeline.clone()).unwrap();
+                        unsafe {builder.dispatch([1, 1, 1])}.unwrap() ;
 
-                    // 2c. Bitonic sort using shared memory optimization
-                    // Sort all n_pow2 elements (including sentinel-padded entries)
-                    let num_stages = n_pow2.trailing_zeros(); // log2(n_pow2)
-                    let local_stages = 6u32.min(num_stages); // stages 0-5 fit in 64-element workgroups
-                    let workgroups = (n_pow2 + 63) / 64;
+                        // 2b. Compute Morton codes (dispatch n_pow2 threads to fill sentinels for padding)
+                        let n = total_tetrahedron_count as u32;
+                        let n_pow2 = n.next_power_of_two();
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_morton_codes_pipeline.clone()).unwrap();
+                        unsafe {builder.dispatch([(n_pow2 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // Phase 1: Sort each 64-element block in shared memory (stages 0-5)
-                    let push_data: [u32; 4] = [0, 0, n_pow2, 0];
-                    builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
-                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_local_pipeline.clone()).unwrap();
-                    unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
+                        // 2c. Bitonic sort using shared memory optimization
+                        // Sort all n_pow2 elements (including sentinel-padded entries)
+                        let num_stages = n_pow2.trailing_zeros(); // log2(n_pow2)
+                        let local_stages = 6u32.min(num_stages); // stages 0-5 fit in 64-element workgroups
+                        let workgroups = (n_pow2 + 63) / 64;
 
-                    // Phase 2: Global merge stages (stages 6+)
-                    for stage in local_stages..num_stages {
-                        // Global steps: stepSize >= 64 (step >= 6)
-                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_pipeline.clone()).unwrap();
-                        for step in (local_stages..=stage).rev() {
-                            let push_data: [u32; 4] = [stage, step, n_pow2, 0];
+                        // Phase 1: Sort each 64-element block in shared memory (stages 0-5)
+                        let push_data: [u32; 4] = [0, 0, n_pow2, 0];
+                        builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_local_pipeline.clone()).unwrap();
+                        unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
+
+                        // Phase 2: Global merge stages (stages 6+)
+                        for stage in local_stages..num_stages {
+                            // Global steps: stepSize >= 64 (step >= 6)
+                            builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_pipeline.clone()).unwrap();
+                            for step in (local_stages..=stage).rev() {
+                                let push_data: [u32; 4] = [stage, step, n_pow2, 0];
+                                builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
+                                unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
+                            }
+                            // Local merge: steps 5-0 in shared memory (1 dispatch)
+                            let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
                             builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
+                            builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_local_merge_pipeline.clone()).unwrap();
                             unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
                         }
-                        // Local merge: steps 5-0 in shared memory (1 dispatch)
-                        let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
-                        builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data).unwrap();
-                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_bitonic_sort_local_merge_pipeline.clone()).unwrap();
-                        unsafe {builder.dispatch([workgroups, 1, 1])}.unwrap() ;
-                    }
 
-                    // 2d. Initialize leaf nodes
-                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_init_leaves_pipeline.clone()).unwrap();
-                    unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+                        // 2d. Initialize leaf nodes
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_init_leaves_pipeline.clone()).unwrap();
+                        unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // 2e. Build internal nodes (Karras algorithm)
-                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_build_tree_pipeline.clone()).unwrap();
-                    unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+                        // 2e. Build internal nodes (Karras algorithm)
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_build_tree_pipeline.clone()).unwrap();
+                        unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // 2f. Compute leaf AABBs
-                    builder.bind_pipeline_compute(self.compute_pipeline.bvh_compute_leaf_aabbs_pipeline.clone()).unwrap();
-                    unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+                        // 2f. Compute leaf AABBs
+                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_compute_leaf_aabbs_pipeline.clone()).unwrap();
+                        unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
 
-                    // 2g. Propagate AABBs from leaves to root (multi-pass)
-                    // Each pass computes AABBs for internal nodes whose children are ready.
-                    // Tree depth is at most ceil(log2(N)), so that many passes suffices.
-                    let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
-                    if num_internal_nodes > 0 {
-                        let num_passes = 2 * (32 - num_internal_nodes.leading_zeros()).max(1);
-                        builder.bind_pipeline_compute(self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone()).unwrap();
-                        for _ in 0..num_passes {
-                            unsafe {builder.dispatch([(num_internal_nodes + 63)/64, 1, 1])}.unwrap();
+                        // 2g. Propagate AABBs from leaves to root (multi-pass)
+                        let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
+                        if num_internal_nodes > 0 {
+                            let num_passes = 2 * (32 - num_internal_nodes.leading_zeros()).max(1);
+                            builder.bind_pipeline_compute(self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone()).unwrap();
+                            for _ in 0..num_passes {
+                                unsafe {builder.dispatch([(num_internal_nodes + 63)/64, 1, 1])}.unwrap();
+                            }
                         }
                     }
+
+                    self.bvh_scene_hash = scene_hash;
+
+                    // Debug: copy BVH data to CPU on first rebuild
+                    if self.frames_rendered == 0 {
+                        builder.copy_buffer(CopyBufferInfo::buffers(
+                            self.sized_buffers.bvh_nodes_buffer.clone(),
+                            self.sized_buffers.cpu_bvh_nodes_buffer.clone(),
+                        )).unwrap();
+                        builder.copy_buffer(CopyBufferInfo::buffers(
+                            self.sized_buffers.morton_codes_buffer.clone(),
+                            self.sized_buffers.cpu_morton_codes_buffer.clone(),
+                        )).unwrap();
+                    }
                 }
 
-                // Debug: copy BVH data to CPU on first frame
-                if self.frames_rendered == 0 {
-                    builder.copy_buffer(CopyBufferInfo::buffers(
-                        self.sized_buffers.bvh_nodes_buffer.clone(),
-                        self.sized_buffers.cpu_bvh_nodes_buffer.clone(),
-                    )).unwrap();
-                    builder.copy_buffer(CopyBufferInfo::buffers(
-                        self.sized_buffers.morton_codes_buffer.clone(),
-                        self.sized_buffers.cpu_morton_codes_buffer.clone(),
-                    )).unwrap();
-                }
-
-                // 3. Raytrace pixels (using BVH)
+                // 3. Raytrace pixels (using BVH) - always runs, only seed changes
                 builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone()).unwrap();
                 unsafe {builder.dispatch([(self.sized_buffers.render_dimensions[0]+7)/8, (self.sized_buffers.render_dimensions[1]+7)/8, 1])}.unwrap() ;
             }
