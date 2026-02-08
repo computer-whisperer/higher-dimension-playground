@@ -27,6 +27,8 @@ use vulkano::{sync, Validated, VulkanError};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::sync::GpuFuture;
+use vulkano::query::{QueryPool, QueryPoolCreateInfo, QueryType, QueryResultFlags};
+use vulkano::sync::PipelineStage;
 use bytemuck::{Zeroable};
 use exr::prelude::{ImageAttributes, WritableImage};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
@@ -790,6 +792,135 @@ impl ComputePipelineContext {
 }
 
 
+const PROFILER_MAX_TIMESTAMPS: u32 = 5;
+const PROFILER_REPORT_INTERVAL: usize = 100;
+
+struct GpuProfiler {
+    query_pool: Arc<QueryPool>,
+    timestamp_period_ns: f32,
+    timestamps_written: u32,
+    bvh_included: bool,
+    // Accumulation for frames with BVH rebuild: [Clear, Tet Preprocess, BVH Build, Raytrace]
+    accum_with_bvh: [f64; 4],
+    frames_with_bvh: usize,
+    // Accumulation for frames without BVH: [Clear, Raytrace]
+    accum_without_bvh: [f64; 2],
+    frames_without_bvh: usize,
+    total_frames: usize,
+}
+
+impl GpuProfiler {
+    fn new(device: Arc<Device>) -> Self {
+        let query_pool = QueryPool::new(
+            device.clone(),
+            QueryPoolCreateInfo {
+                query_count: PROFILER_MAX_TIMESTAMPS,
+                ..QueryPoolCreateInfo::query_type(QueryType::Timestamp)
+            },
+        ).unwrap();
+
+        let timestamp_period_ns = device.physical_device().properties().timestamp_period;
+
+        GpuProfiler {
+            query_pool,
+            timestamp_period_ns,
+            timestamps_written: 0,
+            bvh_included: false,
+            accum_with_bvh: [0.0; 4],
+            frames_with_bvh: 0,
+            accum_without_bvh: [0.0; 2],
+            frames_without_bvh: 0,
+            total_frames: 0,
+        }
+    }
+
+    fn read_results_and_accumulate(&mut self) {
+        if self.timestamps_written < 2 {
+            return;
+        }
+
+        let n = self.timestamps_written;
+        let mut results = vec![0u64; n as usize];
+        match self.query_pool.get_results::<u64>(0..n, &mut results, QueryResultFlags::WAIT) {
+            Ok(true) => {}
+            _ => return,
+        }
+
+        let period_ms = self.timestamp_period_ns as f64 / 1_000_000.0;
+
+        if self.bvh_included {
+            // 5 timestamps: [start, after_clear, after_preprocess, after_bvh, after_raytrace]
+            if n >= 5 {
+                let intervals = [
+                    (results[1] - results[0]) as f64 * period_ms, // Clear
+                    (results[2] - results[1]) as f64 * period_ms, // Tet Preprocess
+                    (results[3] - results[2]) as f64 * period_ms, // BVH Build
+                    (results[4] - results[3]) as f64 * period_ms, // Raytrace
+                ];
+                for i in 0..4 {
+                    self.accum_with_bvh[i] += intervals[i];
+                }
+                self.frames_with_bvh += 1;
+            }
+        } else {
+            // 3 timestamps: [start, after_clear, after_raytrace]
+            if n >= 3 {
+                let intervals = [
+                    (results[1] - results[0]) as f64 * period_ms, // Clear
+                    (results[2] - results[1]) as f64 * period_ms, // Raytrace
+                ];
+                for i in 0..2 {
+                    self.accum_without_bvh[i] += intervals[i];
+                }
+                self.frames_without_bvh += 1;
+            }
+        }
+
+        self.total_frames += 1;
+
+        if self.total_frames > 0 && self.total_frames % PROFILER_REPORT_INTERVAL == 0 {
+            self.print_report();
+        }
+    }
+
+    fn print_report(&mut self) {
+        let total_ms: f64 = self.accum_with_bvh.iter().sum::<f64>()
+            + self.accum_without_bvh.iter().sum::<f64>();
+        let total_frames = self.frames_with_bvh + self.frames_without_bvh;
+
+        println!("=== GPU Profile ({} frames) ===", total_frames);
+        if total_frames > 0 {
+            println!("  Avg total: {:.3} ms", total_ms / total_frames as f64);
+        }
+
+        if self.frames_with_bvh > 0 {
+            let n = self.frames_with_bvh as f64;
+            println!("  With BVH rebuild ({} frames):", self.frames_with_bvh);
+            println!("    Clear: {:.3} ms, Tet Preprocess: {:.3} ms, BVH Build: {:.3} ms, Raytrace: {:.3} ms",
+                     self.accum_with_bvh[0] / n,
+                     self.accum_with_bvh[1] / n,
+                     self.accum_with_bvh[2] / n,
+                     self.accum_with_bvh[3] / n);
+        }
+
+        if self.frames_without_bvh > 0 {
+            let n = self.frames_without_bvh as f64;
+            println!("  Without BVH ({} frames):", self.frames_without_bvh);
+            println!("    Clear: {:.3} ms, Raytrace: {:.3} ms",
+                     self.accum_without_bvh[0] / n,
+                     self.accum_without_bvh[1] / n);
+        }
+
+        println!("================================");
+
+        // Reset accumulators
+        self.accum_with_bvh = [0.0; 4];
+        self.accum_without_bvh = [0.0; 2];
+        self.frames_with_bvh = 0;
+        self.frames_without_bvh = 0;
+    }
+}
+
 pub struct RenderContext {
     pub(crate) window: Option<Arc<Window>>,
     swapchain: Option<Arc<Swapchain>>,
@@ -808,6 +939,7 @@ pub struct RenderContext {
     memory_allocator: Arc<StandardMemoryAllocator>,
     frames_rendered: usize,
     bvh_scene_hash: u64,
+    profiler: GpuProfiler,
 }
 
 
@@ -1107,7 +1239,8 @@ impl RenderContext {
         // avoid that, we store the submission of the previous frame here.
         let previous_frame_end = None;
 
-        
+        let profiler = GpuProfiler::new(device.clone());
+
         RenderContext {
             window,
             swapchain,
@@ -1126,6 +1259,7 @@ impl RenderContext {
             cpu_screen_capture_buffer,
             frames_rendered: 0,
             bvh_scene_hash: 0,
+            profiler,
         }
     }
     
@@ -1165,9 +1299,9 @@ impl RenderContext {
                 fence.wait(None).unwrap();
             }
             self.previous_frame_end = None;
+            self.profiler.read_results_and_accumulate();
         }
 
-        
         let mut force_clear = false;
 
 
@@ -1340,9 +1474,24 @@ impl RenderContext {
             let dummy_push_data: [u32; 4] = [0, 0, 0, 0];
             builder.push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, dummy_push_data).unwrap();
 
+            // GPU profiling: reset query pool and write start timestamp
+            self.profiler.timestamps_written = 0;
+            let mut query_idx = 0u32;
+            if render_options.do_raytrace {
+                unsafe { builder.reset_query_pool(self.profiler.query_pool.clone(), 0..PROFILER_MAX_TIMESTAMPS) }.unwrap();
+                unsafe { builder.write_timestamp(self.profiler.query_pool.clone(), query_idx, PipelineStage::AllCommands) }.unwrap();
+                query_idx += 1;
+            }
+
             if render_options.do_frame_clear || force_clear {
                 builder.bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone()).unwrap();
                 unsafe {builder.dispatch([self.sized_buffers.render_dimensions[0]/8, self.sized_buffers.render_dimensions[1]/8, 1])}.unwrap() ; // Do compute stage
+            }
+
+            if render_options.do_raytrace {
+                // TS1: after clear
+                unsafe { builder.write_timestamp(self.profiler.query_pool.clone(), query_idx, PipelineStage::AllCommands) }.unwrap();
+                query_idx += 1;
             }
 
             if render_options.do_raster || render_options.do_tetrahedron_edges { // Tetrahedron pre-raster
@@ -1384,9 +1533,15 @@ impl RenderContext {
                 let bvh_needs_rebuild = scene_hash != self.bvh_scene_hash;
 
                 if bvh_needs_rebuild {
+                    self.profiler.bvh_included = true;
+
                     // 1. Tetrahedron preprocessing (transform to view space)
                     builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone()).unwrap();
                     unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ;
+
+                    // TS2: after tet preprocess
+                    unsafe { builder.write_timestamp(self.profiler.query_pool.clone(), query_idx, PipelineStage::AllCommands) }.unwrap();
+                    query_idx += 1;
 
                     // 2. BVH Construction
                     if total_tetrahedron_count > 0 {
@@ -1464,12 +1619,24 @@ impl RenderContext {
                             self.sized_buffers.cpu_morton_codes_buffer.clone(),
                         )).unwrap();
                     }
+
+                    // TS3: after BVH construction
+                    unsafe { builder.write_timestamp(self.profiler.query_pool.clone(), query_idx, PipelineStage::AllCommands) }.unwrap();
+                    query_idx += 1;
+                } else {
+                    self.profiler.bvh_included = false;
                 }
 
                 // 3. Raytrace pixels (using BVH) - always runs, only seed changes
                 builder.bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone()).unwrap();
                 unsafe {builder.dispatch([(self.sized_buffers.render_dimensions[0]+7)/8, (self.sized_buffers.render_dimensions[1]+7)/8, 1])}.unwrap() ;
+
+                // Final timestamp: after raytrace
+                unsafe { builder.write_timestamp(self.profiler.query_pool.clone(), query_idx, PipelineStage::AllCommands) }.unwrap();
+                query_idx += 1;
             }
+
+            self.profiler.timestamps_written = query_idx;
         }
 
 
@@ -1626,6 +1793,7 @@ impl RenderContext {
                     let fence =  self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
                     fence.wait(None).unwrap();
                     self.previous_frame_end = None;
+                    self.profiler.read_results_and_accumulate();
                 }
             }
         };
