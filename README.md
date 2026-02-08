@@ -48,8 +48,6 @@ This project renders 4D geometry by decomposing hypercubes into tetrahedra (3-si
 
 ### Not Yet Implemented
 
-- BVH acceleration structure (data structures exist but not actively used)
-- Interactive camera controls
 - Custom scene loading (currently hardcoded demo scene)
 - WebGPU/WASM support (infrastructure exists in `pkg/`)
 
@@ -75,23 +73,36 @@ yay -S shader-slang-bin spirv-tools
 # Build (compiles shaders automatically)
 cargo build --release
 
-# Run with window
-cargo run --release
+# Interactive FPS-style explorer (WASD + mouse look, Q/E for W-axis)
+cargo run -p game --release
 
-# Run headless (renders to frames/*.exr)
-cargo run --release -- --headless
+# Demo with pre-set camera (supports --headless, --raytrace, --edges, etc.)
+cargo run -p demo --release
+
+# Demo headless render to PNG
+cargo run -p demo --release -- --headless
 ```
 
 ## Project Structure
 
 ```
 higher-dimension-playground/
-├── src/
-│   ├── main.rs              # Application entry, demo scene, Vulkan setup
+├── src/                     # Core library
+│   ├── lib.rs               # Library root
 │   ├── render.rs            # Vulkan rendering context and pipelines
 │   ├── hypercube.rs         # Hypercube geometry generation
 │   ├── matrix_operations.rs # 4D transformation matrices
-│   └── exr_converter.rs     # Utility binary for EXR recompression
+│   └── vulkan_setup.rs      # Vulkan device/instance initialization
+├── crates/
+│   ├── game/                # Interactive FPS-style 4D explorer
+│   │   └── src/
+│   │       ├── main.rs      # App struct, event loop, mouse grab
+│   │       ├── camera.rs    # Camera4D: position, yaw, pitch, view matrix
+│   │       ├── input.rs     # InputState: key/mouse tracking
+│   │       └── scene.rs     # Demo scene builder
+│   ├── demo/                # CLI demo with pre-set camera angles
+│   │   └── src/main.rs      # Headless/windowed demo, CLI options
+│   └── exr-converter/       # Standalone EXR recompression tool
 ├── common/                  # Shared math library (CPU + GPU compatible)
 │   └── src/
 │       ├── lib.rs           # Data structures (must match Slang types)
@@ -104,7 +115,7 @@ higher-dimension-playground/
 │       ├── types.slang      # Shared data structures
 │       ├── materials.slang  # Procedural material system
 │       ├── raytracer.slang  # 4D path tracing
-│       ├── rasterizer.slang # 4D rasterization
+│       ├── rasterizer.slang # 4D rasterization + near-plane clipping
 │       └── present.slang    # Screen presentation
 ├── shaders/                 # Legacy rust-gpu shaders (deprecated)
 └── build.rs                 # Slang shader compilation
@@ -137,16 +148,34 @@ The default scene includes:
 
 ## Configuration
 
-Edit `src/main.rs` in `DemoScene::update()`:
+### Game Controls
 
-```rust
-let do_raytrace = true;      // Enable path tracing
-let do_raster = false;       // Enable rasterization
-let do_edges = false;        // Render wireframe edges
-let do_frame_export = true;  // Save frames to disk
-let frame_time_hz = 20.0;    // Animation framerate
-let sub_frames_per_frame = 2000;  // Samples per frame
+| Key | Action |
+|-----|--------|
+| W/A/S/D | Move forward/left/back/right |
+| Mouse | Look around (yaw/pitch) |
+| Space/Shift | Move up/down (Y axis) |
+| Q/E | Move along W axis |
+| Escape | Release mouse (press again to exit) |
+| Click | Re-grab mouse |
+
+### Demo Options
+
+```bash
+cargo run -p demo --release -- [OPTIONS]
 ```
+
+| Flag | Effect |
+|------|--------|
+| `--headless` | Render single frame to PNG, no window |
+| `--raytrace` | Enable path tracing |
+| `--no-raster` | Disable rasterization |
+| `--edges` | Render ZW wireframe edges |
+| `--spin` | Animate camera rotation |
+| `--floor` | Show floor plane |
+| `--walls` | Show wall enclosure |
+| `-W` / `-H` | Canvas width/height (default 960x540) |
+| `--layers` | Depth layers for ZW supersampling (default 4) |
 
 
 ## Acknowledgments

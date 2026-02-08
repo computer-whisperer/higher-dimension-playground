@@ -227,43 +227,19 @@ uint clipTetrahedronByPlane(ClipTet tet, HyperPlane4D plane, out ClipTet results
     }
 }
 
-// Build the 5 frustum planes (matching the original rust-gpu code)
-void getFrustumPlanes(out HyperPlane4D planes[5])
+// Build frustum planes for clipping.
+// Only the near plane is used — the 4D projection boundary |X| = sqrt(Z²+W²) is a
+// cone that cannot be represented by hyperplanes, so side planes inevitably clip visible
+// geometry at certain ZW angles. The per-pixel rasterizer handles screen bounds instead.
+static const uint NUM_FRUSTUM_PLANES = 1;
+void getFrustumPlanes(out HyperPlane4D planes[1])
 {
-    // Near plane: prevents depth ≈ 0
+    // Near plane: prevents depth ≈ 0 (clips Z + W < 0.2)
     planes[0] = HyperPlane4D.from4Points(
         float4(1.0, 1.0, 0.1, 0.1),
         float4(1.0, -1.0, 0.1, 0.1),
         float4(-1.0, 1.0, 0.1, 0.1),
         float4(1.0, 1.0, 1.1, -0.9)
-    );
-    // Top plane
-    planes[1] = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(1.0, 1.0, 1.0, 1.0),
-        float4(-1.0, 1.0, 1.0, 1.0),
-        float4(0.0, 0.0, -1.0, 1.0)
-    );
-    // Bottom plane
-    planes[2] = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(1.0, -1.0, 1.0, 1.0),
-        float4(-1.0, -1.0, 1.0, 1.0),
-        float4(0.0, 0.0, 1.0, -1.0)
-    );
-    // Left plane
-    planes[3] = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(1.0, 1.0, 1.0, 1.0),
-        float4(1.0, -1.0, 1.0, 1.0),
-        float4(0.0, 0.0, 1.0, -1.0)
-    );
-    // Right plane
-    planes[4] = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(-1.0, 1.0, 1.0, 1.0),
-        float4(-1.0, -1.0, 1.0, 1.0),
-        float4(0.0, 0.0, -1.0, 1.0)
     );
 }
 
@@ -305,23 +281,23 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
         initialTet.texCoords[i] = result.texturePosition;
     }
 
-    // Clip against all 5 frustum planes using ping-pong buffers
-    HyperPlane4D frustumPlanes[5];
+    // Clip against near plane only (side planes removed — see getFrustumPlanes comment)
+    HyperPlane4D frustumPlanes[NUM_FRUSTUM_PLANES];
     getFrustumPlanes(frustumPlanes);
 
-    ClipTet bufA[16];
-    ClipTet bufB[16];
+    ClipTet bufA[4];
+    ClipTet bufB[4];
     uint countA = 1;
     bufA[0] = initialTet;
 
-    for (int p = 0; p < 5; p++)
+    for (int p = 0; p < NUM_FRUSTUM_PLANES; p++)
     {
         uint countB = 0;
         for (uint t = 0; t < countA; t++)
         {
             ClipTet clipResults[3];
             uint numResults = clipTetrahedronByPlane(bufA[t], frustumPlanes[p], clipResults);
-            for (uint r = 0; r < numResults && countB < 16; r++)
+            for (uint r = 0; r < numResults && countB < 4; r++)
             {
                 bufB[countB] = clipResults[r];
                 countB++;

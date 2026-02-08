@@ -37,9 +37,8 @@ slang-shaders/
 - `mainBufferVS` / `mainBufferFS` - Display accumulated buffer to screen
 
 ### Rasterizer Pipeline
-- `mainTetrahedronCS` - Tetrahedron preprocessing for rasterization
+- `mainTetrahedronCS` - Tetrahedron preprocessing with near-plane clipping
 - `mainTetrahedronPixelCS` - Per-pixel ZW integration
-- `mainEdgeCS` - Edge processing with 4D frustum clipping
 
 ## Building
 
