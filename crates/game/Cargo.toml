@@ -1,0 +1,11 @@
+[package]
+name = "game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+higher-dimension-playground = { path = "../.." }
+common = { path = "../../common", features = ["ndarray", "nalgebra"] }
+vulkano = "0.35"
+winit = "0.30"
+ndarray = "0.16.0"
