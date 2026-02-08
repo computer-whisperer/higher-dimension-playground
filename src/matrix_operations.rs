@@ -57,3 +57,13 @@ pub fn rotation_matrix_one_angle(dims: usize, dim_from: usize, dim_to: usize, an
     mat[(dim_to, dim_to)] = cos_theta;
     mat
 }
+
+#[allow(dead_code)]
+pub fn double_rotation_matrix_4d(
+    plane1: [usize; 2], angle1: f32,
+    plane2: [usize; 2], angle2: f32,
+) -> Array2<f32> {
+    let r1 = rotation_matrix_one_angle(5, plane1[0], plane1[1], angle1);
+    let r2 = rotation_matrix_one_angle(5, plane2[0], plane2[1], angle2);
+    r1.dot(&r2)
+}

@@ -21,7 +21,7 @@ use winit::{
 };
 use render::RenderContext;
 use clap::Parser;
-use crate::matrix_operations::{rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
+use crate::matrix_operations::{double_rotation_matrix_4d, rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
 use crate::render::RenderOptions;
 
 #[derive(Parser, Debug)]
@@ -244,7 +244,7 @@ impl DemoScene {
         let do_edges = false;
         let do_raster = false;
 
-        let do_animation = false;
+        let do_animation = true;
 
         let do_frame_export = true;
 
@@ -261,7 +261,7 @@ impl DemoScene {
         else {
             1
         };
-        let sub_frames_per_export = 100;  // Reduced for faster testing
+        let sub_frames_per_export = 1000;  // Reduced for faster testing
 
         let time_elapsed = self.frame_num as f32/frame_time_hz;
 
@@ -278,7 +278,9 @@ impl DemoScene {
 
         struct Block {
             position: [i32; 4],
-            materials: [u32; 8]
+            materials: [u32; 8],
+            rotation: Option<([usize; 2], [usize; 2], f32, f32)>,
+            // (plane1, plane2, angular_velocity_1, angular_velocity_2) in rad/s
         }
 
         let mut blocks = Vec::<Block>::new();
@@ -292,7 +294,8 @@ impl DemoScene {
                             blocks.push(
                                 Block{
                                     position: [x*4 - 2, y*4 - 2, z*4 - 2, w*4 - 2],
-                                    materials: [texture_rot+1; 8]
+                                    materials: [texture_rot+1; 8],
+                                    rotation: None,
                                 }
                             );
                             texture_rot = (texture_rot + 1)%5;
@@ -313,7 +316,8 @@ impl DemoScene {
             Block{
                 position: [0, 0, 0, 0],
                 //materials: [1, 2, 3, 4, 5, 6, 7, 8]
-                materials: [13; 8]
+                materials: [13; 8],
+                rotation: Some(([0, 1], [2, 3], 0.5, 0.3)), // XY + ZW double rotation
             }
         );
 
@@ -356,13 +360,30 @@ impl DemoScene {
 
         for block in blocks {
             let model_scale = 1.0;
-            let model_transform =
+            let cx = block.position[0] as f32 * model_scale;
+            let cy = block.position[1] as f32 * model_scale;
+            let cz = block.position[2] as f32 * model_scale;
+            let cw = block.position[3] as f32 * model_scale;
+
+            let model_transform = if let Some((plane1, plane2, omega1, omega2)) = block.rotation {
+                let rot = double_rotation_matrix_4d(
+                    plane1, omega1 * time_elapsed,
+                    plane2, omega2 * time_elapsed,
+                );
+                // translate to center → rotate → translate back, then offset by -0.5 and scale
+                translate_matrix_4d(cx, cy, cz, cw)
+                    .dot(&rot)
+                    .dot(&translate_matrix_4d(-0.5 * model_scale, -0.5 * model_scale, -0.5 * model_scale, -0.5 * model_scale))
+                    .dot(&scale_matrix_4d(model_scale))
+            } else {
                 translate_matrix_4d(
-                    (block.position[0] as f32 - 0.5)*model_scale,
-                    (block.position[1] as f32 - 0.5)*model_scale,
-                    (block.position[2] as f32 - 0.5)*model_scale,
-                    (block.position[3] as f32 - 0.5)*model_scale)
-                    .dot(&scale_matrix_4d(model_scale));
+                    (block.position[0] as f32 - 0.5) * model_scale,
+                    (block.position[1] as f32 - 0.5) * model_scale,
+                    (block.position[2] as f32 - 0.5) * model_scale,
+                    (block.position[3] as f32 - 0.5) * model_scale)
+                    .dot(&scale_matrix_4d(model_scale))
+            };
+
             instances.push(
                 common::ModelInstance{
                     model_transform: model_transform.into(),
