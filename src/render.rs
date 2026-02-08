@@ -946,7 +946,7 @@ impl GpuProfiler {
 }
 
 pub struct RenderContext {
-    pub(crate) window: Option<Arc<Window>>,
+    pub window: Option<Arc<Window>>,
     swapchain: Option<Arc<Swapchain>>,
     render_pass: Option<Arc<RenderPass>>,
     framebuffers: Option<Vec<Arc<Framebuffer>>>,

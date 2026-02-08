@@ -1,12 +1,14 @@
+[workspace]
+members = ["common", "crates/*"]
+
 [package]
 name = "higher-dimension-playground"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "exr_converter"
-path = "src/exr_converter.rs"
-
+[lib]
+name = "higher_dimension_playground"
+path = "src/lib.rs"
 
 [dependencies]
 
@@ -18,8 +20,6 @@ vulkano-shaders = "0.35"
 
 common = {path="common", features=["ndarray", "nalgebra"]}
 
-# shaders = {path="shaders"}  # Replaced by Slang shaders
-clap = { version = "4.5", features = ["derive"] }
 exr = "1.73.0"
 
 ndarray = {version="0.16.0"}
@@ -36,4 +36,3 @@ glam = {version = "0.24", features=["bytemuck"]}
 # Build dependencies removed - using slangc CLI instead
 # [build-dependencies]
 # spirv-builder = {git = "https://github.com/Firestar99/rust-gpu-new.git", branch="linker-speedup"}
-

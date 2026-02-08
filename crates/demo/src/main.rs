@@ -1,233 +1,116 @@
-mod render;
-mod hypercube;
-mod matrix_operations;
-mod exr_converter;
-
 use std::{error::Error, sync::Arc};
-use std::default::Default;
 use std::f32::consts::PI;
 use std::time::Instant;
-use vulkano::{device::{
-    physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, Queue,
-    QueueCreateInfo, QueueFlags,
-}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, swapchain::{Surface},VulkanLibrary};
-use vulkano::device::DeviceFeatures;
-use vulkano::instance::debug::{DebugUtilsMessenger};
+use vulkano::device::{Device, Queue};
+use vulkano::instance::Instance;
+use vulkano::instance::debug::DebugUtilsMessenger;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
-use render::RenderContext;
 use clap::Parser;
-use crate::matrix_operations::{double_rotation_matrix_4d, rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
-use crate::render::RenderOptions;
+use higher_dimension_playground::render::{RenderContext, RenderOptions};
+use higher_dimension_playground::matrix_operations::{double_rotation_matrix_4d, rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
+use higher_dimension_playground::vulkan_setup::vulkan_setup;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long)]
-    headless: bool
+    headless: bool,
+
+    /// Disable rasterization
+    #[arg(long)]
+    no_raster: bool,
+
+    /// Enable raytracing
+    #[arg(long)]
+    raytrace: bool,
+
+    /// Enable ZW edge rendering
+    #[arg(long)]
+    edges: bool,
+
+    /// Enable tetrahedron edge rendering
+    #[arg(long)]
+    tetrahedron_edges: bool,
+
+    /// Enable camera spin animation
+    #[arg(long)]
+    spin: bool,
+
+    /// Disable animation (freeze at frame 0)
+    #[arg(long)]
+    no_animation: bool,
+
+    /// Disable EXR frame export
+    #[arg(long)]
+    no_export: bool,
+
+    /// Hide the outer 4x4 block grid
+    #[arg(long)]
+    no_outer_blocks: bool,
+
+    /// Show floor plane
+    #[arg(long)]
+    floor: bool,
+
+    /// Show wall enclosure
+    #[arg(long)]
+    walls: bool,
+
+    /// Canvas width in pixels
+    #[arg(long, short = 'W', default_value_t = 960)]
+    width: u32,
+
+    /// Canvas height in pixels
+    #[arg(long, short = 'H', default_value_t = 540)]
+    height: u32,
+
+    /// Number of depth layers (supersampling)
+    #[arg(long, default_value_t = 4)]
+    layers: u32,
 }
 
 fn main() -> Result<(), impl Error> {
     let args = Args::parse();
 
     if args.headless {
-        run_headless();
+        run_headless(&args);
         Ok(())
     }
     else {
         let event_loop = EventLoop::new().unwrap();
-        let mut app = App::new(&event_loop);
+        let mut app = App::new(&event_loop, args);
 
         event_loop.run_app(&mut app)
     }
 }
 
-fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Device>, Arc<Queue>) {
-    let library = VulkanLibrary::new().unwrap();
-
-    // The first step of any Vulkan program is to create an instance.
-    //
-    // When we create an instance, we have to pass a list of extensions that we want to enable.
-    //
-    // All the window-drawing functionalities are part of non-core extensions that we need to
-    // enable manually. To do so, we ask `Surface` for the list of extensions required to draw
-    // to a window.
-    let required_extensions = match event_loop {
-        Some(event_loop) => {
-            Surface::required_extensions(event_loop).unwrap()
-        }
-        None => Default::default(),
-    };
-
-    // Now creating the instance.
-    let instance = Instance::new(
-        library,
-        InstanceCreateInfo {
-            // Enable enumerating devices that use non-conformant Vulkan implementations.
-            // (e.g. MoltenVK)
-            flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
-            enabled_extensions: required_extensions,
-            ..Default::default()
-        },
-    ).unwrap();
-
-    // Choose device extensions that we're going to use. In order to present images to a
-    // surface, we need a `Swapchain`, which is provided by the `khr_swapchain` extension.
-    let device_extensions = DeviceExtensions {
-        khr_swapchain: event_loop.is_some(),
-        ..DeviceExtensions::empty()
-    };
-
-    let device_features = DeviceFeatures {
-        fill_mode_non_solid: true,
-        vulkan_memory_model: true,
-        vulkan_memory_model_device_scope: true,
-        variable_pointers: true,
-        variable_pointers_storage_buffer: true,
-        shader_int64: true,
-        shader_int8: true,
-        shader_draw_parameters: true,
-        .. Default::default()
-    };
-
-    // We then choose which physical device to use. First, we enumerate all the available
-    // physical devices, then apply filters to narrow them down to those that can support our
-    // needs.
-    let (physical_device, queue_family_index) = instance
-        .enumerate_physical_devices()
-        .unwrap()
-        .filter(|p| {
-            // Some devices may not support the extensions or features that your application,
-            // or report properties and limits that are not sufficient for your application.
-            // These should be filtered out here.
-            //p.properties().device_name != "AMD Radeon RX 6900 XT (RADV NAVI21)" &&
-            p.supported_extensions().contains(&device_extensions) &&
-                p.supported_features().contains(&device_features)
-        })
-        .filter_map(|p| {
-            // For each physical device, we try to find a suitable queue family that will
-            // execute our draw commands.
-            //
-            // Devices can provide multiple queues to run commands in parallel (for example a
-            // draw queue and a compute queue), similar to CPU threads. This is
-            // something you have to have to manage manually in Vulkan. Queues
-            // of the same type belong to the same queue family.
-            //
-            // Here, we look for a single queue family that is suitable for our purposes. In a
-            // real-world application, you may want to use a separate dedicated transfer queue
-            // to handle data transfers in parallel with graphics operations.
-            // You may also need a separate queue for compute operations, if
-            // your application uses those.
-            p.queue_family_properties()
-                .iter()
-                .enumerate()
-                .position(|(i, q)| {
-                    q.queue_flags.intersects(QueueFlags::COMPUTE) &&
-                    match event_loop {
-                        Some(event_loop) => {
-                            // We select a queue family that supports graphics operations. When drawing
-                            // to a window surface, as we do in this example, we also need to check
-                            // that queues in this queue family are capable of presenting images to the
-                            // surface.
-                            q.queue_flags.intersects(QueueFlags::GRAPHICS)
-                                && p.presentation_support(i as u32, event_loop).unwrap()
-                        }
-                        None => true,
-                    }
-
-                })
-                // The code here searches for the first queue family that is suitable. If none
-                // is found, `None` is returned to `filter_map`, which
-                // disqualifies this physical device.
-                .map(|i| (p, i as u32))
-        })
-        // All the physical devices that pass the filters above are suitable for the
-        // application. However, not every device is equal, some are preferred over others.
-        // Now, we assign each physical device a score, and pick the device with the lowest
-        // ("best") score.
-        //
-        // In this example, we simply select the best-scoring device to use in the application.
-        // In a real-world setting, you may want to use the best-scoring device only as a
-        // "default" or "recommended" device, and let the user choose the device themself.
-        .min_by_key(|(p, _)| {
-            // We assign a lower score to device types that are likely to be faster/better.
-            match p.properties().device_type {
-                PhysicalDeviceType::DiscreteGpu => 0,
-                PhysicalDeviceType::IntegratedGpu => 1,
-                PhysicalDeviceType::VirtualGpu => 2,
-                PhysicalDeviceType::Cpu => 3,
-                PhysicalDeviceType::Other => 4,
-                _ => 5,
-            }
-        })
-        .expect("no suitable physical device found");
-
-    // Some little debug infos.
-    println!(
-        "Using device: {} (type: {:?})",
-        physical_device.properties().device_name,
-        physical_device.properties().device_type,
-    );
-
-    // Now initializing the device. This is probably the most important object of Vulkan.
-    //
-    // An iterator of created queues is returned by the function alongside the device.
-    let (device, mut queues) = Device::new(
-        // Which physical device to connect to.
-        physical_device,
-        DeviceCreateInfo {
-            // A list of optional features and extensions that our program needs to work
-            // correctly. Some parts of the Vulkan specs are optional and must be enabled
-            // manually at device creation. In this example the only thing we are going to need
-            // is the `khr_swapchain` extension that allows us to draw to a window.
-            enabled_extensions: device_extensions,
-
-            enabled_features: device_features,
-
-            // The list of queues that we are going to use. Here we only use one queue, from
-            // the previously chosen queue family.
-            queue_create_infos: vec![QueueCreateInfo {
-                queue_family_index,
-                ..Default::default()
-            }],
-
-            ..Default::default()
-        },
-    )
-        .unwrap();
-
-    // Since we can request multiple queues, the `queues` variable is in fact an iterator. We
-    // only use one queue in this example, so we just retrieve the first and only element of
-    // the iterator.
-    let queue = queues.next().unwrap();
-
-    (instance, device, queue)
-}
-
-fn run_headless() {
+fn run_headless(args: &Args) {
     let (instance, device, queue) = vulkan_setup(None);
 
-    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, [960, 540, 1]);
+    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, [args.width, args.height, 1]);
 
-    let mut demo_scene = DemoScene::new();
+    let mut demo_scene = DemoScene::new(args.clone());
 
     // Render a single frame with PNG export
     demo_scene.update_headless_png(&mut rcx, device.clone(), queue.clone());
 }
 
 struct DemoScene {
+    args: Args,
     start_time: Instant,
     frame_num: u32,
     sub_frame_num: u32
 }
 
 impl DemoScene {
-    fn new() -> DemoScene {
+    fn new(args: Args) -> DemoScene {
         DemoScene {
+            args,
             start_time: Instant::now(),
             frame_num: 0,
             sub_frame_num: 0
@@ -253,7 +136,10 @@ impl DemoScene {
         });
 
         let render_options = RenderOptions {
-            do_raster: true,
+            do_raster: !self.args.no_raster,
+            do_raytrace: self.args.raytrace,
+            do_edges: self.args.edges,
+            do_tetrahedron_edges: self.args.tetrahedron_edges,
             prepare_render_screenshot: true,
             ..Default::default()
         };
@@ -270,20 +156,20 @@ impl DemoScene {
         let focal_length_xy = 1.0;
         let focal_length_zw= 1.0;
 
-        let do_raytrace = false;
-        let do_edges = false;
-        let do_raster = true;
+        let do_raytrace = self.args.raytrace;
+        let do_edges = self.args.edges;
+        let do_raster = !self.args.no_raster;
 
-        let do_animation = true;
+        let do_animation = !self.args.no_animation;
 
-        let do_frame_export = true;
+        let do_frame_export = !self.args.no_export;
 
         let frame_time_hz = 20.0;
-        let do_spin = false;
+        let do_spin = self.args.spin;
 
-        let do_outer_blocks = true;
-        let do_floor = false;
-        let do_walls = false;
+        let do_outer_blocks = !self.args.no_outer_blocks;
+        let do_floor = self.args.floor;
+        let do_walls = self.args.walls;
 
         let sub_frames_per_frame = if do_raytrace {
             100  // Reduced for faster testing
@@ -425,7 +311,7 @@ impl DemoScene {
         let render_options = RenderOptions {
             do_frame_clear: do_raytrace && self.sub_frame_num == 0,
             do_raster,
-            do_tetrahedron_edges: false,
+            do_tetrahedron_edges: self.args.tetrahedron_edges,
             do_raytrace,
             do_edges,
             prepare_render_screenshot: do_frame_export && ((self.sub_frame_num+1) % sub_frames_per_export == 0),
@@ -458,8 +344,7 @@ struct App {
 }
 
 impl App {
-    fn new(event_loop: &EventLoop<()>) -> Self {
-
+    fn new(event_loop: &EventLoop<()>, args: Args) -> Self {
 
         let (instance, device, queue) = vulkan_setup(Some(event_loop));
 
@@ -478,7 +363,7 @@ impl App {
             ).ok()
         };
 
-        let demo_scene = DemoScene::new();
+        let demo_scene = DemoScene::new(args);
 
         let rcx = None;
 
@@ -500,7 +385,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), Some(window), [3840/4, 2160/4, 4]));
+        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), Some(window), [self.demo_scene.args.width, self.demo_scene.args.height, self.demo_scene.args.layers]));
     }
 
     fn window_event(
@@ -530,4 +415,3 @@ impl ApplicationHandler for App {
         rcx.window.clone().unwrap().request_redraw();
     }
 }
-
