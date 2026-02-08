@@ -211,13 +211,12 @@ fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Devic
 fn run_headless() {
     let (instance, device, queue) = vulkan_setup(None);
 
-    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, [3840, 2160, 8]);
+    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, [960, 540, 1]);
 
     let mut demo_scene = DemoScene::new();
 
-    loop {
-        demo_scene.update(&mut rcx, device.clone(), queue.clone());
-    }
+    // Render a single frame with PNG export
+    demo_scene.update_headless_png(&mut rcx, device.clone(), queue.clone());
 }
 
 struct DemoScene {
@@ -235,14 +234,45 @@ impl DemoScene {
         }
     }
 
+    fn update_headless_png(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
+        let mut view_matrix = translate_matrix_4d(0.0, 0.0, 3.0, 2.0);
+        let focal_length_xy = 1.0;
+        let focal_length_zw = 1.0;
+
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.125));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.125));
+
+        let mut instances = Vec::<common::ModelInstance>::new();
+
+        // Single centered tesseract with distinct materials per cell
+        let model_transform = translate_matrix_4d(-0.5, -0.5, -0.5, -0.5)
+            .dot(&scale_matrix_4d(1.0));
+        instances.push(common::ModelInstance {
+            model_transform: model_transform.into(),
+            cell_material_ids: [1, 2, 3, 4, 5, 6, 7, 8],
+        });
+
+        let render_options = RenderOptions {
+            do_raster: true,
+            prepare_render_screenshot: true,
+            ..Default::default()
+        };
+
+        rcx.render(device, queue, view_matrix, focal_length_xy, focal_length_zw, &instances, render_options);
+
+        std::fs::create_dir_all("frames").ok();
+        rcx.save_rendered_frame_png("frames/headless_raster.png");
+        println!("Headless render complete.");
+    }
+
     fn update(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
         let mut view_matrix = translate_matrix_4d(0.0, 0.0, 8.0, 4.0);
         let focal_length_xy = 1.0;
         let focal_length_zw= 1.0;
 
-        let do_raytrace = true;
+        let do_raytrace = false;
         let do_edges = false;
-        let do_raster = false;
+        let do_raster = true;
 
         let do_animation = true;
 
@@ -252,8 +282,8 @@ impl DemoScene {
         let do_spin = false;
 
         let do_outer_blocks = true;
-        let do_floor = true;
-        let do_walls = true;
+        let do_floor = false;
+        let do_walls = false;
 
         let sub_frames_per_frame = if do_raytrace {
             100  // Reduced for faster testing

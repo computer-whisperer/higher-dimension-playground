@@ -298,3 +298,77 @@ float4 getNormal4D(float4 v0, float4 v1, float4 v2, float4 v3)
     float4 edge3 = v3 - v0;
     return normalize(cross4D(edge1, edge2, edge3));
 }
+
+// 4D Hyperplane defined by normal and offset
+struct HyperPlane4D
+{
+    float4 normal;
+    float offset;
+
+    static HyperPlane4D from4Points(float4 p0, float4 p1, float4 p2, float4 p3)
+    {
+        float4 e1 = p1 - p0;
+        float4 e2 = p2 - p0;
+        float4 e3 = p3 - p0;
+        float4 n = normalize(cross4D(e1, e2, e3));
+        HyperPlane4D plane;
+        plane.normal = n;
+        plane.offset = dot(n, p0);
+        return plane;
+    }
+
+    float signedDistance(float4 point)
+    {
+        return dot(normal, point) - offset;
+    }
+
+    // Clip a line segment against this plane.
+    // Returns the portion of the segment on the positive (inside) side.
+    // If fully clipped, returns a degenerate segment [a, a].
+    void clipLine(inout float4 a, inout float4 b)
+    {
+        float da = signedDistance(a);
+        float db = signedDistance(b);
+
+        if (da >= 0.0 && db >= 0.0)
+            return; // both inside
+
+        if (da < 0.0 && db < 0.0)
+        {
+            b = a; // fully clipped (degenerate)
+            return;
+        }
+
+        float t = da / (da - db);
+        float4 intersection = a + t * (b - a);
+
+        if (da < 0.0)
+            a = intersection; // a was outside, clip it
+        else
+            b = intersection; // b was outside, clip it
+    }
+
+    // Clip a line segment, also interpolating associated VecN<5> data.
+    void clipLineWithData(inout VecN<5> a, inout VecN<5> b)
+    {
+        float da = signedDistance(a.toFloat4());
+        float db = signedDistance(b.toFloat4());
+
+        if (da >= 0.0 && db >= 0.0)
+            return;
+
+        if (da < 0.0 && db < 0.0)
+        {
+            b = a;
+            return;
+        }
+
+        float t = da / (da - db);
+        VecN<5> intersection = a * (1.0 - t) + b * t;
+
+        if (da < 0.0)
+            a = intersection;
+        else
+            b = intersection;
+    }
+}

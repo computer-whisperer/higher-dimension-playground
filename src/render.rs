@@ -259,6 +259,7 @@ pub struct SizedBuffers {
     morton_codes_buffer: Subbuffer<[common::MortonCode]>,
     bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
     scene_bounds_buffer: Subbuffer<[common::SceneBounds]>,
+    atomic_counter_buffer: Subbuffer<[u32]>,
     descriptor_set: Arc<DescriptorSet>,
     output_cpu_pixel_buffer: Subbuffer<[Vec4]>,
     // Debug readback buffers
@@ -268,7 +269,7 @@ pub struct SizedBuffers {
 
 impl SizedBuffers {
     pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>, descriptor_set_layout: Arc<DescriptorSetLayout>, render_dimensions: [u32; 3]) -> Self {
-        let max_tetrahedrons: usize = 10000;
+        let max_tetrahedrons: usize = 40000;
 
         let line_vertexes_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -367,6 +368,20 @@ impl SizedBuffers {
             vec![common::SceneBounds::zeroed(); 1]
         ).unwrap();
 
+        // Atomic counter for tetrahedron clipping output
+        let atomic_counter_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; 1]
+        ).unwrap();
+
         // CPU readback buffers for BVH debugging
         let cpu_bvh_nodes_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -404,6 +419,7 @@ impl SizedBuffers {
                 WriteDescriptorSet::buffer(3, morton_codes_buffer.clone()),
                 WriteDescriptorSet::buffer(4, bvh_nodes_buffer.clone()),
                 WriteDescriptorSet::buffer(5, scene_bounds_buffer.clone()),
+                WriteDescriptorSet::buffer(6, atomic_counter_buffer.clone()),
             ],
             []
         ).unwrap();
@@ -416,6 +432,7 @@ impl SizedBuffers {
             morton_codes_buffer,
             bvh_nodes_buffer,
             scene_bounds_buffer,
+            atomic_counter_buffer,
             output_cpu_pixel_buffer,
             cpu_bvh_nodes_buffer,
             cpu_morton_codes_buffer,
@@ -458,6 +475,13 @@ impl SizedBuffers {
             });
         bindings.insert(
             5,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            });
+        // Atomic counter for tetrahedron clipping
+        bindings.insert(
+            6,
             DescriptorSetLayoutBinding {
                 stages: ShaderStages::COMPUTE,
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
@@ -1495,6 +1519,9 @@ impl RenderContext {
             }
 
             if render_options.do_raster || render_options.do_tetrahedron_edges { // Tetrahedron pre-raster
+                // Reset atomic counter to 0 before clipping dispatch
+                builder.fill_buffer(self.sized_buffers.atomic_counter_buffer.clone(), 0u32).unwrap();
+
                 builder.bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone()).unwrap();
                 unsafe {builder.dispatch([(total_tetrahedron_count as u32 + 63)/64u32, 1, 1])}.unwrap() ; // Do compute stage
 
@@ -2015,6 +2042,56 @@ impl RenderContext {
             }
             Err(error) => {
                 eprintln!("Error saving screenshot: {:?}", error);
+            }
+        };
+    }
+
+    pub fn save_rendered_frame_png(&mut self, path: &str) {
+        if self.previous_frame_end.is_some() {
+            let fence = self.previous_frame_end.take().unwrap().then_signal_fence_and_flush().unwrap();
+            fence.wait(None).unwrap();
+            self.previous_frame_end = None;
+        }
+
+        let result = self.sized_buffers.output_cpu_pixel_buffer.read();
+        match result {
+            Ok(buffer_content) => {
+                let w = self.sized_buffers.render_dimensions[0] as u32;
+                let h = self.sized_buffers.render_dimensions[1] as u32;
+                let depth = self.sized_buffers.render_dimensions[2] as u32;
+
+                let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        // Sum across all Z slices (same as the EXR "Full Render" layer)
+                        let mut full_pixel = Vec4::ZERO;
+                        for z in 0..depth {
+                            let idx = (z * w * h + y * w + x) as usize;
+                            full_pixel += buffer_content[idx];
+                        }
+                        // Normalize by alpha (denominator) if non-zero
+                        let (r, g, b) = if full_pixel.w > 0.0 {
+                            (full_pixel.x / full_pixel.w,
+                             full_pixel.y / full_pixel.w,
+                             full_pixel.z / full_pixel.w)
+                        } else {
+                            (0.0, 0.0, 0.0)
+                        };
+                        // Gamma correction (linear -> sRGB) and convert to u8
+                        let gamma = 1.0 / 2.2;
+                        pixels.push((r.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);
+                        pixels.push((g.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);
+                        pixels.push((b.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);
+                        pixels.push(255u8);
+                    }
+                }
+
+                let image = ImageBuffer::<Rgba<u8>, _>::from_raw(w, h, pixels).unwrap();
+                image.save(path).unwrap();
+                println!("Saved PNG to {}", path);
+            }
+            Err(error) => {
+                eprintln!("Error saving PNG: {:?}", error);
             }
         };
     }

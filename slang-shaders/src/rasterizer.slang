@@ -14,6 +14,7 @@ import materials;
 [[vk::binding(0, 1)]] RWStructuredBuffer<float2> outputLineVertices;
 [[vk::binding(1, 1)]] RWStructuredBuffer<Tetrahedron> outputTetrahedrons;
 [[vk::binding(2, 1)]] RWStructuredBuffer<float4> pixelBuffer;
+[[vk::binding(6, 1)]] RWStructuredBuffer<uint> atomicCounter;
 
 // Set 2: LiveBuffers
 [[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;
@@ -64,7 +65,209 @@ float4 project4DVertex(VecN<5> v)
     return float4(v[0] / v[4], v[1] / v[4], v[2], v[3]);
 }
 
-// Tetrahedron preprocessing compute shader
+// Working tetrahedron for clipping (pre-projection space)
+struct ClipTet
+{
+    VecN<5> verts[4];
+    float4 texCoords[4];
+    uint materialId;
+}
+
+// Interpolate a point on an edge between two vertices, given signed distances
+void clipEdge(VecN<5> vA, float4 tA, float dA, VecN<5> vB, float4 tB, float dB, out VecN<5> vOut, out float4 tOut)
+{
+    float t = dA / (dA - dB);
+    vOut = vA * (1.0 - t) + vB * t;
+    tOut = tA * (1.0 - t) + tB * t;
+}
+
+// Clip a tetrahedron against a hyperplane.
+// Returns 0-3 output tetrahedra in results[].
+uint clipTetrahedronByPlane(ClipTet tet, HyperPlane4D plane, out ClipTet results[3])
+{
+    // Classify vertices
+    float dist[4];
+    bool inside[4];
+    uint numInside = 0;
+
+    [ForceUnroll]
+    for (int i = 0; i < 4; i++)
+    {
+        dist[i] = plane.signedDistance(tet.verts[i].toFloat4());
+        inside[i] = dist[i] >= 0.0;
+        if (inside[i]) numInside++;
+    }
+
+    if (numInside == 4)
+    {
+        results[0] = tet;
+        return 1; // unchanged
+    }
+
+    if (numInside == 0)
+        return 0; // fully clipped
+
+    // Gather inside/outside vertex indices
+    uint insideIdx[4];
+    uint outsideIdx[4];
+    uint nIn = 0, nOut = 0;
+    [ForceUnroll]
+    for (int i = 0; i < 4; i++)
+    {
+        if (inside[i])
+            insideIdx[nIn++] = i;
+        else
+            outsideIdx[nOut++] = i;
+    }
+
+    if (numInside == 1)
+    {
+        // One vertex inside -> clip to a smaller tetrahedron (tip)
+        uint a = insideIdx[0];
+        uint b = outsideIdx[0], c = outsideIdx[1], d = outsideIdx[2];
+
+        VecN<5> vAB, vAC, vAD;
+        float4 tAB, tAC, tAD;
+        clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[b], tet.texCoords[b], dist[b], vAB, tAB);
+        clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[c], tet.texCoords[c], dist[c], vAC, tAC);
+        clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[d], tet.texCoords[d], dist[d], vAD, tAD);
+
+        ClipTet r;
+        r.materialId = tet.materialId;
+        r.verts[0] = tet.verts[a]; r.texCoords[0] = tet.texCoords[a];
+        r.verts[1] = vAB;          r.texCoords[1] = tAB;
+        r.verts[2] = vAC;          r.texCoords[2] = tAC;
+        r.verts[3] = vAD;          r.texCoords[3] = tAD;
+        results[0] = r;
+        return 1;
+    }
+
+    if (numInside == 2)
+    {
+        // Two vertices inside -> wedge -> 3 tetrahedra
+        uint a = insideIdx[0], b = insideIdx[1];
+        uint c = outsideIdx[0], d = outsideIdx[1];
+
+        VecN<5> vAC, vAD, vBC, vBD;
+        float4 tAC, tAD, tBC, tBD;
+        clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[c], tet.texCoords[c], dist[c], vAC, tAC);
+        clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[d], tet.texCoords[d], dist[d], vAD, tAD);
+        clipEdge(tet.verts[b], tet.texCoords[b], dist[b], tet.verts[c], tet.texCoords[c], dist[c], vBC, tBC);
+        clipEdge(tet.verts[b], tet.texCoords[b], dist[b], tet.verts[d], tet.texCoords[d], dist[d], vBD, tBD);
+
+        // Decompose wedge (A, B, AC, AD, BC, BD) into 3 tetrahedra
+        ClipTet r0, r1, r2;
+        r0.materialId = tet.materialId;
+        r1.materialId = tet.materialId;
+        r2.materialId = tet.materialId;
+
+        // Tet 0: A, B, AC, AD
+        r0.verts[0] = tet.verts[a]; r0.texCoords[0] = tet.texCoords[a];
+        r0.verts[1] = tet.verts[b]; r0.texCoords[1] = tet.texCoords[b];
+        r0.verts[2] = vAC;          r0.texCoords[2] = tAC;
+        r0.verts[3] = vAD;          r0.texCoords[3] = tAD;
+
+        // Tet 1: B, AC, AD, BC
+        r1.verts[0] = tet.verts[b]; r1.texCoords[0] = tet.texCoords[b];
+        r1.verts[1] = vAC;          r1.texCoords[1] = tAC;
+        r1.verts[2] = vAD;          r1.texCoords[2] = tAD;
+        r1.verts[3] = vBC;          r1.texCoords[3] = tBC;
+
+        // Tet 2: B, AD, BC, BD
+        r2.verts[0] = tet.verts[b]; r2.texCoords[0] = tet.texCoords[b];
+        r2.verts[1] = vAD;          r2.texCoords[1] = tAD;
+        r2.verts[2] = vBC;          r2.texCoords[2] = tBC;
+        r2.verts[3] = vBD;          r2.texCoords[3] = tBD;
+
+        results[0] = r0;
+        results[1] = r1;
+        results[2] = r2;
+        return 3;
+    }
+
+    // numInside == 3: Chop one corner off -> 3 tetrahedra
+    {
+        uint d = outsideIdx[0]; // the one outside vertex
+        uint a = insideIdx[0], b = insideIdx[1], c = insideIdx[2];
+
+        VecN<5> vAD, vBD, vCD;
+        float4 tAD, tBD, tCD;
+        clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[d], tet.texCoords[d], dist[d], vAD, tAD);
+        clipEdge(tet.verts[b], tet.texCoords[b], dist[b], tet.verts[d], tet.texCoords[d], dist[d], vBD, tBD);
+        clipEdge(tet.verts[c], tet.texCoords[c], dist[c], tet.verts[d], tet.texCoords[d], dist[d], vCD, tCD);
+
+        ClipTet r0, r1, r2;
+        r0.materialId = tet.materialId;
+        r1.materialId = tet.materialId;
+        r2.materialId = tet.materialId;
+
+        // Replace D with AD in the original, then subdivide the remainder
+        // Tet 0: A, B, C, AD
+        r0.verts[0] = tet.verts[a]; r0.texCoords[0] = tet.texCoords[a];
+        r0.verts[1] = tet.verts[b]; r0.texCoords[1] = tet.texCoords[b];
+        r0.verts[2] = tet.verts[c]; r0.texCoords[2] = tet.texCoords[c];
+        r0.verts[3] = vAD;          r0.texCoords[3] = tAD;
+
+        // Tet 1: B, C, AD, BD
+        r1.verts[0] = tet.verts[b]; r1.texCoords[0] = tet.texCoords[b];
+        r1.verts[1] = tet.verts[c]; r1.texCoords[1] = tet.texCoords[c];
+        r1.verts[2] = vAD;          r1.texCoords[2] = tAD;
+        r1.verts[3] = vBD;          r1.texCoords[3] = tBD;
+
+        // Tet 2: C, AD, BD, CD
+        r2.verts[0] = tet.verts[c]; r2.texCoords[0] = tet.texCoords[c];
+        r2.verts[1] = vAD;          r2.texCoords[1] = tAD;
+        r2.verts[2] = vBD;          r2.texCoords[2] = tBD;
+        r2.verts[3] = vCD;          r2.texCoords[3] = tCD;
+
+        results[0] = r0;
+        results[1] = r1;
+        results[2] = r2;
+        return 3;
+    }
+}
+
+// Build the 5 frustum planes (matching the original rust-gpu code)
+void getFrustumPlanes(out HyperPlane4D planes[5])
+{
+    // Near plane: prevents depth ≈ 0
+    planes[0] = HyperPlane4D.from4Points(
+        float4(1.0, 1.0, 0.1, 0.1),
+        float4(1.0, -1.0, 0.1, 0.1),
+        float4(-1.0, 1.0, 0.1, 0.1),
+        float4(1.0, 1.0, 1.1, -0.9)
+    );
+    // Top plane
+    planes[1] = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(1.0, 1.0, 1.0, 1.0),
+        float4(-1.0, 1.0, 1.0, 1.0),
+        float4(0.0, 0.0, -1.0, 1.0)
+    );
+    // Bottom plane
+    planes[2] = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(1.0, -1.0, 1.0, 1.0),
+        float4(-1.0, -1.0, 1.0, 1.0),
+        float4(0.0, 0.0, 1.0, -1.0)
+    );
+    // Left plane
+    planes[3] = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(1.0, 1.0, 1.0, 1.0),
+        float4(1.0, -1.0, 1.0, 1.0),
+        float4(0.0, 0.0, 1.0, -1.0)
+    );
+    // Right plane
+    planes[4] = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(-1.0, 1.0, 1.0, 1.0),
+        float4(-1.0, -1.0, 1.0, 1.0),
+        float4(0.0, 0.0, -1.0, 1.0)
+    );
+}
+
+// Tetrahedron preprocessing compute shader with frustum clipping
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
@@ -77,13 +280,19 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
     uint modelIndex = outputIndex % modelCount;
     uint instanceIndex = outputIndex / modelCount;
 
+    if (outputIndex >= workingData.totalNumTetrahedrons)
+        return;
+
     ModelInstance instance = instances[instanceIndex];
     ModelTetrahedron inputTet = modelTetrahedrons[modelIndex];
     uint textureId = instance.cellMaterialIds[inputTet.cellId];
 
-    VecN<5> vertexPositions[4];
-    float4 texturePositions[4];
+    if (textureId == 0)
+        return;
 
+    // Transform vertices to view space
+    ClipTet initialTet;
+    initialTet.materialId = textureId;
     [ForceUnroll]
     for (int i = 0; i < 4; i++)
     {
@@ -92,43 +301,65 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
             inputTet.texturePositions[i],
             instance,
             workingData);
-        vertexPositions[i] = result.vertexPosition;
-        texturePositions[i] = result.texturePosition;
+        initialTet.verts[i] = result.vertexPosition;
+        initialTet.texCoords[i] = result.texturePosition;
     }
 
-    // Project to screen space
-    float4 projected[4];
-    [ForceUnroll]
-    for (int i = 0; i < 4; i++)
+    // Clip against all 5 frustum planes using ping-pong buffers
+    HyperPlane4D frustumPlanes[5];
+    getFrustumPlanes(frustumPlanes);
+
+    ClipTet bufA[16];
+    ClipTet bufB[16];
+    uint countA = 1;
+    bufA[0] = initialTet;
+
+    for (int p = 0; p < 5; p++)
     {
-        projected[i] = project4DVertex(vertexPositions[i]);
+        uint countB = 0;
+        for (uint t = 0; t < countA; t++)
+        {
+            ClipTet clipResults[3];
+            uint numResults = clipTetrahedronByPlane(bufA[t], frustumPlanes[p], clipResults);
+            for (uint r = 0; r < numResults && countB < 16; r++)
+            {
+                bufB[countB] = clipResults[r];
+                countB++;
+            }
+        }
+        // Swap: copy B -> A
+        countA = countB;
+        for (uint t = 0; t < countA; t++)
+            bufA[t] = bufB[t];
     }
 
-    // Compute 4D normal from projected positions
-    float4 normal = getNormal4D(projected[0], projected[1], projected[2], projected[3]);
+    // Write surviving tetrahedra via atomic counter
+    uint bufSize, bufStride;
+    outputTetrahedrons.GetDimensions(bufSize, bufStride);
 
-    // Write output tetrahedron
-    Tetrahedron outTet;
-    outTet.vertexPositions = projected;
-    outTet.texturePositions = texturePositions;
-    outTet.materialId = textureId;
-    outTet.normal = normal;
-    outputTetrahedrons[outputIndex] = outTet;
+    for (uint t = 0; t < countA; t++)
+    {
+        uint slot;
+        InterlockedAdd(atomicCounter[0], 1, slot);
 
-    // Generate wireframe edges (6 edges per tetrahedron, 2 vertices each = 12 vertices)
-    uint baseIdx = outputIndex * 12;
-    outputLineVertices[baseIdx + 0] = projected[0].xy;
-    outputLineVertices[baseIdx + 1] = projected[1].xy;
-    outputLineVertices[baseIdx + 2] = projected[0].xy;
-    outputLineVertices[baseIdx + 3] = projected[2].xy;
-    outputLineVertices[baseIdx + 4] = projected[0].xy;
-    outputLineVertices[baseIdx + 5] = projected[3].xy;
-    outputLineVertices[baseIdx + 6] = projected[1].xy;
-    outputLineVertices[baseIdx + 7] = projected[2].xy;
-    outputLineVertices[baseIdx + 8] = projected[1].xy;
-    outputLineVertices[baseIdx + 9] = projected[3].xy;
-    outputLineVertices[baseIdx + 10] = projected[2].xy;
-    outputLineVertices[baseIdx + 11] = projected[3].xy;
+        if (slot >= bufSize)
+            continue; // overflow protection
+
+        // Project to screen space
+        float4 projected[4];
+        [ForceUnroll]
+        for (int i = 0; i < 4; i++)
+            projected[i] = project4DVertex(bufA[t].verts[i]);
+
+        float4 normal = getNormal4D(projected[0], projected[1], projected[2], projected[3]);
+
+        Tetrahedron outTet;
+        outTet.vertexPositions = projected;
+        outTet.texturePositions = bufA[t].texCoords;
+        outTet.materialId = bufA[t].materialId;
+        outTet.normal = normal;
+        outputTetrahedrons[slot] = outTet;
+    }
 }
 
 // Edge processing with 4D frustum clipping
@@ -160,27 +391,59 @@ void mainEdgeCS(uint3 globalId : SV_DispatchThreadID)
         vertexPositions[i] = result.vertexPosition;
     }
 
-    // TODO: Implement 4D frustum clipping (see clip_line_to_frustum in original)
-    // For now, just project directly
+    // 4D frustum clipping using hyperplanes (operates in view space before perspective division)
+    // Near plane: prevents depth ≈ 0 (div-by-zero in perspective)
+    HyperPlane4D nearPlane = HyperPlane4D.from4Points(
+        float4(1.0, 1.0, 0.1, 0.1),
+        float4(1.0, -1.0, 0.1, 0.1),
+        float4(-1.0, 1.0, 0.1, 0.1),
+        float4(1.0, 1.0, 1.1, -0.9)
+    );
+    nearPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
 
-    float depths[2];
-    VecN<4> clipped[2];
-    [ForceUnroll]
-    for (int i = 0; i < 2; i++)
-    {
-        clipped[i][0] = vertexPositions[i][0];
-        clipped[i][1] = vertexPositions[i][1];
-        clipped[i][2] = vertexPositions[i][2];
-        clipped[i][3] = vertexPositions[i][3];
-        depths[i] = sqrt(clipped[i][2] * clipped[i][2] + clipped[i][3] * clipped[i][3]);
-    }
+    // Top plane
+    HyperPlane4D topPlane = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(1.0, 1.0, 1.0, 1.0),
+        float4(-1.0, 1.0, 1.0, 1.0),
+        float4(0.0, 0.0, -1.0, 1.0)
+    );
+    topPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
 
+    // Bottom plane
+    HyperPlane4D bottomPlane = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(1.0, -1.0, 1.0, 1.0),
+        float4(-1.0, -1.0, 1.0, 1.0),
+        float4(0.0, 0.0, 1.0, -1.0)
+    );
+    bottomPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
+
+    // Left plane
+    HyperPlane4D leftPlane = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(1.0, 1.0, 1.0, 1.0),
+        float4(1.0, -1.0, 1.0, 1.0),
+        float4(0.0, 0.0, 1.0, -1.0)
+    );
+    leftPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
+
+    // Right plane
+    HyperPlane4D rightPlane = HyperPlane4D.from4Points(
+        float4(0.0, 0.0, 0.0, 0.0),
+        float4(-1.0, 1.0, 1.0, 1.0),
+        float4(-1.0, -1.0, 1.0, 1.0),
+        float4(0.0, 0.0, -1.0, 1.0)
+    );
+    rightPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
+
+    // Project clipped vertices
     float2 projected[2];
     [ForceUnroll]
     for (int i = 0; i < 2; i++)
     {
-        float divisor = depths[i] / workingData.focalLengthXY;
-        projected[i] = float2(clipped[i][0] / divisor, clipped[i][1] / divisor);
+        projected[i] = float2(vertexPositions[i][0] / vertexPositions[i][4],
+                              vertexPositions[i][1] / vertexPositions[i][4]);
     }
 
     outputLineVertices[outputIndex * 2 + 0] = projected[0];
@@ -220,6 +483,70 @@ float2 getZWAngleRange(WorkingData workingData)
     const float PI = 3.14159;
     float viewAngle = (PI / 2.0) / workingData.focalLengthZW;
     return float2(PI / 4.0 - viewAngle / 2.0, PI / 4.0 + viewAngle / 2.0);
+}
+
+// Remove dead lines (textureId == 0) and compact the array
+uint condenseZWLines(inout ZWLine lines[96], uint numLines)
+{
+    uint count = 0;
+    for (uint i = 0; i < numLines; i++)
+    {
+        if (lines[i].textureId != 0)
+        {
+            lines[count] = lines[i];
+            count++;
+        }
+    }
+    return count;
+}
+
+// ZW line rendering with occlusion culling
+// First removes fully occluded lines, then uses the simple closest-line-per-angle algorithm
+// on the reduced set for correct depth ordering.
+float4 renderZWLines2(inout ZWLine lines[96], uint numLines, WorkingData workingData)
+{
+    // Stage 1: Remove completely occluded lines
+    for (uint i = 0; i < numLines; i++)
+    {
+        if (lines[i].textureId == 0)
+            continue;
+
+        bool completeOcclusion = false;
+        for (uint j = 0; j < numLines; j++)
+        {
+            if (j == i || lines[j].textureId == 0)
+                continue;
+
+            bool localFullOcclusion = true;
+            for (uint k = 0; k < 2; k++)
+            {
+                float2 lineA[2] = { float2(0), lines[i].zwPositions[k] };
+                float2 lineB[2] = { lines[j].zwPositions[0], lines[j].zwPositions[1] };
+                float2 intersection = getIntersection(lineA, lineB);
+                bool doesOcclude = intersection.x >= 0.0 && intersection.x <= 1.0 && intersection.y >= 0.0 && intersection.y <= 1.0;
+                if (!doesOcclude)
+                {
+                    localFullOcclusion = false;
+                    break;
+                }
+            }
+            if (localFullOcclusion)
+            {
+                completeOcclusion = true;
+                break;
+            }
+        }
+        if (completeOcclusion)
+            lines[i].textureId = 0;
+    }
+
+    numLines = condenseZWLines(lines, numLines);
+
+    // After culling fully occluded lines, use the simple closest-line-per-angle
+    // algorithm on the reduced set. Stages 2-3 (intersection detection, trimming,
+    // and per-line integration) can miss partial overlap configurations where
+    // neither line fully occludes the other, causing double-counted contributions.
+    return renderZWLinesSimple(lines, numLines, workingData);
 }
 
 // Simple ZW line rendering - samples along the ZW angle range
@@ -301,8 +628,11 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
         float(uPixelPos.y) / float(workingData.renderDimensions.y) * 2.0 - 1.0
     );
 
+    // Read actual tetrahedron count from atomic counter (set by mainTetrahedronCS)
+    uint actualTetCount = atomicCounter[0];
+
     // Test each tetrahedron
-    for (uint i = 0; i < workingData.totalNumTetrahedrons; i++)
+    for (uint i = 0; i < actualTetCount; i++)
     {
         Tetrahedron tet = outputTetrahedrons[i];
 
@@ -386,8 +716,8 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
         numZWLines++;
     }
 
-    // Render the collected ZW lines
-    float4 output = renderZWLinesSimple(currentZWLines, numZWLines, workingData);
+    // Render the collected ZW lines with advanced occlusion handling
+    float4 output = renderZWLines2(currentZWLines, numZWLines, workingData);
 
     // Write output
     if (uPixelPos.x < workingData.renderDimensions.x && uPixelPos.y < workingData.renderDimensions.y)
