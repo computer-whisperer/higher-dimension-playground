@@ -131,10 +131,12 @@ impl DemoScene {
         device: Arc<Device>,
         queue: Arc<Queue>,
     ) {
-        let mut view_matrix = translate_matrix_4d(0.0, 0.0, 3.0, 2.0);
+        let mut view_matrix = translate_matrix_4d(0.0, 2.0, 6.0, 4.0);
         let focal_length_xy = 1.0;
         let focal_length_zw = 1.0;
 
+        // Pitch down to see the floor
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 1, -PI * 0.15));
         view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI * 0.125));
         view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI * 0.125));
 
@@ -147,6 +149,17 @@ impl DemoScene {
             model_transform: model_transform.into(),
             cell_material_ids: [1, 2, 3, 4, 5, 6, 7, 8],
         });
+
+        if self.args.floor {
+            let width = 500.0;
+            let model_transform =
+                translate_matrix_4d(-width / 2.0, -4.0, -width / 2.0, -width / 2.0)
+                    .dot(&scale_matrix_4d_elementwise(width, 1.0, width, width));
+            instances.push(common::ModelInstance {
+                model_transform: model_transform.into(),
+                cell_material_ids: [11; 8],
+            });
+        }
 
         let render_options = RenderOptions {
             do_raster: !self.args.no_raster,

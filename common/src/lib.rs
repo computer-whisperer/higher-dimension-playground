@@ -20,6 +20,7 @@ pub struct Tetrahedron {
     pub vertex_positions: [Vec4; 4],
     pub texture_positions: [Vec4; 4],
     pub normal: Vec4,
+    pub inv_projection_divisors: Vec4,
     pub material_id: u32,
     pub padding: [u32; 3],
 }

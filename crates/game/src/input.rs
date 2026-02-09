@@ -1,5 +1,8 @@
+use std::time::Instant;
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
+
+const DOUBLE_TAP_THRESHOLD_MS: u128 = 300;
 
 pub struct InputState {
     forward: bool,
@@ -13,6 +16,9 @@ pub struct InputState {
     mouse_dx: f64,
     mouse_dy: f64,
     escape_pressed: bool,
+    last_space_press: Option<Instant>,
+    fly_toggle_requested: bool,
+    jump_requested: bool,
 }
 
 impl InputState {
@@ -29,6 +35,9 @@ impl InputState {
             mouse_dx: 0.0,
             mouse_dy: 0.0,
             escape_pressed: false,
+            last_space_press: None,
+            fly_toggle_requested: false,
+            jump_requested: false,
         }
     }
 
@@ -40,7 +49,19 @@ impl InputState {
                 KeyCode::KeyS => self.backward = pressed,
                 KeyCode::KeyA => self.left = pressed,
                 KeyCode::KeyD => self.right = pressed,
-                KeyCode::Space => self.up = pressed,
+                KeyCode::Space => {
+                    self.up = pressed;
+                    if pressed {
+                        let now = Instant::now();
+                        if let Some(last) = self.last_space_press {
+                            if now.duration_since(last).as_millis() < DOUBLE_TAP_THRESHOLD_MS {
+                                self.fly_toggle_requested = true;
+                            }
+                        }
+                        self.last_space_press = Some(now);
+                        self.jump_requested = true;
+                    }
+                }
                 KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
                 KeyCode::KeyQ => self.w_neg = pressed,
                 KeyCode::KeyE => self.w_pos = pressed,
@@ -77,6 +98,18 @@ impl InputState {
     pub fn take_escape(&mut self) -> bool {
         let v = self.escape_pressed;
         self.escape_pressed = false;
+        v
+    }
+
+    pub fn take_fly_toggle(&mut self) -> bool {
+        let v = self.fly_toggle_requested;
+        self.fly_toggle_requested = false;
+        v
+    }
+
+    pub fn take_jump(&mut self) -> bool {
+        let v = self.jump_requested;
+        self.jump_requested = false;
         v
     }
 }

@@ -82,10 +82,25 @@ impl App {
             self.input.take_mouse_delta();
         }
 
-        // Movement
+        // Toggle flight mode on double-tap space
+        if self.input.take_fly_toggle() {
+            self.camera.toggle_flying();
+        }
+
+        // Jump when in gravity mode, consume jump either way
+        if self.camera.is_flying {
+            self.input.take_jump();
+        } else if self.input.take_jump() {
+            self.camera.jump();
+        }
+
+        // Movement (vertical zeroed in gravity mode internally)
         let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
         self.camera
             .apply_movement(forward, strafe, vertical, w_axis, dt, MOVE_SPEED);
+
+        // Apply gravity physics
+        self.camera.update_physics(dt);
 
         // Build view matrix and scene
         let view_matrix = self.camera.view_matrix();

@@ -4,10 +4,17 @@ use higher_dimension_playground::matrix_operations::{
 use ndarray::Array2;
 use std::f32::consts::PI;
 
+const GRAVITY: f32 = 20.0;
+const JUMP_SPEED: f32 = 8.0;
+const PLAYER_HEIGHT: f32 = 1.7;
+const FLOOR_Y: f32 = -3.0;
+
 pub struct Camera4D {
     pub position: [f32; 4],
     pub yaw: f32,
     pub pitch: f32,
+    pub is_flying: bool,
+    pub velocity_y: f32,
 }
 
 impl Camera4D {
@@ -16,6 +23,8 @@ impl Camera4D {
             position: [0.0, 0.0, -8.0, -4.0],
             yaw: PI * 0.125,
             pitch: 0.0,
+            is_flying: true,
+            velocity_y: 0.0,
         }
     }
 
@@ -41,7 +50,9 @@ impl Camera4D {
         let fwd_z = self.yaw.cos();
 
         self.position[0] += (forward * fwd_x + strafe * fwd_z) * speed * dt;
-        self.position[1] += vertical * speed * dt;
+        if self.is_flying {
+            self.position[1] += vertical * speed * dt;
+        }
         self.position[2] += (forward * fwd_z - strafe * fwd_x) * speed * dt;
         self.position[3] += w_axis * speed * dt;
     }
@@ -52,5 +63,33 @@ impl Camera4D {
 
         let max_pitch = 81.0_f32.to_radians();
         self.pitch = self.pitch.clamp(-max_pitch, max_pitch);
+    }
+
+    pub fn toggle_flying(&mut self) {
+        self.is_flying = !self.is_flying;
+        self.velocity_y = 0.0;
+    }
+
+    pub fn on_ground(&self) -> bool {
+        self.position[1] <= FLOOR_Y + PLAYER_HEIGHT + 0.01
+    }
+
+    pub fn jump(&mut self) {
+        if self.on_ground() {
+            self.velocity_y = JUMP_SPEED;
+        }
+    }
+
+    pub fn update_physics(&mut self, dt: f32) {
+        if self.is_flying {
+            return;
+        }
+        self.velocity_y -= GRAVITY * dt;
+        self.position[1] += self.velocity_y * dt;
+        let ground_y = FLOOR_Y + PLAYER_HEIGHT;
+        if self.position[1] < ground_y {
+            self.position[1] = ground_y;
+            self.velocity_y = 0.0;
+        }
     }
 }

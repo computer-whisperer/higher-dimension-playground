@@ -9,6 +9,7 @@ struct Tetrahedron
     float4 vertexPositions[4];
     float4 texturePositions[4];
     float4 normal;
+    float4 invProjectionDivisors;
     uint materialId;
     uint padding[3];
 }

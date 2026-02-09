@@ -1,5 +1,5 @@
 use higher_dimension_playground::matrix_operations::{
-    double_rotation_matrix_4d, scale_matrix_4d, translate_matrix_4d,
+    double_rotation_matrix_4d, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d,
 };
 
 pub fn build_scene_instances(time: f32) -> Vec<common::ModelInstance> {
@@ -40,6 +40,14 @@ pub fn build_scene_instances(time: f32) -> Vec<common::ModelInstance> {
     instances.push(common::ModelInstance {
         model_transform: model_transform.into(),
         cell_material_ids: [13; 8],
+    });
+
+    // Floor plane: huge thin tesseract with top surface at Y = -3.0
+    let floor_transform = translate_matrix_4d(-100.0, -3.5, -100.0, -100.0)
+        .dot(&scale_matrix_4d_elementwise(200.0, 0.5, 200.0, 200.0));
+    instances.push(common::ModelInstance {
+        model_transform: floor_transform.into(),
+        cell_material_ids: [11; 8],
     });
 
     instances

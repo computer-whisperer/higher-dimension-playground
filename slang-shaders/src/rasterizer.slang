@@ -81,167 +81,109 @@ void clipEdge(VecN<5> vA, float4 tA, float dA, VecN<5> vB, float4 tB, float dB, 
     tOut = tA * (1.0 - t) + tB * t;
 }
 
-// Clip a tetrahedron against a hyperplane.
-// Returns 0-3 output tetrahedra in results[].
-uint clipTetrahedronByPlane(ClipTet tet, HyperPlane4D plane, out ClipTet results[3])
+// Generic tetrahedron clipper: clips a tetrahedron given pre-computed signed distances
+// per vertex. Vertices with dist >= 0 are "inside" (kept). Returns 0-3 output tetrahedra.
+// When fixDepth is true, new vertices have verts[4] recomputed from Z,W (needed for
+// screen-space clips). When false, verts[4] is linearly interpolated (for 4D-space clips).
+uint clipTetrahedronGeneric(ClipTet tet, float dist[4], float focalLengthXY, bool fixDepth, out ClipTet results[3])
 {
-    // Classify vertices
-    float dist[4];
     bool inside[4];
     uint numInside = 0;
 
     [ForceUnroll]
     for (int i = 0; i < 4; i++)
     {
-        dist[i] = plane.signedDistance(tet.verts[i].toFloat4());
         inside[i] = dist[i] >= 0.0;
         if (inside[i]) numInside++;
     }
 
-    if (numInside == 4)
-    {
-        results[0] = tet;
-        return 1; // unchanged
-    }
+    if (numInside == 4) { results[0] = tet; return 1; }
+    if (numInside == 0) return 0;
 
-    if (numInside == 0)
-        return 0; // fully clipped
-
-    // Gather inside/outside vertex indices
-    uint insideIdx[4];
-    uint outsideIdx[4];
+    uint insideIdx[4], outsideIdx[4];
     uint nIn = 0, nOut = 0;
     [ForceUnroll]
     for (int i = 0; i < 4; i++)
     {
-        if (inside[i])
-            insideIdx[nIn++] = i;
-        else
-            outsideIdx[nOut++] = i;
+        if (inside[i]) insideIdx[nIn++] = i;
+        else           outsideIdx[nOut++] = i;
     }
+
+    // Recompute projectionDivisor from actual Z,W after interpolation
+    // Only applied when fixDepth is true (for screen-space clips where projDiv must be exact).
+    // For 4D-space clips (like ZW cone), linear interpolation of projDiv is kept.
+    #define FIX_DEPTH(v) if (fixDepth) { v[4] = sqrt(v[2] * v[2] + v[3] * v[3]) / focalLengthXY; }
 
     if (numInside == 1)
     {
-        // One vertex inside -> clip to a smaller tetrahedron (tip)
         uint a = insideIdx[0];
         uint b = outsideIdx[0], c = outsideIdx[1], d = outsideIdx[2];
-
-        VecN<5> vAB, vAC, vAD;
-        float4 tAB, tAC, tAD;
+        VecN<5> vAB, vAC, vAD; float4 tAB, tAC, tAD;
         clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[b], tet.texCoords[b], dist[b], vAB, tAB);
         clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[c], tet.texCoords[c], dist[c], vAC, tAC);
         clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[d], tet.texCoords[d], dist[d], vAD, tAD);
-
-        ClipTet r;
-        r.materialId = tet.materialId;
+        FIX_DEPTH(vAB); FIX_DEPTH(vAC); FIX_DEPTH(vAD);
+        ClipTet r; r.materialId = tet.materialId;
         r.verts[0] = tet.verts[a]; r.texCoords[0] = tet.texCoords[a];
-        r.verts[1] = vAB;          r.texCoords[1] = tAB;
-        r.verts[2] = vAC;          r.texCoords[2] = tAC;
-        r.verts[3] = vAD;          r.texCoords[3] = tAD;
-        results[0] = r;
-        return 1;
+        r.verts[1] = vAB; r.texCoords[1] = tAB;
+        r.verts[2] = vAC; r.texCoords[2] = tAC;
+        r.verts[3] = vAD; r.texCoords[3] = tAD;
+        results[0] = r; return 1;
     }
 
     if (numInside == 2)
     {
-        // Two vertices inside -> wedge -> 3 tetrahedra
         uint a = insideIdx[0], b = insideIdx[1];
         uint c = outsideIdx[0], d = outsideIdx[1];
-
-        VecN<5> vAC, vAD, vBC, vBD;
-        float4 tAC, tAD, tBC, tBD;
+        VecN<5> vAC, vAD, vBC, vBD; float4 tAC, tAD, tBC, tBD;
         clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[c], tet.texCoords[c], dist[c], vAC, tAC);
         clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[d], tet.texCoords[d], dist[d], vAD, tAD);
         clipEdge(tet.verts[b], tet.texCoords[b], dist[b], tet.verts[c], tet.texCoords[c], dist[c], vBC, tBC);
         clipEdge(tet.verts[b], tet.texCoords[b], dist[b], tet.verts[d], tet.texCoords[d], dist[d], vBD, tBD);
-
-        // Decompose wedge (A, B, AC, AD, BC, BD) into 3 tetrahedra
+        FIX_DEPTH(vAC); FIX_DEPTH(vAD); FIX_DEPTH(vBC); FIX_DEPTH(vBD);
         ClipTet r0, r1, r2;
-        r0.materialId = tet.materialId;
-        r1.materialId = tet.materialId;
-        r2.materialId = tet.materialId;
-
-        // Tet 0: A, B, AC, AD
+        r0.materialId = tet.materialId; r1.materialId = tet.materialId; r2.materialId = tet.materialId;
         r0.verts[0] = tet.verts[a]; r0.texCoords[0] = tet.texCoords[a];
         r0.verts[1] = tet.verts[b]; r0.texCoords[1] = tet.texCoords[b];
-        r0.verts[2] = vAC;          r0.texCoords[2] = tAC;
-        r0.verts[3] = vAD;          r0.texCoords[3] = tAD;
-
-        // Tet 1: B, AC, AD, BC
+        r0.verts[2] = vAC; r0.texCoords[2] = tAC; r0.verts[3] = vAD; r0.texCoords[3] = tAD;
         r1.verts[0] = tet.verts[b]; r1.texCoords[0] = tet.texCoords[b];
-        r1.verts[1] = vAC;          r1.texCoords[1] = tAC;
-        r1.verts[2] = vAD;          r1.texCoords[2] = tAD;
-        r1.verts[3] = vBC;          r1.texCoords[3] = tBC;
-
-        // Tet 2: B, AD, BC, BD
+        r1.verts[1] = vAC; r1.texCoords[1] = tAC; r1.verts[2] = vAD; r1.texCoords[2] = tAD;
+        r1.verts[3] = vBC; r1.texCoords[3] = tBC;
         r2.verts[0] = tet.verts[b]; r2.texCoords[0] = tet.texCoords[b];
-        r2.verts[1] = vAD;          r2.texCoords[1] = tAD;
-        r2.verts[2] = vBC;          r2.texCoords[2] = tBC;
-        r2.verts[3] = vBD;          r2.texCoords[3] = tBD;
-
-        results[0] = r0;
-        results[1] = r1;
-        results[2] = r2;
-        return 3;
+        r2.verts[1] = vAD; r2.texCoords[1] = tAD; r2.verts[2] = vBC; r2.texCoords[2] = tBC;
+        r2.verts[3] = vBD; r2.texCoords[3] = tBD;
+        results[0] = r0; results[1] = r1; results[2] = r2; return 3;
     }
 
-    // numInside == 3: Chop one corner off -> 3 tetrahedra
+    // numInside == 3
     {
-        uint d = outsideIdx[0]; // the one outside vertex
+        uint d = outsideIdx[0];
         uint a = insideIdx[0], b = insideIdx[1], c = insideIdx[2];
-
-        VecN<5> vAD, vBD, vCD;
-        float4 tAD, tBD, tCD;
+        VecN<5> vAD, vBD, vCD; float4 tAD, tBD, tCD;
         clipEdge(tet.verts[a], tet.texCoords[a], dist[a], tet.verts[d], tet.texCoords[d], dist[d], vAD, tAD);
         clipEdge(tet.verts[b], tet.texCoords[b], dist[b], tet.verts[d], tet.texCoords[d], dist[d], vBD, tBD);
         clipEdge(tet.verts[c], tet.texCoords[c], dist[c], tet.verts[d], tet.texCoords[d], dist[d], vCD, tCD);
-
+        FIX_DEPTH(vAD); FIX_DEPTH(vBD); FIX_DEPTH(vCD);
         ClipTet r0, r1, r2;
-        r0.materialId = tet.materialId;
-        r1.materialId = tet.materialId;
-        r2.materialId = tet.materialId;
-
-        // Replace D with AD in the original, then subdivide the remainder
-        // Tet 0: A, B, C, AD
+        r0.materialId = tet.materialId; r1.materialId = tet.materialId; r2.materialId = tet.materialId;
         r0.verts[0] = tet.verts[a]; r0.texCoords[0] = tet.texCoords[a];
         r0.verts[1] = tet.verts[b]; r0.texCoords[1] = tet.texCoords[b];
         r0.verts[2] = tet.verts[c]; r0.texCoords[2] = tet.texCoords[c];
-        r0.verts[3] = vAD;          r0.texCoords[3] = tAD;
-
-        // Tet 1: B, C, AD, BD
+        r0.verts[3] = vAD; r0.texCoords[3] = tAD;
         r1.verts[0] = tet.verts[b]; r1.texCoords[0] = tet.texCoords[b];
         r1.verts[1] = tet.verts[c]; r1.texCoords[1] = tet.texCoords[c];
-        r1.verts[2] = vAD;          r1.texCoords[2] = tAD;
-        r1.verts[3] = vBD;          r1.texCoords[3] = tBD;
-
-        // Tet 2: C, AD, BD, CD
+        r1.verts[2] = vAD; r1.texCoords[2] = tAD; r1.verts[3] = vBD; r1.texCoords[3] = tBD;
         r2.verts[0] = tet.verts[c]; r2.texCoords[0] = tet.texCoords[c];
-        r2.verts[1] = vAD;          r2.texCoords[1] = tAD;
-        r2.verts[2] = vBD;          r2.texCoords[2] = tBD;
-        r2.verts[3] = vCD;          r2.texCoords[3] = tCD;
-
-        results[0] = r0;
-        results[1] = r1;
-        results[2] = r2;
-        return 3;
+        r2.verts[1] = vAD; r2.texCoords[1] = tAD; r2.verts[2] = vBD; r2.texCoords[2] = tBD;
+        r2.verts[3] = vCD; r2.texCoords[3] = tCD;
+        results[0] = r0; results[1] = r1; results[2] = r2; return 3;
     }
+
+    #undef FIX_DEPTH
 }
 
-// Build frustum planes for clipping.
-// Only the near plane is used — the 4D projection boundary |X| = sqrt(Z²+W²) is a
-// cone that cannot be represented by hyperplanes, so side planes inevitably clip visible
-// geometry at certain ZW angles. The per-pixel rasterizer handles screen bounds instead.
-static const uint NUM_FRUSTUM_PLANES = 1;
-void getFrustumPlanes(out HyperPlane4D planes[1])
-{
-    // Near plane: prevents depth ≈ 0 (clips Z + W < 0.2)
-    planes[0] = HyperPlane4D.from4Points(
-        float4(1.0, 1.0, 0.1, 0.1),
-        float4(1.0, -1.0, 0.1, 0.1),
-        float4(-1.0, 1.0, 0.1, 0.1),
-        float4(1.0, 1.0, 1.1, -0.9)
-    );
-}
+// Near-depth clipping threshold.
+static const float MIN_DEPTH_DIVISOR = 0.15;
 
 // Tetrahedron preprocessing compute shader with frustum clipping
 [shader("compute")]
@@ -281,32 +223,94 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
         initialTet.texCoords[i] = result.texturePosition;
     }
 
-    // Clip against near plane only (side planes removed — see getFrustumPlanes comment)
-    HyperPlane4D frustumPlanes[NUM_FRUSTUM_PLANES];
-    getFrustumPlanes(frustumPlanes);
+    // Frustum clipping in 3 passes:
+    // 1-2. ZW viewing cone: clip to the ZW angle range [theta_min, theta_max].
+    //      This is the critical fix — without it, edges crossing the ZW origin (depth=0)
+    //      produce degenerate screen coordinates. The clip boundaries are LINEAR hyperplanes
+    //      in 4D view space (Z,W), so linear edge interpolation is exact.
+    // 3.   Near depth: projectionDivisor >= MIN_DEPTH_DIVISOR.
+    //      Safety clip to prevent division by near-zero depth.
+    //
+    // Screen-space clips are omitted — the pixel shader handles off-screen geometry via
+    // bounding box tests. Screen clips caused artifacts because FIX_DEPTH (needed to correct
+    // projDiv after interpolation through nonlinear sqrt) creates brightness discontinuities.
+    float fxy = workingData.focalLengthXY;
 
-    ClipTet bufA[4];
-    ClipTet bufB[4];
+    ClipTet bufA[24];
+    ClipTet bufB[24];
     uint countA = 1;
     bufA[0] = initialTet;
 
-    for (int p = 0; p < NUM_FRUSTUM_PLANES; p++)
+    // ZW viewing cone clips: the ZW angle range is [theta_min, theta_max].
+    // For focalLengthZW=1.0: theta_min=0, theta_max=PI/2, giving Z>=0 and W>=0.
+    // Clip conditions are linear in view-space Z,W:
+    //   lower boundary: -sin(theta_min)*Z + cos(theta_min)*W >= 0
+    //   upper boundary:  sin(theta_max)*Z - cos(theta_max)*W >= 0
+    float zwViewAngle = (3.14159265 / 2.0) / workingData.focalLengthZW;
+    float thetaMin = 3.14159265 / 4.0 - zwViewAngle / 2.0;
+    float thetaMax = 3.14159265 / 4.0 + zwViewAngle / 2.0;
+    float sinMin = sin(thetaMin), cosMin = cos(thetaMin);
+    float sinMax = sin(thetaMax), cosMax = cos(thetaMax);
+
+    // Pass 1: ZW cone lower boundary (theta_min) — 4D clip, no FIX_DEPTH
     {
         uint countB = 0;
         for (uint t = 0; t < countA; t++)
         {
+            float dist[4];
+            [ForceUnroll] for (int i = 0; i < 4; i++)
+                dist[i] = -sinMin * bufA[t].verts[i][2] + cosMin * bufA[t].verts[i][3];
             ClipTet clipResults[3];
-            uint numResults = clipTetrahedronByPlane(bufA[t], frustumPlanes[p], clipResults);
-            for (uint r = 0; r < numResults && countB < 4; r++)
-            {
-                bufB[countB] = clipResults[r];
-                countB++;
-            }
+            uint n = clipTetrahedronGeneric(bufA[t], dist, fxy, false, clipResults);
+            for (uint r = 0; r < n && countB < 24; r++)
+                bufB[countB++] = clipResults[r];
         }
-        // Swap: copy B -> A
         countA = countB;
+        for (uint t = 0; t < countA; t++) bufA[t] = bufB[t];
+    }
+
+    // Pass 2: ZW cone upper boundary (theta_max) — 4D clip, no FIX_DEPTH
+    {
+        uint countB = 0;
         for (uint t = 0; t < countA; t++)
-            bufA[t] = bufB[t];
+        {
+            float dist[4];
+            [ForceUnroll] for (int i = 0; i < 4; i++)
+                dist[i] = sinMax * bufA[t].verts[i][2] - cosMax * bufA[t].verts[i][3];
+            ClipTet clipResults[3];
+            uint n = clipTetrahedronGeneric(bufA[t], dist, fxy, false, clipResults);
+            for (uint r = 0; r < n && countB < 24; r++)
+                bufB[countB++] = clipResults[r];
+        }
+        countA = countB;
+        for (uint t = 0; t < countA; t++) bufA[t] = bufB[t];
+    }
+
+    // After ZW cone clips, recompute projDiv from actual Z,W for all vertices.
+    // This ensures subsequent depth/screen clips use correct projDiv values.
+    for (uint t = 0; t < countA; t++)
+    {
+        [ForceUnroll]
+        for (int i = 0; i < 4; i++)
+            bufA[t].verts[i][4] = sqrt(bufA[t].verts[i][2] * bufA[t].verts[i][2] +
+                                       bufA[t].verts[i][3] * bufA[t].verts[i][3]) / fxy;
+    }
+
+    // Pass 3: Near depth clip (projDivisor >= MIN_DEPTH_DIVISOR) — uses FIX_DEPTH
+    {
+        uint countB = 0;
+        for (uint t = 0; t < countA; t++)
+        {
+            float dist[4];
+            [ForceUnroll] for (int i = 0; i < 4; i++)
+                dist[i] = bufA[t].verts[i][4] - MIN_DEPTH_DIVISOR;
+            ClipTet clipResults[3];
+            uint n = clipTetrahedronGeneric(bufA[t], dist, fxy, true, clipResults);
+            for (uint r = 0; r < n && countB < 24; r++)
+                bufB[countB++] = clipResults[r];
+        }
+        countA = countB;
+        for (uint t = 0; t < countA; t++) bufA[t] = bufB[t];
     }
 
     // Write surviving tetrahedra via atomic counter
@@ -321,19 +325,29 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
         if (slot >= bufSize)
             continue; // overflow protection
 
-        // Project to screen space
-        float4 projected[4];
+        // Compute normal from pre-projection view-space vertices
+        float4 preProj[4];
         [ForceUnroll]
         for (int i = 0; i < 4; i++)
-            projected[i] = project4DVertex(bufA[t].verts[i]);
+            preProj[i] = bufA[t].verts[i].toFloat4();
+        float4 normal = getNormal4D(preProj[0], preProj[1], preProj[2], preProj[3]);
 
-        float4 normal = getNormal4D(projected[0], projected[1], projected[2], projected[3]);
+        // Project to screen space and store inverse projection divisors
+        float4 projected[4];
+        float4 invProjDivisors;
+        [ForceUnroll]
+        for (int i = 0; i < 4; i++)
+        {
+            projected[i] = project4DVertex(bufA[t].verts[i]);
+            invProjDivisors[i] = 1.0 / bufA[t].verts[i][4];
+        }
 
         Tetrahedron outTet;
         outTet.vertexPositions = projected;
         outTet.texturePositions = bufA[t].texCoords;
         outTet.materialId = bufA[t].materialId;
         outTet.normal = normal;
+        outTet.invProjectionDivisors = invProjDivisors;
         outputTetrahedrons[slot] = outTet;
     }
 }
@@ -673,6 +687,8 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
             continue;
 
         // Compute ZW line from the two face intersections
+        // Uses perspective-correct interpolation: interpolate attr/d and 1/d
+        // in screen space, then divide to recover correct view-space values.
         currentZWLines[numZWLines].textureId = tet.materialId;
 
         for (uint j = 0; j < 2; j++)
@@ -680,20 +696,36 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
             float3 bary = barycentrics[triIndexes[j]];
             uint3 combo = COMBINATIONS_4_3[triIndexes[j]];
 
+            float3 invD = float3(
+                tet.invProjectionDivisors[combo[0]],
+                tet.invProjectionDivisors[combo[1]],
+                tet.invProjectionDivisors[combo[2]]
+            );
+
+            // Interpolate 1/d in screen space
+            float interpInvD = bary.x * invD.x + bary.y * invD.y + bary.z * invD.z;
+
+            // Interpolate (zw * invD) in screen space, then divide by interpInvD
             float2 zwVertices[3] = {
                 tet.vertexPositions[combo[0]].zw,
                 tet.vertexPositions[combo[1]].zw,
                 tet.vertexPositions[combo[2]].zw
             };
+            float2 zwOverD = bary.x * zwVertices[0] * invD.x
+                           + bary.y * zwVertices[1] * invD.y
+                           + bary.z * zwVertices[2] * invD.z;
+            float2 zwValue = zwOverD / interpInvD;
 
+            // Interpolate (tex * invD) in screen space, then divide by interpInvD
             float4 texVertices[3] = {
                 tet.texturePositions[combo[0]],
                 tet.texturePositions[combo[1]],
                 tet.texturePositions[combo[2]]
             };
-
-            float2 zwValue = bary.x * zwVertices[0] + bary.y * zwVertices[1] + bary.z * zwVertices[2];
-            float4 texValue = bary.x * texVertices[0] + bary.y * texVertices[1] + bary.z * texVertices[2];
+            float4 texOverD = bary.x * texVertices[0] * invD.x
+                            + bary.y * texVertices[1] * invD.y
+                            + bary.z * texVertices[2] * invD.z;
+            float4 texValue = texOverD / interpInvD;
 
             currentZWLines[numZWLines].zwPositions[j] = zwValue;
             currentZWLines[numZWLines].texturePositions[j] = texValue;

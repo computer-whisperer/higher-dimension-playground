@@ -787,6 +787,147 @@ slightly different ZW angle, and the average over all angles produces the final
 ---
 
 
+## Section 8: 4D Frustum Clipping (Rasterizer)
+
+The rasterizer projects tetrahedra from 4D view space to 2D screen space, then
+integrates along the ZW axis per pixel. Before projection, tetrahedra must be
+clipped to the visible region — otherwise edges that cross through depth zero
+produce degenerate screen coordinates.
+
+### 8.1 Why 4D Frustum Boundaries Are Cones
+
+In 3D, the view frustum is bounded by flat planes: near, far, left, right, top,
+bottom. The "depth" axis is a single line (Z), so the near plane is simply
+`Z = near`.
+
+In 4D, **depth has two components**: Z and W. The "depth" of a point is:
+
+```
+depth = sqrt(Z² + W²)
+```
+
+This is always non-negative, regardless of the signs of Z and W. A vertex at
+(Z=1, W=0) and a vertex at (Z=-1, W=0) both have `depth = 1` — but an edge
+connecting them passes through the origin (Z=0, W=0) where `depth = 0`,
+producing a division-by-zero in perspective projection.
+
+The visible region in ZW space is not a half-space — it's a **cone** defined by
+an angular range `[theta_min, theta_max]` where `theta = atan2(W, Z)`. Points
+at any angle have positive depth, but only points within the viewing cone should
+be rendered.
+
+### 8.2 ZW Viewing Cone Clip Boundaries
+
+The camera samples ZW directions uniformly within an angular range centered at
+`pi/4` (equal parts Z and W):
+
+```
+zwViewAngle = (pi/2) / focalLengthZW
+theta_min   = pi/4 - zwViewAngle/2
+theta_max   = pi/4 + zwViewAngle/2
+```
+
+For `focalLengthZW = 1.0`: `theta_min = 0`, `theta_max = pi/2`, meaning the
+visible cone is the first quadrant of the ZW plane (Z >= 0 **and** W >= 0).
+
+The key insight is that these cone boundaries are **linear hyperplanes** in 4D
+view space. The boundary at angle theta is the set of points where the ZW
+component is exactly on the boundary ray:
+
+```
+Lower boundary: -sin(theta_min) * Z + cos(theta_min) * W >= 0
+Upper boundary:  sin(theta_max) * Z - cos(theta_max) * W >= 0
+```
+
+Because these are linear in Z and W, standard edge-clip interpolation is
+**exact** — no nonlinear correction needed. This is the crucial property that
+makes the clips artifact-free.
+
+### 8.3 The FIX_DEPTH Problem
+
+After clipping, new vertices are created by linear interpolation along edges.
+For ZW cone clips, the interpolated `projectionDivisor` (= `depth / focalLength`)
+is linearly interpolated, which does NOT equal the true value
+`sqrt(Z² + W²) / focalLength` at the interpolated Z, W coordinates.
+
+Since `sqrt` is a **concave function**, by Jensen's inequality:
+
+```
+sqrt(lerp(Z₁, Z₂)² + lerp(W₁, W₂)²)  ≤  lerp(sqrt(Z₁² + W₁²), sqrt(Z₂² + W₂²))
+```
+
+Recomputing `projDiv` from the interpolated Z, W (`FIX_DEPTH`) produces a
+**smaller** value than the linearly interpolated one. At clip boundaries this
+creates a brightness discontinuity — vertices just inside the clip have
+recomputed projDiv, while nearby unclipped vertices use their original values.
+
+**Solution**: Do NOT apply FIX_DEPTH after ZW cone clips. Instead, after both
+cone clips are complete, recompute `projDiv` for ALL vertices from their actual
+Z, W coordinates. This ensures consistent values across clip boundaries. Only
+the near-depth clip (pass 3) uses FIX_DEPTH, since it operates on projDiv
+directly and new vertices need exact values.
+
+### 8.4 Clipping Architecture (3 Passes)
+
+The rasterizer clips each tetrahedron in three passes:
+
+| Pass | Clip condition | fixDepth | Purpose |
+|------|---------------|----------|---------|
+| 1 | `-sin(θ_min)*Z + cos(θ_min)*W >= 0` | false | ZW cone lower boundary |
+| 2 | `sin(θ_max)*Z - cos(θ_max)*W >= 0` | false | ZW cone upper boundary |
+| — | Recompute projDiv for all vertices | — | Sync projDiv with actual Z,W |
+| 3 | `projDiv >= MIN_DEPTH_DIVISOR` | true | Near-depth safety clip |
+
+Screen-space clips (left/right/top/bottom) are **omitted**. The pixel shader
+already performs a bounding-box test per tetrahedron, which naturally skips
+off-screen geometry. Adding screen clips would require FIX_DEPTH (since clipped
+vertices need correct projDiv for screen-space position), reintroducing the
+brightness discontinuity problem.
+
+### 8.5 Tetrahedron Clipping Topology
+
+The clipper handles all cases of N vertices inside the clip boundary:
+
+| Inside | Outside | Output tetrahedra | Shape |
+|--------|---------|-------------------|-------|
+| 4 | 0 | 1 (passthrough) | Original |
+| 3 | 1 | 3 | Truncated corner |
+| 2 | 2 | 3 | Sliced in half |
+| 1 | 3 | 1 | Single corner |
+| 0 | 4 | 0 (culled) | — |
+
+Each pass can multiply the tetrahedron count by up to 3x, so the buffer holds
+up to 24 tetrahedra (1 input × 3^3 worst case across 3 passes, though in
+practice the count stays much lower).
+
+### 8.6 Perspective-Correct Interpolation
+
+After projection, the pixel shader needs to interpolate ZW positions and texture
+coordinates across screen-space triangular faces. Naive linear interpolation in
+screen space is incorrect because perspective division is nonlinear.
+
+The rasterizer stores `invProjectionDivisors` (1/projDiv for each of the 4
+vertices) in the output tetrahedron. The pixel shader uses the standard
+perspective-correct formula:
+
+```
+attr_correct = (bary₀·attr₀/d₀ + bary₁·attr₁/d₁ + bary₂·attr₂/d₂)
+             / (bary₀/d₀ + bary₁/d₁ + bary₂/d₂)
+```
+
+where `bary_i` are screen-space barycentric coordinates and `d_i` are the
+projection divisors. This recovers the correct view-space attribute values at
+each pixel.
+
+> **Code ref:** Clipping pipeline in `slang-shaders/src/rasterizer.slang`
+> `mainTetrahedronCS()` (line 191)
+> **Code ref:** Perspective-correct interpolation in `mainTetrahedronPixelCS()`
+> (line 610)
+
+
+---
+
+
 ## Appendix: Dimension Ladder Reference
 
 A quick-reference table of how key concepts scale across dimensions.
@@ -855,6 +996,7 @@ A quick-reference table of how key concepts scale across dimensions.
 | `common/src/linalg_n.rs` | CPU-side N-dimensional cross product and normal computation |
 | `common/src/mat_n.rs` | N×N matrix type with determinant computation |
 | `slang-shaders/src/math.slang` | GPU-side 4D math: `cross4D`, `VecN<N>`, `MatN<N>` |
+| `slang-shaders/src/rasterizer.slang` | 4D rasterizer: frustum clipping, ZW projection, pixel shader |
 | `slang-shaders/src/raytracer.slang` | Ray generation, intersection, BVH traversal, path tracing |
 | `slang-shaders/src/bvh.slang` | Morton codes, bitonic sort, Karras tree, AABB propagation |
 | `slang-shaders/src/materials.slang` | Procedural material definitions |

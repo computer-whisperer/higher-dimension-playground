@@ -10,7 +10,7 @@ mod tests {
         // Expected sizes from Slang reflection with -fvk-use-scalar-layout
         assert_eq!(
             std::mem::size_of::<Tetrahedron>(),
-            160,
+            176,
             "Tetrahedron size mismatch"
         );
         assert_eq!(
@@ -42,13 +42,15 @@ mod tests {
         // Slang: vertexPositions: offset=0, size=64
         // Slang: texturePositions: offset=64, size=64
         // Slang: normal: offset=128, size=16
-        // Slang: materialId: offset=144, size=4
-        // Slang: padding: offset=148, size=12
+        // Slang: invProjectionDivisors: offset=144, size=16
+        // Slang: materialId: offset=160, size=4
+        // Slang: padding: offset=164, size=12
         assert_eq!(std::mem::offset_of!(Tetrahedron, vertex_positions), 0);
         assert_eq!(std::mem::offset_of!(Tetrahedron, texture_positions), 64);
         assert_eq!(std::mem::offset_of!(Tetrahedron, normal), 128);
-        assert_eq!(std::mem::offset_of!(Tetrahedron, material_id), 144);
-        assert_eq!(std::mem::offset_of!(Tetrahedron, padding), 148);
+        assert_eq!(std::mem::offset_of!(Tetrahedron, inv_projection_divisors), 144);
+        assert_eq!(std::mem::offset_of!(Tetrahedron, material_id), 160);
+        assert_eq!(std::mem::offset_of!(Tetrahedron, padding), 164);
     }
 
     #[test]
