@@ -1,19 +1,22 @@
-use std::{error::Error, sync::Arc};
+use clap::Parser;
+use higher_dimension_playground::matrix_operations::{
+    double_rotation_matrix_4d, rotation_matrix_one_angle, scale_matrix_4d,
+    scale_matrix_4d_elementwise, translate_matrix_4d,
+};
+use higher_dimension_playground::render::{RenderContext, RenderOptions};
+use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::f32::consts::PI;
 use std::time::Instant;
+use std::{error::Error, sync::Arc};
 use vulkano::device::{Device, Queue};
-use vulkano::instance::Instance;
 use vulkano::instance::debug::DebugUtilsMessenger;
+use vulkano::instance::Instance;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
-use clap::Parser;
-use higher_dimension_playground::render::{RenderContext, RenderOptions};
-use higher_dimension_playground::matrix_operations::{double_rotation_matrix_4d, rotation_matrix_one_angle, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d};
-use higher_dimension_playground::vulkan_setup::vulkan_setup;
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -80,8 +83,7 @@ fn main() -> Result<(), impl Error> {
     if args.headless {
         run_headless(&args);
         Ok(())
-    }
-    else {
+    } else {
         let event_loop = EventLoop::new().unwrap();
         let mut app = App::new(&event_loop, args);
 
@@ -92,7 +94,13 @@ fn main() -> Result<(), impl Error> {
 fn run_headless(args: &Args) {
     let (instance, device, queue) = vulkan_setup(None);
 
-    let mut rcx = RenderContext::new(device.clone(), instance.clone(), None, [args.width, args.height, 1]);
+    let mut rcx = RenderContext::new(
+        device.clone(),
+        queue.clone(),
+        instance.clone(),
+        None,
+        [args.width, args.height, 1],
+    );
 
     let mut demo_scene = DemoScene::new(args.clone());
 
@@ -104,7 +112,7 @@ struct DemoScene {
     args: Args,
     start_time: Instant,
     frame_num: u32,
-    sub_frame_num: u32
+    sub_frame_num: u32,
 }
 
 impl DemoScene {
@@ -113,23 +121,28 @@ impl DemoScene {
             args,
             start_time: Instant::now(),
             frame_num: 0,
-            sub_frame_num: 0
+            sub_frame_num: 0,
         }
     }
 
-    fn update_headless_png(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
+    fn update_headless_png(
+        &mut self,
+        rcx: &mut RenderContext,
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+    ) {
         let mut view_matrix = translate_matrix_4d(0.0, 0.0, 3.0, 2.0);
         let focal_length_xy = 1.0;
         let focal_length_zw = 1.0;
 
-        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.125));
-        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.125));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI * 0.125));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI * 0.125));
 
         let mut instances = Vec::<common::ModelInstance>::new();
 
         // Single centered tesseract with distinct materials per cell
-        let model_transform = translate_matrix_4d(-0.5, -0.5, -0.5, -0.5)
-            .dot(&scale_matrix_4d(1.0));
+        let model_transform =
+            translate_matrix_4d(-0.5, -0.5, -0.5, -0.5).dot(&scale_matrix_4d(1.0));
         instances.push(common::ModelInstance {
             model_transform: model_transform.into(),
             cell_material_ids: [1, 2, 3, 4, 5, 6, 7, 8],
@@ -144,7 +157,15 @@ impl DemoScene {
             ..Default::default()
         };
 
-        rcx.render(device, queue, view_matrix, focal_length_xy, focal_length_zw, &instances, render_options);
+        rcx.render(
+            device,
+            queue,
+            view_matrix,
+            focal_length_xy,
+            focal_length_zw,
+            &instances,
+            render_options,
+        );
 
         std::fs::create_dir_all("frames").ok();
         rcx.save_rendered_frame_png("frames/headless_raster.png");
@@ -154,7 +175,7 @@ impl DemoScene {
     fn update(&mut self, rcx: &mut RenderContext, device: Arc<Device>, queue: Arc<Queue>) {
         let mut view_matrix = translate_matrix_4d(0.0, 0.0, 8.0, 4.0);
         let focal_length_xy = 1.0;
-        let focal_length_zw= 1.0;
+        let focal_length_zw = 1.0;
 
         let do_raytrace = self.args.raytrace;
         let do_edges = self.args.edges;
@@ -172,23 +193,37 @@ impl DemoScene {
         let do_walls = self.args.walls;
 
         let sub_frames_per_frame = if do_raytrace {
-            100  // Reduced for faster testing
-        }
-        else {
+            100 // Reduced for faster testing
+        } else {
             1
         };
-        let sub_frames_per_export = 1000;  // Reduced for faster testing
+        let sub_frames_per_export = 1000; // Reduced for faster testing
 
-        let time_elapsed = self.frame_num as f32/frame_time_hz;
+        let time_elapsed = self.frame_num as f32 / frame_time_hz;
 
         if do_spin {
-            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.25 + PI*2.0*time_elapsed/30.0));
-            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 1, PI*0.25 + PI*2.0*time_elapsed/30.0));
-            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*2.0*time_elapsed/30.0));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(
+                5,
+                0,
+                2,
+                PI * 0.25 + PI * 2.0 * time_elapsed / 30.0,
+            ));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(
+                5,
+                0,
+                1,
+                PI * 0.25 + PI * 2.0 * time_elapsed / 30.0,
+            ));
+            view_matrix = view_matrix.dot(&rotation_matrix_one_angle(
+                5,
+                2,
+                3,
+                PI * 2.0 * time_elapsed / 30.0,
+            ));
         }
         //view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 2, 3, PI*0.25));
-        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI*0.125));
-        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI*0.125));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 2, PI * 0.125));
+        view_matrix = view_matrix.dot(&rotation_matrix_one_angle(5, 0, 3, PI * 0.125));
 
         let mut instances = Vec::<common::ModelInstance>::new();
 
@@ -207,71 +242,53 @@ impl DemoScene {
                 for y in 0..2 {
                     for z in 0..2 {
                         for w in 0..2 {
-                            blocks.push(
-                                Block{
-                                    position: [x*4 - 2, y*4 - 2, z*4 - 2, w*4 - 2],
-                                    materials: [texture_rot+1; 8],
-                                    rotation: None,
-                                }
-                            );
-                            texture_rot = (texture_rot + 1)%5;
+                            blocks.push(Block {
+                                position: [x * 4 - 2, y * 4 - 2, z * 4 - 2, w * 4 - 2],
+                                materials: [texture_rot + 1; 8],
+                                rotation: None,
+                            });
+                            texture_rot = (texture_rot + 1) % 5;
                         }
                     }
                 }
             }
         }
 
-
         /* blocks.push(
-             Block{
-                 position: [0, -2, -1, 0],
-                 materials: [1, 2, 3, 4, 5, 6, 7, 8]
-             }
-         );*/
-        blocks.push(
             Block{
-                position: [0, 0, 0, 0],
-                //materials: [1, 2, 3, 4, 5, 6, 7, 8]
-                materials: [13; 8],
-                rotation: Some(([0, 1], [2, 3], 0.5, 0.3)), // XY + ZW double rotation
+                position: [0, -2, -1, 0],
+                materials: [1, 2, 3, 4, 5, 6, 7, 8]
             }
-        );
-
+        );*/
+        blocks.push(Block {
+            position: [0, 0, 0, 0],
+            //materials: [1, 2, 3, 4, 5, 6, 7, 8]
+            materials: [13; 8],
+            rotation: Some(([0, 1], [2, 3], 0.5, 0.3)), // XY + ZW double rotation
+        });
 
         if do_walls {
             let width = 30.0;
 
             let model_transform =
-                translate_matrix_4d(
-                    -width/2.0,
-                    -5.0,
-                    -width/2.0,
-                    -width/2.0)
+                translate_matrix_4d(-width / 2.0, -5.0, -width / 2.0, -width / 2.0)
                     .dot(&scale_matrix_4d_elementwise(width, width, width, width));
-            instances.push(
-                common::ModelInstance{
-                    model_transform: model_transform.into(),
-                    //cell_material_ids: [1, 2, 3, 4, 5, 6, 13, 8],
-                    cell_material_ids: [14; 8],
-                }
-            );
+            instances.push(common::ModelInstance {
+                model_transform: model_transform.into(),
+                //cell_material_ids: [1, 2, 3, 4, 5, 6, 13, 8],
+                cell_material_ids: [14; 8],
+            });
         }
 
         if do_floor {
             let width = 1000.0;
             let model_transform =
-                translate_matrix_4d(
-                    -width/2.0,
-                    -4.0,
-                    -width/2.0,
-                    -width/2.0)
+                translate_matrix_4d(-width / 2.0, -4.0, -width / 2.0, -width / 2.0)
                     .dot(&scale_matrix_4d_elementwise(width, 1.0, width, width));
-            instances.push(
-                common::ModelInstance{
-                    model_transform: model_transform.into(),
-                    cell_material_ids: [11; 8],
-                }
-            );
+            instances.push(common::ModelInstance {
+                model_transform: model_transform.into(),
+                cell_material_ids: [11; 8],
+            });
         }
 
         for block in blocks {
@@ -283,29 +300,35 @@ impl DemoScene {
 
             let model_transform = if let Some((plane1, plane2, omega1, omega2)) = block.rotation {
                 let rot = double_rotation_matrix_4d(
-                    plane1, omega1 * time_elapsed,
-                    plane2, omega2 * time_elapsed,
+                    plane1,
+                    omega1 * time_elapsed,
+                    plane2,
+                    omega2 * time_elapsed,
                 );
                 // translate to center → rotate → translate back, then offset by -0.5 and scale
                 translate_matrix_4d(cx, cy, cz, cw)
                     .dot(&rot)
-                    .dot(&translate_matrix_4d(-0.5 * model_scale, -0.5 * model_scale, -0.5 * model_scale, -0.5 * model_scale))
+                    .dot(&translate_matrix_4d(
+                        -0.5 * model_scale,
+                        -0.5 * model_scale,
+                        -0.5 * model_scale,
+                        -0.5 * model_scale,
+                    ))
                     .dot(&scale_matrix_4d(model_scale))
             } else {
                 translate_matrix_4d(
                     (block.position[0] as f32 - 0.5) * model_scale,
                     (block.position[1] as f32 - 0.5) * model_scale,
                     (block.position[2] as f32 - 0.5) * model_scale,
-                    (block.position[3] as f32 - 0.5) * model_scale)
-                    .dot(&scale_matrix_4d(model_scale))
+                    (block.position[3] as f32 - 0.5) * model_scale,
+                )
+                .dot(&scale_matrix_4d(model_scale))
             };
 
-            instances.push(
-                common::ModelInstance{
-                    model_transform: model_transform.into(),
-                    cell_material_ids: block.materials,
-                }
-            );
+            instances.push(common::ModelInstance {
+                model_transform: model_transform.into(),
+                cell_material_ids: block.materials,
+            });
         }
 
         let render_options = RenderOptions {
@@ -314,16 +337,28 @@ impl DemoScene {
             do_tetrahedron_edges: self.args.tetrahedron_edges,
             do_raytrace,
             do_edges,
-            prepare_render_screenshot: do_frame_export && ((self.sub_frame_num+1) % sub_frames_per_export == 0),
+            prepare_render_screenshot: do_frame_export
+                && ((self.sub_frame_num + 1) % sub_frames_per_export == 0),
             ..Default::default()
         };
 
-        rcx.render(device, queue, view_matrix, focal_length_xy, focal_length_zw, &instances, render_options);
+        rcx.render(
+            device,
+            queue,
+            view_matrix,
+            focal_length_xy,
+            focal_length_zw,
+            &instances,
+            render_options,
+        );
 
         self.sub_frame_num += 1;
 
-        if do_frame_export && (self.sub_frame_num % sub_frames_per_export == 0){
-            rcx.save_rendered_frame(&format!("frames/render_{}_{}.exr", self.frame_num, self.sub_frame_num))
+        if do_frame_export && (self.sub_frame_num % sub_frames_per_export == 0) {
+            rcx.save_rendered_frame(&format!(
+                "frames/render_{}_{}.exr",
+                self.frame_num, self.sub_frame_num
+            ))
         }
 
         if do_animation && self.sub_frame_num >= sub_frames_per_frame {
@@ -333,19 +368,17 @@ impl DemoScene {
     }
 }
 
-
 struct App {
     instance: Arc<Instance>,
     device: Arc<Device>,
     queue: Arc<Queue>,
     rcx: Option<RenderContext>,
     demo_scene: DemoScene,
-    _callback: Option<DebugUtilsMessenger>
+    _callback: Option<DebugUtilsMessenger>,
 }
 
 impl App {
     fn new(event_loop: &EventLoop<()>, args: Args) -> Self {
-
         let (instance, device, queue) = vulkan_setup(Some(event_loop));
 
         use vulkano::instance::debug::{
@@ -355,12 +388,13 @@ impl App {
         let _callback = unsafe {
             DebugUtilsMessenger::new(
                 instance.clone(),
-                DebugUtilsMessengerCreateInfo::user_callback(
-                    DebugUtilsMessengerCallback::new(|_message_severity, _message_type, callback_data| {
+                DebugUtilsMessengerCreateInfo::user_callback(DebugUtilsMessengerCallback::new(
+                    |_message_severity, _message_type, callback_data| {
                         println!("Debug callback: {:?}", callback_data.message);
-                    }),
-                ),
-            ).ok()
+                    },
+                )),
+            )
+            .ok()
         };
 
         let demo_scene = DemoScene::new(args);
@@ -373,7 +407,7 @@ impl App {
             device,
             queue,
             rcx,
-            demo_scene
+            demo_scene,
         }
     }
 }
@@ -385,7 +419,17 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(self.device.clone(), self.instance.clone(), Some(window), [self.demo_scene.args.width, self.demo_scene.args.height, self.demo_scene.args.layers]));
+        self.rcx = Some(RenderContext::new(
+            self.device.clone(),
+            self.queue.clone(),
+            self.instance.clone(),
+            Some(window),
+            [
+                self.demo_scene.args.width,
+                self.demo_scene.args.height,
+                self.demo_scene.args.layers,
+            ],
+        ));
     }
 
     fn window_event(
@@ -404,7 +448,8 @@ impl ApplicationHandler for App {
                 rcx.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                self.demo_scene.update(rcx, self.device.clone(), self.queue.clone());
+                self.demo_scene
+                    .update(rcx, self.device.clone(), self.queue.clone());
             }
             _ => {}
         }

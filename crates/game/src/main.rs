@@ -121,6 +121,7 @@ impl ApplicationHandler for App {
         self.grab_mouse(&window);
         self.rcx = Some(RenderContext::new(
             self.device.clone(),
+            self.queue.clone(),
             self.instance.clone(),
             Some(window),
             [960, 540, 4],

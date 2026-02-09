@@ -18,28 +18,115 @@ struct ShaderEntry {
 
 const SHADER_ENTRIES: &[ShaderEntry] = &[
     // Raytracer compute shaders
-    ShaderEntry { file: "raytracer.slang", entry: "mainRaytracerTetrahedronPreprocessor", profile: "cs_6_5" },
-    ShaderEntry { file: "raytracer.slang", entry: "mainRaytracerClear", profile: "cs_6_5" },
-    ShaderEntry { file: "raytracer.slang", entry: "mainRaytracerPixel", profile: "cs_6_5" },
+    ShaderEntry {
+        file: "raytracer.slang",
+        entry: "mainRaytracerTetrahedronPreprocessor",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "raytracer.slang",
+        entry: "mainRaytracerClear",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "raytracer.slang",
+        entry: "mainRaytracerPixel",
+        profile: "cs_6_5",
+    },
     // BVH compute shaders
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHSceneBounds", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHMortonCodes", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHBitonicSortLocal", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHBitonicSort", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHBitonicSortLocalMerge", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHInitLeaves", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHBuildTree", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHComputeLeafAABBs", profile: "cs_6_5" },
-    ShaderEntry { file: "bvh.slang", entry: "mainBVHPropagateAABBs", profile: "cs_6_5" },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHSceneBounds",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHMortonCodes",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHBitonicSortLocal",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHBitonicSort",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHBitonicSortLocalMerge",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHInitLeaves",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHBuildTree",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHComputeLeafAABBs",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "bvh.slang",
+        entry: "mainBVHPropagateAABBs",
+        profile: "cs_6_5",
+    },
     // Rasterizer compute shaders
-    ShaderEntry { file: "rasterizer.slang", entry: "mainTetrahedronCS", profile: "cs_6_5" },
-    ShaderEntry { file: "rasterizer.slang", entry: "mainEdgeCS", profile: "cs_6_5" },
-    ShaderEntry { file: "rasterizer.slang", entry: "mainTetrahedronPixelCS", profile: "cs_6_5" },
+    ShaderEntry {
+        file: "rasterizer.slang",
+        entry: "mainTetrahedronCS",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "rasterizer.slang",
+        entry: "mainEdgeCS",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "rasterizer.slang",
+        entry: "mainTetrahedronPixelCS",
+        profile: "cs_6_5",
+    },
+    // HUD shaders
+    ShaderEntry {
+        file: "hud.slang",
+        entry: "mainHudVS",
+        profile: "vs_6_5",
+    },
+    ShaderEntry {
+        file: "hud.slang",
+        entry: "mainHudFS",
+        profile: "ps_6_5",
+    },
     // Present shaders
-    ShaderEntry { file: "present.slang", entry: "mainLineVS", profile: "vs_6_5" },
-    ShaderEntry { file: "present.slang", entry: "mainLineFS", profile: "ps_6_5" },
-    ShaderEntry { file: "present.slang", entry: "mainBufferVS", profile: "vs_6_5" },
-    ShaderEntry { file: "present.slang", entry: "mainBufferFS", profile: "ps_6_5" },
+    ShaderEntry {
+        file: "present.slang",
+        entry: "mainLineVS",
+        profile: "vs_6_5",
+    },
+    ShaderEntry {
+        file: "present.slang",
+        entry: "mainLineFS",
+        profile: "ps_6_5",
+    },
+    ShaderEntry {
+        file: "present.slang",
+        entry: "mainBufferVS",
+        profile: "vs_6_5",
+    },
+    ShaderEntry {
+        file: "present.slang",
+        entry: "mainBufferFS",
+        profile: "ps_6_5",
+    },
 ];
 
 fn main() {
@@ -51,7 +138,8 @@ fn main() {
     std::fs::create_dir_all(&spirv_out_dir).expect("Failed to create SPIR-V output directory");
 
     // Track all source files for rerun-if-changed
-    for entry in std::fs::read_dir(shader_src_dir).expect("Failed to read shader source directory") {
+    for entry in std::fs::read_dir(shader_src_dir).expect("Failed to read shader source directory")
+    {
         if let Ok(entry) = entry {
             let path = entry.path();
             if path.extension().map_or(false, |ext| ext == "slang") {
@@ -61,8 +149,14 @@ fn main() {
     }
 
     // Check if required tools are available
-    check_tool("slangc", "Slang compiler not found. Install: yay -S shader-slang-bin");
-    check_tool("spirv-link", "spirv-link not found. Install: yay -S spirv-tools");
+    check_tool(
+        "slangc",
+        "Slang compiler not found. Install: yay -S shader-slang-bin",
+    );
+    check_tool(
+        "spirv-link",
+        "spirv-link not found. Install: yay -S spirv-tools",
+    );
 
     // Compile each shader entry point to a separate .spv file
     let mut spv_files = Vec::new();
@@ -76,17 +170,22 @@ fn main() {
 
         let output = Command::new("slangc")
             .args([
-                "-target", "spirv",
-                "-profile", shader.profile,
-                "-entry", shader.entry,
-                "-I", shader_src_dir.to_str().unwrap(),
+                "-target",
+                "spirv",
+                "-profile",
+                shader.profile,
+                "-entry",
+                shader.entry,
+                "-I",
+                shader_src_dir.to_str().unwrap(),
                 // CRITICAL: Use scalar layout to match Rust struct layouts
                 "-fvk-use-scalar-layout",
                 // Use the actual entry point name instead of "main"
                 "-fvk-use-entrypoint-name",
                 // Compile via GLSL for better Vulkano compatibility (avoids SPIR-V extensions)
                 "-emit-spirv-via-glsl",
-                "-o", output_path.to_str().unwrap(),
+                "-o",
+                output_path.to_str().unwrap(),
                 input_path.to_str().unwrap(),
             ])
             .output()
@@ -97,8 +196,14 @@ fn main() {
             spv_files.push(output_path);
         } else {
             println!("FAILED");
-            eprintln!("slangc stderr:\n{}", String::from_utf8_lossy(&output.stderr));
-            eprintln!("slangc stdout:\n{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!(
+                "slangc stderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprintln!(
+                "slangc stdout:\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
             failed = true;
         }
     }
@@ -121,7 +226,11 @@ fn main() {
                 println!("FAILED");
             }
             validation_failed = true;
-            eprintln!("spirv-val failed for {}: {}", spv_file.display(), String::from_utf8_lossy(&output.stderr));
+            eprintln!(
+                "spirv-val failed for {}: {}",
+                spv_file.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
     if validation_failed {
@@ -131,7 +240,10 @@ fn main() {
 
     // Export the SPIR-V output directory for the main crate
     println!("cargo:rustc-env=SPIRV_OUT_DIR={}", spirv_out_dir.display());
-    println!("cargo:warning=Slang shaders compiled to {}", spirv_out_dir.display());
+    println!(
+        "cargo:warning=Slang shaders compiled to {}",
+        spirv_out_dir.display()
+    );
 }
 
 fn check_tool(name: &str, error_msg: &str) {

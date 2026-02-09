@@ -12,8 +12,8 @@ use std::time::Instant;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo,
-    RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
+    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyBufferToImageInfo,
+    CopyImageToBufferInfo, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
 };
 use vulkano::descriptor_set::allocator::{
     DescriptorSetAllocator, StandardDescriptorSetAllocator,
@@ -24,15 +24,19 @@ use vulkano::descriptor_set::layout::{
 };
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, Queue};
-use vulkano::format::Format::R8G8B8A8_UNORM;
+use vulkano::format::Format;
+use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
+use vulkano::image::sys::ImageCreateInfo;
 use vulkano::image::view::ImageView;
-use vulkano::image::{Image, ImageUsage};
+use vulkano::image::{Image, ImageType, ImageUsage};
 use vulkano::instance::Instance;
 use vulkano::memory::allocator::{
     AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
 };
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
-use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
+use vulkano::pipeline::graphics::color_blend::{
+    AttachmentBlend, ColorBlendAttachmentState, ColorBlendState,
+};
 use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
 use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::{PolygonMode, RasterizationState};
@@ -63,6 +67,9 @@ struct ShaderModules {
     line_fs: Arc<ShaderModule>,
     buffer_vs: Arc<ShaderModule>,
     buffer_fs: Arc<ShaderModule>,
+    // HUD shaders
+    hud_vs: Arc<ShaderModule>,
+    hud_fs: Arc<ShaderModule>,
     // Compute shaders
     tetrahedron_cs: Arc<ShaderModule>,
     edge_cs: Arc<ShaderModule>,
@@ -135,6 +142,239 @@ struct OverlayLine {
     start: Vec2,
     end: Vec2,
     color: Vec4,
+}
+
+const HUD_VERTEX_CAPACITY: usize = 64_000;
+
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
+struct HudVertex {
+    position: Vec2,
+    texcoord: Vec2,
+    color: Vec4,
+}
+
+#[derive(Clone)]
+struct GlyphInfo {
+    uv_min: Vec2,
+    uv_max: Vec2,
+    size_px: Vec2,
+    bearing_px: Vec2,
+    advance_px: f32,
+}
+
+struct FontAtlas {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    glyphs: [Option<GlyphInfo>; 128],
+    white_uv: Vec2,
+    line_height: f32,
+    ascent: f32,
+}
+
+fn build_font_atlas(font: &FontArc, pixel_size: f32) -> FontAtlas {
+    let atlas_w: u32 = 512;
+    let atlas_h: u32 = 256;
+    let pixels = vec![0u8; (atlas_w * atlas_h) as usize];
+    let glyphs: [Option<GlyphInfo>; 128] = std::array::from_fn(|_| None);
+    let mut atlas = FontAtlas {
+        width: atlas_w,
+        height: atlas_h,
+        pixels,
+        glyphs,
+        white_uv: Vec2::ZERO,
+        line_height: 0.0,
+        ascent: 0.0,
+    };
+
+    let scaled = font.as_scaled(pixel_size);
+    atlas.line_height = scaled.height() + scaled.line_gap();
+    atlas.ascent = scaled.ascent();
+
+    // Shelf packing
+    let mut cursor_x: u32 = 0;
+    let mut cursor_y: u32 = 0;
+    let mut row_height: u32 = 0;
+    let pad = 2u32; // padding between glyphs
+
+    for ch in 32u8..=126 {
+        let glyph_id = scaled.glyph_id(ch as char);
+        let glyph = glyph_id.with_scale_and_position(pixel_size, point(0.0, scaled.ascent()));
+        let advance = scaled.h_advance(glyph_id);
+
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let bounds = outline.px_bounds();
+            let gw = bounds.width().ceil() as u32;
+            let gh = bounds.height().ceil() as u32;
+
+            if gw == 0 || gh == 0 {
+                atlas.glyphs[ch as usize] = Some(GlyphInfo {
+                    uv_min: Vec2::ZERO,
+                    uv_max: Vec2::ZERO,
+                    size_px: Vec2::ZERO,
+                    bearing_px: Vec2::new(bounds.min.x, bounds.min.y - scaled.ascent()),
+                    advance_px: advance,
+                });
+                continue;
+            }
+
+            // Advance to next row if needed
+            if cursor_x + gw + pad > atlas_w {
+                cursor_x = 0;
+                cursor_y += row_height + pad;
+                row_height = 0;
+            }
+            if cursor_y + gh + pad > atlas_h {
+                // Out of atlas space, skip remaining glyphs
+                break;
+            }
+
+            // Rasterize glyph into atlas
+            outline.draw(|x, y, c| {
+                let px = cursor_x + x;
+                let py = cursor_y + y;
+                if px < atlas_w && py < atlas_h {
+                    let idx = (py * atlas_w + px) as usize;
+                    let val = (c * 255.0).clamp(0.0, 255.0) as u8;
+                    if val > atlas.pixels[idx] {
+                        atlas.pixels[idx] = val;
+                    }
+                }
+            });
+
+            atlas.glyphs[ch as usize] = Some(GlyphInfo {
+                uv_min: Vec2::new(
+                    cursor_x as f32 / atlas_w as f32,
+                    cursor_y as f32 / atlas_h as f32,
+                ),
+                uv_max: Vec2::new(
+                    (cursor_x + gw) as f32 / atlas_w as f32,
+                    (cursor_y + gh) as f32 / atlas_h as f32,
+                ),
+                size_px: Vec2::new(gw as f32, gh as f32),
+                bearing_px: Vec2::new(bounds.min.x, bounds.min.y - scaled.ascent()),
+                advance_px: advance,
+            });
+
+            cursor_x += gw + pad;
+            row_height = row_height.max(gh);
+        } else {
+            // No outline (e.g. space character)
+            atlas.glyphs[ch as usize] = Some(GlyphInfo {
+                uv_min: Vec2::ZERO,
+                uv_max: Vec2::ZERO,
+                size_px: Vec2::ZERO,
+                bearing_px: Vec2::ZERO,
+                advance_px: advance,
+            });
+        }
+    }
+
+    // Reserve a 4x4 white block for solid rectangles
+    if cursor_x + 4 + pad > atlas_w {
+        cursor_x = 0;
+        cursor_y += row_height + pad;
+    }
+    for dy in 0..4u32 {
+        for dx in 0..4u32 {
+            let px = cursor_x + dx;
+            let py = cursor_y + dy;
+            if px < atlas_w && py < atlas_h {
+                atlas.pixels[(py * atlas_w + px) as usize] = 255;
+            }
+        }
+    }
+    atlas.white_uv = Vec2::new(
+        (cursor_x as f32 + 2.0) / atlas_w as f32,
+        (cursor_y as f32 + 2.0) / atlas_h as f32,
+    );
+
+    atlas
+}
+
+struct HudResources {
+    vertex_buffer: Subbuffer<[HudVertex]>,
+    descriptor_set: Arc<DescriptorSet>,
+    font_atlas: FontAtlas,
+}
+
+fn push_text_quads(
+    quads: &mut Vec<HudVertex>,
+    atlas: &FontAtlas,
+    text: &str,
+    top_left_px: Vec2,
+    pixel_size: f32,
+    color: Vec4,
+    present_size: [u32; 2],
+) {
+    let scale = pixel_size / 32.0; // atlas was rasterized at 32px
+    let line_advance = atlas.line_height * scale;
+    let mut caret_x = top_left_px.x;
+    let mut baseline_y = top_left_px.y + atlas.ascent * scale;
+
+    for ch in text.chars() {
+        if ch == '\n' {
+            caret_x = top_left_px.x;
+            baseline_y += line_advance;
+            continue;
+        }
+
+        let idx = ch as usize;
+        if idx >= 128 {
+            continue;
+        }
+        let glyph = match atlas.glyphs[idx].as_ref() {
+            Some(g) => g,
+            None => continue,
+        };
+
+        if glyph.size_px.x > 0.0 && glyph.size_px.y > 0.0 {
+            let gw = glyph.size_px.x * scale;
+            let gh = glyph.size_px.y * scale;
+            let x0 = caret_x + glyph.bearing_px.x * scale;
+            let y0 = baseline_y + glyph.bearing_px.y * scale;
+
+            let p_min = pixels_to_ndc(Vec2::new(x0, y0), present_size);
+            let p_max = pixels_to_ndc(Vec2::new(x0 + gw, y0 + gh), present_size);
+
+            let uv_min = glyph.uv_min;
+            let uv_max = glyph.uv_max;
+
+            // Two triangles forming a quad
+            // Note: pixels_to_ndc flips Y (pixel Y=0 → NDC Y=+1 = Vulkan bottom),
+            // so p_min.y (larger NDC) is the screen bottom and p_max.y (smaller NDC)
+            // is the screen top. We must swap UV Y to compensate: atlas top (uv_min.y)
+            // maps to screen top (p_max.y), atlas bottom (uv_max.y) maps to screen
+            // bottom (p_min.y).
+            quads.push(HudVertex { position: Vec2::new(p_min.x, p_min.y), texcoord: Vec2::new(uv_min.x, uv_max.y), color });
+            quads.push(HudVertex { position: Vec2::new(p_max.x, p_min.y), texcoord: Vec2::new(uv_max.x, uv_max.y), color });
+            quads.push(HudVertex { position: Vec2::new(p_max.x, p_max.y), texcoord: Vec2::new(uv_max.x, uv_min.y), color });
+
+            quads.push(HudVertex { position: Vec2::new(p_min.x, p_min.y), texcoord: Vec2::new(uv_min.x, uv_max.y), color });
+            quads.push(HudVertex { position: Vec2::new(p_max.x, p_max.y), texcoord: Vec2::new(uv_max.x, uv_min.y), color });
+            quads.push(HudVertex { position: Vec2::new(p_min.x, p_max.y), texcoord: Vec2::new(uv_min.x, uv_min.y), color });
+        }
+
+        caret_x += glyph.advance_px * scale;
+    }
+}
+
+fn push_filled_rect_quads(
+    quads: &mut Vec<HudVertex>,
+    atlas: &FontAtlas,
+    min_ndc: Vec2,
+    max_ndc: Vec2,
+    color: Vec4,
+) {
+    let uv = atlas.white_uv;
+    quads.push(HudVertex { position: Vec2::new(min_ndc.x, min_ndc.y), texcoord: uv, color });
+    quads.push(HudVertex { position: Vec2::new(max_ndc.x, min_ndc.y), texcoord: uv, color });
+    quads.push(HudVertex { position: Vec2::new(max_ndc.x, max_ndc.y), texcoord: uv, color });
+
+    quads.push(HudVertex { position: Vec2::new(min_ndc.x, min_ndc.y), texcoord: uv, color });
+    quads.push(HudVertex { position: Vec2::new(max_ndc.x, max_ndc.y), texcoord: uv, color });
+    quads.push(HudVertex { position: Vec2::new(min_ndc.x, max_ndc.y), texcoord: uv, color });
 }
 
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
@@ -907,6 +1147,8 @@ struct PresentPipelineContext {
     line_pipeline: Arc<GraphicsPipeline>,
     buffer_pipeline: Arc<GraphicsPipeline>,
     pipeline_layout: Arc<PipelineLayout>,
+    hud_pipeline: Arc<GraphicsPipeline>,
+    hud_pipeline_layout: Arc<PipelineLayout>,
 }
 
 impl PresentPipelineContext {
@@ -1055,10 +1297,86 @@ impl PresentPipelineContext {
             .unwrap()
         };
 
+        // HUD pipeline: separate descriptor set layout and pipeline layout
+        let hud_descriptor_set_layout = {
+            let mut bindings = BTreeMap::new();
+            // Binding 0: StorageBuffer for HudVertex data
+            bindings.insert(
+                0,
+                DescriptorSetLayoutBinding {
+                    stages: ShaderStages::VERTEX,
+                    ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+                },
+            );
+            // Binding 1: CombinedImageSampler for font atlas
+            bindings.insert(
+                1,
+                DescriptorSetLayoutBinding {
+                    stages: ShaderStages::FRAGMENT,
+                    ..DescriptorSetLayoutBinding::descriptor_type(
+                        DescriptorType::CombinedImageSampler,
+                    )
+                },
+            );
+            DescriptorSetLayout::new(
+                device.clone(),
+                DescriptorSetLayoutCreateInfo {
+                    bindings,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+
+        let hud_pipeline_layout = PipelineLayout::new(
+            device.clone(),
+            PipelineLayoutCreateInfo {
+                set_layouts: vec![hud_descriptor_set_layout],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let hud_pipeline = {
+            let vs = shaders.hud_vs.entry_point("mainHudVS").unwrap();
+            let fs = shaders.hud_fs.entry_point("mainHudFS").unwrap();
+            let stages = [
+                PipelineShaderStageCreateInfo::new(vs),
+                PipelineShaderStageCreateInfo::new(fs),
+            ];
+            let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
+
+            GraphicsPipeline::new(
+                device.clone(),
+                None,
+                GraphicsPipelineCreateInfo {
+                    stages: stages.into_iter().collect(),
+                    vertex_input_state: Some(VertexInputState::new()),
+                    input_assembly_state: Some(InputAssemblyState::default()),
+                    viewport_state: Some(ViewportState::default()),
+                    rasterization_state: Some(RasterizationState::default()),
+                    multisample_state: Some(MultisampleState::default()),
+                    color_blend_state: Some(ColorBlendState::with_attachment_states(
+                        subpass.num_color_attachments(),
+                        ColorBlendAttachmentState {
+                            blend: Some(AttachmentBlend::alpha()),
+                            ..Default::default()
+                        },
+                    )),
+                    dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+                    subpass: Some(subpass.into()),
+                    ..GraphicsPipelineCreateInfo::layout(hud_pipeline_layout.clone())
+                },
+            )
+            .unwrap()
+        };
+
         Self {
             line_pipeline,
             buffer_pipeline,
             pipeline_layout,
+            hud_pipeline,
+            hud_pipeline_layout,
         }
     }
 }
@@ -1458,6 +1776,7 @@ pub struct RenderContext {
     bvh_scene_hash: u64,
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
+    hud_resources: Option<HudResources>,
     hud_breadcrumbs: VecDeque<[f32; 4]>,
     hud_previous_camera: Option<[f32; 4]>,
     hud_previous_sample_time: Option<Instant>,
@@ -1467,6 +1786,7 @@ pub struct RenderContext {
 impl RenderContext {
     pub fn new(
         device: Arc<Device>,
+        queue: Arc<Queue>,
         instance: Arc<Instance>,
         window: Option<Arc<Window>>,
         render_dimensions: [u32; 3],
@@ -1615,6 +1935,15 @@ impl RenderContext {
         let present_buffer_fs = load_shader(
             device.clone(),
             &std::fs::read(spirv_dir.join("mainBufferFS.spv")).expect("Failed to read shader"),
+        );
+        // HUD shaders
+        let hud_vs = load_shader(
+            device.clone(),
+            &std::fs::read(spirv_dir.join("mainHudVS.spv")).expect("Failed to read shader"),
+        );
+        let hud_fs = load_shader(
+            device.clone(),
+            &std::fs::read(spirv_dir.join("mainHudFS.spv")).expect("Failed to read shader"),
         );
         // BVH shaders
         let bvh_scene_bounds = load_shader(
@@ -1773,6 +2102,8 @@ impl RenderContext {
             line_fs: present_line_fs,
             buffer_vs: present_buffer_vs,
             buffer_fs: present_buffer_fs,
+            hud_vs,
+            hud_fs,
             tetrahedron_cs: raster_tet,
             edge_cs: raster_edge,
             tetrahedron_pixel_cs: raster_pixel,
@@ -1838,6 +2169,121 @@ impl RenderContext {
         let profiler = GpuProfiler::new(device.clone());
         let hud_font = load_hud_font();
 
+        // Build HUD resources (font atlas, GPU texture, vertex buffer, descriptor set)
+        let hud_resources = match (&hud_font, &present_pipeline) {
+            (Some(font), Some(present_ctx)) => {
+                let font_atlas = build_font_atlas(font, 32.0);
+
+                // Create staging buffer with atlas pixel data
+                let staging_buffer = Buffer::from_iter(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::TRANSFER_SRC,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                            | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    font_atlas.pixels.iter().copied(),
+                )
+                .unwrap();
+
+                // Create GPU image for font atlas
+                let atlas_image = Image::new(
+                    memory_allocator.clone(),
+                    ImageCreateInfo {
+                        image_type: ImageType::Dim2d,
+                        format: Format::R8_UNORM,
+                        extent: [font_atlas.width, font_atlas.height, 1],
+                        usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+                // Upload atlas via one-shot command buffer
+                {
+                    let mut upload_builder = AutoCommandBufferBuilder::primary(
+                        command_buffer_allocator.clone(),
+                        queue.queue_family_index(),
+                        CommandBufferUsage::OneTimeSubmit,
+                    )
+                    .unwrap();
+                    upload_builder
+                        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                            staging_buffer,
+                            atlas_image.clone(),
+                        ))
+                        .unwrap();
+                    let upload_cmd = upload_builder.build().unwrap();
+                    let upload_future = sync::now(device.clone())
+                        .then_execute(queue.clone(), upload_cmd)
+                        .unwrap()
+                        .then_signal_fence_and_flush()
+                        .unwrap();
+                    upload_future.wait(None).unwrap();
+                }
+
+                let atlas_view = ImageView::new_default(atlas_image).unwrap();
+                let atlas_sampler = Sampler::new(
+                    device.clone(),
+                    SamplerCreateInfo {
+                        mag_filter: Filter::Linear,
+                        min_filter: Filter::Linear,
+                        address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+                // Create HUD vertex buffer
+                let hud_vertex_buffer = Buffer::from_iter(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::STORAGE_BUFFER,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                            | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    vec![HudVertex::zeroed(); HUD_VERTEX_CAPACITY],
+                )
+                .unwrap();
+
+                // Create HUD descriptor set
+                let hud_descriptor_set = DescriptorSet::new(
+                    descriptor_set_allocator.clone(),
+                    present_ctx
+                        .hud_pipeline_layout
+                        .set_layouts()
+                        .first()
+                        .unwrap()
+                        .clone(),
+                    [
+                        WriteDescriptorSet::buffer(0, hud_vertex_buffer.clone()),
+                        WriteDescriptorSet::image_view_sampler(1, atlas_view, atlas_sampler),
+                    ],
+                    [],
+                )
+                .unwrap();
+
+                Some(HudResources {
+                    vertex_buffer: hud_vertex_buffer,
+                    descriptor_set: hud_descriptor_set,
+                    font_atlas,
+                })
+            }
+            _ => None,
+        };
+
         RenderContext {
             window,
             swapchain,
@@ -1858,6 +2304,7 @@ impl RenderContext {
             bvh_scene_hash: 0,
             profiler,
             hud_font,
+            hud_resources,
             hud_breadcrumbs: VecDeque::new(),
             hud_previous_camera: None,
             hud_previous_sample_time: None,
@@ -1865,6 +2312,7 @@ impl RenderContext {
         }
     }
 
+    /// Returns (line_count, hud_vertex_count)
     fn write_navigation_hud_overlay(
         &mut self,
         base_line_count: usize,
@@ -1872,10 +2320,10 @@ impl RenderContext {
         view_matrix_inverse: &nalgebra::Matrix5<f32>,
         focal_length_xy: f32,
         model_instances: &[common::ModelInstance],
-    ) -> usize {
+    ) -> (usize, usize) {
         let max_lines = LINE_VERTEX_CAPACITY / 2;
         if base_line_count >= max_lines {
-            return 0;
+            return (0, 0);
         }
 
         let axis_colors = [
@@ -1897,15 +2345,19 @@ impl RenderContext {
         let altimeter_color = Vec4::new(1.00, 0.75, 0.25, 1.0);
         let drift_color = Vec4::new(0.95, 0.95, 0.35, 1.0);
 
-        let present_size = match self.window.as_ref() {
+        let (present_size, text_scale) = match self.window.as_ref() {
             Some(window) => {
                 let s = window.inner_size();
-                [s.width.max(1), s.height.max(1)]
+                let sf = window.scale_factor() as f32;
+                ([s.width.max(1), s.height.max(1)], sf * 1.5)
             }
-            None => [
-                self.sized_buffers.render_dimensions[0].max(1),
-                self.sized_buffers.render_dimensions[1].max(1),
-            ],
+            None => (
+                [
+                    self.sized_buffers.render_dimensions[0].max(1),
+                    self.sized_buffers.render_dimensions[1].max(1),
+                ],
+                2.0,
+            ),
         };
         let aspect = present_size[0] as f32 / present_size[1] as f32;
 
@@ -2088,7 +2540,26 @@ impl RenderContext {
             );
         }
 
-        if let Some(font) = self.hud_font.as_ref() {
+        let mut hud_quads = Vec::<HudVertex>::with_capacity(2048);
+
+        let legend_text_size = 14.0 * text_scale;
+        let readout_text_size = 12.0 * text_scale;
+
+        if let Some(hud_res) = self.hud_resources.as_ref() {
+            for axis_id in 0..4 {
+                let y = legend_top - axis_id as f32 * legend_row_step + 0.012;
+                let label_px = ndc_to_pixels(Vec2::new(legend_x + 0.055, y), present_size);
+                push_text_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    legend_labels[axis_id],
+                    label_px,
+                    legend_text_size,
+                    axis_colors[axis_id],
+                    present_size,
+                );
+            }
+        } else if let Some(font) = self.hud_font.as_ref() {
             for axis_id in 0..4 {
                 let y = legend_top - axis_id as f32 * legend_row_step + 0.012;
                 let label_px = ndc_to_pixels(Vec2::new(legend_x + 0.055, y), present_size);
@@ -2097,7 +2568,7 @@ impl RenderContext {
                     font,
                     legend_labels[axis_id],
                     label_px,
-                    14.0,
+                    legend_text_size,
                     axis_colors[axis_id],
                     present_size,
                 );
@@ -2280,43 +2751,86 @@ impl RenderContext {
             drift_color,
         );
 
-        if let Some(font) = self.hud_font.as_ref() {
-            let readout_text = format!(
-                "POS {:+.2} {:+.2} {:+.2} {:+.2}\nLOOK {:+.2} {:+.2} {:+.2} {:+.2}",
-                camera_position[0],
-                camera_position[1],
-                camera_position[2],
-                camera_position[3],
-                look_world[0],
-                look_world[1],
-                look_world[2],
-                look_world[3]
+        let readout_text = format!(
+            "POS {:+.2} {:+.2} {:+.2} {:+.2}\nLOOK {:+.2} {:+.2} {:+.2} {:+.2}",
+            camera_position[0],
+            camera_position[1],
+            camera_position[2],
+            camera_position[3],
+            look_world[0],
+            look_world[1],
+            look_world[2],
+            look_world[3]
+        );
+        // Position readout below the minimaps on the actual screen.
+        // In Vulkan NDC, Y=-1 is framebuffer top. The minimaps' lowest point on
+        // screen is at upper_top (≈-0.54). We place the readout just below that.
+        let readout_anchor_ndc = Vec2::new(left, upper_top + 0.06);
+
+        if let Some(hud_res) = self.hud_resources.as_ref() {
+            let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
+
+            // Semi-transparent backgrounds behind minimap panels
+            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, xy_min, xy_max, panel_bg);
+            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, zw_min, zw_max, panel_bg);
+
+            // Semi-transparent background behind text readout
+            let readout_bg_min = Vec2::new(left, upper_top + 0.02);
+            let readout_bg_max = Vec2::new(right, upper_top + 0.14);
+            push_filled_rect_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                readout_bg_min,
+                readout_bg_max,
+                panel_bg,
             );
-            let readout_anchor_ndc = Vec2::new(left, lower_bottom - 0.10);
+
+            let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
+            push_text_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                &readout_text,
+                readout_anchor_px,
+                readout_text_size,
+                map_axis_color,
+                present_size,
+            );
+        } else if let Some(font) = self.hud_font.as_ref() {
             let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
             push_text_lines(
                 &mut lines,
                 font,
                 &readout_text,
                 readout_anchor_px,
-                12.0,
+                readout_text_size,
                 map_axis_color,
                 present_size,
             );
         }
 
+        // Write line data to GPU buffer
         let lines_to_write = lines.len().min(max_lines - base_line_count);
-        if lines_to_write == 0 {
-            return 0;
+        if lines_to_write > 0 {
+            let mut writer = self.sized_buffers.line_vertexes_buffer.write().unwrap();
+            for (line_id, segment) in lines.iter().take(lines_to_write).enumerate() {
+                let vertex_id = (base_line_count + line_id) * 2;
+                writer[vertex_id] = LineVertex::new(segment.start, segment.color);
+                writer[vertex_id + 1] = LineVertex::new(segment.end, segment.color);
+            }
         }
 
-        let mut writer = self.sized_buffers.line_vertexes_buffer.write().unwrap();
-        for (line_id, segment) in lines.iter().take(lines_to_write).enumerate() {
-            let vertex_id = (base_line_count + line_id) * 2;
-            writer[vertex_id] = LineVertex::new(segment.start, segment.color);
-            writer[vertex_id + 1] = LineVertex::new(segment.end, segment.color);
+        // Write HUD quad data to GPU buffer
+        let hud_verts_to_write = hud_quads.len().min(HUD_VERTEX_CAPACITY);
+        if hud_verts_to_write > 0 {
+            if let Some(hud_res) = self.hud_resources.as_ref() {
+                let mut writer = hud_res.vertex_buffer.write().unwrap();
+                for (i, v) in hud_quads.iter().take(hud_verts_to_write).enumerate() {
+                    writer[i] = *v;
+                }
+            }
         }
-        lines_to_write
+
+        (lines_to_write, hud_verts_to_write)
     }
 
     pub fn recreate_swapchain(&mut self) {
@@ -2885,8 +3399,9 @@ impl RenderContext {
             self.profiler.timestamps_written = query_idx;
         }
 
+        let mut hud_vertex_count = 0usize;
         if render_options.do_navigation_hud {
-            let hud_line_count = self.write_navigation_hud_overlay(
+            let (hud_line_count, hud_quad_count) = self.write_navigation_hud_overlay(
                 line_render_count,
                 &view_matrix_nalgebra,
                 &view_matrix_nalgebra_inv,
@@ -2894,6 +3409,7 @@ impl RenderContext {
                 model_instances,
             );
             line_render_count += hud_line_count;
+            hud_vertex_count = hud_quad_count;
         }
 
         if let Some(image_index) = image_index {
@@ -2955,6 +3471,27 @@ impl RenderContext {
                             .bind_pipeline_graphics(present_pipeline.line_pipeline.clone())
                             .unwrap();
                         unsafe { builder.draw(line_render_count as u32 * 2, 1, 0, 0) }.unwrap();
+                    }
+
+                    // Render HUD quads (text + panels, alpha-blended on top)
+                    if hud_vertex_count > 0 {
+                        if let Some(hud_res) = self.hud_resources.as_ref() {
+                            builder
+                                .bind_pipeline_graphics(present_pipeline.hud_pipeline.clone())
+                                .unwrap();
+                            builder
+                                .bind_descriptor_sets(
+                                    PipelineBindPoint::Graphics,
+                                    present_pipeline.hud_pipeline_layout.clone(),
+                                    0,
+                                    vec![hud_res.descriptor_set.clone()],
+                                )
+                                .unwrap();
+                            unsafe {
+                                builder.draw(hud_vertex_count as u32, 1, 0, 0)
+                            }
+                            .unwrap();
+                        }
                     }
 
                     // End render pass

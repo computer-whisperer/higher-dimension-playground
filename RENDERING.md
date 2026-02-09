@@ -858,4 +858,5 @@ A quick-reference table of how key concepts scale across dimensions.
 | `slang-shaders/src/raytracer.slang` | Ray generation, intersection, BVH traversal, path tracing |
 | `slang-shaders/src/bvh.slang` | Morton codes, bitonic sort, Karras tree, AABB propagation |
 | `slang-shaders/src/materials.slang` | Procedural material definitions |
+| `slang-shaders/src/hud.slang` | HUD overlay: font atlas text and panel rendering |
 | `slang-shaders/src/types.slang` | Shared data structures: `Tetrahedron`, `BVHNode`, `RayHit` |

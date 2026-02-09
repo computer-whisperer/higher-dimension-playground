@@ -21,7 +21,8 @@ slang-shaders/
 │   ├── materials.slang  # Procedural material system
 │   ├── raytracer.slang  # 4D raytracing compute shaders
 │   ├── rasterizer.slang # 4D rasterization compute shaders
-│   └── present.slang    # Screen presentation vertex/fragment shaders
+│   ├── present.slang    # Screen presentation vertex/fragment shaders
+│   └── hud.slang        # HUD overlay vertex/fragment shaders (font atlas text + panels)
 └── README.md
 ```
 
@@ -35,6 +36,9 @@ slang-shaders/
 ### Present Pipeline
 - `mainLineVS` / `mainLineFS` - Wireframe line rendering
 - `mainBufferVS` / `mainBufferFS` - Display accumulated buffer to screen
+
+### HUD Pipeline
+- `mainHudVS` / `mainHudFS` - Alpha-blended textured quads for text and panel backgrounds
 
 ### Rasterizer Pipeline
 - `mainTetrahedronCS` - Tetrahedron preprocessing with near-plane clipping
