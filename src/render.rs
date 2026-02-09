@@ -1211,7 +1211,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![common::ModelInstance::zeroed(); 1000],
+            vec![common::ModelInstance::zeroed(); 100000],
         )
         .unwrap();
 

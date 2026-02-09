@@ -1,54 +1,51 @@
-use higher_dimension_playground::matrix_operations::{
-    double_rotation_matrix_4d, scale_matrix_4d, scale_matrix_4d_elementwise, translate_matrix_4d,
-};
+use crate::voxel::cull::{self, SurfaceData};
+use crate::voxel::worldgen;
+use crate::voxel::VoxelType;
 
-pub fn build_scene_instances(time: f32) -> Vec<common::ModelInstance> {
-    let mut instances = Vec::new();
+const RENDER_DISTANCE: f32 = 64.0;
 
-    // 16 outer blocks: 2x2x2x2 grid
-    let mut texture_rot = 0u32;
-    for x in 0..2 {
-        for y in 0..2 {
-            for z in 0..2 {
-                for w in 0..2 {
-                    let px = (x * 4 - 2) as f32 - 0.5;
-                    let py = (y * 4 - 2) as f32 - 0.5;
-                    let pz = (z * 4 - 2) as f32 - 0.5;
-                    let pw = (w * 4 - 2) as f32 - 0.5;
+pub struct Scene {
+    pub world: crate::voxel::world::VoxelWorld,
+    surface: SurfaceData,
+    culled_instances: Vec<common::ModelInstance>,
+}
 
-                    let model_transform =
-                        translate_matrix_4d(px, py, pz, pw).dot(&scale_matrix_4d(1.0));
+impl Scene {
+    pub fn new() -> Self {
+        let world = worldgen::generate_flat_world(
+            3,             // 3×3×3 chunks in X, Z, W
+            VoxelType(3),  // grass
+        );
 
-                    instances.push(common::ModelInstance {
-                        model_transform: model_transform.into(),
-                        cell_material_ids: [texture_rot + 1; 8],
-                    });
+        let surface = cull::extract_surfaces(&world);
+        let total_voxels: u32 = surface.chunks.iter().map(|c| c.voxel_end - c.voxel_start).sum();
+        eprintln!("Voxel surface: {} chunks, {} surface voxels", surface.chunks.len(), total_voxels);
 
-                    texture_rot = (texture_rot + 1) % 5;
-                }
-            }
+        Self {
+            world,
+            surface,
+            culled_instances: Vec::new(),
         }
     }
 
-    // Center block with double rotation
-    let rot = double_rotation_matrix_4d([0, 1], 0.5 * time, [2, 3], 0.3 * time);
-    let model_transform = translate_matrix_4d(0.0, 0.0, 0.0, 0.0)
-        .dot(&rot)
-        .dot(&translate_matrix_4d(-0.5, -0.5, -0.5, -0.5))
-        .dot(&scale_matrix_4d(1.0));
+    /// Rebuild surface data if any chunk is dirty.
+    pub fn update_surfaces_if_dirty(&mut self) {
+        if self.world.any_dirty() {
+            self.surface = cull::extract_surfaces(&self.world);
+            self.world.clear_dirty();
+            let total_voxels: u32 = self.surface.chunks.iter().map(|c| c.voxel_end - c.voxel_start).sum();
+            eprintln!("Voxel surface rebuilt: {} chunks, {} surface voxels", self.surface.chunks.len(), total_voxels);
+        }
+    }
 
-    instances.push(common::ModelInstance {
-        model_transform: model_transform.into(),
-        cell_material_ids: [13; 8],
-    });
+    /// Per-frame: cull and build ModelInstances for the current camera position.
+    pub fn build_instances(&mut self, cam_pos: [f32; 4]) -> &[common::ModelInstance] {
+        self.culled_instances.clear();
+        cull::cull_and_build(&self.surface, cam_pos, RENDER_DISTANCE, &mut self.culled_instances);
 
-    // Floor plane: huge thin tesseract with top surface at Y = -3.0
-    let floor_transform = translate_matrix_4d(-100.0, -3.5, -100.0, -100.0)
-        .dot(&scale_matrix_4d_elementwise(200.0, 0.5, 200.0, 200.0));
-    instances.push(common::ModelInstance {
-        model_transform: floor_transform.into(),
-        cell_material_ids: [11; 8],
-    });
+        let (num_instances, num_tets) = cull::mesh_stats(&self.culled_instances);
+        eprintln!("Culled: {num_instances} instances, {num_tets} tetrahedra");
 
-    instances
+        &self.culled_instances
+    }
 }

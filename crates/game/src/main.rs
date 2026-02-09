@@ -1,6 +1,8 @@
 mod camera;
+mod cpu_render;
 mod input;
 mod scene;
+mod voxel;
 
 use clap::Parser;
 use higher_dimension_playground::render::{RenderContext, RenderOptions};
@@ -18,6 +20,7 @@ use winit::{
 
 use camera::Camera4D;
 use input::{ControlScheme, InputState, RotationPair};
+use scene::Scene;
 
 const MOUSE_SENSITIVITY: f32 = 0.002;
 
@@ -35,24 +38,51 @@ struct Args {
     /// Number of depth layers (supersampling)
     #[arg(long, default_value_t = 4)]
     layers: u32,
+
+    /// CPU-only render: produce frames/cpu_render.png and exit (no GPU window)
+    #[arg(long)]
+    cpu_render: bool,
+
+    /// GPU screenshot: render one frame at debug camera position and exit
+    #[arg(long)]
+    gpu_screenshot: bool,
 }
 
 fn main() {
     let args = Args::parse();
+
+    if args.cpu_render {
+        run_cpu_render();
+        return;
+    }
+
     let event_loop = EventLoop::new().unwrap();
     let (instance, device, queue) = vulkan_setup(Some(&event_loop));
+
+    let gpu_screenshot = args.gpu_screenshot;
+
+    let mut camera = Camera4D::new();
+    if gpu_screenshot {
+        camera.position = [5.65, 4.60, -11.07, -4.00];
+        camera.yaw = -0.29;
+        camera.pitch = -0.27;
+        camera.xw_angle = 0.64;
+        camera.zw_angle = 0.65;
+    }
 
     let mut app = App {
         instance,
         device,
         queue,
         rcx: None,
-        camera: Camera4D::new(),
+        scene: Scene::new(),
+        camera,
         input: InputState::new(),
         start_time: Instant::now(),
         last_frame: Instant::now(),
         mouse_grabbed: false,
         should_exit_after_render: false,
+        gpu_screenshot_countdown: if gpu_screenshot { 3 } else { 0 },
         args,
         control_scheme: ControlScheme::SideButtonLayers,
         scroll_cycle_pair: RotationPair::Standard,
@@ -62,17 +92,60 @@ fn main() {
     event_loop.run_app(&mut app).unwrap();
 }
 
+fn run_cpu_render() {
+    use common::MatN;
+
+    let mut scene = Scene::new();
+    let mut camera = Camera4D::new();
+
+    // Debug camera: specific position/orientation where GPU renders incorrectly
+    camera.position = [5.65, 4.60, -11.07, -4.00];
+    camera.yaw = -0.29;
+    camera.pitch = -0.27;
+    camera.xw_angle = 0.64;
+    camera.zw_angle = 0.65;
+
+    scene.update_surfaces_if_dirty();
+    let instances = scene.build_instances(camera.position);
+
+    let view_matrix_ndarray = camera.view_matrix();
+    let view_matrix: MatN<5> = MatN::from(&view_matrix_ndarray);
+
+    let model_tets = higher_dimension_playground::render::generate_tesseract_tetrahedrons();
+
+    let params = cpu_render::CpuRenderParams {
+        view_matrix,
+        focal_length_xy: 1.0,
+        focal_length_zw: 1.0,
+        width: 120,
+        height: 68,
+        ..Default::default()
+    };
+
+    eprintln!("CPU render: {}x{}", params.width, params.height);
+    let start = Instant::now();
+    let img = cpu_render::cpu_render(instances, &model_tets, &params);
+    let elapsed = start.elapsed();
+    eprintln!("CPU render done in {:.2}s", elapsed.as_secs_f32());
+
+    let _ = std::fs::create_dir_all("frames");
+    img.save("frames/cpu_render.png").unwrap();
+    eprintln!("Saved frames/cpu_render.png");
+}
+
 struct App {
     instance: Arc<Instance>,
     device: Arc<Device>,
     queue: Arc<Queue>,
     rcx: Option<RenderContext>,
+    scene: Scene,
     camera: Camera4D,
     input: InputState,
     start_time: Instant,
     last_frame: Instant,
     mouse_grabbed: bool,
     should_exit_after_render: bool,
+    gpu_screenshot_countdown: u32,
     args: Args,
     control_scheme: ControlScheme,
     scroll_cycle_pair: RotationPair,
@@ -187,9 +260,18 @@ impl App {
 
         // Build view matrix and scene
         let view_matrix = self.camera.view_matrix();
-        let time = self.start_time.elapsed().as_secs_f32();
-        let instances = scene::build_scene_instances(time);
+        self.scene.update_surfaces_if_dirty();
+        let instances = self.scene.build_instances(self.camera.position);
 
+        let auto_screenshot = if self.gpu_screenshot_countdown > 1 {
+            self.gpu_screenshot_countdown -= 1;
+            false
+        } else if self.gpu_screenshot_countdown == 1 {
+            self.gpu_screenshot_countdown = 0;
+            true
+        } else {
+            false
+        };
         let take_screenshot = self.input.take_screenshot();
         if take_screenshot {
             let _ = std::fs::create_dir_all("frames");
@@ -200,6 +282,7 @@ impl App {
             do_raster: true,
             do_navigation_hud: true,
             take_framebuffer_screenshot: take_screenshot,
+            prepare_render_screenshot: auto_screenshot,
             hud_rotation_label: Some({
                 let inv = if self.camera.is_y_inverted() {
                     " Y-INV"
@@ -233,6 +316,12 @@ impl App {
             &instances,
             render_options,
         );
+
+        if auto_screenshot {
+            let _ = std::fs::create_dir_all("frames");
+            rcx.save_rendered_frame_png("frames/gpu_render.png");
+            self.should_exit_after_render = true;
+        }
     }
 }
 

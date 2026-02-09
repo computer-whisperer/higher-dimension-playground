@@ -726,6 +726,7 @@ dependencies = [
  "clap",
  "common",
  "higher-dimension-playground",
+ "image",
  "ndarray",
  "vulkano",
  "winit",

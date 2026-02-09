@@ -10,3 +10,4 @@ vulkano = "0.35"
 winit = "0.30"
 clap = { version = "4.5", features = ["derive"] }
 ndarray = "0.16.0"
+image = "0.25"
