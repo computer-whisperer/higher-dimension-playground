@@ -7,7 +7,7 @@ import types;
 // Set 1: SizedBuffers (line vertices, output tetrahedrons, pixel buffer)
 // Set 2: LiveBuffers (model instances, working data)
 
-[[vk::binding(0, 1)]] StructuredBuffer<float2> lineVertices;
+[[vk::binding(0, 1)]] StructuredBuffer<LineVertex> lineVertices;
 [[vk::binding(2, 1)]] StructuredBuffer<float4> pixelBuffer;
 [[vk::binding(1, 2)]] StructuredBuffer<WorkingData> workingDataBuffer;
 
@@ -15,22 +15,24 @@ import types;
 struct LineVSOutput
 {
     float4 position : SV_Position;
+    float4 color : COLOR0;
 }
 
 [shader("vertex")]
 LineVSOutput mainLineVS(uint vertexId : SV_VertexID)
 {
     LineVSOutput output;
-    float2 pos = lineVertices[vertexId];
-    output.position = float4(pos.x, pos.y, 0.0, 1.0);
+    LineVertex vertex = lineVertices[vertexId];
+    output.position = float4(vertex.position.x, vertex.position.y, 0.0, 1.0);
+    output.color = vertex.color;
     return output;
 }
 
 // Fragment shader for line rendering
 [shader("fragment")]
-float4 mainLineFS() : SV_Target
+float4 mainLineFS(LineVSOutput input) : SV_Target
 {
-    return float4(0.0, 0.0, 1.0, 1.0);
+    return input.color;
 }
 
 // Vertex shader for fullscreen quad (buffer display)

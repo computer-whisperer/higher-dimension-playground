@@ -32,6 +32,7 @@ image = { version="0.25", features=["rayon"] }
 # this would be out of scope. In order to open a window, we are going to use the `winit` crate.
 winit = "0.30"
 glam = {version = "0.24", features=["bytemuck"]}
+ab_glyph = "0.2"
 
 # Build dependencies removed - using slangc CLI instead
 # [build-dependencies]

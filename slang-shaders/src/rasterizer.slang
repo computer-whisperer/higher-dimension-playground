@@ -11,7 +11,7 @@ import materials;
 [[vk::binding(1, 0)]] StructuredBuffer<ModelEdge> modelEdges;
 
 // Set 1: SizedBuffers
-[[vk::binding(0, 1)]] RWStructuredBuffer<float2> outputLineVertices;
+[[vk::binding(0, 1)]] RWStructuredBuffer<LineVertex> outputLineVertices;
 [[vk::binding(1, 1)]] RWStructuredBuffer<Tetrahedron> outputTetrahedrons;
 [[vk::binding(2, 1)]] RWStructuredBuffer<float4> pixelBuffer;
 [[vk::binding(6, 1)]] RWStructuredBuffer<uint> atomicCounter;
@@ -422,8 +422,18 @@ void mainEdgeCS(uint3 globalId : SV_DispatchThreadID)
                               vertexPositions[i][1] / vertexPositions[i][4]);
     }
 
-    outputLineVertices[outputIndex * 2 + 0] = projected[0];
-    outputLineVertices[outputIndex * 2 + 1] = projected[1];
+    LineVertex v0;
+    v0.position = projected[0];
+    v0.padding = float2(0.0, 0.0);
+    v0.color = float4(0.30, 0.70, 1.00, 1.0);
+
+    LineVertex v1;
+    v1.position = projected[1];
+    v1.padding = float2(0.0, 0.0);
+    v1.color = float4(0.30, 0.70, 1.00, 1.0);
+
+    outputLineVertices[outputIndex * 2 + 0] = v0;
+    outputLineVertices[outputIndex * 2 + 1] = v1;
 }
 
 // Barycentric coordinates for 2D triangle

@@ -2,6 +2,8 @@ mod camera;
 mod input;
 mod scene;
 
+use higher_dimension_playground::render::{RenderContext, RenderOptions};
+use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::sync::Arc;
 use std::time::Instant;
 use vulkano::device::{Device, Queue};
@@ -12,8 +14,6 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop},
     window::{CursorGrabMode, Window, WindowId},
 };
-use higher_dimension_playground::render::{RenderContext, RenderOptions};
-use higher_dimension_playground::vulkan_setup::vulkan_setup;
 
 use camera::Camera4D;
 use input::InputState;
@@ -54,7 +54,8 @@ struct App {
 
 impl App {
     fn grab_mouse(&mut self, window: &Window) {
-        let result = window.set_cursor_grab(CursorGrabMode::Locked)
+        let result = window
+            .set_cursor_grab(CursorGrabMode::Locked)
             .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
         if result.is_ok() {
             window.set_cursor_visible(false);
@@ -83,7 +84,8 @@ impl App {
 
         // Movement
         let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
-        self.camera.apply_movement(forward, strafe, vertical, w_axis, dt, MOVE_SPEED);
+        self.camera
+            .apply_movement(forward, strafe, vertical, w_axis, dt, MOVE_SPEED);
 
         // Build view matrix and scene
         let view_matrix = self.camera.view_matrix();
@@ -92,6 +94,7 @@ impl App {
 
         let render_options = RenderOptions {
             do_raster: true,
+            do_navigation_hud: true,
             ..Default::default()
         };
 
@@ -152,7 +155,11 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::MouseInput { button: MouseButton::Left, state: winit::event::ElementState::Pressed, .. } => {
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state: winit::event::ElementState::Pressed,
+                ..
+            } => {
                 if !self.mouse_grabbed {
                     let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
                     self.grab_mouse(&window);

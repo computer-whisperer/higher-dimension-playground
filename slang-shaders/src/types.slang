@@ -28,6 +28,15 @@ struct ModelEdge
     float4 vertexPositions[2];
 }
 
+// Screen-space line vertex with per-vertex color.
+// Layout must match Rust's LineVertex in src/render.rs.
+struct LineVertex
+{
+    float2 position;
+    float2 padding;
+    float4 color;
+}
+
 // Instance data with 5x5 transform matrix
 struct ModelInstance
 {
