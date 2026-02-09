@@ -1,18 +1,17 @@
+use common::{binomial, factorial, generate_combinations, generate_permutations};
 use std::marker::PhantomData;
-use common::{factorial, binomial, generate_combinations, generate_permutations};
 
 #[allow(dead_code)]
 pub struct Hypercube<const D: usize, T: From<usize>> {
-    phantom_data: PhantomData<T>
+    phantom_data: PhantomData<T>,
 }
 
 #[allow(dead_code)]
 impl<const D: usize, T: From<usize> + Copy + Default> Hypercube<D, T> {
-
     pub fn generate_vertices() -> Vec<[T; D]> {
-        (0..(1 << D)).map(|i| {
-            std::array::from_fn(|d| ((i >> d) & 1).into())
-        }).collect()
+        (0..(1 << D))
+            .map(|i| std::array::from_fn(|d| ((i >> d) & 1).into()))
+            .collect()
     }
 
     /// Generate 1-faces (edges) of a D-dimensional hypercube
@@ -124,23 +123,35 @@ mod tests {
 
     #[test]
     fn test_k_faces_1() {
-        assert_eq!(Hypercube::<2, usize>::generate_k_faces_1(), vec![
-            [0b00, 0b01], [0b00, 0b10],
-            [0b10, 0b11], [0b01, 0b11]
-        ]);
-        assert_eq!(Hypercube::<3, usize>::generate_k_faces_1(), vec![
-            [0b000, 0b001], [0b000, 0b010], [0b000, 0b100],
-            [0b010, 0b011], [0b001, 0b011], [0b001, 0b101],
-            [0b100, 0b101], [0b100, 0b110], [0b010, 0b110],
-            [0b110, 0b111], [0b101, 0b111], [0b011, 0b111]
-        ]);
+        assert_eq!(
+            Hypercube::<2, usize>::generate_k_faces_1(),
+            vec![[0b00, 0b01], [0b00, 0b10], [0b10, 0b11], [0b01, 0b11]]
+        );
+        assert_eq!(
+            Hypercube::<3, usize>::generate_k_faces_1(),
+            vec![
+                [0b000, 0b001],
+                [0b000, 0b010],
+                [0b000, 0b100],
+                [0b010, 0b011],
+                [0b001, 0b011],
+                [0b001, 0b101],
+                [0b100, 0b101],
+                [0b100, 0b110],
+                [0b010, 0b110],
+                [0b110, 0b111],
+                [0b101, 0b111],
+                [0b011, 0b111]
+            ]
+        );
     }
 
     #[test]
     fn test_k_faces_3() {
-        assert_eq!(Hypercube::<3, usize>::generate_k_faces_3(), vec![
-            [0b000, 0b001, 0b010, 0b100]
-        ]);
+        assert_eq!(
+            Hypercube::<3, usize>::generate_k_faces_3(),
+            vec![[0b000, 0b001, 0b010, 0b100]]
+        );
         assert_eq!(Hypercube::<4, usize>::generate_k_faces_3().len(), 8);
     }
 
@@ -149,13 +160,16 @@ mod tests {
         let face = [0b000, 0b001, 0b010, 0b100];
         let simplexes = generate_simplexes_for_k_face_3::<3>(face);
         assert_eq!(simplexes.len(), 6); // 3! = 6 simplexes per 3-face
-        assert_eq!(simplexes, vec![
-            [0b000, 0b001, 0b011, 0b111],
-            [0b000, 0b001, 0b101, 0b111],
-            [0b000, 0b010, 0b011, 0b111],
-            [0b000, 0b010, 0b110, 0b111],
-            [0b000, 0b100, 0b101, 0b111],
-            [0b000, 0b100, 0b110, 0b111]
-        ]);
+        assert_eq!(
+            simplexes,
+            vec![
+                [0b000, 0b001, 0b011, 0b111],
+                [0b000, 0b001, 0b101, 0b111],
+                [0b000, 0b010, 0b011, 0b111],
+                [0b000, 0b010, 0b110, 0b111],
+                [0b000, 0b100, 0b101, 0b111],
+                [0b000, 0b100, 0b110, 0b111]
+            ]
+        );
     }
 }

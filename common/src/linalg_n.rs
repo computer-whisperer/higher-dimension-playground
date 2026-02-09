@@ -1,4 +1,3 @@
-
 use crate::mat_n::MatN;
 use crate::vec_n::VecN;
 
@@ -37,7 +36,7 @@ mod tests {
         let components = [
             VecN::<4>::new([1.0, 0.0, 0.0, 0.0]),
             VecN::<4>::new([0.0, 1.0, 0.0, 0.0]),
-            VecN::<4>::new([0.0, 0.0, 1.0, 0.0])
+            VecN::<4>::new([0.0, 0.0, 1.0, 0.0]),
         ];
         let result = get_normal(&components);
         let expected_result = VecN::<4>::new([0.0, 0.0, 0.0, 1.0]);
@@ -46,7 +45,7 @@ mod tests {
         let components = [
             VecN::<4>::new([1.0, 1.0, 0.0, 0.0]),
             VecN::<4>::new([0.0, 1.0, 1.0, 0.0]),
-            VecN::<4>::new([1.0, 0.0, 1.0, 0.0])
+            VecN::<4>::new([1.0, 0.0, 1.0, 0.0]),
         ];
         let result = get_normal(&components);
         let expected_result = VecN::<4>::new([0.0, 0.0, 0.0, 2.0]);
@@ -55,7 +54,7 @@ mod tests {
         let components = [
             VecN::<4>::new([1.0, 1.0, 0.0, 0.0]),
             VecN::<4>::new([0.0, 1.0, 1.0, 0.0]),
-            VecN::<4>::new([0.0, 0.0, 1.0, 1.0])
+            VecN::<4>::new([0.0, 0.0, 1.0, 1.0]),
         ];
         let result = get_normal(&components);
         let expected_result = VecN::<4>::new([1.0, 1.0, 1.0, 1.0]);

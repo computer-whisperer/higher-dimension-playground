@@ -1,22 +1,20 @@
-use glam::{Mat2, Mat3, Mat4};
 use crate::vec_n::VecN;
+use glam::{Mat2, Mat3, Mat4};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[repr(transparent)]
 pub struct MatN<const N: usize> {
-    values: [[f32; N]; N] // [row][col]
+    values: [[f32; N]; N], // [row][col]
 }
 
-unsafe impl<const N: usize> bytemuck::Zeroable for MatN<N> {
-}
+unsafe impl<const N: usize> bytemuck::Zeroable for MatN<N> {}
 
-unsafe impl<const N: usize> bytemuck::Pod for MatN<N> {
-}
+unsafe impl<const N: usize> bytemuck::Pod for MatN<N> {}
 
-
-
-impl <const N: usize> MatN<N> {
-    pub const ZERO: Self = Self{ values: [[0f32; N]; N]};
+impl<const N: usize> MatN<N> {
+    pub const ZERO: Self = Self {
+        values: [[0f32; N]; N],
+    };
 
     pub fn identity() -> Self {
         let mut output = Self::ZERO;
@@ -36,17 +34,25 @@ impl <const N: usize> MatN<N> {
         output
     }
 
-
-
     pub fn determinant_basic(&self) -> f32 {
         // Compute determinant
         match N {
             1 => self.values[0][0],
             2 => self.values[0][0] * self.values[1][1] - self.values[0][1] * self.values[1][0],
-            3 => self.values[0][0] * (self.values[1][1] * self.values[2][2] - self.values[1][2] * self.values[2][1])
-                - self.values[0][1] * (self.values[1][0] * self.values[2][2] - self.values[1][2] * self.values[2][0])
-                + self.values[0][2] * (self.values[1][0] * self.values[2][1] - self.values[1][1] * self.values[2][0]),
-            _ => {unimplemented!()}
+            3 => {
+                self.values[0][0]
+                    * (self.values[1][1] * self.values[2][2]
+                        - self.values[1][2] * self.values[2][1])
+                    - self.values[0][1]
+                        * (self.values[1][0] * self.values[2][2]
+                            - self.values[1][2] * self.values[2][0])
+                    + self.values[0][2]
+                        * (self.values[1][0] * self.values[2][1]
+                            - self.values[1][1] * self.values[2][0])
+            }
+            _ => {
+                unimplemented!()
+            }
         }
     }
 }
@@ -69,32 +75,32 @@ impl MatN<4> {
     }
 }
 
-impl <const N: usize> core::ops::Index<[usize; 2]> for &MatN<N> {
+impl<const N: usize> core::ops::Index<[usize; 2]> for &MatN<N> {
     type Output = f32;
     fn index(&self, index: [usize; 2]) -> &Self::Output {
         &self.values[index[0]][index[1]]
     }
 }
 
-impl From<&MatN::<2>> for Mat2 {
+impl From<&MatN<2>> for Mat2 {
     fn from(value: &MatN<2>) -> Self {
         Mat2::from_cols_array_2d(&value.values)
     }
 }
 
-impl From<&MatN::<3>> for Mat3 {
+impl From<&MatN<3>> for Mat3 {
     fn from(value: &MatN<3>) -> Self {
         Mat3::from_cols_array_2d(&value.values)
     }
 }
 
-impl From<&MatN::<4>> for Mat4 {
+impl From<&MatN<4>> for Mat4 {
     fn from(value: &MatN<4>) -> Self {
         Mat4::from_cols_array_2d(&value.values)
     }
 }
 
-impl From<MatN::<4>> for Mat4 {
+impl From<MatN<4>> for Mat4 {
     fn from(value: MatN<4>) -> Self {
         Mat4::from(&value)
     }
@@ -121,21 +127,20 @@ impl From<MatN<5>> for ndarray::Array2<f32> {
     }
 }
 
-
-impl <const N: usize> core::ops::Index<[usize; 2]> for MatN<N> {
+impl<const N: usize> core::ops::Index<[usize; 2]> for MatN<N> {
     type Output = f32;
     fn index(&self, index: [usize; 2]) -> &Self::Output {
         &self.values[index[0]][index[1]]
     }
 }
 
-impl <const N: usize> core::ops::IndexMut<[usize; 2]> for MatN<N> {
+impl<const N: usize> core::ops::IndexMut<[usize; 2]> for MatN<N> {
     fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
         &mut self.values[index[0]][index[1]]
     }
 }
 
-impl <const N: usize> core::ops::Mul<VecN<N>> for MatN<N> {
+impl<const N: usize> core::ops::Mul<VecN<N>> for MatN<N> {
     type Output = VecN<N>;
 
     fn mul(self, rhs: VecN<N>) -> Self::Output {
@@ -151,7 +156,7 @@ impl <const N: usize> core::ops::Mul<VecN<N>> for MatN<N> {
     }
 }
 
-impl <const N: usize> core::ops::Mul<MatN<N>> for MatN<N> {
+impl<const N: usize> core::ops::Mul<MatN<N>> for MatN<N> {
     type Output = MatN<N>;
     fn mul(self, rhs: MatN<N>) -> Self::Output {
         let mut output = MatN::<N>::ZERO;
@@ -178,9 +183,7 @@ impl From<&Mat4> for MatN<4> {
             }
         }
 
-        MatN {
-            values
-        }
+        MatN { values }
     }
 }
 
@@ -194,9 +197,7 @@ impl From<&Mat3> for MatN<3> {
             }
         }
 
-        MatN {
-            values
-        }
+        MatN { values }
     }
 }
 
@@ -210,23 +211,33 @@ impl From<&Mat2> for MatN<2> {
             }
         }
 
-        MatN {
-            values
-        }
+        MatN { values }
     }
 }
 
-impl From<Mat4> for MatN<4> { fn from(value: Mat4) -> Self { MatN::from(&value) } }
+impl From<Mat4> for MatN<4> {
+    fn from(value: Mat4) -> Self {
+        MatN::from(&value)
+    }
+}
 
-impl From<Mat3> for MatN<3> { fn from(value: Mat3) -> Self { MatN::from(&value) } }
+impl From<Mat3> for MatN<3> {
+    fn from(value: Mat3) -> Self {
+        MatN::from(&value)
+    }
+}
 
-impl From<Mat2> for MatN<2> { fn from(value: Mat2) -> Self { MatN::from(&value) } }
+impl From<Mat2> for MatN<2> {
+    fn from(value: Mat2) -> Self {
+        MatN::from(&value)
+    }
+}
 
 #[cfg(feature = "nalgebra")]
 use nalgebra::Matrix5;
 
 #[cfg(feature = "nalgebra")]
-impl From<nalgebra::Matrix5<f32>> for MatN::<5> {
+impl From<nalgebra::Matrix5<f32>> for MatN<5> {
     fn from(value: Matrix5<f32>) -> Self {
         let mut output = Self::ZERO;
 
@@ -293,11 +304,8 @@ mod tests {
     #[test]
     fn test_mat_conversion() {
         let input_mat: Vec<f32> = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0,
-            6.0, 7.0, 8.0, 9.0, 10.0,
-            11.0, 12.0, 13.0, 14.0, 15.0,
-            16.0, 17.0, 18.0, 19.0, 20.0,
-            21.0, 22.0, 23.0, 24.0, 25.0
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+            17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0,
         ];
         let nd_mat = ndarray::Array2::from_shape_vec((5, 5), input_mat).unwrap();
         let converted_mat = MatN::<5>::from(&nd_mat);
@@ -308,11 +316,8 @@ mod tests {
     #[test]
     fn test_mat_vec_mul() {
         let input_mat: Vec<f32> = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0,
-            6.0, 7.0, 8.0, 9.0, 10.0,
-            11.0, 12.0, 13.0, 14.0, 15.0,
-            16.0, 17.0, 18.0, 19.0, 20.0,
-            21.0, 22.0, 23.0, 24.0, 25.0
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+            17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0,
         ];
         let input_vec: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let nd_mat = ndarray::Array2::from_shape_vec((5, 5), input_mat).unwrap();
@@ -328,18 +333,12 @@ mod tests {
     #[test]
     fn test_mat_mat_mul() {
         let input_mat1: Vec<f32> = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0,
-            6.0, 7.0, 8.0, 9.0, 10.0,
-            11.0, 12.0, 13.0, 14.0, 15.0,
-            16.0, 17.0, 18.0, 19.0, 20.0,
-            21.0, 22.0, 23.0, 24.0, 25.0
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+            17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0,
         ];
         let input_mat2: Vec<f32> = vec![
-            26.0, 27.0, 28.0, 29.0, 30.0,
-            31.0, 32.0, 33.0, 34.0, 35.0,
-            36.0, 37.0, 38.0, 39.0, 40.0,
-            41.0, 42.0, 43.0, 44.0, 45.0,
-            46.0, 47.0, 48.0, 49.0, 50.0
+            26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0,
+            40.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0, 50.0,
         ];
         let nd_mat1 = ndarray::Array2::from_shape_vec((5, 5), input_mat1).unwrap();
         let nd_mat2 = ndarray::Array2::from_shape_vec((5, 5), input_mat2).unwrap();

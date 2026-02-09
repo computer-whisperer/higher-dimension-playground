@@ -1,5 +1,5 @@
-use std::fs;
 use exr::prelude::WritableImage;
+use std::fs;
 
 fn main() {
     let input_dir = "/home/christian/Documents/tesseract_images/";
@@ -23,17 +23,13 @@ fn main() {
 
                         image.write().to_file(dest_path).unwrap();
                         println!("Converted: {}", file_name.file_name().to_str().unwrap());
-                    },
+                    }
                     Err(error) => {
                         eprintln!("Error reading EXR file: {}", error);
                         continue;
                     }
                 }
-
-
             }
-
-
         }
     }
 

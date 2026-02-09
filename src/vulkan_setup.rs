@@ -1,20 +1,20 @@
 use std::sync::Arc;
 use vulkano::device::{
-    physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions,
-    DeviceFeatures, Queue, QueueCreateInfo, QueueFlags,
+    physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures,
+    Queue, QueueCreateInfo, QueueFlags,
 };
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::swapchain::Surface;
 use vulkano::VulkanLibrary;
 use winit::event_loop::EventLoop;
 
-pub fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<Device>, Arc<Queue>) {
+pub fn vulkan_setup(
+    event_loop: Option<&EventLoop<()>>,
+) -> (Arc<Instance>, Arc<Device>, Arc<Queue>) {
     let library = VulkanLibrary::new().unwrap();
 
     let required_extensions = match event_loop {
-        Some(event_loop) => {
-            Surface::required_extensions(event_loop).unwrap()
-        }
+        Some(event_loop) => Surface::required_extensions(event_loop).unwrap(),
         None => Default::default(),
     };
 
@@ -25,7 +25,8 @@ pub fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<D
             enabled_extensions: required_extensions,
             ..Default::default()
         },
-    ).unwrap();
+    )
+    .unwrap();
 
     let device_extensions = DeviceExtensions {
         khr_swapchain: event_loop.is_some(),
@@ -41,41 +42,39 @@ pub fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<D
         shader_int64: true,
         shader_int8: true,
         shader_draw_parameters: true,
-        .. Default::default()
+        ..Default::default()
     };
 
     let (physical_device, queue_family_index) = instance
         .enumerate_physical_devices()
         .unwrap()
         .filter(|p| {
-            p.supported_extensions().contains(&device_extensions) &&
-                p.supported_features().contains(&device_features)
+            p.supported_extensions().contains(&device_extensions)
+                && p.supported_features().contains(&device_features)
         })
         .filter_map(|p| {
             p.queue_family_properties()
                 .iter()
                 .enumerate()
                 .position(|(i, q)| {
-                    q.queue_flags.intersects(QueueFlags::COMPUTE) &&
-                    match event_loop {
-                        Some(event_loop) => {
-                            q.queue_flags.intersects(QueueFlags::GRAPHICS)
-                                && p.presentation_support(i as u32, event_loop).unwrap()
+                    q.queue_flags.intersects(QueueFlags::COMPUTE)
+                        && match event_loop {
+                            Some(event_loop) => {
+                                q.queue_flags.intersects(QueueFlags::GRAPHICS)
+                                    && p.presentation_support(i as u32, event_loop).unwrap()
+                            }
+                            None => true,
                         }
-                        None => true,
-                    }
                 })
                 .map(|i| (p, i as u32))
         })
-        .min_by_key(|(p, _)| {
-            match p.properties().device_type {
-                PhysicalDeviceType::DiscreteGpu => 0,
-                PhysicalDeviceType::IntegratedGpu => 1,
-                PhysicalDeviceType::VirtualGpu => 2,
-                PhysicalDeviceType::Cpu => 3,
-                PhysicalDeviceType::Other => 4,
-                _ => 5,
-            }
+        .min_by_key(|(p, _)| match p.properties().device_type {
+            PhysicalDeviceType::DiscreteGpu => 0,
+            PhysicalDeviceType::IntegratedGpu => 1,
+            PhysicalDeviceType::VirtualGpu => 2,
+            PhysicalDeviceType::Cpu => 3,
+            PhysicalDeviceType::Other => 4,
+            _ => 5,
         })
         .expect("no suitable physical device found");
 
@@ -97,7 +96,7 @@ pub fn vulkan_setup(event_loop: Option<&EventLoop<()>>) -> (Arc<Instance>, Arc<D
             ..Default::default()
         },
     )
-        .unwrap();
+    .unwrap();
 
     let queue = queues.next().unwrap();
 

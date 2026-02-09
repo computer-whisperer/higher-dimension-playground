@@ -1,18 +1,18 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
 
-mod utils;
-mod linalg_n;
-mod vec_n;
-mod mat_n;
 mod layout_verify;
+mod linalg_n;
+mod mat_n;
+mod utils;
+mod vec_n;
 
-use glam::{Vec4, UVec2, UVec4};
-pub use vec_n::VecN;
-pub use mat_n::MatN;
-pub use utils::{factorial, binomial, generate_combinations, generate_permutations};
-pub use linalg_n::*;
-pub use utils::{BasicRNG};
 use bytemuck::{Pod, Zeroable};
+use glam::{UVec2, UVec4, Vec4};
+pub use linalg_n::*;
+pub use mat_n::MatN;
+pub use utils::BasicRNG;
+pub use utils::{binomial, factorial, generate_combinations, generate_permutations};
+pub use vec_n::VecN;
 
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
@@ -21,7 +21,7 @@ pub struct Tetrahedron {
     pub texture_positions: [Vec4; 4],
     pub normal: Vec4,
     pub material_id: u32,
-    pub padding: [u32; 3]
+    pub padding: [u32; 3],
 }
 
 /// Morton code for spatial sorting in LBVH construction
@@ -63,20 +63,19 @@ pub struct ModelTetrahedron {
     pub vertex_positions: [Vec4; 4],
     pub texture_positions: [Vec4; 4],
     pub cell_id: u32,
-    pub padding: [u32; 3]
+    pub padding: [u32; 3],
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct ModelEdge {
-    pub vertex_positions: [Vec4; 2]
+    pub vertex_positions: [Vec4; 2],
 }
-
 
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct ModelInstance {
-    pub model_transform: MatN::<5>,
+    pub model_transform: MatN<5>,
     pub cell_material_ids: [u32; 8],
 }
 
@@ -86,11 +85,11 @@ pub struct WorkingData {
     pub render_dimensions: UVec4,
     pub present_dimensions: UVec2,
     pub raytrace_seed: u64,
-    pub view_matrix: MatN::<5>,
-    pub view_matrix_inverse: MatN::<5>,
+    pub view_matrix: MatN<5>,
+    pub view_matrix_inverse: MatN<5>,
     pub total_num_tetrahedrons: u32,
     pub shader_fault: u32,
     pub focal_length_xy: f32,
     pub focal_length_zw: f32,
-    pub padding: [u32; 2]
+    pub padding: [u32; 2],
 }

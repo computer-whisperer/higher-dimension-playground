@@ -1,6 +1,8 @@
-use std::f32::consts::PI;
+use higher_dimension_playground::matrix_operations::{
+    rotation_matrix_one_angle, translate_matrix_4d,
+};
 use ndarray::Array2;
-use higher_dimension_playground::matrix_operations::{translate_matrix_4d, rotation_matrix_one_angle};
+use std::f32::consts::PI;
 
 pub struct Camera4D {
     pub position: [f32; 4],
@@ -26,7 +28,15 @@ impl Camera4D {
         m
     }
 
-    pub fn apply_movement(&mut self, forward: f32, strafe: f32, vertical: f32, w_axis: f32, dt: f32, speed: f32) {
+    pub fn apply_movement(
+        &mut self,
+        forward: f32,
+        strafe: f32,
+        vertical: f32,
+        w_axis: f32,
+        dt: f32,
+        speed: f32,
+    ) {
         let fwd_x = -self.yaw.sin();
         let fwd_z = self.yaw.cos();
 

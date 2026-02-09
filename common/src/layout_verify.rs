@@ -8,11 +8,31 @@ mod tests {
     #[test]
     fn verify_struct_sizes() {
         // Expected sizes from Slang reflection with -fvk-use-scalar-layout
-        assert_eq!(std::mem::size_of::<Tetrahedron>(), 160, "Tetrahedron size mismatch");
-        assert_eq!(std::mem::size_of::<ModelTetrahedron>(), 144, "ModelTetrahedron size mismatch");
-        assert_eq!(std::mem::size_of::<ModelEdge>(), 32, "ModelEdge size mismatch");
-        assert_eq!(std::mem::size_of::<ModelInstance>(), 132, "ModelInstance size mismatch");
-        assert_eq!(std::mem::size_of::<WorkingData>(), 256, "WorkingData size mismatch");
+        assert_eq!(
+            std::mem::size_of::<Tetrahedron>(),
+            160,
+            "Tetrahedron size mismatch"
+        );
+        assert_eq!(
+            std::mem::size_of::<ModelTetrahedron>(),
+            144,
+            "ModelTetrahedron size mismatch"
+        );
+        assert_eq!(
+            std::mem::size_of::<ModelEdge>(),
+            32,
+            "ModelEdge size mismatch"
+        );
+        assert_eq!(
+            std::mem::size_of::<ModelInstance>(),
+            132,
+            "ModelInstance size mismatch"
+        );
+        assert_eq!(
+            std::mem::size_of::<WorkingData>(),
+            256,
+            "WorkingData size mismatch"
+        );
         assert_eq!(std::mem::size_of::<MatN<5>>(), 100, "MatN<5> size mismatch");
         assert_eq!(std::mem::size_of::<VecN<5>>(), 20, "VecN<5> size mismatch");
     }
@@ -38,7 +58,10 @@ mod tests {
         // Slang: cellId: offset=128, size=4
         // Slang: padding: offset=132, size=12
         assert_eq!(std::mem::offset_of!(ModelTetrahedron, vertex_positions), 0);
-        assert_eq!(std::mem::offset_of!(ModelTetrahedron, texture_positions), 64);
+        assert_eq!(
+            std::mem::offset_of!(ModelTetrahedron, texture_positions),
+            64
+        );
         assert_eq!(std::mem::offset_of!(ModelTetrahedron, cell_id), 128);
         assert_eq!(std::mem::offset_of!(ModelTetrahedron, padding), 132);
     }
@@ -68,7 +91,10 @@ mod tests {
         assert_eq!(std::mem::offset_of!(WorkingData, raytrace_seed), 24);
         assert_eq!(std::mem::offset_of!(WorkingData, view_matrix), 32);
         assert_eq!(std::mem::offset_of!(WorkingData, view_matrix_inverse), 132);
-        assert_eq!(std::mem::offset_of!(WorkingData, total_num_tetrahedrons), 232);
+        assert_eq!(
+            std::mem::offset_of!(WorkingData, total_num_tetrahedrons),
+            232
+        );
         assert_eq!(std::mem::offset_of!(WorkingData, shader_fault), 236);
         assert_eq!(std::mem::offset_of!(WorkingData, focal_length_xy), 240);
         assert_eq!(std::mem::offset_of!(WorkingData, focal_length_zw), 244);

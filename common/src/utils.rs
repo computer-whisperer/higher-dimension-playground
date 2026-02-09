@@ -13,7 +13,7 @@ pub fn factorial(n: usize) -> usize {
         7 => 5040,
         8 => 40320,
         9 => 362880,
-        _ => (1..=n).product()
+        _ => (1..=n).product(),
     }
 }
 
@@ -171,7 +171,10 @@ mod tests {
     #[test]
     fn test_combinations() {
         assert_eq!(generate_combinations(2, 1), vec![vec![0], vec![1]]);
-        assert_eq!(generate_combinations(3, 2), vec![vec![0, 1], vec![0, 2], vec![1, 2]]);
+        assert_eq!(
+            generate_combinations(3, 2),
+            vec![vec![0, 1], vec![0, 2], vec![1, 2]]
+        );
     }
 
     #[test]
