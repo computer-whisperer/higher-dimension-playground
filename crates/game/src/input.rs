@@ -19,6 +19,7 @@ pub struct InputState {
     last_space_press: Option<Instant>,
     fly_toggle_requested: bool,
     jump_requested: bool,
+    screenshot_requested: bool,
 }
 
 impl InputState {
@@ -38,6 +39,7 @@ impl InputState {
             last_space_press: None,
             fly_toggle_requested: false,
             jump_requested: false,
+            screenshot_requested: false,
         }
     }
 
@@ -65,6 +67,11 @@ impl InputState {
                 KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
                 KeyCode::KeyQ => self.w_neg = pressed,
                 KeyCode::KeyE => self.w_pos = pressed,
+                KeyCode::F12 => {
+                    if pressed {
+                        self.screenshot_requested = true;
+                    }
+                }
                 KeyCode::Escape => {
                     if pressed {
                         self.escape_pressed = true;
@@ -110,6 +117,12 @@ impl InputState {
     pub fn take_jump(&mut self) -> bool {
         let v = self.jump_requested;
         self.jump_requested = false;
+        v
+    }
+
+    pub fn take_screenshot(&mut self) -> bool {
+        let v = self.screenshot_requested;
+        self.screenshot_requested = false;
         v
     }
 }

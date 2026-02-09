@@ -2,6 +2,7 @@ mod camera;
 mod input;
 mod scene;
 
+use clap::Parser;
 use higher_dimension_playground::render::{RenderContext, RenderOptions};
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::sync::Arc;
@@ -21,7 +22,24 @@ use input::InputState;
 const MOVE_SPEED: f32 = 5.0;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 
+#[derive(Parser, Debug, Clone)]
+#[command(version, about = "4D game explorer")]
+struct Args {
+    /// Render buffer width in pixels
+    #[arg(long, short = 'W', default_value_t = 480)]
+    width: u32,
+
+    /// Render buffer height in pixels
+    #[arg(long, short = 'H', default_value_t = 270)]
+    height: u32,
+
+    /// Number of depth layers (supersampling)
+    #[arg(long, default_value_t = 4)]
+    layers: u32,
+}
+
 fn main() {
+    let args = Args::parse();
     let event_loop = EventLoop::new().unwrap();
     let (instance, device, queue) = vulkan_setup(Some(&event_loop));
 
@@ -35,6 +53,8 @@ fn main() {
         start_time: Instant::now(),
         last_frame: Instant::now(),
         mouse_grabbed: false,
+        should_exit_after_render: false,
+        args,
     };
 
     event_loop.run_app(&mut app).unwrap();
@@ -50,6 +70,8 @@ struct App {
     start_time: Instant,
     last_frame: Instant,
     mouse_grabbed: bool,
+    should_exit_after_render: bool,
+    args: Args,
 }
 
 impl App {
@@ -107,9 +129,16 @@ impl App {
         let time = self.start_time.elapsed().as_secs_f32();
         let instances = scene::build_scene_instances(time);
 
+        let take_screenshot = self.input.take_screenshot();
+        if take_screenshot {
+            let _ = std::fs::create_dir_all("frames");
+            self.should_exit_after_render = true;
+        }
+
         let render_options = RenderOptions {
             do_raster: true,
             do_navigation_hud: true,
+            take_framebuffer_screenshot: take_screenshot,
             ..Default::default()
         };
 
@@ -139,7 +168,7 @@ impl ApplicationHandler for App {
             self.queue.clone(),
             self.instance.clone(),
             Some(window),
-            [960, 540, 4],
+            [self.args.width, self.args.height, self.args.layers],
         ));
         self.last_frame = Instant::now();
     }
@@ -183,6 +212,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.update_and_render();
+                if self.should_exit_after_render {
+                    event_loop.exit();
+                }
             }
             _ => {}
         }

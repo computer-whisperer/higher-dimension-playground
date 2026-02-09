@@ -1621,21 +1621,22 @@ impl ComputePipelineContext {
     }
 }
 
-const PROFILER_MAX_TIMESTAMPS: u32 = 5;
+const PROFILER_MAX_TIMESTAMPS: u32 = 16;
 const PROFILER_REPORT_INTERVAL: usize = 100;
 
 struct GpuProfiler {
     query_pool: Arc<QueryPool>,
     timestamp_period_ns: f32,
-    timestamps_written: u32,
-    bvh_included: bool,
-    // Accumulation for frames with BVH rebuild: [Clear, Tet Preprocess, BVH Build, Raytrace]
-    accum_with_bvh: [f64; 4],
-    frames_with_bvh: usize,
-    // Accumulation for frames without BVH: [Clear, Raytrace]
-    accum_without_bvh: [f64; 2],
-    frames_without_bvh: usize,
+    next_query: u32,
+    /// Phase name for each timestamp (interval is from previous to this timestamp)
+    phase_names: Vec<&'static str>,
+    /// Accumulated (total_ms, count) per phase name
+    accum: Vec<(&'static str, f64, usize)>,
     total_frames: usize,
+    /// Last frame's GPU total in ms (for HUD display)
+    last_gpu_total_ms: f32,
+    /// Last frame's per-phase breakdown (for HUD display)
+    last_frame_phases: Vec<(&'static str, f32)>,
 }
 
 impl GpuProfiler {
@@ -1654,22 +1655,33 @@ impl GpuProfiler {
         GpuProfiler {
             query_pool,
             timestamp_period_ns,
-            timestamps_written: 0,
-            bvh_included: false,
-            accum_with_bvh: [0.0; 4],
-            frames_with_bvh: 0,
-            accum_without_bvh: [0.0; 2],
-            frames_without_bvh: 0,
+            next_query: 0,
+            phase_names: Vec::new(),
+            accum: Vec::new(),
             total_frames: 0,
+            last_gpu_total_ms: 0.0,
+            last_frame_phases: Vec::new(),
         }
     }
 
+    fn begin_frame(&mut self) {
+        self.next_query = 0;
+        self.phase_names.clear();
+    }
+
+    fn next_query_index(&mut self, name: &'static str) -> u32 {
+        let idx = self.next_query;
+        self.phase_names.push(name);
+        self.next_query += 1;
+        idx
+    }
+
     fn read_results_and_accumulate(&mut self) {
-        if self.timestamps_written < 2 {
+        let n = self.next_query;
+        if n < 2 {
             return;
         }
 
-        let n = self.timestamps_written;
         let mut results = vec![0u64; n as usize];
         match self
             .query_pool
@@ -1681,33 +1693,26 @@ impl GpuProfiler {
 
         let period_ms = self.timestamp_period_ns as f64 / 1_000_000.0;
 
-        if self.bvh_included {
-            // 5 timestamps: [start, after_clear, after_preprocess, after_bvh, after_raytrace]
-            if n >= 5 {
-                let intervals = [
-                    (results[1] - results[0]) as f64 * period_ms, // Clear
-                    (results[2] - results[1]) as f64 * period_ms, // Tet Preprocess
-                    (results[3] - results[2]) as f64 * period_ms, // BVH Build
-                    (results[4] - results[3]) as f64 * period_ms, // Raytrace
-                ];
-                for i in 0..4 {
-                    self.accum_with_bvh[i] += intervals[i];
-                }
-                self.frames_with_bvh += 1;
-            }
-        } else {
-            // 3 timestamps: [start, after_clear, after_raytrace]
-            if n >= 3 {
-                let intervals = [
-                    (results[1] - results[0]) as f64 * period_ms, // Clear
-                    (results[2] - results[1]) as f64 * period_ms, // Raytrace
-                ];
-                for i in 0..2 {
-                    self.accum_without_bvh[i] += intervals[i];
-                }
-                self.frames_without_bvh += 1;
+        self.last_frame_phases.clear();
+        let mut total_ms = 0.0f64;
+
+        // Compute intervals between consecutive timestamps
+        for i in 1..n as usize {
+            let interval_ms = (results[i] - results[i - 1]) as f64 * period_ms;
+            let name = self.phase_names[i];
+            total_ms += interval_ms;
+            self.last_frame_phases
+                .push((name, interval_ms as f32));
+
+            // Accumulate into named buckets
+            if let Some(entry) = self.accum.iter_mut().find(|(n, _, _)| *n == name) {
+                entry.1 += interval_ms;
+                entry.2 += 1;
+            } else {
+                self.accum.push((name, interval_ms, 1));
             }
         }
+        self.last_gpu_total_ms = total_ms as f32;
 
         self.total_frames += 1;
 
@@ -1717,42 +1722,25 @@ impl GpuProfiler {
     }
 
     fn print_report(&mut self) {
-        let total_ms: f64 =
-            self.accum_with_bvh.iter().sum::<f64>() + self.accum_without_bvh.iter().sum::<f64>();
-        let total_frames = self.frames_with_bvh + self.frames_without_bvh;
+        println!(
+            "=== GPU Profile ({} frames) ===",
+            self.total_frames
+        );
 
-        println!("=== GPU Profile ({} frames) ===", total_frames);
-        if total_frames > 0 {
-            println!("  Avg total: {:.3} ms", total_ms / total_frames as f64);
+        let mut total_avg = 0.0f64;
+        for (name, total_ms, count) in &self.accum {
+            if *count > 0 {
+                let avg = total_ms / *count as f64;
+                total_avg += avg;
+                println!("  {}: {:.3} ms (avg over {} samples)", name, avg, count);
+            }
         }
-
-        if self.frames_with_bvh > 0 {
-            let n = self.frames_with_bvh as f64;
-            println!("  With BVH rebuild ({} frames):", self.frames_with_bvh);
-            println!("    Clear: {:.3} ms, Tet Preprocess: {:.3} ms, BVH Build: {:.3} ms, Raytrace: {:.3} ms",
-                     self.accum_with_bvh[0] / n,
-                     self.accum_with_bvh[1] / n,
-                     self.accum_with_bvh[2] / n,
-                     self.accum_with_bvh[3] / n);
-        }
-
-        if self.frames_without_bvh > 0 {
-            let n = self.frames_without_bvh as f64;
-            println!("  Without BVH ({} frames):", self.frames_without_bvh);
-            println!(
-                "    Clear: {:.3} ms, Raytrace: {:.3} ms",
-                self.accum_without_bvh[0] / n,
-                self.accum_without_bvh[1] / n
-            );
-        }
+        println!("  Total avg: {:.3} ms ({:.0} FPS)", total_avg, 1000.0 / total_avg.max(0.001));
 
         println!("================================");
 
         // Reset accumulators
-        self.accum_with_bvh = [0.0; 4];
-        self.accum_without_bvh = [0.0; 2];
-        self.frames_with_bvh = 0;
-        self.frames_without_bvh = 0;
+        self.accum.clear();
     }
 }
 
@@ -1781,6 +1769,8 @@ pub struct RenderContext {
     hud_previous_camera: Option<[f32; 4]>,
     hud_previous_sample_time: Option<Instant>,
     hud_w_velocity: f32,
+    frame_time_ms: f32,
+    last_render_start: Option<Instant>,
 }
 
 impl RenderContext {
@@ -2309,6 +2299,8 @@ impl RenderContext {
             hud_previous_camera: None,
             hud_previous_sample_time: None,
             hud_w_velocity: 0.0,
+            frame_time_ms: 0.0,
+            last_render_start: None,
         }
     }
 
@@ -2437,16 +2429,22 @@ impl RenderContext {
 
         let mut lines = Vec::<OverlayLine>::with_capacity(2048);
 
-        // Axis rose: compact orientation widget in the top-left corner.
-        let rose_origin = Vec2::new(-0.82, 0.74);
-        let rose_radius = 0.035;
-        push_rect(
-            &mut lines,
-            rose_origin - Vec2::splat(rose_radius),
-            rose_origin + Vec2::splat(rose_radius),
-            rose_frame_color,
-        );
-        push_cross(&mut lines, rose_origin, rose_radius * 0.4, rose_frame_color);
+        // Axis rose: orientation widget with labeled arrows and circle boundary.
+        let rose_origin = Vec2::new(-0.78, 0.72);
+        let rose_radius: f32 = 0.09;
+
+        // Circle boundary (~32 segments)
+        let circle_segments = 32;
+        for i in 0..circle_segments {
+            let a0 = (i as f32 / circle_segments as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / circle_segments as f32) * std::f32::consts::TAU;
+            push_line(
+                &mut lines,
+                rose_origin + Vec2::new(a0.cos(), a0.sin()) * rose_radius,
+                rose_origin + Vec2::new(a1.cos(), a1.sin()) * rose_radius,
+                rose_frame_color,
+            );
+        }
 
         let axis_directions = [
             [1.0, 0.0, 0.0, 0.0], // X
@@ -2460,6 +2458,19 @@ impl RenderContext {
             Vec2::new(-1.0, 0.0),
             Vec2::new(0.0, -1.0),
         ];
+        let axis_labels = ["X", "Y", "Z", "W"];
+        let arrow_len = rose_radius * 0.70;
+        let arrowhead_back = rose_radius * 0.12;
+        let arrowhead_side = rose_radius * 0.07;
+
+        // Compute arrow data for all axes, then draw lines and labels
+        struct ArrowData {
+            ray_dir: Vec2,
+            color: Vec4,
+            label_pos: Vec2,
+        }
+        let mut arrows = Vec::with_capacity(4);
+
         for axis_id in 0..4 {
             let dir = axis_directions[axis_id];
             let view_dir = mat5_mul_vec5(view_matrix, [dir[0], dir[1], dir[2], dir[3], 0.0]);
@@ -2476,107 +2487,86 @@ impl RenderContext {
                 ray_dir = fallback_dirs[axis_id];
             }
 
-            let ray_len = 0.14 - axis_id as f32 * 0.02;
-            let tip = rose_origin + ray_dir * ray_len;
-            let axis_color = axis_colors[axis_id];
+            // Depth dimming: arrows pointing away from camera are dimmed
+            // Positive Z or W in view space means pointing away
+            let depth_component = view_dir[2] + view_dir[3];
+            let brightness = if depth_component > 0.0 { 0.45 } else { 1.0 };
+            let axis_color = axis_colors[axis_id] * brightness;
+
+            let tip = rose_origin + ray_dir * arrow_len;
             push_line(&mut lines, rose_origin, tip, axis_color);
 
+            // Arrowhead
             let side = Vec2::new(-ray_dir.y, ray_dir.x);
             push_line(
                 &mut lines,
                 tip,
-                tip - ray_dir * 0.02 + side * 0.012,
+                tip - ray_dir * arrowhead_back + side * arrowhead_side,
                 axis_color,
             );
             push_line(
                 &mut lines,
                 tip,
-                tip - ray_dir * 0.02 - side * 0.012,
+                tip - ray_dir * arrowhead_back - side * arrowhead_side,
                 axis_color,
             );
 
-            // Use 1..4 notches as an inline legend for X/Y/Z/W.
-            let notch_count = axis_id + 1;
-            let notch_base = tip - ray_dir * 0.03;
-            for i in 0..notch_count {
-                let offset = (i as f32 - (notch_count as f32 - 1.0) * 0.5) * 0.012;
-                let center = notch_base + side * offset;
-                push_line(
-                    &mut lines,
-                    center - side * 0.004,
-                    center + side * 0.004,
-                    axis_color * 0.85,
-                );
-            }
-        }
-
-        // Axis legend near the rose.
-        let legend_x = rose_origin.x + 0.095;
-        let legend_top = rose_origin.y + 0.09;
-        let legend_row_step = 0.047;
-        let legend_line_len = 0.045;
-        let legend_labels = ["X", "Y", "Z", "W"];
-
-        for axis_id in 0..4 {
-            let y = legend_top - axis_id as f32 * legend_row_step;
-            let axis_color = axis_colors[axis_id];
-            push_line(
-                &mut lines,
-                Vec2::new(legend_x, y),
-                Vec2::new(legend_x + legend_line_len, y),
-                axis_color,
-            );
-            push_line(
-                &mut lines,
-                Vec2::new(legend_x + legend_line_len, y),
-                Vec2::new(legend_x + legend_line_len - 0.01, y + 0.008),
-                axis_color,
-            );
-            push_line(
-                &mut lines,
-                Vec2::new(legend_x + legend_line_len, y),
-                Vec2::new(legend_x + legend_line_len - 0.01, y - 0.008),
-                axis_color,
-            );
+            // Label position: just beyond arrowhead
+            let label_pos = rose_origin + ray_dir * (arrow_len + rose_radius * 0.28);
+            arrows.push(ArrowData { ray_dir, color: axis_color, label_pos });
         }
 
         let mut hud_quads = Vec::<HudVertex>::with_capacity(2048);
 
-        let legend_text_size = 14.0 * text_scale;
+        let rose_label_text_size = 13.0 * text_scale;
         let readout_text_size = 12.0 * text_scale;
 
+        // Rose background
         if let Some(hud_res) = self.hud_resources.as_ref() {
-            for axis_id in 0..4 {
-                let y = legend_top - axis_id as f32 * legend_row_step + 0.012;
-                let label_px = ndc_to_pixels(Vec2::new(legend_x + 0.055, y), present_size);
+            let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
+            push_filled_rect_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                rose_origin - Vec2::splat(rose_radius * 1.15),
+                rose_origin + Vec2::splat(rose_radius * 1.15),
+                panel_bg,
+            );
+        }
+
+        // Render axis labels at arrow tips
+        for (axis_id, arrow) in arrows.iter().enumerate() {
+            // Offset label position so text is centered on the label point
+            let label_offset = Vec2::new(
+                -arrow.ray_dir.x.abs() * 0.012,
+                arrow.ray_dir.y * 0.012,
+            );
+            let label_ndc = arrow.label_pos + label_offset;
+            let label_px = ndc_to_pixels(label_ndc, present_size);
+            if let Some(hud_res) = self.hud_resources.as_ref() {
                 push_text_quads(
                     &mut hud_quads,
                     &hud_res.font_atlas,
-                    legend_labels[axis_id],
+                    axis_labels[axis_id],
                     label_px,
-                    legend_text_size,
-                    axis_colors[axis_id],
+                    rose_label_text_size,
+                    arrow.color,
                     present_size,
                 );
-            }
-        } else if let Some(font) = self.hud_font.as_ref() {
-            for axis_id in 0..4 {
-                let y = legend_top - axis_id as f32 * legend_row_step + 0.012;
-                let label_px = ndc_to_pixels(Vec2::new(legend_x + 0.055, y), present_size);
+            } else if let Some(font) = self.hud_font.as_ref() {
                 push_text_lines(
                     &mut lines,
                     font,
-                    legend_labels[axis_id],
+                    axis_labels[axis_id],
                     label_px,
-                    legend_text_size,
-                    axis_colors[axis_id],
+                    rose_label_text_size,
+                    arrow.color,
                     present_size,
                 );
             }
         }
 
-        // Dual minimap: XY on top, ZW below.
-        let panel_size = Vec2::new(0.30, 0.18);
+        // Dual minimap: XZ on top (ground plane), YW below (height + 4th dim).
+        let panel_size = Vec2::new(0.34, 0.20);
         let panel_half = panel_size * 0.5;
         let panel_gap = 0.04;
         let margin = Vec2::new(0.05, 0.06);
@@ -2586,103 +2576,201 @@ impl RenderContext {
         let lower_top = lower_bottom + panel_size.y;
         let upper_bottom = lower_top + panel_gap;
         let upper_top = upper_bottom + panel_size.y;
-        let xy_center = Vec2::new((left + right) * 0.5, (upper_bottom + upper_top) * 0.5);
-        let zw_center = Vec2::new((left + right) * 0.5, (lower_bottom + lower_top) * 0.5);
-        let xy_min = Vec2::new(left, upper_bottom);
-        let xy_max = Vec2::new(right, upper_top);
-        let zw_min = Vec2::new(left, lower_bottom);
-        let zw_max = Vec2::new(right, lower_top);
+        let xz_center = Vec2::new((left + right) * 0.5, (upper_bottom + upper_top) * 0.5);
+        let yw_center = Vec2::new((left + right) * 0.5, (lower_bottom + lower_top) * 0.5);
+        let xz_min = Vec2::new(left, upper_bottom);
+        let xz_max = Vec2::new(right, upper_top);
+        let yw_min = Vec2::new(left, lower_bottom);
+        let yw_max = Vec2::new(right, lower_top);
         let map_range = 12.0;
+        let xz_frame_color = xy_frame_color;
+        let yw_frame_color = zw_frame_color;
+        let marker_xz_color = marker_xy_color;
+        let marker_yw_color = marker_zw_color;
+        let breadcrumb_xz_start = breadcrumb_xy_start;
+        let breadcrumb_xz_end = breadcrumb_xy_end;
+        let breadcrumb_yw_start = breadcrumb_zw_start;
+        let breadcrumb_yw_end = breadcrumb_zw_end;
 
-        push_rect(&mut lines, xy_min, xy_max, xy_frame_color);
-        push_rect(&mut lines, zw_min, zw_max, zw_frame_color);
+        // Panel frames
+        push_rect(&mut lines, xz_min, xz_max, xz_frame_color);
+        push_rect(&mut lines, yw_min, yw_max, yw_frame_color);
+
+        // Crosshair axes
         push_line(
             &mut lines,
-            Vec2::new(xy_min.x, xy_center.y),
-            Vec2::new(xy_max.x, xy_center.y),
+            Vec2::new(xz_min.x, xz_center.y),
+            Vec2::new(xz_max.x, xz_center.y),
             map_axis_color,
         );
         push_line(
             &mut lines,
-            Vec2::new(xy_center.x, xy_min.y),
-            Vec2::new(xy_center.x, xy_max.y),
+            Vec2::new(xz_center.x, xz_min.y),
+            Vec2::new(xz_center.x, xz_max.y),
             map_axis_color,
         );
         push_line(
             &mut lines,
-            Vec2::new(zw_min.x, zw_center.y),
-            Vec2::new(zw_max.x, zw_center.y),
+            Vec2::new(yw_min.x, yw_center.y),
+            Vec2::new(yw_max.x, yw_center.y),
             map_axis_color,
         );
         push_line(
             &mut lines,
-            Vec2::new(zw_center.x, zw_min.y),
-            Vec2::new(zw_center.x, zw_max.y),
+            Vec2::new(yw_center.x, yw_min.y),
+            Vec2::new(yw_center.x, yw_max.y),
             map_axis_color,
         );
 
-        push_cross(&mut lines, xy_center, 0.012, axis_colors[0]);
-        push_cross(&mut lines, zw_center, 0.012, axis_colors[3]);
+        // Scale tick marks every 4 world units along crosshairs (skip origin)
+        let tick_size = 0.008;
+        let tick_interval = 4.0;
+        let max_ticks = (map_range / tick_interval) as i32;
+        for panel_data in [
+            (xz_center, xz_min, xz_max),
+            (yw_center, yw_min, yw_max),
+        ] {
+            let (center, pmin, pmax) = panel_data;
+            for i in 1..=max_ticks {
+                let frac = (i as f32 * tick_interval) / map_range;
+                // Horizontal axis ticks (vertical dashes)
+                for sign in [-1.0f32, 1.0] {
+                    let tx = center.x + sign * frac * panel_half.x * 0.9;
+                    if tx > pmin.x && tx < pmax.x {
+                        push_line(
+                            &mut lines,
+                            Vec2::new(tx, center.y - tick_size),
+                            Vec2::new(tx, center.y + tick_size),
+                            map_axis_color * 0.6,
+                        );
+                    }
+                    // Vertical axis ticks (horizontal dashes)
+                    let ty = center.y + sign * frac * panel_half.y * 0.9;
+                    if ty > pmin.y && ty < pmax.y {
+                        push_line(
+                            &mut lines,
+                            Vec2::new(center.x - tick_size, ty),
+                            Vec2::new(center.x + tick_size, ty),
+                            map_axis_color * 0.6,
+                        );
+                    }
+                }
+            }
+        }
 
+        // Direction wedge on XZ panel: small triangle showing camera yaw
+        {
+            let yaw_x = -look_world[0]; // X component of look direction
+            let yaw_z = look_world[2];  // Z component of look direction
+            let yaw_len = (yaw_x * yaw_x + yaw_z * yaw_z).sqrt();
+            if yaw_len > 1e-4 {
+                let dx = yaw_x / yaw_len;
+                let dz = yaw_z / yaw_len;
+                // Map to panel space: X horizontal, Z vertical (up on screen)
+                // Correct for non-square panel aspect ratio
+                let panel_aspect = panel_half.x / panel_half.y;
+                let wedge_dir = Vec2::new(dx, dz * panel_aspect).normalize();
+                let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
+                let wedge_len = 0.025;
+                let wedge_width = 0.012;
+                let wedge_tip = xz_center + wedge_dir * wedge_len;
+                let wedge_left = xz_center - wedge_dir * wedge_len * 0.3 + wedge_side * wedge_width;
+                let wedge_right = xz_center - wedge_dir * wedge_len * 0.3 - wedge_side * wedge_width;
+                let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
+                push_line(&mut lines, wedge_tip, wedge_left, wedge_color);
+                push_line(&mut lines, wedge_tip, wedge_right, wedge_color);
+                push_line(&mut lines, wedge_left, wedge_right, wedge_color);
+            }
+        }
+
+        // Panel title labels and axis labels
+        let minimap_label_size = 11.0 * text_scale;
+        if let Some(hud_res) = self.hud_resources.as_ref() {
+            // Panel titles inside top-left corner
+            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_max.y - 0.01), present_size);
+            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "XZ", xz_title_px, minimap_label_size, xz_frame_color, present_size);
+            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_max.y - 0.01), present_size);
+            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "YW", yw_title_px, minimap_label_size, yw_frame_color, present_size);
+
+            // XZ panel axis labels: X at right edge, Z at top edge
+            let xz_x_label_px = ndc_to_pixels(Vec2::new(xz_max.x - 0.025, xz_center.y + 0.02), present_size);
+            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "X", xz_x_label_px, minimap_label_size, axis_colors[0], present_size);
+            let xz_z_label_px = ndc_to_pixels(Vec2::new(xz_center.x + 0.015, xz_max.y - 0.01), present_size);
+            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "Z", xz_z_label_px, minimap_label_size, axis_colors[2], present_size);
+
+            // YW panel axis labels: Y at right edge, W at top edge
+            let yw_y_label_px = ndc_to_pixels(Vec2::new(yw_max.x - 0.025, yw_center.y + 0.02), present_size);
+            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "Y", yw_y_label_px, minimap_label_size, axis_colors[1], present_size);
+            let yw_w_label_px = ndc_to_pixels(Vec2::new(yw_center.x + 0.015, yw_max.y - 0.01), present_size);
+            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "W", yw_w_label_px, minimap_label_size, axis_colors[3], present_size);
+        } else if let Some(font) = self.hud_font.as_ref() {
+            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_max.y - 0.01), present_size);
+            push_text_lines(&mut lines, font, "XZ", xz_title_px, minimap_label_size, xz_frame_color, present_size);
+            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_max.y - 0.01), present_size);
+            push_text_lines(&mut lines, font, "YW", yw_title_px, minimap_label_size, yw_frame_color, present_size);
+        }
+
+        // Instance markers: XZ panel uses indices [0]=X, [2]=Z; YW panel uses [1]=Y, [3]=W
         for center in &instance_centers {
-            let xy_point = map_to_panel(
-                xy_center,
+            let xz_point = map_to_panel(
+                xz_center,
                 panel_half * 0.9,
                 map_range,
                 center[0] - camera_position[0],
-                center[1] - camera_position[1],
+                center[2] - camera_position[2],
             );
-            let zw_point = map_to_panel(
-                zw_center,
+            let yw_point = map_to_panel(
+                yw_center,
                 panel_half * 0.9,
                 map_range,
-                center[2] - camera_position[2],
+                center[1] - camera_position[1],
                 center[3] - camera_position[3],
             );
-            push_cross(&mut lines, xy_point, 0.005, marker_xy_color);
-            push_cross(&mut lines, zw_point, 0.005, marker_zw_color);
+            push_cross(&mut lines, xz_point, 0.005, marker_xz_color);
+            push_cross(&mut lines, yw_point, 0.005, marker_yw_color);
         }
 
+        // Breadcrumb trails: XZ uses [0],[2]; YW uses [1],[3]
         if self.hud_breadcrumbs.len() >= 2 {
             let denom = (self.hud_breadcrumbs.len() - 1) as f32;
             for i in 1..self.hud_breadcrumbs.len() {
                 let prev = self.hud_breadcrumbs[i - 1];
                 let next = self.hud_breadcrumbs[i];
                 let t = i as f32 / denom;
-                let breadcrumb_xy_color = breadcrumb_xy_start.lerp(breadcrumb_xy_end, t);
-                let breadcrumb_zw_color = breadcrumb_zw_start.lerp(breadcrumb_zw_end, t);
+                let breadcrumb_xz_color = breadcrumb_xz_start.lerp(breadcrumb_xz_end, t);
+                let breadcrumb_yw_color = breadcrumb_yw_start.lerp(breadcrumb_yw_end, t);
 
-                let xy_prev = map_to_panel(
-                    xy_center,
+                let xz_prev = map_to_panel(
+                    xz_center,
                     panel_half * 0.9,
                     map_range,
                     prev[0] - camera_position[0],
-                    prev[1] - camera_position[1],
+                    prev[2] - camera_position[2],
                 );
-                let xy_next = map_to_panel(
-                    xy_center,
+                let xz_next = map_to_panel(
+                    xz_center,
                     panel_half * 0.9,
                     map_range,
                     next[0] - camera_position[0],
-                    next[1] - camera_position[1],
+                    next[2] - camera_position[2],
                 );
-                push_line(&mut lines, xy_prev, xy_next, breadcrumb_xy_color);
+                push_line(&mut lines, xz_prev, xz_next, breadcrumb_xz_color);
 
-                let zw_prev = map_to_panel(
-                    zw_center,
+                let yw_prev = map_to_panel(
+                    yw_center,
                     panel_half * 0.9,
                     map_range,
-                    prev[2] - camera_position[2],
+                    prev[1] - camera_position[1],
                     prev[3] - camera_position[3],
                 );
-                let zw_next = map_to_panel(
-                    zw_center,
+                let yw_next = map_to_panel(
+                    yw_center,
                     panel_half * 0.9,
                     map_range,
-                    next[2] - camera_position[2],
+                    next[1] - camera_position[1],
                     next[3] - camera_position[3],
                 );
-                push_line(&mut lines, zw_prev, zw_next, breadcrumb_zw_color);
+                push_line(&mut lines, yw_prev, yw_next, breadcrumb_yw_color);
             }
         }
 
@@ -2751,8 +2839,16 @@ impl RenderContext {
             drift_color,
         );
 
-        let readout_text = format!(
-            "POS {:+.2} {:+.2} {:+.2} {:+.2}\nLOOK {:+.2} {:+.2} {:+.2} {:+.2}",
+        let fps = if self.frame_time_ms > 0.1 {
+            1000.0 / self.frame_time_ms
+        } else {
+            0.0
+        };
+        let mut readout_text = format!(
+            "{:.1} ms ({:.0} fps) GPU {:.1} ms\nPOS {:+.2} {:+.2} {:+.2} {:+.2}\nLOOK {:+.2} {:+.2} {:+.2} {:+.2}",
+            self.frame_time_ms,
+            fps,
+            self.profiler.last_gpu_total_ms,
             camera_position[0],
             camera_position[1],
             camera_position[2],
@@ -2762,6 +2858,12 @@ impl RenderContext {
             look_world[2],
             look_world[3]
         );
+        if !self.profiler.last_frame_phases.is_empty() {
+            readout_text.push('\n');
+            for (name, ms) in &self.profiler.last_frame_phases {
+                readout_text.push_str(&format!(" {}:{:.1}", name, ms));
+            }
+        }
         // Position readout below the minimaps on the actual screen.
         // In Vulkan NDC, Y=-1 is framebuffer top. The minimaps' lowest point on
         // screen is at upper_top (≈-0.54). We place the readout just below that.
@@ -2771,12 +2873,12 @@ impl RenderContext {
             let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
 
             // Semi-transparent backgrounds behind minimap panels
-            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, xy_min, xy_max, panel_bg);
-            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, zw_min, zw_max, panel_bg);
+            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, xz_min, xz_max, panel_bg);
+            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, yw_min, yw_max, panel_bg);
 
             // Semi-transparent background behind text readout
             let readout_bg_min = Vec2::new(left, upper_top + 0.02);
-            let readout_bg_max = Vec2::new(right, upper_top + 0.14);
+            let readout_bg_max = Vec2::new(right, upper_top + 0.22);
             push_filled_rect_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
@@ -2865,6 +2967,13 @@ impl RenderContext {
             }
             None => {}
         };
+
+        // CPU frame time tracking
+        let render_start = Instant::now();
+        if let Some(prev_start) = self.last_render_start {
+            self.frame_time_ms = (render_start - prev_start).as_secs_f32() * 1000.0;
+        }
+        self.last_render_start = Some(render_start);
 
         if self.previous_frame_end.is_some() {
             // Wait for previous frame to complete before updating buffers
@@ -3073,25 +3182,24 @@ impl RenderContext {
                 .unwrap();
 
             // GPU profiling: reset query pool and write start timestamp
-            self.profiler.timestamps_written = 0;
-            let mut query_idx = 0u32;
-            if render_options.do_raytrace {
-                unsafe {
-                    builder.reset_query_pool(
-                        self.profiler.query_pool.clone(),
-                        0..PROFILER_MAX_TIMESTAMPS,
-                    )
-                }
-                .unwrap();
+            self.profiler.begin_frame();
+            unsafe {
+                builder.reset_query_pool(
+                    self.profiler.query_pool.clone(),
+                    0..PROFILER_MAX_TIMESTAMPS,
+                )
+            }
+            .unwrap();
+            {
+                let q = self.profiler.next_query_index("start");
                 unsafe {
                     builder.write_timestamp(
                         self.profiler.query_pool.clone(),
-                        query_idx,
+                        q,
                         PipelineStage::AllCommands,
                     )
                 }
                 .unwrap();
-                query_idx += 1;
             }
 
             if render_options.do_frame_clear || force_clear {
@@ -3105,20 +3213,16 @@ impl RenderContext {
                         1,
                     ])
                 }
-                .unwrap(); // Do compute stage
-            }
-
-            if render_options.do_raytrace {
-                // TS1: after clear
+                .unwrap();
+                let q = self.profiler.next_query_index("clear");
                 unsafe {
                     builder.write_timestamp(
                         self.profiler.query_pool.clone(),
-                        query_idx,
+                        q,
                         PipelineStage::AllCommands,
                     )
                 }
                 .unwrap();
-                query_idx += 1;
             }
 
             if render_options.do_raster || render_options.do_tetrahedron_edges {
@@ -3132,7 +3236,18 @@ impl RenderContext {
                     .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone())
                     .unwrap();
                 unsafe { builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1]) }
-                    .unwrap(); // Do compute stage
+                    .unwrap();
+                {
+                    let q = self.profiler.next_query_index("tet_clip");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.profiler.query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
 
                 if render_options.do_tetrahedron_edges {
                     line_render_count = total_tetrahedron_count * 6;
@@ -3151,7 +3266,18 @@ impl RenderContext {
                         1,
                     ])
                 }
-                .unwrap(); // Do compute stage
+                .unwrap();
+                {
+                    let q = self.profiler.next_query_index("tet_raster");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.profiler.query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
             }
 
             if render_options.do_edges {
@@ -3162,7 +3288,18 @@ impl RenderContext {
                 let total_edge_count =
                     self.one_time_buffers.model_edge_count * model_instances.len();
                 unsafe { builder.dispatch([(total_edge_count as u32 + 63) / 64u32, 1, 1]) }
-                    .unwrap(); // Do compute stage
+                    .unwrap();
+                {
+                    let q = self.profiler.next_query_index("edges");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.profiler.query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
 
                 line_render_count = total_edge_count;
             }
@@ -3184,8 +3321,6 @@ impl RenderContext {
                 let bvh_needs_rebuild = scene_hash != self.bvh_scene_hash;
 
                 if bvh_needs_rebuild {
-                    self.profiler.bvh_included = true;
-
                     // 1. Tetrahedron preprocessing (transform to view space)
                     builder
                         .bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone())
@@ -3194,17 +3329,17 @@ impl RenderContext {
                         builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
                     }
                     .unwrap();
-
-                    // TS2: after tet preprocess
-                    unsafe {
-                        builder.write_timestamp(
-                            self.profiler.query_pool.clone(),
-                            query_idx,
-                            PipelineStage::AllCommands,
-                        )
+                    {
+                        let q = self.profiler.next_query_index("rt_preprocess");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.profiler.query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
                     }
-                    .unwrap();
-                    query_idx += 1;
 
                     // 2. BVH Construction
                     if total_tetrahedron_count > 0 {
@@ -3357,18 +3492,17 @@ impl RenderContext {
                             .unwrap();
                     }
 
-                    // TS3: after BVH construction
-                    unsafe {
-                        builder.write_timestamp(
-                            self.profiler.query_pool.clone(),
-                            query_idx,
-                            PipelineStage::AllCommands,
-                        )
+                    {
+                        let q = self.profiler.next_query_index("bvh_build");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.profiler.query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
                     }
-                    .unwrap();
-                    query_idx += 1;
-                } else {
-                    self.profiler.bvh_included = false;
                 }
 
                 // 3. Raytrace pixels (using BVH) - always runs, only seed changes
@@ -3383,20 +3517,18 @@ impl RenderContext {
                     ])
                 }
                 .unwrap();
-
-                // Final timestamp: after raytrace
-                unsafe {
-                    builder.write_timestamp(
-                        self.profiler.query_pool.clone(),
-                        query_idx,
-                        PipelineStage::AllCommands,
-                    )
+                {
+                    let q = self.profiler.next_query_index("raytrace");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.profiler.query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
                 }
-                .unwrap();
-                query_idx += 1;
             }
-
-            self.profiler.timestamps_written = query_idx;
         }
 
         let mut hud_vertex_count = 0usize;
