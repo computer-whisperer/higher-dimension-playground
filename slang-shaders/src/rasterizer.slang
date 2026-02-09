@@ -489,9 +489,9 @@ float2 getZWAngleRange(WorkingData workingData)
     return float2(PI / 4.0 - viewAngle / 2.0, PI / 4.0 + viewAngle / 2.0);
 }
 
-// Maximum ZW lines per pixel. Reducing from 96 to 32 cuts register pressure from
-// 4.6KB to 1.5KB per thread, significantly improving GPU occupancy.
-static const uint MAX_ZW_LINES = 32;
+// Maximum ZW lines per pixel. With tile-based binning, each pixel only processes
+// tets overlapping its tile (~30-50), so 64 is rarely hit.
+static const uint MAX_ZW_LINES = 64;
 
 // Remove dead lines (textureId == 0) and compact the array
 uint condenseZWLines(inout ZWLine lines[MAX_ZW_LINES], uint numLines)
@@ -559,11 +559,37 @@ float4 renderZWLines2(inout ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDa
 
 // Simple ZW line rendering - samples along the ZW angle range
 // Uses incremental sin/cos rotation to avoid per-sample transcendentals.
+// Ray-from-origin intersection is specialized: for ray P(r)=r*(rayX,rayY)
+// and segment Q(s)=Q0+s*(dx,dy), the intersection parameters are:
+//   rNum = Q0.x*dy - Q0.y*dx  (constant per line — precomputed)
+//   rDen = rayX*dy - rayY*dx
+//   sNum = Q0.x*rayY - Q0.y*rayX
+//   r = rNum/rDen, s = sNum/rDen
 float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingData workingData)
 {
-    const uint DEPTH_FACTOR = 64;
+    const uint DEPTH_FACTOR = 256;
     float2 angleRange = getZWAngleRange(workingData);
     float angleStep = (angleRange.y - angleRange.x) / float(DEPTH_FACTOR);
+
+    // Precompute per-line constants for ray-from-origin intersection
+    float lineDx[MAX_ZW_LINES];
+    float lineDy[MAX_ZW_LINES];
+    float lineRNum[MAX_ZW_LINES];
+    float lineQ0x[MAX_ZW_LINES];
+    float lineQ0y[MAX_ZW_LINES];
+
+    for (uint j = 0; j < numLines; j++)
+    {
+        float2 q0 = lines[j].zwPositions[0];
+        float2 q1 = lines[j].zwPositions[1];
+        float dx = q1.x - q0.x;
+        float dy = q1.y - q0.y;
+        lineDx[j] = dx;
+        lineDy[j] = dy;
+        lineRNum[j] = q0.x * dy - q0.y * dx;
+        lineQ0x[j] = q0.x;
+        lineQ0y[j] = q0.y;
+    }
 
     // Initialize sin/cos for incremental rotation
     float theta0 = angleRange.x;
@@ -576,30 +602,27 @@ float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDat
 
     for (uint i = 0; i < DEPTH_FACTOR; i++)
     {
-        float2 sampleRay = float2(rayX, rayY);
-
         int closestLine = -1;
         float closestDist = 1e10;
         float closestVal = 0;
 
         for (uint j = 0; j < numLines; j++)
         {
-            float2 lineA[2] = { float2(0), sampleRay };
-            float2 lineB[2] = { lines[j].zwPositions[0], lines[j].zwPositions[1] };
+            float rDen = rayX * lineDy[j] - rayY * lineDx[j];
+            float invRDen = 1.0 / rDen;
+            float r = lineRNum[j] * invRDen;
+            float s = (lineQ0x[j] * rayY - lineQ0y[j] * rayX) * invRDen;
 
-            float2 intersection = getIntersection(lineA, lineB);
-            float dist = intersection.x;
-
-            if (intersection.y < 0.0 || intersection.y > 1.0)
+            if (s < 0.0 || s > 1.0)
                 continue;
-            if (dist < 0.0)
+            if (r < 0.0)
                 continue;
 
-            if (closestLine < 0 || dist < closestDist)
+            if (closestLine < 0 || r < closestDist)
             {
                 closestLine = int(j);
-                closestDist = dist;
-                closestVal = intersection.y;
+                closestDist = r;
+                closestVal = s;
             }
         }
 
