@@ -107,6 +107,7 @@ struct ZWLine
 {
     float2 zwPositions[2];
     float4 texturePositions[2];
+    float4 normal;           // 4D surface normal (view space), flat per-tetrahedron face
     uint textureId;
     uint padding[3];
 
@@ -117,6 +118,7 @@ struct ZWLine
         line.zwPositions[1] = float2(0);
         line.texturePositions[0] = float4(0);
         line.texturePositions[1] = float4(0);
+        line.normal = float4(0);
         line.textureId = 0;
         line.padding[0] = 0;
         line.padding[1] = 0;
@@ -131,6 +133,7 @@ struct ZWLine
         result.zwPositions[1] = zwPositions[0] * (1.0 - end) + zwPositions[1] * end;
         result.texturePositions[0] = texturePositions[0] * (1.0 - start) + texturePositions[1] * start;
         result.texturePositions[1] = texturePositions[0] * (1.0 - end) + texturePositions[1] * end;
+        result.normal = normal;
         result.textureId = textureId;
         return result;
     }

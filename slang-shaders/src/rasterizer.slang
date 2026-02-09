@@ -571,6 +571,12 @@ float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDat
     float2 angleRange = getZWAngleRange(workingData);
     float angleStep = (angleRange.y - angleRange.x) / float(DEPTH_FACTOR);
 
+    // Transform sun direction from world space to view space (direction only, w5=0)
+    float4 sunDirWorld = normalize(float4(0.3, 1.0, -0.3, 0.0));
+    VecN<5> sunDir5 = VecN<4>.fromFloat4(sunDirWorld).extend(0.0);
+    VecN<5> sunViewDir5 = workingData.viewMatrix * sunDir5;
+    float4 sunViewDir = normalize(sunViewDir5.toFloat4());
+
     // Precompute per-line constants for ray-from-origin intersection
     float lineDx[MAX_ZW_LINES];
     float lineDy[MAX_ZW_LINES];
@@ -632,7 +638,20 @@ float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDat
             float4 texPos = lines[closestLine].texturePositions[0] * val +
                            lines[closestLine].texturePositions[1] * (1.0 - val);
             MaterialProperties mat = sampleMaterial(lines[closestLine].textureId, texPos.xyz);
-            outputAccum += mat.albedo.xyz / float(DEPTH_FACTOR);
+            float4 normal = lines[closestLine].normal;
+
+            // Two-sided Lambert diffuse
+            float NdotL = max(0.0, dot(normal, sunViewDir));
+            float NdotLBack = max(0.0, dot(-normal, sunViewDir));
+            float diffuse = max(NdotL, NdotLBack);
+
+            float3 ambient = float3(0.08, 0.09, 0.12);
+            float3 sunColor = float3(1.0, 0.95, 0.9) * 0.8;
+
+            float3 litColor = mat.albedo.xyz * (ambient + sunColor * diffuse)
+                            + mat.luminance * mat.albedo.xyz;
+
+            outputAccum += litColor / float(DEPTH_FACTOR);
         }
 
         // Incremental rotation: (cos(θ+Δ), sin(θ+Δ)) = rotate(cos(θ), sin(θ))
@@ -789,6 +808,7 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
         // Uses perspective-correct interpolation: interpolate attr/d and 1/d
         // in screen space, then divide to recover correct view-space values.
         currentZWLines[numZWLines].textureId = tet.materialId;
+        currentZWLines[numZWLines].normal = tet.normal;
 
         for (uint j = 0; j < 2; j++)
         {

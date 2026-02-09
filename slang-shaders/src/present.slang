@@ -59,6 +59,17 @@ BufferVSOutput mainBufferVS(uint vertexId : SV_VertexID)
     return output;
 }
 
+// ACES filmic tone mapping
+float3 acesToneMap(float3 x)
+{
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 // Gamma correction
 float linearToGamma(float value)
 {
@@ -95,13 +106,15 @@ float4 mainBufferFS(float4 fragCoord : SV_Position) : SV_Target
         csResult += pixelBuffer[index];
     }
 
-    // Gamma correct and normalize
+    // Tone map and gamma correct
     if (csResult.w > 0.0)
     {
+        float3 color = csResult.xyz / csResult.w;
+        color = acesToneMap(color);
         float4 adjusted = float4(
-            linearToGamma(csResult.x / csResult.w),
-            linearToGamma(csResult.y / csResult.w),
-            linearToGamma(csResult.z / csResult.w),
+            linearToGamma(color.x),
+            linearToGamma(color.y),
+            linearToGamma(color.z),
             1.0
         );
         return adjusted;

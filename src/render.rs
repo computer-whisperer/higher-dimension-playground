@@ -365,12 +365,14 @@ fn push_text_quads(
     let scale = pixel_size / 32.0; // atlas was rasterized at 32px
     let line_advance = atlas.line_height * scale;
     let mut caret_x = top_left_px.x;
-    let mut baseline_y = top_left_px.y + atlas.ascent * scale;
+    // ndc_to_pixels produces Y-up coords (pixel 0 = screen bottom, pixel h = screen top).
+    // Baseline sits below the top of the text box.
+    let mut baseline_y = top_left_px.y - atlas.ascent * scale;
 
     for ch in text.chars() {
         if ch == '\n' {
             caret_x = top_left_px.x;
-            baseline_y += line_advance;
+            baseline_y -= line_advance; // next line goes down in Y-up
             continue;
         }
 
@@ -387,7 +389,9 @@ fn push_text_quads(
             let gw = glyph.size_px.x * scale;
             let gh = glyph.size_px.y * scale;
             let x0 = caret_x + glyph.bearing_px.x * scale;
-            let y0 = baseline_y + glyph.bearing_px.y * scale;
+            // bearing_px.y is Y-down offset from baseline to glyph top (negative).
+            // In Y-up, negate it to get glyph top, then subtract gh for glyph bottom.
+            let y0 = baseline_y - glyph.bearing_px.y * scale - gh;
 
             let p_min = pixels_to_ndc(Vec2::new(x0, y0), present_size);
             let p_max = pixels_to_ndc(Vec2::new(x0 + gw, y0 + gh), present_size);
@@ -604,7 +608,7 @@ fn push_cross(lines: &mut Vec<OverlayLine>, center: Vec2, radius: f32, color: Ve
 
 fn map_to_panel(center: Vec2, half_size: Vec2, map_range: f32, a: f32, b: f32) -> Vec2 {
     let x = (a / map_range).clamp(-1.0, 1.0) * half_size.x;
-    let y = (b / map_range).clamp(-1.0, 1.0) * half_size.y;
+    let y = (-b / map_range).clamp(-1.0, 1.0) * half_size.y; // negate for Vulkan +Y=down
     center + Vec2::new(x, y)
 }
 
@@ -659,15 +663,18 @@ fn push_text_lines(
     present_size: [u32; 2],
 ) {
     let scaled = font.as_scaled(pixel_size);
+    let h = present_size[1] as f32;
     let mut caret_x = top_left_px.x;
-    let mut baseline_y = top_left_px.y + scaled.ascent();
+    // top_left_px is in Y-up pixel space (from ndc_to_pixels), but ab_glyph uses Y-down.
+    // Convert: Y-down baseline = (h - top_left_y_up) + ascent
+    let mut baseline_y = (h - top_left_px.y) + scaled.ascent();
     let line_advance = (scaled.height() + scaled.line_gap()).max(pixel_size * 1.2);
     let mut prev_glyph = None;
 
     for ch in text.chars() {
         if ch == '\n' {
             caret_x = top_left_px.x;
-            baseline_y += line_advance;
+            baseline_y += line_advance; // Y-down: next line increases y
             prev_glyph = None;
             continue;
         }
@@ -707,7 +714,9 @@ fn push_text_lines(
                             x += 1;
                         }
 
-                        let px_y = bounds.min.y + y as f32 + 0.5;
+                        // bounds are in Y-down pixels; convert to Y-up for pixels_to_ndc
+                        let px_y_down = bounds.min.y + y as f32 + 0.5;
+                        let px_y = h - px_y_down;
                         let px_start = Vec2::new(bounds.min.x + run_start as f32, px_y);
                         let px_end = Vec2::new(bounds.min.x + x as f32, px_y);
                         push_line(
@@ -2615,10 +2624,10 @@ impl RenderContext {
             [0.0, 0.0, 0.0, 1.0], // W
         ];
         let fallback_dirs = [
-            Vec2::new(1.0, 0.0),
-            Vec2::new(0.0, 1.0),
-            Vec2::new(-1.0, 0.0),
-            Vec2::new(0.0, -1.0),
+            Vec2::new(1.0, 0.0),   // X: right
+            Vec2::new(0.0, -1.0),  // Y: up (Vulkan +Y=down)
+            Vec2::new(-1.0, 0.0),  // Z: left
+            Vec2::new(0.0, 1.0),   // W: down (Vulkan +Y=down)
         ];
         let axis_labels = ["X", "Y", "Z", "W"];
         let arrow_len = rose_radius * 0.70;
@@ -2738,12 +2747,14 @@ impl RenderContext {
         let lower_top = lower_bottom + panel_size.y;
         let upper_bottom = lower_top + panel_gap;
         let upper_top = upper_bottom + panel_size.y;
-        let xz_center = Vec2::new((left + right) * 0.5, (upper_bottom + upper_top) * 0.5);
-        let yw_center = Vec2::new((left + right) * 0.5, (lower_bottom + lower_top) * 0.5);
-        let xz_min = Vec2::new(left, upper_bottom);
-        let xz_max = Vec2::new(right, upper_top);
-        let yw_min = Vec2::new(left, lower_bottom);
-        let yw_max = Vec2::new(right, lower_top);
+        // In Vulkan clip space +Y=down, so lower clip Y = higher on screen.
+        // XZ on top (lower clip Y), YW below (higher clip Y).
+        let xz_center = Vec2::new((left + right) * 0.5, (lower_bottom + lower_top) * 0.5);
+        let yw_center = Vec2::new((left + right) * 0.5, (upper_bottom + upper_top) * 0.5);
+        let xz_min = Vec2::new(left, lower_bottom);
+        let xz_max = Vec2::new(right, lower_top);
+        let yw_min = Vec2::new(left, upper_bottom);
+        let yw_max = Vec2::new(right, upper_top);
         let map_range = 12.0;
         let xz_frame_color = xy_frame_color;
         let yw_frame_color = zw_frame_color;
@@ -2822,16 +2833,16 @@ impl RenderContext {
 
         // Direction wedge on XZ panel: small triangle showing camera yaw
         {
-            let yaw_x = -look_world[0]; // X component of look direction
-            let yaw_z = look_world[2];  // Z component of look direction
+            let yaw_x = look_world[0];  // X component of look direction
+            let yaw_z = look_world[2]; // Z component of look direction
             let yaw_len = (yaw_x * yaw_x + yaw_z * yaw_z).sqrt();
             if yaw_len > 1e-4 {
                 let dx = yaw_x / yaw_len;
                 let dz = yaw_z / yaw_len;
                 // Map to panel space: X horizontal, Z vertical (up on screen)
-                // Correct for non-square panel aspect ratio
+                // Negate dz because Vulkan +Y=down but +Z should point up on minimap
                 let panel_aspect = panel_half.x / panel_half.y;
-                let wedge_dir = Vec2::new(dx, dz * panel_aspect).normalize();
+                let wedge_dir = Vec2::new(dx, -dz * panel_aspect).normalize();
                 let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
                 let wedge_len = 0.025;
                 let wedge_width = 0.012;
@@ -2845,30 +2856,57 @@ impl RenderContext {
             }
         }
 
+        // Direction wedge on YW panel: small triangle showing camera look in Y/W plane
+        {
+            let look_y = look_world[1]; // Y component of look direction
+            let look_w = look_world[3]; // W component of look direction
+            let yw_len = (look_y * look_y + look_w * look_w).sqrt();
+            if yw_len > 1e-4 {
+                let dy = look_y / yw_len;
+                let dw = look_w / yw_len;
+                // Map to panel space: Y horizontal, W vertical (up on screen)
+                // Negate dw because Vulkan +Y=down but +W should point up on minimap
+                let panel_aspect = panel_half.x / panel_half.y;
+                let wedge_dir = Vec2::new(dy, -dw * panel_aspect).normalize();
+                let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
+                let wedge_len = 0.025;
+                let wedge_width = 0.012;
+                let wedge_tip = yw_center + wedge_dir * wedge_len;
+                let wedge_left =
+                    yw_center - wedge_dir * wedge_len * 0.3 + wedge_side * wedge_width;
+                let wedge_right =
+                    yw_center - wedge_dir * wedge_len * 0.3 - wedge_side * wedge_width;
+                let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
+                push_line(&mut lines, wedge_tip, wedge_left, wedge_color);
+                push_line(&mut lines, wedge_tip, wedge_right, wedge_color);
+                push_line(&mut lines, wedge_left, wedge_right, wedge_color);
+            }
+        }
+
         // Panel title labels and axis labels
         let minimap_label_size = 11.0 * text_scale;
         if let Some(hud_res) = self.hud_resources.as_ref() {
-            // Panel titles inside top-left corner
-            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_max.y - 0.01), present_size);
+            // Panel titles inside top-left corner (Vulkan: lower clip Y = higher on screen)
+            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
             push_text_quads(&mut hud_quads, &hud_res.font_atlas, "XZ", xz_title_px, minimap_label_size, xz_frame_color, present_size);
-            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_max.y - 0.01), present_size);
+            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
             push_text_quads(&mut hud_quads, &hud_res.font_atlas, "YW", yw_title_px, minimap_label_size, yw_frame_color, present_size);
 
-            // XZ panel axis labels: X at right edge, Z at top edge
+            // XZ panel axis labels: X at right edge, Z at top edge (lower clip Y)
             let xz_x_label_px = ndc_to_pixels(Vec2::new(xz_max.x - 0.025, xz_center.y + 0.02), present_size);
             push_text_quads(&mut hud_quads, &hud_res.font_atlas, "X", xz_x_label_px, minimap_label_size, axis_colors[0], present_size);
-            let xz_z_label_px = ndc_to_pixels(Vec2::new(xz_center.x + 0.015, xz_max.y - 0.01), present_size);
+            let xz_z_label_px = ndc_to_pixels(Vec2::new(xz_center.x + 0.015, xz_min.y + 0.01), present_size);
             push_text_quads(&mut hud_quads, &hud_res.font_atlas, "Z", xz_z_label_px, minimap_label_size, axis_colors[2], present_size);
 
-            // YW panel axis labels: Y at right edge, W at top edge
+            // YW panel axis labels: Y at right edge, W at top edge (lower clip Y)
             let yw_y_label_px = ndc_to_pixels(Vec2::new(yw_max.x - 0.025, yw_center.y + 0.02), present_size);
             push_text_quads(&mut hud_quads, &hud_res.font_atlas, "Y", yw_y_label_px, minimap_label_size, axis_colors[1], present_size);
-            let yw_w_label_px = ndc_to_pixels(Vec2::new(yw_center.x + 0.015, yw_max.y - 0.01), present_size);
+            let yw_w_label_px = ndc_to_pixels(Vec2::new(yw_center.x + 0.015, yw_min.y + 0.01), present_size);
             push_text_quads(&mut hud_quads, &hud_res.font_atlas, "W", yw_w_label_px, minimap_label_size, axis_colors[3], present_size);
         } else if let Some(font) = self.hud_font.as_ref() {
-            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_max.y - 0.01), present_size);
+            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
             push_text_lines(&mut lines, font, "XZ", xz_title_px, minimap_label_size, xz_frame_color, present_size);
-            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_max.y - 0.01), present_size);
+            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
             push_text_lines(&mut lines, font, "YW", yw_title_px, minimap_label_size, yw_frame_color, present_size);
         }
 
@@ -2942,9 +2980,11 @@ impl RenderContext {
         let altimeter_max_y = upper_top;
         let altimeter_range = 12.0;
         let zero_ratio = 0.5;
-        let zero_y = altimeter_min_y + (altimeter_max_y - altimeter_min_y) * zero_ratio;
+        // In Vulkan clip space, altimeter_min_y (lower value) is higher on screen.
+        // Higher W should be higher on screen (lower clip Y), so invert the mapping.
+        let zero_y = altimeter_max_y + (altimeter_min_y - altimeter_max_y) * zero_ratio;
         let w_ratio = ((camera_position[3] / altimeter_range) * 0.5 + 0.5).clamp(0.0, 1.0);
-        let w_y = altimeter_min_y + (altimeter_max_y - altimeter_min_y) * w_ratio;
+        let w_y = altimeter_max_y + (altimeter_min_y - altimeter_max_y) * w_ratio;
 
         push_line(
             &mut lines,
@@ -3027,8 +3067,7 @@ impl RenderContext {
             }
         }
         // Position readout below the minimaps on the actual screen.
-        // In Vulkan NDC, Y=-1 is framebuffer top. The minimaps' lowest point on
-        // screen is at upper_top (≈-0.54). We place the readout just below that.
+        // In Vulkan NDC +Y is down. upper_top is the panel's lowest screen edge.
         let readout_anchor_ndc = Vec2::new(left, upper_top + 0.06);
 
         if let Some(hud_res) = self.hud_resources.as_ref() {
