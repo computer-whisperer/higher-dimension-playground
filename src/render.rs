@@ -100,6 +100,7 @@ pub struct RenderOptions {
     pub do_navigation_hud: bool,
     pub take_framebuffer_screenshot: bool,
     pub prepare_render_screenshot: bool,
+    pub hud_rotation_label: Option<String>,
 }
 
 impl Default for RenderOptions {
@@ -113,6 +114,7 @@ impl Default for RenderOptions {
             do_navigation_hud: false,
             take_framebuffer_screenshot: false,
             prepare_render_screenshot: false,
+            hud_rotation_label: None,
         }
     }
 }
@@ -2483,6 +2485,7 @@ impl RenderContext {
         view_matrix_inverse: &nalgebra::Matrix5<f32>,
         focal_length_xy: f32,
         model_instances: &[common::ModelInstance],
+        rotation_label: Option<&str>,
     ) -> (usize, usize) {
         let max_lines = LINE_VERTEX_CAPACITY / 2;
         if base_line_count >= max_lines {
@@ -2731,6 +2734,36 @@ impl RenderContext {
                     label_px,
                     rose_label_text_size,
                     arrow.color,
+                    present_size,
+                );
+            }
+        }
+
+        // Rotation mode label below compass rose
+        if let Some(label) = rotation_label {
+            let label_ndc = Vec2::new(rose_origin.x, rose_origin.y + rose_radius + 0.04);
+            let label_text_size = 11.0 * text_scale;
+            let label_color = Vec4::new(0.90, 0.90, 0.55, 1.0);
+            if let Some(hud_res) = self.hud_resources.as_ref() {
+                let label_px = ndc_to_pixels(label_ndc, present_size);
+                push_text_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    label,
+                    label_px,
+                    label_text_size,
+                    label_color,
+                    present_size,
+                );
+            } else if let Some(font) = self.hud_font.as_ref() {
+                let label_px = ndc_to_pixels(label_ndc, present_size);
+                push_text_lines(
+                    &mut lines,
+                    font,
+                    label,
+                    label_px,
+                    label_text_size,
+                    label_color,
                     present_size,
                 );
             }
@@ -3783,6 +3816,7 @@ impl RenderContext {
                 &view_matrix_nalgebra_inv,
                 focal_length_xy,
                 model_instances,
+                render_options.hud_rotation_label.as_deref(),
             );
             line_render_count += hud_line_count;
             hud_vertex_count = hud_quad_count;

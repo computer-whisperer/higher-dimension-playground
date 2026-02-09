@@ -97,8 +97,8 @@ higher-dimension-playground/
 │   ├── game/                # Interactive FPS-style 4D explorer
 │   │   └── src/
 │   │       ├── main.rs      # App struct, event loop, mouse grab
-│   │       ├── camera.rs    # Camera4D: position, yaw, pitch, view matrix
-│   │       ├── input.rs     # InputState: key/mouse tracking
+│   │       ├── camera.rs    # Camera4D: 5-angle orientation, auto-leveling
+│   │       ├── input.rs     # InputState: keys, mouse buttons, scroll, rotation modes
 │   │       └── scene.rs     # Demo scene builder
 │   ├── demo/                # CLI demo with pre-set camera angles
 │   │   └── src/main.rs      # Headless/windowed demo, CLI options
@@ -150,14 +150,21 @@ The default scene includes:
 
 ### Game Controls
 
-| Key | Action |
-|-----|--------|
+| Input | Action |
+|-------|--------|
 | W/A/S/D | Move forward/left/back/right |
-| Mouse | Look around (yaw/pitch) |
+| Mouse | Look around (yaw/pitch by default) |
 | Space/Shift | Move up/down (Y axis) |
 | Q/E | Move along W axis |
+| Mouse Back | Hold for 4D rotation (XW/ZW planes) |
+| Mouse Back+Forward | Hold both for double rotation (XZ yaw + YW) |
+| Scroll wheel | Adjust move speed (Layers mode) or cycle rotation pair (Scroll mode) |
+| Tab | Toggle control scheme (Layers / Scroll) |
+| R | Reset camera orientation to defaults |
+| F12 | Screenshot |
 | Escape | Release mouse (press again to exit) |
 | Click | Re-grab mouse |
+| Double-tap Space | Toggle fly/gravity mode |
 
 ### Demo Options
 
