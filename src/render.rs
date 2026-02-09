@@ -77,6 +77,8 @@ struct ShaderModules {
     raytrace_preprocess: Arc<ShaderModule>,
     raytrace_pixel: Arc<ShaderModule>,
     raytrace_clear: Arc<ShaderModule>,
+    // Tile binning
+    bin_tets_cs: Arc<ShaderModule>,
     // BVH compute shaders
     bvh_scene_bounds: Arc<ShaderModule>,
     bvh_morton_codes: Arc<ShaderModule>,
@@ -118,6 +120,17 @@ impl Default for RenderOptions {
 const LINE_VERTEX_CAPACITY: usize = 100_000;
 const HUD_BREADCRUMB_CAPACITY: usize = 128;
 const HUD_BREADCRUMB_MIN_STEP: f32 = 0.2;
+const FRAMES_IN_FLIGHT: usize = 2;
+
+struct FrameInFlight {
+    live_buffers: LiveBuffers,
+    line_vertexes_buffer: Subbuffer<[LineVertex]>,
+    hud_vertex_buffer: Option<Subbuffer<[HudVertex]>>,
+    hud_descriptor_set: Option<Arc<DescriptorSet>>,
+    sized_descriptor_set: Arc<DescriptorSet>,
+    query_pool: Arc<QueryPool>,
+    fence: Option<Box<dyn GpuFuture>>,
+}
 
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
@@ -294,9 +307,50 @@ fn build_font_atlas(font: &FontArc, pixel_size: f32) -> FontAtlas {
 }
 
 struct HudResources {
-    vertex_buffer: Subbuffer<[HudVertex]>,
-    descriptor_set: Arc<DescriptorSet>,
     font_atlas: FontAtlas,
+    atlas_view: Arc<ImageView>,
+    atlas_sampler: Arc<Sampler>,
+    hud_descriptor_set_layout: Arc<DescriptorSetLayout>,
+}
+
+impl HudResources {
+    fn create_per_frame_hud(
+        &self,
+        memory_allocator: Arc<dyn MemoryAllocator>,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
+    ) -> (Subbuffer<[HudVertex]>, Arc<DescriptorSet>) {
+        let hud_vertex_buffer = Buffer::from_iter(
+            memory_allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![HudVertex::zeroed(); HUD_VERTEX_CAPACITY],
+        )
+        .unwrap();
+
+        let hud_descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator,
+            self.hud_descriptor_set_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, hud_vertex_buffer.clone()),
+                WriteDescriptorSet::image_view_sampler(
+                    1,
+                    self.atlas_view.clone(),
+                    self.atlas_sampler.clone(),
+                ),
+            ],
+            [],
+        )
+        .unwrap();
+
+        (hud_vertex_buffer, hud_descriptor_set)
+    }
 }
 
 fn push_text_quads(
@@ -766,18 +820,23 @@ impl OneTimeBuffers {
     }
 }
 
+const MAX_TETS_PER_TILE: usize = 256;
+
 pub struct SizedBuffers {
     render_dimensions: [u32; 3],
     max_tetrahedrons: usize,
-    line_vertexes_buffer: Subbuffer<[LineVertex]>,
     output_tetrahedron_buffer: Subbuffer<[common::Tetrahedron]>,
     output_pixel_buffer: Subbuffer<[Vec4]>,
     morton_codes_buffer: Subbuffer<[common::MortonCode]>,
     bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
     scene_bounds_buffer: Subbuffer<[common::SceneBounds]>,
     atomic_counter_buffer: Subbuffer<[u32]>,
-    descriptor_set: Arc<DescriptorSet>,
+    cpu_atomic_counter_buffer: Subbuffer<[u32]>,
     output_cpu_pixel_buffer: Subbuffer<[Vec4]>,
+    // Tile binning buffers
+    tile_tet_counts_buffer: Subbuffer<[u32]>,
+    tile_tet_indices_buffer: Subbuffer<[u32]>,
+    tile_count: u32,
     // Debug readback buffers
     cpu_bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
     cpu_morton_codes_buffer: Subbuffer<[common::MortonCode]>,
@@ -786,26 +845,9 @@ pub struct SizedBuffers {
 impl SizedBuffers {
     pub fn new(
         memory_allocator: Arc<dyn MemoryAllocator>,
-        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
-        descriptor_set_layout: Arc<DescriptorSetLayout>,
         render_dimensions: [u32; 3],
     ) -> Self {
         let max_tetrahedrons: usize = 40000;
-
-        let line_vertexes_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![LineVertex::zeroed(); LINE_VERTEX_CAPACITY],
-        )
-        .unwrap();
 
         let output_tetrahedron_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -919,7 +961,7 @@ impl SizedBuffers {
         let atomic_counter_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -928,6 +970,56 @@ impl SizedBuffers {
                 ..Default::default()
             },
             vec![0u32; 1],
+        )
+        .unwrap();
+
+        let cpu_atomic_counter_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            vec![0u32; 1],
+        )
+        .unwrap();
+
+        // Tile binning buffers
+        let tiles_x = (render_dimensions[0] + 7) / 8;
+        let tiles_y = (render_dimensions[1] + 7) / 8;
+        let tile_count = tiles_x * tiles_y;
+
+        let tile_tet_counts_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; tile_count as usize],
+        )
+        .unwrap();
+
+        let tile_tet_indices_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; tile_count as usize * MAX_TETS_PER_TILE],
         )
         .unwrap();
 
@@ -962,36 +1054,48 @@ impl SizedBuffers {
         )
         .unwrap();
 
-        let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator,
-            descriptor_set_layout,
-            [
-                WriteDescriptorSet::buffer(0, line_vertexes_buffer.clone()),
-                WriteDescriptorSet::buffer(1, output_tetrahedron_buffer.clone()),
-                WriteDescriptorSet::buffer(2, output_pixel_buffer.clone()),
-                WriteDescriptorSet::buffer(3, morton_codes_buffer.clone()),
-                WriteDescriptorSet::buffer(4, bvh_nodes_buffer.clone()),
-                WriteDescriptorSet::buffer(5, scene_bounds_buffer.clone()),
-                WriteDescriptorSet::buffer(6, atomic_counter_buffer.clone()),
-            ],
-            [],
-        )
-        .unwrap();
         Self {
             render_dimensions,
             max_tetrahedrons,
-            line_vertexes_buffer,
             output_tetrahedron_buffer,
             output_pixel_buffer,
             morton_codes_buffer,
             bvh_nodes_buffer,
             scene_bounds_buffer,
             atomic_counter_buffer,
+            cpu_atomic_counter_buffer,
             output_cpu_pixel_buffer,
+            tile_tet_counts_buffer,
+            tile_tet_indices_buffer,
+            tile_count,
             cpu_bvh_nodes_buffer,
             cpu_morton_codes_buffer,
-            descriptor_set,
         }
+    }
+
+    fn create_sized_descriptor_set(
+        &self,
+        line_vertexes_buffer: &Subbuffer<[LineVertex]>,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
+        descriptor_set_layout: Arc<DescriptorSetLayout>,
+    ) -> Arc<DescriptorSet> {
+        DescriptorSet::new(
+            descriptor_set_allocator,
+            descriptor_set_layout,
+            [
+                WriteDescriptorSet::buffer(0, line_vertexes_buffer.clone()),
+                WriteDescriptorSet::buffer(1, self.output_tetrahedron_buffer.clone()),
+                WriteDescriptorSet::buffer(2, self.output_pixel_buffer.clone()),
+                WriteDescriptorSet::buffer(3, self.morton_codes_buffer.clone()),
+                WriteDescriptorSet::buffer(4, self.bvh_nodes_buffer.clone()),
+                WriteDescriptorSet::buffer(5, self.scene_bounds_buffer.clone()),
+                WriteDescriptorSet::buffer(6, self.atomic_counter_buffer.clone()),
+                WriteDescriptorSet::buffer(7, self.tile_tet_counts_buffer.clone()),
+                WriteDescriptorSet::buffer(8, self.tile_tet_indices_buffer.clone()),
+            ],
+            [],
+        )
+        .unwrap()
     }
 
     pub fn create_descriptor_set_layout(device: Arc<Device>) -> Arc<DescriptorSetLayout> {
@@ -1042,6 +1146,21 @@ impl SizedBuffers {
         // Atomic counter for tetrahedron clipping
         bindings.insert(
             6,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            },
+        );
+        // Tile binning buffers
+        bindings.insert(
+            7,
+            DescriptorSetLayoutBinding {
+                stages: ShaderStages::COMPUTE,
+                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+            },
+        );
+        bindings.insert(
+            8,
             DescriptorSetLayoutBinding {
                 stages: ShaderStages::COMPUTE,
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
@@ -1385,6 +1504,7 @@ struct ComputePipelineContext {
     tetrahedron_pipeline: Arc<ComputePipeline>,
     edge_pipeline: Arc<ComputePipeline>,
     tetrahedron_pixel_pipeline: Arc<ComputePipeline>,
+    bin_tets_pipeline: Arc<ComputePipeline>,
     raytrace_pre_pipeline: Arc<ComputePipeline>,
     raytrace_pixel_pipeline: Arc<ComputePipeline>,
     raytrace_clear_pipeline: Arc<ComputePipeline>,
@@ -1441,6 +1561,20 @@ impl ComputePipelineContext {
                         shaders
                             .tetrahedron_pixel_cs
                             .entry_point("mainTetrahedronPixelCS")
+                            .unwrap(),
+                    ),
+                    pipeline_layout.clone(),
+                ),
+            )
+            .unwrap(),
+            bin_tets_pipeline: ComputePipeline::new(
+                device.clone(),
+                None,
+                ComputePipelineCreateInfo::stage_layout(
+                    PipelineShaderStageCreateInfo::new(
+                        shaders
+                            .bin_tets_cs
+                            .entry_point("mainBinTetsCS")
                             .unwrap(),
                     ),
                     pipeline_layout.clone(),
@@ -1625,7 +1759,6 @@ const PROFILER_MAX_TIMESTAMPS: u32 = 16;
 const PROFILER_REPORT_INTERVAL: usize = 100;
 
 struct GpuProfiler {
-    query_pool: Arc<QueryPool>,
     timestamp_period_ns: f32,
     next_query: u32,
     /// Phase name for each timestamp (interval is from previous to this timestamp)
@@ -1641,19 +1774,9 @@ struct GpuProfiler {
 
 impl GpuProfiler {
     fn new(device: Arc<Device>) -> Self {
-        let query_pool = QueryPool::new(
-            device.clone(),
-            QueryPoolCreateInfo {
-                query_count: PROFILER_MAX_TIMESTAMPS,
-                ..QueryPoolCreateInfo::query_type(QueryType::Timestamp)
-            },
-        )
-        .unwrap();
-
         let timestamp_period_ns = device.physical_device().properties().timestamp_period;
 
         GpuProfiler {
-            query_pool,
             timestamp_period_ns,
             next_query: 0,
             phase_names: Vec::new(),
@@ -1662,6 +1785,17 @@ impl GpuProfiler {
             last_gpu_total_ms: 0.0,
             last_frame_phases: Vec::new(),
         }
+    }
+
+    fn create_query_pool(device: &Arc<Device>) -> Arc<QueryPool> {
+        QueryPool::new(
+            device.clone(),
+            QueryPoolCreateInfo {
+                query_count: PROFILER_MAX_TIMESTAMPS,
+                ..QueryPoolCreateInfo::query_type(QueryType::Timestamp)
+            },
+        )
+        .unwrap()
     }
 
     fn begin_frame(&mut self) {
@@ -1676,15 +1810,14 @@ impl GpuProfiler {
         idx
     }
 
-    fn read_results_and_accumulate(&mut self) {
+    fn read_results_and_accumulate(&mut self, query_pool: &Arc<QueryPool>, clipped_tet_count: u32) {
         let n = self.next_query;
         if n < 2 {
             return;
         }
 
         let mut results = vec![0u64; n as usize];
-        match self
-            .query_pool
+        match query_pool
             .get_results::<u64>(0..n, &mut results, QueryResultFlags::WAIT)
         {
             Ok(true) => {}
@@ -1715,6 +1848,13 @@ impl GpuProfiler {
         self.last_gpu_total_ms = total_ms as f32;
 
         self.total_frames += 1;
+
+        if total_ms > 100.0 {
+            println!("!!! SLOW FRAME ({:.1} ms) — clipped_tets={} — per-phase:", total_ms, clipped_tet_count);
+            for (name, ms) in &self.last_frame_phases {
+                println!("  {}: {:.3} ms", name, ms);
+            }
+        }
 
         if self.total_frames > 0 && self.total_frames % PROFILER_REPORT_INTERVAL == 0 {
             self.print_report();
@@ -1753,15 +1893,16 @@ pub struct RenderContext {
     compute_pipeline: ComputePipelineContext,
     viewport: Viewport,
     recreate_swapchain: bool,
-    previous_frame_end: Option<Box<dyn GpuFuture>>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     one_time_buffers: OneTimeBuffers,
     sized_buffers: SizedBuffers,
-    live_buffers: LiveBuffers,
+    frames_in_flight: Vec<FrameInFlight>,
     cpu_screen_capture_buffer: Subbuffer<[u8]>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     frames_rendered: usize,
     bvh_scene_hash: u64,
+    last_clipped_tet_count: u32,
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
     hud_resources: Option<HudResources>,
@@ -1910,6 +2051,10 @@ impl RenderContext {
             &std::fs::read(spirv_dir.join("mainTetrahedronPixelCS.spv"))
                 .expect("Failed to read shader"),
         );
+        let bin_tets_cs = load_shader(
+            device.clone(),
+            &std::fs::read(spirv_dir.join("mainBinTetsCS.spv")).expect("Failed to read shader"),
+        );
         let present_line_vs = load_shader(
             device.clone(),
             &std::fs::read(spirv_dir.join("mainLineVS.spv")).expect("Failed to read shader"),
@@ -2047,17 +2192,10 @@ impl RenderContext {
             SizedBuffers::create_descriptor_set_layout(device.clone());
         let sized_buffers = SizedBuffers::new(
             memory_allocator.clone(),
-            descriptor_set_allocator.clone(),
-            sized_descriptor_set_layout.clone(),
             render_dimensions,
         );
 
         let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
-        let live_buffers = LiveBuffers::new(
-            memory_allocator.clone(),
-            descriptor_set_allocator.clone(),
-            live_descriptor_set_layout.clone(),
-        );
 
         // We must now create a **pipeline layout** object, which describes the locations and
         // types of descriptor sets and push constants used by the shaders in the pipeline.
@@ -2097,6 +2235,7 @@ impl RenderContext {
             tetrahedron_cs: raster_tet,
             edge_cs: raster_edge,
             tetrahedron_pixel_cs: raster_pixel,
+            bin_tets_cs,
             raytrace_preprocess: raytrace_preprocess,
             raytrace_pixel: raytrace_pixel,
             raytrace_clear: raytrace_clear,
@@ -2147,14 +2286,6 @@ impl RenderContext {
         // work. To continue rendering, we need to recreate the swapchain by creating a new
         // swapchain. Here, we remember that we need to do this for the next loop iteration.
         let recreate_swapchain = false;
-
-        // In the `window_event` handler below we are going to submit commands to the GPU.
-        // Submitting a command produces an object that implements the `GpuFuture` trait, which
-        // holds the resources for as long as they are in use by the GPU.
-        //
-        // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to
-        // avoid that, we store the submission of the previous frame here.
-        let previous_frame_end = None;
 
         let profiler = GpuProfiler::new(device.clone());
         let hud_font = load_hud_font();
@@ -2232,47 +2363,76 @@ impl RenderContext {
                 )
                 .unwrap();
 
-                // Create HUD vertex buffer
-                let hud_vertex_buffer = Buffer::from_iter(
-                    memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::STORAGE_BUFFER,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                            | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                    vec![HudVertex::zeroed(); HUD_VERTEX_CAPACITY],
-                )
-                .unwrap();
-
-                // Create HUD descriptor set
-                let hud_descriptor_set = DescriptorSet::new(
-                    descriptor_set_allocator.clone(),
-                    present_ctx
-                        .hud_pipeline_layout
-                        .set_layouts()
-                        .first()
-                        .unwrap()
-                        .clone(),
-                    [
-                        WriteDescriptorSet::buffer(0, hud_vertex_buffer.clone()),
-                        WriteDescriptorSet::image_view_sampler(1, atlas_view, atlas_sampler),
-                    ],
-                    [],
-                )
-                .unwrap();
+                let hud_descriptor_set_layout = present_ctx
+                    .hud_pipeline_layout
+                    .set_layouts()
+                    .first()
+                    .unwrap()
+                    .clone();
 
                 Some(HudResources {
-                    vertex_buffer: hud_vertex_buffer,
-                    descriptor_set: hud_descriptor_set,
                     font_atlas,
+                    atlas_view,
+                    atlas_sampler,
+                    hud_descriptor_set_layout,
                 })
             }
             _ => None,
         };
+
+        // Create per-frame resources
+        let mut frames_in_flight = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        for _ in 0..FRAMES_IN_FLIGHT {
+            let live_buffers = LiveBuffers::new(
+                memory_allocator.clone(),
+                descriptor_set_allocator.clone(),
+                live_descriptor_set_layout.clone(),
+            );
+
+            let line_vertexes_buffer = Buffer::from_iter(
+                memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::STORAGE_BUFFER,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                vec![LineVertex::zeroed(); LINE_VERTEX_CAPACITY],
+            )
+            .unwrap();
+
+            let sized_descriptor_set = sized_buffers.create_sized_descriptor_set(
+                &line_vertexes_buffer,
+                descriptor_set_allocator.clone(),
+                sized_descriptor_set_layout.clone(),
+            );
+
+            let (hud_vertex_buffer, hud_descriptor_set) = match &hud_resources {
+                Some(hud_res) => {
+                    let (buf, ds) = hud_res.create_per_frame_hud(
+                        memory_allocator.clone(),
+                        descriptor_set_allocator.clone(),
+                    );
+                    (Some(buf), Some(ds))
+                }
+                None => (None, None),
+            };
+
+            let query_pool = GpuProfiler::create_query_pool(&device);
+
+            frames_in_flight.push(FrameInFlight {
+                live_buffers,
+                line_vertexes_buffer,
+                hud_vertex_buffer,
+                hud_descriptor_set,
+                sized_descriptor_set,
+                query_pool,
+                fence: None,
+            });
+        }
 
         RenderContext {
             window,
@@ -2283,15 +2443,16 @@ impl RenderContext {
             compute_pipeline,
             viewport,
             recreate_swapchain,
-            previous_frame_end,
             command_buffer_allocator,
+            descriptor_set_allocator,
             memory_allocator,
             one_time_buffers,
             sized_buffers,
-            live_buffers,
+            frames_in_flight,
             cpu_screen_capture_buffer,
             frames_rendered: 0,
             bvh_scene_hash: 0,
+            last_clipped_tet_count: 0,
             profiler,
             hud_font,
             hud_resources,
@@ -2307,6 +2468,7 @@ impl RenderContext {
     /// Returns (line_count, hud_vertex_count)
     fn write_navigation_hud_overlay(
         &mut self,
+        frame_idx: usize,
         base_line_count: usize,
         view_matrix: &nalgebra::Matrix5<f32>,
         view_matrix_inverse: &nalgebra::Matrix5<f32>,
@@ -2913,7 +3075,7 @@ impl RenderContext {
         // Write line data to GPU buffer
         let lines_to_write = lines.len().min(max_lines - base_line_count);
         if lines_to_write > 0 {
-            let mut writer = self.sized_buffers.line_vertexes_buffer.write().unwrap();
+            let mut writer = self.frames_in_flight[frame_idx].line_vertexes_buffer.write().unwrap();
             for (line_id, segment) in lines.iter().take(lines_to_write).enumerate() {
                 let vertex_id = (base_line_count + line_id) * 2;
                 writer[vertex_id] = LineVertex::new(segment.start, segment.color);
@@ -2924,8 +3086,8 @@ impl RenderContext {
         // Write HUD quad data to GPU buffer
         let hud_verts_to_write = hud_quads.len().min(HUD_VERTEX_CAPACITY);
         if hud_verts_to_write > 0 {
-            if let Some(hud_res) = self.hud_resources.as_ref() {
-                let mut writer = hud_res.vertex_buffer.write().unwrap();
+            if let Some(hud_buf) = self.frames_in_flight[frame_idx].hud_vertex_buffer.as_ref() {
+                let mut writer = hud_buf.write().unwrap();
                 for (i, v) in hud_quads.iter().take(hud_verts_to_write).enumerate() {
                     writer[i] = *v;
                 }
@@ -2937,6 +3099,17 @@ impl RenderContext {
 
     pub fn recreate_swapchain(&mut self) {
         self.recreate_swapchain = true;
+    }
+
+    fn wait_for_all_frames(&mut self) {
+        for frame in &mut self.frames_in_flight {
+            if let Some(future) = frame.fence.take() {
+                if future.queue().is_some() {
+                    let f = future.then_signal_fence_and_flush().unwrap();
+                    f.wait(None).unwrap();
+                }
+            }
+        }
     }
 
     pub fn render(
@@ -2975,16 +3148,17 @@ impl RenderContext {
         }
         self.last_render_start = Some(render_start);
 
-        if self.previous_frame_end.is_some() {
-            // Wait for previous frame to complete before updating buffers
-            // This is needed because the working_data_buffer is read by shaders
-            let previous_frame = self.previous_frame_end.take().unwrap();
-            if previous_frame.queue().is_some() {
-                let fence = previous_frame.then_signal_fence_and_flush().unwrap();
-                fence.wait(None).unwrap();
+        let frame_idx = self.frames_rendered % FRAMES_IN_FLIGHT;
+
+        // Wait for this frame slot's previous GPU work to complete before writing its buffers.
+        // This protects the per-frame LiveBuffers/line vertex buffer from being overwritten
+        // while still in use by the GPU. Note: we do NOT wait for the most recent frame here —
+        // that wait happens later, just before submission, to protect shared SizedBuffers.
+        if let Some(prev_fence) = self.frames_in_flight[frame_idx].fence.take() {
+            if prev_fence.queue().is_some() {
+                let f = prev_fence.then_signal_fence_and_flush().unwrap();
+                f.wait(None).unwrap();
             }
-            self.previous_frame_end = None;
-            self.profiler.read_results_and_accumulate();
         }
 
         let mut force_clear = false;
@@ -3047,7 +3221,7 @@ impl RenderContext {
             );
         }
         {
-            let mut writer = self.live_buffers.working_data_buffer.write().unwrap();
+            let mut writer = self.frames_in_flight[frame_idx].live_buffers.working_data_buffer.write().unwrap();
             writer.view_matrix = view_matrix_nalgebra.into();
             writer.view_matrix_inverse = view_matrix_nalgebra_inv.into();
             writer.render_dimensions = glam::UVec4::new(
@@ -3074,7 +3248,7 @@ impl RenderContext {
         }
 
         {
-            let mut writer = self.live_buffers.model_instance_buffer.write().unwrap();
+            let mut writer = self.frames_in_flight[frame_idx].live_buffers.model_instance_buffer.write().unwrap();
             for i in 0..model_instances.len() {
                 writer[i] = model_instances[i];
             }
@@ -3128,14 +3302,7 @@ impl RenderContext {
         let cpu_mode = false;
 
         if cpu_mode {
-            if self.previous_frame_end.is_some() {
-                let previous_frame = self.previous_frame_end.take().unwrap();
-                if previous_frame.queue().is_some() {
-                    let fence = previous_frame.then_signal_fence_and_flush().unwrap();
-                    fence.wait(None).unwrap();
-                }
-                self.previous_frame_end = None;
-            }
+            self.wait_for_all_frames();
         }
 
         if cpu_mode {
@@ -3165,8 +3332,8 @@ impl RenderContext {
                     0,
                     vec![
                         self.one_time_buffers.descriptor_set.clone(),
-                        self.sized_buffers.descriptor_set.clone(),
-                        self.live_buffers.descriptor_set.clone(),
+                        self.frames_in_flight[frame_idx].sized_descriptor_set.clone(),
+                        self.frames_in_flight[frame_idx].live_buffers.descriptor_set.clone(),
                     ],
                 )
                 .unwrap();
@@ -3185,7 +3352,7 @@ impl RenderContext {
             self.profiler.begin_frame();
             unsafe {
                 builder.reset_query_pool(
-                    self.profiler.query_pool.clone(),
+                    self.frames_in_flight[frame_idx].query_pool.clone(),
                     0..PROFILER_MAX_TIMESTAMPS,
                 )
             }
@@ -3194,7 +3361,7 @@ impl RenderContext {
                 let q = self.profiler.next_query_index("start");
                 unsafe {
                     builder.write_timestamp(
-                        self.profiler.query_pool.clone(),
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
                         q,
                         PipelineStage::AllCommands,
                     )
@@ -3217,7 +3384,7 @@ impl RenderContext {
                 let q = self.profiler.next_query_index("clear");
                 unsafe {
                     builder.write_timestamp(
-                        self.profiler.query_pool.clone(),
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
                         q,
                         PipelineStage::AllCommands,
                     )
@@ -3241,7 +3408,7 @@ impl RenderContext {
                     let q = self.profiler.next_query_index("tet_clip");
                     unsafe {
                         builder.write_timestamp(
-                            self.profiler.query_pool.clone(),
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
                             q,
                             PipelineStage::AllCommands,
                         )
@@ -3249,13 +3416,50 @@ impl RenderContext {
                     .unwrap();
                 }
 
+                // Copy atomic counter for CPU readback (clipped tet count diagnostic)
+                builder
+                    .copy_buffer(CopyBufferInfo::buffers(
+                        self.sized_buffers.atomic_counter_buffer.clone(),
+                        self.sized_buffers.cpu_atomic_counter_buffer.clone(),
+                    ))
+                    .unwrap();
+
                 if render_options.do_tetrahedron_edges {
                     line_render_count = total_tetrahedron_count * 6;
                 }
             }
 
             if render_options.do_raster {
-                // Tetrahedron pixel raster
+                // Zero tile counts
+                builder
+                    .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
+                    .unwrap();
+
+                // Bin tetrahedra into tiles
+                builder
+                    .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
+                    .unwrap();
+                unsafe {
+                    builder.dispatch([
+                        (self.sized_buffers.max_tetrahedrons as u32 + 63) / 64,
+                        1,
+                        1,
+                    ])
+                }
+                .unwrap();
+                {
+                    let q = self.profiler.next_query_index("tet_bin");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
+
+                // Tetrahedron pixel raster (tile-based)
                 builder
                     .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone())
                     .unwrap();
@@ -3271,7 +3475,7 @@ impl RenderContext {
                     let q = self.profiler.next_query_index("tet_raster");
                     unsafe {
                         builder.write_timestamp(
-                            self.profiler.query_pool.clone(),
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
                             q,
                             PipelineStage::AllCommands,
                         )
@@ -3293,7 +3497,7 @@ impl RenderContext {
                     let q = self.profiler.next_query_index("edges");
                     unsafe {
                         builder.write_timestamp(
-                            self.profiler.query_pool.clone(),
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
                             q,
                             PipelineStage::AllCommands,
                         )
@@ -3333,7 +3537,7 @@ impl RenderContext {
                         let q = self.profiler.next_query_index("rt_preprocess");
                         unsafe {
                             builder.write_timestamp(
-                                self.profiler.query_pool.clone(),
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
                                 q,
                                 PipelineStage::AllCommands,
                             )
@@ -3496,7 +3700,7 @@ impl RenderContext {
                         let q = self.profiler.next_query_index("bvh_build");
                         unsafe {
                             builder.write_timestamp(
-                                self.profiler.query_pool.clone(),
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
                                 q,
                                 PipelineStage::AllCommands,
                             )
@@ -3521,7 +3725,7 @@ impl RenderContext {
                     let q = self.profiler.next_query_index("raytrace");
                     unsafe {
                         builder.write_timestamp(
-                            self.profiler.query_pool.clone(),
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
                             q,
                             PipelineStage::AllCommands,
                         )
@@ -3534,6 +3738,7 @@ impl RenderContext {
         let mut hud_vertex_count = 0usize;
         if render_options.do_navigation_hud {
             let (hud_line_count, hud_quad_count) = self.write_navigation_hud_overlay(
+                frame_idx,
                 line_render_count,
                 &view_matrix_nalgebra,
                 &view_matrix_nalgebra_inv,
@@ -3583,8 +3788,8 @@ impl RenderContext {
                             0,
                             vec![
                                 self.one_time_buffers.descriptor_set.clone(),
-                                self.sized_buffers.descriptor_set.clone(),
-                                self.live_buffers.descriptor_set.clone(),
+                                self.frames_in_flight[frame_idx].sized_descriptor_set.clone(),
+                                self.frames_in_flight[frame_idx].live_buffers.descriptor_set.clone(),
                             ],
                         )
                         .unwrap();
@@ -3607,7 +3812,7 @@ impl RenderContext {
 
                     // Render HUD quads (text + panels, alpha-blended on top)
                     if hud_vertex_count > 0 {
-                        if let Some(hud_res) = self.hud_resources.as_ref() {
+                        if let Some(hud_ds) = self.frames_in_flight[frame_idx].hud_descriptor_set.as_ref() {
                             builder
                                 .bind_pipeline_graphics(present_pipeline.hud_pipeline.clone())
                                 .unwrap();
@@ -3616,7 +3821,7 @@ impl RenderContext {
                                     PipelineBindPoint::Graphics,
                                     present_pipeline.hud_pipeline_layout.clone(),
                                     0,
-                                    vec![hud_res.descriptor_set.clone()],
+                                    vec![hud_ds.clone()],
                                 )
                                 .unwrap();
                             unsafe {
@@ -3658,26 +3863,36 @@ impl RenderContext {
         // Finish recording the command buffer by calling `end`.
         let command_buffer = builder.build().unwrap();
 
-        let frame_end = match self.previous_frame_end.take() {
-            Some(f) => f,
-            None => sync::now(device.clone()).boxed(),
-        };
-        self.previous_frame_end = None;
+        // Wait for the most recently submitted frame to complete before submitting.
+        // This protects shared SizedBuffers (pixel buffer, BVH, tetrahedra) and
+        // ensures GPU ordering is maintained.
+        if self.frames_rendered > 0 {
+            let prev_idx = (self.frames_rendered - 1) % FRAMES_IN_FLIGHT;
+            if let Some(prev_fence) = self.frames_in_flight[prev_idx].fence.take() {
+                if prev_fence.queue().is_some() {
+                    let f = prev_fence.then_signal_fence_and_flush().unwrap();
+                    f.wait(None).unwrap();
+                }
+                // Read back clipped tetrahedron count for diagnostics
+                let clipped_count = self.sized_buffers.cpu_atomic_counter_buffer.read()
+                    .map(|data| data[0])
+                    .unwrap_or(0);
+                self.last_clipped_tet_count = clipped_count;
+                self.profiler.read_results_and_accumulate(
+                    &self.frames_in_flight[prev_idx].query_pool,
+                    clipped_count,
+                );
+            }
+        }
 
+        // Submit the command buffer
+        let base_future = sync::now(device.clone());
         match acquire_future {
             Some(acquire_future) => {
-                let future = frame_end
+                let future = base_future
                     .join(acquire_future)
                     .then_execute(queue.clone(), command_buffer)
                     .unwrap()
-                    // The color output is now expected to contain our triangle. But in order to
-                    // show it on the screen, we have to *present* the image by calling
-                    // `then_swapchain_present`.
-                    //
-                    // This function does not actually present the image immediately. Instead it
-                    // submits a present command at the end of the queue. This means that it will
-                    // only be presented once the GPU has finished executing the command buffer
-                    // that draws the triangle.
                     .then_swapchain_present(
                         queue.clone(),
                         SwapchainPresentInfo::swapchain_image_index(
@@ -3689,48 +3904,32 @@ impl RenderContext {
 
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
-                        self.previous_frame_end = Some(future.boxed());
+                        self.frames_in_flight[frame_idx].fence = Some(future.boxed());
                     }
                     Err(VulkanError::OutOfDate) => {
                         self.recreate_swapchain = true;
-                        self.previous_frame_end = None;
                     }
                     Err(e) => {
                         panic!("failed to flush future: {e}");
-                        // previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                 }
             }
             None => {
-                let future = frame_end
+                let future = base_future
                     .then_execute(queue.clone(), command_buffer)
                     .unwrap()
                     .then_signal_fence_and_flush();
 
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
-                        self.previous_frame_end = Some(future.boxed());
+                        self.frames_in_flight[frame_idx].fence = Some(future.boxed());
                     }
                     Err(VulkanError::OutOfDate) => {
                         self.recreate_swapchain = true;
-                        self.previous_frame_end = None;
                     }
                     Err(e) => {
                         panic!("failed to flush future: {e}");
-                        // previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
-                }
-
-                if self.previous_frame_end.is_some() {
-                    let fence = self
-                        .previous_frame_end
-                        .take()
-                        .unwrap()
-                        .then_signal_fence_and_flush()
-                        .unwrap();
-                    fence.wait(None).unwrap();
-                    self.previous_frame_end = None;
-                    self.profiler.read_results_and_accumulate();
                 }
             }
         };
@@ -3739,16 +3938,7 @@ impl RenderContext {
             let window_size = window.inner_size();
             // Save frame
             if self.frames_rendered > 3 && render_options.take_framebuffer_screenshot {
-                if self.previous_frame_end.is_some() {
-                    let fence = self
-                        .previous_frame_end
-                        .take()
-                        .unwrap()
-                        .then_signal_fence_and_flush()
-                        .unwrap();
-                    fence.wait(None).unwrap();
-                    self.previous_frame_end = None;
-                }
+                self.wait_for_all_frames();
 
                 let result = self.cpu_screen_capture_buffer.read();
                 match result {
@@ -3775,16 +3965,7 @@ impl RenderContext {
         // Debug: print BVH diagnostics on first frame
         if self.frames_rendered == 0 && render_options.do_raytrace {
             // Ensure GPU work is done
-            if self.previous_frame_end.is_some() {
-                let fence = self
-                    .previous_frame_end
-                    .take()
-                    .unwrap()
-                    .then_signal_fence_and_flush()
-                    .unwrap();
-                fence.wait(None).unwrap();
-                self.previous_frame_end = None;
-            }
+            self.wait_for_all_frames();
 
             let bvh_nodes = self.sized_buffers.cpu_bvh_nodes_buffer.read().unwrap();
             let morton_codes = self.sized_buffers.cpu_morton_codes_buffer.read().unwrap();
@@ -3895,16 +4076,7 @@ impl RenderContext {
     }
 
     pub fn save_rendered_frame(&mut self, path: &str) {
-        if self.previous_frame_end.is_some() {
-            let fence = self
-                .previous_frame_end
-                .take()
-                .unwrap()
-                .then_signal_fence_and_flush()
-                .unwrap();
-            fence.wait(None).unwrap();
-            self.previous_frame_end = None;
-        }
+        self.wait_for_all_frames();
 
         let result = self.sized_buffers.output_cpu_pixel_buffer.read();
         match result {
@@ -4012,16 +4184,7 @@ impl RenderContext {
     }
 
     pub fn save_rendered_frame_png(&mut self, path: &str) {
-        if self.previous_frame_end.is_some() {
-            let fence = self
-                .previous_frame_end
-                .take()
-                .unwrap()
-                .then_signal_fence_and_flush()
-                .unwrap();
-            fence.wait(None).unwrap();
-            self.previous_frame_end = None;
-        }
+        self.wait_for_all_frames();
 
         let result = self.sized_buffers.output_cpu_pixel_buffer.read();
         match result {

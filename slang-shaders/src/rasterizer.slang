@@ -15,6 +15,10 @@ import materials;
 [[vk::binding(1, 1)]] RWStructuredBuffer<Tetrahedron> outputTetrahedrons;
 [[vk::binding(2, 1)]] RWStructuredBuffer<float4> pixelBuffer;
 [[vk::binding(6, 1)]] RWStructuredBuffer<uint> atomicCounter;
+[[vk::binding(7, 1)]] RWStructuredBuffer<uint> tileTetCounts;
+[[vk::binding(8, 1)]] RWStructuredBuffer<uint> tileTetIndices;
+
+static const uint MAX_TETS_PER_TILE = 256;
 
 // Set 2: LiveBuffers
 [[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;
@@ -485,8 +489,12 @@ float2 getZWAngleRange(WorkingData workingData)
     return float2(PI / 4.0 - viewAngle / 2.0, PI / 4.0 + viewAngle / 2.0);
 }
 
+// Maximum ZW lines per pixel. Reducing from 96 to 32 cuts register pressure from
+// 4.6KB to 1.5KB per thread, significantly improving GPU occupancy.
+static const uint MAX_ZW_LINES = 32;
+
 // Remove dead lines (textureId == 0) and compact the array
-uint condenseZWLines(inout ZWLine lines[96], uint numLines)
+uint condenseZWLines(inout ZWLine lines[MAX_ZW_LINES], uint numLines)
 {
     uint count = 0;
     for (uint i = 0; i < numLines; i++)
@@ -503,7 +511,7 @@ uint condenseZWLines(inout ZWLine lines[96], uint numLines)
 // ZW line rendering with occlusion culling
 // First removes fully occluded lines, then uses the simple closest-line-per-angle algorithm
 // on the reduced set for correct depth ordering.
-float4 renderZWLines2(inout ZWLine lines[96], uint numLines, WorkingData workingData)
+float4 renderZWLines2(inout ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingData workingData)
 {
     // Stage 1: Remove completely occluded lines
     for (uint i = 0; i < numLines; i++)
@@ -550,18 +558,25 @@ float4 renderZWLines2(inout ZWLine lines[96], uint numLines, WorkingData working
 }
 
 // Simple ZW line rendering - samples along the ZW angle range
-float4 renderZWLinesSimple(ZWLine lines[96], uint numLines, WorkingData workingData)
+// Uses incremental sin/cos rotation to avoid per-sample transcendentals.
+float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingData workingData)
 {
-    const uint DEPTH_FACTOR = 256;
+    const uint DEPTH_FACTOR = 64;
     float2 angleRange = getZWAngleRange(workingData);
+    float angleStep = (angleRange.y - angleRange.x) / float(DEPTH_FACTOR);
+
+    // Initialize sin/cos for incremental rotation
+    float theta0 = angleRange.x;
+    float rayX = cos(theta0);
+    float rayY = sin(theta0);
+    float cosStep = cos(angleStep);
+    float sinStep = sin(angleStep);
 
     float3 outputAccum = float3(0);
 
     for (uint i = 0; i < DEPTH_FACTOR; i++)
     {
-        float angleRatio = float(i) / float(DEPTH_FACTOR);
-        float theta = angleRatio * (angleRange.y - angleRange.x) + angleRange.x;
-        float2 sampleRay = float2(cos(theta), sin(theta));
+        float2 sampleRay = float2(rayX, rayY);
 
         int closestLine = -1;
         float closestDist = 1e10;
@@ -569,9 +584,6 @@ float4 renderZWLinesSimple(ZWLine lines[96], uint numLines, WorkingData workingD
 
         for (uint j = 0; j < numLines; j++)
         {
-            if (lines[j].textureId == 0)
-                continue;
-
             float2 lineA[2] = { float2(0), sampleRay };
             float2 lineB[2] = { lines[j].zwPositions[0], lines[j].zwPositions[1] };
 
@@ -599,15 +611,73 @@ float4 renderZWLinesSimple(ZWLine lines[96], uint numLines, WorkingData workingD
             MaterialProperties mat = sampleMaterial(lines[closestLine].textureId, texPos.xyz);
             outputAccum += mat.albedo.xyz / float(DEPTH_FACTOR);
         }
+
+        // Incremental rotation: (cos(θ+Δ), sin(θ+Δ)) = rotate(cos(θ), sin(θ))
+        float newRayX = rayX * cosStep - rayY * sinStep;
+        float newRayY = rayX * sinStep + rayY * cosStep;
+        rayX = newRayX;
+        rayY = newRayY;
     }
 
     return float4(outputAccum, 1.0);
 }
 
+// Bin clipped tetrahedra into screen-space tiles
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mainBinTetsCS(uint3 globalId : SV_DispatchThreadID)
+{
+    WorkingData workingData = workingDataBuffer[0];
+
+    uint tetIndex = globalId.x;
+    uint actualTetCount = atomicCounter[0];
+    if (tetIndex >= actualTetCount)
+        return;
+
+    Tetrahedron tet = outputTetrahedrons[tetIndex];
+    if (tet.materialId == 0)
+        return;
+
+    // Compute 2D bounding box in NDC [-1,1]
+    float2 bboxMin = min(min(tet.vertexPositions[0].xy, tet.vertexPositions[1].xy),
+                         min(tet.vertexPositions[2].xy, tet.vertexPositions[3].xy));
+    float2 bboxMax = max(max(tet.vertexPositions[0].xy, tet.vertexPositions[1].xy),
+                         max(tet.vertexPositions[2].xy, tet.vertexPositions[3].xy));
+
+    // Convert NDC to pixel coordinates
+    float2 pixMin = (bboxMin + 1.0) * 0.5 * float2(workingData.renderDimensions.xy);
+    float2 pixMax = (bboxMax + 1.0) * 0.5 * float2(workingData.renderDimensions.xy);
+
+    // Convert to tile coordinates (8x8 tiles)
+    uint tilesX = (workingData.renderDimensions.x + 7) / 8;
+    uint tilesY = (workingData.renderDimensions.y + 7) / 8;
+
+    int tileMinX = max(int(pixMin.x) / 8, 0);
+    int tileMinY = max(int(pixMin.y) / 8, 0);
+    int tileMaxX = min(int(pixMax.x) / 8, int(tilesX) - 1);
+    int tileMaxY = min(int(pixMax.y) / 8, int(tilesY) - 1);
+
+    for (int ty = tileMinY; ty <= tileMaxY; ty++)
+    {
+        for (int tx = tileMinX; tx <= tileMaxX; tx++)
+        {
+            uint tileIdx = uint(ty) * tilesX + uint(tx);
+            uint slot;
+            InterlockedAdd(tileTetCounts[tileIdx], 1, slot);
+            if (slot < MAX_TETS_PER_TILE)
+                tileTetIndices[tileIdx * MAX_TETS_PER_TILE + slot] = tetIndex;
+        }
+    }
+}
+
+// Shared memory for tile tet list — cooperatively loaded by all 64 threads in workgroup
+groupshared uint sharedTetCount;
+groupshared uint sharedTetIndices[MAX_TETS_PER_TILE];
+
 // Per-pixel tetrahedron rasterization
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
+void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex)
 {
     WorkingData workingData = workingDataBuffer[0];
     // Combinations for iterating over tetrahedron faces
@@ -615,12 +685,21 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
         uint3(0, 1, 2), uint3(0, 1, 3), uint3(0, 2, 3), uint3(1, 2, 3)
     };
 
-    ZWLine currentZWLines[96];
-    uint numZWLines = 0;
+    // Load tile tet list into shared memory
+    uint tilesX = (workingData.renderDimensions.x + 7) / 8;
+    uint tileIdx = groupId.y * tilesX + groupId.x;
 
-    // Initialize lines array
-    for (uint i = 0; i < 96; i++)
-        currentZWLines[i] = ZWLine.empty();
+    if (localIndex == 0)
+        sharedTetCount = min(tileTetCounts[tileIdx], MAX_TETS_PER_TILE);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint tetCount = sharedTetCount;
+    for (uint loadIdx = localIndex; loadIdx < tetCount; loadIdx += 64)
+        sharedTetIndices[loadIdx] = tileTetIndices[tileIdx * MAX_TETS_PER_TILE + loadIdx];
+    GroupMemoryBarrierWithGroupSync();
+
+    ZWLine currentZWLines[MAX_ZW_LINES];
+    uint numZWLines = 0;
 
     uint2 uPixelPos = globalId.xy;
     float2 pixelPos = float2(
@@ -628,13 +707,10 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
         float(uPixelPos.y) / float(workingData.renderDimensions.y) * 2.0 - 1.0
     );
 
-    // Read actual tetrahedron count from atomic counter (set by mainTetrahedronCS)
-    uint actualTetCount = atomicCounter[0];
-
-    // Test each tetrahedron
-    for (uint i = 0; i < actualTetCount; i++)
+    // Test each tetrahedron in tile
+    for (uint i = 0; i < tetCount; i++)
     {
-        Tetrahedron tet = outputTetrahedrons[i];
+        Tetrahedron tet = outputTetrahedrons[sharedTetIndices[i]];
 
         if (tet.materialId == 0)
             continue;
@@ -683,7 +759,7 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
             triIndexes[1] = 3;
         }
 
-        if (numZWLines >= 96)
+        if (numZWLines >= MAX_ZW_LINES)
             continue;
 
         // Compute ZW line from the two face intersections
@@ -734,8 +810,10 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID)
         numZWLines++;
     }
 
-    // Render the collected ZW lines with advanced occlusion handling
-    float4 output = renderZWLines2(currentZWLines, numZWLines, workingData);
+    // Early-out: skip rendering if no tetrahedra cover this pixel
+    float4 output = float4(0, 0, 0, 1.0);
+    if (numZWLines > 0)
+        output = renderZWLines2(currentZWLines, numZWLines, workingData);
 
     // Write output
     if (uPixelPos.x < workingData.renderDimensions.x && uPixelPos.y < workingData.renderDimensions.y)

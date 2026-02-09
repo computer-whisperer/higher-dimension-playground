@@ -92,6 +92,11 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
     },
     ShaderEntry {
         file: "rasterizer.slang",
+        entry: "mainBinTetsCS",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "rasterizer.slang",
         entry: "mainTetrahedronPixelCS",
         profile: "cs_6_5",
     },
