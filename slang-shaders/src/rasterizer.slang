@@ -744,6 +744,9 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
     uint numZWLines = 0;
 
     uint2 uPixelPos = globalId.xy;
+    if (uPixelPos.x >= workingData.renderDimensions.x || uPixelPos.y >= workingData.renderDimensions.y)
+        return;
+
     float2 pixelPos = float2(
         float(uPixelPos.x) / float(workingData.renderDimensions.x) * 2.0 - 1.0,
         float(uPixelPos.y) / float(workingData.renderDimensions.y) * 2.0 - 1.0
@@ -876,10 +879,7 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
         output = renderZWLines2(currentZWLines, numZWLines, workingData);
 
     // Write output
-    if (uPixelPos.x < workingData.renderDimensions.x && uPixelPos.y < workingData.renderDimensions.y)
-    {
-        pixelBuffer[uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x] = output;
-    }
+    pixelBuffer[uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x] = output;
 
     // Clear other Z slices
     for (uint z = 1; z < workingData.renderDimensions.z; z++)
