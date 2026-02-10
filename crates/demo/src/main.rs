@@ -1,9 +1,11 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use higher_dimension_playground::matrix_operations::{
     double_rotation_matrix_4d, rotation_matrix_one_angle, scale_matrix_4d,
     scale_matrix_4d_elementwise, translate_matrix_4d,
 };
-use higher_dimension_playground::render::{RenderContext, RenderOptions};
+use higher_dimension_playground::render::{
+    FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput, VoxelFrameInput,
+};
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::f32::consts::PI;
 use std::time::Instant;
@@ -75,6 +77,29 @@ struct Args {
     /// Number of depth layers (supersampling)
     #[arg(long, default_value_t = 4)]
     layers: u32,
+
+    /// Rendering backend to use
+    #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
+    backend: BackendArg,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum BackendArg {
+    Auto,
+    TetraRaster,
+    TetraRaytrace,
+    VoxelTraversal,
+}
+
+impl BackendArg {
+    fn to_render_backend(self) -> RenderBackend {
+        match self {
+            BackendArg::Auto => RenderBackend::Auto,
+            BackendArg::TetraRaster => RenderBackend::TetraRaster,
+            BackendArg::TetraRaytrace => RenderBackend::TetraRaytrace,
+            BackendArg::VoxelTraversal => RenderBackend::VoxelTraversal,
+        }
+    }
 }
 
 fn main() -> Result<(), impl Error> {
@@ -164,21 +189,42 @@ impl DemoScene {
         let render_options = RenderOptions {
             do_raster: !self.args.no_raster,
             do_raytrace: self.args.raytrace,
+            render_backend: self.args.backend.to_render_backend(),
             do_edges: self.args.edges,
             do_tetrahedron_edges: self.args.tetrahedron_edges,
             prepare_render_screenshot: true,
             ..Default::default()
         };
 
-        rcx.render(
-            device,
-            queue,
+        let backend = render_options.render_backend;
+        let frame_params = FrameParams {
             view_matrix,
             focal_length_xy,
             focal_length_zw,
-            &instances,
             render_options,
-        );
+        };
+        if backend == RenderBackend::VoxelTraversal {
+            rcx.render_voxel_frame(
+                device,
+                queue,
+                frame_params,
+                VoxelFrameInput {
+                    chunk_headers: &[],
+                    occupancy_words: &[],
+                    material_words: &[],
+                    visible_chunk_indices: &[],
+                },
+            );
+        } else {
+            rcx.render_tetra_frame(
+                device,
+                queue,
+                frame_params,
+                TetraFrameInput {
+                    model_instances: &instances,
+                },
+            );
+        }
 
         std::fs::create_dir_all("frames").ok();
         rcx.save_rendered_frame_png("frames/headless_raster.png");
@@ -347,6 +393,7 @@ impl DemoScene {
         let render_options = RenderOptions {
             do_frame_clear: do_raytrace && self.sub_frame_num == 0,
             do_raster,
+            render_backend: self.args.backend.to_render_backend(),
             do_tetrahedron_edges: self.args.tetrahedron_edges,
             do_raytrace,
             do_edges,
@@ -355,15 +402,35 @@ impl DemoScene {
             ..Default::default()
         };
 
-        rcx.render(
-            device,
-            queue,
+        let backend = render_options.render_backend;
+        let frame_params = FrameParams {
             view_matrix,
             focal_length_xy,
             focal_length_zw,
-            &instances,
             render_options,
-        );
+        };
+        if backend == RenderBackend::VoxelTraversal {
+            rcx.render_voxel_frame(
+                device,
+                queue,
+                frame_params,
+                VoxelFrameInput {
+                    chunk_headers: &[],
+                    occupancy_words: &[],
+                    material_words: &[],
+                    visible_chunk_indices: &[],
+                },
+            );
+        } else {
+            rcx.render_tetra_frame(
+                device,
+                queue,
+                frame_params,
+                TetraFrameInput {
+                    model_instances: &instances,
+                },
+            );
+        }
 
         self.sub_frame_num += 1;
 

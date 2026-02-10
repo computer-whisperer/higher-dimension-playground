@@ -77,6 +77,10 @@ struct ShaderModules {
     raytrace_preprocess: Arc<ShaderModule>,
     raytrace_pixel: Arc<ShaderModule>,
     raytrace_clear: Arc<ShaderModule>,
+    // Voxel traversal engine (VTE) compute shaders
+    voxel_clear: Arc<ShaderModule>,
+    voxel_trace_stage_a: Arc<ShaderModule>,
+    voxel_display_stage_b: Arc<ShaderModule>,
     // Tile binning
     bin_tets_cs: Arc<ShaderModule>,
     // BVH compute shaders
@@ -91,10 +95,40 @@ struct ShaderModules {
     bvh_propagate_aabbs: Arc<ShaderModule>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RenderBackend {
+    /// Legacy behavior: derive backend from existing booleans.
+    Auto,
+    /// Existing tetrahedron tile raster path.
+    TetraRaster,
+    /// Existing tetrahedron raytrace path.
+    TetraRaytrace,
+    /// New voxel traversal engine path (currently placeholder).
+    VoxelTraversal,
+}
+
+impl Default for RenderBackend {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl RenderBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::TetraRaster => "tetra_raster",
+            Self::TetraRaytrace => "tetra_raytrace",
+            Self::VoxelTraversal => "voxel_traversal",
+        }
+    }
+}
+
 pub struct RenderOptions {
     pub do_frame_clear: bool,
     pub do_raster: bool,
     pub do_raytrace: bool,
+    pub render_backend: RenderBackend,
     pub do_edges: bool,
     pub do_tetrahedron_edges: bool,
     pub do_navigation_hud: bool,
@@ -109,6 +143,7 @@ impl Default for RenderOptions {
             do_frame_clear: false,
             do_raster: true,
             do_raytrace: false,
+            render_backend: RenderBackend::Auto,
             do_edges: false,
             do_tetrahedron_edges: false,
             do_navigation_hud: false,
@@ -119,10 +154,109 @@ impl Default for RenderOptions {
     }
 }
 
+pub struct FrameParams {
+    pub view_matrix: ndarray::Array2<f32>,
+    pub focal_length_xy: f32,
+    pub focal_length_zw: f32,
+    pub render_options: RenderOptions,
+}
+
+pub struct TetraFrameInput<'a> {
+    pub model_instances: &'a [common::ModelInstance],
+}
+
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+#[repr(C)]
+pub struct GpuVoxelChunkHeader {
+    pub chunk_coord: [i32; 4],
+    pub occupancy_word_offset: u32,
+    pub material_word_offset: u32,
+    pub flags: u32,
+    pub _padding: u32,
+}
+
+impl GpuVoxelChunkHeader {
+    pub const FLAG_EMPTY: u32 = 1 << 0;
+    pub const FLAG_FULL: u32 = 1 << 1;
+}
+
+pub struct VoxelFrameInput<'a> {
+    pub chunk_headers: &'a [GpuVoxelChunkHeader],
+    pub occupancy_words: &'a [u32],
+    pub material_words: &'a [u32],
+    pub visible_chunk_indices: &'a [u32],
+}
+
+#[derive(Copy, Clone, Default, Pod, Zeroable)]
+#[repr(C)]
+struct GpuVoxelFrameMeta {
+    chunk_count: u32,
+    visible_chunk_count: u32,
+    occupancy_word_count: u32,
+    material_word_count: u32,
+    max_trace_steps: u32,
+    chunk_lookup_capacity: u32,
+    _padding: [u32; 2],
+}
+
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[repr(C)]
+struct GpuVoxelChunkLookupEntry {
+    chunk_coord: [i32; 4],
+    chunk_index: u32,
+    _padding: [u32; 3],
+}
+
+impl GpuVoxelChunkLookupEntry {
+    const INVALID_INDEX: u32 = u32::MAX;
+
+    fn empty() -> Self {
+        Self {
+            chunk_coord: [0; 4],
+            chunk_index: Self::INVALID_INDEX,
+            _padding: [0; 3],
+        }
+    }
+}
+
+impl Default for GpuVoxelChunkLookupEntry {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct VteDebugCounters {
+    pub candidate_chunks: u32,
+    pub frustum_culled_chunks: u32,
+    pub empty_chunks_skipped: u32,
+    pub macro_cells_skipped: u32,
+    pub chunk_steps: u64,
+    pub voxel_steps: u64,
+    pub primary_hits: u64,
+    pub s_samples: u64,
+}
+
 const LINE_VERTEX_CAPACITY: usize = 100_000;
 const HUD_BREADCRUMB_CAPACITY: usize = 128;
 const HUD_BREADCRUMB_MIN_STEP: f32 = 0.2;
 const FRAMES_IN_FLIGHT: usize = 2;
+const VTE_MAX_CHUNKS: usize = 8_192;
+const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
+const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
+const VTE_CHUNK_LOOKUP_CAPACITY: usize = 32_768; // Must be power of two.
+
+#[inline]
+fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
+    let x = chunk_coord[0] as u32;
+    let y = chunk_coord[1] as u32;
+    let z = chunk_coord[2] as u32;
+    let w = chunk_coord[3] as u32;
+    x.wrapping_mul(0x8DA6_B343)
+        ^ y.wrapping_mul(0xD816_3841)
+        ^ z.wrapping_mul(0xCB1A_B31F)
+        ^ w.wrapping_mul(0x1656_67B1)
+}
 
 struct FrameInFlight {
     live_buffers: LiveBuffers,
@@ -407,13 +541,37 @@ fn push_text_quads(
             // is the screen top. We must swap UV Y to compensate: atlas top (uv_min.y)
             // maps to screen top (p_max.y), atlas bottom (uv_max.y) maps to screen
             // bottom (p_min.y).
-            quads.push(HudVertex { position: Vec2::new(p_min.x, p_min.y), texcoord: Vec2::new(uv_min.x, uv_max.y), color });
-            quads.push(HudVertex { position: Vec2::new(p_max.x, p_min.y), texcoord: Vec2::new(uv_max.x, uv_max.y), color });
-            quads.push(HudVertex { position: Vec2::new(p_max.x, p_max.y), texcoord: Vec2::new(uv_max.x, uv_min.y), color });
+            quads.push(HudVertex {
+                position: Vec2::new(p_min.x, p_min.y),
+                texcoord: Vec2::new(uv_min.x, uv_max.y),
+                color,
+            });
+            quads.push(HudVertex {
+                position: Vec2::new(p_max.x, p_min.y),
+                texcoord: Vec2::new(uv_max.x, uv_max.y),
+                color,
+            });
+            quads.push(HudVertex {
+                position: Vec2::new(p_max.x, p_max.y),
+                texcoord: Vec2::new(uv_max.x, uv_min.y),
+                color,
+            });
 
-            quads.push(HudVertex { position: Vec2::new(p_min.x, p_min.y), texcoord: Vec2::new(uv_min.x, uv_max.y), color });
-            quads.push(HudVertex { position: Vec2::new(p_max.x, p_max.y), texcoord: Vec2::new(uv_max.x, uv_min.y), color });
-            quads.push(HudVertex { position: Vec2::new(p_min.x, p_max.y), texcoord: Vec2::new(uv_min.x, uv_min.y), color });
+            quads.push(HudVertex {
+                position: Vec2::new(p_min.x, p_min.y),
+                texcoord: Vec2::new(uv_min.x, uv_max.y),
+                color,
+            });
+            quads.push(HudVertex {
+                position: Vec2::new(p_max.x, p_max.y),
+                texcoord: Vec2::new(uv_max.x, uv_min.y),
+                color,
+            });
+            quads.push(HudVertex {
+                position: Vec2::new(p_min.x, p_max.y),
+                texcoord: Vec2::new(uv_min.x, uv_min.y),
+                color,
+            });
         }
 
         caret_x += glyph.advance_px * scale;
@@ -428,13 +586,37 @@ fn push_filled_rect_quads(
     color: Vec4,
 ) {
     let uv = atlas.white_uv;
-    quads.push(HudVertex { position: Vec2::new(min_ndc.x, min_ndc.y), texcoord: uv, color });
-    quads.push(HudVertex { position: Vec2::new(max_ndc.x, min_ndc.y), texcoord: uv, color });
-    quads.push(HudVertex { position: Vec2::new(max_ndc.x, max_ndc.y), texcoord: uv, color });
+    quads.push(HudVertex {
+        position: Vec2::new(min_ndc.x, min_ndc.y),
+        texcoord: uv,
+        color,
+    });
+    quads.push(HudVertex {
+        position: Vec2::new(max_ndc.x, min_ndc.y),
+        texcoord: uv,
+        color,
+    });
+    quads.push(HudVertex {
+        position: Vec2::new(max_ndc.x, max_ndc.y),
+        texcoord: uv,
+        color,
+    });
 
-    quads.push(HudVertex { position: Vec2::new(min_ndc.x, min_ndc.y), texcoord: uv, color });
-    quads.push(HudVertex { position: Vec2::new(max_ndc.x, max_ndc.y), texcoord: uv, color });
-    quads.push(HudVertex { position: Vec2::new(min_ndc.x, max_ndc.y), texcoord: uv, color });
+    quads.push(HudVertex {
+        position: Vec2::new(min_ndc.x, min_ndc.y),
+        texcoord: uv,
+        color,
+    });
+    quads.push(HudVertex {
+        position: Vec2::new(max_ndc.x, max_ndc.y),
+        texcoord: uv,
+        color,
+    });
+    quads.push(HudVertex {
+        position: Vec2::new(min_ndc.x, max_ndc.y),
+        texcoord: uv,
+        color,
+    });
 }
 
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
@@ -854,10 +1036,7 @@ pub struct SizedBuffers {
 }
 
 impl SizedBuffers {
-    pub fn new(
-        memory_allocator: Arc<dyn MemoryAllocator>,
-        render_dimensions: [u32; 3],
-    ) -> Self {
+    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, render_dimensions: [u32; 3]) -> Self {
         let max_tetrahedrons: usize = 200000;
 
         let output_tetrahedron_buffer = Buffer::from_iter(
@@ -972,7 +1151,9 @@ impl SizedBuffers {
         let atomic_counter_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                usage: BufferUsage::STORAGE_BUFFER
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::TRANSFER_SRC,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -1191,6 +1372,12 @@ impl SizedBuffers {
 pub struct LiveBuffers {
     model_instance_buffer: Subbuffer<[common::ModelInstance]>,
     working_data_buffer: Subbuffer<common::WorkingData>,
+    voxel_frame_meta_buffer: Subbuffer<GpuVoxelFrameMeta>,
+    voxel_chunk_headers_buffer: Subbuffer<[GpuVoxelChunkHeader]>,
+    voxel_occupancy_words_buffer: Subbuffer<[u32]>,
+    voxel_material_words_buffer: Subbuffer<[u32]>,
+    voxel_visible_chunk_indices_buffer: Subbuffer<[u32]>,
+    voxel_chunk_lookup_buffer: Subbuffer<[GpuVoxelChunkLookupEntry]>,
     descriptor_set: Arc<DescriptorSet>,
 }
 
@@ -1229,12 +1416,109 @@ impl LiveBuffers {
             common::WorkingData::zeroed(),
         )
         .unwrap();
+
+        let voxel_frame_meta_buffer = Buffer::from_data(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            GpuVoxelFrameMeta::zeroed(),
+        )
+        .unwrap();
+
+        let voxel_chunk_headers_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![GpuVoxelChunkHeader::zeroed(); VTE_MAX_CHUNKS],
+        )
+        .unwrap();
+
+        let voxel_occupancy_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK],
+        )
+        .unwrap();
+
+        let voxel_material_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK],
+        )
+        .unwrap();
+
+        let voxel_visible_chunk_indices_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; VTE_MAX_CHUNKS],
+        )
+        .unwrap();
+
+        let voxel_chunk_lookup_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![GpuVoxelChunkLookupEntry::empty(); VTE_CHUNK_LOOKUP_CAPACITY],
+        )
+        .unwrap();
+
         let descriptor_set = DescriptorSet::new(
             descriptor_set_allocator,
             descriptor_set_layout,
             [
                 WriteDescriptorSet::buffer(0, model_instance_buffer.clone()),
                 WriteDescriptorSet::buffer(1, working_data_buffer.clone()),
+                WriteDescriptorSet::buffer(2, voxel_frame_meta_buffer.clone()),
+                WriteDescriptorSet::buffer(3, voxel_chunk_headers_buffer.clone()),
+                WriteDescriptorSet::buffer(4, voxel_occupancy_words_buffer.clone()),
+                WriteDescriptorSet::buffer(5, voxel_material_words_buffer.clone()),
+                WriteDescriptorSet::buffer(6, voxel_visible_chunk_indices_buffer.clone()),
+                WriteDescriptorSet::buffer(7, voxel_chunk_lookup_buffer.clone()),
             ],
             [],
         )
@@ -1242,6 +1526,12 @@ impl LiveBuffers {
         Self {
             model_instance_buffer,
             working_data_buffer,
+            voxel_frame_meta_buffer,
+            voxel_chunk_headers_buffer,
+            voxel_occupancy_words_buffer,
+            voxel_material_words_buffer,
+            voxel_visible_chunk_indices_buffer,
+            voxel_chunk_lookup_buffer,
             descriptor_set,
         }
     }
@@ -1262,6 +1552,15 @@ impl LiveBuffers {
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             },
         );
+        for binding in 2..=7u32 {
+            bindings.insert(
+                binding,
+                DescriptorSetLayoutBinding {
+                    stages: ShaderStages::COMPUTE,
+                    ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+                },
+            );
+        }
         DescriptorSetLayout::new(
             device.clone(),
             DescriptorSetLayoutCreateInfo {
@@ -1519,6 +1818,10 @@ struct ComputePipelineContext {
     raytrace_pre_pipeline: Arc<ComputePipeline>,
     raytrace_pixel_pipeline: Arc<ComputePipeline>,
     raytrace_clear_pipeline: Arc<ComputePipeline>,
+    // Voxel traversal engine (VTE) pipelines
+    voxel_clear_pipeline: Arc<ComputePipeline>,
+    voxel_trace_stage_a_pipeline: Arc<ComputePipeline>,
+    voxel_display_stage_b_pipeline: Arc<ComputePipeline>,
     // BVH pipelines
     bvh_scene_bounds_pipeline: Arc<ComputePipeline>,
     bvh_morton_codes_pipeline: Arc<ComputePipeline>,
@@ -1583,10 +1886,7 @@ impl ComputePipelineContext {
                 None,
                 ComputePipelineCreateInfo::stage_layout(
                     PipelineShaderStageCreateInfo::new(
-                        shaders
-                            .bin_tets_cs
-                            .entry_point("mainBinTetsCS")
-                            .unwrap(),
+                        shaders.bin_tets_cs.entry_point("mainBinTetsCS").unwrap(),
                     ),
                     pipeline_layout.clone(),
                 ),
@@ -1628,6 +1928,45 @@ impl ComputePipelineContext {
                         shaders
                             .raytrace_clear
                             .entry_point("mainRaytracerClear")
+                            .unwrap(),
+                    ),
+                    pipeline_layout.clone(),
+                ),
+            )
+            .unwrap(),
+            voxel_clear_pipeline: ComputePipeline::new(
+                device.clone(),
+                None,
+                ComputePipelineCreateInfo::stage_layout(
+                    PipelineShaderStageCreateInfo::new(
+                        shaders.voxel_clear.entry_point("mainVoxelClear").unwrap(),
+                    ),
+                    pipeline_layout.clone(),
+                ),
+            )
+            .unwrap(),
+            voxel_trace_stage_a_pipeline: ComputePipeline::new(
+                device.clone(),
+                None,
+                ComputePipelineCreateInfo::stage_layout(
+                    PipelineShaderStageCreateInfo::new(
+                        shaders
+                            .voxel_trace_stage_a
+                            .entry_point("mainVoxelTraceStageA")
+                            .unwrap(),
+                    ),
+                    pipeline_layout.clone(),
+                ),
+            )
+            .unwrap(),
+            voxel_display_stage_b_pipeline: ComputePipeline::new(
+                device.clone(),
+                None,
+                ComputePipelineCreateInfo::stage_layout(
+                    PipelineShaderStageCreateInfo::new(
+                        shaders
+                            .voxel_display_stage_b
+                            .entry_point("mainVoxelDisplayStageB")
                             .unwrap(),
                     ),
                     pipeline_layout.clone(),
@@ -1828,9 +2167,7 @@ impl GpuProfiler {
         }
 
         let mut results = vec![0u64; n as usize];
-        match query_pool
-            .get_results::<u64>(0..n, &mut results, QueryResultFlags::WAIT)
-        {
+        match query_pool.get_results::<u64>(0..n, &mut results, QueryResultFlags::WAIT) {
             Ok(true) => {}
             _ => return,
         }
@@ -1845,8 +2182,7 @@ impl GpuProfiler {
             let interval_ms = (results[i] - results[i - 1]) as f64 * period_ms;
             let name = self.phase_names[i];
             total_ms += interval_ms;
-            self.last_frame_phases
-                .push((name, interval_ms as f32));
+            self.last_frame_phases.push((name, interval_ms as f32));
 
             // Accumulate into named buckets
             if let Some(entry) = self.accum.iter_mut().find(|(n, _, _)| *n == name) {
@@ -1861,7 +2197,10 @@ impl GpuProfiler {
         self.total_frames += 1;
 
         if total_ms > 100.0 {
-            println!("!!! SLOW FRAME ({:.1} ms) — clipped_tets={} — per-phase:", total_ms, clipped_tet_count);
+            println!(
+                "!!! SLOW FRAME ({:.1} ms) — clipped_tets={} — per-phase:",
+                total_ms, clipped_tet_count
+            );
             for (name, ms) in &self.last_frame_phases {
                 println!("  {}: {:.3} ms", name, ms);
             }
@@ -1873,10 +2212,7 @@ impl GpuProfiler {
     }
 
     fn print_report(&mut self) {
-        println!(
-            "=== GPU Profile ({} frames) ===",
-            self.total_frames
-        );
+        println!("=== GPU Profile ({} frames) ===", self.total_frames);
 
         let mut total_avg = 0.0f64;
         for (name, total_ms, count) in &self.accum {
@@ -1886,7 +2222,11 @@ impl GpuProfiler {
                 println!("  {}: {:.3} ms (avg over {} samples)", name, avg, count);
             }
         }
-        println!("  Total avg: {:.3} ms ({:.0} FPS)", total_avg, 1000.0 / total_avg.max(0.001));
+        println!(
+            "  Total avg: {:.3} ms ({:.0} FPS)",
+            total_avg,
+            1000.0 / total_avg.max(0.001)
+        );
 
         println!("================================");
 
@@ -1923,6 +2263,9 @@ pub struct RenderContext {
     hud_w_velocity: f32,
     frame_time_ms: f32,
     last_render_start: Option<Instant>,
+    last_backend: RenderBackend,
+    vte_debug_counters: VteDebugCounters,
+    vte_backend_notice_printed: bool,
 }
 
 impl RenderContext {
@@ -2047,6 +2390,20 @@ impl RenderContext {
         let raytrace_clear = load_shader(
             device.clone(),
             &std::fs::read(spirv_dir.join("mainRaytracerClear.spv"))
+                .expect("Failed to read shader"),
+        );
+        let voxel_clear = load_shader(
+            device.clone(),
+            &std::fs::read(spirv_dir.join("mainVoxelClear.spv")).expect("Failed to read shader"),
+        );
+        let voxel_trace_stage_a = load_shader(
+            device.clone(),
+            &std::fs::read(spirv_dir.join("mainVoxelTraceStageA.spv"))
+                .expect("Failed to read shader"),
+        );
+        let voxel_display_stage_b = load_shader(
+            device.clone(),
+            &std::fs::read(spirv_dir.join("mainVoxelDisplayStageB.spv"))
                 .expect("Failed to read shader"),
         );
         let raster_tet = load_shader(
@@ -2201,10 +2558,7 @@ impl RenderContext {
 
         let sized_descriptor_set_layout =
             SizedBuffers::create_descriptor_set_layout(device.clone());
-        let sized_buffers = SizedBuffers::new(
-            memory_allocator.clone(),
-            render_dimensions,
-        );
+        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), render_dimensions);
 
         let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
 
@@ -2250,6 +2604,9 @@ impl RenderContext {
             raytrace_preprocess: raytrace_preprocess,
             raytrace_pixel: raytrace_pixel,
             raytrace_clear: raytrace_clear,
+            voxel_clear,
+            voxel_trace_stage_a,
+            voxel_display_stage_b,
             bvh_scene_bounds,
             bvh_morton_codes,
             bvh_bitonic_sort_local,
@@ -2473,6 +2830,9 @@ impl RenderContext {
             hud_w_velocity: 0.0,
             frame_time_ms: 0.0,
             last_render_start: None,
+            last_backend: RenderBackend::Auto,
+            vte_debug_counters: VteDebugCounters::default(),
+            vte_backend_notice_printed: false,
         }
     }
 
@@ -2627,10 +2987,10 @@ impl RenderContext {
             [0.0, 0.0, 0.0, 1.0], // W
         ];
         let fallback_dirs = [
-            Vec2::new(1.0, 0.0),   // X: right
-            Vec2::new(0.0, -1.0),  // Y: up (Vulkan +Y=down)
-            Vec2::new(-1.0, 0.0),  // Z: left
-            Vec2::new(0.0, 1.0),   // W: down (Vulkan +Y=down)
+            Vec2::new(1.0, 0.0),  // X: right
+            Vec2::new(0.0, -1.0), // Y: up (Vulkan +Y=down)
+            Vec2::new(-1.0, 0.0), // Z: left
+            Vec2::new(0.0, 1.0),  // W: down (Vulkan +Y=down)
         ];
         let axis_labels = ["X", "Y", "Z", "W"];
         let arrow_len = rose_radius * 0.70;
@@ -2687,7 +3047,11 @@ impl RenderContext {
 
             // Label position: just beyond arrowhead
             let label_pos = rose_origin + ray_dir * (arrow_len + rose_radius * 0.28);
-            arrows.push(ArrowData { ray_dir, color: axis_color, label_pos });
+            arrows.push(ArrowData {
+                ray_dir,
+                color: axis_color,
+                label_pos,
+            });
         }
 
         let mut hud_quads = Vec::<HudVertex>::with_capacity(2048);
@@ -2710,10 +3074,7 @@ impl RenderContext {
         // Render axis labels at arrow tips
         for (axis_id, arrow) in arrows.iter().enumerate() {
             // Offset label position so text is centered on the label point
-            let label_offset = Vec2::new(
-                -arrow.ray_dir.x.abs() * 0.012,
-                arrow.ray_dir.y * 0.012,
-            );
+            let label_offset = Vec2::new(-arrow.ray_dir.x.abs() * 0.012, arrow.ray_dir.y * 0.012);
             let label_ndc = arrow.label_pos + label_offset;
             let label_px = ndc_to_pixels(label_ndc, present_size);
             if let Some(hud_res) = self.hud_resources.as_ref() {
@@ -2832,10 +3193,7 @@ impl RenderContext {
         let tick_size = 0.008;
         let tick_interval = 4.0;
         let max_ticks = (map_range / tick_interval) as i32;
-        for panel_data in [
-            (xz_center, xz_min, xz_max),
-            (yw_center, yw_min, yw_max),
-        ] {
+        for panel_data in [(xz_center, xz_min, xz_max), (yw_center, yw_min, yw_max)] {
             let (center, pmin, pmax) = panel_data;
             for i in 1..=max_ticks {
                 let frac = (i as f32 * tick_interval) / map_range;
@@ -2866,7 +3224,7 @@ impl RenderContext {
 
         // Direction wedge on XZ panel: small triangle showing camera yaw
         {
-            let yaw_x = look_world[0];  // X component of look direction
+            let yaw_x = look_world[0]; // X component of look direction
             let yaw_z = look_world[2]; // Z component of look direction
             let yaw_len = (yaw_x * yaw_x + yaw_z * yaw_z).sqrt();
             if yaw_len > 1e-4 {
@@ -2881,7 +3239,8 @@ impl RenderContext {
                 let wedge_width = 0.012;
                 let wedge_tip = xz_center + wedge_dir * wedge_len;
                 let wedge_left = xz_center - wedge_dir * wedge_len * 0.3 + wedge_side * wedge_width;
-                let wedge_right = xz_center - wedge_dir * wedge_len * 0.3 - wedge_side * wedge_width;
+                let wedge_right =
+                    xz_center - wedge_dir * wedge_len * 0.3 - wedge_side * wedge_width;
                 let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
                 push_line(&mut lines, wedge_tip, wedge_left, wedge_color);
                 push_line(&mut lines, wedge_tip, wedge_right, wedge_color);
@@ -2905,8 +3264,7 @@ impl RenderContext {
                 let wedge_len = 0.025;
                 let wedge_width = 0.012;
                 let wedge_tip = yw_center + wedge_dir * wedge_len;
-                let wedge_left =
-                    yw_center - wedge_dir * wedge_len * 0.3 + wedge_side * wedge_width;
+                let wedge_left = yw_center - wedge_dir * wedge_len * 0.3 + wedge_side * wedge_width;
                 let wedge_right =
                     yw_center - wedge_dir * wedge_len * 0.3 - wedge_side * wedge_width;
                 let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
@@ -2920,27 +3278,107 @@ impl RenderContext {
         let minimap_label_size = 11.0 * text_scale;
         if let Some(hud_res) = self.hud_resources.as_ref() {
             // Panel titles inside top-left corner (Vulkan: lower clip Y = higher on screen)
-            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
-            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "XZ", xz_title_px, minimap_label_size, xz_frame_color, present_size);
-            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
-            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "YW", yw_title_px, minimap_label_size, yw_frame_color, present_size);
+            let xz_title_px =
+                ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
+            push_text_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                "XZ",
+                xz_title_px,
+                minimap_label_size,
+                xz_frame_color,
+                present_size,
+            );
+            let yw_title_px =
+                ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
+            push_text_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                "YW",
+                yw_title_px,
+                minimap_label_size,
+                yw_frame_color,
+                present_size,
+            );
 
             // XZ panel axis labels: X at right edge, Z at top edge (lower clip Y)
-            let xz_x_label_px = ndc_to_pixels(Vec2::new(xz_max.x - 0.025, xz_center.y + 0.02), present_size);
-            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "X", xz_x_label_px, minimap_label_size, axis_colors[0], present_size);
-            let xz_z_label_px = ndc_to_pixels(Vec2::new(xz_center.x + 0.015, xz_min.y + 0.01), present_size);
-            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "Z", xz_z_label_px, minimap_label_size, axis_colors[2], present_size);
+            let xz_x_label_px = ndc_to_pixels(
+                Vec2::new(xz_max.x - 0.025, xz_center.y + 0.02),
+                present_size,
+            );
+            push_text_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                "X",
+                xz_x_label_px,
+                minimap_label_size,
+                axis_colors[0],
+                present_size,
+            );
+            let xz_z_label_px = ndc_to_pixels(
+                Vec2::new(xz_center.x + 0.015, xz_min.y + 0.01),
+                present_size,
+            );
+            push_text_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                "Z",
+                xz_z_label_px,
+                minimap_label_size,
+                axis_colors[2],
+                present_size,
+            );
 
             // YW panel axis labels: Y at right edge, W at top edge (lower clip Y)
-            let yw_y_label_px = ndc_to_pixels(Vec2::new(yw_max.x - 0.025, yw_center.y + 0.02), present_size);
-            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "Y", yw_y_label_px, minimap_label_size, axis_colors[1], present_size);
-            let yw_w_label_px = ndc_to_pixels(Vec2::new(yw_center.x + 0.015, yw_min.y + 0.01), present_size);
-            push_text_quads(&mut hud_quads, &hud_res.font_atlas, "W", yw_w_label_px, minimap_label_size, axis_colors[3], present_size);
+            let yw_y_label_px = ndc_to_pixels(
+                Vec2::new(yw_max.x - 0.025, yw_center.y + 0.02),
+                present_size,
+            );
+            push_text_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                "Y",
+                yw_y_label_px,
+                minimap_label_size,
+                axis_colors[1],
+                present_size,
+            );
+            let yw_w_label_px = ndc_to_pixels(
+                Vec2::new(yw_center.x + 0.015, yw_min.y + 0.01),
+                present_size,
+            );
+            push_text_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                "W",
+                yw_w_label_px,
+                minimap_label_size,
+                axis_colors[3],
+                present_size,
+            );
         } else if let Some(font) = self.hud_font.as_ref() {
-            let xz_title_px = ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
-            push_text_lines(&mut lines, font, "XZ", xz_title_px, minimap_label_size, xz_frame_color, present_size);
-            let yw_title_px = ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
-            push_text_lines(&mut lines, font, "YW", yw_title_px, minimap_label_size, yw_frame_color, present_size);
+            let xz_title_px =
+                ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
+            push_text_lines(
+                &mut lines,
+                font,
+                "XZ",
+                xz_title_px,
+                minimap_label_size,
+                xz_frame_color,
+                present_size,
+            );
+            let yw_title_px =
+                ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
+            push_text_lines(
+                &mut lines,
+                font,
+                "YW",
+                yw_title_px,
+                minimap_label_size,
+                yw_frame_color,
+                present_size,
+            );
         }
 
         // Instance markers: XZ panel uses indices [0]=X, [2]=Z; YW panel uses [1]=Y, [3]=W
@@ -3080,10 +3518,11 @@ impl RenderContext {
             0.0
         };
         let mut readout_text = format!(
-            "{:.1} ms ({:.0} fps) GPU {:.1} ms\nPOS {:+.2} {:+.2} {:+.2} {:+.2}\nLOOK {:+.2} {:+.2} {:+.2} {:+.2}",
+            "{:.1} ms ({:.0} fps) GPU {:.1} ms [{}]\nPOS {:+.2} {:+.2} {:+.2} {:+.2}\nLOOK {:+.2} {:+.2} {:+.2} {:+.2}",
             self.frame_time_ms,
             fps,
             self.profiler.last_gpu_total_ms,
+            self.last_backend.label(),
             camera_position[0],
             camera_position[1],
             camera_position[2],
@@ -3093,6 +3532,19 @@ impl RenderContext {
             look_world[2],
             look_world[3]
         );
+        if self.last_backend == RenderBackend::VoxelTraversal {
+            readout_text.push_str(&format!(
+                "\nVTE c:{} f:{} e:{} m:{} cs:{} vs:{} h:{} s:{}",
+                self.vte_debug_counters.candidate_chunks,
+                self.vte_debug_counters.frustum_culled_chunks,
+                self.vte_debug_counters.empty_chunks_skipped,
+                self.vte_debug_counters.macro_cells_skipped,
+                self.vte_debug_counters.chunk_steps,
+                self.vte_debug_counters.voxel_steps,
+                self.vte_debug_counters.primary_hits,
+                self.vte_debug_counters.s_samples
+            ));
+        }
         if !self.profiler.last_frame_phases.is_empty() {
             readout_text.push('\n');
             for (name, ms) in &self.profiler.last_frame_phases {
@@ -3107,8 +3559,20 @@ impl RenderContext {
             let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
 
             // Semi-transparent backgrounds behind minimap panels
-            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, xz_min, xz_max, panel_bg);
-            push_filled_rect_quads(&mut hud_quads, &hud_res.font_atlas, yw_min, yw_max, panel_bg);
+            push_filled_rect_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                xz_min,
+                xz_max,
+                panel_bg,
+            );
+            push_filled_rect_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                yw_min,
+                yw_max,
+                panel_bg,
+            );
 
             // Semi-transparent background behind text readout
             let readout_bg_min = Vec2::new(left, upper_top + 0.02);
@@ -3147,7 +3611,10 @@ impl RenderContext {
         // Write line data to GPU buffer
         let lines_to_write = lines.len().min(max_lines - base_line_count);
         if lines_to_write > 0 {
-            let mut writer = self.frames_in_flight[frame_idx].line_vertexes_buffer.write().unwrap();
+            let mut writer = self.frames_in_flight[frame_idx]
+                .line_vertexes_buffer
+                .write()
+                .unwrap();
             for (line_id, segment) in lines.iter().take(lines_to_write).enumerate() {
                 let vertex_id = (base_line_count + line_id) * 2;
                 writer[vertex_id] = LineVertex::new(segment.start, segment.color);
@@ -3194,6 +3661,69 @@ impl RenderContext {
         model_instances: &[common::ModelInstance],
         render_options: RenderOptions,
     ) {
+        // Backward-compatible shim while call sites migrate to explicit tetra/voxel contracts.
+        self.render_tetra_frame(
+            device,
+            queue,
+            FrameParams {
+                view_matrix,
+                focal_length_xy,
+                focal_length_zw,
+                render_options,
+            },
+            TetraFrameInput { model_instances },
+        );
+    }
+
+    pub fn render_tetra_frame(
+        &mut self,
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+        mut frame_params: FrameParams,
+        tetra_input: TetraFrameInput<'_>,
+    ) {
+        if frame_params.render_options.render_backend == RenderBackend::VoxelTraversal {
+            eprintln!(
+                "render_tetra_frame called with '{}' backend; forcing '{}'.",
+                RenderBackend::VoxelTraversal.label(),
+                RenderBackend::TetraRaster.label()
+            );
+            frame_params.render_options.render_backend = RenderBackend::TetraRaster;
+        }
+        self.render_internal(
+            device,
+            queue,
+            frame_params,
+            tetra_input.model_instances,
+            None,
+        );
+    }
+
+    pub fn render_voxel_frame(
+        &mut self,
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+        mut frame_params: FrameParams,
+        voxel_input: VoxelFrameInput<'_>,
+    ) {
+        frame_params.render_options.render_backend = RenderBackend::VoxelTraversal;
+        self.render_internal(device, queue, frame_params, &[], Some(&voxel_input));
+    }
+
+    fn render_internal(
+        &mut self,
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+        frame_params: FrameParams,
+        model_instances: &[common::ModelInstance],
+        voxel_input: Option<&VoxelFrameInput<'_>>,
+    ) {
+        let FrameParams {
+            view_matrix,
+            focal_length_xy,
+            focal_length_zw,
+            render_options,
+        } = frame_params;
         let view_matrix_view = view_matrix.into_owned();
 
         let slice = view_matrix_view.view().to_slice().unwrap();
@@ -3233,7 +3763,7 @@ impl RenderContext {
             }
         }
 
-        let mut force_clear = false;
+        let force_clear = false;
 
         if let Some(swapchain) = self.swapchain.clone() {
             if let Some(window) = self.window.clone() {
@@ -3293,7 +3823,11 @@ impl RenderContext {
             );
         }
         {
-            let mut writer = self.frames_in_flight[frame_idx].live_buffers.working_data_buffer.write().unwrap();
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .working_data_buffer
+                .write()
+                .unwrap();
             writer.view_matrix = view_matrix_nalgebra.into();
             writer.view_matrix_inverse = view_matrix_nalgebra_inv.into();
             writer.render_dimensions = glam::UVec4::new(
@@ -3320,10 +3854,150 @@ impl RenderContext {
         }
 
         {
-            let mut writer = self.frames_in_flight[frame_idx].live_buffers.model_instance_buffer.write().unwrap();
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .model_instance_buffer
+                .write()
+                .unwrap();
             for i in 0..model_instances.len() {
                 writer[i] = model_instances[i];
             }
+        }
+
+        let mut vte_chunk_count: usize = 0;
+        let mut vte_visible_chunk_count: usize = 0;
+        let mut vte_occupancy_word_count: usize = 0;
+        let mut vte_material_word_count: usize = 0;
+        if let Some(input) = voxel_input {
+            vte_chunk_count = input.chunk_headers.len().min(VTE_MAX_CHUNKS);
+            vte_visible_chunk_count = input
+                .visible_chunk_indices
+                .len()
+                .min(VTE_MAX_CHUNKS)
+                .min(vte_chunk_count);
+            vte_occupancy_word_count = input
+                .occupancy_words
+                .len()
+                .min(VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK);
+            vte_material_word_count = input
+                .material_words
+                .len()
+                .min(VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK);
+
+            if self.frames_rendered == 0
+                && (input.chunk_headers.len() > vte_chunk_count
+                    || input.visible_chunk_indices.len() > vte_visible_chunk_count
+                    || input.occupancy_words.len() > vte_occupancy_word_count
+                    || input.material_words.len() > vte_material_word_count)
+            {
+                eprintln!(
+                    "VTE input truncated to capacities: chunks {}->{}, visible {}->{}, occupancy {}->{}, materials {}->{}",
+                    input.chunk_headers.len(),
+                    vte_chunk_count,
+                    input.visible_chunk_indices.len(),
+                    vte_visible_chunk_count,
+                    input.occupancy_words.len(),
+                    vte_occupancy_word_count,
+                    input.material_words.len(),
+                    vte_material_word_count
+                );
+            }
+
+            {
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
+                    .voxel_chunk_headers_buffer
+                    .write()
+                    .unwrap();
+                for i in 0..vte_chunk_count {
+                    writer[i] = input.chunk_headers[i];
+                }
+            }
+            {
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
+                    .voxel_occupancy_words_buffer
+                    .write()
+                    .unwrap();
+                for i in 0..vte_occupancy_word_count {
+                    writer[i] = input.occupancy_words[i];
+                }
+            }
+            {
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
+                    .voxel_material_words_buffer
+                    .write()
+                    .unwrap();
+                for i in 0..vte_material_word_count {
+                    writer[i] = input.material_words[i];
+                }
+            }
+            {
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
+                    .voxel_visible_chunk_indices_buffer
+                    .write()
+                    .unwrap();
+                for i in 0..vte_visible_chunk_count {
+                    writer[i] =
+                        input.visible_chunk_indices[i].min(vte_chunk_count.saturating_sub(1) as u32);
+                }
+            }
+            {
+                debug_assert!(VTE_CHUNK_LOOKUP_CAPACITY.is_power_of_two());
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
+                    .voxel_chunk_lookup_buffer
+                    .write()
+                    .unwrap();
+
+                for entry in writer.iter_mut() {
+                    *entry = GpuVoxelChunkLookupEntry::empty();
+                }
+
+                if vte_chunk_count > 0 {
+                    let hash_mask = (VTE_CHUNK_LOOKUP_CAPACITY as u32) - 1;
+                    for i in 0..vte_visible_chunk_count {
+                        let chunk_index = input.visible_chunk_indices[i]
+                            .min(vte_chunk_count.saturating_sub(1) as u32);
+                        let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                        let mut slot =
+                            (vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
+
+                        for _ in 0..VTE_CHUNK_LOOKUP_CAPACITY {
+                            let entry = &mut writer[slot];
+                            if entry.chunk_index == GpuVoxelChunkLookupEntry::INVALID_INDEX
+                                || entry.chunk_coord == chunk_coord
+                            {
+                                *entry = GpuVoxelChunkLookupEntry {
+                                    chunk_coord,
+                                    chunk_index,
+                                    _padding: [0; 3],
+                                };
+                                break;
+                            }
+                            slot = (slot + 1) & (VTE_CHUNK_LOOKUP_CAPACITY - 1);
+                        }
+                    }
+                }
+            }
+        }
+        {
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .voxel_frame_meta_buffer
+                .write()
+                .unwrap();
+            *writer = GpuVoxelFrameMeta {
+                chunk_count: vte_chunk_count as u32,
+                visible_chunk_count: vte_visible_chunk_count as u32,
+                occupancy_word_count: vte_occupancy_word_count as u32,
+                material_word_count: vte_material_word_count as u32,
+                max_trace_steps: 320,
+                chunk_lookup_capacity: VTE_CHUNK_LOOKUP_CAPACITY as u32,
+                _padding: [0; 2],
+            };
         }
 
         let mut line_render_count = 0;
@@ -3371,6 +4045,97 @@ impl RenderContext {
             None => (None, None),
         };
 
+        let mut do_raster = render_options.do_raster;
+        let mut do_raytrace = render_options.do_raytrace;
+        let mut do_edges = render_options.do_edges;
+        let mut do_tetrahedron_edges = render_options.do_tetrahedron_edges;
+        let mut do_voxel_vte = false;
+
+        match render_options.render_backend {
+            RenderBackend::Auto => {}
+            RenderBackend::TetraRaster => {
+                do_raster = true;
+                do_raytrace = false;
+            }
+            RenderBackend::TetraRaytrace => {
+                do_raster = false;
+                do_raytrace = true;
+            }
+            RenderBackend::VoxelTraversal => {
+                do_raster = false;
+                do_raytrace = false;
+                do_edges = false;
+                do_tetrahedron_edges = false;
+                do_voxel_vte = true;
+            }
+        }
+
+        if do_voxel_vte {
+            let (
+                candidate_chunks,
+                visible_chunks,
+                empty_chunks,
+                full_chunks,
+                occupancy_words,
+                material_words,
+            ) = if let Some(input) = voxel_input {
+                    let empty = input
+                        .chunk_headers
+                        .iter()
+                        .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_EMPTY) != 0)
+                        .count() as u32;
+                    let full = input
+                        .chunk_headers
+                        .iter()
+                        .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0)
+                        .count() as u32;
+                    (
+                        input.chunk_headers.len() as u32,
+                        input.visible_chunk_indices.len() as u32,
+                        empty,
+                        full,
+                        input.occupancy_words.len() as u64,
+                        input.material_words.len() as u64,
+                    )
+                } else {
+                    (0, 0, 0, 0, 0, 0)
+                };
+
+            self.vte_debug_counters = VteDebugCounters {
+                candidate_chunks,
+                frustum_culled_chunks: candidate_chunks.saturating_sub(visible_chunks),
+                empty_chunks_skipped: empty_chunks,
+                macro_cells_skipped: 0,
+                chunk_steps: 0,
+                voxel_steps: 0,
+                primary_hits: full_chunks as u64,
+                s_samples: self.sized_buffers.render_dimensions[0] as u64
+                    * self.sized_buffers.render_dimensions[1] as u64
+                    * self.sized_buffers.render_dimensions[2] as u64,
+            };
+            if !self.vte_backend_notice_printed {
+                println!(
+                    "Render backend '{}' selected: VTE pass skeleton active (chunks={}, visible={}, occupancy_words={}, material_words={}).",
+                    RenderBackend::VoxelTraversal.label(),
+                    candidate_chunks,
+                    visible_chunks,
+                    occupancy_words,
+                    material_words,
+                );
+                self.vte_backend_notice_printed = true;
+            }
+        }
+
+        self.last_backend = if do_voxel_vte {
+            RenderBackend::VoxelTraversal
+        } else if do_raytrace {
+            RenderBackend::TetraRaytrace
+        } else if do_raster || do_tetrahedron_edges || do_edges {
+            RenderBackend::TetraRaster
+        } else {
+            RenderBackend::Auto
+        };
+
         let cpu_mode = false;
 
         if cpu_mode {
@@ -3378,23 +4143,26 @@ impl RenderContext {
         }
 
         if cpu_mode {
-            if render_options.do_raster || render_options.do_tetrahedron_edges {
+            if do_raster || do_tetrahedron_edges {
                 // Tetrahedron pre-raster
                 unimplemented!();
             }
 
-            if render_options.do_raster {
+            if do_raster {
                 unimplemented!();
             }
 
-            if render_options.do_edges {
+            if do_edges {
                 unimplemented!();
             }
 
-            if render_options.do_raytrace {
+            if do_raytrace {
                 // CPU shader fallback not available with Slang shaders
                 // (Slang compiles to SPIR-V only, not CPU-executable code)
                 unimplemented!("CPU raytracing not available - use GPU mode");
+            }
+            if do_voxel_vte {
+                unimplemented!("CPU voxel traversal backend not implemented");
             }
         } else {
             builder
@@ -3404,8 +4172,13 @@ impl RenderContext {
                     0,
                     vec![
                         self.one_time_buffers.descriptor_set.clone(),
-                        self.frames_in_flight[frame_idx].sized_descriptor_set.clone(),
-                        self.frames_in_flight[frame_idx].live_buffers.descriptor_set.clone(),
+                        self.frames_in_flight[frame_idx]
+                            .sized_descriptor_set
+                            .clone(),
+                        self.frames_in_flight[frame_idx]
+                            .live_buffers
+                            .descriptor_set
+                            .clone(),
                     ],
                 )
                 .unwrap();
@@ -3441,7 +4214,57 @@ impl RenderContext {
                 .unwrap();
             }
 
-            if render_options.do_frame_clear || force_clear {
+            if do_voxel_vte {
+                builder
+                    .bind_pipeline_compute(
+                        self.compute_pipeline.voxel_trace_stage_a_pipeline.clone(),
+                    )
+                    .unwrap();
+                unsafe {
+                    builder.dispatch([
+                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
+                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                        self.sized_buffers.render_dimensions[2].max(1),
+                    ])
+                }
+                .unwrap();
+                {
+                    let q = self.profiler.next_query_index("vte_stage_a");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
+
+                builder
+                    .bind_pipeline_compute(
+                        self.compute_pipeline.voxel_display_stage_b_pipeline.clone(),
+                    )
+                    .unwrap();
+                unsafe {
+                    builder.dispatch([
+                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
+                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                        1,
+                    ])
+                }
+                .unwrap();
+                {
+                    let q = self.profiler.next_query_index("vte_stage_b");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
+            } else if render_options.do_frame_clear || force_clear {
                 builder
                     .bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone())
                     .unwrap();
@@ -3464,7 +4287,7 @@ impl RenderContext {
                 .unwrap();
             }
 
-            if render_options.do_raster || render_options.do_tetrahedron_edges {
+            if do_raster || do_tetrahedron_edges {
                 // Tetrahedron pre-raster
                 // Reset atomic counter to 0 before clipping dispatch
                 builder
@@ -3496,12 +4319,12 @@ impl RenderContext {
                     ))
                     .unwrap();
 
-                if render_options.do_tetrahedron_edges {
+                if do_tetrahedron_edges {
                     line_render_count = total_tetrahedron_count * 6;
                 }
             }
 
-            if render_options.do_raster {
+            if do_raster {
                 // Zero tile counts
                 builder
                     .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
@@ -3512,11 +4335,7 @@ impl RenderContext {
                     .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
                     .unwrap();
                 unsafe {
-                    builder.dispatch([
-                        (self.sized_buffers.max_tetrahedrons as u32 + 63) / 64,
-                        1,
-                        1,
-                    ])
+                    builder.dispatch([(self.sized_buffers.max_tetrahedrons as u32 + 63) / 64, 1, 1])
                 }
                 .unwrap();
                 {
@@ -3556,7 +4375,7 @@ impl RenderContext {
                 }
             }
 
-            if render_options.do_edges {
+            if do_edges {
                 // Tetrahedron edge pre-raster
                 builder
                     .bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone())
@@ -3580,7 +4399,7 @@ impl RenderContext {
                 line_render_count = total_edge_count;
             }
 
-            if render_options.do_raytrace {
+            if do_raytrace {
                 // Compute a hash of the scene inputs that affect the BVH.
                 // If unchanged, skip tetrahedron preprocessing and BVH construction.
                 let scene_hash = {
@@ -3861,8 +4680,13 @@ impl RenderContext {
                             0,
                             vec![
                                 self.one_time_buffers.descriptor_set.clone(),
-                                self.frames_in_flight[frame_idx].sized_descriptor_set.clone(),
-                                self.frames_in_flight[frame_idx].live_buffers.descriptor_set.clone(),
+                                self.frames_in_flight[frame_idx]
+                                    .sized_descriptor_set
+                                    .clone(),
+                                self.frames_in_flight[frame_idx]
+                                    .live_buffers
+                                    .descriptor_set
+                                    .clone(),
                             ],
                         )
                         .unwrap();
@@ -3885,7 +4709,9 @@ impl RenderContext {
 
                     // Render HUD quads (text + panels, alpha-blended on top)
                     if hud_vertex_count > 0 {
-                        if let Some(hud_ds) = self.frames_in_flight[frame_idx].hud_descriptor_set.as_ref() {
+                        if let Some(hud_ds) =
+                            self.frames_in_flight[frame_idx].hud_descriptor_set.as_ref()
+                        {
                             builder
                                 .bind_pipeline_graphics(present_pipeline.hud_pipeline.clone())
                                 .unwrap();
@@ -3897,10 +4723,7 @@ impl RenderContext {
                                     vec![hud_ds.clone()],
                                 )
                                 .unwrap();
-                            unsafe {
-                                builder.draw(hud_vertex_count as u32, 1, 0, 0)
-                            }
-                            .unwrap();
+                            unsafe { builder.draw(hud_vertex_count as u32, 1, 0, 0) }.unwrap();
                         }
                     }
 
@@ -3933,6 +4756,20 @@ impl RenderContext {
                 .unwrap();
         }
 
+        // Final frame marker so profiling includes graphics/present-tail work
+        // after the last compute phase timestamp.
+        {
+            let q = self.profiler.next_query_index("frame_end");
+            unsafe {
+                builder.write_timestamp(
+                    self.frames_in_flight[frame_idx].query_pool.clone(),
+                    q,
+                    PipelineStage::AllCommands,
+                )
+            }
+            .unwrap();
+        }
+
         // Finish recording the command buffer by calling `end`.
         let command_buffer = builder.build().unwrap();
 
@@ -3947,7 +4784,10 @@ impl RenderContext {
                     f.wait(None).unwrap();
                 }
                 // Read back clipped tetrahedron count for diagnostics
-                let clipped_count = self.sized_buffers.cpu_atomic_counter_buffer.read()
+                let clipped_count = self
+                    .sized_buffers
+                    .cpu_atomic_counter_buffer
+                    .read()
                     .map(|data| data[0])
                     .unwrap_or(0);
                 self.last_clipped_tet_count = clipped_count;
@@ -4036,7 +4876,7 @@ impl RenderContext {
         }
 
         // Debug: print BVH diagnostics on first frame
-        if self.frames_rendered == 0 && render_options.do_raytrace {
+        if self.frames_rendered == 0 && do_raytrace {
             // Ensure GPU work is done
             self.wait_for_all_frames();
 

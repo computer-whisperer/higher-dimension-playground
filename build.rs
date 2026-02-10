@@ -100,6 +100,22 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
         entry: "mainTetrahedronPixelCS",
         profile: "cs_6_5",
     },
+    // Voxel traversal engine compute shaders
+    ShaderEntry {
+        file: "voxel.slang",
+        entry: "mainVoxelClear",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "voxel.slang",
+        entry: "mainVoxelTraceStageA",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "voxel.slang",
+        entry: "mainVoxelDisplayStageB",
+        profile: "cs_6_5",
+    },
     // HUD shaders
     ShaderEntry {
         file: "hud.slang",

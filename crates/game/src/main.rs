@@ -4,8 +4,10 @@ mod input;
 mod scene;
 mod voxel;
 
-use clap::Parser;
-use higher_dimension_playground::render::{RenderContext, RenderOptions};
+use clap::{Parser, ValueEnum};
+use higher_dimension_playground::render::{
+    FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
+};
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,6 +48,60 @@ struct Args {
     /// GPU screenshot: render one frame at debug camera position and exit
     #[arg(long)]
     gpu_screenshot: bool,
+
+    /// Override screenshot camera position as 4 values: X Y Z W
+    #[arg(
+        long,
+        num_args = 4,
+        value_names = ["X", "Y", "Z", "W"],
+        allow_hyphen_values = true
+    )]
+    screenshot_pos: Option<Vec<f32>>,
+
+    /// Override screenshot camera angles as 4 values (radians): YAW PITCH XW ZW
+    #[arg(
+        long,
+        num_args = 4,
+        value_names = ["YAW", "PITCH", "XW", "ZW"],
+        allow_hyphen_values = true
+    )]
+    screenshot_angles: Option<Vec<f32>>,
+
+    /// Override screenshot camera angles as 4 values (degrees): YAW PITCH XW ZW
+    #[arg(
+        long,
+        num_args = 4,
+        value_names = ["YAW_DEG", "PITCH_DEG", "XW_DEG", "ZW_DEG"],
+        allow_hyphen_values = true
+    )]
+    screenshot_angles_deg: Option<Vec<f32>>,
+
+    /// Optional screenshot YW deviation angle (radians)
+    #[arg(long)]
+    screenshot_yw: Option<f32>,
+
+    /// Rendering backend to use
+    #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
+    backend: BackendArg,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum BackendArg {
+    Auto,
+    TetraRaster,
+    TetraRaytrace,
+    VoxelTraversal,
+}
+
+impl BackendArg {
+    fn to_render_backend(self) -> RenderBackend {
+        match self {
+            BackendArg::Auto => RenderBackend::Auto,
+            BackendArg::TetraRaster => RenderBackend::TetraRaster,
+            BackendArg::TetraRaytrace => RenderBackend::TetraRaytrace,
+            BackendArg::VoxelTraversal => RenderBackend::VoxelTraversal,
+        }
+    }
 }
 
 fn main() {
@@ -68,6 +124,43 @@ fn main() {
         camera.pitch = 0.0;
         camera.xw_angle = 0.58;
         camera.zw_angle = 0.65;
+
+        if let Some(pos) = args.screenshot_pos.as_ref() {
+            if pos.len() == 4 {
+                camera.position = [pos[0], pos[1], pos[2], pos[3]];
+            }
+        }
+        if let Some(angles) = args.screenshot_angles.as_ref() {
+            if angles.len() == 4 {
+                camera.yaw = angles[0];
+                camera.pitch = angles[1];
+                camera.xw_angle = angles[2];
+                camera.zw_angle = angles[3];
+            }
+        } else if let Some(angles_deg) = args.screenshot_angles_deg.as_ref() {
+            if angles_deg.len() == 4 {
+                camera.yaw = angles_deg[0].to_radians();
+                camera.pitch = angles_deg[1].to_radians();
+                camera.xw_angle = angles_deg[2].to_radians();
+                camera.zw_angle = angles_deg[3].to_radians();
+            }
+        }
+        if let Some(yw) = args.screenshot_yw {
+            camera.yw_deviation = yw;
+        }
+
+        eprintln!(
+            "GPU screenshot camera: pos=({:+.4}, {:+.4}, {:+.4}, {:+.4}) angles(rad)=({:+.4}, {:+.4}, {:+.4}, {:+.4}) yw={:+.4}",
+            camera.position[0],
+            camera.position[1],
+            camera.position[2],
+            camera.position[3],
+            camera.yaw,
+            camera.pitch,
+            camera.xw_angle,
+            camera.zw_angle,
+            camera.yw_deviation
+        );
     }
 
     let mut app = App {
@@ -227,8 +320,13 @@ impl App {
         // Mouse look
         if self.mouse_grabbed {
             let (dx, dy) = self.input.take_mouse_delta();
-            self.camera
-                .apply_mouse_look_on(dx, dy, MOUSE_SENSITIVITY, pair.h_target(), pair.v_target());
+            self.camera.apply_mouse_look_on(
+                dx,
+                dy,
+                MOUSE_SENSITIVITY,
+                pair.h_target(),
+                pair.v_target(),
+            );
         } else {
             self.input.take_mouse_delta();
         }
@@ -260,8 +358,7 @@ impl App {
 
         // Build view matrix and scene
         let view_matrix = self.camera.view_matrix();
-        self.scene.update_surfaces_if_dirty();
-        let instances = self.scene.build_instances(self.camera.position);
+        let backend = self.args.backend.to_render_backend();
 
         let auto_screenshot = if self.gpu_screenshot_countdown > 1 {
             self.gpu_screenshot_countdown -= 1;
@@ -280,6 +377,7 @@ impl App {
 
         let render_options = RenderOptions {
             do_raster: true,
+            render_backend: backend,
             do_navigation_hud: true,
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
@@ -306,20 +404,40 @@ impl App {
             ..Default::default()
         };
 
-        let rcx = self.rcx.as_mut().unwrap();
-        rcx.render(
-            self.device.clone(),
-            self.queue.clone(),
+        let frame_params = FrameParams {
             view_matrix,
-            1.0,
-            1.0,
-            &instances,
+            focal_length_xy: 1.0,
+            focal_length_zw: 1.0,
             render_options,
-        );
+        };
+
+        if backend == RenderBackend::VoxelTraversal {
+            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
+            self.rcx.as_mut().unwrap().render_voxel_frame(
+                self.device.clone(),
+                self.queue.clone(),
+                frame_params,
+                voxel_frame.as_input(),
+            );
+        } else {
+            self.scene.update_surfaces_if_dirty();
+            let instances = self.scene.build_instances(self.camera.position);
+            self.rcx.as_mut().unwrap().render_tetra_frame(
+                self.device.clone(),
+                self.queue.clone(),
+                frame_params,
+                TetraFrameInput {
+                    model_instances: instances,
+                },
+            );
+        }
 
         if auto_screenshot {
             let _ = std::fs::create_dir_all("frames");
-            rcx.save_rendered_frame_png("frames/gpu_render.png");
+            self.rcx
+                .as_mut()
+                .unwrap()
+                .save_rendered_frame_png("frames/gpu_render.png");
             self.should_exit_after_render = true;
         }
     }
@@ -370,20 +488,18 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::MouseInput { button, state, .. } => {
-                match button {
-                    MouseButton::Left => {
-                        if state.is_pressed() && !self.mouse_grabbed {
-                            let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
-                            self.grab_mouse(&window);
-                        }
+            WindowEvent::MouseInput { button, state, .. } => match button {
+                MouseButton::Left => {
+                    if state.is_pressed() && !self.mouse_grabbed {
+                        let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
+                        self.grab_mouse(&window);
                     }
-                    MouseButton::Back | MouseButton::Forward => {
-                        self.input.handle_mouse_button(button, state);
-                    }
-                    _ => {}
                 }
-            }
+                MouseButton::Back | MouseButton::Forward => {
+                    self.input.handle_mouse_button(button, state);
+                }
+                _ => {}
+            },
             WindowEvent::MouseWheel { delta, .. } => {
                 let y = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,

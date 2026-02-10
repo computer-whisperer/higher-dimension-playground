@@ -60,6 +60,11 @@ The final 2D image is produced by applying an operator over `s`:
 
 This separation makes the hidden dimension explicit and easier to reason about.
 
+Comment:
+
+- `integral` is the primary gameplay/exploration mode.
+- `slice` and `thick_slice` are diagnostic/intuition tools, not the main output.
+
 ### 2.3 Compatibility with Current Semantics
 
 Current ZW-angle sampling can be treated as one particular Stage B operator
@@ -278,14 +283,94 @@ Ray traversal inherently culls obscured voxels:
 
 ### 7.7 L5: Temporal Occlusion Hinting (Optional, Advanced)
 
-Maintain low-resolution previous-frame nearest-hit depth by tile/ZW-bin:
+Maintain low-resolution previous-frame nearest-hit depth by tile/sample-bin:
 
 - If chunk AABB entry `t_min` is well beyond known near depth for tile/bin,
   skip chunk traversal for that sample.
 - Keep conservative safety margin to avoid popping.
 
 
-## 8. Shader/Pass Plan
+## 8. Integral-Mode Optimization Strategy (Primary)
+
+This section defines how VTE should be optimized when `integral` mode is active.
+
+Comment:
+
+- Integral mode is the target performance benchmark.
+- Slice/thick-slice optimizations are secondary.
+
+### 8.1 Integral Cost Drivers
+
+In integral mode, Stage B cannot reject by `s` interval. Cost is dominated by:
+
+- number of `s` samples per pixel
+- chunk-level traversal steps per sample
+- in-chunk voxel steps until first hit
+- divergence across rays in a workgroup
+
+### 8.2 Integral-Focused Levers
+
+1. Aggressive empty-space skipping:
+- prioritize chunk occupancy flags + macro occupancy hierarchy.
+- reduce average traversal steps before first solid hit.
+
+2. Low-discrepancy `s` sampling:
+- use deterministic low-discrepancy sequences (per-pixel scrambled) instead of
+  naive uniform RNG each frame.
+- improves convergence at equal sample count.
+
+3. Temporal accumulation in integral mode:
+- accumulate integral samples across frames with camera-motion gating.
+- reset or blend down accumulation under high motion/rotation.
+
+4. Motion-adaptive sample count:
+- low samples while moving quickly, higher samples when still.
+- keep stable frame-time target while preserving integral semantics.
+
+5. Ray coherence batching:
+- dispatch/tile strategy that traces similar `s` values together where possible.
+- reduces branch divergence and improves cache locality.
+
+6. Opaque-first shading path:
+- first-hit terminate for opaque materials (default).
+- defer transparency/translucency to later milestones.
+
+7. Shader hot-path minimization:
+- precompute camera basis and reusable constants once per dispatch.
+- keep material sampling branch-light and texture-coordinate math simple.
+
+### 8.3 What Not to Rely On
+
+- Do not count on `s`-interval culling for integral mode.
+- Do not count on thin/thick slice mode for baseline game performance claims.
+
+### 8.4 Future Acceleration Tracks (Post-Baseline)
+
+These are explicitly future steps, not blockers for initial VTE implementation.
+
+1. `s`-coherent ray bundles (neighbor reuse):
+- trace sparse skeleton `s` samples with full DDA
+- infer nearby `s` samples from local hit neighborhoods
+- fall back to full DDA on misses (correctness-preserving)
+
+2. Beam/shared chunk traversal:
+- share chunk-level traversal across an `s`-sample bundle for a pixel
+- fan out to voxel-level traversal only when needed
+
+3. Voxel splatting to `H(u, v, s)` (alternate architecture):
+- invert traversal into surface-driven projection
+- evaluate if integral DDA path misses performance targets
+
+4. 4D sparse tree acceleration:
+- consider 16-tree hierarchy once chunk+macro occupancy path matures
+
+Decision gate:
+
+- Implement and profile integral baseline first.
+- Add (1), then (2), before considering architecture pivot (3).
+
+
+## 9. Shader/Pass Plan
 
 Proposed new compute stages in `src/render.rs` orchestration:
 
@@ -300,7 +385,7 @@ Potential helper kernels:
 - `compute_chunk_s_intervals_cs` (optional if `s`-interval culling is GPU-driven)
 - `voxel_debug_stats_cs` (counters for traversal and culling efficiency)
 
-### 8.1 Output Contract
+### 9.1 Output Contract
 
 Two practical options:
 
@@ -315,7 +400,7 @@ Option B (cleaner):
 - Add a present shader branch for this engine.
 
 
-## 9. Performance Model
+## 10. Performance Model
 
 Current tetra raster cost is roughly:
 
@@ -340,51 +425,54 @@ With Stage B operators:
   full hidden-dimension integration.
 
 
-## 10. Integration Plan
+## 11. Integration Plan
 
 ### Milestone M0: Design + Interfaces
 
 - Add `RenderBackend` enum for engine selection.
 - Add VTE-specific debug counters.
 
-### Milestone M1: Static Voxel Trace
+### Milestone M1: Integral Baseline Path
 
 - Upload chunk occupancy/material buffers.
 - Implement Stage A ray -> chunk DDA -> voxel DDA first-hit.
-- Flat color by material id.
+- Implement Stage B `integral` only (initially no slice/thick-slice dependency).
+- Flat/basic shading by material id.
 
-### Milestone M2: Texture + Lighting Parity
+### Milestone M2: Integral Visual Parity
 
 - Implement face-local texture coordinates.
-- Reuse material sampling and basic shading (ambient + sun diffuse).
-- Add Stage B operators (`slice`, `thick_slice`, `integral`) and runtime toggle.
+- Reuse material sampling and basic lighting (ambient + sun diffuse).
+- Validate visual continuity against current integral behavior.
 
-### Milestone M3: Culling Stack
+### Milestone M3: Integral Performance Stack
 
-- L0/L1 candidate reduction.
-- L1b `s`-interval rejection.
-- L2 occupancy flags and L3 macro skipping.
-- Collect and expose per-stage rejection metrics.
+- L0/L1 candidate reduction (always-on).
+- L2 occupancy flags and L3 macro skipping (always-on).
+- Low-discrepancy `s` sampling + motion-adaptive sample count.
+- Temporal accumulation/reprojection for integral convergence.
+- Collect and expose per-stage rejection/perf metrics.
 
-### Milestone M4: Temporal Quality/Performance Control
+### Milestone M4: Secondary Display Operators
 
-- Sample count scaling by motion.
-- Optional temporal accumulation/reprojection.
-- Optional temporal occlusion hints.
+- Add `slice` and `thick_slice` as optional diagnostic modes.
+- Add L1b `s`-interval rejection for non-integral operators.
+- Keep `integral` as default exploration mode.
 
 
-## 11. Validation and Metrics
+## 12. Validation and Metrics
 
 Track these per frame:
 
 - candidate chunks
 - frustum-culled chunks
-- `s`-interval-culled chunks
+- `s`-interval-culled chunks (non-integral operators)
 - empty chunks skipped
 - macrocells skipped
 - average chunk steps per ray
 - average voxel steps per ray
 - primary-hit rate
+- `s` samples per pixel (current/adaptive)
 - Stage B operator mode
 - GPU ms per VTE phase
 
@@ -395,11 +483,11 @@ Success criteria:
 - Significant reduction vs current `tet_raster` frame cost in game scenes.
 
 
-## 12. Open Questions
+## 13. Open Questions
 
 1. Should VTE become game-default immediately, or ship behind runtime toggle?
-2. Which Stage B operator should be default in exploration mode:
-   `slice`, `thick_slice`, or `integral`?
+2. What integral sample budget targets should we enforce:
+   moving camera vs stationary camera?
 3. Is chunk lookup best done by:
    - GPU hash map, or
    - sorted visible chunk list + direct address table?
@@ -409,13 +497,15 @@ Success criteria:
    pure implicit voxel traversal?
 
 
-## 13. Recommendation
+## 14. Recommendation
 
 Implement VTE as the new game-focused backend and keep tetra-based engines as:
 
 - correctness reference
 - non-voxel/general-geometry path
 - research path tracer path
+- keep `integral` as the default game operator
+- keep `slice`/`thick_slice` as optional diagnostic overlays/modes
 
 This matches project goals: interactive exploration of large 4D voxel worlds
 with performance that scales better than tetra rasterization.
