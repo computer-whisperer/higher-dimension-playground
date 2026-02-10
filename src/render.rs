@@ -3777,16 +3777,6 @@ impl RenderContext {
                 let f = prev_fence.then_signal_fence_and_flush().unwrap();
                 f.wait(None).unwrap();
             }
-            let clipped_count = self.frames_in_flight[frame_idx]
-                .cpu_clipped_tet_count_buffer
-                .read()
-                .map(|data| data[0])
-                .unwrap_or(0);
-            self.last_clipped_tet_count = clipped_count;
-            self.profiler.read_results_and_accumulate(
-                &self.frames_in_flight[frame_idx].query_pool,
-                clipped_count,
-            );
         }
 
         let force_clear = false;
@@ -4800,6 +4790,30 @@ impl RenderContext {
 
         // Finish recording the command buffer by calling `end`.
         let command_buffer = builder.build().unwrap();
+
+        // Wait for the most recently submitted frame to complete before submitting.
+        // This protects shared SizedBuffers (pixel buffer, BVH, tetrahedra) and
+        // ensures GPU ordering is maintained.
+        if self.frames_rendered > 0 {
+            let prev_idx = (self.frames_rendered - 1) % FRAMES_IN_FLIGHT;
+            if let Some(prev_fence) = self.frames_in_flight[prev_idx].fence.take() {
+                if prev_fence.queue().is_some() {
+                    let f = prev_fence.then_signal_fence_and_flush().unwrap();
+                    f.wait(None).unwrap();
+                }
+                // Read back clipped tetrahedron count for diagnostics
+                let clipped_count = self.frames_in_flight[prev_idx]
+                    .cpu_clipped_tet_count_buffer
+                    .read()
+                    .map(|data| data[0])
+                    .unwrap_or(0);
+                self.last_clipped_tet_count = clipped_count;
+                self.profiler.read_results_and_accumulate(
+                    &self.frames_in_flight[prev_idx].query_pool,
+                    clipped_count,
+                );
+            }
+        }
 
         // Submit the command buffer
         let base_future = sync::now(device.clone());
