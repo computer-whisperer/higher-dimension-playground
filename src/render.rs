@@ -264,6 +264,7 @@ struct FrameInFlight {
     hud_vertex_buffer: Option<Subbuffer<[HudVertex]>>,
     hud_descriptor_set: Option<Arc<DescriptorSet>>,
     sized_descriptor_set: Arc<DescriptorSet>,
+    cpu_clipped_tet_count_buffer: Subbuffer<[u32]>,
     query_pool: Arc<QueryPool>,
     fence: Option<Box<dyn GpuFuture>>,
 }
@@ -2778,6 +2779,21 @@ impl RenderContext {
                 sized_descriptor_set_layout.clone(),
             );
 
+            let cpu_clipped_tet_count_buffer = Buffer::from_iter(
+                memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::TRANSFER_DST,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                        | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                    ..Default::default()
+                },
+                vec![0u32; 1],
+            )
+            .unwrap();
+
             let (hud_vertex_buffer, hud_descriptor_set) = match &hud_resources {
                 Some(hud_res) => {
                     let (buf, ds) = hud_res.create_per_frame_hud(
@@ -2797,6 +2813,7 @@ impl RenderContext {
                 hud_vertex_buffer,
                 hud_descriptor_set,
                 sized_descriptor_set,
+                cpu_clipped_tet_count_buffer,
                 query_pool,
                 fence: None,
             });
@@ -3754,13 +3771,22 @@ impl RenderContext {
 
         // Wait for this frame slot's previous GPU work to complete before writing its buffers.
         // This protects the per-frame LiveBuffers/line vertex buffer from being overwritten
-        // while still in use by the GPU. Note: we do NOT wait for the most recent frame here —
-        // that wait happens later, just before submission, to protect shared SizedBuffers.
+        // while still in use by the GPU.
         if let Some(prev_fence) = self.frames_in_flight[frame_idx].fence.take() {
             if prev_fence.queue().is_some() {
                 let f = prev_fence.then_signal_fence_and_flush().unwrap();
                 f.wait(None).unwrap();
             }
+            let clipped_count = self.frames_in_flight[frame_idx]
+                .cpu_clipped_tet_count_buffer
+                .read()
+                .map(|data| data[0])
+                .unwrap_or(0);
+            self.last_clipped_tet_count = clipped_count;
+            self.profiler.read_results_and_accumulate(
+                &self.frames_in_flight[frame_idx].query_pool,
+                clipped_count,
+            );
         }
 
         let force_clear = false;
@@ -4315,7 +4341,9 @@ impl RenderContext {
                 builder
                     .copy_buffer(CopyBufferInfo::buffers(
                         self.sized_buffers.atomic_counter_buffer.clone(),
-                        self.sized_buffers.cpu_atomic_counter_buffer.clone(),
+                        self.frames_in_flight[frame_idx]
+                            .cpu_clipped_tet_count_buffer
+                            .clone(),
                     ))
                     .unwrap();
 
@@ -4772,31 +4800,6 @@ impl RenderContext {
 
         // Finish recording the command buffer by calling `end`.
         let command_buffer = builder.build().unwrap();
-
-        // Wait for the most recently submitted frame to complete before submitting.
-        // This protects shared SizedBuffers (pixel buffer, BVH, tetrahedra) and
-        // ensures GPU ordering is maintained.
-        if self.frames_rendered > 0 {
-            let prev_idx = (self.frames_rendered - 1) % FRAMES_IN_FLIGHT;
-            if let Some(prev_fence) = self.frames_in_flight[prev_idx].fence.take() {
-                if prev_fence.queue().is_some() {
-                    let f = prev_fence.then_signal_fence_and_flush().unwrap();
-                    f.wait(None).unwrap();
-                }
-                // Read back clipped tetrahedron count for diagnostics
-                let clipped_count = self
-                    .sized_buffers
-                    .cpu_atomic_counter_buffer
-                    .read()
-                    .map(|data| data[0])
-                    .unwrap_or(0);
-                self.last_clipped_tet_count = clipped_count;
-                self.profiler.read_results_and_accumulate(
-                    &self.frames_in_flight[prev_idx].query_pool,
-                    clipped_count,
-                );
-            }
-        }
 
         // Submit the command buffer
         let base_future = sync::now(device.clone());
