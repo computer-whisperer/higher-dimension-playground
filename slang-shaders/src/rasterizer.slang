@@ -18,7 +18,7 @@ import materials;
 [[vk::binding(7, 1)]] RWStructuredBuffer<uint> tileTetCounts;
 [[vk::binding(8, 1)]] RWStructuredBuffer<uint> tileTetIndices;
 
-static const uint MAX_TETS_PER_TILE = 256;
+static const uint MAX_TETS_PER_TILE = 8192;
 
 // Set 2: LiveBuffers
 [[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;
@@ -801,14 +801,12 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
             triIndexes[1] = 3;
         }
 
-        if (numZWLines >= MAX_ZW_LINES)
-            continue;
-
         // Compute ZW line from the two face intersections
         // Uses perspective-correct interpolation: interpolate attr/d and 1/d
         // in screen space, then divide to recover correct view-space values.
-        currentZWLines[numZWLines].textureId = tet.materialId;
-        currentZWLines[numZWLines].normal = tet.normal;
+        ZWLine newLine;
+        newLine.textureId = tet.materialId;
+        newLine.normal = tet.normal;
 
         for (uint j = 0; j < 2; j++)
         {
@@ -846,11 +844,30 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
                             + bary.z * texVertices[2] * invD.z;
             float4 texValue = texOverD / interpInvD;
 
-            currentZWLines[numZWLines].zwPositions[j] = zwValue;
-            currentZWLines[numZWLines].texturePositions[j] = texValue;
+            newLine.zwPositions[j] = zwValue;
+            newLine.texturePositions[j] = texValue;
         }
 
-        numZWLines++;
+        if (numZWLines < MAX_ZW_LINES)
+        {
+            currentZWLines[numZWLines] = newLine;
+            numZWLines++;
+        }
+        else
+        {
+            // Array full: replace the farthest ZW line if new one is closer.
+            // ZW depth = distance from origin; smaller = closer to camera.
+            float newDepth = length(newLine.zwPositions[0]) + length(newLine.zwPositions[1]);
+            float maxDepth = 0.0;
+            uint maxIdx = 0;
+            for (uint k = 0; k < MAX_ZW_LINES; k++)
+            {
+                float d = length(currentZWLines[k].zwPositions[0]) + length(currentZWLines[k].zwPositions[1]);
+                if (d > maxDepth) { maxDepth = d; maxIdx = k; }
+            }
+            if (newDepth < maxDepth)
+                currentZWLines[maxIdx] = newLine;
+        }
     }
 
     // Early-out: skip rendering if no tetrahedra cover this pixel

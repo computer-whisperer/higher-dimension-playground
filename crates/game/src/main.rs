@@ -63,10 +63,10 @@ fn main() {
 
     let mut camera = Camera4D::new();
     if gpu_screenshot {
-        camera.position = [5.65, 4.60, -11.07, -4.00];
-        camera.yaw = -0.29;
-        camera.pitch = -0.27;
-        camera.xw_angle = 0.64;
+        camera.position = [5.44, 0.47, -1.23, -4.00];
+        camera.yaw = -0.49;
+        camera.pitch = 0.0;
+        camera.xw_angle = 0.58;
         camera.zw_angle = 0.65;
     }
 
@@ -99,10 +99,10 @@ fn run_cpu_render() {
     let mut camera = Camera4D::new();
 
     // Debug camera: specific position/orientation where GPU renders incorrectly
-    camera.position = [5.65, 4.60, -11.07, -4.00];
-    camera.yaw = -0.29;
-    camera.pitch = -0.27;
-    camera.xw_angle = 0.64;
+    camera.position = [5.44, 0.47, -1.23, -4.00];
+    camera.yaw = -0.49;
+    camera.pitch = 0.0;
+    camera.xw_angle = 0.58;
     camera.zw_angle = 0.65;
 
     scene.update_surfaces_if_dirty();

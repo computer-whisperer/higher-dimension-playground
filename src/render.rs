@@ -831,7 +831,7 @@ impl OneTimeBuffers {
     }
 }
 
-const MAX_TETS_PER_TILE: usize = 256;
+const MAX_TETS_PER_TILE: usize = 8192;
 
 pub struct SizedBuffers {
     render_dimensions: [u32; 3],
@@ -858,7 +858,7 @@ impl SizedBuffers {
         memory_allocator: Arc<dyn MemoryAllocator>,
         render_dimensions: [u32; 3],
     ) -> Self {
-        let max_tetrahedrons: usize = 40000;
+        let max_tetrahedrons: usize = 200000;
 
         let output_tetrahedron_buffer = Buffer::from_iter(
             memory_allocator.clone(),
