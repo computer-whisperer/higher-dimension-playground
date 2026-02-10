@@ -16,13 +16,13 @@ use vulkano::instance::Instance;
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, MouseButton, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{CursorGrabMode, Window, WindowId},
 };
 
 use camera::Camera4D;
 use input::{ControlScheme, InputState, RotationPair};
-use scene::Scene;
+use scene::{Scene, ScenePreset};
 
 const MOUSE_SENSITIVITY: f32 = 0.002;
 
@@ -40,6 +40,10 @@ struct Args {
     /// Number of depth layers (supersampling)
     #[arg(long, default_value_t = 4)]
     layers: u32,
+
+    /// Voxel scene preset (used by VTE backend)
+    #[arg(long, value_enum, default_value_t = SceneArg::Flat)]
+    scene: SceneArg,
 
     /// CPU-only render: produce frames/cpu_render.png and exit (no GPU window)
     #[arg(long)]
@@ -83,6 +87,10 @@ struct Args {
     /// Rendering backend to use
     #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
     backend: BackendArg,
+
+    /// VTE traversal step budget per ray (quality/perf tradeoff)
+    #[arg(long, default_value_t = 320)]
+    vte_max_trace_steps: u32,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -104,11 +112,26 @@ impl BackendArg {
     }
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum SceneArg {
+    Flat,
+    DemoCubes,
+}
+
+impl SceneArg {
+    fn to_scene_preset(self) -> ScenePreset {
+        match self {
+            SceneArg::Flat => ScenePreset::Flat,
+            SceneArg::DemoCubes => ScenePreset::DemoCubes,
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
     if args.cpu_render {
-        run_cpu_render();
+        run_cpu_render(args.scene.to_scene_preset(), &args);
         return;
     }
 
@@ -124,31 +147,33 @@ fn main() {
         camera.pitch = 0.0;
         camera.xw_angle = 0.58;
         camera.zw_angle = 0.65;
+    }
 
-        if let Some(pos) = args.screenshot_pos.as_ref() {
-            if pos.len() == 4 {
-                camera.position = [pos[0], pos[1], pos[2], pos[3]];
-            }
+    if let Some(pos) = args.screenshot_pos.as_ref() {
+        if pos.len() == 4 {
+            camera.position = [pos[0], pos[1], pos[2], pos[3]];
         }
-        if let Some(angles) = args.screenshot_angles.as_ref() {
-            if angles.len() == 4 {
-                camera.yaw = angles[0];
-                camera.pitch = angles[1];
-                camera.xw_angle = angles[2];
-                camera.zw_angle = angles[3];
-            }
-        } else if let Some(angles_deg) = args.screenshot_angles_deg.as_ref() {
-            if angles_deg.len() == 4 {
-                camera.yaw = angles_deg[0].to_radians();
-                camera.pitch = angles_deg[1].to_radians();
-                camera.xw_angle = angles_deg[2].to_radians();
-                camera.zw_angle = angles_deg[3].to_radians();
-            }
+    }
+    if let Some(angles) = args.screenshot_angles.as_ref() {
+        if angles.len() == 4 {
+            camera.yaw = angles[0];
+            camera.pitch = angles[1];
+            camera.xw_angle = angles[2];
+            camera.zw_angle = angles[3];
         }
-        if let Some(yw) = args.screenshot_yw {
-            camera.yw_deviation = yw;
+    } else if let Some(angles_deg) = args.screenshot_angles_deg.as_ref() {
+        if angles_deg.len() == 4 {
+            camera.yaw = angles_deg[0].to_radians();
+            camera.pitch = angles_deg[1].to_radians();
+            camera.xw_angle = angles_deg[2].to_radians();
+            camera.zw_angle = angles_deg[3].to_radians();
         }
+    }
+    if let Some(yw) = args.screenshot_yw {
+        camera.yw_deviation = yw;
+    }
 
+    if gpu_screenshot {
         eprintln!(
             "GPU screenshot camera: pos=({:+.4}, {:+.4}, {:+.4}, {:+.4}) angles(rad)=({:+.4}, {:+.4}, {:+.4}, {:+.4}) yw={:+.4}",
             camera.position[0],
@@ -168,7 +193,7 @@ fn main() {
         device,
         queue,
         rcx: None,
-        scene: Scene::new(),
+        scene: Scene::new(args.scene.to_scene_preset()),
         camera,
         input: InputState::new(),
         start_time: Instant::now(),
@@ -185,10 +210,10 @@ fn main() {
     event_loop.run_app(&mut app).unwrap();
 }
 
-fn run_cpu_render() {
+fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
     use common::MatN;
 
-    let mut scene = Scene::new();
+    let mut scene = Scene::new(scene_preset);
     let mut camera = Camera4D::new();
 
     // Debug camera: specific position/orientation where GPU renders incorrectly
@@ -197,6 +222,30 @@ fn run_cpu_render() {
     camera.pitch = 0.0;
     camera.xw_angle = 0.58;
     camera.zw_angle = 0.65;
+
+    if let Some(pos) = args.screenshot_pos.as_ref() {
+        if pos.len() == 4 {
+            camera.position = [pos[0], pos[1], pos[2], pos[3]];
+        }
+    }
+    if let Some(angles) = args.screenshot_angles.as_ref() {
+        if angles.len() == 4 {
+            camera.yaw = angles[0];
+            camera.pitch = angles[1];
+            camera.xw_angle = angles[2];
+            camera.zw_angle = angles[3];
+        }
+    } else if let Some(angles_deg) = args.screenshot_angles_deg.as_ref() {
+        if angles_deg.len() == 4 {
+            camera.yaw = angles_deg[0].to_radians();
+            camera.pitch = angles_deg[1].to_radians();
+            camera.xw_angle = angles_deg[2].to_radians();
+            camera.zw_angle = angles_deg[3].to_radians();
+        }
+    }
+    if let Some(yw) = args.screenshot_yw {
+        camera.yw_deviation = yw;
+    }
 
     scene.update_surfaces_if_dirty();
     let instances = scene.build_instances(camera.position);
@@ -210,8 +259,8 @@ fn run_cpu_render() {
         view_matrix,
         focal_length_xy: 1.0,
         focal_length_zw: 1.0,
-        width: 120,
-        height: 68,
+        width: args.width.max(16),
+        height: args.height.max(16),
         ..Default::default()
     };
 
@@ -253,6 +302,7 @@ impl App {
         if result.is_ok() {
             window.set_cursor_visible(false);
             self.mouse_grabbed = true;
+            self.input.clear_mouse_delta();
         }
     }
 
@@ -260,6 +310,7 @@ impl App {
         let _ = window.set_cursor_grab(CursorGrabMode::None);
         window.set_cursor_visible(true);
         self.mouse_grabbed = false;
+        self.input.clear_mouse_delta();
     }
 
     fn active_rotation_pair(&self) -> RotationPair {
@@ -378,6 +429,7 @@ impl App {
         let render_options = RenderOptions {
             do_raster: true,
             render_backend: backend,
+            vte_max_trace_steps: self.args.vte_max_trace_steps.max(1),
             do_navigation_hud: true,
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
@@ -445,6 +497,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::Poll);
         let window = Arc::new(
             event_loop
                 .create_window(Window::default_attributes())
@@ -507,6 +560,12 @@ impl ApplicationHandler for App {
                 };
                 self.input.handle_scroll(y);
             }
+            WindowEvent::Focused(false) => {
+                if self.mouse_grabbed {
+                    let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
+                    self.release_mouse(&window);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 self.update_and_render();
                 if self.should_exit_after_render {
@@ -524,7 +583,14 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            self.input.handle_mouse_motion(delta);
+            if self.mouse_grabbed {
+                self.input.handle_mouse_motion(delta);
+                if let Some(rcx) = self.rcx.as_ref() {
+                    if let Some(window) = rcx.window.as_ref() {
+                        window.request_redraw();
+                    }
+                }
+            }
         }
     }
 

@@ -7,6 +7,21 @@ const RENDER_DISTANCE: f32 = 64.0;
 const OCCUPANCY_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 32;
 const MATERIAL_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 4; // packed 4x u8 per u32
 
+#[derive(Copy, Clone, Debug)]
+pub enum ScenePreset {
+    Flat,
+    DemoCubes,
+}
+
+impl ScenePreset {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::DemoCubes => "demo_cubes",
+        }
+    }
+}
+
 pub struct VoxelFrameData {
     pub chunk_headers: Vec<GpuVoxelChunkHeader>,
     pub occupancy_words: Vec<u32>,
@@ -29,14 +44,18 @@ pub struct Scene {
     pub world: crate::voxel::world::VoxelWorld,
     surface: SurfaceData,
     culled_instances: Vec<common::ModelInstance>,
+    cull_log_counter: u64,
 }
 
 impl Scene {
-    pub fn new() -> Self {
-        let world = worldgen::generate_flat_world(
-            3,            // 3×3×3 chunks in X, Z, W
-            VoxelType(3), // grass
-        );
+    pub fn new(preset: ScenePreset) -> Self {
+        let world = match preset {
+            ScenePreset::Flat => worldgen::generate_flat_world(
+                3,            // 3×3×3 chunks in X, Z, W
+                VoxelType(3), // grass
+            ),
+            ScenePreset::DemoCubes => worldgen::generate_demo_cube_layout_world(),
+        };
 
         let surface = cull::extract_surfaces(&world);
         let total_voxels: u32 = surface
@@ -45,7 +64,8 @@ impl Scene {
             .map(|c| c.voxel_end - c.voxel_start)
             .sum();
         eprintln!(
-            "Voxel surface: {} chunks, {} surface voxels",
+            "Voxel surface ({}): {} chunks, {} surface voxels",
+            preset.label(),
             surface.chunks.len(),
             total_voxels
         );
@@ -54,6 +74,7 @@ impl Scene {
             world,
             surface,
             culled_instances: Vec::new(),
+            cull_log_counter: 0,
         }
     }
 
@@ -87,7 +108,10 @@ impl Scene {
         );
 
         let (num_instances, num_tets) = cull::mesh_stats(&self.culled_instances);
-        eprintln!("Culled: {num_instances} instances, {num_tets} tetrahedra");
+        if self.cull_log_counter == 0 || self.cull_log_counter % 120 == 0 {
+            eprintln!("Culled: {num_instances} instances, {num_tets} tetrahedra");
+        }
+        self.cull_log_counter = self.cull_log_counter.wrapping_add(1);
 
         &self.culled_instances
     }

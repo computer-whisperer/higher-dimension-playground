@@ -129,6 +129,7 @@ pub struct RenderOptions {
     pub do_raster: bool,
     pub do_raytrace: bool,
     pub render_backend: RenderBackend,
+    pub vte_max_trace_steps: u32,
     pub do_edges: bool,
     pub do_tetrahedron_edges: bool,
     pub do_navigation_hud: bool,
@@ -144,6 +145,7 @@ impl Default for RenderOptions {
             do_raster: true,
             do_raytrace: false,
             render_backend: RenderBackend::Auto,
+            vte_max_trace_steps: 320,
             do_edges: false,
             do_tetrahedron_edges: false,
             do_navigation_hud: false,
@@ -1038,7 +1040,9 @@ pub struct SizedBuffers {
 
 impl SizedBuffers {
     pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, render_dimensions: [u32; 3]) -> Self {
-        let max_tetrahedrons: usize = 200000;
+        // Raytracing path currently expands voxel surface instances into full tesseract tet sets.
+        // Keep this high enough for dense game scenes used in quality comparisons.
+        let max_tetrahedrons: usize = 700_000;
 
         let output_tetrahedron_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -2108,6 +2112,8 @@ impl ComputePipelineContext {
 
 const PROFILER_MAX_TIMESTAMPS: u32 = 16;
 const PROFILER_REPORT_INTERVAL: usize = 100;
+const PROFILER_SLOW_FRAME_THRESHOLD_MS: f64 = 100.0;
+const PROFILER_SLOW_FRAME_REPORT_INTERVAL: usize = 60;
 
 struct GpuProfiler {
     timestamp_period_ns: f32,
@@ -2117,6 +2123,7 @@ struct GpuProfiler {
     /// Accumulated (total_ms, count) per phase name
     accum: Vec<(&'static str, f64, usize)>,
     total_frames: usize,
+    last_slow_report_frame: Option<usize>,
     /// Last frame's GPU total in ms (for HUD display)
     last_gpu_total_ms: f32,
     /// Last frame's per-phase breakdown (for HUD display)
@@ -2133,6 +2140,7 @@ impl GpuProfiler {
             phase_names: Vec::new(),
             accum: Vec::new(),
             total_frames: 0,
+            last_slow_report_frame: None,
             last_gpu_total_ms: 0.0,
             last_frame_phases: Vec::new(),
         }
@@ -2168,7 +2176,7 @@ impl GpuProfiler {
         }
 
         let mut results = vec![0u64; n as usize];
-        match query_pool.get_results::<u64>(0..n, &mut results, QueryResultFlags::WAIT) {
+        match query_pool.get_results::<u64>(0..n, &mut results, QueryResultFlags::empty()) {
             Ok(true) => {}
             _ => return,
         }
@@ -2197,13 +2205,22 @@ impl GpuProfiler {
 
         self.total_frames += 1;
 
-        if total_ms > 100.0 {
-            println!(
-                "!!! SLOW FRAME ({:.1} ms) — clipped_tets={} — per-phase:",
-                total_ms, clipped_tet_count
-            );
-            for (name, ms) in &self.last_frame_phases {
-                println!("  {}: {:.3} ms", name, ms);
+        if total_ms > PROFILER_SLOW_FRAME_THRESHOLD_MS {
+            let should_report = match self.last_slow_report_frame {
+                None => true,
+                Some(last_frame) => {
+                    self.total_frames.saturating_sub(last_frame) >= PROFILER_SLOW_FRAME_REPORT_INTERVAL
+                }
+            };
+            if should_report {
+                println!(
+                    "!!! SLOW FRAME ({:.1} ms) — clipped_tets={} — per-phase:",
+                    total_ms, clipped_tet_count
+                );
+                for (name, ms) in &self.last_frame_phases {
+                    println!("  {}: {:.3} ms", name, ms);
+                }
+                self.last_slow_report_frame = Some(self.total_frames);
             }
         }
 
@@ -2264,6 +2281,7 @@ pub struct RenderContext {
     hud_w_velocity: f32,
     frame_time_ms: f32,
     last_render_start: Option<Instant>,
+    stall_trace: bool,
     last_backend: RenderBackend,
     vte_debug_counters: VteDebugCounters,
     vte_backend_notice_printed: bool,
@@ -2317,7 +2335,27 @@ impl RenderContext {
                     .surface_formats(&surface, Default::default())
                     .unwrap();
 
-                let image_format = image_formats[0].0;
+                let preferred_swapchain_formats = [
+                    Format::B8G8R8A8_SRGB,
+                    Format::B8G8R8A8_UNORM,
+                    Format::R8G8B8A8_SRGB,
+                    Format::R8G8B8A8_UNORM,
+                ];
+                let (image_format, image_color_space) = preferred_swapchain_formats
+                    .iter()
+                    .find_map(|preferred| {
+                        image_formats
+                            .iter()
+                            .copied()
+                            .find(|(fmt, _)| *fmt == *preferred)
+                    })
+                    .or_else(|| {
+                        image_formats
+                            .iter()
+                            .copied()
+                            .find(|(fmt, _)| fmt.block_size() == 4)
+                    })
+                    .unwrap_or(image_formats[0]);
                 //let image_format = R8G8B8A8_UNORM;
                 // Please take a look at the docs for the meaning of the parameters we didn't mention.
                 let (swapchain, images) = Swapchain::new(
@@ -2330,6 +2368,7 @@ impl RenderContext {
                         min_image_count: surface_capabilities.min_image_count.max(2),
 
                         image_format,
+                        image_color_space,
 
                         // The size of the window, only used to initially setup the swapchain.
                         //
@@ -2639,11 +2678,23 @@ impl RenderContext {
             depth_range: 0.0..=1.0,
         };
 
-        let cpu_screen_capture_buffer = create_cpu_screencapture_buffer(
-            memory_allocator.clone(),
-            window_size.width,
-            window_size.height,
-        );
+        let cpu_screen_capture_buffer = match swapchain.as_ref() {
+            Some(swapchain) => {
+                let [width, height] = swapchain.image_extent();
+                create_cpu_screencapture_buffer(
+                    memory_allocator.clone(),
+                    width,
+                    height,
+                    swapchain.image_format(),
+                )
+            }
+            None => create_cpu_screencapture_buffer(
+                memory_allocator.clone(),
+                window_size.width,
+                window_size.height,
+                Format::R8G8B8A8_UNORM,
+            ),
+        };
 
         // In some situations, the swapchain will become invalid by itself. This includes for
         // example when the window is resized (as the images of the swapchain will no longer match
@@ -2847,6 +2898,7 @@ impl RenderContext {
             hud_w_velocity: 0.0,
             frame_time_ms: 0.0,
             last_render_start: None,
+            stall_trace: std::env::var_os("R4D_TRACE_STALLS").is_some(),
             last_backend: RenderBackend::Auto,
             vte_debug_counters: VteDebugCounters::default(),
             vte_backend_notice_printed: false,
@@ -3660,9 +3712,17 @@ impl RenderContext {
     fn wait_for_all_frames(&mut self) {
         for frame in &mut self.frames_in_flight {
             if let Some(future) = frame.fence.take() {
-                if future.queue().is_some() {
-                    let f = future.then_signal_fence_and_flush().unwrap();
-                    f.wait(None).unwrap();
+                if self.stall_trace {
+                    eprintln!("[stall] wait_for_all_frames: begin");
+                }
+                let wait_start = Instant::now();
+                let f = future.then_signal_fence_and_flush().unwrap();
+                f.wait(None).unwrap();
+                if self.stall_trace {
+                    eprintln!(
+                        "[stall] wait_for_all_frames: end ({:.2} ms)",
+                        wait_start.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
             }
         }
@@ -3773,9 +3833,21 @@ impl RenderContext {
         // This protects the per-frame LiveBuffers/line vertex buffer from being overwritten
         // while still in use by the GPU.
         if let Some(prev_fence) = self.frames_in_flight[frame_idx].fence.take() {
-            if prev_fence.queue().is_some() {
-                let f = prev_fence.then_signal_fence_and_flush().unwrap();
-                f.wait(None).unwrap();
+            if self.stall_trace {
+                eprintln!(
+                    "[stall] frame={} slot_wait begin (slot={})",
+                    self.frames_rendered, frame_idx
+                );
+            }
+            let wait_start = Instant::now();
+            let f = prev_fence.then_signal_fence_and_flush().unwrap();
+            f.wait(None).unwrap();
+            if self.stall_trace {
+                eprintln!(
+                    "[stall] frame={} slot_wait end ({:.2} ms)",
+                    self.frames_rendered,
+                    wait_start.elapsed().as_secs_f64() * 1000.0
+                );
             }
         }
 
@@ -3811,26 +3883,61 @@ impl RenderContext {
 
                         self.recreate_swapchain = false;
 
+                        let [capture_w, capture_h] = self
+                            .swapchain
+                            .as_ref()
+                            .map(|s| s.image_extent())
+                            .unwrap_or([window_size.width, window_size.height]);
+                        let capture_format = self
+                            .swapchain
+                            .as_ref()
+                            .map(|s| s.image_format())
+                            .unwrap_or(Format::R8G8B8A8_UNORM);
                         self.cpu_screen_capture_buffer = create_cpu_screencapture_buffer(
                             self.memory_allocator.clone(),
-                            window_size.width,
-                            window_size.height,
+                            capture_w,
+                            capture_h,
+                            capture_format,
                         );
                     }
                 }
             }
         }
 
+        let model_instance_capacity = usize::try_from(
+            self.frames_in_flight[frame_idx]
+                .live_buffers
+                .model_instance_buffer
+                .len(),
+        )
+        .unwrap_or(usize::MAX);
+        let used_instance_count = model_instances.len().min(model_instance_capacity);
+        let requested_tetrahedron_count =
+            self.one_time_buffers.model_tetrahedron_count * used_instance_count;
         let total_tetrahedron_count =
-            self.one_time_buffers.model_tetrahedron_count * model_instances.len();
+            requested_tetrahedron_count.min(self.sized_buffers.max_tetrahedrons);
 
         // Debug: print scene info on first frame only
         if self.frames_rendered == 0 {
+            if model_instances.len() > used_instance_count {
+                eprintln!(
+                    "Model instance input truncated to buffer capacity: {} -> {}",
+                    model_instances.len(),
+                    used_instance_count
+                );
+            }
+            if requested_tetrahedron_count > total_tetrahedron_count {
+                eprintln!(
+                    "Tetrahedron input truncated to buffer capacity: {} -> {}",
+                    requested_tetrahedron_count,
+                    total_tetrahedron_count
+                );
+            }
             println!(
                 "Scene: {} tetrahedrons ({} per instance × {} instances)",
                 total_tetrahedron_count,
                 self.one_time_buffers.model_tetrahedron_count,
-                model_instances.len()
+                used_instance_count
             );
             println!(
                 "BVH: {} internal nodes, {} total nodes",
@@ -3875,7 +3982,7 @@ impl RenderContext {
                 .model_instance_buffer
                 .write()
                 .unwrap();
-            for i in 0..model_instances.len() {
+            for i in 0..used_instance_count {
                 writer[i] = model_instances[i];
             }
         }
@@ -4010,7 +4117,7 @@ impl RenderContext {
                 visible_chunk_count: vte_visible_chunk_count as u32,
                 occupancy_word_count: vte_occupancy_word_count as u32,
                 material_word_count: vte_material_word_count as u32,
-                max_trace_steps: 320,
+                max_trace_steps: render_options.vte_max_trace_steps.max(1),
                 chunk_lookup_capacity: VTE_CHUNK_LOOKUP_CAPACITY as u32,
                 _padding: [0; 2],
             };
@@ -4038,6 +4145,10 @@ impl RenderContext {
 
         let (image_index, acquire_future) = match self.swapchain.clone() {
             Some(swapchain) => {
+                if self.stall_trace {
+                    eprintln!("[stall] frame={} acquire_next_image begin", self.frames_rendered);
+                }
+                let acquire_start = Instant::now();
                 let (image_index, suboptimal, acquire_future) =
                     match acquire_next_image(swapchain.clone(), None).map_err(Validated::unwrap) {
                         Ok(r) => r,
@@ -4047,6 +4158,13 @@ impl RenderContext {
                         }
                         Err(e) => panic!("failed to acquire next image: {e}"),
                     };
+                if self.stall_trace {
+                    eprintln!(
+                        "[stall] frame={} acquire_next_image end ({:.2} ms)",
+                        self.frames_rendered,
+                        acquire_start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
 
                 // `acquire_next_image` can be successful, but suboptimal. This means that the
                 // swapchain image will still work, but it may not display correctly. With some
@@ -4131,12 +4249,13 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE pass skeleton active (chunks={}, visible={}, occupancy_words={}, material_words={}).",
+                    "Render backend '{}' selected: VTE pass skeleton active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
                     occupancy_words,
                     material_words,
+                    render_options.vte_max_trace_steps.max(1),
                 );
                 self.vte_backend_notice_printed = true;
             }
@@ -4280,7 +4399,7 @@ impl RenderContext {
                     }
                     .unwrap();
                 }
-            } else if render_options.do_frame_clear || force_clear {
+            } else if (render_options.do_frame_clear || force_clear) && !do_raytrace {
                 builder
                     .bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone())
                     .unwrap();
@@ -4432,6 +4551,31 @@ impl RenderContext {
                     hasher.finish()
                 };
                 let bvh_needs_rebuild = scene_hash != self.bvh_scene_hash;
+                let raytrace_should_clear =
+                    render_options.do_frame_clear || force_clear || bvh_needs_rebuild;
+
+                if raytrace_should_clear {
+                    builder
+                        .bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone())
+                        .unwrap();
+                    unsafe {
+                        builder.dispatch([
+                            self.sized_buffers.render_dimensions[0] / 8,
+                            self.sized_buffers.render_dimensions[1] / 8,
+                            1,
+                        ])
+                    }
+                    .unwrap();
+                    let q = self.profiler.next_query_index("clear");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
 
                 if bvh_needs_rebuild {
                     // 1. Tetrahedron preprocessing (transform to view space)
@@ -4797,9 +4941,21 @@ impl RenderContext {
         if self.frames_rendered > 0 {
             let prev_idx = (self.frames_rendered - 1) % FRAMES_IN_FLIGHT;
             if let Some(prev_fence) = self.frames_in_flight[prev_idx].fence.take() {
-                if prev_fence.queue().is_some() {
-                    let f = prev_fence.then_signal_fence_and_flush().unwrap();
-                    f.wait(None).unwrap();
+                if self.stall_trace {
+                    eprintln!(
+                        "[stall] frame={} prev_submit_wait begin (slot={})",
+                        self.frames_rendered, prev_idx
+                    );
+                }
+                let wait_start = Instant::now();
+                let f = prev_fence.then_signal_fence_and_flush().unwrap();
+                f.wait(None).unwrap();
+                if self.stall_trace {
+                    eprintln!(
+                        "[stall] frame={} prev_submit_wait end ({:.2} ms)",
+                        self.frames_rendered,
+                        wait_start.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 // Read back clipped tetrahedron count for diagnostics
                 let clipped_count = self.frames_in_flight[prev_idx]
@@ -4875,15 +5031,79 @@ impl RenderContext {
                     Ok(buffer_content) => {
                         let screenshot_path =
                             format!("frames/framebuffer_{}.webp", self.frames_rendered - 3);
+                        let (capture_w, capture_h, capture_format) = self
+                            .swapchain
+                            .as_ref()
+                            .map(|swapchain| {
+                                let [w, h] = swapchain.image_extent();
+                                (w, h, swapchain.image_format())
+                            })
+                            .unwrap_or((
+                                window_size.width,
+                                window_size.height,
+                                Format::R8G8B8A8_UNORM,
+                            ));
+                        let expected_bytes = (capture_w as usize)
+                            .saturating_mul(capture_h as usize)
+                            .saturating_mul(4);
 
-                        let image = ImageBuffer::<Rgba<u8>, _>::from_raw(
-                            window_size.width,
-                            window_size.height,
-                            &buffer_content[..],
-                        )
-                        .unwrap();
-                        image.save(screenshot_path.clone()).unwrap();
-                        println!("Saved screenshot to {}", screenshot_path);
+                        let rgba_bytes = match capture_format {
+                            Format::R8G8B8A8_UNORM | Format::R8G8B8A8_SRGB => {
+                                if buffer_content.len() < expected_bytes {
+                                    eprintln!(
+                                        "Framebuffer screenshot buffer too small: have {}, need {}",
+                                        buffer_content.len(),
+                                        expected_bytes
+                                    );
+                                    None
+                                } else {
+                                    Some(buffer_content[..expected_bytes].to_vec())
+                                }
+                            }
+                            Format::B8G8R8A8_UNORM | Format::B8G8R8A8_SRGB => {
+                                if buffer_content.len() < expected_bytes {
+                                    eprintln!(
+                                        "Framebuffer screenshot buffer too small: have {}, need {}",
+                                        buffer_content.len(),
+                                        expected_bytes
+                                    );
+                                    None
+                                } else {
+                                    let mut bytes = vec![0u8; expected_bytes];
+                                    for (src, dst) in buffer_content[..expected_bytes]
+                                        .chunks_exact(4)
+                                        .zip(bytes.chunks_exact_mut(4))
+                                    {
+                                        dst[0] = src[2];
+                                        dst[1] = src[1];
+                                        dst[2] = src[0];
+                                        dst[3] = src[3];
+                                    }
+                                    Some(bytes)
+                                }
+                            }
+                            _ => {
+                                eprintln!(
+                                    "Framebuffer screenshot not supported for swapchain format {:?}",
+                                    capture_format
+                                );
+                                None
+                            }
+                        };
+
+                        if let Some(bytes) = rgba_bytes {
+                            if let Some(image) =
+                                ImageBuffer::<Rgba<u8>, _>::from_raw(capture_w, capture_h, bytes)
+                            {
+                                image.save(screenshot_path.clone()).unwrap();
+                                println!("Saved screenshot to {}", screenshot_path);
+                            } else {
+                                eprintln!(
+                                    "Failed to build screenshot image buffer ({}x{})",
+                                    capture_w, capture_h
+                                );
+                            }
+                        }
                     }
                     Err(error) => {
                         eprintln!("Error saving screenshot: {:?}", error);
@@ -4901,7 +5121,7 @@ impl RenderContext {
             let morton_codes = self.sized_buffers.cpu_morton_codes_buffer.read().unwrap();
             let num_leaves = total_tetrahedron_count;
             let num_internal = num_leaves.saturating_sub(1);
-            let total_nodes = 2 * num_leaves - 1;
+            let total_nodes = num_leaves.saturating_mul(2).saturating_sub(1);
 
             // Check Morton code sorting
             let mut sorted = true;
@@ -5188,7 +5408,15 @@ fn create_cpu_screencapture_buffer(
     memory_allocator: Arc<dyn MemoryAllocator>,
     width: u32,
     height: u32,
+    format: Format,
 ) -> Subbuffer<[u8]> {
+    let block_extent = format.block_extent();
+    let blocks_x = width.div_ceil(block_extent[0]) as u64;
+    let blocks_y = height.div_ceil(block_extent[1]) as u64;
+    let byte_len = blocks_x
+        .saturating_mul(blocks_y)
+        .saturating_mul(format.block_size()) as usize;
+
     Buffer::from_iter(
         memory_allocator,
         BufferCreateInfo {
@@ -5200,7 +5428,7 @@ fn create_cpu_screencapture_buffer(
                 | MemoryTypeFilter::HOST_RANDOM_ACCESS,
             ..Default::default()
         },
-        vec![0; (width * height * 4) as usize],
+        vec![0; byte_len],
     )
     .unwrap()
 }

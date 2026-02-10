@@ -200,6 +200,11 @@ impl InputState {
         d
     }
 
+    pub fn clear_mouse_delta(&mut self) {
+        self.mouse_dx = 0.0;
+        self.mouse_dy = 0.0;
+    }
+
     pub fn take_escape(&mut self) -> bool {
         let v = self.escape_pressed;
         self.escape_pressed = false;
