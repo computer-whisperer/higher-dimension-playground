@@ -1431,7 +1431,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
                 if (highlightKind != 0u)
                 {
-                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     float3 litColor = shadeVoxelMaterial(mat, hitNormal);
                     float3 highlighted = shadeHighlightedVoxelSample(
@@ -1456,7 +1456,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 }
                 else
                 {
-                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     accumColor += shadeVoxelMaterial(mat, hitNormal);
                 }
@@ -1807,7 +1807,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
         if (highlightKind != 0u)
         {
-            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             float3 litColor = shadeVoxelMaterial(mat, hitNormal);
             outColor = shadeHighlightedVoxelSample(
@@ -1821,7 +1821,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         }
         else
         {
-            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             outColor = shadeVoxelMaterial(mat, hitNormal);
         }

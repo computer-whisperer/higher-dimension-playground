@@ -2,7 +2,7 @@ use super::chunk::Chunk;
 use super::world::VoxelWorld;
 use super::{ChunkPos, VoxelType, CHUNK_SIZE};
 
-/// Generate a flat 4D ground world — a single-voxel-thick floor at y = -1.
+/// Generate a flat 4D ground world as a two-voxel-thick slab.
 ///
 /// - `extent_xzw`: number of chunks in each of X, Z, W (centered around origin)
 /// - `material`: material for the floor voxels
@@ -10,9 +10,10 @@ pub fn generate_flat_world(extent_xzw: i32, material: VoxelType) -> VoxelWorld {
     let mut world = VoxelWorld::new();
     let half = extent_xzw / 2;
 
-    // Floor sits at y = -1 (the top voxel of chunk cy = -1)
+    // Floor top sits at y = -1 in chunk cy = -1; add one layer below for thickness.
     let cy = -1i32;
-    let local_y = CHUNK_SIZE - 1; // y = -1 maps to local y = 7
+    let local_y_top = CHUNK_SIZE - 1; // y = -1 maps to local y = 7
+    let local_y_bottom = CHUNK_SIZE - 2; // y = -2 maps to local y = 6
 
     for cx in -half..extent_xzw - half {
         for cz in -half..extent_xzw - half {
@@ -21,7 +22,8 @@ pub fn generate_flat_world(extent_xzw: i32, material: VoxelType) -> VoxelWorld {
                 for x in 0..CHUNK_SIZE {
                     for z in 0..CHUNK_SIZE {
                         for w in 0..CHUNK_SIZE {
-                            chunk.set(x, local_y, z, w, material);
+                            chunk.set(x, local_y_top, z, w, material);
+                            chunk.set(x, local_y_bottom, z, w, material);
                         }
                     }
                 }

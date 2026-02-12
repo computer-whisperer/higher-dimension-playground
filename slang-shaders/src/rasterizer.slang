@@ -637,7 +637,7 @@ float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDat
             float val = closestVal;
             float4 texPos = lines[closestLine].texturePositions[0] * val +
                            lines[closestLine].texturePositions[1] * (1.0 - val);
-            MaterialProperties mat = sampleMaterial(lines[closestLine].textureId, texPos.xyz);
+            MaterialProperties mat = sampleMaterial(lines[closestLine].textureId, texPos);
             float4 normal = lines[closestLine].normal;
 
             // Two-sided Lambert diffuse

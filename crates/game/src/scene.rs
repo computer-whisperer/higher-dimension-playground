@@ -69,8 +69,8 @@ impl Scene {
     pub fn new(preset: ScenePreset) -> Self {
         let world = match preset {
             ScenePreset::Flat => worldgen::generate_flat_world(
-                3,            // 3×3×3 chunks in X, Z, W
-                VoxelType(3), // grass
+                5,             // 5×5×5 chunks in X, Z, W
+                VoxelType(11), // neutral grid floor
             ),
             ScenePreset::DemoCubes => worldgen::generate_demo_cube_layout_world(),
         };

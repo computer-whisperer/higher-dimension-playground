@@ -2,11 +2,12 @@
 
 import types;
 
-MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
+MaterialProperties sampleMaterial(uint textureId, float4 texturePos)
 {
     const float basicLuminance = 0.001;
     const float tau = 6.2831853;
-    float3 p = frac(texturePos);
+    float4 p4 = texturePos;
+    float3 p = p4.xyz;
 
     MaterialProperties mat;
     mat.metallic = 0.0;
@@ -42,7 +43,7 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
         break;
     case 9:
         // Texture-coordinate based color
-        mat.albedo = float4((texturePos + float3(1.0)) / 2.0, 1.0);
+        mat.albedo = float4((p + float3(1.0)) / 2.0, 1.0);
         mat.luminance = 0.4;
         break;
     case 10:
@@ -50,10 +51,28 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
         mat.luminance = 0.0;
         break;
     case 11:
-        // Floor
-        mat.albedo = float4(float3(0.1) * 0.4, 1.0);
-        mat.metallic = 0.2;
-        mat.roughness = 0.3;
+        // Neutral ground with 4D grid references:
+        // - major lines every 4 units
+        // - minor lines every 1 unit
+        {
+            float4 minorDist = abs(frac(p4 + 0.5) - 0.5);
+            float minorAxis = min(minorDist.x, min(minorDist.y, min(minorDist.z, minorDist.w)));
+            float minorLine = 1.0 - saturate(minorAxis / 0.055);
+
+            float4 majorDist = abs(frac(p4 * 0.25 + 0.5) - 0.5);
+            float majorAxis = min(majorDist.x, min(majorDist.y, min(majorDist.z, majorDist.w)));
+            float majorLine = 1.0 - saturate(majorAxis / 0.085);
+
+            float3 baseColor = float3(0.45, 0.47, 0.49);
+            float3 minorColor = float3(0.36, 0.38, 0.40);
+            float3 majorColor = float3(0.66, 0.68, 0.71);
+            float3 color = lerp(baseColor, minorColor, minorLine * 0.6);
+            color = lerp(color, majorColor, majorLine);
+
+            mat.albedo = float4(color, 1.0);
+        }
+        mat.metallic = 0.05;
+        mat.roughness = 0.75;
         mat.luminance = 0.0;
         break;
     case 12:
@@ -74,6 +93,7 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
     case 15:
         // Lava-veined basalt
         {
+            p = frac(p);
             float veinField = 0.5 + 0.5 * sin((p.x * 11.0 + p.y * 13.0 + p.z * 17.0) * tau);
             float veins = pow(veinField, 6.0);
             float3 rockColor = float3(0.08, 0.05, 0.04);
@@ -86,6 +106,7 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
     case 16:
         // Crystal lattice
         {
+            p = frac(p);
             float3 cell = abs(frac(p * 8.0) - 0.5);
             float line = 1.0 - saturate(min(cell.x, min(cell.y, cell.z)) * 36.0);
             float3 baseColor = float3(0.02, 0.06, 0.09);
@@ -98,6 +119,7 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
     case 17:
         // Marble swirl
         {
+            p = frac(p);
             float swirl = sin((p.x * 14.0 + p.z * 9.0) * tau + sin(p.y * tau * 5.0) * 1.5);
             float veins = smoothstep(0.62, 0.88, 0.5 + 0.5 * swirl);
             float3 stoneBase = float3(0.82, 0.84, 0.88);
@@ -110,6 +132,7 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
     case 18:
         // Oxidized metal
         {
+            p = frac(p);
             float noise = frac(sin(dot(p * 16.0, float3(12.9898, 78.233, 37.719))) * 43758.5453);
             float rust = smoothstep(0.42, 0.8, noise);
             float3 steel = float3(0.55, 0.58, 0.60);
@@ -123,6 +146,7 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
     case 19:
         // Bio-spore moss
         {
+            p = frac(p);
             float3 voxelCell = floor(p * 10.0);
             float seed = frac(sin(dot(voxelCell, float3(17.13, 3.71, 29.97))) * 15731.743);
             float spores = smoothstep(0.93, 1.0, seed);
@@ -136,6 +160,7 @@ MaterialProperties sampleMaterial(uint textureId, float3 texturePos)
     case 20:
         // Void mirror
         {
+            p = frac(p);
             float3 q = p - 0.5;
             float centerGlow = pow(saturate(1.0 - length(q) * 1.8), 2.0);
             mat.albedo = float4(

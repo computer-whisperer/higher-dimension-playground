@@ -422,7 +422,7 @@ float4 raycastSample(
         if (hit.didHit != 0)
         {
             Tetrahedron tet = outputTetrahedrons[hit.tetrahedronIndex];
-            MaterialProperties mat = sampleMaterial(tet.materialId, hit.textureCoordinates.xyz);
+            MaterialProperties mat = sampleMaterial(tet.materialId, hit.textureCoordinates);
 
             // Compute reflection
             float4 reflection = direction - 2.0 * dot(direction, hit.hitNormal) * hit.hitNormal;
@@ -476,7 +476,7 @@ float4 raycastSample(
     {
         RayHit hit = hitStack[numHits - i - 1];
         Tetrahedron tet = outputTetrahedrons[hit.tetrahedronIndex];
-        MaterialProperties mat = sampleMaterial(tet.materialId, hit.textureCoordinates.xyz);
+        MaterialProperties mat = sampleMaterial(tet.materialId, hit.textureCoordinates);
 
         lightValue = lightValue * mat.albedo.xyz + mat.luminance * mat.albedo.xyz;
     }

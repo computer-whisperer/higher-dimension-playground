@@ -661,7 +661,7 @@ fn render_zw_lines_simple(
                 lines[j].tex[0][3] * val + lines[j].tex[1][3] * (1.0 - val),
             ];
             let (albedo, luminance) =
-                sample_material(lines[j].material_id, [tex[0], tex[1], tex[2]]);
+                sample_material(lines[j].material_id, [tex[0], tex[1], tex[2], tex[3]]);
             let normal = lines[j].normal;
 
             // Two-sided Lambert diffuse
@@ -711,10 +711,15 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-fn sample_material(id: u32, tex_pos: [f32; 3]) -> ([f32; 3], f32) {
+fn sample_material(id: u32, tex_pos: [f32; 4]) -> ([f32; 3], f32) {
     const TAU: f32 = 6.283_185_5;
     let basic_lum = 0.001;
-    let p = [fract(tex_pos[0]), fract(tex_pos[1]), fract(tex_pos[2])];
+    let p = [
+        fract(tex_pos[0]),
+        fract(tex_pos[1]),
+        fract(tex_pos[2]),
+        fract(tex_pos[3]),
+    ];
     match id {
         1 => ([1.0, 0.0, 0.0], basic_lum), // Red
         2 => ([1.0, 0.8, 0.0], basic_lum), // Orange
@@ -733,7 +738,33 @@ fn sample_material(id: u32, tex_pos: [f32; 3]) -> ([f32; 3], f32) {
             (albedo, 0.4)
         }
         10 => ([39.0 / 256.0, 69.0 / 256.0, 19.8 / 256.0], 0.0), // Brown
-        11 => ([0.1 * 0.4, 0.1 * 0.4, 0.1 * 0.4], 0.0),          // Floor
+        11 => {
+            // Neutral 4D ground grid
+            let minor = [
+                (fract(tex_pos[0] + 0.5) - 0.5).abs(),
+                (fract(tex_pos[1] + 0.5) - 0.5).abs(),
+                (fract(tex_pos[2] + 0.5) - 0.5).abs(),
+                (fract(tex_pos[3] + 0.5) - 0.5).abs(),
+            ];
+            let minor_axis = minor[0].min(minor[1]).min(minor[2]).min(minor[3]);
+            let minor_line = 1.0 - saturate(minor_axis / 0.055);
+
+            let major = [
+                (fract(tex_pos[0] * 0.25 + 0.5) - 0.5).abs(),
+                (fract(tex_pos[1] * 0.25 + 0.5) - 0.5).abs(),
+                (fract(tex_pos[2] * 0.25 + 0.5) - 0.5).abs(),
+                (fract(tex_pos[3] * 0.25 + 0.5) - 0.5).abs(),
+            ];
+            let major_axis = major[0].min(major[1]).min(major[2]).min(major[3]);
+            let major_line = 1.0 - saturate(major_axis / 0.085);
+
+            let base = [0.45, 0.47, 0.49];
+            let minor_col = [0.36, 0.38, 0.40];
+            let major_col = [0.66, 0.68, 0.71];
+            let mut col = lerp3(base, minor_col, minor_line * 0.6);
+            col = lerp3(col, major_col, major_line);
+            (col, 0.0)
+        }
         12 => ([1.0, 1.0, 1.0], 0.0),                            // White
         13 => ([1.0, 1.0, 1.0], 40.0),                           // Light source
         14 => ([1.0, 1.0, 1.0], 0.0),                            // Mirror walls
