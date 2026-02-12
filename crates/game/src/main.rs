@@ -666,12 +666,22 @@ impl ApplicationHandler for App {
                 .unwrap(),
         );
         self.grab_mouse(&window);
-        self.rcx = Some(RenderContext::new(
+        let backend = self.args.backend.to_render_backend();
+        let vte_mode = self.args.vte_display_mode.to_render_mode();
+        let pixel_storage_layers = if backend == RenderBackend::VoxelTraversal
+            && vte_mode == VteDisplayMode::Integral
+        {
+            Some(1)
+        } else {
+            None
+        };
+        self.rcx = Some(RenderContext::new_with_pixel_storage_layers(
             self.device.clone(),
             self.queue.clone(),
             self.instance.clone(),
             Some(window),
             [self.args.width, self.args.height, self.args.layers],
+            pixel_storage_layers,
         ));
         self.last_frame = Instant::now();
     }

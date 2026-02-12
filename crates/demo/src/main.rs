@@ -118,13 +118,19 @@ fn main() -> Result<(), impl Error> {
 
 fn run_headless(args: &Args) {
     let (instance, device, queue) = vulkan_setup(None);
+    let pixel_storage_layers = if args.backend.to_render_backend() == RenderBackend::VoxelTraversal {
+        Some(1)
+    } else {
+        None
+    };
 
-    let mut rcx = RenderContext::new(
+    let mut rcx = RenderContext::new_with_pixel_storage_layers(
         device.clone(),
         queue.clone(),
         instance.clone(),
         None,
         [args.width, args.height, 1],
+        pixel_storage_layers,
     );
 
     let mut demo_scene = DemoScene::new(args.clone());
@@ -499,7 +505,13 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
-        self.rcx = Some(RenderContext::new(
+        let pixel_storage_layers =
+            if self.demo_scene.args.backend.to_render_backend() == RenderBackend::VoxelTraversal {
+                Some(1)
+            } else {
+                None
+            };
+        self.rcx = Some(RenderContext::new_with_pixel_storage_layers(
             self.device.clone(),
             self.queue.clone(),
             self.instance.clone(),
@@ -509,6 +521,7 @@ impl ApplicationHandler for App {
                 self.demo_scene.args.height,
                 self.demo_scene.args.layers,
             ],
+            pixel_storage_layers,
         ));
     }
 

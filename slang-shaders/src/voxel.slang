@@ -94,6 +94,14 @@ struct VoxelFrameMeta
     uint stageBSliceLayer;
     uint stageBThickHalfWidth;
     uint debugFlags;
+    int visibleChunkMinX;
+    int visibleChunkMinY;
+    int visibleChunkMinZ;
+    int visibleChunkMinW;
+    int visibleChunkMaxX;
+    int visibleChunkMaxY;
+    int visibleChunkMaxZ;
+    int visibleChunkMaxW;
 }
 
 struct VoxelChunkHeader
@@ -443,6 +451,71 @@ bool intersectChunkAABB(
     return tExit >= tEnter;
 }
 
+bool intersectAABB(
+    float4 rayOrigin,
+    float4 rayDir,
+    float4 bmin,
+    float4 bmax,
+    out float tEnter,
+    out float tExit)
+{
+    const float EPS = 1e-6;
+    float tMin = 0.0;
+    float tMax = 1e30;
+
+    if (abs(rayDir.x) > EPS)
+    {
+        float tx0 = (bmin.x - rayOrigin.x) / rayDir.x;
+        float tx1 = (bmax.x - rayOrigin.x) / rayDir.x;
+        tMin = max(tMin, min(tx0, tx1));
+        tMax = min(tMax, max(tx0, tx1));
+    }
+    else if (rayOrigin.x < bmin.x || rayOrigin.x > bmax.x)
+    {
+        tEnter = 0.0; tExit = -1.0; return false;
+    }
+
+    if (abs(rayDir.y) > EPS)
+    {
+        float ty0 = (bmin.y - rayOrigin.y) / rayDir.y;
+        float ty1 = (bmax.y - rayOrigin.y) / rayDir.y;
+        tMin = max(tMin, min(ty0, ty1));
+        tMax = min(tMax, max(ty0, ty1));
+    }
+    else if (rayOrigin.y < bmin.y || rayOrigin.y > bmax.y)
+    {
+        tEnter = 0.0; tExit = -1.0; return false;
+    }
+
+    if (abs(rayDir.z) > EPS)
+    {
+        float tz0 = (bmin.z - rayOrigin.z) / rayDir.z;
+        float tz1 = (bmax.z - rayOrigin.z) / rayDir.z;
+        tMin = max(tMin, min(tz0, tz1));
+        tMax = min(tMax, max(tz0, tz1));
+    }
+    else if (rayOrigin.z < bmin.z || rayOrigin.z > bmax.z)
+    {
+        tEnter = 0.0; tExit = -1.0; return false;
+    }
+
+    if (abs(rayDir.w) > EPS)
+    {
+        float tw0 = (bmin.w - rayOrigin.w) / rayDir.w;
+        float tw1 = (bmax.w - rayOrigin.w) / rayDir.w;
+        tMin = max(tMin, min(tw0, tw1));
+        tMax = min(tMax, max(tw0, tw1));
+    }
+    else if (rayOrigin.w < bmin.w || rayOrigin.w > bmax.w)
+    {
+        tEnter = 0.0; tExit = -1.0; return false;
+    }
+
+    tEnter = tMin;
+    tExit = tMax;
+    return tExit >= tEnter;
+}
+
 void advanceDDA4(inout int4 coord, int4 step, inout float4 tMax, float4 tDelta, out float nextT)
 {
     // Deterministic single-axis DDA step.
@@ -742,6 +815,9 @@ bool traceVoxelRayDDA(
     uint remainingVoxelSteps = max(1u, min(meta.maxTraceSteps * 8u, 32768u));
     bool collectDebugFlags = (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
         || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL);
+    bool useSlabChunkInterval = collectDebugFlags
+        || (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) != 0u;
+    bool forceFrequentReanchor = useSlabChunkInterval;
 
     int4 chunkStep = int4(
         stepSign(rayDir.x),
@@ -749,68 +825,107 @@ bool traceVoxelRayDDA(
         stepSign(rayDir.z),
         stepSign(rayDir.w)
     );
+    float4 tDeltaChunk = float4(
+        safeInvAbs(rayDir.x) * float(CHUNK_SIZE),
+        safeInvAbs(rayDir.y) * float(CHUNK_SIZE),
+        safeInvAbs(rayDir.z) * float(CHUNK_SIZE),
+        safeInvAbs(rayDir.w) * float(CHUNK_SIZE)
+    );
 
     bool touchedVisibleChunk = false;
     uint chunkStepsTaken = 0u;
     float currentT = 0.0;
+    float traversalMaxT = MAX_DISTANCE;
     int4 lastChunkCoord = int4(0, 0, 0, 0);
+    int4 chunkCoord = int4(0, 0, 0, 0);
+    float4 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
+    bool chunkStateValid = false;
     const float CHUNK_EPS = 1e-6;
+    float chunkSizeF = float(CHUNK_SIZE);
+    float4 visibleBMin = float4(
+        float(meta.visibleChunkMinX) * chunkSizeF,
+        float(meta.visibleChunkMinY) * chunkSizeF,
+        float(meta.visibleChunkMinZ) * chunkSizeF,
+        float(meta.visibleChunkMinW) * chunkSizeF
+    );
+    float4 visibleBMax = float4(
+        float(meta.visibleChunkMaxX + 1) * chunkSizeF,
+        float(meta.visibleChunkMaxY + 1) * chunkSizeF,
+        float(meta.visibleChunkMaxZ + 1) * chunkSizeF,
+        float(meta.visibleChunkMaxW + 1) * chunkSizeF
+    );
+    float visibleEnter = 0.0;
+    float visibleExit = 0.0;
+    if (!intersectAABB(rayOrigin, rayDir, visibleBMin, visibleBMax, visibleEnter, visibleExit))
+    {
+        return false;
+    }
+    currentT = max(0.0, visibleEnter);
+    traversalMaxT = min(MAX_DISTANCE, visibleExit);
+    if (traversalMaxT <= currentT + CHUNK_EPS)
+    {
+        return false;
+    }
+    uint chunkReanchorMask = forceFrequentReanchor ? 31u : 255u;
     for (uint chunkStepIdx = 0; chunkStepIdx < maxChunkSteps; chunkStepIdx++)
     {
         chunkStepsTaken++;
-        if (currentT > MAX_DISTANCE || remainingVoxelSteps == 0)
+        if (currentT > traversalMaxT || remainingVoxelSteps == 0)
         {
             break;
         }
 
-        // Probe slightly forward along the ray so boundary points are owned by
-        // the chunk we are entering, not the chunk we just exited.
-        float probeEps = max(CHUNK_EPS, abs(currentT) * 1e-7);
-        float probeT = min(MAX_DISTANCE, currentT + probeEps);
-        float4 currentPos = rayOrigin + rayDir * probeT;
-        int4 chunkCoord = int4(
-            entryChunkCoord(currentPos.x, rayDir.x),
-            entryChunkCoord(currentPos.y, rayDir.y),
-            entryChunkCoord(currentPos.z, rayDir.z),
-            entryChunkCoord(currentPos.w, rayDir.w)
-        );
+        if (!chunkStateValid || (chunkStepIdx & chunkReanchorMask) == 0u)
+        {
+            // Probe slightly forward so boundary points are owned by the chunk we are entering.
+            float probeEps = max(CHUNK_EPS, abs(currentT) * 1e-7);
+            float probeT = min(traversalMaxT, currentT + probeEps);
+            float4 currentPos = rayOrigin + rayDir * probeT;
+            chunkCoord = int4(
+                entryChunkCoord(currentPos.x, rayDir.x),
+                entryChunkCoord(currentPos.y, rayDir.y),
+                entryChunkCoord(currentPos.z, rayDir.z),
+                entryChunkCoord(currentPos.w, rayDir.w)
+            );
+
+            tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
+            if (chunkStep.x > 0)
+            {
+                tMaxChunk.x = (float((chunkCoord.x + 1) * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
+            }
+            else if (chunkStep.x < 0)
+            {
+                tMaxChunk.x = (float(chunkCoord.x * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
+            }
+            if (chunkStep.y > 0)
+            {
+                tMaxChunk.y = (float((chunkCoord.y + 1) * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
+            }
+            else if (chunkStep.y < 0)
+            {
+                tMaxChunk.y = (float(chunkCoord.y * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
+            }
+            if (chunkStep.z > 0)
+            {
+                tMaxChunk.z = (float((chunkCoord.z + 1) * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
+            }
+            else if (chunkStep.z < 0)
+            {
+                tMaxChunk.z = (float(chunkCoord.z * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
+            }
+            if (chunkStep.w > 0)
+            {
+                tMaxChunk.w = (float((chunkCoord.w + 1) * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
+            }
+            else if (chunkStep.w < 0)
+            {
+                tMaxChunk.w = (float(chunkCoord.w * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
+            }
+            chunkStateValid = true;
+        }
         lastChunkCoord = chunkCoord;
 
-        float4 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
-        if (chunkStep.x > 0)
-        {
-            tMaxChunk.x = (float((chunkCoord.x + 1) * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
-        }
-        else if (chunkStep.x < 0)
-        {
-            tMaxChunk.x = (float(chunkCoord.x * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
-        }
-        if (chunkStep.y > 0)
-        {
-            tMaxChunk.y = (float((chunkCoord.y + 1) * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
-        }
-        else if (chunkStep.y < 0)
-        {
-            tMaxChunk.y = (float(chunkCoord.y * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
-        }
-        if (chunkStep.z > 0)
-        {
-            tMaxChunk.z = (float((chunkCoord.z + 1) * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
-        }
-        else if (chunkStep.z < 0)
-        {
-            tMaxChunk.z = (float(chunkCoord.z * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
-        }
-        if (chunkStep.w > 0)
-        {
-            tMaxChunk.w = (float((chunkCoord.w + 1) * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
-        }
-        else if (chunkStep.w < 0)
-        {
-            tMaxChunk.w = (float(chunkCoord.w * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
-        }
-
-        float chunkExitT = min(MAX_DISTANCE, min4(tMaxChunk));
+        float chunkExitT = min(traversalMaxT, min4(tMaxChunk));
         chunkExitT = max(chunkExitT, currentT);
         if (collectDebugFlags)
         {
@@ -828,8 +943,34 @@ bool traceVoxelRayDDA(
             }
         }
 
-        uint chunkIndex = findChunkIndex(chunkCoord, meta);
-        if (chunkIndex == INVALID_INDEX
+        bool inVisibleChunkBounds =
+            chunkCoord.x >= meta.visibleChunkMinX && chunkCoord.x <= meta.visibleChunkMaxX
+            && chunkCoord.y >= meta.visibleChunkMinY && chunkCoord.y <= meta.visibleChunkMaxY
+            && chunkCoord.z >= meta.visibleChunkMinZ && chunkCoord.z <= meta.visibleChunkMaxZ
+            && chunkCoord.w >= meta.visibleChunkMinW && chunkCoord.w <= meta.visibleChunkMaxW;
+        if (!inVisibleChunkBounds)
+        {
+            bool divergingFromVisibleBounds =
+                (chunkCoord.x < meta.visibleChunkMinX && chunkStep.x <= 0)
+                || (chunkCoord.x > meta.visibleChunkMaxX && chunkStep.x >= 0)
+                || (chunkCoord.y < meta.visibleChunkMinY && chunkStep.y <= 0)
+                || (chunkCoord.y > meta.visibleChunkMaxY && chunkStep.y >= 0)
+                || (chunkCoord.z < meta.visibleChunkMinZ && chunkStep.z <= 0)
+                || (chunkCoord.z > meta.visibleChunkMaxZ && chunkStep.z >= 0)
+                || (chunkCoord.w < meta.visibleChunkMinW && chunkStep.w <= 0)
+                || (chunkCoord.w > meta.visibleChunkMaxW && chunkStep.w >= 0);
+            if (divergingFromVisibleBounds)
+            {
+                break;
+            }
+        }
+
+        uint chunkIndex = INVALID_INDEX;
+        if (inVisibleChunkBounds)
+        {
+            chunkIndex = findChunkIndex(chunkCoord, meta);
+        }
+        if (chunkIndex == INVALID_INDEX && inVisibleChunkBounds
             && (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
                 || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL))
         {
@@ -851,8 +992,6 @@ bool traceVoxelRayDDA(
             // Hot path: DDA already tracks the chunk interval [currentT, chunkExitT].
             // Slab recomputation is kept only for debug/compare paths where we want
             // extra diagnostics around boundary ownership.
-            bool useSlabChunkInterval = collectDebugFlags
-                || (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) != 0u;
             float tEnter = currentT;
             float tExit = chunkExitT;
             if (useSlabChunkInterval)
@@ -901,10 +1040,11 @@ bool traceVoxelRayDDA(
             }
         }
 
-        // Always advance from absolute ray parameterization. This avoids
-        // cumulative ownership drift across boundary ties.
-        float advanceEps = max(CHUNK_EPS, abs(chunkExitT) * 1e-7);
-        currentT = max(currentT + CHUNK_EPS, chunkExitT + advanceEps);
+        float nextChunkT = chunkExitT;
+        advanceDDA4(chunkCoord, chunkStep, tMaxChunk, tDeltaChunk, nextChunkT);
+        // Keep a tiny forward bias to avoid re-entering the same boundary chunk.
+        float advanceEps = max(CHUNK_EPS, abs(nextChunkT) * 1e-7);
+        currentT = max(currentT + CHUNK_EPS, nextChunkT + advanceEps);
     }
 
     if ((debugFlags & DEBUG_FLAG_LOOKUP_FALLBACK_USED) != 0u)
@@ -1002,6 +1142,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             float(globalId.y) / float(wd.renderDimensions.y) * 2.0 - 1.0
         );
         float aspectRatio = float(wd.presentDimensions.x) / float(wd.presentDimensions.y);
+        float sx = pixelPos.x / wd.focalLengthXY;
+        float sy = (-pixelPos.y / aspectRatio) / wd.focalLengthXY;
 
         const float PI = 3.14159265;
         float viewAngle = (PI / 2.0) / wd.focalLengthZW;
@@ -1010,33 +1152,34 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         VecN<5> origin5 = VecN<4>.fromFloat4(viewOrigin).extend(1.0);
         VecN<5> worldOrigin5 = wd.viewMatrixInverse * origin5;
         float4 worldOrigin = worldOrigin5.toFloat4();
+        float4 worldDirX = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(1.0, 0.0, 0.0, 0.0)).extend(0.0)).toFloat4();
+        float4 worldDirY = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(0.0, 1.0, 0.0, 0.0)).extend(0.0)).toFloat4();
+        float4 worldDirZ = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(0.0, 0.0, 1.0, 0.0)).extend(0.0)).toFloat4();
+        float4 worldDirW = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(0.0, 0.0, 0.0, 1.0)).extend(0.0)).toFloat4();
+        float4 worldXY = worldDirX * sx + worldDirY * sy;
+
+        float invLayerCount = 1.0 / float(layerCount);
+        float firstZNorm = invLayerCount - 1.0;
+        float angle = firstZNorm * (viewAngle * 0.5) + (PI * 0.25);
+        float sinAngle = sin(angle);
+        float cosAngle = cos(angle);
+        float angleStep = viewAngle * invLayerCount;
+        float sinStep = sin(angleStep);
+        float cosStep = cos(angleStep);
 
         float3 accumColor = float3(0.0, 0.0, 0.0);
+        uint hitMaterial = 0u;
+        float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
+        int4 hitChunkCoord = int4(0, 0, 0, 0);
+        uint missReason = MISS_REASON_NONE;
+        uint debugFlags = 0u;
+        uint chunkStepsTaken = 0u;
+        uint remainingVoxelSteps = 0u;
+        float finalT = 0.0;
+        int4 lastChunkCoord = int4(0, 0, 0, 0);
         for (uint sampleLayer = 0u; sampleLayer < layerCount; sampleLayer++)
         {
-            float zNorm = ((float(sampleLayer) + 0.5) / float(layerCount)) * 2.0 - 1.0;
-            float zwAngle = zNorm * (viewAngle * 0.5) + (PI * 0.25);
-
-            float4 viewDirection = normalize(float4(
-                pixelPos.x / wd.focalLengthXY,
-                (-pixelPos.y / aspectRatio) / wd.focalLengthXY,
-                cos(zwAngle),
-                sin(zwAngle)
-            ));
-
-            VecN<5> dir5 = VecN<4>.fromFloat4(viewOrigin + viewDirection).extend(1.0);
-            VecN<5> worldDir5 = wd.viewMatrixInverse * dir5;
-            float4 worldDirection = normalize(worldDir5.toFloat4() - worldOrigin);
-
-            uint hitMaterial = 0u;
-            float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
-            int4 hitChunkCoord = int4(0, 0, 0, 0);
-            uint missReason = MISS_REASON_NONE;
-            uint debugFlags = 0u;
-            uint chunkStepsTaken = 0u;
-            uint remainingVoxelSteps = 0u;
-            float finalT = 0.0;
-            int4 lastChunkCoord = int4(0, 0, 0, 0);
+            float4 worldDirection = normalize(worldXY + worldDirZ * cosAngle + worldDirW * sinAngle);
             bool hit = traceVoxelRayDDA(
                 worldOrigin,
                 worldDirection,
@@ -1061,6 +1204,11 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 float a = 0.5 + 0.5 * worldDirection.y;
                 accumColor += lerp(float3(0.02, 0.03, 0.06), float3(0.16, 0.22, 0.40), saturate(a));
             }
+
+            float nextCos = cosAngle * cosStep - sinAngle * sinStep;
+            float nextSin = sinAngle * cosStep + cosAngle * sinStep;
+            cosAngle = nextCos;
+            sinAngle = nextSin;
         }
 
         pixelBuffer[pixelBase] = float4(accumColor / float(layerCount), 1.0);

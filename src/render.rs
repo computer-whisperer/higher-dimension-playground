@@ -254,6 +254,14 @@ struct GpuVoxelFrameMeta {
     stage_b_slice_layer: u32,
     stage_b_thick_half_width: u32,
     debug_flags: u32,
+    visible_chunk_min_x: i32,
+    visible_chunk_min_y: i32,
+    visible_chunk_min_z: i32,
+    visible_chunk_min_w: i32,
+    visible_chunk_max_x: i32,
+    visible_chunk_max_y: i32,
+    visible_chunk_max_z: i32,
+    visible_chunk_max_w: i32,
 }
 
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -1164,6 +1172,7 @@ const MAX_TETS_PER_TILE: usize = 8192;
 
 pub struct SizedBuffers {
     render_dimensions: [u32; 3],
+    pixel_storage_layers: u32,
     max_tetrahedrons: usize,
     output_tetrahedron_buffer: Subbuffer<[common::Tetrahedron]>,
     output_pixel_buffer: Subbuffer<[Vec4]>,
@@ -1183,10 +1192,21 @@ pub struct SizedBuffers {
 }
 
 impl SizedBuffers {
-    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, render_dimensions: [u32; 3]) -> Self {
+    pub fn new(
+        memory_allocator: Arc<dyn MemoryAllocator>,
+        render_dimensions: [u32; 3],
+        pixel_storage_layers: Option<u32>,
+    ) -> Self {
         // Raytracing path currently expands voxel surface instances into full tesseract tet sets.
         // Keep this high enough for dense game scenes used in quality comparisons.
         let max_tetrahedrons: usize = 700_000;
+        let logical_layers = render_dimensions[2].max(1);
+        let storage_layers = pixel_storage_layers
+            .unwrap_or(logical_layers)
+            .clamp(1, logical_layers);
+        let pixel_count = (render_dimensions[0] as usize)
+            .saturating_mul(render_dimensions[1] as usize)
+            .saturating_mul(storage_layers as usize);
 
         let output_tetrahedron_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -1214,10 +1234,7 @@ impl SizedBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![
-                Vec4::ZERO;
-                (render_dimensions[0] * render_dimensions[1] * render_dimensions[2]) as usize
-            ],
+            vec![Vec4::ZERO; pixel_count],
         )
         .unwrap();
 
@@ -1232,10 +1249,7 @@ impl SizedBuffers {
                     | MemoryTypeFilter::HOST_RANDOM_ACCESS,
                 ..Default::default()
             },
-            vec![
-                Vec4::ZERO;
-                (render_dimensions[0] * render_dimensions[1] * render_dimensions[2]) as usize
-            ],
+            vec![Vec4::ZERO; pixel_count],
         )
         .unwrap();
 
@@ -1397,6 +1411,7 @@ impl SizedBuffers {
 
         Self {
             render_dimensions,
+            pixel_storage_layers: storage_layers,
             max_tetrahedrons,
             output_tetrahedron_buffer,
             output_pixel_buffer,
@@ -2477,6 +2492,24 @@ impl RenderContext {
         window: Option<Arc<Window>>,
         render_dimensions: [u32; 3],
     ) -> RenderContext {
+        Self::new_with_pixel_storage_layers(
+            device,
+            queue,
+            instance,
+            window,
+            render_dimensions,
+            None,
+        )
+    }
+
+    pub fn new_with_pixel_storage_layers(
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+        instance: Arc<Instance>,
+        window: Option<Arc<Window>>,
+        render_dimensions: [u32; 3],
+        pixel_storage_layers: Option<u32>,
+    ) -> RenderContext {
         // Before we can start creating and recording command buffers, we need a way of allocating
         // them. Vulkano provides a command buffer allocator, which manages raw Vulkan command
         // pools underneath and provides a safe interface for them.
@@ -2780,7 +2813,11 @@ impl RenderContext {
 
         let sized_descriptor_set_layout =
             SizedBuffers::create_descriptor_set_layout(device.clone());
-        let sized_buffers = SizedBuffers::new(memory_allocator.clone(), render_dimensions);
+        let sized_buffers = SizedBuffers::new(
+            memory_allocator.clone(),
+            render_dimensions,
+            pixel_storage_layers,
+        );
 
         let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
 
@@ -4313,6 +4350,8 @@ impl RenderContext {
         let mut vte_visible_chunk_count: usize = 0;
         let mut vte_occupancy_word_count: usize = 0;
         let mut vte_material_word_count: usize = 0;
+        let mut vte_visible_chunk_min = [i32::MAX; 4];
+        let mut vte_visible_chunk_max = [i32::MIN; 4];
         if let Some(input) = voxel_input {
             vte_chunk_count = input.chunk_headers.len().min(VTE_MAX_CHUNKS);
             vte_visible_chunk_count = input
@@ -4385,8 +4424,16 @@ impl RenderContext {
                     .write()
                     .unwrap();
                 for i in 0..vte_visible_chunk_count {
-                    writer[i] =
+                    let chunk_index =
                         input.visible_chunk_indices[i].min(vte_chunk_count.saturating_sub(1) as u32);
+                    writer[i] = chunk_index;
+                    let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                    for axis in 0..4 {
+                        vte_visible_chunk_min[axis] =
+                            vte_visible_chunk_min[axis].min(chunk_coord[axis]);
+                        vte_visible_chunk_max[axis] =
+                            vte_visible_chunk_max[axis].max(chunk_coord[axis]);
+                    }
                 }
             }
             {
@@ -4464,6 +4511,14 @@ impl RenderContext {
                     }
                     flags
                 },
+                visible_chunk_min_x: vte_visible_chunk_min[0],
+                visible_chunk_min_y: vte_visible_chunk_min[1],
+                visible_chunk_min_z: vte_visible_chunk_min[2],
+                visible_chunk_min_w: vte_visible_chunk_min[3],
+                visible_chunk_max_x: vte_visible_chunk_max[0],
+                visible_chunk_max_y: vte_visible_chunk_max[1],
+                visible_chunk_max_z: vte_visible_chunk_max[2],
+                visible_chunk_max_w: vte_visible_chunk_max[3],
             };
         }
 
@@ -4529,6 +4584,8 @@ impl RenderContext {
         let mut do_tetrahedron_edges = render_options.do_tetrahedron_edges;
         let mut do_voxel_vte = false;
         let mut vte_compare_diagnostics_enabled = false;
+        let logical_layers = self.sized_buffers.render_dimensions[2].max(1);
+        let storage_layers = self.sized_buffers.pixel_storage_layers.max(1);
 
         match render_options.render_backend {
             RenderBackend::Auto => {}
@@ -4625,7 +4682,7 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
@@ -4639,11 +4696,22 @@ impl RenderContext {
                     render_options.vte_reference_compare,
                     render_options.vte_reference_mismatch_only,
                     render_options.vte_compare_slice_only,
+                    storage_layers,
+                    logical_layers,
                 );
                 self.vte_backend_notice_printed = true;
             }
         } else {
             self.clear_vte_compare_diagnostics();
+        }
+
+        let reduced_storage_supported =
+            do_voxel_vte && render_options.vte_display_mode == VteDisplayMode::Integral;
+        if storage_layers < logical_layers && !reduced_storage_supported {
+            panic!(
+                "pixel storage layers ({storage_layers}) are less than logical render layers ({logical_layers}); \
+this reduced-storage configuration currently supports only '--backend voxel-traversal --vte-display-mode integral'."
+            );
         }
 
         self.frames_in_flight[frame_idx].vte_compare_enabled =
@@ -5768,7 +5836,14 @@ impl RenderContext {
                 let mut buffer_stored = Vec::new();
                 buffer_stored.extend_from_slice(&buffer_content[..]);
                 let mut buffer_arc = Arc::new(buffer_stored);
-                let buffer_dimensions = self.sized_buffers.render_dimensions;
+                let mut buffer_dimensions = self.sized_buffers.render_dimensions;
+                let logical_depth = buffer_dimensions[2].max(1);
+                let storage_depth = self.sized_buffers.pixel_storage_layers.max(1);
+                buffer_dimensions[2] = if self.last_backend == RenderBackend::VoxelTraversal {
+                    1
+                } else {
+                    logical_depth.min(storage_depth)
+                };
                 let mut layers = Vec::new();
                 struct HereGetPixel {
                     buffer_arc: Arc<Vec<Vec4>>,
@@ -5821,7 +5896,7 @@ impl RenderContext {
                     exr::prelude::Encoding::SMALL_FAST_LOSSLESS,
                     exr::prelude::SpecificChannels::rgba(pixel_getter),
                 ));
-                for z in 0..self.sized_buffers.render_dimensions[2] {
+                for z in 0..buffer_dimensions[2] {
                     let pixel_getter = HereGetPixel {
                         buffer_arc: buffer_arc.clone(),
                         dimensions: buffer_dimensions,
@@ -5884,8 +5959,15 @@ impl RenderContext {
 
                 let w = self.sized_buffers.render_dimensions[0] as u32;
                 let h = self.sized_buffers.render_dimensions[1] as u32;
-                let depth = self.sized_buffers.render_dimensions[2] as u32;
                 let vte_collapsed = self.last_backend == RenderBackend::VoxelTraversal;
+                let depth = if vte_collapsed {
+                    1
+                } else {
+                    self.sized_buffers
+                        .render_dimensions[2]
+                        .max(1)
+                        .min(self.sized_buffers.pixel_storage_layers.max(1))
+                };
 
                 let mut pixels = Vec::with_capacity((w * h * 4) as usize);
                 for y in 0..h {
