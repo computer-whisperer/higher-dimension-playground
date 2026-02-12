@@ -161,7 +161,7 @@ The default scene includes:
 | Q/E | Hidden-dimension strafe (friendly side axis in `UPRIGHT`) |
 | Mouse Back | Hold for XW turning (`UPRIGHT`: XW/ZY, `LEG-SIDE`: XW/ZW) |
 | Mouse Back+Forward | Legacy only: double rotation (XZ yaw + YW) |
-| Scroll wheel | Adjust move speed (except `LEG-SCRL`, where it cycles legacy rotation pair) |
+| Scroll wheel | Cycle block material (`LEG-SCRL` keeps legacy rotation-pair cycling) |
 | Tab | Cycle control scheme (`UPRIGHT` default -> `LEG-SIDE` -> `LEG-SCRL`) |
 | R | Reset camera orientation to defaults |
 | F12 | Screenshot |

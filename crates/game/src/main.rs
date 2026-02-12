@@ -537,7 +537,12 @@ fn normalize4(v: [f32; 4]) -> [f32; 4] {
         return v;
     }
     let inv_len = len_sq.sqrt().recip();
-    [v[0] * inv_len, v[1] * inv_len, v[2] * inv_len, v[3] * inv_len]
+    [
+        v[0] * inv_len,
+        v[1] * inv_len,
+        v[2] * inv_len,
+        v[3] * inv_len,
+    ]
 }
 
 fn rotate_basis_plane(basis: &mut [[f32; 4]; 4], axis_a: usize, axis_b: usize, angle: f32) {
@@ -557,10 +562,9 @@ fn build_place_preview_instance(
     time_s: f32,
     upright_mode: bool,
 ) -> common::ModelInstance {
-    let material = selected_material.clamp(
-        BLOCK_EDIT_PLACE_MATERIAL_MIN,
-        BLOCK_EDIT_PLACE_MATERIAL_MAX,
-    ) as u32;
+    let material = selected_material
+        .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
+        as u32;
     let (right, up, view_z, view_w) = if upright_mode {
         camera.view_basis_upright()
     } else {
@@ -581,24 +585,16 @@ fn build_place_preview_instance(
     ]);
 
     let anchor = [
-        camera.position[0]
-            + 0.92 * right[0]
-            - 0.78 * up[0]
+        camera.position[0] + 0.92 * right[0] - 0.78 * up[0]
             + 1.35 * center_forward[0]
             + 0.52 * side_w[0],
-        camera.position[1]
-            + 0.92 * right[1]
-            - 0.78 * up[1]
+        camera.position[1] + 0.92 * right[1] - 0.78 * up[1]
             + 1.35 * center_forward[1]
             + 0.52 * side_w[1],
-        camera.position[2]
-            + 0.92 * right[2]
-            - 0.78 * up[2]
+        camera.position[2] + 0.92 * right[2] - 0.78 * up[2]
             + 1.35 * center_forward[2]
             + 0.52 * side_w[2],
-        camera.position[3]
-            + 0.92 * right[3]
-            - 0.78 * up[3]
+        camera.position[3] + 0.92 * right[3] - 0.78 * up[3]
             + 1.35 * center_forward[3]
             + 0.52 * side_w[3],
     ];
@@ -640,6 +636,22 @@ impl App {
         window.set_cursor_visible(true);
         self.mouse_grabbed = false;
         self.input.clear_mouse_delta();
+    }
+
+    fn cycle_place_material_prev(&mut self) {
+        self.place_material = if self.place_material <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
+            BLOCK_EDIT_PLACE_MATERIAL_MAX
+        } else {
+            self.place_material.saturating_sub(1)
+        };
+    }
+
+    fn cycle_place_material_next(&mut self) {
+        self.place_material = if self.place_material >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
+            BLOCK_EDIT_PLACE_MATERIAL_MIN
+        } else {
+            self.place_material.saturating_add(1)
+        };
     }
 
     fn active_rotation_pair(&self) -> RotationPair {
@@ -685,24 +697,32 @@ impl App {
         }
 
         // Scroll wheel
-        let scroll = self.input.take_scroll();
-        if scroll != 0.0 {
+        let scroll_steps = self.input.take_scroll_steps();
+        if scroll_steps != 0 {
             if self.control_scheme.uses_scroll_pair_cycle() {
-                if scroll > 0.0 {
-                    self.scroll_cycle_pair = self.scroll_cycle_pair.next();
-                } else {
-                    // Reverse cycle for the legacy scroll mode.
-                    self.scroll_cycle_pair = match self.scroll_cycle_pair {
-                        RotationPair::Standard => RotationPair::FourD,
-                        RotationPair::FourD => RotationPair::Standard,
-                        RotationPair::DoubleRotation | RotationPair::IntuitiveXwPitch => {
-                            RotationPair::Standard
-                        }
-                    };
+                for _ in 0..scroll_steps.abs() {
+                    if scroll_steps > 0 {
+                        self.scroll_cycle_pair = self.scroll_cycle_pair.next();
+                    } else {
+                        // Reverse cycle for the legacy scroll mode.
+                        self.scroll_cycle_pair = match self.scroll_cycle_pair {
+                            RotationPair::Standard => RotationPair::FourD,
+                            RotationPair::FourD => RotationPair::Standard,
+                            RotationPair::DoubleRotation | RotationPair::IntuitiveXwPitch => {
+                                RotationPair::Standard
+                            }
+                        };
+                    }
                 }
             } else {
-                let factor = 1.1_f32.powf(scroll);
-                self.move_speed = (self.move_speed * factor).clamp(0.5, 100.0);
+                for _ in 0..scroll_steps.abs() {
+                    if scroll_steps > 0 {
+                        self.cycle_place_material_next();
+                    } else {
+                        self.cycle_place_material_prev();
+                    }
+                }
+                eprintln!("Selected place material: {}", self.place_material);
             }
         }
 
@@ -739,19 +759,11 @@ impl App {
 
         // Block place material selection.
         if self.input.take_place_material_prev() {
-            self.place_material = if self.place_material <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
-                BLOCK_EDIT_PLACE_MATERIAL_MAX
-            } else {
-                self.place_material.saturating_sub(1)
-            };
+            self.cycle_place_material_prev();
             eprintln!("Selected place material: {}", self.place_material);
         }
         if self.input.take_place_material_next() {
-            self.place_material = if self.place_material >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
-                BLOCK_EDIT_PLACE_MATERIAL_MIN
-            } else {
-                self.place_material.saturating_add(1)
-            };
+            self.cycle_place_material_next();
             eprintln!("Selected place material: {}", self.place_material);
         }
         if let Some(material_digit) = self.input.take_place_material_digit() {
@@ -946,7 +958,7 @@ impl App {
                     "{} [{}]  spd:{:.1}{}\n\
                      yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
                      edit:LMB- RMB+ mat:{} hl:{}\n\
-                     mat:[ ] cycle, 1-0 direct",
+                     mat:[ ]/wheel cycle, 1-0 direct",
                     pair.label(),
                     self.control_scheme.label(),
                     self.move_speed,

@@ -353,10 +353,10 @@ impl InputState {
         self.place_material_digit_requested.take()
     }
 
-    pub fn take_scroll(&mut self) -> f32 {
-        let v = self.scroll_accumulated;
-        self.scroll_accumulated = 0.0;
-        v
+    pub fn take_scroll_steps(&mut self) -> i32 {
+        let steps = self.scroll_accumulated.trunc() as i32;
+        self.scroll_accumulated -= steps as f32;
+        steps
     }
 
     pub fn take_scheme_cycle(&mut self) -> bool {
