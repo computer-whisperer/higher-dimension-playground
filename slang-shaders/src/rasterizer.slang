@@ -873,20 +873,31 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
         }
     }
 
-    // Early-out: skip rendering if no tetrahedra cover this pixel
-    float4 output = float4(0, 0, 0, 1.0);
+    uint pixelIndex = uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x;
+
     if (numZWLines > 0)
-        output = renderZWLines2(currentZWLines, numZWLines, workingData);
-
-    // Write output
-    pixelBuffer[uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x] = output;
-
-    // Clear other Z slices
-    for (uint z = 1; z < workingData.renderDimensions.z; z++)
     {
-        uint index = z * workingData.renderDimensions.x * workingData.renderDimensions.y
-                   + uPixelPos.y * workingData.renderDimensions.x
-                   + uPixelPos.x;
-        pixelBuffer[index] = float4(0);
+        // Normal raster output: opaque color where tetrahedra project.
+        pixelBuffer[pixelIndex] = renderZWLines2(currentZWLines, numZWLines, workingData);
+    }
+    else if (workingData.padding[0] == 0u)
+    {
+        // Legacy raster/ray paths expect uncovered pixels to be cleared each frame.
+        pixelBuffer[pixelIndex] = float4(0, 0, 0, 1.0);
+    }
+    // In VTE mode (padding[0] != 0), leave uncovered pixels untouched so
+    // voxel Stage A/B output remains visible behind the overlay raster.
+
+    // Only clear other Z slices for non-VTE paths. VTE uses layer 0 as the
+    // collapsed display target, and clearing here can clobber Stage A data.
+    if (workingData.padding[0] == 0u)
+    {
+        for (uint z = 1; z < workingData.renderDimensions.z; z++)
+        {
+            uint index = z * workingData.renderDimensions.x * workingData.renderDimensions.y
+                       + uPixelPos.y * workingData.renderDimensions.x
+                       + uPixelPos.x;
+            pixelBuffer[index] = float4(0);
+        }
     }
 }
