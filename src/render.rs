@@ -3391,10 +3391,10 @@ impl RenderContext {
         }
 
         let axis_colors = [
-            Vec4::new(1.00, 0.30, 0.30, 1.0), // X
-            Vec4::new(0.30, 1.00, 0.45, 1.0), // Y
-            Vec4::new(0.35, 0.65, 1.00, 1.0), // Z
-            Vec4::new(1.00, 0.75, 0.25, 1.0), // W
+            Vec4::new(1.00, 0.32, 0.32, 1.0), // +X
+            Vec4::new(0.34, 1.00, 0.52, 1.0), // +Y
+            Vec4::new(0.36, 0.70, 1.00, 1.0), // +Z
+            Vec4::new(1.00, 0.78, 0.28, 1.0), // +W
         ];
         let rose_frame_color = Vec4::new(0.85, 0.85, 0.90, 1.0);
         let xy_frame_color = Vec4::new(0.25, 0.92, 0.92, 1.0);

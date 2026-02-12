@@ -416,13 +416,22 @@ bool decodePlacementFace(VoxelFrameMeta meta, out uint axis, out int sign)
     return nonZeroAxes == 1u;
 }
 
-float3 highlightBaseTint(uint highlightKind)
+float3 faceAxisSignColor(uint axis, int sign)
 {
-    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
+    bool isPositive = sign >= 0;
+    if (axis == 0u)
     {
-        return float3(0.08, 0.95, 1.0); // Cyan.
+        return isPositive ? float3(1.00, 0.32, 0.32) : float3(0.74, 0.22, 0.22); // +/-X
     }
-    return float3(1.0, 0.55, 0.08); // Orange.
+    if (axis == 1u)
+    {
+        return isPositive ? float3(0.34, 1.00, 0.52) : float3(0.22, 0.74, 0.36); // +/-Y
+    }
+    if (axis == 2u)
+    {
+        return isPositive ? float3(0.36, 0.70, 1.00) : float3(0.22, 0.44, 0.80); // +/-Z
+    }
+    return isPositive ? float3(1.00, 0.78, 0.28) : float3(0.80, 0.56, 0.20); // +/-W
 }
 
 float3 shadeHighlightedVoxelSample(
@@ -485,8 +494,9 @@ float3 shadeHighlightedVoxelSample(
         float faceMask = 1.0 - smoothstep(0.01, 0.06, guideFaceDist);
         float edgeMask = 1.0 - smoothstep(0.05, 0.13, minCellFaceDist);
         float accentMask = faceMask * edgeMask;
-        // High-contrast indicator for the selected placement face on the hit voxel.
-        shaded = lerp(shaded, float3(1.0, 1.0, 1.0), accentMask * 0.92);
+        // Signed axis tint so +/− X/Y/Z/W are immediately recognizable.
+        float3 axisTint = faceAxisSignColor(guideAxis, guideSign);
+        shaded = lerp(shaded, axisTint, accentMask * 0.94);
     }
 
     return shaded;
