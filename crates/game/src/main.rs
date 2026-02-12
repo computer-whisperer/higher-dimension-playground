@@ -664,7 +664,7 @@ impl App {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => {
                 if self.input.mouse_back_held() {
-                    RotationPair::IntuitiveXwPitch
+                    RotationPair::FourD
                 } else {
                     RotationPair::Standard
                 }
@@ -714,9 +714,7 @@ impl App {
                         self.scroll_cycle_pair = match self.scroll_cycle_pair {
                             RotationPair::Standard => RotationPair::FourD,
                             RotationPair::FourD => RotationPair::Standard,
-                            RotationPair::DoubleRotation | RotationPair::IntuitiveXwPitch => {
-                                RotationPair::Standard
-                            }
+                            RotationPair::DoubleRotation => RotationPair::Standard,
                         };
                     }
                 }

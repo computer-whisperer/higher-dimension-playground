@@ -18,6 +18,9 @@ const GRAVITY: f32 = 20.0;
 const JUMP_SPEED: f32 = 8.0;
 pub const PLAYER_HEIGHT: f32 = 1.7;
 pub const PLAYER_RADIUS_XZW: f32 = 0.30;
+const UPRIGHT_YAW_ZERO_OFFSET: f32 = 0.0;
+const UPRIGHT_ZW_ZERO_OFFSET: f32 = std::f32::consts::FRAC_PI_4;
+const UPRIGHT_XW_ZERO_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AngleTarget {
@@ -50,11 +53,17 @@ impl Camera4D {
     }
 
     /// Upright composition order for intuitive controls:
-    /// XW first, then yaw, then pitch (applied right-to-left to vectors).
+    /// XW first, then ZW, then yaw, then pitch (applied right-to-left to vectors).
     fn rotation_matrix_upright(&self) -> Array2<f32> {
+        // Re-center upright zero angles to a simple axis-aligned forward (+X).
+        let yaw = self.yaw + UPRIGHT_YAW_ZERO_OFFSET;
+        let zw = self.zw_angle + UPRIGHT_ZW_ZERO_OFFSET;
+        let xw = self.xw_angle + UPRIGHT_XW_ZERO_OFFSET;
+
         let m = rotation_matrix_one_angle(5, 2, 1, self.pitch); // ZY (outermost)
-        let m = m.dot(&rotation_matrix_one_angle(5, 0, 2, self.yaw)); // XZ
-        m.dot(&rotation_matrix_one_angle(5, 0, 3, self.xw_angle)) // XW (innermost)
+        let m = m.dot(&rotation_matrix_one_angle(5, 0, 2, yaw)); // XZ
+        let m = m.dot(&rotation_matrix_one_angle(5, 2, 3, zw)); // ZW
+        m.dot(&rotation_matrix_one_angle(5, 0, 3, xw)) // XW (innermost)
     }
 
     /// Convert a direction from view-space basis to world-space.
@@ -95,9 +104,9 @@ impl Camera4D {
         Camera4D {
             // Stand on top of the default flat-ground surface (voxel top at y=0).
             position: [0.0, PLAYER_HEIGHT, -8.0, -4.0],
-            yaw: PI * 0.125,
+            yaw: 0.0,
             pitch: 0.0,
-            xw_angle: PI * 0.125,
+            xw_angle: 0.0,
             zw_angle: 0.0,
             yw_deviation: 0.0,
             is_flying: true,
@@ -210,16 +219,15 @@ impl Camera4D {
     }
 
     pub fn reset_orientation(&mut self) {
-        self.yaw = PI * 0.125;
+        self.yaw = 0.0;
         self.pitch = 0.0;
-        self.xw_angle = PI * 0.125;
+        self.xw_angle = 0.0;
         self.zw_angle = 0.0;
         self.yw_deviation = 0.0;
     }
 
     /// Constrain camera orientation to an upright, no-roll/no-twist mode.
     pub fn enforce_upright_constraints(&mut self) {
-        self.zw_angle = 0.0;
         self.yw_deviation = 0.0;
         let max_pitch = 81.0_f32.to_radians();
         self.pitch = self.pitch.clamp(-max_pitch, max_pitch);
@@ -481,7 +489,7 @@ mod tests {
         cam.yw_deviation = -1.11;
         cam.enforce_upright_constraints();
 
-        assert_eq!(cam.zw_angle, 0.0);
+        assert!((cam.zw_angle - 0.73).abs() < 1e-6);
         assert_eq!(cam.yw_deviation, 0.0);
         let max_pitch = 81.0_f32.to_radians();
         assert!(cam.pitch <= max_pitch + 1e-6);
@@ -575,5 +583,37 @@ mod tests {
                 along_right
             );
         }
+    }
+
+    #[test]
+    fn upright_zw_can_aim_center_ray_to_positive_z_axis() {
+        let mut cam = Camera4D::new();
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        cam.xw_angle = 0.0;
+        cam.zw_angle = -std::f32::consts::FRAC_PI_2;
+        cam.enforce_upright_constraints();
+
+        let look = cam.look_direction_upright();
+        assert!(look[2] > 0.9999, "expected +Z aim, got z={}", look[2]);
+        assert!(look[0].abs() < 1e-4, "expected x≈0, got x={}", look[0]);
+        assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
+        assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
+    }
+
+    #[test]
+    fn upright_zero_angles_look_along_positive_x_axis() {
+        let mut cam = Camera4D::new();
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        cam.xw_angle = 0.0;
+        cam.zw_angle = 0.0;
+        cam.enforce_upright_constraints();
+
+        let look = cam.look_direction_upright();
+        assert!(look[0] > 0.9999, "expected +X aim, got x={}", look[0]);
+        assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
+        assert!(look[2].abs() < 1e-4, "expected z≈0, got z={}", look[2]);
+        assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
     }
 }

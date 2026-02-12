@@ -44,7 +44,6 @@ pub enum RotationPair {
     Standard,
     FourD,
     DoubleRotation,
-    IntuitiveXwPitch,
 }
 
 impl RotationPair {
@@ -53,7 +52,6 @@ impl RotationPair {
             RotationPair::Standard => AngleTarget::Yaw,
             RotationPair::FourD => AngleTarget::XwAngle,
             RotationPair::DoubleRotation => AngleTarget::Yaw,
-            RotationPair::IntuitiveXwPitch => AngleTarget::XwAngle,
         }
     }
 
@@ -62,7 +60,6 @@ impl RotationPair {
             RotationPair::Standard => AngleTarget::Pitch,
             RotationPair::FourD => AngleTarget::ZwAngle,
             RotationPair::DoubleRotation => AngleTarget::YwDeviation,
-            RotationPair::IntuitiveXwPitch => AngleTarget::Pitch,
         }
     }
 
@@ -71,7 +68,6 @@ impl RotationPair {
             RotationPair::Standard => "XZ/ZY",
             RotationPair::FourD => "XW/ZW",
             RotationPair::DoubleRotation => "DOUBLE XZ+YW",
-            RotationPair::IntuitiveXwPitch => "XW/ZY",
         }
     }
 
@@ -80,7 +76,6 @@ impl RotationPair {
             RotationPair::Standard => RotationPair::FourD,
             RotationPair::FourD => RotationPair::Standard,
             RotationPair::DoubleRotation => RotationPair::Standard,
-            RotationPair::IntuitiveXwPitch => RotationPair::Standard,
         }
     }
 }
