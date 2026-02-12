@@ -11,6 +11,8 @@ const FLY_TOGGLE_COOLDOWN_MS: u128 = 700;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ControlScheme {
     IntuitiveUpright,
+    LookTransport,
+    RotorFree,
     LegacySideButtonLayers,
     LegacyScrollCycle,
 }
@@ -18,7 +20,9 @@ pub enum ControlScheme {
 impl ControlScheme {
     pub fn next(self) -> Self {
         match self {
-            ControlScheme::IntuitiveUpright => ControlScheme::LegacySideButtonLayers,
+            ControlScheme::IntuitiveUpright => ControlScheme::LookTransport,
+            ControlScheme::LookTransport => ControlScheme::RotorFree,
+            ControlScheme::RotorFree => ControlScheme::LegacySideButtonLayers,
             ControlScheme::LegacySideButtonLayers => ControlScheme::LegacyScrollCycle,
             ControlScheme::LegacyScrollCycle => ControlScheme::IntuitiveUpright,
         }
@@ -27,6 +31,8 @@ impl ControlScheme {
     pub fn label(self) -> &'static str {
         match self {
             ControlScheme::IntuitiveUpright => "UPRIGHT",
+            ControlScheme::LookTransport => "LOOK-TR",
+            ControlScheme::RotorFree => "ROTOR",
             ControlScheme::LegacySideButtonLayers => "LEG-SIDE",
             ControlScheme::LegacyScrollCycle => "LEG-SCRL",
         }
@@ -34,6 +40,13 @@ impl ControlScheme {
 
     pub fn is_upright_primary(self) -> bool {
         matches!(self, ControlScheme::IntuitiveUpright)
+    }
+
+    pub fn uses_look_frame(self) -> bool {
+        matches!(
+            self,
+            ControlScheme::LookTransport | ControlScheme::RotorFree
+        )
     }
 
     pub fn uses_scroll_pair_cycle(self) -> bool {

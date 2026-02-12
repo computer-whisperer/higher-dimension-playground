@@ -18,6 +18,7 @@ const GRAVITY: f32 = 20.0;
 const JUMP_SPEED: f32 = 8.0;
 pub const PLAYER_HEIGHT: f32 = 1.7;
 pub const PLAYER_RADIUS_XZW: f32 = 0.30;
+const LOOK_TRANSPORT_UPRIGHT_DAMPING: f32 = 0.06;
 const UPRIGHT_YAW_ZERO_OFFSET: f32 = 0.0;
 const UPRIGHT_ZW_ZERO_OFFSET: f32 = std::f32::consts::FRAC_PI_4;
 const UPRIGHT_XW_ZERO_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
@@ -38,6 +39,11 @@ pub struct Camera4D {
     pub xw_angle: f32,
     pub zw_angle: f32,
     pub yw_deviation: f32,
+    look_right: [f32; 4],
+    look_up: [f32; 4],
+    look_forward: [f32; 4],
+    look_side: [f32; 4],
+    look_frame_initialized: bool,
     pub is_flying: bool,
     pub is_grounded: bool,
     pub velocity_y: f32,
@@ -110,6 +116,304 @@ impl Camera4D {
         ]
     }
 
+    fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    }
+
+    fn sub_projection(v: [f32; 4], axis: [f32; 4]) -> [f32; 4] {
+        let d = Self::dot4(v, axis);
+        [
+            v[0] - d * axis[0],
+            v[1] - d * axis[1],
+            v[2] - d * axis[2],
+            v[3] - d * axis[3],
+        ]
+    }
+
+    fn normalize_with_fallback(dir: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
+        let len_sq = Self::dot4(dir, dir);
+        if len_sq <= 1e-8 {
+            return fallback;
+        }
+        let inv_len = len_sq.sqrt().recip();
+        [
+            dir[0] * inv_len,
+            dir[1] * inv_len,
+            dir[2] * inv_len,
+            dir[3] * inv_len,
+        ]
+    }
+
+    fn rotate_axis_pair(a: &mut [f32; 4], b: &mut [f32; 4], angle: f32) {
+        let c = angle.cos();
+        let s = angle.sin();
+        let old_a = *a;
+        let old_b = *b;
+        for i in 0..4 {
+            a[i] = c * old_a[i] + s * old_b[i];
+            b[i] = -s * old_a[i] + c * old_b[i];
+        }
+    }
+
+    fn reorthonormalize_look_frame(&mut self) {
+        self.look_forward = Self::normalize_with_fallback(self.look_forward, [1.0, 0.0, 0.0, 0.0]);
+
+        let mut side = Self::sub_projection(self.look_side, self.look_forward);
+        side = Self::normalize_with_fallback(side, [0.0, 0.0, 0.0, 1.0]);
+        self.look_side = side;
+
+        let mut up = Self::sub_projection(self.look_up, self.look_forward);
+        up = Self::sub_projection(up, self.look_side);
+        let world_up = [0.0, 1.0, 0.0, 0.0];
+        let mut up_fallback = Self::sub_projection(world_up, self.look_forward);
+        up_fallback = Self::sub_projection(up_fallback, self.look_side);
+        up_fallback = Self::normalize_with_fallback(up_fallback, [0.0, 1.0, 0.0, 0.0]);
+        self.look_up = Self::normalize_with_fallback(up, up_fallback);
+
+        let mut right = Self::sub_projection(self.look_right, self.look_forward);
+        right = Self::sub_projection(right, self.look_side);
+        right = Self::sub_projection(right, self.look_up);
+        right = Self::normalize_with_fallback(right, [0.0, 0.0, 1.0, 0.0]);
+        self.look_right = right;
+    }
+
+    fn stabilize_look_up_axis(&mut self, blend: f32) {
+        let world_up = [0.0, 1.0, 0.0, 0.0];
+        let mut desired_up = Self::sub_projection(world_up, self.look_forward);
+        desired_up = Self::sub_projection(desired_up, self.look_side);
+        let desired_len_sq = Self::dot4(desired_up, desired_up);
+        if desired_len_sq <= 1e-8 {
+            return;
+        }
+        let inv_len = desired_len_sq.sqrt().recip();
+        for v in &mut desired_up {
+            *v *= inv_len;
+        }
+
+        let alpha = blend.clamp(0.0, 1.0);
+        let blended = [
+            self.look_up[0] * (1.0 - alpha) + desired_up[0] * alpha,
+            self.look_up[1] * (1.0 - alpha) + desired_up[1] * alpha,
+            self.look_up[2] * (1.0 - alpha) + desired_up[2] * alpha,
+            self.look_up[3] * (1.0 - alpha) + desired_up[3] * alpha,
+        ];
+        self.look_up = Self::normalize_with_fallback(blended, desired_up);
+        self.reorthonormalize_look_frame();
+
+        // Keep the visual up hemisphere consistent with world +Y.
+        if Self::dot4(self.look_up, world_up) < 0.0 {
+            for i in 0..4 {
+                self.look_up[i] = -self.look_up[i];
+                self.look_right[i] = -self.look_right[i];
+            }
+        }
+    }
+
+    fn look_view_zw_axes(&self) -> ([f32; 4], [f32; 4]) {
+        let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
+        let view_z = [
+            (self.look_forward[0] - self.look_side[0]) * inv_sqrt2,
+            (self.look_forward[1] - self.look_side[1]) * inv_sqrt2,
+            (self.look_forward[2] - self.look_side[2]) * inv_sqrt2,
+            (self.look_forward[3] - self.look_side[3]) * inv_sqrt2,
+        ];
+        let view_w = [
+            (self.look_forward[0] + self.look_side[0]) * inv_sqrt2,
+            (self.look_forward[1] + self.look_side[1]) * inv_sqrt2,
+            (self.look_forward[2] + self.look_side[2]) * inv_sqrt2,
+            (self.look_forward[3] + self.look_side[3]) * inv_sqrt2,
+        ];
+        (view_z, view_w)
+    }
+
+    fn sync_look_frame_from_rotation_matrix(&mut self, rotation: Array2<f32>) {
+        self.look_right = [
+            rotation[[0, 0]],
+            rotation[[0, 1]],
+            rotation[[0, 2]],
+            rotation[[0, 3]],
+        ];
+        self.look_up = [
+            rotation[[1, 0]],
+            rotation[[1, 1]],
+            rotation[[1, 2]],
+            rotation[[1, 3]],
+        ];
+        let view_z = [
+            rotation[[2, 0]],
+            rotation[[2, 1]],
+            rotation[[2, 2]],
+            rotation[[2, 3]],
+        ];
+        let view_w = [
+            rotation[[3, 0]],
+            rotation[[3, 1]],
+            rotation[[3, 2]],
+            rotation[[3, 3]],
+        ];
+        self.look_forward = Self::normalize_with_fallback(
+            [
+                view_z[0] + view_w[0],
+                view_z[1] + view_w[1],
+                view_z[2] + view_w[2],
+                view_z[3] + view_w[3],
+            ],
+            [1.0, 0.0, 0.0, 0.0],
+        );
+        self.look_side = Self::normalize_with_fallback(
+            [
+                view_w[0] - view_z[0],
+                view_w[1] - view_z[1],
+                view_w[2] - view_z[2],
+                view_w[3] - view_z[3],
+            ],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        self.reorthonormalize_look_frame();
+        self.look_frame_initialized = true;
+    }
+
+    pub fn sync_look_frame_from_standard_rotation(&mut self) {
+        self.sync_look_frame_from_rotation_matrix(self.rotation_matrix());
+    }
+
+    pub fn sync_look_frame_from_upright_rotation(&mut self) {
+        self.sync_look_frame_from_rotation_matrix(self.rotation_matrix_upright());
+    }
+
+    pub fn look_frame_initialized(&self) -> bool {
+        self.look_frame_initialized
+    }
+
+    pub fn apply_mouse_look_transport(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        hidden_mode: bool,
+    ) {
+        let yaw_delta = dx * sensitivity;
+        let pitch_delta = -dy * sensitivity;
+
+        if hidden_mode {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_side, yaw_delta);
+        } else {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_right, yaw_delta);
+        }
+        // Keep vertical mouse motion on the visual up axis in both modes; hidden mode
+        // only changes the horizontal plane from forward/right to forward/side.
+        Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, pitch_delta);
+
+        self.reorthonormalize_look_frame();
+        // Low-gain roll damping keeps the world horizon stable without fighting hidden turns.
+        self.stabilize_look_up_axis(LOOK_TRANSPORT_UPRIGHT_DAMPING);
+    }
+
+    pub fn apply_mouse_look_rotor(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        hidden_mode: bool,
+        spin_mode: bool,
+    ) {
+        let h_delta = dx * sensitivity;
+        let v_delta = -dy * sensitivity;
+
+        if hidden_mode && spin_mode {
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_side, h_delta);
+            Self::rotate_axis_pair(&mut self.look_up, &mut self.look_side, v_delta);
+        } else if hidden_mode {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_side, h_delta);
+            Self::rotate_axis_pair(&mut self.look_up, &mut self.look_side, v_delta);
+        } else if spin_mode {
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_side, h_delta);
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, v_delta);
+        } else {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_right, h_delta);
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, v_delta);
+        }
+
+        self.reorthonormalize_look_frame();
+    }
+
+    pub fn view_matrix_look_frame(&self) -> Array2<f32> {
+        let [px, py, pz, pw] = self.position;
+        let mut m = Array2::<f32>::eye(5);
+        let (view_z, view_w) = self.look_view_zw_axes();
+        for axis in 0..4 {
+            m[[0, axis]] = self.look_right[axis];
+            m[[1, axis]] = self.look_up[axis];
+            m[[2, axis]] = view_z[axis];
+            m[[3, axis]] = view_w[axis];
+        }
+        m.dot(&translate_matrix_4d(-px, -py, -pz, -pw))
+    }
+
+    pub fn view_basis_look_frame(&self) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+        let (view_z, view_w) = self.look_view_zw_axes();
+        (self.look_right, self.look_up, view_z, view_w)
+    }
+
+    pub fn look_direction_look_frame(&self) -> [f32; 4] {
+        self.look_forward
+    }
+
+    pub fn is_y_inverted_look_frame(&self) -> bool {
+        Self::dot4(self.look_up, [0.0, 1.0, 0.0, 0.0]) < 0.0
+    }
+
+    pub fn apply_movement_look_frame(
+        &mut self,
+        forward: f32,
+        strafe: f32,
+        vertical: f32,
+        w_axis: f32,
+        dt: f32,
+        speed: f32,
+    ) {
+        let right = Self::normalize_xzw(self.look_right);
+        let center_forward = Self::normalize_xzw(self.look_forward);
+        let side_w = Self::normalize_xzw(self.look_side);
+
+        let vertical_input = if self.is_flying { vertical } else { 0.0 };
+        let input_len = (forward * forward
+            + strafe * strafe
+            + w_axis * w_axis
+            + vertical_input * vertical_input)
+            .sqrt();
+        if input_len <= 1e-8 {
+            return;
+        }
+        let input_mag = input_len.min(1.0);
+        let input_scale = if input_len > 1.0 {
+            input_len.recip()
+        } else {
+            1.0
+        };
+        let forward_i = forward * input_scale;
+        let strafe_i = strafe * input_scale;
+        let w_i = w_axis * input_scale;
+        let vertical_i = vertical_input * input_scale;
+
+        let mut wish = [0.0f32; 4];
+        for axis in 0..4 {
+            wish[axis] =
+                forward_i * center_forward[axis] + strafe_i * right[axis] + w_i * side_w[axis];
+        }
+        wish[1] += vertical_i;
+
+        let wish_len_sq =
+            wish[0] * wish[0] + wish[1] * wish[1] + wish[2] * wish[2] + wish[3] * wish[3];
+        if wish_len_sq <= 1e-8 {
+            return;
+        }
+        let movement_scale = speed * dt * input_mag * wish_len_sq.sqrt().recip();
+        for axis in 0..4 {
+            self.position[axis] += wish[axis] * movement_scale;
+        }
+    }
+
     pub fn new() -> Self {
         Camera4D {
             // Stand on top of the default flat-ground surface (voxel top at y=0).
@@ -119,6 +423,11 @@ impl Camera4D {
             xw_angle: 0.0,
             zw_angle: 0.0,
             yw_deviation: 0.0,
+            look_right: [0.0, 0.0, 1.0, 0.0],
+            look_up: [0.0, 1.0, 0.0, 0.0],
+            look_forward: [1.0, 0.0, 0.0, 0.0],
+            look_side: [0.0, 0.0, 0.0, 1.0],
+            look_frame_initialized: true,
             is_flying: true,
             is_grounded: false,
             velocity_y: 0.0,
@@ -237,6 +546,11 @@ impl Camera4D {
         self.xw_angle = 0.0;
         self.zw_angle = 0.0;
         self.yw_deviation = 0.0;
+        self.look_right = [0.0, 0.0, 1.0, 0.0];
+        self.look_up = [0.0, 1.0, 0.0, 0.0];
+        self.look_forward = [1.0, 0.0, 0.0, 0.0];
+        self.look_side = [0.0, 0.0, 0.0, 1.0];
+        self.look_frame_initialized = true;
     }
 
     /// Constrain camera orientation to an upright, no-roll/no-twist mode.
@@ -862,5 +1176,188 @@ mod tests {
             "gravity movement should not change Y, got {}",
             tilted.position[1]
         );
+    }
+
+    #[test]
+    fn look_transport_zero_orientation_looks_along_positive_x() {
+        let cam = Camera4D::new();
+        let look = cam.look_direction_look_frame();
+        assert!(look[0] > 0.9999, "expected +X aim, got x={}", look[0]);
+        assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
+        assert!(look[2].abs() < 1e-4, "expected z≈0, got z={}", look[2]);
+        assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
+    }
+
+    #[test]
+    fn look_transport_half_turn_yaw_faces_negative_x() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(std::f32::consts::PI, 0.0, 1.0, false);
+        let look = cam.look_direction_look_frame();
+        assert!(look[0] < -0.9999, "expected -X aim, got x={}", look[0]);
+        assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
+        assert!(look[2].abs() < 1e-4, "expected z≈0, got z={}", look[2]);
+        assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
+    }
+
+    #[test]
+    fn look_transport_hidden_mode_reaches_positive_w() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(std::f32::consts::FRAC_PI_2, 0.0, 1.0, true);
+        let look = cam.look_direction_look_frame();
+        assert!(look[3] > 0.9999, "expected +W aim, got w={}", look[3]);
+        assert!(look[0].abs() < 1e-4, "expected x≈0, got x={}", look[0]);
+    }
+
+    #[test]
+    fn look_transport_hidden_mode_vertical_uses_visual_pitch() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(0.0, -std::f32::consts::FRAC_PI_2, 1.0, true);
+        let look = cam.look_direction_look_frame();
+        assert!(look[1] > 0.9999, "expected +Y aim, got y={}", look[1]);
+        assert!(look[3].abs() < 1e-4, "expected w≈0 for pure pitch, got w={}", look[3]);
+    }
+
+    #[test]
+    fn look_transport_roll_damping_reduces_tilt() {
+        let mut cam = Camera4D::new();
+        Camera4D::rotate_axis_pair(
+            &mut cam.look_up,
+            &mut cam.look_right,
+            std::f32::consts::FRAC_PI_2 * 0.8,
+        );
+        cam.reorthonormalize_look_frame();
+
+        let world_up = [0.0, 1.0, 0.0, 0.0];
+        let before = dot4(cam.look_up, world_up);
+
+        for _ in 0..60 {
+            cam.apply_mouse_look_transport(0.0, 0.0, 1.0, false);
+        }
+        let after = dot4(cam.look_up, world_up);
+
+        assert!(
+            after > before + 0.4,
+            "expected look-transport damping to recover tilt: before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn rotor_mode_preserves_orthonormal_look_frame() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_rotor(120.0, -80.0, 0.003, false, false);
+        cam.apply_mouse_look_rotor(-90.0, 55.0, 0.002, true, false);
+        cam.apply_mouse_look_rotor(75.0, 40.0, 0.0025, true, true);
+
+        let (right, up, view_z, view_w) = cam.view_basis_look_frame();
+        let basis = [right, up, view_z, view_w];
+        for i in 0..4 {
+            let norm = len4(basis[i]);
+            assert!(
+                (norm - 1.0).abs() < 1e-3,
+                "basis vector {i} should stay unit length, got {norm}"
+            );
+            for j in (i + 1)..4 {
+                let d = dot4(basis[i], basis[j]);
+                assert!(
+                    d.abs() < 1e-3,
+                    "basis vectors {i},{j} should remain orthogonal, dot={d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn look_transport_stays_orthonormal_under_mixed_inputs() {
+        let mut cam = Camera4D::new();
+
+        for i in 0..5_000 {
+            let t = i as f32;
+            let dx = (t * 0.037).sin() * 140.0 + (t * 0.013).cos() * 60.0;
+            let dy = (t * 0.031).cos() * 90.0 + (t * 0.019).sin() * 45.0;
+            let hidden = i % 7 < 3;
+            cam.apply_mouse_look_transport(dx, dy, 0.0015, hidden);
+
+            let (right, up, view_z, view_w) = cam.view_basis_look_frame();
+            let basis = [right, up, view_z, view_w];
+            for a in 0..4 {
+                let n = len4(basis[a]);
+                assert!(
+                    (n - 1.0).abs() < 1e-3,
+                    "vector {a} drifted from unit length: {n}"
+                );
+                for b in (a + 1)..4 {
+                    let d = dot4(basis[a], basis[b]);
+                    assert!(
+                        d.abs() < 1e-3,
+                        "vectors {a} and {b} lost orthogonality: dot={d}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn look_transport_center_ray_matches_view_matrix() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(180.0, -120.0, 0.0018, false);
+        cam.apply_mouse_look_transport(-90.0, 60.0, 0.0021, true);
+        cam.apply_mouse_look_transport(35.0, 40.0, 0.0019, false);
+
+        let got = cam.look_direction_look_frame();
+        let view = cam.view_matrix_look_frame();
+        let look_view = [
+            0.0,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        let mut expected = [0.0f32; 4];
+        for world_axis in 0..4 {
+            let mut value = 0.0f32;
+            for view_axis in 0..4 {
+                value += view[[view_axis, world_axis]] * look_view[view_axis];
+            }
+            expected[world_axis] = value;
+        }
+        let len = len4(expected);
+        assert!(len > 1e-6, "expected non-zero center-ray direction");
+        for v in &mut expected {
+            *v /= len;
+        }
+
+        for axis in 0..4 {
+            assert!(
+                (got[axis] - expected[axis]).abs() < 1e-4,
+                "center-ray mismatch axis {axis}: got={} expected={}",
+                got[axis],
+                expected[axis]
+            );
+        }
+    }
+
+    #[test]
+    fn look_frame_sync_from_standard_preserves_view_matrix() {
+        let mut cam = Camera4D::new();
+        cam.position = [3.0, -2.5, 1.2, 0.7];
+        cam.yaw = 0.47;
+        cam.pitch = -0.33;
+        cam.xw_angle = 0.61;
+        cam.zw_angle = -0.28;
+        cam.yw_deviation = 0.22;
+
+        let standard = cam.view_matrix();
+        cam.sync_look_frame_from_standard_rotation();
+        let look = cam.view_matrix_look_frame();
+
+        for row in 0..5 {
+            for col in 0..5 {
+                assert!(
+                    (standard[[row, col]] - look[[row, col]]).abs() < 1e-4,
+                    "view mismatch at ({row},{col}): standard={} look={}",
+                    standard[[row, col]],
+                    look[[row, col]]
+                );
+            }
+        }
     }
 }

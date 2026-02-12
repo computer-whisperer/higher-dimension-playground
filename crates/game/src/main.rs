@@ -599,15 +599,17 @@ fn build_place_preview_instance(
     camera: &Camera4D,
     selected_material: u8,
     time_s: f32,
-    upright_mode: bool,
+    control_scheme: ControlScheme,
 ) -> common::ModelInstance {
     let material = selected_material
         .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
         as u32;
-    let (right, up, view_z, view_w) = if upright_mode {
-        camera.view_basis_upright()
-    } else {
-        camera.view_basis()
+    let (right, up, view_z, view_w) = match control_scheme {
+        ControlScheme::IntuitiveUpright => camera.view_basis_upright(),
+        ControlScheme::LookTransport | ControlScheme::RotorFree => camera.view_basis_look_frame(),
+        ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+            camera.view_basis()
+        }
     };
 
     let center_forward = normalize4([
@@ -735,6 +737,7 @@ impl App {
                     RotationPair::Standard
                 }
             }
+            ControlScheme::LookTransport | ControlScheme::RotorFree => RotationPair::Standard,
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 if self.input.mouse_back_held() && self.input.mouse_forward_held() {
                     RotationPair::DoubleRotation
@@ -749,6 +752,42 @@ impl App {
         }
     }
 
+    fn current_look_direction(&self) -> [f32; 4] {
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => self.camera.look_direction_upright(),
+            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                self.camera.look_direction_look_frame()
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                self.camera.look_direction()
+            }
+        }
+    }
+
+    fn current_view_matrix(&self) -> ndarray::Array2<f32> {
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => self.camera.view_matrix_upright(),
+            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                self.camera.view_matrix_look_frame()
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                self.camera.view_matrix()
+            }
+        }
+    }
+
+    fn current_y_inverted(&self) -> bool {
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => self.camera.is_y_inverted_upright(),
+            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                self.camera.is_y_inverted_look_frame()
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                self.camera.is_y_inverted()
+            }
+        }
+    }
+
     fn update_and_render(&mut self) {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
@@ -756,10 +795,19 @@ impl App {
 
         // Scheme cycle (Tab)
         if self.input.take_scheme_cycle() {
+            let previous_scheme = self.control_scheme;
             self.control_scheme = self.control_scheme.next();
             self.scroll_cycle_pair = RotationPair::Standard;
             if self.control_scheme.is_upright_primary() {
                 self.camera.enforce_upright_constraints();
+            } else if self.control_scheme.uses_look_frame()
+                && (!previous_scheme.uses_look_frame() || !self.camera.look_frame_initialized())
+            {
+                if previous_scheme.is_upright_primary() {
+                    self.camera.sync_look_frame_from_upright_rotation();
+                } else {
+                    self.camera.sync_look_frame_from_standard_rotation();
+                }
             }
         }
 
@@ -830,24 +878,51 @@ impl App {
         // Mouse look
         if self.mouse_grabbed {
             let (dx, dy) = self.input.take_mouse_delta();
-            self.camera.apply_mouse_look_on(
-                dx,
-                dy,
-                MOUSE_SENSITIVITY,
-                pair.h_target(),
-                pair.v_target(),
-            );
+            match self.control_scheme {
+                ControlScheme::LookTransport => {
+                    self.camera.apply_mouse_look_transport(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        self.input.mouse_back_held(),
+                    );
+                }
+                ControlScheme::RotorFree => {
+                    self.camera.apply_mouse_look_rotor(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        self.input.mouse_back_held(),
+                        self.input.mouse_forward_held(),
+                    );
+                }
+                ControlScheme::IntuitiveUpright
+                | ControlScheme::LegacySideButtonLayers
+                | ControlScheme::LegacyScrollCycle => {
+                    self.camera.apply_mouse_look_on(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        pair.h_target(),
+                        pair.v_target(),
+                    );
+                }
+            }
         } else {
             self.input.take_mouse_delta();
         }
 
-        if self.control_scheme.is_upright_primary() {
-            self.camera.enforce_upright_constraints();
-        }
-
-        // Auto-level when not in double rotation
-        if !self.control_scheme.is_upright_primary() && pair != RotationPair::DoubleRotation {
-            self.camera.auto_level(dt);
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => {
+                self.camera.enforce_upright_constraints();
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                // Auto-level when not in double rotation
+                if pair != RotationPair::DoubleRotation {
+                    self.camera.auto_level(dt);
+                }
+            }
+            ControlScheme::LookTransport | ControlScheme::RotorFree => {}
         }
 
         // Toggle flight mode on double-tap space
@@ -879,35 +954,44 @@ impl App {
 
         // Movement (vertical zeroed in gravity mode internally)
         let prev_position = self.camera.position;
-        let look_dir = if self.control_scheme.is_upright_primary() {
-            self.camera.look_direction_upright()
-        } else {
-            self.camera.look_direction()
-        };
+        let look_dir = self.current_look_direction();
         let edit_reach = self
             .args
             .edit_reach
             .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
         let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
-        if self.control_scheme.is_upright_primary() {
-            self.camera.apply_movement_upright(
-                forward,
-                strafe,
-                vertical,
-                w_axis,
-                dt,
-                self.move_speed,
-            );
-        } else {
-            self.camera
-                .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => {
+                self.camera.apply_movement_upright(
+                    forward,
+                    strafe,
+                    vertical,
+                    w_axis,
+                    dt,
+                    self.move_speed,
+                );
+            }
+            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                self.camera.apply_movement_look_frame(
+                    forward,
+                    strafe,
+                    vertical,
+                    w_axis,
+                    dt,
+                    self.move_speed,
+                );
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                self.camera
+                    .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
+            }
         }
         let preview_time_s = (now - self.start_time).as_secs_f32();
         let preview_instance = build_place_preview_instance(
             &self.camera,
             self.place_material,
             preview_time_s,
-            self.control_scheme.is_upright_primary(),
+            self.control_scheme,
         );
 
         // Apply gravity physics
@@ -956,11 +1040,7 @@ impl App {
         }
 
         // Build view matrix and scene
-        let view_matrix = if self.control_scheme.is_upright_primary() {
-            self.camera.view_matrix_upright()
-        } else {
-            self.camera.view_matrix()
-        };
+        let view_matrix = self.current_view_matrix();
         let backend = self.args.backend.to_render_backend();
         let highlight_mode = self.args.edit_highlight_mode;
         let targets =
@@ -1066,31 +1146,47 @@ impl App {
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
             hud_rotation_label: Some({
-                let inv = if self.control_scheme.is_upright_primary() {
-                    self.camera.is_y_inverted_upright()
-                } else {
-                    self.camera.is_y_inverted()
-                };
+                let inv = self.current_y_inverted();
                 let inv = if inv { " Y-INV" } else { "" };
-                format!(
-                    "{} [{}]  spd:{:.1}{}\n\
-                     yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
-                     edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                     mat:[ ]/wheel cycle, 1-0 direct\n\
-                     world:F5 save, F9 load",
-                    pair.label(),
-                    self.control_scheme.label(),
-                    self.move_speed,
-                    inv,
-                    self.camera.yaw.to_degrees(),
-                    self.camera.pitch.to_degrees(),
-                    self.camera.xw_angle.to_degrees(),
-                    self.camera.zw_angle.to_degrees(),
-                    self.camera.yw_deviation.to_degrees(),
-                    self.place_material,
-                    edit_reach,
-                    highlight_mode.label(),
-                )
+                if self.control_scheme.uses_look_frame() {
+                    format!(
+                        "LOOK-FRAME [{}]  spd:{:.1}{}\n\
+                         look:{:+.2} {:+.2} {:+.2} {:+.2}\n\
+                         edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
+                         mat:[ ]/wheel cycle, 1-0 direct\n\
+                         world:F5 save, F9 load",
+                        self.control_scheme.label(),
+                        self.move_speed,
+                        inv,
+                        look_dir[0],
+                        look_dir[1],
+                        look_dir[2],
+                        look_dir[3],
+                        self.place_material,
+                        edit_reach,
+                        highlight_mode.label(),
+                    )
+                } else {
+                    format!(
+                        "{} [{}]  spd:{:.1}{}\n\
+                         yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
+                         edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
+                         mat:[ ]/wheel cycle, 1-0 direct\n\
+                         world:F5 save, F9 load",
+                        pair.label(),
+                        self.control_scheme.label(),
+                        self.move_speed,
+                        inv,
+                        self.camera.yaw.to_degrees(),
+                        self.camera.pitch.to_degrees(),
+                        self.camera.xw_angle.to_degrees(),
+                        self.camera.zw_angle.to_degrees(),
+                        self.camera.yw_deviation.to_degrees(),
+                        self.place_material,
+                        edit_reach,
+                        highlight_mode.label(),
+                    )
+                }
             }),
             hud_target_hit_voxel,
             hud_target_hit_face,
