@@ -134,7 +134,10 @@ impl Camera4D {
                 self.zw_angle += delta;
                 self.zw_angle = wrap_angle(self.zw_angle);
             }
-            AngleTarget::YwDeviation => self.yw_deviation += delta,
+            AngleTarget::YwDeviation => {
+                self.yw_deviation += delta;
+                self.yw_deviation = wrap_angle(self.yw_deviation);
+            }
         }
     }
 
@@ -385,6 +388,14 @@ impl Camera4D {
 mod tests {
     use super::*;
 
+    fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    }
+
+    fn len4(a: [f32; 4]) -> f32 {
+        dot4(a, a).sqrt()
+    }
+
     #[test]
     fn look_direction_matches_view_rotation_inverse() {
         let mut cam = Camera4D::new();
@@ -615,5 +626,159 @@ mod tests {
         assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
         assert!(look[2].abs() < 1e-4, "expected z≈0, got z={}", look[2]);
         assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
+    }
+
+    #[test]
+    fn periodic_angles_are_wrapped_including_yw_deviation() {
+        let mut cam = Camera4D::new();
+        let near_pi = std::f32::consts::PI - 1e-3;
+
+        cam.yaw = near_pi;
+        cam.adjust_angle(AngleTarget::Yaw, 0.01);
+        assert!(
+            cam.yaw < 0.0 && cam.yaw.abs() < std::f32::consts::PI,
+            "yaw should wrap into (-pi, pi], got {}",
+            cam.yaw
+        );
+
+        cam.xw_angle = near_pi;
+        cam.adjust_angle(AngleTarget::XwAngle, 0.01);
+        assert!(
+            cam.xw_angle < 0.0 && cam.xw_angle.abs() < std::f32::consts::PI,
+            "xw should wrap into (-pi, pi], got {}",
+            cam.xw_angle
+        );
+
+        cam.zw_angle = near_pi;
+        cam.adjust_angle(AngleTarget::ZwAngle, 0.01);
+        assert!(
+            cam.zw_angle < 0.0 && cam.zw_angle.abs() < std::f32::consts::PI,
+            "zw should wrap into (-pi, pi], got {}",
+            cam.zw_angle
+        );
+
+        cam.yw_deviation = near_pi;
+        cam.adjust_angle(AngleTarget::YwDeviation, 0.01);
+        assert!(
+            cam.yw_deviation < 0.0 && cam.yw_deviation.abs() < std::f32::consts::PI,
+            "yw deviation should wrap into (-pi, pi], got {}",
+            cam.yw_deviation
+        );
+    }
+
+    #[test]
+    fn view_basis_vectors_remain_orthonormal_in_standard_mode() {
+        let mut cam = Camera4D::new();
+        cam.yaw = 0.74;
+        cam.pitch = -0.43;
+        cam.xw_angle = 1.16;
+        cam.zw_angle = -0.82;
+        cam.yw_deviation = 0.57;
+
+        let (right, up, view_z, view_w) = cam.view_basis();
+        let basis = [right, up, view_z, view_w];
+
+        for i in 0..4 {
+            let norm = len4(basis[i]);
+            assert!(
+                (norm - 1.0).abs() < 1e-4,
+                "basis vector {i} should be unit length, got {norm}"
+            );
+            for j in (i + 1)..4 {
+                let d = dot4(basis[i], basis[j]);
+                assert!(
+                    d.abs() < 1e-4,
+                    "basis vectors {i},{j} should be orthogonal, dot={d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upright_forward_and_hidden_side_axes_are_orthogonal_unit_vectors() {
+        let mut cam = Camera4D::new();
+        cam.yaw = -0.62;
+        cam.pitch = 0.28;
+        cam.xw_angle = 1.03;
+        cam.zw_angle = -0.51;
+        cam.enforce_upright_constraints();
+
+        let (_, _, view_z, view_w) = cam.view_basis_upright();
+        let forward = Camera4D::normalize_dir([
+            view_z[0] + view_w[0],
+            view_z[1] + view_w[1],
+            view_z[2] + view_w[2],
+            view_z[3] + view_w[3],
+        ]);
+        let hidden_side = Camera4D::normalize_dir([
+            view_w[0] - view_z[0],
+            view_w[1] - view_z[1],
+            view_w[2] - view_z[2],
+            view_w[3] - view_z[3],
+        ]);
+        let dot = dot4(forward, hidden_side);
+        let forward_len = len4(forward);
+        let side_len = len4(hidden_side);
+
+        assert!(
+            dot.abs() < 1e-4,
+            "forward and hidden-side axes should be orthogonal, dot={dot}"
+        );
+        assert!(
+            (forward_len - 1.0).abs() < 1e-4,
+            "forward axis should be unit length, got {forward_len}"
+        );
+        assert!(
+            (side_len - 1.0).abs() < 1e-4,
+            "hidden-side axis should be unit length, got {side_len}"
+        );
+    }
+
+    #[test]
+    fn gravity_upright_forward_speed_is_pitch_invariant_on_xzw_hyperplane() {
+        let mut flat = Camera4D::new();
+        flat.position = [0.0, 0.0, 0.0, 0.0];
+        flat.yaw = 0.18;
+        flat.pitch = 0.0;
+        flat.xw_angle = 0.63;
+        flat.zw_angle = -0.21;
+        flat.enforce_upright_constraints();
+        flat.is_flying = false;
+
+        let mut tilted = Camera4D::new();
+        tilted.position = [0.0, 0.0, 0.0, 0.0];
+        tilted.yaw = flat.yaw;
+        tilted.pitch = 0.78;
+        tilted.xw_angle = flat.xw_angle;
+        tilted.zw_angle = flat.zw_angle;
+        tilted.enforce_upright_constraints();
+        tilted.is_flying = false;
+
+        flat.apply_movement_upright(1.0, 0.0, 0.0, 0.0, 1.0, 1.0);
+        tilted.apply_movement_upright(1.0, 0.0, 0.0, 0.0, 1.0, 1.0);
+
+        let flat_xzw = (flat.position[0] * flat.position[0]
+            + flat.position[2] * flat.position[2]
+            + flat.position[3] * flat.position[3])
+            .sqrt();
+        let tilted_xzw = (tilted.position[0] * tilted.position[0]
+            + tilted.position[2] * tilted.position[2]
+            + tilted.position[3] * tilted.position[3])
+            .sqrt();
+
+        assert!(
+            (flat_xzw - tilted_xzw).abs() < 1e-4,
+            "gravity-mode speed in XZW should not depend on pitch: flat={flat_xzw} tilted={tilted_xzw}"
+        );
+        assert!(
+            flat.position[1].abs() < 1e-6,
+            "gravity movement should not change Y, got {}",
+            flat.position[1]
+        );
+        assert!(
+            tilted.position[1].abs() < 1e-6,
+            "gravity movement should not change Y, got {}",
+            tilted.position[1]
+        );
     }
 }
