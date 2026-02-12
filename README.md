@@ -159,11 +159,12 @@ The default scene includes:
 | Mouse | Look around (`UPRIGHT` default: yaw/pitch) |
 | Space/Shift | Move up/down (Y axis) |
 | Q/E | Hidden-dimension strafe (friendly side axis in `UPRIGHT`) |
-| Mouse Back | Hold for XW turning (`UPRIGHT`: XW/ZY, `LEG-SIDE`: XW/ZW) |
+| Mouse Back | Hold for XW turning (`UPRIGHT`/`LEG-SIDE`: XW/ZW) |
 | Mouse Back+Forward | Legacy only: double rotation (XZ yaw + YW) |
 | Scroll wheel | Cycle block material (`LEG-SCRL` keeps legacy rotation-pair cycling) |
 | Tab | Cycle control scheme (`UPRIGHT` default -> `LEG-SIDE` -> `LEG-SCRL`) |
 | R | Reset camera orientation to defaults |
+| F5 / F9 | Save/load world (`--world-file`) |
 | F12 | Screenshot |
 | Escape | Release mouse (press again to exit) |
 | Click | Re-grab mouse |
@@ -184,6 +185,8 @@ Core runtime options:
 | `-W, --width` / `-H, --height` | Render size |
 | `--layers` | Hidden-dimension sample layers |
 | `--edit-reach` | Max block remove/place/highlight reach |
+| `--world-file <path>` | Save/load file path for `F5`/`F9` |
+| `--load-world` | Load `--world-file` at startup |
 | `--cpu-render` | CPU reference render to `frames/cpu_render.png`, then exit |
 
 VTE-specific options:

@@ -1,8 +1,12 @@
 use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::cull::{self, SurfaceData};
+use crate::voxel::io as voxel_io;
 use crate::voxel::worldgen;
 use crate::voxel::{VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{GpuVoxelChunkHeader, VoxelFrameInput};
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Write};
+use std::path::Path;
 
 const RENDER_DISTANCE: f32 = 64.0;
 const OCCUPANCY_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 32;
@@ -67,6 +71,26 @@ pub struct BlockEditTargets {
 }
 
 impl Scene {
+    fn surface_voxel_count(surface: &SurfaceData) -> u32 {
+        surface
+            .chunks
+            .iter()
+            .map(|c| c.voxel_end - c.voxel_start)
+            .sum()
+    }
+
+    fn rebuild_surface(&mut self, label: &str) {
+        self.surface = cull::extract_surfaces(&self.world);
+        self.world.clear_dirty();
+        let total_voxels = Self::surface_voxel_count(&self.surface);
+        eprintln!(
+            "{}: {} chunks, {} surface voxels",
+            label,
+            self.surface.chunks.len(),
+            total_voxels
+        );
+    }
+
     pub fn new(preset: ScenePreset) -> Self {
         let world = match preset {
             ScenePreset::Flat => worldgen::generate_flat_world(
@@ -77,42 +101,62 @@ impl Scene {
         };
 
         let surface = cull::extract_surfaces(&world);
-        let total_voxels: u32 = surface
-            .chunks
-            .iter()
-            .map(|c| c.voxel_end - c.voxel_start)
-            .sum();
-        eprintln!(
-            "Voxel surface ({}): {} chunks, {} surface voxels",
-            preset.label(),
-            surface.chunks.len(),
-            total_voxels
-        );
-
-        Self {
+        let scene = Self {
             world,
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,
+        };
+        let total_voxels = Self::surface_voxel_count(&scene.surface);
+        eprintln!(
+            "Voxel surface ({}): {} chunks, {} surface voxels",
+            preset.label(),
+            scene.surface.chunks.len(),
+            total_voxels
+        );
+        scene
+    }
+
+    pub fn replace_world(&mut self, world: crate::voxel::world::VoxelWorld) {
+        self.world = world;
+        self.rebuild_surface("Voxel surface (loaded)");
+    }
+
+    pub fn save_world_to_path(&self, path: &Path) -> io::Result<usize> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
+
+        let mut writer = BufWriter::new(File::create(path)?);
+        voxel_io::save_world(&self.world, &mut writer)?;
+        writer.flush()?;
+
+        Ok(self
+            .world
+            .chunks
+            .values()
+            .filter(|chunk| !chunk.is_empty())
+            .count())
+    }
+
+    pub fn load_world_from_path(&mut self, path: &Path) -> io::Result<usize> {
+        let mut reader = BufReader::new(File::open(path)?);
+        let world = voxel_io::load_world(&mut reader)?;
+        let non_empty_chunks = world
+            .chunks
+            .values()
+            .filter(|chunk| !chunk.is_empty())
+            .count();
+        self.replace_world(world);
+        Ok(non_empty_chunks)
     }
 
     /// Rebuild surface data if any chunk is dirty.
     pub fn update_surfaces_if_dirty(&mut self) {
         if self.world.any_dirty() {
-            self.surface = cull::extract_surfaces(&self.world);
-            self.world.clear_dirty();
-            let total_voxels: u32 = self
-                .surface
-                .chunks
-                .iter()
-                .map(|c| c.voxel_end - c.voxel_start)
-                .sum();
-            eprintln!(
-                "Voxel surface rebuilt: {} chunks, {} surface voxels",
-                self.surface.chunks.len(),
-                total_voxels
-            );
+            self.rebuild_surface("Voxel surface rebuilt");
         }
     }
 
@@ -601,5 +645,16 @@ mod tests {
         assert!(grounded);
         assert!((resolved[1] - (HARD_WORLD_FLOOR_Y + PLAYER_HEIGHT)).abs() < 0.03);
         assert_eq!(velocity_y, 0.0);
+    }
+
+    #[test]
+    fn replace_world_rebuilds_surface_for_clean_loaded_world() {
+        let mut world = VoxelWorld::new();
+        world.set_voxel(0, 0, 0, 0, VoxelType(3));
+        let mut scene = make_scene_with_world(world);
+        assert!(!scene.surface.chunks.is_empty());
+
+        scene.replace_world(VoxelWorld::new());
+        assert!(scene.surface.chunks.is_empty());
     }
 }

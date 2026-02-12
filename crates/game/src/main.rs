@@ -35,6 +35,7 @@ const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 20;
 const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
+const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum EditHighlightModeArg {
@@ -158,6 +159,14 @@ struct Args {
     /// Block interaction reach limit in world units.
     #[arg(long, default_value_t = BLOCK_EDIT_REACH_DEFAULT)]
     edit_reach: f32,
+
+    /// Path used for manual world save/load.
+    #[arg(long, default_value = WORLD_FILE_DEFAULT)]
+    world_file: PathBuf,
+
+    /// Load `--world-file` at startup.
+    #[arg(long)]
+    load_world: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -288,12 +297,25 @@ fn main() {
         || vte_reference_mismatch_only_enabled
         || vte_compare_slice_only_enabled;
 
+    let world_file = args.world_file.clone();
+    let mut scene = Scene::new(args.scene.to_scene_preset());
+    if args.load_world {
+        match scene.load_world_from_path(&world_file) {
+            Ok(chunks) => eprintln!(
+                "Loaded world from {} ({} non-empty chunks)",
+                world_file.display(),
+                chunks
+            ),
+            Err(err) => eprintln!("Failed to load world from {}: {err}", world_file.display()),
+        }
+    }
+
     let mut app = App {
         instance,
         device,
         queue,
         rcx: None,
-        scene: Scene::new(args.scene.to_scene_preset()),
+        scene,
         camera,
         input: InputState::new(),
         start_time: Instant::now(),
@@ -313,6 +335,7 @@ fn main() {
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
         place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
+        world_file,
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
         vte_compare_slice_only_enabled,
@@ -335,6 +358,14 @@ fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
     use common::MatN;
 
     let mut scene = Scene::new(scene_preset);
+    if args.load_world {
+        if let Err(err) = scene.load_world_from_path(&args.world_file) {
+            eprintln!(
+                "Failed to load world from {}: {err}",
+                args.world_file.display()
+            );
+        }
+    }
     let mut camera = Camera4D::new();
 
     // Debug camera: specific position/orientation where GPU renders incorrectly
@@ -414,6 +445,7 @@ struct App {
     scroll_cycle_pair: RotationPair,
     move_speed: f32,
     place_material: u8,
+    world_file: PathBuf,
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
     vte_compare_slice_only_enabled: bool,
@@ -702,6 +734,34 @@ impl App {
             self.camera.reset_orientation();
         }
 
+        if self.input.take_save_world() {
+            match self.scene.save_world_to_path(&self.world_file) {
+                Ok(chunks) => eprintln!(
+                    "Saved world to {} ({} non-empty chunks)",
+                    self.world_file.display(),
+                    chunks
+                ),
+                Err(err) => eprintln!(
+                    "Failed to save world to {}: {err}",
+                    self.world_file.display()
+                ),
+            }
+        }
+
+        if self.input.take_load_world() {
+            match self.scene.load_world_from_path(&self.world_file) {
+                Ok(chunks) => eprintln!(
+                    "Loaded world from {} ({} non-empty chunks)",
+                    self.world_file.display(),
+                    chunks
+                ),
+                Err(err) => eprintln!(
+                    "Failed to load world from {}: {err}",
+                    self.world_file.display()
+                ),
+            }
+        }
+
         // Scroll wheel
         let scroll_steps = self.input.take_scroll_steps();
         if scroll_steps != 0 {
@@ -982,7 +1042,8 @@ impl App {
                     "{} [{}]  spd:{:.1}{}\n\
                      yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
                      edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                     mat:[ ]/wheel cycle, 1-0 direct",
+                     mat:[ ]/wheel cycle, 1-0 direct\n\
+                     world:F5 save, F9 load",
                     pair.label(),
                     self.control_scheme.label(),
                     self.move_speed,
