@@ -16,8 +16,8 @@ fn wrap_angle(a: f32) -> f32 {
 
 const GRAVITY: f32 = 20.0;
 const JUMP_SPEED: f32 = 8.0;
-const PLAYER_HEIGHT: f32 = 1.7;
-const FLOOR_Y: f32 = -3.0;
+pub const PLAYER_HEIGHT: f32 = 1.7;
+pub const PLAYER_RADIUS_XZW: f32 = 0.30;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AngleTarget {
@@ -36,6 +36,7 @@ pub struct Camera4D {
     pub zw_angle: f32,
     pub yw_deviation: f32,
     pub is_flying: bool,
+    pub is_grounded: bool,
     pub velocity_y: f32,
 }
 
@@ -49,6 +50,7 @@ impl Camera4D {
             zw_angle: 0.0,
             yw_deviation: 0.0,
             is_flying: true,
+            is_grounded: false,
             velocity_y: 0.0,
         }
     }
@@ -97,6 +99,34 @@ impl Camera4D {
         let m = m.dot(&rotation_matrix_one_angle(5, 0, 2, self.yaw)); // XZ (yaw, innermost)
         let m = m.dot(&translate_matrix_4d(-px, -py, -pz, -pw));
         m
+    }
+
+    /// World-space look direction for the center of the current Z/W view.
+    pub fn look_direction(&self) -> [f32; 4] {
+        let view = self.view_matrix();
+        let look_view = [
+            0.0,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        let mut look = [0.0f32; 4];
+
+        // For pure directions, inverse(view_rotation) = transpose(view_rotation).
+        for world_axis in 0..4 {
+            for view_axis in 0..4 {
+                look[world_axis] += view[[view_axis, world_axis]] * look_view[view_axis];
+            }
+        }
+
+        let len_sq = look[0] * look[0] + look[1] * look[1] + look[2] * look[2] + look[3] * look[3];
+        if len_sq > 1e-8 {
+            let inv_len = len_sq.sqrt().recip();
+            for axis in &mut look {
+                *axis *= inv_len;
+            }
+        }
+        look
     }
 
     pub fn auto_level(&mut self, dt: f32) {
@@ -149,16 +179,16 @@ impl Camera4D {
 
     pub fn toggle_flying(&mut self) {
         self.is_flying = !self.is_flying;
+        if self.is_flying {
+            self.is_grounded = false;
+        }
         self.velocity_y = 0.0;
     }
 
-    pub fn on_ground(&self) -> bool {
-        self.position[1] <= FLOOR_Y + PLAYER_HEIGHT + 0.01
-    }
-
     pub fn jump(&mut self) {
-        if self.on_ground() {
+        if self.is_grounded {
             self.velocity_y = JUMP_SPEED;
+            self.is_grounded = false;
         }
     }
 
@@ -168,10 +198,52 @@ impl Camera4D {
         }
         self.velocity_y -= GRAVITY * dt;
         self.position[1] += self.velocity_y * dt;
-        let ground_y = FLOOR_Y + PLAYER_HEIGHT;
-        if self.position[1] < ground_y {
-            self.position[1] = ground_y;
-            self.velocity_y = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn look_direction_matches_view_rotation_inverse() {
+        let mut cam = Camera4D::new();
+        cam.yaw = 0.37;
+        cam.pitch = -0.22;
+        cam.xw_angle = 0.61;
+        cam.zw_angle = -0.48;
+        cam.yw_deviation = 0.19;
+
+        let got = cam.look_direction();
+        let view = cam.view_matrix();
+        let look_view = [
+            0.0,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        let mut expected = [0.0f32; 4];
+
+        // For pure directions, inverse(view_rotation) = transpose(view_rotation).
+        for world_axis in 0..4 {
+            let mut value = 0.0f32;
+            for view_axis in 0..4 {
+                value += view[[view_axis, world_axis]] * look_view[view_axis];
+            }
+            expected[world_axis] = value;
+        }
+
+        let len = (expected[0] * expected[0]
+            + expected[1] * expected[1]
+            + expected[2] * expected[2]
+            + expected[3] * expected[3])
+            .sqrt();
+        for v in &mut expected {
+            *v /= len;
+        }
+
+        for axis in 0..4 {
+            assert!((got[axis] - expected[axis]).abs() < 1e-4);
         }
     }
 }

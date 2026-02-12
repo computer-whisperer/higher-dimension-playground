@@ -85,6 +85,11 @@ pub struct InputState {
     fly_toggle_requested: bool,
     jump_requested: bool,
     screenshot_requested: bool,
+    remove_block_requested: bool,
+    place_block_requested: bool,
+    place_material_prev_requested: bool,
+    place_material_next_requested: bool,
+    place_material_digit_requested: Option<u8>,
     mouse_back_held: bool,
     mouse_forward_held: bool,
     scroll_accumulated: f32,
@@ -110,6 +115,11 @@ impl InputState {
             fly_toggle_requested: false,
             jump_requested: false,
             screenshot_requested: false,
+            remove_block_requested: false,
+            place_block_requested: false,
+            place_material_prev_requested: false,
+            place_material_next_requested: false,
+            place_material_digit_requested: None,
             mouse_back_held: false,
             mouse_forward_held: false,
             scroll_accumulated: 0.0,
@@ -147,6 +157,66 @@ impl InputState {
                         self.screenshot_requested = true;
                     }
                 }
+                KeyCode::BracketLeft => {
+                    if pressed {
+                        self.place_material_prev_requested = true;
+                    }
+                }
+                KeyCode::BracketRight => {
+                    if pressed {
+                        self.place_material_next_requested = true;
+                    }
+                }
+                KeyCode::Digit1 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(1);
+                    }
+                }
+                KeyCode::Digit2 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(2);
+                    }
+                }
+                KeyCode::Digit3 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(3);
+                    }
+                }
+                KeyCode::Digit4 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(4);
+                    }
+                }
+                KeyCode::Digit5 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(5);
+                    }
+                }
+                KeyCode::Digit6 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(6);
+                    }
+                }
+                KeyCode::Digit7 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(7);
+                    }
+                }
+                KeyCode::Digit8 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(8);
+                    }
+                }
+                KeyCode::Digit9 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(9);
+                    }
+                }
+                KeyCode::Digit0 => {
+                    if pressed {
+                        self.place_material_digit_requested = Some(10);
+                    }
+                }
                 KeyCode::Tab => {
                     if pressed {
                         self.scheme_cycle_requested = true;
@@ -170,6 +240,16 @@ impl InputState {
     pub fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         let pressed = state.is_pressed();
         match button {
+            MouseButton::Left => {
+                if pressed {
+                    self.remove_block_requested = true;
+                }
+            }
+            MouseButton::Right => {
+                if pressed {
+                    self.place_block_requested = true;
+                }
+            }
             MouseButton::Back => self.mouse_back_held = pressed,
             MouseButton::Forward => self.mouse_forward_held = pressed,
             _ => {}
@@ -227,6 +307,34 @@ impl InputState {
         let v = self.screenshot_requested;
         self.screenshot_requested = false;
         v
+    }
+
+    pub fn take_remove_block(&mut self) -> bool {
+        let v = self.remove_block_requested;
+        self.remove_block_requested = false;
+        v
+    }
+
+    pub fn take_place_block(&mut self) -> bool {
+        let v = self.place_block_requested;
+        self.place_block_requested = false;
+        v
+    }
+
+    pub fn take_place_material_prev(&mut self) -> bool {
+        let v = self.place_material_prev_requested;
+        self.place_material_prev_requested = false;
+        v
+    }
+
+    pub fn take_place_material_next(&mut self) -> bool {
+        let v = self.place_material_next_requested;
+        self.place_material_next_requested = false;
+        v
+    }
+
+    pub fn take_place_material_digit(&mut self) -> Option<u8> {
+        self.place_material_digit_requested.take()
     }
 
     pub fn take_scroll(&mut self) -> f32 {

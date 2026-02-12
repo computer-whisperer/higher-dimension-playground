@@ -26,6 +26,10 @@ use input::{ControlScheme, InputState, RotationPair};
 use scene::{Scene, ScenePreset};
 
 const MOUSE_SENSITIVITY: f32 = 0.002;
+const BLOCK_EDIT_MAX_DISTANCE: f32 = 12.0;
+const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
+const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
+const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 14;
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about = "4D game explorer")]
@@ -112,7 +116,6 @@ struct Args {
     /// VTE thick-slice half-width in layer indices.
     #[arg(long, default_value_t = 2)]
     vte_thick_half_width: u32,
-
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -237,13 +240,11 @@ fn main() {
         );
     }
 
-    let vte_reference_mismatch_only_enabled =
-        env_flag_enabled("R4D_VTE_REFERENCE_MISMATCH_ONLY");
+    let vte_reference_mismatch_only_enabled = env_flag_enabled("R4D_VTE_REFERENCE_MISMATCH_ONLY");
     let vte_compare_slice_only_enabled = env_flag_enabled("R4D_VTE_COMPARE_SLICE_ONLY");
-    let vte_reference_compare_enabled =
-        env_flag_enabled("R4D_VTE_REFERENCE_COMPARE")
-            || vte_reference_mismatch_only_enabled
-            || vte_compare_slice_only_enabled;
+    let vte_reference_compare_enabled = env_flag_enabled("R4D_VTE_REFERENCE_COMPARE")
+        || vte_reference_mismatch_only_enabled
+        || vte_compare_slice_only_enabled;
 
     let mut app = App {
         instance,
@@ -269,6 +270,7 @@ fn main() {
         control_scheme: ControlScheme::SideButtonLayers,
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
+        place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
         vte_compare_slice_only_enabled,
@@ -278,9 +280,7 @@ fn main() {
         eprintln!("VTE reference compare enabled via R4D_VTE_REFERENCE_COMPARE");
     }
     if app.vte_reference_mismatch_only_enabled {
-        eprintln!(
-            "VTE mismatch-only visualization enabled via R4D_VTE_REFERENCE_MISMATCH_ONLY"
-        );
+        eprintln!("VTE mismatch-only visualization enabled via R4D_VTE_REFERENCE_MISMATCH_ONLY");
     }
     if app.vte_compare_slice_only_enabled {
         eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
@@ -371,6 +371,7 @@ struct App {
     control_scheme: ControlScheme,
     scroll_cycle_pair: RotationPair,
     move_speed: f32,
+    place_material: u8,
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
     vte_compare_slice_only_enabled: bool,
@@ -505,6 +506,29 @@ impl App {
             self.camera.toggle_flying();
         }
 
+        // Block place material selection.
+        if self.input.take_place_material_prev() {
+            self.place_material = if self.place_material <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
+                BLOCK_EDIT_PLACE_MATERIAL_MAX
+            } else {
+                self.place_material.saturating_sub(1)
+            };
+            eprintln!("Selected place material: {}", self.place_material);
+        }
+        if self.input.take_place_material_next() {
+            self.place_material = if self.place_material >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
+                BLOCK_EDIT_PLACE_MATERIAL_MIN
+            } else {
+                self.place_material.saturating_add(1)
+            };
+            eprintln!("Selected place material: {}", self.place_material);
+        }
+        if let Some(material_digit) = self.input.take_place_material_digit() {
+            self.place_material =
+                material_digit.clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
+            eprintln!("Selected place material: {}", self.place_material);
+        }
+
         // Jump when in gravity mode, consume jump either way
         if self.camera.is_flying {
             self.input.take_jump();
@@ -513,12 +537,56 @@ impl App {
         }
 
         // Movement (vertical zeroed in gravity mode internally)
+        let prev_position = self.camera.position;
         let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
         self.camera
             .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
 
         // Apply gravity physics
         self.camera.update_physics(dt);
+        if self.camera.is_flying {
+            self.camera.is_grounded = false;
+        } else {
+            let (resolved_pos, grounded) = self.scene.resolve_player_collision(
+                prev_position,
+                self.camera.position,
+                &mut self.camera.velocity_y,
+            );
+            self.camera.position = resolved_pos;
+            self.camera.is_grounded = grounded;
+        }
+
+        if self.mouse_grabbed {
+            let remove_requested = self.input.take_remove_block();
+            let place_requested = self.input.take_place_block();
+            if remove_requested || place_requested {
+                let look_dir = self.camera.look_direction();
+                if remove_requested {
+                    if let Some([x, y, z, w]) = self.scene.remove_block_along_ray(
+                        self.camera.position,
+                        look_dir,
+                        BLOCK_EDIT_MAX_DISTANCE,
+                    ) {
+                        eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
+                    }
+                } else if place_requested {
+                    if let Some([x, y, z, w]) = self.scene.place_block_along_ray(
+                        self.camera.position,
+                        look_dir,
+                        BLOCK_EDIT_MAX_DISTANCE,
+                        voxel::VoxelType(self.place_material),
+                    ) {
+                        eprintln!(
+                            "Placed voxel material {} at ({x}, {y}, {z}, {w})",
+                            self.place_material
+                        );
+                    }
+                }
+            }
+        } else {
+            self.input.take_remove_block();
+            self.input.take_place_block();
+        }
 
         // Build view matrix and scene
         let view_matrix = self.camera.view_matrix();
@@ -568,7 +636,9 @@ impl App {
                 };
                 format!(
                     "{} [{}]  spd:{:.1}{}\n\
-                     yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}",
+                     yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
+                     edit:LMB- RMB+ mat:{}\n\
+                     mat:[ ] cycle, 1-0 direct",
                     pair.label(),
                     self.control_scheme.label(),
                     self.move_speed,
@@ -578,6 +648,7 @@ impl App {
                     self.camera.xw_angle.to_degrees(),
                     self.camera.zw_angle.to_degrees(),
                     self.camera.yw_deviation.to_degrees(),
+                    self.place_material,
                 )
             }),
             ..Default::default()
@@ -668,13 +739,12 @@ impl ApplicationHandler for App {
         self.grab_mouse(&window);
         let backend = self.args.backend.to_render_backend();
         let vte_mode = self.args.vte_display_mode.to_render_mode();
-        let pixel_storage_layers = if backend == RenderBackend::VoxelTraversal
-            && vte_mode == VteDisplayMode::Integral
-        {
-            Some(1)
-        } else {
-            None
-        };
+        let pixel_storage_layers =
+            if backend == RenderBackend::VoxelTraversal && vte_mode == VteDisplayMode::Integral {
+                Some(1)
+            } else {
+                None
+            };
         self.rcx = Some(RenderContext::new_with_pixel_storage_layers(
             self.device.clone(),
             self.queue.clone(),
@@ -715,12 +785,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { button, state, .. } => match button {
                 MouseButton::Left => {
-                    if state.is_pressed() && !self.mouse_grabbed {
-                        let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
-                        self.grab_mouse(&window);
+                    if state.is_pressed() {
+                        if !self.mouse_grabbed {
+                            let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
+                            self.grab_mouse(&window);
+                        } else {
+                            self.input.handle_mouse_button(button, state);
+                        }
                     }
                 }
-                MouseButton::Back | MouseButton::Forward => {
+                MouseButton::Right | MouseButton::Back | MouseButton::Forward => {
                     self.input.handle_mouse_button(button, state);
                 }
                 _ => {}

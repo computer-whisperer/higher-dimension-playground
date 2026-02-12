@@ -262,6 +262,51 @@ uint hashChunkCoord(int4 chunkCoord)
          ^ w * 0x165667B1u;
 }
 
+float4 estimateVoxelHitNormal(float4 hitPos, float4 rayDir)
+{
+    // Nudge forward so boundary hits resolve to the entered voxel.
+    float4 local = frac(hitPos + rayDir * 1e-4);
+    float4 toLow = local;
+    float4 toHigh = 1.0 - local;
+    float4 edgeDist = min(toLow, toHigh);
+
+    uint axis = argMin4(edgeDist);
+    float4 normal = float4(0.0, 0.0, 0.0, 0.0);
+
+    if (axis == 0u)
+    {
+        normal.x = (toLow.x <= toHigh.x) ? -1.0 : 1.0;
+    }
+    else if (axis == 1u)
+    {
+        normal.y = (toLow.y <= toHigh.y) ? -1.0 : 1.0;
+    }
+    else if (axis == 2u)
+    {
+        normal.z = (toLow.z <= toHigh.z) ? -1.0 : 1.0;
+    }
+    else
+    {
+        normal.w = (toLow.w <= toHigh.w) ? -1.0 : 1.0;
+    }
+
+    return normal;
+}
+
+float3 shadeVoxelMaterial(MaterialProperties mat, float4 hitNormal)
+{
+    float4 sunWorldDir = normalize(float4(0.3, 1.0, -0.3, 0.0));
+    float nDotL = max(0.0, dot(hitNormal, sunWorldDir));
+    float nDotLBack = max(0.0, dot(-hitNormal, sunWorldDir));
+    float diffuse = max(nDotL, nDotLBack);
+
+    float3 ambient = float3(0.08, 0.09, 0.12);
+    float3 sunColor = float3(0.8, 0.76, 0.72);
+
+    return mat.albedo.xyz * (ambient + sunColor * diffuse)
+         + mat.albedo.xyz * mat.luminance;
+}
+
 uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
 {
     if (meta.chunkLookupCapacity == 0)
@@ -1197,7 +1242,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             if (hit)
             {
                 MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
-                accumColor += mat.albedo.xyz * 0.75 + mat.albedo.xyz * mat.luminance;
+                float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
+                accumColor += shadeVoxelMaterial(mat, hitNormal);
             }
             else
             {
@@ -1532,7 +1578,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     else if (hit)
     {
         MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
-        outColor = mat.albedo.xyz * 0.75 + mat.albedo.xyz * mat.luminance;
+        float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
+        outColor = shadeVoxelMaterial(mat, hitNormal);
     }
     else
     {
