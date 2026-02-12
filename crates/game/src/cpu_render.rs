@@ -690,8 +690,31 @@ fn render_zw_lines_simple(
 
 // ─── Material sampling ──────────────────────────────────────────────
 
+fn fract(x: f32) -> f32 {
+    x - x.floor()
+}
+
+fn saturate(x: f32) -> f32 {
+    x.clamp(0.0, 1.0)
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = saturate((x - edge0) / (edge1 - edge0));
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
 fn sample_material(id: u32, tex_pos: [f32; 3]) -> ([f32; 3], f32) {
+    const TAU: f32 = 6.283_185_5;
     let basic_lum = 0.001;
+    let p = [fract(tex_pos[0]), fract(tex_pos[1]), fract(tex_pos[2])];
     match id {
         1 => ([1.0, 0.0, 0.0], basic_lum), // Red
         2 => ([1.0, 0.8, 0.0], basic_lum), // Orange
@@ -714,6 +737,69 @@ fn sample_material(id: u32, tex_pos: [f32; 3]) -> ([f32; 3], f32) {
         12 => ([1.0, 1.0, 1.0], 0.0),                            // White
         13 => ([1.0, 1.0, 1.0], 40.0),                           // Light source
         14 => ([1.0, 1.0, 1.0], 0.0),                            // Mirror walls
+        15 => {
+            // Lava-veined basalt
+            let vein_field = 0.5 + 0.5 * ((p[0] * 11.0 + p[1] * 13.0 + p[2] * 17.0) * TAU).sin();
+            let veins = vein_field.powf(6.0);
+            let rock_color = [0.08, 0.05, 0.04];
+            let lava_color = [0.95, 0.36, 0.08];
+            (lerp3(rock_color, lava_color, veins), 0.08 + 6.0 * veins)
+        }
+        16 => {
+            // Crystal lattice
+            let c0 = (fract(p[0] * 8.0) - 0.5).abs();
+            let c1 = (fract(p[1] * 8.0) - 0.5).abs();
+            let c2 = (fract(p[2] * 8.0) - 0.5).abs();
+            let line = 1.0 - saturate(c0.min(c1).min(c2) * 36.0);
+            let base_color = [0.02, 0.06, 0.09];
+            let line_color = [0.25, 0.9, 1.0];
+            (lerp3(base_color, line_color, line), 0.2 + 2.2 * line)
+        }
+        17 => {
+            // Marble swirl
+            let swirl = ((p[0] * 14.0 + p[2] * 9.0) * TAU + (p[1] * TAU * 5.0).sin() * 1.5).sin();
+            let veins = smoothstep(0.62, 0.88, 0.5 + 0.5 * swirl);
+            let stone_base = [0.82, 0.84, 0.88];
+            let vein_color = [0.96, 0.97, 1.0];
+            (lerp3(stone_base, vein_color, veins), 0.0)
+        }
+        18 => {
+            // Oxidized metal
+            let dot_v = (p[0] * 16.0) * 12.9898 + (p[1] * 16.0) * 78.233 + (p[2] * 16.0) * 37.719;
+            let noise = fract(dot_v.sin() * 43_758.547);
+            let rust = smoothstep(0.42, 0.8, noise);
+            let steel = [0.55, 0.58, 0.60];
+            let oxide = [0.48, 0.18, 0.07];
+            (lerp3(steel, oxide, rust), 0.0)
+        }
+        19 => {
+            // Bio-spore moss
+            let cell = [
+                (p[0] * 10.0).floor(),
+                (p[1] * 10.0).floor(),
+                (p[2] * 10.0).floor(),
+            ];
+            let seed =
+                fract((cell[0] * 17.13 + cell[1] * 3.71 + cell[2] * 29.97).sin() * 15_731.743);
+            let spores = smoothstep(0.93, 1.0, seed);
+            let moss_base = [0.06, 0.22, 0.09];
+            let spore_glow = [0.25, 0.75, 0.35];
+            (lerp3(moss_base, spore_glow, spores), spores * 3.5)
+        }
+        20 => {
+            // Void mirror
+            let q = [p[0] - 0.5, p[1] - 0.5, p[2] - 0.5];
+            let q_len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            let center_glow = saturate(1.0 - q_len * 1.8).powf(2.0);
+            (
+                [
+                    0.03 + 0.20 * center_glow,
+                    0.05 + 0.10 * center_glow,
+                    0.12 + 0.20 * center_glow,
+                ],
+                0.15 * center_glow,
+            )
+        }
         _ => ([0.0, 0.0, 0.0], 0.0),
     }
 }
