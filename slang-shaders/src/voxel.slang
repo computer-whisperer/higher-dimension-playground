@@ -848,44 +848,56 @@ bool traceVoxelRayDDA(
             uint chunkMaterial = 0;
             float4 chunkHitPos = float4(0.0, 0.0, 0.0, 0.0);
             int4 chunkHitChunkCoord = int4(0, 0, 0, 0);
-            // Use slab intersection to disambiguate boundary ownership at tie crossings, then
-            // clamp to the DDA interval for this chunk step.
-            float slabEnter = 0.0;
-            float slabExit = 0.0;
-            if (intersectChunkAABB(rayOrigin, rayDir, chunkCoord, slabEnter, slabExit))
+            // Hot path: DDA already tracks the chunk interval [currentT, chunkExitT].
+            // Slab recomputation is kept only for debug/compare paths where we want
+            // extra diagnostics around boundary ownership.
+            bool useSlabChunkInterval = collectDebugFlags
+                || (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) != 0u;
+            float tEnter = currentT;
+            float tExit = chunkExitT;
+            if (useSlabChunkInterval)
             {
-                float tEnter = max(currentT, slabEnter);
-                float tExit = min(chunkExitT, slabExit);
-                if (tExit > tEnter + CHUNK_EPS)
+                float slabEnter = 0.0;
+                float slabExit = 0.0;
+                if (intersectChunkAABB(rayOrigin, rayDir, chunkCoord, slabEnter, slabExit))
                 {
-                    if (traceVoxelsInChunk(
-                        rayOrigin,
-                        rayDir,
-                        tEnter,
-                        tExit,
-                        chunkCoord,
-                        h,
-                        meta,
-                        remainingVoxelSteps,
-                        chunkMaterial,
-                        chunkHitPos,
-                        chunkHitChunkCoord))
-                    {
-                        hitMaterial = chunkMaterial;
-                        hitPos = chunkHitPos;
-                        hitChunkCoord = chunkHitChunkCoord;
-                        missReason = MISS_REASON_NONE;
-                        outChunkStepsTaken = chunkStepsTaken;
-                        outRemainingVoxelSteps = remainingVoxelSteps;
-                        outFinalT = currentT;
-                        outLastChunkCoord = lastChunkCoord;
-                        return true;
-                    }
+                    tEnter = max(currentT, slabEnter);
+                    tExit = min(chunkExitT, slabExit);
                 }
-                else if (collectDebugFlags)
+                else
                 {
-                    debugFlags |= DEBUG_FLAG_CHUNK_ZERO_INTERVAL;
+                    tExit = tEnter;
                 }
+            }
+            if (tExit > tEnter + CHUNK_EPS)
+            {
+                if (traceVoxelsInChunk(
+                    rayOrigin,
+                    rayDir,
+                    tEnter,
+                    tExit,
+                    chunkCoord,
+                    h,
+                    meta,
+                    remainingVoxelSteps,
+                    chunkMaterial,
+                    chunkHitPos,
+                    chunkHitChunkCoord))
+                {
+                    hitMaterial = chunkMaterial;
+                    hitPos = chunkHitPos;
+                    hitChunkCoord = chunkHitChunkCoord;
+                    missReason = MISS_REASON_NONE;
+                    outChunkStepsTaken = chunkStepsTaken;
+                    outRemainingVoxelSteps = remainingVoxelSteps;
+                    outFinalT = currentT;
+                    outLastChunkCoord = lastChunkCoord;
+                    return true;
+                }
+            }
+            else if (collectDebugFlags)
+            {
+                debugFlags |= DEBUG_FLAG_CHUNK_ZERO_INTERVAL;
             }
         }
 
