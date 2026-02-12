@@ -12,6 +12,7 @@ const EDIT_RAY_MAX_STEPS: usize = 4096;
 const COLLISION_PUSHUP_STEP: f32 = 0.05;
 const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
+const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 
 #[derive(Copy, Clone, Debug)]
 pub enum ScenePreset {
@@ -240,6 +241,11 @@ impl Scene {
     }
 
     fn aabb_intersects_solid(&self, min: [f32; 4], max: [f32; 4]) -> bool {
+        // Infinite hard floor: disallow moving below this world Y plane.
+        if min[1] < HARD_WORLD_FLOOR_Y {
+            return true;
+        }
+
         let max_epsilon = 1e-4f32;
         let lo = [
             min[0].floor() as i32,
@@ -579,5 +585,21 @@ mod tests {
 
         // Player radius keeps center below x=0.7 when blocked by voxel slab at x>=1.
         assert!(resolved[0] < 0.72);
+    }
+
+    #[test]
+    fn resolve_player_collision_lands_on_hard_world_floor() {
+        let world = VoxelWorld::new();
+        let scene = make_scene_with_world(world);
+
+        let old_pos = [0.0, 0.4, 0.0, 0.0];
+        let attempted = [0.0, -6.0, 0.0, 0.0];
+        let mut velocity_y = -9.0;
+        let (resolved, grounded) =
+            scene.resolve_player_collision(old_pos, attempted, &mut velocity_y);
+
+        assert!(grounded);
+        assert!((resolved[1] - (HARD_WORLD_FLOOR_Y + PLAYER_HEIGHT)).abs() < 0.03);
+        assert_eq!(velocity_y, 0.0);
     }
 }

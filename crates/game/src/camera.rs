@@ -93,7 +93,8 @@ impl Camera4D {
 
     pub fn new() -> Self {
         Camera4D {
-            position: [0.0, 0.0, -8.0, -4.0],
+            // Stand on top of the default flat-ground surface (voxel top at y=0).
+            position: [0.0, PLAYER_HEIGHT, -8.0, -4.0],
             yaw: PI * 0.125,
             pitch: 0.0,
             xw_angle: PI * 0.125,
