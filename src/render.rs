@@ -4738,6 +4738,8 @@ impl RenderContext {
             }
 
             if do_voxel_vte {
+                let fuse_integral_in_stage_a =
+                    render_options.vte_display_mode == VteDisplayMode::Integral;
                 builder
                     .bind_pipeline_compute(
                         self.compute_pipeline.voxel_trace_stage_a_pipeline.clone(),
@@ -4747,7 +4749,11 @@ impl RenderContext {
                     builder.dispatch([
                         (self.sized_buffers.render_dimensions[0] + 7) / 8,
                         (self.sized_buffers.render_dimensions[1] + 7) / 8,
-                        self.sized_buffers.render_dimensions[2].max(1),
+                        if fuse_integral_in_stage_a {
+                            1
+                        } else {
+                            self.sized_buffers.render_dimensions[2].max(1)
+                        },
                     ])
                 }
                 .unwrap();
@@ -4763,19 +4769,21 @@ impl RenderContext {
                     .unwrap();
                 }
 
-                builder
-                    .bind_pipeline_compute(
-                        self.compute_pipeline.voxel_display_stage_b_pipeline.clone(),
-                    )
+                if !fuse_integral_in_stage_a {
+                    builder
+                        .bind_pipeline_compute(
+                            self.compute_pipeline.voxel_display_stage_b_pipeline.clone(),
+                        )
+                        .unwrap();
+                    unsafe {
+                        builder.dispatch([
+                            (self.sized_buffers.render_dimensions[0] + 7) / 8,
+                            (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                            1,
+                        ])
+                    }
                     .unwrap();
-                unsafe {
-                    builder.dispatch([
-                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
-                        1,
-                    ])
                 }
-                .unwrap();
                 {
                     let q = self.profiler.next_query_index("vte_stage_b");
                     unsafe {

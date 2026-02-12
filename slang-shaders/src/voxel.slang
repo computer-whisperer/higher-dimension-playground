@@ -982,6 +982,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     uint index = globalId.z * wd.renderDimensions.x * wd.renderDimensions.y
                + globalId.y * wd.renderDimensions.x
                + globalId.x;
+    uint pixelBase = globalId.y * wd.renderDimensions.x + globalId.x;
     uint layerCount = max(1u, wd.renderDimensions.z);
     uint centerLayer = min(meta.stageBSliceLayer, layerCount - 1u);
     bool compareSliceOnly = (meta.debugFlags & META_DEBUG_FLAG_COMPARE_SLICE_ONLY) != 0u
@@ -989,6 +990,80 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     if (compareSliceOnly && globalId.z != centerLayer)
     {
         pixelBuffer[index] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    // Integral mode fast path: collapse across all layers in Stage A and write
+    // directly to layer 0, so Stage B can be skipped for this mode.
+    if (meta.stageBMode == STAGE_B_MODE_INTEGRAL && globalId.z == 0u && layerCount > 1u)
+    {
+        float2 pixelPos = float2(
+            float(globalId.x) / float(wd.renderDimensions.x) * 2.0 - 1.0,
+            float(globalId.y) / float(wd.renderDimensions.y) * 2.0 - 1.0
+        );
+        float aspectRatio = float(wd.presentDimensions.x) / float(wd.presentDimensions.y);
+
+        const float PI = 3.14159265;
+        float viewAngle = (PI / 2.0) / wd.focalLengthZW;
+        float4 viewOrigin = float4(0.0, 0.0, 0.0, 0.0);
+
+        VecN<5> origin5 = VecN<4>.fromFloat4(viewOrigin).extend(1.0);
+        VecN<5> worldOrigin5 = wd.viewMatrixInverse * origin5;
+        float4 worldOrigin = worldOrigin5.toFloat4();
+
+        float3 accumColor = float3(0.0, 0.0, 0.0);
+        for (uint sampleLayer = 0u; sampleLayer < layerCount; sampleLayer++)
+        {
+            float zNorm = ((float(sampleLayer) + 0.5) / float(layerCount)) * 2.0 - 1.0;
+            float zwAngle = zNorm * (viewAngle * 0.5) + (PI * 0.25);
+
+            float4 viewDirection = normalize(float4(
+                pixelPos.x / wd.focalLengthXY,
+                (-pixelPos.y / aspectRatio) / wd.focalLengthXY,
+                cos(zwAngle),
+                sin(zwAngle)
+            ));
+
+            VecN<5> dir5 = VecN<4>.fromFloat4(viewOrigin + viewDirection).extend(1.0);
+            VecN<5> worldDir5 = wd.viewMatrixInverse * dir5;
+            float4 worldDirection = normalize(worldDir5.toFloat4() - worldOrigin);
+
+            uint hitMaterial = 0u;
+            float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
+            int4 hitChunkCoord = int4(0, 0, 0, 0);
+            uint missReason = MISS_REASON_NONE;
+            uint debugFlags = 0u;
+            uint chunkStepsTaken = 0u;
+            uint remainingVoxelSteps = 0u;
+            float finalT = 0.0;
+            int4 lastChunkCoord = int4(0, 0, 0, 0);
+            bool hit = traceVoxelRayDDA(
+                worldOrigin,
+                worldDirection,
+                meta,
+                hitMaterial,
+                hitPos,
+                hitChunkCoord,
+                missReason,
+                debugFlags,
+                chunkStepsTaken,
+                remainingVoxelSteps,
+                finalT,
+                lastChunkCoord);
+
+            if (hit)
+            {
+                MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+                accumColor += mat.albedo.xyz * 0.75 + mat.albedo.xyz * mat.luminance;
+            }
+            else
+            {
+                float a = 0.5 + 0.5 * worldDirection.y;
+                accumColor += lerp(float3(0.02, 0.03, 0.06), float3(0.16, 0.22, 0.40), saturate(a));
+            }
+        }
+
+        pixelBuffer[pixelBase] = float4(accumColor / float(layerCount), 1.0);
         return;
     }
 
