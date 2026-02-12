@@ -6,7 +6,8 @@ mod voxel;
 
 use clap::{Parser, ValueEnum};
 use higher_dimension_playground::render::{
-    FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput, VteDisplayMode,
+    CustomOverlayLine, FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
+    VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::path::PathBuf;
@@ -30,6 +31,35 @@ const BLOCK_EDIT_MAX_DISTANCE: f32 = 12.0;
 const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 14;
+const TARGET_OUTLINE_COLOR: [f32; 4] = [0.20, 1.00, 1.00, 1.00];
+const PLACE_OUTLINE_COLOR: [f32; 4] = [1.00, 0.60, 0.20, 1.00];
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum EditHighlightModeArg {
+    Faces,
+    Edges,
+    Both,
+    Off,
+}
+
+impl EditHighlightModeArg {
+    fn uses_faces(self) -> bool {
+        matches!(self, Self::Faces | Self::Both)
+    }
+
+    fn uses_edges(self) -> bool {
+        matches!(self, Self::Edges | Self::Both)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Faces => "faces",
+            Self::Edges => "edges",
+            Self::Both => "both",
+            Self::Off => "off",
+        }
+    }
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about = "4D game explorer")]
@@ -116,6 +146,12 @@ struct Args {
     /// VTE thick-slice half-width in layer indices.
     #[arg(long, default_value_t = 2)]
     vte_thick_half_width: u32,
+
+    /// Edit highlight mode for pointed/placement voxel guides.
+    /// `faces` uses in-VTE occlusion-correct face highlighting.
+    /// `edges` keeps the legacy overlay-line outline debug view.
+    #[arg(long, value_enum, default_value_t = EditHighlightModeArg::Faces)]
+    edit_highlight_mode: EditHighlightModeArg,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -267,7 +303,7 @@ fn main() {
             0
         },
         args,
-        control_scheme: ControlScheme::SideButtonLayers,
+        control_scheme: ControlScheme::IntuitiveUpright,
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
         place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
@@ -408,6 +444,93 @@ fn env_flag_enabled(name: &str) -> bool {
     }
 }
 
+fn project_world_point_to_ndc(
+    view_matrix: &ndarray::Array2<f32>,
+    world_point: [f32; 4],
+    focal_length_xy: f32,
+    aspect: f32,
+) -> Option<[f32; 2]> {
+    let input = [
+        world_point[0],
+        world_point[1],
+        world_point[2],
+        world_point[3],
+        1.0,
+    ];
+    let mut view_h = [0.0f32; 5];
+    for row in 0..5 {
+        for col in 0..5 {
+            view_h[row] += view_matrix[[row, col]] * input[col];
+        }
+    }
+
+    let inv_w = if view_h[4].abs() > 1e-6 {
+        view_h[4].recip()
+    } else {
+        1.0
+    };
+    let view = [
+        view_h[0] * inv_w,
+        view_h[1] * inv_w,
+        view_h[2] * inv_w,
+        view_h[3] * inv_w,
+    ];
+
+    let depth = (view[2] * view[2] + view[3] * view[3]).sqrt();
+    if !depth.is_finite() || depth < 1e-4 {
+        return None;
+    }
+    let projection_divisor = depth / focal_length_xy.max(1e-4);
+    let x = view[0] / projection_divisor;
+    let y = aspect * (-view[1]) / projection_divisor;
+    if x.is_finite() && y.is_finite() {
+        Some([x, y])
+    } else {
+        None
+    }
+}
+
+fn append_voxel_outline_lines(
+    overlay_lines: &mut Vec<CustomOverlayLine>,
+    view_matrix: &ndarray::Array2<f32>,
+    voxel: [i32; 4],
+    focal_length_xy: f32,
+    aspect: f32,
+    color: [f32; 4],
+) {
+    let mut projected_vertices: [Option<[f32; 2]>; 16] = [None; 16];
+    for vertex_mask in 0..16usize {
+        let world_point = [
+            voxel[0] as f32 + (vertex_mask & 1) as f32,
+            voxel[1] as f32 + ((vertex_mask >> 1) & 1) as f32,
+            voxel[2] as f32 + ((vertex_mask >> 2) & 1) as f32,
+            voxel[3] as f32 + ((vertex_mask >> 3) & 1) as f32,
+        ];
+        projected_vertices[vertex_mask] =
+            project_world_point_to_ndc(view_matrix, world_point, focal_length_xy, aspect);
+    }
+
+    for vertex_mask in 0..16usize {
+        for axis in 0..4usize {
+            if ((vertex_mask >> axis) & 1) != 0 {
+                continue;
+            }
+            let next_mask = vertex_mask | (1usize << axis);
+            let Some(start_ndc) = projected_vertices[vertex_mask] else {
+                continue;
+            };
+            let Some(end_ndc) = projected_vertices[next_mask] else {
+                continue;
+            };
+            overlay_lines.push(CustomOverlayLine {
+                start_ndc,
+                end_ndc,
+                color,
+            });
+        }
+    }
+}
+
 impl App {
     fn grab_mouse(&mut self, window: &Window) {
         let result = window
@@ -428,14 +551,24 @@ impl App {
     }
 
     fn active_rotation_pair(&self) -> RotationPair {
-        if self.input.mouse_back_held() && self.input.mouse_forward_held() {
-            RotationPair::DoubleRotation
-        } else if self.input.mouse_back_held() {
-            RotationPair::FourD
-        } else {
-            match self.control_scheme {
-                ControlScheme::SideButtonLayers => RotationPair::Standard,
-                ControlScheme::ScrollCycle => self.scroll_cycle_pair,
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => {
+                if self.input.mouse_back_held() {
+                    RotationPair::IntuitiveXwPitch
+                } else {
+                    RotationPair::Standard
+                }
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                if self.input.mouse_back_held() && self.input.mouse_forward_held() {
+                    RotationPair::DoubleRotation
+                } else if self.input.mouse_back_held() {
+                    RotationPair::FourD
+                } else if self.control_scheme.uses_scroll_pair_cycle() {
+                    self.scroll_cycle_pair
+                } else {
+                    RotationPair::Standard
+                }
             }
         }
     }
@@ -449,6 +582,9 @@ impl App {
         if self.input.take_scheme_cycle() {
             self.control_scheme = self.control_scheme.next();
             self.scroll_cycle_pair = RotationPair::Standard;
+            if self.control_scheme.is_upright_primary() {
+                self.camera.enforce_upright_constraints();
+            }
         }
 
         // Reset orientation (R)
@@ -459,23 +595,22 @@ impl App {
         // Scroll wheel
         let scroll = self.input.take_scroll();
         if scroll != 0.0 {
-            match self.control_scheme {
-                ControlScheme::SideButtonLayers => {
-                    let factor = 1.1_f32.powf(scroll);
-                    self.move_speed = (self.move_speed * factor).clamp(0.5, 100.0);
+            if self.control_scheme.uses_scroll_pair_cycle() {
+                if scroll > 0.0 {
+                    self.scroll_cycle_pair = self.scroll_cycle_pair.next();
+                } else {
+                    // Reverse cycle for the legacy scroll mode.
+                    self.scroll_cycle_pair = match self.scroll_cycle_pair {
+                        RotationPair::Standard => RotationPair::FourD,
+                        RotationPair::FourD => RotationPair::Standard,
+                        RotationPair::DoubleRotation | RotationPair::IntuitiveXwPitch => {
+                            RotationPair::Standard
+                        }
+                    };
                 }
-                ControlScheme::ScrollCycle => {
-                    if scroll > 0.0 {
-                        self.scroll_cycle_pair = self.scroll_cycle_pair.next();
-                    } else {
-                        // Reverse cycle
-                        self.scroll_cycle_pair = match self.scroll_cycle_pair {
-                            RotationPair::Standard => RotationPair::FourD,
-                            RotationPair::FourD => RotationPair::Standard,
-                            RotationPair::DoubleRotation => RotationPair::Standard,
-                        };
-                    }
-                }
+            } else {
+                let factor = 1.1_f32.powf(scroll);
+                self.move_speed = (self.move_speed * factor).clamp(0.5, 100.0);
             }
         }
 
@@ -496,8 +631,12 @@ impl App {
             self.input.take_mouse_delta();
         }
 
+        if self.control_scheme.is_upright_primary() {
+            self.camera.enforce_upright_constraints();
+        }
+
         // Auto-level when not in double rotation
-        if pair != RotationPair::DoubleRotation {
+        if !self.control_scheme.is_upright_primary() && pair != RotationPair::DoubleRotation {
             self.camera.auto_level(dt);
         }
 
@@ -538,9 +677,25 @@ impl App {
 
         // Movement (vertical zeroed in gravity mode internally)
         let prev_position = self.camera.position;
+        let look_dir = if self.control_scheme.is_upright_primary() {
+            self.camera.look_direction_upright()
+        } else {
+            self.camera.look_direction()
+        };
         let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
-        self.camera
-            .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
+        if self.control_scheme.is_upright_primary() {
+            self.camera.apply_movement_upright(
+                forward,
+                strafe,
+                vertical,
+                w_axis,
+                dt,
+                self.move_speed,
+            );
+        } else {
+            self.camera
+                .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
+        }
 
         // Apply gravity physics
         self.camera.update_physics(dt);
@@ -560,7 +715,6 @@ impl App {
             let remove_requested = self.input.take_remove_block();
             let place_requested = self.input.take_place_block();
             if remove_requested || place_requested {
-                let look_dir = self.camera.look_direction();
                 if remove_requested {
                     if let Some([x, y, z, w]) = self.scene.remove_block_along_ray(
                         self.camera.position,
@@ -589,8 +743,59 @@ impl App {
         }
 
         // Build view matrix and scene
-        let view_matrix = self.camera.view_matrix();
+        let view_matrix = if self.control_scheme.is_upright_primary() {
+            self.camera.view_matrix_upright()
+        } else {
+            self.camera.view_matrix()
+        };
         let backend = self.args.backend.to_render_backend();
+        let highlight_mode = self.args.edit_highlight_mode;
+        let targets =
+            if self.mouse_grabbed && (highlight_mode.uses_faces() || highlight_mode.uses_edges()) {
+                Some(self.scene.block_edit_targets(
+                    self.camera.position,
+                    look_dir,
+                    BLOCK_EDIT_MAX_DISTANCE,
+                ))
+            } else {
+                None
+            };
+
+        let mut custom_overlay_lines = Vec::with_capacity(32);
+        if highlight_mode.uses_edges() {
+            if let Some(targets) = targets {
+                let aspect = self.args.width.max(1) as f32 / self.args.height.max(1) as f32;
+                if let Some(hit_voxel) = targets.hit_voxel {
+                    append_voxel_outline_lines(
+                        &mut custom_overlay_lines,
+                        &view_matrix,
+                        hit_voxel,
+                        1.0,
+                        aspect,
+                        TARGET_OUTLINE_COLOR,
+                    );
+                }
+                if let Some(place_voxel) = targets.place_voxel {
+                    append_voxel_outline_lines(
+                        &mut custom_overlay_lines,
+                        &view_matrix,
+                        place_voxel,
+                        1.0,
+                        aspect,
+                        PLACE_OUTLINE_COLOR,
+                    );
+                }
+            }
+        }
+
+        let mut vte_highlight_hit_voxel = None;
+        let mut vte_highlight_place_voxel = None;
+        if backend == RenderBackend::VoxelTraversal && highlight_mode.uses_faces() {
+            if let Some(targets) = targets {
+                vte_highlight_hit_voxel = targets.hit_voxel;
+                vte_highlight_place_voxel = targets.place_voxel;
+            }
+        }
 
         let auto_screenshot = if self.gpu_screenshot_countdown > 1 {
             self.gpu_screenshot_countdown -= 1;
@@ -625,19 +830,23 @@ impl App {
             vte_reference_compare: self.vte_reference_compare_enabled,
             vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
             vte_compare_slice_only: self.vte_compare_slice_only_enabled,
+            vte_highlight_hit_voxel,
+            vte_highlight_place_voxel,
             do_navigation_hud: true,
+            custom_overlay_lines,
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
             hud_rotation_label: Some({
-                let inv = if self.camera.is_y_inverted() {
-                    " Y-INV"
+                let inv = if self.control_scheme.is_upright_primary() {
+                    self.camera.is_y_inverted_upright()
                 } else {
-                    ""
+                    self.camera.is_y_inverted()
                 };
+                let inv = if inv { " Y-INV" } else { "" };
                 format!(
                     "{} [{}]  spd:{:.1}{}\n\
                      yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
-                     edit:LMB- RMB+ mat:{}\n\
+                     edit:LMB- RMB+ mat:{} hl:{}\n\
                      mat:[ ] cycle, 1-0 direct",
                     pair.label(),
                     self.control_scheme.label(),
@@ -649,6 +858,7 @@ impl App {
                     self.camera.zw_angle.to_degrees(),
                     self.camera.yw_deviation.to_degrees(),
                     self.place_material,
+                    highlight_mode.label(),
                 )
             }),
             ..Default::default()

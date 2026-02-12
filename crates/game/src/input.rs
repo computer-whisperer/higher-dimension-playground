@@ -8,23 +8,34 @@ const DOUBLE_TAP_THRESHOLD_MS: u128 = 300;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ControlScheme {
-    SideButtonLayers,
-    ScrollCycle,
+    IntuitiveUpright,
+    LegacySideButtonLayers,
+    LegacyScrollCycle,
 }
 
 impl ControlScheme {
     pub fn next(self) -> Self {
         match self {
-            ControlScheme::SideButtonLayers => ControlScheme::ScrollCycle,
-            ControlScheme::ScrollCycle => ControlScheme::SideButtonLayers,
+            ControlScheme::IntuitiveUpright => ControlScheme::LegacySideButtonLayers,
+            ControlScheme::LegacySideButtonLayers => ControlScheme::LegacyScrollCycle,
+            ControlScheme::LegacyScrollCycle => ControlScheme::IntuitiveUpright,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            ControlScheme::SideButtonLayers => "LAYERS",
-            ControlScheme::ScrollCycle => "SCROLL",
+            ControlScheme::IntuitiveUpright => "UPRIGHT",
+            ControlScheme::LegacySideButtonLayers => "LEG-SIDE",
+            ControlScheme::LegacyScrollCycle => "LEG-SCRL",
         }
+    }
+
+    pub fn is_upright_primary(self) -> bool {
+        matches!(self, ControlScheme::IntuitiveUpright)
+    }
+
+    pub fn uses_scroll_pair_cycle(self) -> bool {
+        matches!(self, ControlScheme::LegacyScrollCycle)
     }
 }
 
@@ -33,6 +44,7 @@ pub enum RotationPair {
     Standard,
     FourD,
     DoubleRotation,
+    IntuitiveXwPitch,
 }
 
 impl RotationPair {
@@ -41,6 +53,7 @@ impl RotationPair {
             RotationPair::Standard => AngleTarget::Yaw,
             RotationPair::FourD => AngleTarget::XwAngle,
             RotationPair::DoubleRotation => AngleTarget::Yaw,
+            RotationPair::IntuitiveXwPitch => AngleTarget::XwAngle,
         }
     }
 
@@ -49,6 +62,7 @@ impl RotationPair {
             RotationPair::Standard => AngleTarget::Pitch,
             RotationPair::FourD => AngleTarget::ZwAngle,
             RotationPair::DoubleRotation => AngleTarget::YwDeviation,
+            RotationPair::IntuitiveXwPitch => AngleTarget::Pitch,
         }
     }
 
@@ -57,6 +71,7 @@ impl RotationPair {
             RotationPair::Standard => "XZ/ZY",
             RotationPair::FourD => "XW/ZW",
             RotationPair::DoubleRotation => "DOUBLE XZ+YW",
+            RotationPair::IntuitiveXwPitch => "XW/ZY",
         }
     }
 
@@ -65,6 +80,7 @@ impl RotationPair {
             RotationPair::Standard => RotationPair::FourD,
             RotationPair::FourD => RotationPair::Standard,
             RotationPair::DoubleRotation => RotationPair::Standard,
+            RotationPair::IntuitiveXwPitch => RotationPair::Standard,
         }
     }
 }

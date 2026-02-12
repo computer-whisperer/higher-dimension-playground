@@ -156,13 +156,13 @@ The default scene includes:
 | Input | Action |
 |-------|--------|
 | W/A/S/D | Move forward/left/back/right |
-| Mouse | Look around (yaw/pitch by default) |
+| Mouse | Look around (`UPRIGHT` default: yaw/pitch) |
 | Space/Shift | Move up/down (Y axis) |
-| Q/E | Move along W axis |
-| Mouse Back | Hold for 4D rotation (XW/ZW planes) |
-| Mouse Back+Forward | Hold both for double rotation (XZ yaw + YW) |
-| Scroll wheel | Adjust move speed (Layers mode) or cycle rotation pair (Scroll mode) |
-| Tab | Toggle control scheme (Layers / Scroll) |
+| Q/E | Hidden-dimension strafe (friendly side axis in `UPRIGHT`) |
+| Mouse Back | Hold for XW turning (`UPRIGHT`: XW/ZY, `LEG-SIDE`: XW/ZW) |
+| Mouse Back+Forward | Legacy only: double rotation (XZ yaw + YW) |
+| Scroll wheel | Adjust move speed (except `LEG-SCRL`, where it cycles legacy rotation pair) |
+| Tab | Cycle control scheme (`UPRIGHT` default -> `LEG-SIDE` -> `LEG-SCRL`) |
 | R | Reset camera orientation to defaults |
 | F12 | Screenshot |
 | Escape | Release mouse (press again to exit) |
