@@ -446,15 +446,20 @@ struct FrameInFlight {
 #[repr(C)]
 struct LineVertex {
     position: Vec2,
+    // padding[0] is used as an optional line style id for present shader.
     _padding: [f32; 2],
     color: Vec4,
 }
 
 impl LineVertex {
     fn new(position: Vec2, color: Vec4) -> Self {
+        Self::new_with_style(position, color, 0.0)
+    }
+
+    fn new_with_style(position: Vec2, color: Vec4, style: f32) -> Self {
         Self {
             position,
-            _padding: [0.0; 2],
+            _padding: [style, 0.0],
             color,
         }
     }
@@ -465,6 +470,7 @@ struct OverlayLine {
     start: Vec2,
     end: Vec2,
     color: Vec4,
+    style: f32,
 }
 
 const HUD_VERTEX_CAPACITY: usize = 64_000;
@@ -931,10 +937,15 @@ fn project_view_point_to_ndc(
 }
 
 fn push_line(lines: &mut Vec<OverlayLine>, a: Vec2, b: Vec2, color: Vec4) {
+    push_line_with_style(lines, a, b, color, 0.0);
+}
+
+fn push_line_with_style(lines: &mut Vec<OverlayLine>, a: Vec2, b: Vec2, color: Vec4, style: f32) {
     lines.push(OverlayLine {
         start: a,
         end: b,
         color,
+        style,
     });
 }
 
@@ -968,75 +979,105 @@ fn push_minecraft_crosshair(
     lines: &mut Vec<OverlayLine>,
     present_size: [u32; 2],
     center_ndc: Vec2,
+    dpi_scale: f32,
     color: Vec4,
     outline_color: Vec4,
 ) {
-    // Keep the crosshair in pixel units so it stays visually stable across resolutions.
-    const INNER_GAP_PX: f32 = 3.0;
-    const ARM_LENGTH_PX: f32 = 8.0;
-    const OUTLINE_PAD_PX: f32 = 1.0;
+    // Crosshair dimensions are authored in logical pixels and scaled by the
+    // window DPI factor so it remains consistent on HiDPI Wayland displays.
+    const INNER_GAP_PX: f32 = 5.0;
+    const ARM_LENGTH_PX: f32 = 12.0;
+    const OUTLINE_PAD_PX: f32 = 2.0;
+    const INNER_THICKNESS_PX: f32 = 3.0;
+    const OUTLINE_THICKNESS_PX: f32 = 5.0;
 
     let inv_w = 2.0 / present_size[0].max(1) as f32;
     let inv_h = 2.0 / present_size[1].max(1) as f32;
+    let px_scale = dpi_scale.max(1.0);
 
-    let inner_x = INNER_GAP_PX * inv_w;
-    let inner_y = INNER_GAP_PX * inv_h;
-    let arm_x = ARM_LENGTH_PX * inv_w;
-    let arm_y = ARM_LENGTH_PX * inv_h;
-    let pad_x = OUTLINE_PAD_PX * inv_w;
-    let pad_y = OUTLINE_PAD_PX * inv_h;
+    let inner_x = INNER_GAP_PX * px_scale * inv_w;
+    let inner_y = INNER_GAP_PX * px_scale * inv_h;
+    let arm_x = ARM_LENGTH_PX * px_scale * inv_w;
+    let arm_y = ARM_LENGTH_PX * px_scale * inv_h;
+    let pad_x = OUTLINE_PAD_PX * px_scale * inv_w;
+    let pad_y = OUTLINE_PAD_PX * px_scale * inv_h;
+
+    let inner_half_steps = (((INNER_THICKNESS_PX * px_scale) - 1.0) * 0.5)
+        .max(0.0)
+        .round() as i32;
+    let outline_half_steps = (((OUTLINE_THICKNESS_PX * px_scale) - 1.0) * 0.5)
+        .max(0.0)
+        .round() as i32;
+
+    let push_hbar = |lines: &mut Vec<OverlayLine>,
+                     x0: f32,
+                     x1: f32,
+                     half_steps: i32,
+                     bar_color: Vec4| {
+        for step in -half_steps..=half_steps {
+            let y_offset = step as f32 * inv_h;
+            push_line_with_style(
+                lines,
+                center_ndc + Vec2::new(x0, y_offset),
+                center_ndc + Vec2::new(x1, y_offset),
+                bar_color,
+                1.0,
+            );
+        }
+    };
+
+    let push_vbar = |lines: &mut Vec<OverlayLine>,
+                     y0: f32,
+                     y1: f32,
+                     half_steps: i32,
+                     bar_color: Vec4| {
+        for step in -half_steps..=half_steps {
+            let x_offset = step as f32 * inv_w;
+            push_line_with_style(
+                lines,
+                center_ndc + Vec2::new(x_offset, y0),
+                center_ndc + Vec2::new(x_offset, y1),
+                bar_color,
+                1.0,
+            );
+        }
+    };
 
     // Outline pass.
-    push_line(
+    push_hbar(
         lines,
-        center_ndc + Vec2::new(-(inner_x + arm_x + pad_x), 0.0),
-        center_ndc + Vec2::new(-(inner_x - pad_x), 0.0),
+        -(inner_x + arm_x + pad_x),
+        -(inner_x - pad_x),
+        outline_half_steps,
         outline_color,
     );
-    push_line(
+    push_hbar(
         lines,
-        center_ndc + Vec2::new(inner_x - pad_x, 0.0),
-        center_ndc + Vec2::new(inner_x + arm_x + pad_x, 0.0),
+        inner_x - pad_x,
+        inner_x + arm_x + pad_x,
+        outline_half_steps,
         outline_color,
     );
-    push_line(
+    push_vbar(
         lines,
-        center_ndc + Vec2::new(0.0, -(inner_y + arm_y + pad_y)),
-        center_ndc + Vec2::new(0.0, -(inner_y - pad_y)),
+        -(inner_y + arm_y + pad_y),
+        -(inner_y - pad_y),
+        outline_half_steps,
         outline_color,
     );
-    push_line(
+    push_vbar(
         lines,
-        center_ndc + Vec2::new(0.0, inner_y - pad_y),
-        center_ndc + Vec2::new(0.0, inner_y + arm_y + pad_y),
+        inner_y - pad_y,
+        inner_y + arm_y + pad_y,
+        outline_half_steps,
         outline_color,
     );
 
-    // Inner bright pass.
-    push_line(
-        lines,
-        center_ndc + Vec2::new(-(inner_x + arm_x), 0.0),
-        center_ndc + Vec2::new(-inner_x, 0.0),
-        color,
-    );
-    push_line(
-        lines,
-        center_ndc + Vec2::new(inner_x, 0.0),
-        center_ndc + Vec2::new(inner_x + arm_x, 0.0),
-        color,
-    );
-    push_line(
-        lines,
-        center_ndc + Vec2::new(0.0, -(inner_y + arm_y)),
-        center_ndc + Vec2::new(0.0, -inner_y),
-        color,
-    );
-    push_line(
-        lines,
-        center_ndc + Vec2::new(0.0, inner_y),
-        center_ndc + Vec2::new(0.0, inner_y + arm_y),
-        color,
-    );
+    // Inner pass.
+    push_hbar(lines, -(inner_x + arm_x), -inner_x, inner_half_steps, color);
+    push_hbar(lines, inner_x, inner_x + arm_x, inner_half_steps, color);
+    push_vbar(lines, -(inner_y + arm_y), -inner_y, inner_half_steps, color);
+    push_vbar(lines, inner_y, inner_y + arm_y, inner_half_steps, color);
 }
 
 fn map_to_panel(center: Vec2, half_size: Vec2, map_range: f32, a: f32, b: f32) -> Vec2 {
@@ -3364,17 +3405,18 @@ impl RenderContext {
         let crosshair_color = Vec4::new(0.95, 0.95, 0.95, 1.0);
         let crosshair_outline = Vec4::new(0.0, 0.0, 0.0, 1.0);
 
-        let (present_size, text_scale) = match self.window.as_ref() {
+        let (present_size, ui_scale, text_scale) = match self.window.as_ref() {
             Some(window) => {
                 let s = window.inner_size();
                 let sf = window.scale_factor() as f32;
-                ([s.width.max(1), s.height.max(1)], sf * 1.5)
+                ([s.width.max(1), s.height.max(1)], sf, sf * 1.5)
             }
             None => (
                 [
                     self.sized_buffers.render_dimensions[0].max(1),
                     self.sized_buffers.render_dimensions[1].max(1),
                 ],
+                1.0,
                 2.0,
             ),
         };
@@ -4124,6 +4166,7 @@ impl RenderContext {
             &mut lines,
             present_size,
             Vec2::ZERO,
+            ui_scale,
             crosshair_color,
             crosshair_outline,
         );
@@ -4137,8 +4180,10 @@ impl RenderContext {
                 .unwrap();
             for (line_id, segment) in lines.iter().take(lines_to_write).enumerate() {
                 let vertex_id = (base_line_count + line_id) * 2;
-                writer[vertex_id] = LineVertex::new(segment.start, segment.color);
-                writer[vertex_id + 1] = LineVertex::new(segment.end, segment.color);
+                writer[vertex_id] =
+                    LineVertex::new_with_style(segment.start, segment.color, segment.style);
+                writer[vertex_id + 1] =
+                    LineVertex::new_with_style(segment.end, segment.color, segment.style);
             }
         }
 

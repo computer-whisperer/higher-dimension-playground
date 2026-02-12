@@ -19,6 +19,7 @@ struct LineVSOutput
 {
     float4 position : SV_Position;
     float4 color : COLOR0;
+    float style : TEXCOORD0;
 }
 
 [shader("vertex")]
@@ -28,14 +29,8 @@ LineVSOutput mainLineVS(uint vertexId : SV_VertexID)
     LineVertex vertex = lineVertices[vertexId];
     output.position = float4(vertex.position.x, vertex.position.y, 0.0, 1.0);
     output.color = vertex.color;
+    output.style = vertex.padding.x;
     return output;
-}
-
-// Fragment shader for line rendering
-[shader("fragment")]
-float4 mainLineFS(LineVSOutput input) : SV_Target
-{
-    return input.color;
 }
 
 // Vertex shader for fullscreen quad (buffer display)
@@ -80,9 +75,7 @@ float linearToGamma(float value)
     return pow(value, 1.0 / gamma);
 }
 
-// Fragment shader to display accumulated buffer
-[shader("fragment")]
-float4 mainBufferFS(float4 fragCoord : SV_Position) : SV_Target
+float4 samplePresentedColor(float2 fragCoord)
 {
     WorkingData wd = workingDataBuffer[0];
 
@@ -97,14 +90,15 @@ float4 mainBufferFS(float4 fragCoord : SV_Position) : SV_Target
         float(wd.renderDimensions.y) * normalPos.y
     );
 
-    uint2 uPixelPos = uint2(uint(pixelPosF.x), uint(pixelPosF.y));
+    uint px = min(uint(pixelPosF.x), wd.renderDimensions.x - 1);
+    uint py = min(uint(pixelPosF.y), wd.renderDimensions.y - 1);
 
-    float4 csResult = float4(0);
+    float4 csResult = float4(0.0, 0.0, 0.0, 0.0);
     // For VTE, Stage B collapses to layer 0 in compute.
     // Legacy raster/raytrace paths still accumulate all Z slices here.
     if (wd.padding[0] != 0u)
     {
-        uint index = uPixelPos.y * wd.renderDimensions.x + uPixelPos.x;
+        uint index = py * wd.renderDimensions.x + px;
         csResult = pixelBuffer[index];
     }
     else
@@ -112,8 +106,8 @@ float4 mainBufferFS(float4 fragCoord : SV_Position) : SV_Target
         for (uint z = 0; z < wd.renderDimensions.z; z++)
         {
             uint index = z * wd.renderDimensions.x * wd.renderDimensions.y
-                       + uPixelPos.y * wd.renderDimensions.x
-                       + uPixelPos.x;
+                       + py * wd.renderDimensions.x
+                       + px;
             csResult += pixelBuffer[index];
         }
     }
@@ -130,14 +124,47 @@ float4 mainBufferFS(float4 fragCoord : SV_Position) : SV_Target
             return float4(saturate(color), 1.0);
         }
         color = acesToneMap(color);
-        float4 adjusted = float4(
+        return float4(
             linearToGamma(color.x),
             linearToGamma(color.y),
             linearToGamma(color.z),
             1.0
         );
-        return adjusted;
     }
 
-    return float4(0);
+    return float4(0.0, 0.0, 0.0, 1.0);
+}
+
+float3 adaptiveCrosshairColor(float3 baseColor, float tint)
+{
+    // Inversion-like behavior with a black/white anchor to hold contrast.
+    float3 inverted = 1.0 - baseColor;
+    float luma = dot(baseColor, float3(0.2126, 0.7152, 0.0722));
+    float3 bw = (luma > 0.5) ? float3(0.0, 0.0, 0.0) : float3(1.0, 1.0, 1.0);
+    float3 adaptive = lerp(inverted, bw, 0.45);
+
+    // White-authored lines use adaptive directly; dark-authored lines use
+    // the inverse, preserving a clear outline/inner relationship.
+    return lerp(1.0 - adaptive, adaptive, saturate(tint));
+}
+
+// Fragment shader for line rendering
+[shader("fragment")]
+float4 mainLineFS(LineVSOutput input, float4 fragCoord : SV_Position) : SV_Target
+{
+    if (input.style > 0.5)
+    {
+        float3 base = samplePresentedColor(fragCoord.xy).xyz;
+        float tint = dot(input.color.rgb, float3(0.33333334, 0.33333334, 0.33333334));
+        return float4(adaptiveCrosshairColor(base, tint), 1.0);
+    }
+
+    return input.color;
+}
+
+// Fragment shader to display accumulated buffer
+[shader("fragment")]
+float4 mainBufferFS(float4 fragCoord : SV_Position) : SV_Target
+{
+    return samplePresentedColor(fragCoord.xy);
 }
