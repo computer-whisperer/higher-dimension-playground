@@ -190,6 +190,8 @@ pub struct RenderOptions {
     pub take_framebuffer_screenshot: bool,
     pub prepare_render_screenshot: bool,
     pub hud_rotation_label: Option<String>,
+    pub hud_target_hit_voxel: Option<[i32; 4]>,
+    pub hud_target_hit_face: Option<[i32; 4]>,
 }
 
 impl Default for RenderOptions {
@@ -216,6 +218,8 @@ impl Default for RenderOptions {
             take_framebuffer_screenshot: false,
             prepare_render_screenshot: false,
             hud_rotation_label: None,
+            hud_target_hit_voxel: None,
+            hud_target_hit_face: None,
         }
     }
 }
@@ -3378,6 +3382,8 @@ impl RenderContext {
         focal_length_xy: f32,
         model_instances: &[common::ModelInstance],
         rotation_label: Option<&str>,
+        target_hit_voxel: Option<[i32; 4]>,
+        target_hit_face: Option<[i32; 4]>,
     ) -> (usize, usize) {
         let max_lines = LINE_VERTEX_CAPACITY / 2;
         if base_line_count >= max_lines {
@@ -3630,36 +3636,6 @@ impl RenderContext {
                     label_px,
                     rose_label_text_size,
                     arrow.color,
-                    present_size,
-                );
-            }
-        }
-
-        // Rotation mode label below compass rose
-        if let Some(label) = rotation_label {
-            let label_ndc = Vec2::new(rose_origin.x, rose_origin.y + rose_radius + 0.04);
-            let label_text_size = 11.0 * text_scale;
-            let label_color = Vec4::new(0.90, 0.90, 0.55, 1.0);
-            if let Some(hud_res) = self.hud_resources.as_ref() {
-                let label_px = ndc_to_pixels(label_ndc, present_size);
-                push_text_quads(
-                    &mut hud_quads,
-                    &hud_res.font_atlas,
-                    label,
-                    label_px,
-                    label_text_size,
-                    label_color,
-                    present_size,
-                );
-            } else if let Some(font) = self.hud_font.as_ref() {
-                let label_px = ndc_to_pixels(label_ndc, present_size);
-                push_text_lines(
-                    &mut lines,
-                    font,
-                    label,
-                    label_px,
-                    label_text_size,
-                    label_color,
                     present_size,
                 );
             }
@@ -4052,21 +4028,57 @@ impl RenderContext {
         } else {
             0.0
         };
-        let mut readout_text = format!(
-            "{:.1} ms ({:.0} fps) GPU {:.1} ms [{}]\nPOS {:+.2} {:+.2} {:+.2} {:+.2}\nLOOK {:+.2} {:+.2} {:+.2} {:+.2}",
+        let mut readout_text = String::new();
+        if let Some(label) = rotation_label {
+            readout_text.push_str(label);
+            readout_text.push('\n');
+        }
+        readout_text.push_str(&format!(
+            "frame {:>5.1} ms ({:>3.0} fps)\n\
+             gpu   {:>5.1} ms [{}]",
             self.frame_time_ms,
             fps,
             self.profiler.last_gpu_total_ms,
-            self.last_backend.label(),
+            self.last_backend.label()
+        ));
+        readout_text.push_str(
+            "\nvec       |        X |        Y |        Z |        W\n\
+             ----------+----------+----------+----------+----------",
+        );
+        readout_text.push_str(&format!(
+            "\n{:<9} | {:+8.2} | {:+8.2} | {:+8.2} | {:+8.2}",
+            "cam_pos",
             camera_position[0],
             camera_position[1],
             camera_position[2],
             camera_position[3],
+        ));
+        readout_text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "look_dir",
             look_world[0],
             look_world[1],
             look_world[2],
-            look_world[3]
-        );
+            look_world[3],
+        ));
+        if let Some(hit) = target_hit_voxel {
+            readout_text.push_str(&format!(
+                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                "block_hit", hit[0], hit[1], hit[2], hit[3]
+            ));
+        } else {
+            readout_text
+                .push_str(&format!("\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}", "block_hit", "--", "--", "--", "--"));
+        }
+        if let Some(face) = target_hit_face {
+            readout_text.push_str(&format!(
+                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                "face_n", face[0], face[1], face[2], face[3]
+            ));
+        } else {
+            readout_text
+                .push_str(&format!("\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}", "face_n", "--", "--", "--", "--"));
+        }
         if self.last_backend == RenderBackend::VoxelTraversal {
             readout_text.push_str(&format!(
                 "\nVTE c:{} f:{} e:{} m:{}",
@@ -4102,15 +4114,38 @@ impl RenderContext {
         if !self.profiler.last_frame_phases.is_empty() {
             readout_text.push('\n');
             for (name, ms) in &self.profiler.last_frame_phases {
-                readout_text.push_str(&format!(" {}:{:.1}", name, ms));
+                readout_text.push_str(&format!("\n {}:{:.1}", name, ms));
             }
         }
-        // Position readout below the minimaps on the actual screen.
-        // In Vulkan NDC +Y is down. upper_top is the panel's lowest screen edge.
-        let readout_anchor_ndc = Vec2::new(left, upper_top + 0.06);
+        // Top-left text panel in Vulkan NDC (+Y is down).
+        let text_margin_ndc = Vec2::new(0.03, 0.03);
+        let readout_bg_min = Vec2::new(-1.0 + text_margin_ndc.x, -1.0 + text_margin_ndc.y);
+        let panel_padding_px = 10.0 * ui_scale.max(1.0);
+        let max_line_chars = readout_text
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(1) as f32;
+        let estimated_char_width_px = readout_text_size * 0.56;
+        let panel_width_px = (max_line_chars * estimated_char_width_px + panel_padding_px * 2.0)
+            .clamp(360.0 * ui_scale.max(1.0), 560.0 * ui_scale.max(1.0));
+        let line_height_px = (readout_text_size * 1.25).max(12.0);
+        let readout_line_count = readout_text.lines().count().max(1) as f32;
+        let panel_height_px = readout_line_count * line_height_px + panel_padding_px * 2.0;
+        let width_ndc = (panel_width_px / present_size[0] as f32) * 2.0;
+        let height_ndc = (panel_height_px / present_size[1] as f32) * 2.0;
+        let readout_bg_max = Vec2::new(
+            (readout_bg_min.x + width_ndc).min(0.95),
+            (readout_bg_min.y + height_ndc).min(0.95),
+        );
+        let readout_anchor_ndc = Vec2::new(
+            readout_bg_min.x + (panel_padding_px / present_size[0] as f32) * 2.0,
+            readout_bg_min.y + (panel_padding_px / present_size[1] as f32) * 2.0,
+        );
 
         if let Some(hud_res) = self.hud_resources.as_ref() {
             let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
+            let text_panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.78);
 
             // Semi-transparent backgrounds behind minimap panels
             push_filled_rect_quads(
@@ -4128,15 +4163,13 @@ impl RenderContext {
                 panel_bg,
             );
 
-            // Semi-transparent background behind text readout
-            let readout_bg_min = Vec2::new(left, upper_top + 0.02);
-            let readout_bg_max = Vec2::new(right, upper_top + 0.30);
+            // Darker background behind text readout
             push_filled_rect_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
                 readout_bg_min,
                 readout_bg_max,
-                panel_bg,
+                text_panel_bg,
             );
 
             let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
@@ -5478,6 +5511,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 focal_length_xy,
                 model_instances,
                 render_options.hud_rotation_label.as_deref(),
+                render_options.hud_target_hit_voxel,
+                render_options.hud_target_hit_face,
             );
             line_render_count += hud_line_count;
             hud_vertex_count = hud_quad_count;

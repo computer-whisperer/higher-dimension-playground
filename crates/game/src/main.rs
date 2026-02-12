@@ -880,6 +880,23 @@ impl App {
             } else {
                 None
             };
+        let mut hud_target_hit_voxel = None;
+        let mut hud_target_hit_face = None;
+        if let Some(targets) = targets {
+            hud_target_hit_voxel = targets.hit_voxel;
+            if let (Some(hit), Some(place)) = (targets.hit_voxel, targets.place_voxel) {
+                let face = [
+                    place[0] - hit[0],
+                    place[1] - hit[1],
+                    place[2] - hit[2],
+                    place[3] - hit[3],
+                ];
+                let manhattan = face[0].abs() + face[1].abs() + face[2].abs() + face[3].abs();
+                if manhattan == 1 {
+                    hud_target_hit_face = Some(face);
+                }
+            }
+        }
 
         let mut custom_overlay_lines = Vec::with_capacity(64);
         if highlight_mode.uses_edges() {
@@ -982,6 +999,8 @@ impl App {
                     highlight_mode.label(),
                 )
             }),
+            hud_target_hit_voxel,
+            hud_target_hit_face,
             ..Default::default()
         };
 
