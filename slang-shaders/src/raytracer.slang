@@ -17,6 +17,19 @@ import materials;
 [[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;
 [[vk::binding(1, 2)]] StructuredBuffer<WorkingData> workingDataBuffer;
 
+// Shared push constants (offset/length controls for preprocessing dispatches).
+// If tetrahedronCount is 0, preprocess falls back to workingData.totalNumTetrahedrons.
+struct DispatchParams
+{
+    uint instanceBase;
+    uint tetrahedronCount;
+    uint outputBase;
+    uint padding;
+}
+
+[[vk::push_constant]]
+DispatchParams dispatchParams;
+
 // Simple RNG for monte-carlo sampling
 struct BasicRNG
 {
@@ -93,10 +106,19 @@ void mainRaytracerTetrahedronPreprocessor(uint3 globalId : SV_DispatchThreadID)
     WorkingData workingData = workingDataBuffer[0];
 
     uint outputIndex = globalId.x;
+    uint tetrahedronCount = dispatchParams.tetrahedronCount != 0u
+        ? dispatchParams.tetrahedronCount
+        : workingData.totalNumTetrahedrons;
+    if (outputIndex >= tetrahedronCount)
+    {
+        return;
+    }
+
     uint modelCount, modelStride;
     modelTetrahedrons.GetDimensions(modelCount, modelStride);
     uint modelIndex = outputIndex % modelCount;
-    uint instanceIndex = outputIndex / modelCount;
+    uint instanceIndex = dispatchParams.instanceBase + (outputIndex / modelCount);
+    uint outTetIndex = dispatchParams.outputBase + outputIndex;
 
     ModelInstance instance = instances[instanceIndex];
     ModelTetrahedron inputTet = modelTetrahedrons[modelIndex];
@@ -132,7 +154,7 @@ void mainRaytracerTetrahedronPreprocessor(uint3 globalId : SV_DispatchThreadID)
     outTet.padding[1] = 0;
     outTet.padding[2] = 0;
 
-    outputTetrahedrons[outputIndex] = outTet;
+    outputTetrahedrons[outTetIndex] = outTet;
 }
 
 // Clear the pixel buffer

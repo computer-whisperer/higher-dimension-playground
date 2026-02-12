@@ -24,6 +24,19 @@ static const uint MAX_TETS_PER_TILE = 8192;
 [[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;
 [[vk::binding(1, 2)]] StructuredBuffer<WorkingData> workingDataBuffer;
 
+// Shared push constants (instance-base/length controls for preprocessing dispatches).
+// If tetrahedronCount is 0, preprocessing falls back to workingData.totalNumTetrahedrons.
+struct DispatchParams
+{
+    uint instanceBase;
+    uint tetrahedronCount;
+    uint outputBase;
+    uint padding;
+}
+
+[[vk::push_constant]]
+DispatchParams dispatchParams;
+
 // Vertex shader for rasterization pipeline
 struct RasterVertexOutput
 {
@@ -197,13 +210,16 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
     WorkingData workingData = workingDataBuffer[0];
 
     uint outputIndex = globalId.x;
+    uint tetrahedronCount = dispatchParams.tetrahedronCount != 0u
+        ? dispatchParams.tetrahedronCount
+        : workingData.totalNumTetrahedrons;
+    if (outputIndex >= tetrahedronCount)
+        return;
+
     uint modelCount, modelStride;
     modelTetrahedrons.GetDimensions(modelCount, modelStride);
     uint modelIndex = outputIndex % modelCount;
-    uint instanceIndex = outputIndex / modelCount;
-
-    if (outputIndex >= workingData.totalNumTetrahedrons)
-        return;
+    uint instanceIndex = dispatchParams.instanceBase + (outputIndex / modelCount);
 
     ModelInstance instance = instances[instanceIndex];
     ModelTetrahedron inputTet = modelTetrahedrons[modelIndex];

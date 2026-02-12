@@ -18,6 +18,7 @@ static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
 static const uint HIGHLIGHT_FLAG_HIT_VOXEL = 1u << 0u;
 static const uint HIGHLIGHT_FLAG_PLACE_VOXEL = 1u << 1u;
 static const float INTEGRAL_HIGHLIGHT_WEIGHT_BOOST = 15.0;
+static const uint ENTITY_LINEAR_THRESHOLD_TETS = 8u;
 
 static const uint MISS_REASON_NONE = 0u;
 static const uint MISS_REASON_TOUCHED_VISIBLE_CHUNK = 1u;
@@ -132,7 +133,9 @@ struct VoxelChunkLookupEntry
 }
 
 // Set 1: SizedBuffers
+[[vk::binding(1, 1)]] StructuredBuffer<Tetrahedron> outputTetrahedrons;
 [[vk::binding(2, 1)]] RWStructuredBuffer<float4> pixelBuffer;
+[[vk::binding(4, 1)]] StructuredBuffer<BVHNode> bvhNodes;
 
 // Set 2: LiveBuffers
 [[vk::binding(1, 2)]] StructuredBuffer<WorkingData> workingDataBuffer;
@@ -269,6 +272,279 @@ uint hashChunkCoord(int4 chunkCoord)
          ^ y * 0xD8163841u
          ^ z * 0xCB1AB31Fu
          ^ w * 0x165667B1u;
+}
+
+struct EntityTetraHit
+{
+    bool didHit;
+    float hitDistance;
+    float4 hitPosition;
+    float4 hitNormal;
+    float4 textureCoordinates;
+    uint materialId;
+}
+
+EntityTetraHit entityTetraHitNone()
+{
+    EntityTetraHit hit;
+    hit.didHit = false;
+    hit.hitDistance = 0.0;
+    hit.hitPosition = float4(0.0, 0.0, 0.0, 0.0);
+    hit.hitNormal = float4(0.0, 0.0, 0.0, 0.0);
+    hit.textureCoordinates = float4(0.0, 0.0, 0.0, 0.0);
+    hit.materialId = 0u;
+    return hit;
+}
+
+float2 rayAABBIntersect4DEntity(float4 origin, float4 invDir, float4 minB, float4 maxB)
+{
+    float4 t1 = (minB - origin) * invDir;
+    float4 t2 = (maxB - origin) * invDir;
+
+    float4 tmin4 = min(t1, t2);
+    float4 tmax4 = max(t1, t2);
+
+    float tmin = max(max(tmin4.x, tmin4.y), max(tmin4.z, tmin4.w));
+    float tmax = min(min(tmax4.x, tmax4.y), min(tmax4.z, tmax4.w));
+
+    if (tmax < 0.0 || tmin > tmax)
+    {
+        return float2(-1.0, -1.0);
+    }
+    return float2(max(tmin, 0.0), tmax);
+}
+
+bool testEntityTetrahedronHit(
+    float4 start,
+    float4 direction,
+    uint tetIndex,
+    float maxDistance,
+    inout EntityTetraHit closestHit)
+{
+    Tetrahedron tet = outputTetrahedrons[tetIndex];
+
+    if (tet.materialId == 0u)
+    {
+        return false;
+    }
+
+    float denom = dot(tet.normal, direction);
+    if (abs(denom) < 0.001)
+    {
+        return false;
+    }
+
+    float4 b = start - tet.vertexPositions[0];
+    float hitDistance = -dot(b, tet.normal) / denom;
+    if (hitDistance <= 0.0 || hitDistance > maxDistance)
+    {
+        return false;
+    }
+    if (closestHit.didHit && closestHit.hitDistance <= hitDistance)
+    {
+        return false;
+    }
+
+    float4 q = b + hitDistance * direction;
+
+    float4 e1 = tet.vertexPositions[1] - tet.vertexPositions[0];
+    float4 e2 = tet.vertexPositions[2] - tet.vertexPositions[0];
+    float4 e3 = tet.vertexPositions[3] - tet.vertexPositions[0];
+
+    float4 absN = abs(tet.normal);
+    float3 e1s;
+    float3 e2s;
+    float3 e3s;
+    float3 qs;
+
+    if (absN.x >= absN.y && absN.x >= absN.z && absN.x >= absN.w)
+    {
+        e1s = e1.yzw;
+        e2s = e2.yzw;
+        e3s = e3.yzw;
+        qs = q.yzw;
+    }
+    else if (absN.y >= absN.z && absN.y >= absN.w)
+    {
+        e1s = float3(e1.x, e1.z, e1.w);
+        e2s = float3(e2.x, e2.z, e2.w);
+        e3s = float3(e3.x, e3.z, e3.w);
+        qs = float3(q.x, q.z, q.w);
+    }
+    else if (absN.z >= absN.w)
+    {
+        e1s = float3(e1.x, e1.y, e1.w);
+        e2s = float3(e2.x, e2.y, e2.w);
+        e3s = float3(e3.x, e3.y, e3.w);
+        qs = float3(q.x, q.y, q.w);
+    }
+    else
+    {
+        e1s = e1.xyz;
+        e2s = e2.xyz;
+        e3s = e3.xyz;
+        qs = q.xyz;
+    }
+
+    float3 c23 = cross(e2s, e3s);
+    float det3 = dot(e1s, c23);
+    if (abs(det3) < 1e-10)
+    {
+        return false;
+    }
+
+    float invDet = 1.0 / det3;
+    float u = dot(qs, c23) * invDet;
+    float v = dot(e1s, cross(qs, e3s)) * invDet;
+    float w = dot(e1s, cross(e2s, qs)) * invDet;
+    float bary0 = 1.0 - u - v - w;
+
+    if (bary0 >= 0.0 && u >= 0.0 && v >= 0.0 && w >= 0.0)
+    {
+        closestHit.didHit = true;
+        closestHit.hitDistance = hitDistance;
+        closestHit.hitPosition = start + hitDistance * direction;
+        closestHit.hitNormal = denom < 0.0 ? tet.normal : -tet.normal;
+        closestHit.textureCoordinates =
+            bary0 * tet.texturePositions[0]
+            + u * tet.texturePositions[1]
+            + v * tet.texturePositions[2]
+            + w * tet.texturePositions[3];
+        closestHit.materialId = tet.materialId;
+        return true;
+    }
+
+    return false;
+}
+
+EntityTetraHit traceEntityTetraLinear(
+    float4 start,
+    float4 direction,
+    uint numTetrahedrons,
+    float maxDistance)
+{
+    EntityTetraHit closestHit = entityTetraHitNone();
+    for (uint i = 0u; i < numTetrahedrons; i++)
+    {
+        testEntityTetrahedronHit(start, direction, i, maxDistance, closestHit);
+    }
+    return closestHit;
+}
+
+EntityTetraHit traceEntityTetraBVH(
+    float4 start,
+    float4 direction,
+    uint numTetrahedrons,
+    float maxDistance)
+{
+    EntityTetraHit closestHit = entityTetraHitNone();
+    if (numTetrahedrons == 0u)
+    {
+        return closestHit;
+    }
+
+    float4 invDir = float4(
+        abs(direction.x) > 1e-8 ? 1.0 / direction.x : (direction.x >= 0.0 ? 1e8 : -1e8),
+        abs(direction.y) > 1e-8 ? 1.0 / direction.y : (direction.y >= 0.0 ? 1e8 : -1e8),
+        abs(direction.z) > 1e-8 ? 1.0 / direction.z : (direction.z >= 0.0 ? 1e8 : -1e8),
+        abs(direction.w) > 1e-8 ? 1.0 / direction.w : (direction.w >= 0.0 ? 1e8 : -1e8)
+    );
+
+    float2 rootT = rayAABBIntersect4DEntity(
+        start,
+        invDir,
+        bvhNodes[0].minBounds,
+        bvhNodes[0].maxBounds);
+    if (rootT.x < 0.0 || rootT.x > maxDistance)
+    {
+        return closestHit;
+    }
+
+    uint stack[BVH_STACK_SIZE];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0u;
+
+    while (stackPtr > 0)
+    {
+        uint nodeIdx = stack[--stackPtr];
+        BVHNode node = bvhNodes[nodeIdx];
+
+        if (node.isLeaf != 0u)
+        {
+            if (node.tetrahedronIndex < numTetrahedrons)
+            {
+                testEntityTetrahedronHit(
+                    start,
+                    direction,
+                    node.tetrahedronIndex,
+                    maxDistance,
+                    closestHit);
+            }
+        }
+        else
+        {
+            uint left = node.leftChild;
+            uint right = node.rightChild;
+            float bestBound = closestHit.didHit ? min(maxDistance, closestHit.hitDistance) : maxDistance;
+
+            float2 leftT = rayAABBIntersect4DEntity(
+                start,
+                invDir,
+                bvhNodes[left].minBounds,
+                bvhNodes[left].maxBounds);
+            float2 rightT = rayAABBIntersect4DEntity(
+                start,
+                invDir,
+                bvhNodes[right].minBounds,
+                bvhNodes[right].maxBounds);
+
+            bool leftHit = leftT.x >= 0.0 && leftT.x <= bestBound;
+            bool rightHit = rightT.x >= 0.0 && rightT.x <= bestBound;
+
+            if (leftHit && rightHit)
+            {
+                if (leftT.x > rightT.x)
+                {
+                    stack[stackPtr++] = left;
+                    stack[stackPtr++] = right;
+                }
+                else
+                {
+                    stack[stackPtr++] = right;
+                    stack[stackPtr++] = left;
+                }
+            }
+            else if (leftHit)
+            {
+                stack[stackPtr++] = left;
+            }
+            else if (rightHit)
+            {
+                stack[stackPtr++] = right;
+            }
+        }
+    }
+
+    return closestHit;
+}
+
+EntityTetraHit traceEntityTetra(
+    float4 start,
+    float4 direction,
+    uint numTetrahedrons,
+    float maxDistance)
+{
+    if (numTetrahedrons == 0u || maxDistance <= 0.0)
+    {
+        return entityTetraHitNone();
+    }
+
+    if (numTetrahedrons <= ENTITY_LINEAR_THRESHOLD_TETS)
+    {
+        return traceEntityTetraLinear(start, direction, numTetrahedrons, maxDistance);
+    }
+
+    return traceEntityTetraBVH(start, direction, numTetrahedrons, maxDistance);
 }
 
 float4 estimateVoxelHitNormal(float4 hitPos, float4 rayDir)
@@ -1409,6 +1685,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
 
         float3 accumColor = float3(0.0, 0.0, 0.0);
         float accumWeight = 0.0;
+        float maxEntityDistance = max(1.0, meta.maxTraceDistance);
+        bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u;
         uint hitMaterial = 0u;
         float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
         int4 hitChunkCoord = int4(0, 0, 0, 0);
@@ -1435,7 +1713,29 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 finalT,
                 lastChunkCoord);
 
-            if (hit)
+            EntityTetraHit entityHit = entityTetraHitNone();
+            if (evaluateEntityTetra)
+            {
+                float nearestVoxelDistance = hit
+                    ? max(1e-4, dot(hitPos - worldOrigin, worldDirection))
+                    : maxEntityDistance;
+                entityHit = traceEntityTetra(
+                    worldOrigin,
+                    worldDirection,
+                    wd.totalNumTetrahedrons,
+                    nearestVoxelDistance);
+            }
+
+            if (entityHit.didHit)
+            {
+                MaterialProperties mat = sampleMaterial(
+                    entityHit.materialId,
+                    entityHit.textureCoordinates);
+                float w = max(1e-4, mat.integrationWeight);
+                accumColor += shadeVoxelMaterial(mat, entityHit.hitNormal) * w;
+                accumWeight += w;
+            }
+            else if (hit)
             {
                 int4 hitVoxelCoord = hitVoxelCoordFromHitPos(hitPos, worldDirection);
                 uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
@@ -1535,6 +1835,24 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         remainingVoxelSteps,
         finalT,
         lastChunkCoord);
+
+    bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u
+        && meta.stageBMode != STAGE_B_MODE_DEBUG_COMPARE
+        && meta.stageBMode != STAGE_B_MODE_DEBUG_INTEGRAL;
+    EntityTetraHit entityHit = entityTetraHitNone();
+    if (evaluateEntityTetra)
+    {
+        float maxEntityDistance = max(1.0, meta.maxTraceDistance);
+        if (hit)
+        {
+            maxEntityDistance = max(1e-4, dot(hitPos - worldOrigin, worldDirection));
+        }
+        entityHit = traceEntityTetra(
+            worldOrigin,
+            worldDirection,
+            wd.totalNumTetrahedrons,
+            maxEntityDistance);
+    }
 
     float3 outColor;
     float outAlpha = 1.0;
@@ -1799,6 +2117,13 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             }
             outAlpha = (meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL) ? 0.0 : 1.0;
         }
+    }
+    else if (entityHit.didHit)
+    {
+        MaterialProperties mat = sampleMaterial(
+            entityHit.materialId,
+            entityHit.textureCoordinates);
+        outColor = shadeVoxelMaterial(mat, entityHit.hitNormal);
     }
     else if (hit)
     {

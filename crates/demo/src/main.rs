@@ -222,6 +222,7 @@ impl DemoScene {
                     visible_chunk_indices: &[],
                 },
                 &[],
+                &[],
             );
         } else {
             rcx.render_tetra_frame(
@@ -428,6 +429,7 @@ impl DemoScene {
                     material_words: &[],
                     visible_chunk_indices: &[],
                 },
+                &[],
                 &[],
             );
         } else {

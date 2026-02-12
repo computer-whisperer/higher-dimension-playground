@@ -421,6 +421,7 @@ const VTE_FIRST_MISMATCH_LAST_CHUNK_X: usize = 23;
 const VTE_FIRST_MISMATCH_LAST_CHUNK_Y: usize = 24;
 const VTE_FIRST_MISMATCH_LAST_CHUNK_Z: usize = 25;
 const VTE_FIRST_MISMATCH_LAST_CHUNK_W: usize = 26;
+const VTE_ENTITY_LINEAR_THRESHOLD_TETS: usize = 8;
 
 #[inline]
 fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
@@ -2606,6 +2607,7 @@ pub struct RenderContext {
     memory_allocator: Arc<StandardMemoryAllocator>,
     frames_rendered: usize,
     bvh_scene_hash: u64,
+    vte_entity_scene_hash: u64,
     last_clipped_tet_count: u32,
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
@@ -3248,6 +3250,7 @@ impl RenderContext {
             cpu_screen_capture_buffer,
             frames_rendered: 0,
             bvh_scene_hash: 0,
+            vte_entity_scene_hash: 0,
             last_clipped_tet_count: 0,
             profiler,
             hud_font,
@@ -4329,6 +4332,7 @@ impl RenderContext {
             queue,
             frame_params,
             tetra_input.model_instances,
+            &[],
             None,
         );
     }
@@ -4339,6 +4343,7 @@ impl RenderContext {
         queue: Arc<Queue>,
         mut frame_params: FrameParams,
         voxel_input: VoxelFrameInput<'_>,
+        tetra_entity_instances: &[common::ModelInstance],
         tetra_overlay_instances: &[common::ModelInstance],
     ) {
         frame_params.render_options.render_backend = RenderBackend::VoxelTraversal;
@@ -4346,6 +4351,7 @@ impl RenderContext {
             device,
             queue,
             frame_params,
+            tetra_entity_instances,
             tetra_overlay_instances,
             Some(&voxel_input),
         );
@@ -4357,6 +4363,7 @@ impl RenderContext {
         queue: Arc<Queue>,
         frame_params: FrameParams,
         model_instances: &[common::ModelInstance],
+        raster_overlay_instances: &[common::ModelInstance],
         voxel_input: Option<&VoxelFrameInput<'_>>,
     ) {
         let FrameParams {
@@ -4480,38 +4487,103 @@ impl RenderContext {
                 .len(),
         )
         .unwrap_or(usize::MAX);
-        let used_instance_count = model_instances.len().min(model_instance_capacity);
+        let use_split_voxel_instances = voxel_input.is_some();
+        let entity_used_instance_count = model_instances.len().min(model_instance_capacity);
+        let overlay_instance_capacity = model_instance_capacity.saturating_sub(entity_used_instance_count);
+        let overlay_used_instance_count = if use_split_voxel_instances {
+            raster_overlay_instances.len().min(overlay_instance_capacity)
+        } else {
+            0
+        };
+        let used_instance_count = entity_used_instance_count + overlay_used_instance_count;
+
         let requested_tetrahedron_count =
-            self.one_time_buffers.model_tetrahedron_count * used_instance_count;
+            self.one_time_buffers.model_tetrahedron_count * entity_used_instance_count;
         let total_tetrahedron_count =
             requested_tetrahedron_count.min(self.sized_buffers.max_tetrahedrons);
+        let requested_raster_overlay_tetrahedron_count =
+            self.one_time_buffers.model_tetrahedron_count * overlay_used_instance_count;
+        let raster_overlay_tetrahedron_count =
+            requested_raster_overlay_tetrahedron_count.min(self.sized_buffers.max_tetrahedrons);
+        let raster_instance_base = if use_split_voxel_instances {
+            entity_used_instance_count
+        } else {
+            0
+        };
+        let raster_tetrahedron_count = if use_split_voxel_instances {
+            raster_overlay_tetrahedron_count
+        } else {
+            total_tetrahedron_count
+        };
 
         // Debug: print scene info on first frame only
         if self.frames_rendered == 0 {
-            if model_instances.len() > used_instance_count {
-                eprintln!(
-                    "Model instance input truncated to buffer capacity: {} -> {}",
-                    model_instances.len(),
+            if use_split_voxel_instances {
+                if model_instances.len() > entity_used_instance_count {
+                    eprintln!(
+                        "VTE entity input truncated to buffer capacity: {} -> {}",
+                        model_instances.len(),
+                        entity_used_instance_count
+                    );
+                }
+                if raster_overlay_instances.len() > overlay_used_instance_count {
+                    eprintln!(
+                        "VTE raster overlay input truncated to buffer capacity: {} -> {}",
+                        raster_overlay_instances.len(),
+                        overlay_used_instance_count
+                    );
+                }
+                if requested_tetrahedron_count > total_tetrahedron_count {
+                    eprintln!(
+                        "VTE entity tetrahedrons truncated to buffer capacity: {} -> {}",
+                        requested_tetrahedron_count, total_tetrahedron_count
+                    );
+                }
+                if requested_raster_overlay_tetrahedron_count > raster_overlay_tetrahedron_count {
+                    eprintln!(
+                        "VTE raster overlay tetrahedrons truncated to buffer capacity: {} -> {}",
+                        requested_raster_overlay_tetrahedron_count, raster_overlay_tetrahedron_count
+                    );
+                }
+                println!(
+                    "VTE scene: {} entity tetrahedrons, {} raster overlay tetrahedrons ({} per instance × entities={}, overlays={})",
+                    total_tetrahedron_count,
+                    raster_overlay_tetrahedron_count,
+                    self.one_time_buffers.model_tetrahedron_count,
+                    entity_used_instance_count,
+                    overlay_used_instance_count
+                );
+                println!(
+                    "VTE entity BVH: {} internal nodes, {} total nodes",
+                    total_tetrahedron_count.saturating_sub(1),
+                    2 * total_tetrahedron_count.saturating_sub(1) + 1
+                );
+            } else {
+                if model_instances.len() > used_instance_count {
+                    eprintln!(
+                        "Model instance input truncated to buffer capacity: {} -> {}",
+                        model_instances.len(),
+                        used_instance_count
+                    );
+                }
+                if requested_tetrahedron_count > total_tetrahedron_count {
+                    eprintln!(
+                        "Tetrahedron input truncated to buffer capacity: {} -> {}",
+                        requested_tetrahedron_count, total_tetrahedron_count
+                    );
+                }
+                println!(
+                    "Scene: {} tetrahedrons ({} per instance × {} instances)",
+                    total_tetrahedron_count,
+                    self.one_time_buffers.model_tetrahedron_count,
                     used_instance_count
                 );
-            }
-            if requested_tetrahedron_count > total_tetrahedron_count {
-                eprintln!(
-                    "Tetrahedron input truncated to buffer capacity: {} -> {}",
-                    requested_tetrahedron_count, total_tetrahedron_count
+                println!(
+                    "BVH: {} internal nodes, {} total nodes",
+                    total_tetrahedron_count.saturating_sub(1),
+                    2 * total_tetrahedron_count.saturating_sub(1) + 1
                 );
             }
-            println!(
-                "Scene: {} tetrahedrons ({} per instance × {} instances)",
-                total_tetrahedron_count,
-                self.one_time_buffers.model_tetrahedron_count,
-                used_instance_count
-            );
-            println!(
-                "BVH: {} internal nodes, {} total nodes",
-                total_tetrahedron_count.saturating_sub(1),
-                2 * total_tetrahedron_count.saturating_sub(1) + 1
-            );
         }
         {
             let mut writer = self.frames_in_flight[frame_idx]
@@ -4558,8 +4630,11 @@ impl RenderContext {
                 .model_instance_buffer
                 .write()
                 .unwrap();
-            for i in 0..used_instance_count {
+            for i in 0..entity_used_instance_count {
                 writer[i] = model_instances[i];
+            }
+            for i in 0..overlay_used_instance_count {
+                writer[entity_used_instance_count + i] = raster_overlay_instances[i];
             }
         }
 
@@ -4838,9 +4913,10 @@ impl RenderContext {
                 do_raytrace = true;
             }
             RenderBackend::VoxelTraversal => {
-                // VTE is the primary pass, but optional tetra overlays (e.g. held-item previews)
-                // can be rasterized on top in the same frame.
-                do_raster = !model_instances.is_empty();
+                // VTE resolves entity tetrahedra directly in Stage A for depth correctness.
+                // Optional post-raster overlays (e.g. held block preview) are rasterized from
+                // a separate instance range to avoid double-rendering depth-tested entities.
+                do_raster = raster_tetrahedron_count > 0;
                 do_raytrace = false;
                 do_edges = false;
                 do_tetrahedron_edges = false;
@@ -4944,6 +5020,9 @@ impl RenderContext {
                 self.vte_backend_notice_printed = true;
             }
         } else {
+            // Non-VTE passes reuse the same tetra/BVH buffers for other pipelines.
+            // Force entity reprovisioning when VTE is re-enabled.
+            self.vte_entity_scene_hash = 0;
             self.clear_vte_compare_diagnostics();
         }
 
@@ -5048,6 +5127,190 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             }
 
             if do_voxel_vte {
+                let entity_tetrahedron_count = total_tetrahedron_count;
+                if entity_tetrahedron_count == 0 {
+                    self.vte_entity_scene_hash = 0;
+                } else {
+                    let entity_scene_hash = {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        entity_used_instance_count.hash(&mut hasher);
+                        entity_tetrahedron_count.hash(&mut hasher);
+                        bytemuck::cast_slice::<_, u8>(
+                            &model_instances[..entity_used_instance_count],
+                        )
+                        .hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    let entity_rebuild_needed = entity_scene_hash != self.vte_entity_scene_hash;
+                    if entity_rebuild_needed {
+                        // Preprocess tetra entity instances into world-space tetrahedra.
+                        let vte_preprocess_push_data: [u32; 4] =
+                            [0, entity_tetrahedron_count as u32, 0, 0];
+                        builder
+                            .push_constants(
+                                self.compute_pipeline.pipeline_layout.clone(),
+                                0,
+                                vte_preprocess_push_data,
+                            )
+                            .unwrap();
+                        builder
+                            .bind_pipeline_compute(
+                                self.compute_pipeline.raytrace_pre_pipeline.clone(),
+                            )
+                            .unwrap();
+                        unsafe {
+                            builder.dispatch([
+                                (entity_tetrahedron_count as u32 + 63) / 64u32,
+                                1,
+                                1,
+                            ])
+                        }
+                        .unwrap();
+                        {
+                            let q = self.profiler.next_query_index("vte_entity_preprocess");
+                            unsafe {
+                                builder.write_timestamp(
+                                    self.frames_in_flight[frame_idx].query_pool.clone(),
+                                    q,
+                                    PipelineStage::AllCommands,
+                                )
+                            }
+                            .unwrap();
+                        }
+
+                        if entity_tetrahedron_count > VTE_ENTITY_LINEAR_THRESHOLD_TETS {
+                            // Build an entity-only BVH used by the VTE Stage A tetra pass.
+                            let n = entity_tetrahedron_count as u32;
+                            let n_pow2 = n.next_power_of_two();
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_scene_bounds_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([1, 1, 1]) }.unwrap();
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([(n_pow2 + 63) / 64u32, 1, 1]) }.unwrap();
+
+                            let num_stages = n_pow2.trailing_zeros();
+                            let local_stages = 6u32.min(num_stages);
+                            let workgroups = (n_pow2 + 63) / 64;
+
+                            let push_data: [u32; 4] = [0, 0, n_pow2, 0];
+                            builder
+                                .push_constants(
+                                    self.compute_pipeline.pipeline_layout.clone(),
+                                    0,
+                                    push_data,
+                                )
+                                .unwrap();
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline
+                                        .bvh_bitonic_sort_local_pipeline
+                                        .clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+
+                            for stage in local_stages..num_stages {
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_bitonic_sort_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                for step in (local_stages..=stage).rev() {
+                                    let push_data: [u32; 4] = [stage, step, n_pow2, 0];
+                                    builder
+                                        .push_constants(
+                                            self.compute_pipeline.pipeline_layout.clone(),
+                                            0,
+                                            push_data,
+                                        )
+                                        .unwrap();
+                                    unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+                                }
+
+                                let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
+                                builder
+                                    .push_constants(
+                                        self.compute_pipeline.pipeline_layout.clone(),
+                                        0,
+                                        push_data,
+                                    )
+                                    .unwrap();
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline
+                                            .bvh_bitonic_sort_local_merge_pipeline
+                                            .clone(),
+                                    )
+                                    .unwrap();
+                                unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+                            }
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_build_tree_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline
+                                        .bvh_compute_leaf_aabbs_pipeline
+                                        .clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+
+                            let num_internal_nodes = entity_tetrahedron_count.saturating_sub(1) as u32;
+                            if num_internal_nodes > 0 {
+                                let num_passes =
+                                    2 * (32 - num_internal_nodes.leading_zeros()).max(1);
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                for _ in 0..num_passes {
+                                    unsafe {
+                                        builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
+                                    }
+                                    .unwrap();
+                                }
+                            }
+
+                            {
+                                let q = self.profiler.next_query_index("vte_entity_bvh");
+                                unsafe {
+                                    builder.write_timestamp(
+                                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                                        q,
+                                        PipelineStage::AllCommands,
+                                    )
+                                }
+                                .unwrap();
+                            }
+                        }
+
+                        self.vte_entity_scene_hash = entity_scene_hash;
+                    }
+                }
+
                 let fuse_integral_in_stage_a =
                     render_options.vte_display_mode == VteDisplayMode::Integral;
                 builder
@@ -5129,6 +5392,18 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             }
 
             if do_raster || do_tetrahedron_edges {
+                let raster_preprocess_tetrahedron_count = if do_voxel_vte {
+                    raster_tetrahedron_count
+                } else {
+                    total_tetrahedron_count
+                };
+                let raster_preprocess_push_data: [u32; 4] = [
+                    raster_instance_base as u32,
+                    raster_preprocess_tetrahedron_count as u32,
+                    0,
+                    0,
+                ];
+
                 // Tetrahedron pre-raster
                 // Reset atomic counter to 0 before clipping dispatch
                 builder
@@ -5136,10 +5411,23 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
 
                 builder
+                    .push_constants(
+                        self.compute_pipeline.pipeline_layout.clone(),
+                        0,
+                        raster_preprocess_push_data,
+                    )
+                    .unwrap();
+                builder
                     .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone())
                     .unwrap();
-                unsafe { builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1]) }
-                    .unwrap();
+                unsafe {
+                    builder.dispatch([
+                        (raster_preprocess_tetrahedron_count as u32 + 63) / 64u32,
+                        1,
+                        1,
+                    ])
+                }
+                .unwrap();
                 {
                     let q = self.profiler.next_query_index("tet_clip");
                     unsafe {
@@ -5163,7 +5451,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
 
                 if do_tetrahedron_edges {
-                    line_render_count = total_tetrahedron_count * 6;
+                    line_render_count = raster_preprocess_tetrahedron_count * 6;
                 }
             }
 
@@ -5287,6 +5575,15 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
 
                 if bvh_needs_rebuild {
                     // 1. Tetrahedron preprocessing (transform to view space)
+                    let raytrace_preprocess_push_data: [u32; 4] =
+                        [0, total_tetrahedron_count as u32, 0, 0];
+                    builder
+                        .push_constants(
+                            self.compute_pipeline.pipeline_layout.clone(),
+                            0,
+                            raytrace_preprocess_push_data,
+                        )
+                        .unwrap();
                     builder
                         .bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone())
                         .unwrap();
