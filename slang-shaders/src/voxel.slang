@@ -10,6 +10,76 @@ static const uint CHUNK_SIZE = 8;
 static const uint CHUNK_VOLUME = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
 static const uint INVALID_INDEX = 0xFFFFFFFF;
 static const uint CHUNK_FLAG_FULL = 1u << 1u;
+static const uint STAGE_B_MODE_INTEGRAL = 0u;
+static const uint STAGE_B_MODE_SLICE = 1u;
+static const uint STAGE_B_MODE_THICK_SLICE = 2u;
+static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
+static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
+
+static const uint MISS_REASON_NONE = 0u;
+static const uint MISS_REASON_TOUCHED_VISIBLE_CHUNK = 1u;
+static const uint MISS_REASON_VOXEL_BUDGET = 2u;
+static const uint MISS_REASON_CHUNK_BUDGET = 3u;
+static const uint MISS_REASON_MAX_DISTANCE = 4u;
+static const uint MISS_REASON_LOOKUP_FALSE_NEGATIVE = 5u;
+
+static const uint DEBUG_FLAG_LOOKUP_FALLBACK_USED = 1u;
+static const uint META_DEBUG_FLAG_REFERENCE_COMPARE = 1u;
+static const uint META_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY = 1u << 1u;
+static const uint META_DEBUG_FLAG_COMPARE_SLICE_ONLY = 1u << 2u;
+static const uint DEBUG_FLAG_CHUNK_TIE_STEPPED = 1u << 1u;
+static const uint DEBUG_FLAG_CHUNK_ZERO_INTERVAL = 1u << 2u;
+
+static const uint COMPARE_MISMATCH_KIND_NONE = 0u;
+static const uint COMPARE_MISMATCH_KIND_HIT_STATE = 1u;
+static const uint COMPARE_MISMATCH_KIND_CHUNK_MATERIAL = 2u;
+
+static const uint COMPARE_STAT_COMPARED = 0u;
+static const uint COMPARE_STAT_MATCHES = 1u;
+static const uint COMPARE_STAT_MISMATCHES = 2u;
+static const uint COMPARE_STAT_HIT_STATE_MISMATCHES = 3u;
+static const uint COMPARE_STAT_CHUNK_MATERIAL_MISMATCHES = 4u;
+static const uint COMPARE_STAT_FAST_MISS_REF_HIT = 5u;
+static const uint COMPARE_STAT_FAST_HIT_REF_MISS = 6u;
+static const uint COMPARE_STAT_REASON_NONE = 7u;
+static const uint COMPARE_STAT_REASON_TOUCHED_VISIBLE = 8u;
+static const uint COMPARE_STAT_REASON_VOXEL_BUDGET = 9u;
+static const uint COMPARE_STAT_REASON_CHUNK_BUDGET = 10u;
+static const uint COMPARE_STAT_REASON_MAX_DISTANCE = 11u;
+static const uint COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE = 12u;
+static const uint COMPARE_STAT_ZERO_INTERVAL_FLAG = 13u;
+static const uint COMPARE_STAT_TIE_STEPPED_FLAG = 14u;
+static const uint COMPARE_STAT_LOOKUP_FALLBACK_FLAG = 15u;
+static const uint COMPARE_STAT_COUNT = 16u;
+
+static const uint FIRST_MISMATCH_VALID = 0u;
+static const uint FIRST_MISMATCH_PIXEL_X = 1u;
+static const uint FIRST_MISMATCH_PIXEL_Y = 2u;
+static const uint FIRST_MISMATCH_LAYER = 3u;
+static const uint FIRST_MISMATCH_KIND = 4u;
+static const uint FIRST_MISMATCH_MISS_REASON = 5u;
+static const uint FIRST_MISMATCH_DEBUG_FLAGS = 6u;
+static const uint FIRST_MISMATCH_HIT_MASK = 7u;
+static const uint FIRST_MISMATCH_FAST_CHUNK_X = 8u;
+static const uint FIRST_MISMATCH_FAST_CHUNK_Y = 9u;
+static const uint FIRST_MISMATCH_FAST_CHUNK_Z = 10u;
+static const uint FIRST_MISMATCH_FAST_CHUNK_W = 11u;
+static const uint FIRST_MISMATCH_REF_CHUNK_X = 12u;
+static const uint FIRST_MISMATCH_REF_CHUNK_Y = 13u;
+static const uint FIRST_MISMATCH_REF_CHUNK_Z = 14u;
+static const uint FIRST_MISMATCH_REF_CHUNK_W = 15u;
+static const uint FIRST_MISMATCH_FAST_MATERIAL = 16u;
+static const uint FIRST_MISMATCH_REF_MATERIAL = 17u;
+static const uint FIRST_MISMATCH_FAST_HIT_T = 18u;
+static const uint FIRST_MISMATCH_REF_HIT_T = 19u;
+static const uint FIRST_MISMATCH_CHUNK_STEPS = 20u;
+static const uint FIRST_MISMATCH_REMAINING_VOXELS = 21u;
+static const uint FIRST_MISMATCH_FINAL_T = 22u;
+static const uint FIRST_MISMATCH_LAST_CHUNK_X = 23u;
+static const uint FIRST_MISMATCH_LAST_CHUNK_Y = 24u;
+static const uint FIRST_MISMATCH_LAST_CHUNK_Z = 25u;
+static const uint FIRST_MISMATCH_LAST_CHUNK_W = 26u;
+static const uint FIRST_MISMATCH_COUNT = 27u;
 
 struct VoxelFrameMeta
 {
@@ -18,9 +88,12 @@ struct VoxelFrameMeta
     uint occupancyWordCount;
     uint materialWordCount;
     uint maxTraceSteps;
+    float maxTraceDistance;
     uint chunkLookupCapacity;
-    uint padding0;
-    uint padding1;
+    uint stageBMode;
+    uint stageBSliceLayer;
+    uint stageBThickHalfWidth;
+    uint debugFlags;
 }
 
 struct VoxelChunkHeader
@@ -52,6 +125,106 @@ struct VoxelChunkLookupEntry
 [[vk::binding(5, 2)]] StructuredBuffer<uint> voxelMaterialWords;
 [[vk::binding(6, 2)]] StructuredBuffer<uint> voxelVisibleChunkIndices;
 [[vk::binding(7, 2)]] StructuredBuffer<VoxelChunkLookupEntry> voxelChunkLookup;
+[[vk::binding(8, 2)]] RWStructuredBuffer<uint> vteCompareStats;
+[[vk::binding(9, 2)]] RWStructuredBuffer<uint> vteFirstMismatchRecord;
+
+void incrementCompareStat(uint statIndex)
+{
+    if (statIndex < COMPARE_STAT_COUNT)
+    {
+        InterlockedAdd(vteCompareStats[statIndex], 1u);
+    }
+}
+
+void incrementCompareMissReason(uint missReason)
+{
+    if (missReason == MISS_REASON_NONE)
+    {
+        incrementCompareStat(COMPARE_STAT_REASON_NONE);
+    }
+    else if (missReason == MISS_REASON_TOUCHED_VISIBLE_CHUNK)
+    {
+        incrementCompareStat(COMPARE_STAT_REASON_TOUCHED_VISIBLE);
+    }
+    else if (missReason == MISS_REASON_VOXEL_BUDGET)
+    {
+        incrementCompareStat(COMPARE_STAT_REASON_VOXEL_BUDGET);
+    }
+    else if (missReason == MISS_REASON_CHUNK_BUDGET)
+    {
+        incrementCompareStat(COMPARE_STAT_REASON_CHUNK_BUDGET);
+    }
+    else if (missReason == MISS_REASON_MAX_DISTANCE)
+    {
+        incrementCompareStat(COMPARE_STAT_REASON_MAX_DISTANCE);
+    }
+    else if (missReason == MISS_REASON_LOOKUP_FALSE_NEGATIVE)
+    {
+        incrementCompareStat(COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE);
+    }
+}
+
+void captureFirstMismatch(
+    uint3 globalId,
+    uint mismatchKind,
+    uint missReason,
+    uint debugFlags,
+    bool hit,
+    bool refHit,
+    int4 hitChunkCoord,
+    int4 refHitChunkCoord,
+    uint hitMaterial,
+    uint refHitMaterial,
+    float4 worldOrigin,
+    float4 worldDirection,
+    float4 hitPos,
+    float4 refHitPos,
+    uint chunkStepsTaken,
+    uint remainingVoxelSteps,
+    float finalT,
+    int4 lastChunkCoord)
+{
+    uint prior = 1u;
+    InterlockedCompareExchange(
+        vteFirstMismatchRecord[FIRST_MISMATCH_VALID],
+        0u,
+        1u,
+        prior);
+    if (prior != 0u)
+    {
+        return;
+    }
+
+    vteFirstMismatchRecord[FIRST_MISMATCH_PIXEL_X] = globalId.x;
+    vteFirstMismatchRecord[FIRST_MISMATCH_PIXEL_Y] = globalId.y;
+    vteFirstMismatchRecord[FIRST_MISMATCH_LAYER] = globalId.z;
+    vteFirstMismatchRecord[FIRST_MISMATCH_KIND] = mismatchKind;
+    vteFirstMismatchRecord[FIRST_MISMATCH_MISS_REASON] = missReason;
+    vteFirstMismatchRecord[FIRST_MISMATCH_DEBUG_FLAGS] = debugFlags;
+    vteFirstMismatchRecord[FIRST_MISMATCH_HIT_MASK] = (hit ? 1u : 0u) | (refHit ? 2u : 0u);
+    vteFirstMismatchRecord[FIRST_MISMATCH_FAST_CHUNK_X] = asuint(hitChunkCoord.x);
+    vteFirstMismatchRecord[FIRST_MISMATCH_FAST_CHUNK_Y] = asuint(hitChunkCoord.y);
+    vteFirstMismatchRecord[FIRST_MISMATCH_FAST_CHUNK_Z] = asuint(hitChunkCoord.z);
+    vteFirstMismatchRecord[FIRST_MISMATCH_FAST_CHUNK_W] = asuint(hitChunkCoord.w);
+    vteFirstMismatchRecord[FIRST_MISMATCH_REF_CHUNK_X] = asuint(refHitChunkCoord.x);
+    vteFirstMismatchRecord[FIRST_MISMATCH_REF_CHUNK_Y] = asuint(refHitChunkCoord.y);
+    vteFirstMismatchRecord[FIRST_MISMATCH_REF_CHUNK_Z] = asuint(refHitChunkCoord.z);
+    vteFirstMismatchRecord[FIRST_MISMATCH_REF_CHUNK_W] = asuint(refHitChunkCoord.w);
+    vteFirstMismatchRecord[FIRST_MISMATCH_FAST_MATERIAL] = hitMaterial;
+    vteFirstMismatchRecord[FIRST_MISMATCH_REF_MATERIAL] = refHitMaterial;
+
+    float fastHitT = hit ? dot(hitPos - worldOrigin, worldDirection) : -1.0;
+    float refHitT = refHit ? dot(refHitPos - worldOrigin, worldDirection) : -1.0;
+    vteFirstMismatchRecord[FIRST_MISMATCH_FAST_HIT_T] = asuint(fastHitT);
+    vteFirstMismatchRecord[FIRST_MISMATCH_REF_HIT_T] = asuint(refHitT);
+    vteFirstMismatchRecord[FIRST_MISMATCH_CHUNK_STEPS] = chunkStepsTaken;
+    vteFirstMismatchRecord[FIRST_MISMATCH_REMAINING_VOXELS] = remainingVoxelSteps;
+    vteFirstMismatchRecord[FIRST_MISMATCH_FINAL_T] = asuint(finalT);
+    vteFirstMismatchRecord[FIRST_MISMATCH_LAST_CHUNK_X] = asuint(lastChunkCoord.x);
+    vteFirstMismatchRecord[FIRST_MISMATCH_LAST_CHUNK_Y] = asuint(lastChunkCoord.y);
+    vteFirstMismatchRecord[FIRST_MISMATCH_LAST_CHUNK_Z] = asuint(lastChunkCoord.z);
+    vteFirstMismatchRecord[FIRST_MISMATCH_LAST_CHUNK_W] = asuint(lastChunkCoord.w);
+}
 
 int floorDiv(int a, int b)
 {
@@ -107,6 +280,19 @@ uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
     return INVALID_INDEX;
 }
 
+uint findChunkIndexLinearVisible(int4 chunkCoord, VoxelFrameMeta meta)
+{
+    for (uint i = 0; i < meta.visibleChunkCount; i++)
+    {
+        uint chunkIndex = voxelVisibleChunkIndices[i];
+        if (chunkIndex < meta.chunkCount && all(voxelChunkHeaders[chunkIndex].chunkCoord == chunkCoord))
+        {
+            return chunkIndex;
+        }
+    }
+    return INVALID_INDEX;
+}
+
 float min4(float4 v)
 {
     return min(min(v.x, v.y), min(v.z, v.w));
@@ -150,6 +336,27 @@ float safeInvAbs(float d)
 {
     const float EPS = 1e-6;
     return abs(d) > EPS ? (1.0 / abs(d)) : 1e30;
+}
+
+int entryChunkCoord(float position, float direction)
+{
+    float chunkSizeF = float(CHUNK_SIZE);
+    float q = position / chunkSizeF;
+    float qFloor = floor(q);
+    int chunk = int(qFloor);
+
+    // Exact chunk-boundary ownership: negative travel owns the previous chunk.
+    if (direction < 0.0)
+    {
+        float boundary = qFloor * chunkSizeF;
+        float eps = 1e-7 * chunkSizeF;
+        if (abs(position - boundary) <= eps)
+        {
+            chunk -= 1;
+        }
+    }
+
+    return chunk;
 }
 
 bool voxelInChunk(int4 voxelCoord, int4 chunkMin, int4 chunkMax)
@@ -238,28 +445,31 @@ bool intersectChunkAABB(
 
 void advanceDDA4(inout int4 coord, int4 step, inout float4 tMax, float4 tDelta, out float nextT)
 {
-    // Step all tied axes at the same boundary crossing distance.
-    // This avoids traversal instability when rays pass through voxel/chunk edges/corners.
-    nextT = min4(tMax);
-    float eps = max(1e-5, abs(nextT) * 1e-5);
-
-    if (abs(tMax.x - nextT) <= eps)
+    // Deterministic single-axis DDA step.
+    // Multi-axis tie stepping is mathematically neat, but with finite precision it can
+    // promote near-ties into false ties and skip whole cells/chunks.
+    uint axis = argMin4(tMax);
+    if (axis == 0u)
     {
+        nextT = tMax.x;
         tMax.x += tDelta.x;
         coord.x += step.x;
     }
-    if (abs(tMax.y - nextT) <= eps)
+    else if (axis == 1u)
     {
+        nextT = tMax.y;
         tMax.y += tDelta.y;
         coord.y += step.y;
     }
-    if (abs(tMax.z - nextT) <= eps)
+    else if (axis == 2u)
     {
+        nextT = tMax.z;
         tMax.z += tDelta.z;
         coord.z += step.z;
     }
-    if (abs(tMax.w - nextT) <= eps)
+    else
     {
+        nextT = tMax.w;
         tMax.w += tDelta.w;
         coord.w += step.w;
     }
@@ -310,26 +520,39 @@ bool traceVoxelsInChunk(
     VoxelFrameMeta meta,
     inout uint remainingVoxelSteps,
     out uint hitMaterial,
-    out float4 hitPos)
+    out float4 hitPos,
+    out int4 hitChunkCoord)
 {
+    const float EPS = 1e-6;
     hitMaterial = 0;
     hitPos = float4(0.0, 0.0, 0.0, 0.0);
-    if (remainingVoxelSteps == 0 || tExit < tEnter)
+    hitChunkCoord = int4(0, 0, 0, 0);
+    float intervalEps = max(EPS, max(abs(tEnter), abs(tExit)) * 1e-7);
+    if (remainingVoxelSteps == 0 || tExit <= tEnter + intervalEps)
     {
         return false;
     }
 
-    const float START_EPS = 1e-4;
-    float tStart = max(0.0, tEnter + START_EPS);
-    if (tStart > tExit)
+    float tStart = max(0.0, tEnter);
+    float startBias = max(intervalEps, abs(tStart) * 1e-7);
+    float tTraceStart = tStart + startBias;
+    if (tTraceStart >= tExit)
     {
+        return false;
+    }
+    float localTExit = tExit - tTraceStart;
+    if (localTExit <= intervalEps)
+    {
+        // Ray only touches this chunk at a boundary point/edge/vertex.
+        // Treat as no interior traversal to avoid boundary-order first-hit artifacts.
         return false;
     }
 
     int4 chunkMin = chunkCoord * int(CHUNK_SIZE);
     int4 chunkMax = chunkMin + int(CHUNK_SIZE);
 
-    float4 startPos = rayOrigin + rayDir * tStart;
+    float4 startPos = rayOrigin + rayDir * tTraceStart;
+    // tTraceStart is already biased inside the interval, so plain floor gives stable ownership.
     int4 voxelCoord = int4(
         int(floor(startPos.x)),
         int(floor(startPos.y)),
@@ -351,6 +574,7 @@ bool traceVoxelsInChunk(
         stepSign(rayDir.z),
         stepSign(rayDir.w)
     );
+
     float4 tDelta = float4(
         safeInvAbs(rayDir.x),
         safeInvAbs(rayDir.y),
@@ -371,22 +595,29 @@ bool traceVoxelsInChunk(
     float localT = 0.0;
     while (remainingVoxelSteps > 0)
     {
-        float worldT = tStart + localT;
-        if (worldT > tExit)
+        if (localT > localTExit + intervalEps)
         {
             break;
         }
 
-        remainingVoxelSteps--;
-        uint materialId = 0;
-        if (sampleVoxelInChunk(voxelCoord, chunkMin, h, meta, materialId))
+        float nextLocalT = min4(tMaxLocal);
+        float segmentEnd = min(nextLocalT, localTExit);
+        bool hasInterior = (segmentEnd - localT) > intervalEps;
+
+        if (hasInterior)
         {
-            hitMaterial = materialId;
-            hitPos = rayOrigin + rayDir * worldT;
-            return true;
+            remainingVoxelSteps--;
+            uint materialId = 0;
+            if (sampleVoxelInChunk(voxelCoord, chunkMin, h, meta, materialId))
+            {
+                hitMaterial = materialId;
+                hitPos = rayOrigin + rayDir * (tTraceStart + localT);
+                hitChunkCoord = chunkCoord;
+                return true;
+            }
         }
 
-        float nextLocalT = 0.0;
+        nextLocalT = 0.0;
         advanceDDA4(voxelCoord, step, tMaxLocal, tDelta, nextLocalT);
         localT = max(localT, nextLocalT);
 
@@ -398,36 +629,120 @@ bool traceVoxelsInChunk(
     return false;
 }
 
-bool traceVoxelRayDDA(
+bool traceVoxelRayReferenceVisible(
     float4 rayOrigin,
     float4 rayDir,
     VoxelFrameMeta meta,
     out uint hitMaterial,
-    out float4 hitPos)
+    out float4 hitPos,
+    out int4 hitChunkCoord)
 {
+    const float EPS = 1e-6;
     hitMaterial = 0;
     hitPos = float4(0.0, 0.0, 0.0, 0.0);
+    hitChunkCoord = int4(0, 0, 0, 0);
+
     if (meta.chunkCount == 0 || meta.visibleChunkCount == 0)
     {
         return false;
     }
 
-    const float MAX_DISTANCE = 160.0;
+    float MAX_DISTANCE = max(1.0, meta.maxTraceDistance);
+    float bestHitT = 1e30;
+    bool foundHit = false;
+    uint baseVoxelBudget = max(1u, min(meta.maxTraceSteps * 8u, 32768u));
+
+    for (uint i = 0; i < meta.visibleChunkCount; i++)
+    {
+        uint chunkIndex = voxelVisibleChunkIndices[i];
+        if (chunkIndex >= meta.chunkCount)
+        {
+            continue;
+        }
+
+        VoxelChunkHeader h = voxelChunkHeaders[chunkIndex];
+        float tEnter = 0.0;
+        float tExit = 0.0;
+        if (!intersectChunkAABB(rayOrigin, rayDir, h.chunkCoord, tEnter, tExit))
+        {
+            continue;
+        }
+
+        tEnter = max(0.0, tEnter);
+        tExit = min(MAX_DISTANCE, tExit);
+        if (tExit <= tEnter + EPS)
+        {
+            continue;
+        }
+
+        uint localBudget = baseVoxelBudget;
+        uint chunkHitMaterial = 0;
+        float4 chunkHitPos = float4(0.0, 0.0, 0.0, 0.0);
+        int4 chunkHitChunkCoord = int4(0, 0, 0, 0);
+        if (!traceVoxelsInChunk(
+            rayOrigin,
+            rayDir,
+            tEnter,
+            tExit,
+            h.chunkCoord,
+            h,
+            meta,
+            localBudget,
+            chunkHitMaterial,
+            chunkHitPos,
+            chunkHitChunkCoord))
+        {
+            continue;
+        }
+
+        float hitT = dot(chunkHitPos - rayOrigin, rayDir);
+        if (hitT < bestHitT)
+        {
+            bestHitT = hitT;
+            hitMaterial = chunkHitMaterial;
+            hitPos = chunkHitPos;
+            hitChunkCoord = chunkHitChunkCoord;
+            foundHit = true;
+        }
+    }
+
+    return foundHit;
+}
+
+bool traceVoxelRayDDA(
+    float4 rayOrigin,
+    float4 rayDir,
+    VoxelFrameMeta meta,
+    out uint hitMaterial,
+    out float4 hitPos,
+    out int4 hitChunkCoord,
+    out uint missReason,
+    out uint debugFlags,
+    out uint outChunkStepsTaken,
+    out uint outRemainingVoxelSteps,
+    out float outFinalT,
+    out int4 outLastChunkCoord)
+{
+    hitMaterial = 0;
+    hitPos = float4(0.0, 0.0, 0.0, 0.0);
+    hitChunkCoord = int4(0, 0, 0, 0);
+    missReason = MISS_REASON_NONE;
+    debugFlags = 0u;
+    outChunkStepsTaken = 0u;
+    outRemainingVoxelSteps = 0u;
+    outFinalT = 0.0;
+    outLastChunkCoord = int4(0, 0, 0, 0);
+    if (meta.chunkCount == 0 || meta.visibleChunkCount == 0)
+    {
+        return false;
+    }
+
+    float MAX_DISTANCE = max(1.0, meta.maxTraceDistance);
     uint maxChunkSteps = max(1u, min(meta.maxTraceSteps, 4096u));
     uint remainingVoxelSteps = max(1u, min(meta.maxTraceSteps * 8u, 32768u));
+    bool collectDebugFlags = (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
+        || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL);
 
-    int4 startVoxel = int4(
-        int(floor(rayOrigin.x)),
-        int(floor(rayOrigin.y)),
-        int(floor(rayOrigin.z)),
-        int(floor(rayOrigin.w))
-    );
-    int4 chunkCoord = int4(
-        floorDiv(startVoxel.x, int(CHUNK_SIZE)),
-        floorDiv(startVoxel.y, int(CHUNK_SIZE)),
-        floorDiv(startVoxel.z, int(CHUNK_SIZE)),
-        floorDiv(startVoxel.w, int(CHUNK_SIZE))
-    );
     int4 chunkStep = int4(
         stepSign(rayDir.x),
         stepSign(rayDir.y),
@@ -435,70 +750,113 @@ bool traceVoxelRayDDA(
         stepSign(rayDir.w)
     );
 
-    float4 tDeltaChunk = float4(
-        safeInvAbs(rayDir.x) * float(CHUNK_SIZE),
-        safeInvAbs(rayDir.y) * float(CHUNK_SIZE),
-        safeInvAbs(rayDir.z) * float(CHUNK_SIZE),
-        safeInvAbs(rayDir.w) * float(CHUNK_SIZE)
-    );
-    float4 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
-    if (chunkStep.x > 0)
-    {
-        tMaxChunk.x = (float((chunkCoord.x + 1) * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
-    }
-    else if (chunkStep.x < 0)
-    {
-        tMaxChunk.x = (float(chunkCoord.x * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
-    }
-    if (chunkStep.y > 0)
-    {
-        tMaxChunk.y = (float((chunkCoord.y + 1) * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
-    }
-    else if (chunkStep.y < 0)
-    {
-        tMaxChunk.y = (float(chunkCoord.y * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
-    }
-    if (chunkStep.z > 0)
-    {
-        tMaxChunk.z = (float((chunkCoord.z + 1) * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
-    }
-    else if (chunkStep.z < 0)
-    {
-        tMaxChunk.z = (float(chunkCoord.z * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
-    }
-    if (chunkStep.w > 0)
-    {
-        tMaxChunk.w = (float((chunkCoord.w + 1) * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
-    }
-    else if (chunkStep.w < 0)
-    {
-        tMaxChunk.w = (float(chunkCoord.w * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
-    }
-
+    bool touchedVisibleChunk = false;
+    uint chunkStepsTaken = 0u;
     float currentT = 0.0;
+    int4 lastChunkCoord = int4(0, 0, 0, 0);
+    const float CHUNK_EPS = 1e-6;
     for (uint chunkStepIdx = 0; chunkStepIdx < maxChunkSteps; chunkStepIdx++)
     {
+        chunkStepsTaken++;
         if (currentT > MAX_DISTANCE || remainingVoxelSteps == 0)
         {
             break;
         }
 
+        // Probe slightly forward along the ray so boundary points are owned by
+        // the chunk we are entering, not the chunk we just exited.
+        float probeEps = max(CHUNK_EPS, abs(currentT) * 1e-7);
+        float probeT = min(MAX_DISTANCE, currentT + probeEps);
+        float4 currentPos = rayOrigin + rayDir * probeT;
+        int4 chunkCoord = int4(
+            entryChunkCoord(currentPos.x, rayDir.x),
+            entryChunkCoord(currentPos.y, rayDir.y),
+            entryChunkCoord(currentPos.z, rayDir.z),
+            entryChunkCoord(currentPos.w, rayDir.w)
+        );
+        lastChunkCoord = chunkCoord;
+
+        float4 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
+        if (chunkStep.x > 0)
+        {
+            tMaxChunk.x = (float((chunkCoord.x + 1) * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
+        }
+        else if (chunkStep.x < 0)
+        {
+            tMaxChunk.x = (float(chunkCoord.x * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
+        }
+        if (chunkStep.y > 0)
+        {
+            tMaxChunk.y = (float((chunkCoord.y + 1) * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
+        }
+        else if (chunkStep.y < 0)
+        {
+            tMaxChunk.y = (float(chunkCoord.y * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
+        }
+        if (chunkStep.z > 0)
+        {
+            tMaxChunk.z = (float((chunkCoord.z + 1) * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
+        }
+        else if (chunkStep.z < 0)
+        {
+            tMaxChunk.z = (float(chunkCoord.z * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
+        }
+        if (chunkStep.w > 0)
+        {
+            tMaxChunk.w = (float((chunkCoord.w + 1) * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
+        }
+        else if (chunkStep.w < 0)
+        {
+            tMaxChunk.w = (float(chunkCoord.w * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
+        }
+
         float chunkExitT = min(MAX_DISTANCE, min4(tMaxChunk));
         chunkExitT = max(chunkExitT, currentT);
+        if (collectDebugFlags)
+        {
+            // Tight tie threshold: only classify true multi-plane boundary crossings.
+            // Loose thresholds promote near-ties and pollute diagnostics/ownership logic.
+            float tieEps = max(1e-8, abs(chunkExitT) * 1e-7);
+            uint tieCount = 0u;
+            if (abs(tMaxChunk.x - chunkExitT) <= tieEps) tieCount++;
+            if (abs(tMaxChunk.y - chunkExitT) <= tieEps) tieCount++;
+            if (abs(tMaxChunk.z - chunkExitT) <= tieEps) tieCount++;
+            if (abs(tMaxChunk.w - chunkExitT) <= tieEps) tieCount++;
+            if (tieCount > 1u)
+            {
+                debugFlags |= DEBUG_FLAG_CHUNK_TIE_STEPPED;
+            }
+        }
 
         uint chunkIndex = findChunkIndex(chunkCoord, meta);
+        if (chunkIndex == INVALID_INDEX
+            && (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
+                || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL))
+        {
+            uint linearChunkIndex = findChunkIndexLinearVisible(chunkCoord, meta);
+            if (linearChunkIndex != INVALID_INDEX)
+            {
+                // Hash lookup false negative: fall back so debug mode can keep tracing.
+                debugFlags |= DEBUG_FLAG_LOOKUP_FALLBACK_USED;
+                chunkIndex = linearChunkIndex;
+            }
+        }
         if (chunkIndex != INVALID_INDEX)
         {
+            touchedVisibleChunk = true;
             VoxelChunkHeader h = voxelChunkHeaders[chunkIndex];
             uint chunkMaterial = 0;
             float4 chunkHitPos = float4(0.0, 0.0, 0.0, 0.0);
-            float aabbEnter = 0.0;
-            float aabbExit = -1.0;
-            if (intersectChunkAABB(rayOrigin, rayDir, chunkCoord, aabbEnter, aabbExit))
+            int4 chunkHitChunkCoord = int4(0, 0, 0, 0);
+            // Use slab intersection to disambiguate boundary ownership at tie crossings, then
+            // clamp to the DDA interval for this chunk step.
+            float slabEnter = 0.0;
+            float slabExit = 0.0;
+            if (intersectChunkAABB(rayOrigin, rayDir, chunkCoord, slabEnter, slabExit))
             {
-                float tEnter = max(currentT, aabbEnter);
-                float tExit = min(chunkExitT, aabbExit);
-                if (tExit >= tEnter)
+                float tEnter = max(currentT, slabEnter);
+                float tExit = min(chunkExitT, slabExit);
+                if (tExit > tEnter + CHUNK_EPS)
                 {
                     if (traceVoxelsInChunk(
                         rayOrigin,
@@ -510,20 +868,61 @@ bool traceVoxelRayDDA(
                         meta,
                         remainingVoxelSteps,
                         chunkMaterial,
-                        chunkHitPos))
+                        chunkHitPos,
+                        chunkHitChunkCoord))
                     {
                         hitMaterial = chunkMaterial;
                         hitPos = chunkHitPos;
+                        hitChunkCoord = chunkHitChunkCoord;
+                        missReason = MISS_REASON_NONE;
+                        outChunkStepsTaken = chunkStepsTaken;
+                        outRemainingVoxelSteps = remainingVoxelSteps;
+                        outFinalT = currentT;
+                        outLastChunkCoord = lastChunkCoord;
                         return true;
                     }
+                }
+                else if (collectDebugFlags)
+                {
+                    debugFlags |= DEBUG_FLAG_CHUNK_ZERO_INTERVAL;
                 }
             }
         }
 
-        float nextChunkT = 0.0;
-        advanceDDA4(chunkCoord, chunkStep, tMaxChunk, tDeltaChunk, nextChunkT);
-        currentT = max(currentT, nextChunkT);
+        // Always advance from absolute ray parameterization. This avoids
+        // cumulative ownership drift across boundary ties.
+        float advanceEps = max(CHUNK_EPS, abs(chunkExitT) * 1e-7);
+        currentT = max(currentT + CHUNK_EPS, chunkExitT + advanceEps);
     }
+
+    if ((debugFlags & DEBUG_FLAG_LOOKUP_FALLBACK_USED) != 0u)
+    {
+        missReason = MISS_REASON_LOOKUP_FALSE_NEGATIVE;
+    }
+    else if (remainingVoxelSteps == 0)
+    {
+        missReason = MISS_REASON_VOXEL_BUDGET;
+    }
+    else if (currentT > MAX_DISTANCE)
+    {
+        missReason = MISS_REASON_MAX_DISTANCE;
+    }
+    else if (chunkStepsTaken >= maxChunkSteps)
+    {
+        missReason = MISS_REASON_CHUNK_BUDGET;
+    }
+    else if (touchedVisibleChunk)
+    {
+        missReason = MISS_REASON_TOUCHED_VISIBLE_CHUNK;
+    }
+    else
+    {
+        missReason = MISS_REASON_NONE;
+    }
+    outChunkStepsTaken = chunkStepsTaken;
+    outRemainingVoxelSteps = remainingVoxelSteps;
+    outFinalT = currentT;
+    outLastChunkCoord = lastChunkCoord;
     return false;
 }
 
@@ -535,6 +934,18 @@ void mainVoxelClear(uint3 globalId : SV_DispatchThreadID)
     if (globalId.x >= wd.renderDimensions.x || globalId.y >= wd.renderDimensions.y)
     {
         return;
+    }
+
+    if (globalId.x == 0u && globalId.y == 0u)
+    {
+        for (uint i = 0u; i < COMPARE_STAT_COUNT; i++)
+        {
+            vteCompareStats[i] = 0u;
+        }
+        for (uint i = 0u; i < FIRST_MISMATCH_COUNT; i++)
+        {
+            vteFirstMismatchRecord[i] = 0u;
+        }
     }
 
     uint pixelBase = globalId.y * wd.renderDimensions.x + globalId.x;
@@ -553,6 +964,19 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     VoxelFrameMeta meta = voxelFrameMetaBuffer[0];
     if (globalId.x >= wd.renderDimensions.x || globalId.y >= wd.renderDimensions.y || globalId.z >= wd.renderDimensions.z)
     {
+        return;
+    }
+
+    uint index = globalId.z * wd.renderDimensions.x * wd.renderDimensions.y
+               + globalId.y * wd.renderDimensions.x
+               + globalId.x;
+    uint layerCount = max(1u, wd.renderDimensions.z);
+    uint centerLayer = min(meta.stageBSliceLayer, layerCount - 1u);
+    bool compareSliceOnly = (meta.debugFlags & META_DEBUG_FLAG_COMPARE_SLICE_ONLY) != 0u
+        && (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL);
+    if (compareSliceOnly && globalId.z != centerLayer)
+    {
+        pixelBuffer[index] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
@@ -585,10 +1009,292 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
 
     uint hitMaterial = 0;
     float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
-    bool hit = traceVoxelRayDDA(worldOrigin, worldDirection, meta, hitMaterial, hitPos);
+    int4 hitChunkCoord = int4(0, 0, 0, 0);
+    uint missReason = MISS_REASON_NONE;
+    uint debugFlags = 0u;
+    uint chunkStepsTaken = 0u;
+    uint remainingVoxelSteps = 0u;
+    float finalT = 0.0;
+    int4 lastChunkCoord = int4(0, 0, 0, 0);
+    bool hit = traceVoxelRayDDA(
+        worldOrigin,
+        worldDirection,
+        meta,
+        hitMaterial,
+        hitPos,
+        hitChunkCoord,
+        missReason,
+        debugFlags,
+        chunkStepsTaken,
+        remainingVoxelSteps,
+        finalT,
+        lastChunkCoord);
 
     float3 outColor;
-    if (hit)
+    float outAlpha = 1.0;
+    if (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL)
+    {
+        bool doReferenceCompare = (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) != 0u;
+        bool mismatchOnly = (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY) != 0u;
+        if (doReferenceCompare)
+        {
+            uint refHitMaterial = 0;
+            float4 refHitPos = float4(0.0, 0.0, 0.0, 0.0);
+            int4 refHitChunkCoord = int4(0, 0, 0, 0);
+            bool refHit = traceVoxelRayReferenceVisible(
+                worldOrigin,
+                worldDirection,
+                meta,
+                refHitMaterial,
+                refHitPos,
+                refHitChunkCoord);
+
+            bool hitStateMismatch = (hit != refHit);
+            bool chunkMaterialMismatch = (!hitStateMismatch)
+                && hit
+                && refHit
+                && (!all(hitChunkCoord == refHitChunkCoord) || hitMaterial != refHitMaterial);
+            bool anyMismatch = hitStateMismatch || chunkMaterialMismatch;
+            uint mismatchKind = COMPARE_MISMATCH_KIND_NONE;
+            if (hitStateMismatch)
+            {
+                mismatchKind = COMPARE_MISMATCH_KIND_HIT_STATE;
+            }
+            else if (chunkMaterialMismatch)
+            {
+                mismatchKind = COMPARE_MISMATCH_KIND_CHUNK_MATERIAL;
+            }
+
+            incrementCompareStat(COMPARE_STAT_COMPARED);
+            incrementCompareMissReason(missReason);
+            if ((debugFlags & DEBUG_FLAG_CHUNK_ZERO_INTERVAL) != 0u)
+            {
+                incrementCompareStat(COMPARE_STAT_ZERO_INTERVAL_FLAG);
+            }
+            if ((debugFlags & DEBUG_FLAG_CHUNK_TIE_STEPPED) != 0u)
+            {
+                incrementCompareStat(COMPARE_STAT_TIE_STEPPED_FLAG);
+            }
+            if ((debugFlags & DEBUG_FLAG_LOOKUP_FALLBACK_USED) != 0u)
+            {
+                incrementCompareStat(COMPARE_STAT_LOOKUP_FALLBACK_FLAG);
+            }
+
+            if (anyMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_MISMATCHES);
+                if (hitStateMismatch)
+                {
+                    incrementCompareStat(COMPARE_STAT_HIT_STATE_MISMATCHES);
+                    if (hit)
+                    {
+                        incrementCompareStat(COMPARE_STAT_FAST_HIT_REF_MISS);
+                    }
+                    else
+                    {
+                        incrementCompareStat(COMPARE_STAT_FAST_MISS_REF_HIT);
+                    }
+                }
+                if (chunkMaterialMismatch)
+                {
+                    incrementCompareStat(COMPARE_STAT_CHUNK_MATERIAL_MISMATCHES);
+                }
+                captureFirstMismatch(
+                    globalId,
+                    mismatchKind,
+                    missReason,
+                    debugFlags,
+                    hit,
+                    refHit,
+                    hitChunkCoord,
+                    refHitChunkCoord,
+                    hitMaterial,
+                    refHitMaterial,
+                    worldOrigin,
+                    worldDirection,
+                    hitPos,
+                    refHitPos,
+                    chunkStepsTaken,
+                    remainingVoxelSteps,
+                    finalT,
+                    lastChunkCoord);
+            }
+            else
+            {
+                incrementCompareStat(COMPARE_STAT_MATCHES);
+            }
+
+            if (hitStateMismatch)
+            {
+                // Red: fast DDA reported hit, reference says miss.
+                // Blue: fast DDA missed, reference says hit.
+                if (hit)
+                {
+                    outColor = float3(1.0, 0.0, 0.0);
+                }
+                else if ((debugFlags & DEBUG_FLAG_CHUNK_ZERO_INTERVAL) != 0u)
+                {
+                    // Teal: DDA lost interior due zero-interval chunk ownership.
+                    outColor = float3(0.0, 0.85, 1.0);
+                }
+                else if ((debugFlags & DEBUG_FLAG_CHUNK_TIE_STEPPED) != 0u)
+                {
+                    // Violet: DDA encountered tie crossings before miss.
+                    outColor = float3(0.62, 0.25, 1.0);
+                }
+                else if (missReason == MISS_REASON_TOUCHED_VISIBLE_CHUNK)
+                {
+                    // Deep blue: stepped visible chunks but found no hit.
+                    outColor = float3(0.05, 0.05, 1.0);
+                }
+                else if (missReason == MISS_REASON_LOOKUP_FALSE_NEGATIVE)
+                {
+                    // Magenta-blue: hash lookup divergence.
+                    outColor = float3(0.65, 0.1, 1.0);
+                }
+                else if (missReason == MISS_REASON_VOXEL_BUDGET)
+                {
+                    // Cyan-blue: voxel budget exhausted (should not happen at high budgets).
+                    outColor = float3(0.0, 0.55, 1.0);
+                }
+                else if (missReason == MISS_REASON_CHUNK_BUDGET)
+                {
+                    // Indigo: chunk budget exhausted.
+                    outColor = float3(0.2, 0.0, 1.0);
+                }
+                else if (missReason == MISS_REASON_MAX_DISTANCE)
+                {
+                    // Sky-blue: max-distance clipped.
+                    outColor = float3(0.25, 0.75, 1.0);
+                }
+                else
+                {
+                    // Pure blue: generic DDA miss vs reference hit.
+                    outColor = float3(0.1, 0.1, 1.0);
+                }
+                outAlpha = 1.0;
+            }
+            else if (chunkMaterialMismatch)
+            {
+                // Orange: both hit, but chose different chunk/material.
+                outColor = float3(1.0, 0.5, 0.0);
+                outAlpha = 1.0;
+            }
+            else if (mismatchOnly)
+            {
+                // Mismatch-only view: neutral colors for agreement, vivid colors for disagreement.
+                outColor = hit ? float3(0.12, 0.12, 0.12) : float3(0.05, 0.08, 0.12);
+                outAlpha = 1.0;
+            }
+            else if (hit)
+            {
+                // Match path (hit): show normal chunk-color debug output.
+                uint h = hashChunkCoord(hitChunkCoord);
+                float3 chunkColor = float3(
+                    float((h >> 0u) & 0xFFu),
+                    float((h >> 8u) & 0xFFu),
+                    float((h >> 16u) & 0xFFu)) / 255.0;
+
+                float chunkSizeF = float(CHUNK_SIZE);
+                float4 chunkLocal = hitPos - floor(hitPos / chunkSizeF) * chunkSizeF;
+                float4 edgeDist = min(chunkLocal, chunkSizeF - chunkLocal);
+                float seamDist = min(min(edgeDist.x, edgeDist.z), edgeDist.w);
+                outColor = seamDist < 0.04
+                    ? lerp(chunkColor, float3(1.0, 1.0, 1.0), 0.65)
+                    : chunkColor;
+                outAlpha = 1.0;
+            }
+            else
+            {
+                // Match path (miss): keep miss-reason palette.
+                if (missReason == MISS_REASON_LOOKUP_FALSE_NEGATIVE)
+                {
+                    outColor = float3(1.0, 0.0, 1.0);
+                }
+                else if (missReason == MISS_REASON_TOUCHED_VISIBLE_CHUNK)
+                {
+                    outColor = float3(1.0, 0.0, 0.2);
+                }
+                else if (missReason == MISS_REASON_VOXEL_BUDGET)
+                {
+                    outColor = float3(1.0, 0.55, 0.0);
+                }
+                else if (missReason == MISS_REASON_CHUNK_BUDGET)
+                {
+                    outColor = float3(1.0, 0.95, 0.1);
+                }
+                else if (missReason == MISS_REASON_MAX_DISTANCE)
+                {
+                    outColor = float3(0.15, 0.65, 1.0);
+                }
+                else
+                {
+                    outColor = float3(0.03, 0.03, 0.05);
+                }
+                outAlpha = (meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL) ? 0.0 : 1.0;
+            }
+        }
+        else if (hit)
+        {
+            if ((debugFlags & DEBUG_FLAG_LOOKUP_FALLBACK_USED) != 0u)
+            {
+                outColor = float3(1.0, 0.0, 1.0);
+            }
+            else
+            {
+                uint h = hashChunkCoord(hitChunkCoord);
+                float3 chunkColor = float3(
+                    float((h >> 0u) & 0xFFu),
+                    float((h >> 8u) & 0xFFu),
+                    float((h >> 16u) & 0xFFu)) / 255.0;
+
+                float chunkSizeF = float(CHUNK_SIZE);
+                float4 chunkLocal = hitPos - floor(hitPos / chunkSizeF) * chunkSizeF;
+                float4 edgeDist = min(chunkLocal, chunkSizeF - chunkLocal);
+                // Ignore Y seams for diagnostics here: the flat world's first hit often lies on
+                // the y=0 boundary of chunk y=-1, which would otherwise paint everything as seam.
+                float seamDist = min(min(edgeDist.x, edgeDist.z), edgeDist.w);
+                if (seamDist < 0.04)
+                {
+                    outColor = lerp(chunkColor, float3(1.0, 1.0, 1.0), 0.65);
+                }
+                else
+                {
+                    outColor = chunkColor;
+                }
+            }
+            outAlpha = 1.0;
+        }
+        else
+        {
+            if (missReason == MISS_REASON_LOOKUP_FALSE_NEGATIVE)
+            {
+                outColor = float3(1.0, 0.0, 1.0);
+            }
+            else if (missReason == MISS_REASON_TOUCHED_VISIBLE_CHUNK)
+            {
+                outColor = float3(1.0, 0.0, 0.2);
+            }
+            else if (missReason == MISS_REASON_VOXEL_BUDGET)
+            {
+                outColor = float3(1.0, 0.55, 0.0);
+            }
+            else if (missReason == MISS_REASON_CHUNK_BUDGET)
+            {
+                outColor = float3(1.0, 0.95, 0.1);
+            }
+            else if (missReason == MISS_REASON_MAX_DISTANCE)
+            {
+                outColor = float3(0.15, 0.65, 1.0);
+            }
+            else
+            {
+                outColor = float3(0.03, 0.03, 0.05);
+            }
+            outAlpha = (meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL) ? 0.0 : 1.0;
+        }
+    }
+    else if (hit)
     {
         MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
         outColor = mat.albedo.xyz * 0.75 + mat.albedo.xyz * mat.luminance;
@@ -599,15 +1305,79 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         outColor = lerp(float3(0.02, 0.03, 0.06), float3(0.16, 0.22, 0.40), saturate(a));
     }
 
-    uint index = globalId.z * wd.renderDimensions.x * wd.renderDimensions.y
-               + globalId.y * wd.renderDimensions.x
-               + globalId.x;
-    pixelBuffer[index] = float4(outColor, 1.0);
+    pixelBuffer[index] = float4(outColor, outAlpha);
 }
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void mainVoxelDisplayStageB(uint3 globalId : SV_DispatchThreadID)
 {
-    // Stage B currently relies on existing present shader accumulation across Z slices.
+    WorkingData wd = workingDataBuffer[0];
+    VoxelFrameMeta meta = voxelFrameMetaBuffer[0];
+    if (globalId.x >= wd.renderDimensions.x || globalId.y >= wd.renderDimensions.y)
+    {
+        return;
+    }
+
+    uint width = wd.renderDimensions.x;
+    uint height = wd.renderDimensions.y;
+    uint layers = max(1u, wd.renderDimensions.z);
+    uint layerStride = width * height;
+    uint pixelBase = globalId.y * width + globalId.x;
+    uint centerLayer = min(meta.stageBSliceLayer, layers - 1);
+
+    float3 color = float3(0.0, 0.0, 0.0);
+    if (meta.stageBMode == STAGE_B_MODE_SLICE || meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE)
+    {
+        color = pixelBuffer[pixelBase + centerLayer * layerStride].xyz;
+    }
+    else if (meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL)
+    {
+        float3 hitAccum = float3(0.0, 0.0, 0.0);
+        float3 missAccum = float3(0.0, 0.0, 0.0);
+        float hitCount = 0.0;
+        float missCount = 0.0;
+        for (uint z = 0; z < layers; z++)
+        {
+            float4 sample = pixelBuffer[pixelBase + z * layerStride];
+            float hitMask = sample.w > 0.5 ? 1.0 : 0.0;
+            hitAccum += sample.xyz * hitMask;
+            missAccum += sample.xyz * (1.0 - hitMask);
+            hitCount += hitMask;
+            missCount += (1.0 - hitMask);
+        }
+
+        float3 hitColor = hitCount > 0.0 ? hitAccum / hitCount : float3(0.0, 0.0, 0.0);
+        float3 missColor = missCount > 0.0 ? missAccum / missCount : float3(0.0, 0.0, 0.0);
+        float hitFrac = hitCount / float(max(1u, layers));
+
+        color = lerp(missColor, hitColor, hitFrac);
+        color = lerp(color, float3(hitFrac, hitFrac, hitFrac), 0.2);
+    }
+    else
+    {
+        uint lo = 0;
+        uint hi = layers - 1;
+        if (meta.stageBMode == STAGE_B_MODE_THICK_SLICE)
+        {
+            uint half = min(meta.stageBThickHalfWidth, layers - 1);
+            lo = centerLayer > half ? centerLayer - half : 0;
+            hi = min(layers - 1, centerLayer + half);
+        }
+
+        float3 accum = float3(0.0, 0.0, 0.0);
+        uint sampleCount = 0;
+        for (uint z = lo; z <= hi; z++)
+        {
+            accum += pixelBuffer[pixelBase + z * layerStride].xyz;
+            sampleCount++;
+        }
+
+        if (sampleCount > 0)
+        {
+            color = accum / float(sampleCount);
+        }
+    }
+
+    pixelBuffer[pixelBase] = float4(color, 1.0);
 }

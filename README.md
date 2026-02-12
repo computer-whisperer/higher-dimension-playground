@@ -4,10 +4,11 @@ A 4D rendering engine for visualizing tesseracts (hypercubes) and other four-dim
 
 ## Overview
 
-This project renders 4D geometry by decomposing hypercubes into tetrahedra (3-simplices) and projecting them to screen space. It supports two rendering pipelines:
+This project renders 4D geometry with multiple backends. It supports three rendering pipelines:
 
-- **Path Tracing** - Monte Carlo path tracing in 4D space with progressive accumulation
-- **Rasterization** - Traditional rasterization extended to 4D with ZW-depth integration
+- **Tetra Ray Tracing** - Monte Carlo/path-traced tetrahedron intersections in 4D
+- **Tetra Rasterization** - Rasterization extended to 4D with ZW-depth integration
+- **Voxel Traversal Engine (VTE)** - Native voxel chunk/cell traversal with Stage-A/Stage-B resolve
 
 ## Features
 
@@ -30,11 +31,13 @@ This project renders 4D geometry by decomposing hypercubes into tetrahedra (3-si
   - Model instancing with per-cell material assignment
   - View matrix transforms for camera positioning
   - Configurable focal lengths for XY and ZW projections
+  - Runtime-selectable backend: tetra-raster, tetra-raytrace, or voxel-traversal
 
 - **Shader System** (`slang-shaders/`)
   - Written in [Slang](https://shader-slang.com/) for stable generics support
   - Raytracing: tetrahedron preprocessing, ray-tetrahedron intersection, path tracing
   - Rasterization: tetrahedron processing, per-pixel ZW integration, edge rendering
+  - VTE: chunk DDA + in-chunk voxel DDA, plus Stage-B display modes
   - Presentation: line wireframe rendering, buffer display
 
 - **Procedural Materials** (`slang-shaders/src/materials.slang`)
@@ -165,6 +168,57 @@ The default scene includes:
 | Escape | Release mouse (press again to exit) |
 | Click | Re-grab mouse |
 | Double-tap Space | Toggle fly/gravity mode |
+
+### Game Options
+
+```bash
+cargo run -p game --release -- [OPTIONS]
+```
+
+Core runtime options:
+
+| Flag | Effect |
+|------|--------|
+| `--backend <auto\|tetra-raster\|tetra-raytrace\|voxel-traversal>` | Select renderer backend |
+| `--scene <flat\|demo-cubes>` | Voxel scene preset |
+| `-W, --width` / `-H, --height` | Render size |
+| `--layers` | Hidden-dimension sample layers |
+| `--cpu-render` | CPU reference render to `frames/cpu_render.png`, then exit |
+
+VTE-specific options:
+
+| Flag | Effect |
+|------|--------|
+| `--vte-max-trace-steps` | Per-ray traversal step budget |
+| `--vte-max-trace-distance` | Max ray distance before miss |
+| `--vte-display-mode <integral\|slice\|thick-slice\|debug-compare\|debug-integral>` | Stage-B resolve mode |
+| `--vte-slice-layer <index>` | Slice center layer (default: middle layer) |
+| `--vte-thick-half-width <n>` | Thick-slice radius around center layer |
+
+Screenshot/capture options:
+
+| Flag | Effect |
+|------|--------|
+| `--gpu-screenshot` | Render one frame with screenshot camera and exit |
+| `--gpu-screenshot-source <render-buffer\|framebuffer>` | Capture source for `--gpu-screenshot` |
+| `--screenshot-pos X Y Z W` | Camera position override |
+| `--screenshot-angles YAW PITCH XW ZW` | Camera orientation override (radians) |
+| `--screenshot-angles-deg YAW PITCH XW ZW` | Camera orientation override (degrees) |
+| `--screenshot-yw <rad>` | Camera YW deviation override |
+
+The runtime `F12` screenshot path writes both `.webp` and `.png` to `frames/`,
+and prints screenshot metadata (frame, camera pose, look vector, backend, and
+active VTE mode details) to stdout.
+
+### VTE Debug Environment Flags
+
+These flags are intended for diagnostics and can be expensive:
+
+| Env var | Effect |
+|---------|--------|
+| `R4D_VTE_REFERENCE_COMPARE=1` | Enable reference-trace comparison in VTE debug modes |
+| `R4D_VTE_REFERENCE_MISMATCH_ONLY=1` | In compare mode, visualize mismatches only |
+| `R4D_VTE_COMPARE_SLICE_ONLY=1` | In compare mode, compare only the selected slice layer |
 
 ### Demo Options
 

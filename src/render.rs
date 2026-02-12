@@ -107,6 +107,43 @@ pub enum RenderBackend {
     VoxelTraversal,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VteDisplayMode {
+    Integral,
+    Slice,
+    ThickSlice,
+    DebugCompare,
+    DebugIntegral,
+}
+
+impl Default for VteDisplayMode {
+    fn default() -> Self {
+        Self::Integral
+    }
+}
+
+impl VteDisplayMode {
+    fn as_u32(self) -> u32 {
+        match self {
+            Self::Integral => 0,
+            Self::Slice => 1,
+            Self::ThickSlice => 2,
+            Self::DebugCompare => 3,
+            Self::DebugIntegral => 4,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Integral => "integral",
+            Self::Slice => "slice",
+            Self::ThickSlice => "thick_slice",
+            Self::DebugCompare => "debug_compare",
+            Self::DebugIntegral => "debug_integral",
+        }
+    }
+}
+
 impl Default for RenderBackend {
     fn default() -> Self {
         Self::Auto
@@ -130,6 +167,13 @@ pub struct RenderOptions {
     pub do_raytrace: bool,
     pub render_backend: RenderBackend,
     pub vte_max_trace_steps: u32,
+    pub vte_max_trace_distance: f32,
+    pub vte_display_mode: VteDisplayMode,
+    pub vte_slice_layer: Option<u32>,
+    pub vte_thick_half_width: u32,
+    pub vte_reference_compare: bool,
+    pub vte_reference_mismatch_only: bool,
+    pub vte_compare_slice_only: bool,
     pub do_edges: bool,
     pub do_tetrahedron_edges: bool,
     pub do_navigation_hud: bool,
@@ -146,6 +190,13 @@ impl Default for RenderOptions {
             do_raytrace: false,
             render_backend: RenderBackend::Auto,
             vte_max_trace_steps: 320,
+            vte_max_trace_distance: 160.0,
+            vte_display_mode: VteDisplayMode::Integral,
+            vte_slice_layer: None,
+            vte_thick_half_width: 2,
+            vte_reference_compare: false,
+            vte_reference_mismatch_only: false,
+            vte_compare_slice_only: false,
             do_edges: false,
             do_tetrahedron_edges: false,
             do_navigation_hud: false,
@@ -197,8 +248,12 @@ struct GpuVoxelFrameMeta {
     occupancy_word_count: u32,
     material_word_count: u32,
     max_trace_steps: u32,
+    max_trace_distance: f32,
     chunk_lookup_capacity: u32,
-    _padding: [u32; 2],
+    stage_b_mode: u32,
+    stage_b_slice_layer: u32,
+    stage_b_thick_half_width: u32,
+    debug_flags: u32,
 }
 
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -237,6 +292,46 @@ pub struct VteDebugCounters {
     pub voxel_steps: u64,
     pub primary_hits: u64,
     pub s_samples: u64,
+    pub visible_set_hash_valid: bool,
+    pub visible_set_hash: u32,
+}
+
+#[derive(Copy, Clone, Default)]
+struct VteCompareStats {
+    compared: u32,
+    matches: u32,
+    mismatches: u32,
+    hit_state_mismatches: u32,
+    chunk_material_mismatches: u32,
+    fast_miss_ref_hit: u32,
+    fast_hit_ref_miss: u32,
+    miss_reason_counts: [u32; 6],
+    zero_interval_flags: u32,
+    tie_stepped_flags: u32,
+    lookup_fallback_flags: u32,
+}
+
+#[derive(Copy, Clone, Default)]
+struct VteFirstMismatch {
+    valid: bool,
+    pixel_x: u32,
+    pixel_y: u32,
+    layer: u32,
+    mismatch_kind: u32,
+    miss_reason: u32,
+    debug_flags: u32,
+    fast_hit: bool,
+    ref_hit: bool,
+    fast_chunk: [i32; 4],
+    ref_chunk: [i32; 4],
+    fast_material: u32,
+    ref_material: u32,
+    fast_hit_t: f32,
+    ref_hit_t: f32,
+    chunk_steps_taken: u32,
+    remaining_voxel_steps: u32,
+    final_t: f32,
+    last_chunk: [i32; 4],
 }
 
 const LINE_VERTEX_CAPACITY: usize = 100_000;
@@ -247,6 +342,54 @@ const VTE_MAX_CHUNKS: usize = 8_192;
 const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
 const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
 const VTE_CHUNK_LOOKUP_CAPACITY: usize = 32_768; // Must be power of two.
+const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
+const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
+const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
+const VTE_COMPARE_STATS_WORD_COUNT: usize = 16;
+const VTE_COMPARE_STAT_COMPARED: usize = 0;
+const VTE_COMPARE_STAT_MATCHES: usize = 1;
+const VTE_COMPARE_STAT_MISMATCHES: usize = 2;
+const VTE_COMPARE_STAT_HIT_STATE_MISMATCHES: usize = 3;
+const VTE_COMPARE_STAT_CHUNK_MATERIAL_MISMATCHES: usize = 4;
+const VTE_COMPARE_STAT_FAST_MISS_REF_HIT: usize = 5;
+const VTE_COMPARE_STAT_FAST_HIT_REF_MISS: usize = 6;
+const VTE_COMPARE_STAT_REASON_NONE: usize = 7;
+const VTE_COMPARE_STAT_REASON_TOUCHED_VISIBLE: usize = 8;
+const VTE_COMPARE_STAT_REASON_VOXEL_BUDGET: usize = 9;
+const VTE_COMPARE_STAT_REASON_CHUNK_BUDGET: usize = 10;
+const VTE_COMPARE_STAT_REASON_MAX_DISTANCE: usize = 11;
+const VTE_COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE: usize = 12;
+const VTE_COMPARE_STAT_ZERO_INTERVAL_FLAG: usize = 13;
+const VTE_COMPARE_STAT_TIE_STEPPED_FLAG: usize = 14;
+const VTE_COMPARE_STAT_LOOKUP_FALLBACK_FLAG: usize = 15;
+const VTE_FIRST_MISMATCH_WORD_COUNT: usize = 27;
+const VTE_FIRST_MISMATCH_VALID: usize = 0;
+const VTE_FIRST_MISMATCH_PIXEL_X: usize = 1;
+const VTE_FIRST_MISMATCH_PIXEL_Y: usize = 2;
+const VTE_FIRST_MISMATCH_LAYER: usize = 3;
+const VTE_FIRST_MISMATCH_KIND: usize = 4;
+const VTE_FIRST_MISMATCH_MISS_REASON: usize = 5;
+const VTE_FIRST_MISMATCH_DEBUG_FLAGS: usize = 6;
+const VTE_FIRST_MISMATCH_HIT_MASK: usize = 7;
+const VTE_FIRST_MISMATCH_FAST_CHUNK_X: usize = 8;
+const VTE_FIRST_MISMATCH_FAST_CHUNK_Y: usize = 9;
+const VTE_FIRST_MISMATCH_FAST_CHUNK_Z: usize = 10;
+const VTE_FIRST_MISMATCH_FAST_CHUNK_W: usize = 11;
+const VTE_FIRST_MISMATCH_REF_CHUNK_X: usize = 12;
+const VTE_FIRST_MISMATCH_REF_CHUNK_Y: usize = 13;
+const VTE_FIRST_MISMATCH_REF_CHUNK_Z: usize = 14;
+const VTE_FIRST_MISMATCH_REF_CHUNK_W: usize = 15;
+const VTE_FIRST_MISMATCH_FAST_MATERIAL: usize = 16;
+const VTE_FIRST_MISMATCH_REF_MATERIAL: usize = 17;
+const VTE_FIRST_MISMATCH_FAST_HIT_T: usize = 18;
+const VTE_FIRST_MISMATCH_REF_HIT_T: usize = 19;
+const VTE_FIRST_MISMATCH_CHUNK_STEPS: usize = 20;
+const VTE_FIRST_MISMATCH_REMAINING_VOXELS: usize = 21;
+const VTE_FIRST_MISMATCH_FINAL_T: usize = 22;
+const VTE_FIRST_MISMATCH_LAST_CHUNK_X: usize = 23;
+const VTE_FIRST_MISMATCH_LAST_CHUNK_Y: usize = 24;
+const VTE_FIRST_MISMATCH_LAST_CHUNK_Z: usize = 25;
+const VTE_FIRST_MISMATCH_LAST_CHUNK_W: usize = 26;
 
 #[inline]
 fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
@@ -269,6 +412,7 @@ struct FrameInFlight {
     cpu_clipped_tet_count_buffer: Subbuffer<[u32]>,
     query_pool: Arc<QueryPool>,
     fence: Option<Box<dyn GpuFuture>>,
+    vte_compare_enabled: bool,
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -1383,6 +1527,8 @@ pub struct LiveBuffers {
     voxel_material_words_buffer: Subbuffer<[u32]>,
     voxel_visible_chunk_indices_buffer: Subbuffer<[u32]>,
     voxel_chunk_lookup_buffer: Subbuffer<[GpuVoxelChunkLookupEntry]>,
+    vte_compare_stats_buffer: Subbuffer<[u32]>,
+    vte_first_mismatch_buffer: Subbuffer<[u32]>,
     descriptor_set: Arc<DescriptorSet>,
 }
 
@@ -1512,6 +1658,36 @@ impl LiveBuffers {
         )
         .unwrap();
 
+        let vte_compare_stats_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; VTE_COMPARE_STATS_WORD_COUNT],
+        )
+        .unwrap();
+
+        let vte_first_mismatch_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; VTE_FIRST_MISMATCH_WORD_COUNT],
+        )
+        .unwrap();
+
         let descriptor_set = DescriptorSet::new(
             descriptor_set_allocator,
             descriptor_set_layout,
@@ -1524,6 +1700,8 @@ impl LiveBuffers {
                 WriteDescriptorSet::buffer(5, voxel_material_words_buffer.clone()),
                 WriteDescriptorSet::buffer(6, voxel_visible_chunk_indices_buffer.clone()),
                 WriteDescriptorSet::buffer(7, voxel_chunk_lookup_buffer.clone()),
+                WriteDescriptorSet::buffer(8, vte_compare_stats_buffer.clone()),
+                WriteDescriptorSet::buffer(9, vte_first_mismatch_buffer.clone()),
             ],
             [],
         )
@@ -1537,6 +1715,8 @@ impl LiveBuffers {
             voxel_material_words_buffer,
             voxel_visible_chunk_indices_buffer,
             voxel_chunk_lookup_buffer,
+            vte_compare_stats_buffer,
+            vte_first_mismatch_buffer,
             descriptor_set,
         }
     }
@@ -1557,7 +1737,7 @@ impl LiveBuffers {
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             },
         );
-        for binding in 2..=7u32 {
+        for binding in 2..=9u32 {
             bindings.insert(
                 binding,
                 DescriptorSetLayoutBinding {
@@ -2284,6 +2464,8 @@ pub struct RenderContext {
     stall_trace: bool,
     last_backend: RenderBackend,
     vte_debug_counters: VteDebugCounters,
+    vte_compare_stats: VteCompareStats,
+    vte_first_mismatch: VteFirstMismatch,
     vte_backend_notice_printed: bool,
 }
 
@@ -2867,6 +3049,7 @@ impl RenderContext {
                 cpu_clipped_tet_count_buffer,
                 query_pool,
                 fence: None,
+                vte_compare_enabled: false,
             });
         }
 
@@ -2901,7 +3084,114 @@ impl RenderContext {
             stall_trace: std::env::var_os("R4D_TRACE_STALLS").is_some(),
             last_backend: RenderBackend::Auto,
             vte_debug_counters: VteDebugCounters::default(),
+            vte_compare_stats: VteCompareStats::default(),
+            vte_first_mismatch: VteFirstMismatch::default(),
             vte_backend_notice_printed: false,
+        }
+    }
+
+    fn reset_vte_compare_buffers(&mut self, frame_idx: usize) {
+        {
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .vte_compare_stats_buffer
+                .write()
+                .unwrap();
+            writer.fill(0u32);
+        }
+        {
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .vte_first_mismatch_buffer
+                .write()
+                .unwrap();
+            writer.fill(0u32);
+        }
+    }
+
+    fn clear_vte_compare_diagnostics(&mut self) {
+        self.vte_compare_stats = VteCompareStats::default();
+        self.vte_first_mismatch = VteFirstMismatch::default();
+    }
+
+    fn refresh_vte_compare_diagnostics(&mut self, frame_idx: usize) {
+        let stats_words = self.frames_in_flight[frame_idx]
+            .live_buffers
+            .vte_compare_stats_buffer
+            .read()
+            .unwrap();
+        if stats_words.len() >= VTE_COMPARE_STATS_WORD_COUNT {
+            self.vte_compare_stats = VteCompareStats {
+                compared: stats_words[VTE_COMPARE_STAT_COMPARED],
+                matches: stats_words[VTE_COMPARE_STAT_MATCHES],
+                mismatches: stats_words[VTE_COMPARE_STAT_MISMATCHES],
+                hit_state_mismatches: stats_words[VTE_COMPARE_STAT_HIT_STATE_MISMATCHES],
+                chunk_material_mismatches: stats_words[VTE_COMPARE_STAT_CHUNK_MATERIAL_MISMATCHES],
+                fast_miss_ref_hit: stats_words[VTE_COMPARE_STAT_FAST_MISS_REF_HIT],
+                fast_hit_ref_miss: stats_words[VTE_COMPARE_STAT_FAST_HIT_REF_MISS],
+                miss_reason_counts: [
+                    stats_words[VTE_COMPARE_STAT_REASON_NONE],
+                    stats_words[VTE_COMPARE_STAT_REASON_TOUCHED_VISIBLE],
+                    stats_words[VTE_COMPARE_STAT_REASON_VOXEL_BUDGET],
+                    stats_words[VTE_COMPARE_STAT_REASON_CHUNK_BUDGET],
+                    stats_words[VTE_COMPARE_STAT_REASON_MAX_DISTANCE],
+                    stats_words[VTE_COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE],
+                ],
+                zero_interval_flags: stats_words[VTE_COMPARE_STAT_ZERO_INTERVAL_FLAG],
+                tie_stepped_flags: stats_words[VTE_COMPARE_STAT_TIE_STEPPED_FLAG],
+                lookup_fallback_flags: stats_words[VTE_COMPARE_STAT_LOOKUP_FALLBACK_FLAG],
+            };
+        } else {
+            self.vte_compare_stats = VteCompareStats::default();
+        }
+
+        let first_words = self.frames_in_flight[frame_idx]
+            .live_buffers
+            .vte_first_mismatch_buffer
+            .read()
+            .unwrap();
+        if first_words.len() >= VTE_FIRST_MISMATCH_WORD_COUNT
+            && first_words[VTE_FIRST_MISMATCH_VALID] != 0
+        {
+            let hit_mask = first_words[VTE_FIRST_MISMATCH_HIT_MASK];
+            self.vte_first_mismatch = VteFirstMismatch {
+                valid: true,
+                pixel_x: first_words[VTE_FIRST_MISMATCH_PIXEL_X],
+                pixel_y: first_words[VTE_FIRST_MISMATCH_PIXEL_Y],
+                layer: first_words[VTE_FIRST_MISMATCH_LAYER],
+                mismatch_kind: first_words[VTE_FIRST_MISMATCH_KIND],
+                miss_reason: first_words[VTE_FIRST_MISMATCH_MISS_REASON],
+                debug_flags: first_words[VTE_FIRST_MISMATCH_DEBUG_FLAGS],
+                fast_hit: (hit_mask & 0x1) != 0,
+                ref_hit: (hit_mask & 0x2) != 0,
+                fast_chunk: [
+                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_X] as i32,
+                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_Y] as i32,
+                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_Z] as i32,
+                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_W] as i32,
+                ],
+                ref_chunk: [
+                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_X] as i32,
+                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_Y] as i32,
+                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_Z] as i32,
+                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_W] as i32,
+                ],
+                fast_material: first_words[VTE_FIRST_MISMATCH_FAST_MATERIAL],
+                ref_material: first_words[VTE_FIRST_MISMATCH_REF_MATERIAL],
+                fast_hit_t: f32::from_bits(first_words[VTE_FIRST_MISMATCH_FAST_HIT_T]),
+                ref_hit_t: f32::from_bits(first_words[VTE_FIRST_MISMATCH_REF_HIT_T]),
+                chunk_steps_taken: first_words[VTE_FIRST_MISMATCH_CHUNK_STEPS],
+                remaining_voxel_steps: first_words[VTE_FIRST_MISMATCH_REMAINING_VOXELS],
+                final_t: f32::from_bits(first_words[VTE_FIRST_MISMATCH_FINAL_T]),
+                last_chunk: [
+                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_X] as i32,
+                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_Y] as i32,
+                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_Z] as i32,
+                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_W] as i32,
+                ],
+            };
+        } else {
+            self.vte_first_mismatch = VteFirstMismatch::default();
         }
     }
 
@@ -3603,16 +3893,35 @@ impl RenderContext {
         );
         if self.last_backend == RenderBackend::VoxelTraversal {
             readout_text.push_str(&format!(
-                "\nVTE c:{} f:{} e:{} m:{} cs:{} vs:{} h:{} s:{}",
+                "\nVTE c:{} f:{} e:{} m:{}",
                 self.vte_debug_counters.candidate_chunks,
                 self.vte_debug_counters.frustum_culled_chunks,
                 self.vte_debug_counters.empty_chunks_skipped,
                 self.vte_debug_counters.macro_cells_skipped,
+            ));
+            readout_text.push_str(&format!(
+                "\n    cs:{} vs:{} h:{} s:{}",
                 self.vte_debug_counters.chunk_steps,
                 self.vte_debug_counters.voxel_steps,
                 self.vte_debug_counters.primary_hits,
                 self.vte_debug_counters.s_samples
             ));
+            if self.vte_debug_counters.visible_set_hash_valid {
+                readout_text.push_str(&format!(
+                    "\n    vh:{:08x}",
+                    self.vte_debug_counters.visible_set_hash
+                ));
+            }
+            if self.vte_compare_stats.compared > 0 || self.vte_compare_stats.mismatches > 0 {
+                readout_text.push_str(&format!(
+                    "\n    cmp:{}/{} mm:{} hs:{} cm:{}",
+                    self.vte_compare_stats.matches,
+                    self.vte_compare_stats.compared,
+                    self.vte_compare_stats.mismatches,
+                    self.vte_compare_stats.hit_state_mismatches,
+                    self.vte_compare_stats.chunk_material_mismatches
+                ));
+            }
         }
         if !self.profiler.last_frame_phases.is_empty() {
             readout_text.push('\n');
@@ -3645,7 +3954,7 @@ impl RenderContext {
 
             // Semi-transparent background behind text readout
             let readout_bg_min = Vec2::new(left, upper_top + 0.02);
-            let readout_bg_max = Vec2::new(right, upper_top + 0.22);
+            let readout_bg_max = Vec2::new(right, upper_top + 0.30);
             push_filled_rect_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
@@ -3850,6 +4159,11 @@ impl RenderContext {
                 );
             }
         }
+        if self.frames_in_flight[frame_idx].vte_compare_enabled {
+            self.refresh_vte_compare_diagnostics(frame_idx);
+        } else {
+            self.clear_vte_compare_diagnostics();
+        }
 
         let force_clear = false;
 
@@ -3974,6 +4288,14 @@ impl RenderContext {
             writer.focal_length_zw = focal_length_zw;
             // writer.total_num_tetrahedrons = 1;
             writer.shader_fault = 0;
+            // Flag used by present shader:
+            // 0 = legacy per-layer accumulation, 1 = VTE Stage-B-collapsed output in layer 0.
+            // padding[1] carries VTE stage_b_mode so present shader can conditionally
+            // bypass tone mapping for debug compare output.
+            writer.padding = [
+                u32::from(voxel_input.is_some()),
+                render_options.vte_display_mode.as_u32(),
+            ];
         }
 
         {
@@ -4112,14 +4434,36 @@ impl RenderContext {
                 .voxel_frame_meta_buffer
                 .write()
                 .unwrap();
+            let layer_count = self.sized_buffers.render_dimensions[2].max(1);
+            let default_slice_layer = (layer_count - 1) / 2;
+            let stage_b_slice_layer = render_options
+                .vte_slice_layer
+                .unwrap_or(default_slice_layer)
+                .min(layer_count - 1);
             *writer = GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 visible_chunk_count: vte_visible_chunk_count as u32,
                 occupancy_word_count: vte_occupancy_word_count as u32,
                 material_word_count: vte_material_word_count as u32,
                 max_trace_steps: render_options.vte_max_trace_steps.max(1),
+                max_trace_distance: render_options.vte_max_trace_distance.max(1.0),
                 chunk_lookup_capacity: VTE_CHUNK_LOOKUP_CAPACITY as u32,
-                _padding: [0; 2],
+                stage_b_mode: render_options.vte_display_mode.as_u32(),
+                stage_b_slice_layer,
+                stage_b_thick_half_width: render_options.vte_thick_half_width,
+                debug_flags: {
+                    let mut flags = 0;
+                    if render_options.vte_reference_compare {
+                        flags |= VTE_DEBUG_FLAG_REFERENCE_COMPARE;
+                    }
+                    if render_options.vte_reference_mismatch_only {
+                        flags |= VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY;
+                    }
+                    if render_options.vte_compare_slice_only {
+                        flags |= VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
+                    }
+                    flags
+                },
             };
         }
 
@@ -4184,6 +4528,7 @@ impl RenderContext {
         let mut do_edges = render_options.do_edges;
         let mut do_tetrahedron_edges = render_options.do_tetrahedron_edges;
         let mut do_voxel_vte = false;
+        let mut vte_compare_diagnostics_enabled = false;
 
         match render_options.render_backend {
             RenderBackend::Auto => {}
@@ -4205,6 +4550,16 @@ impl RenderContext {
         }
 
         if do_voxel_vte {
+            vte_compare_diagnostics_enabled = render_options.vte_reference_compare
+                && matches!(
+                    render_options.vte_display_mode,
+                    VteDisplayMode::DebugCompare | VteDisplayMode::DebugIntegral
+                );
+            if vte_compare_diagnostics_enabled {
+                self.reset_vte_compare_buffers(frame_idx);
+            } else {
+                self.clear_vte_compare_diagnostics();
+            }
             let (
                 candidate_chunks,
                 visible_chunks,
@@ -4212,6 +4567,8 @@ impl RenderContext {
                 full_chunks,
                 occupancy_words,
                 material_words,
+                visible_set_hash_valid,
+                visible_set_hash,
             ) = if let Some(input) = voxel_input {
                     let empty = input
                         .chunk_headers
@@ -4223,6 +4580,21 @@ impl RenderContext {
                         .iter()
                         .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0)
                         .count() as u32;
+                    let collect_visible_set_hash = render_options.vte_reference_compare;
+                    let hash = if collect_visible_set_hash {
+                        let mut hash = 0x811C_9DC5u32;
+                        for &chunk_index in input.visible_chunk_indices.iter() {
+                            let Some(header) = input.chunk_headers.get(chunk_index as usize) else {
+                                continue;
+                            };
+                            let h = vte_hash_chunk_coord(header.chunk_coord);
+                            hash ^= h;
+                            hash = hash.wrapping_mul(0x0100_0193);
+                        }
+                        hash
+                    } else {
+                        0
+                    };
                     (
                         input.chunk_headers.len() as u32,
                         input.visible_chunk_indices.len() as u32,
@@ -4230,9 +4602,11 @@ impl RenderContext {
                         full,
                         input.occupancy_words.len() as u64,
                         input.material_words.len() as u64,
+                        collect_visible_set_hash,
+                        hash,
                     )
                 } else {
-                    (0, 0, 0, 0, 0, 0)
+                    (0, 0, 0, 0, 0, 0, false, 0)
                 };
 
             self.vte_debug_counters = VteDebugCounters {
@@ -4246,20 +4620,34 @@ impl RenderContext {
                 s_samples: self.sized_buffers.render_dimensions[0] as u64
                     * self.sized_buffers.render_dimensions[1] as u64
                     * self.sized_buffers.render_dimensions[2] as u64,
+                visible_set_hash_valid,
+                visible_set_hash,
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE pass skeleton active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
                     occupancy_words,
                     material_words,
                     render_options.vte_max_trace_steps.max(1),
+                    render_options.vte_max_trace_distance.max(1.0),
+                    render_options.vte_display_mode.label(),
+                    render_options.vte_slice_layer,
+                    render_options.vte_thick_half_width,
+                    render_options.vte_reference_compare,
+                    render_options.vte_reference_mismatch_only,
+                    render_options.vte_compare_slice_only,
                 );
                 self.vte_backend_notice_printed = true;
             }
+        } else {
+            self.clear_vte_compare_diagnostics();
         }
+
+        self.frames_in_flight[frame_idx].vte_compare_enabled =
+            do_voxel_vte && vte_compare_diagnostics_enabled;
 
         self.last_backend = if do_voxel_vte {
             RenderBackend::VoxelTraversal
@@ -5029,8 +5417,11 @@ impl RenderContext {
                 let result = self.cpu_screen_capture_buffer.read();
                 match result {
                     Ok(buffer_content) => {
-                        let screenshot_path =
-                            format!("frames/framebuffer_{}.webp", self.frames_rendered - 3);
+                        let screenshot_index = self.frames_rendered - 3;
+                        let screenshot_webp_path =
+                            format!("frames/framebuffer_{}.webp", screenshot_index);
+                        let screenshot_png_path =
+                            format!("frames/framebuffer_{}.png", screenshot_index);
                         let (capture_w, capture_h, capture_format) = self
                             .swapchain
                             .as_ref()
@@ -5095,8 +5486,143 @@ impl RenderContext {
                             if let Some(image) =
                                 ImageBuffer::<Rgba<u8>, _>::from_raw(capture_w, capture_h, bytes)
                             {
-                                image.save(screenshot_path.clone()).unwrap();
-                                println!("Saved screenshot to {}", screenshot_path);
+                                if let Err(err) = image.save(screenshot_webp_path.clone()) {
+                                    eprintln!(
+                                        "Failed to save screenshot to {}: {}",
+                                        screenshot_webp_path, err
+                                    );
+                                } else {
+                                    println!("Saved screenshot to {}", screenshot_webp_path);
+                                }
+                                if let Err(err) = image.save(screenshot_png_path.clone()) {
+                                    eprintln!(
+                                        "Failed to save screenshot to {}: {}",
+                                        screenshot_png_path, err
+                                    );
+                                } else {
+                                    println!("Saved screenshot to {}", screenshot_png_path);
+                                }
+
+                                let camera_h =
+                                    mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
+                                let inv_w = if camera_h[4].abs() > 1e-6 {
+                                    1.0 / camera_h[4]
+                                } else {
+                                    1.0
+                                };
+                                let camera_pos = [
+                                    camera_h[0] * inv_w,
+                                    camera_h[1] * inv_w,
+                                    camera_h[2] * inv_w,
+                                    camera_h[3] * inv_w,
+                                ];
+                                let look_h = mat5_mul_vec5(
+                                    &view_matrix_nalgebra_inv,
+                                    [
+                                        0.0,
+                                        0.0,
+                                        std::f32::consts::FRAC_1_SQRT_2,
+                                        std::f32::consts::FRAC_1_SQRT_2,
+                                        0.0,
+                                    ],
+                                );
+                                let mut look = [look_h[0], look_h[1], look_h[2], look_h[3]];
+                                let look_len = (look[0] * look[0]
+                                    + look[1] * look[1]
+                                    + look[2] * look[2]
+                                    + look[3] * look[3])
+                                    .sqrt();
+                                if look_len > 1e-6 {
+                                    for c in &mut look {
+                                        *c /= look_len;
+                                    }
+                                }
+                                println!(
+                                    "Screenshot meta frame={} backend={} size={}x{} layers={} focal_xy={:.3} focal_zw={:.3}",
+                                    screenshot_index,
+                                    self.last_backend.label(),
+                                    capture_w,
+                                    capture_h,
+                                    self.sized_buffers.render_dimensions[2],
+                                    focal_length_xy,
+                                    focal_length_zw
+                                );
+                                if self.last_backend == RenderBackend::VoxelTraversal {
+                                    println!(
+                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} reference_compare={} mismatch_only={} compare_slice_only={}",
+                                        render_options.vte_display_mode.label(),
+                                        render_options.vte_slice_layer,
+                                        render_options.vte_thick_half_width,
+                                        render_options.vte_max_trace_steps,
+                                        render_options.vte_max_trace_distance,
+                                        render_options.vte_reference_compare,
+                                        render_options.vte_reference_mismatch_only,
+                                        render_options.vte_compare_slice_only,
+                                    );
+                                    if self.vte_compare_stats.compared > 0
+                                        || self.vte_compare_stats.mismatches > 0
+                                    {
+                                        println!(
+                                            "  VTE compare compared={} match={} mismatch={} hit_state={} chunk_material={} fm_ref={} fh_ref={} reason=[none:{} touched:{} voxel:{} chunk:{} dist:{} lookup:{}] flags=[zero:{} tie:{} fallback:{}]",
+                                            self.vte_compare_stats.compared,
+                                            self.vte_compare_stats.matches,
+                                            self.vte_compare_stats.mismatches,
+                                            self.vte_compare_stats.hit_state_mismatches,
+                                            self.vte_compare_stats.chunk_material_mismatches,
+                                            self.vte_compare_stats.fast_miss_ref_hit,
+                                            self.vte_compare_stats.fast_hit_ref_miss,
+                                            self.vte_compare_stats.miss_reason_counts[0],
+                                            self.vte_compare_stats.miss_reason_counts[1],
+                                            self.vte_compare_stats.miss_reason_counts[2],
+                                            self.vte_compare_stats.miss_reason_counts[3],
+                                            self.vte_compare_stats.miss_reason_counts[4],
+                                            self.vte_compare_stats.miss_reason_counts[5],
+                                            self.vte_compare_stats.zero_interval_flags,
+                                            self.vte_compare_stats.tie_stepped_flags,
+                                            self.vte_compare_stats.lookup_fallback_flags,
+                                        );
+                                        if self.vte_first_mismatch.valid {
+                                            println!(
+                                                "  VTE first_mismatch px=({}, {}, l={}) kind={} miss_reason={} debug=0x{:x} hit=({}/{}) fast_chunk=({},{},{},{}) ref_chunk=({},{},{},{}) mat=({}/{}) t=({:.5}/{:.5}) steps={} rem_vox={} final_t={:.5} last_chunk=({},{},{},{})",
+                                                self.vte_first_mismatch.pixel_x,
+                                                self.vte_first_mismatch.pixel_y,
+                                                self.vte_first_mismatch.layer,
+                                                self.vte_first_mismatch.mismatch_kind,
+                                                self.vte_first_mismatch.miss_reason,
+                                                self.vte_first_mismatch.debug_flags,
+                                                self.vte_first_mismatch.fast_hit as u32,
+                                                self.vte_first_mismatch.ref_hit as u32,
+                                                self.vte_first_mismatch.fast_chunk[0],
+                                                self.vte_first_mismatch.fast_chunk[1],
+                                                self.vte_first_mismatch.fast_chunk[2],
+                                                self.vte_first_mismatch.fast_chunk[3],
+                                                self.vte_first_mismatch.ref_chunk[0],
+                                                self.vte_first_mismatch.ref_chunk[1],
+                                                self.vte_first_mismatch.ref_chunk[2],
+                                                self.vte_first_mismatch.ref_chunk[3],
+                                                self.vte_first_mismatch.fast_material,
+                                                self.vte_first_mismatch.ref_material,
+                                                self.vte_first_mismatch.fast_hit_t,
+                                                self.vte_first_mismatch.ref_hit_t,
+                                                self.vte_first_mismatch.chunk_steps_taken,
+                                                self.vte_first_mismatch.remaining_voxel_steps,
+                                                self.vte_first_mismatch.final_t,
+                                                self.vte_first_mismatch.last_chunk[0],
+                                                self.vte_first_mismatch.last_chunk[1],
+                                                self.vte_first_mismatch.last_chunk[2],
+                                                self.vte_first_mismatch.last_chunk[3],
+                                            );
+                                        }
+                                    }
+                                }
+                                println!(
+                                    "  POS {:+.4} {:+.4} {:+.4} {:+.4}",
+                                    camera_pos[0], camera_pos[1], camera_pos[2], camera_pos[3]
+                                );
+                                println!(
+                                    "  LOOK {:+.4} {:+.4} {:+.4} {:+.4}",
+                                    look[0], look[1], look[2], look[3]
+                                );
                             } else {
                                 eprintln!(
                                     "Failed to build screenshot image buffer ({}x{})",
@@ -5339,30 +5865,52 @@ impl RenderContext {
         let result = self.sized_buffers.output_cpu_pixel_buffer.read();
         match result {
             Ok(buffer_content) => {
+                fn aces_tone_map(x: f32) -> f32 {
+                    let a = 2.51f32;
+                    let b = 0.03f32;
+                    let c = 2.43f32;
+                    let d = 0.59f32;
+                    let e = 0.14f32;
+                    ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
+                }
+
                 let w = self.sized_buffers.render_dimensions[0] as u32;
                 let h = self.sized_buffers.render_dimensions[1] as u32;
                 let depth = self.sized_buffers.render_dimensions[2] as u32;
+                let vte_collapsed = self.last_backend == RenderBackend::VoxelTraversal;
 
                 let mut pixels = Vec::with_capacity((w * h * 4) as usize);
                 for y in 0..h {
                     for x in 0..w {
-                        // Sum across all Z slices (same as the EXR "Full Render" layer)
-                        let mut full_pixel = Vec4::ZERO;
-                        for z in 0..depth {
-                            let idx = (z * w * h + y * w + x) as usize;
-                            full_pixel += buffer_content[idx];
-                        }
-                        // Normalize by alpha (denominator) if non-zero
-                        let (r, g, b) = if full_pixel.w > 0.0 {
-                            (
-                                full_pixel.x / full_pixel.w,
-                                full_pixel.y / full_pixel.w,
-                                full_pixel.z / full_pixel.w,
-                            )
+                        // Match present shader behavior:
+                        // - VTE uses Stage-B-collapsed layer 0.
+                        // - Legacy tetra paths accumulate all Z slices.
+                        let accum_pixel = if vte_collapsed {
+                            let idx = (y * w + x) as usize;
+                            buffer_content[idx]
                         } else {
-                            (0.0, 0.0, 0.0)
+                            let mut full_pixel = Vec4::ZERO;
+                            for z in 0..depth {
+                                let idx = (z * w * h + y * w + x) as usize;
+                                full_pixel += buffer_content[idx];
+                            }
+                            full_pixel
                         };
-                        // Gamma correction (linear -> sRGB) and convert to u8
+
+                        // Normalize by alpha (denominator) if non-zero.
+                        let mut r = 0.0f32;
+                        let mut g = 0.0f32;
+                        let mut b = 0.0f32;
+                        if accum_pixel.w > 0.0 {
+                            r = accum_pixel.x / accum_pixel.w;
+                            g = accum_pixel.y / accum_pixel.w;
+                            b = accum_pixel.z / accum_pixel.w;
+                        }
+
+                        // Match present pass tone-map + gamma.
+                        r = aces_tone_map(r);
+                        g = aces_tone_map(g);
+                        b = aces_tone_map(b);
                         let gamma = 1.0 / 2.2;
                         pixels.push((r.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);
                         pixels.push((g.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);

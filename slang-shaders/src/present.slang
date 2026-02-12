@@ -11,6 +11,9 @@ import types;
 [[vk::binding(2, 1)]] StructuredBuffer<float4> pixelBuffer;
 [[vk::binding(1, 2)]] StructuredBuffer<WorkingData> workingDataBuffer;
 
+static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
+static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
+
 // Vertex shader for line rendering
 struct LineVSOutput
 {
@@ -96,20 +99,36 @@ float4 mainBufferFS(float4 fragCoord : SV_Position) : SV_Target
 
     uint2 uPixelPos = uint2(uint(pixelPosF.x), uint(pixelPosF.y));
 
-    // Accumulate across Z slices
     float4 csResult = float4(0);
-    for (uint z = 0; z < wd.renderDimensions.z; z++)
+    // For VTE, Stage B collapses to layer 0 in compute.
+    // Legacy raster/raytrace paths still accumulate all Z slices here.
+    if (wd.padding[0] != 0u)
     {
-        uint index = z * wd.renderDimensions.x * wd.renderDimensions.y
-                   + uPixelPos.y * wd.renderDimensions.x
-                   + uPixelPos.x;
-        csResult += pixelBuffer[index];
+        uint index = uPixelPos.y * wd.renderDimensions.x + uPixelPos.x;
+        csResult = pixelBuffer[index];
+    }
+    else
+    {
+        for (uint z = 0; z < wd.renderDimensions.z; z++)
+        {
+            uint index = z * wd.renderDimensions.x * wd.renderDimensions.y
+                       + uPixelPos.y * wd.renderDimensions.x
+                       + uPixelPos.x;
+            csResult += pixelBuffer[index];
+        }
     }
 
     // Tone map and gamma correct
     if (csResult.w > 0.0)
     {
         float3 color = csResult.xyz / csResult.w;
+        // Debug mode relies on exact false-color output; skip post-tonemap transforms.
+        if (wd.padding[0] != 0u
+            && (wd.padding[1] == STAGE_B_MODE_DEBUG_COMPARE
+                || wd.padding[1] == STAGE_B_MODE_DEBUG_INTEGRAL))
+        {
+            return float4(saturate(color), 1.0);
+        }
         color = acesToneMap(color);
         float4 adjusted = float4(
             linearToGamma(color.x),

@@ -6,9 +6,10 @@ mod voxel;
 
 use clap::{Parser, ValueEnum};
 use higher_dimension_playground::render::{
-    FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
+    FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use vulkano::device::{Device, Queue};
@@ -53,6 +54,10 @@ struct Args {
     #[arg(long)]
     gpu_screenshot: bool,
 
+    /// Source for --gpu-screenshot capture output
+    #[arg(long, value_enum, default_value_t = GpuScreenshotSourceArg::RenderBuffer)]
+    gpu_screenshot_source: GpuScreenshotSourceArg,
+
     /// Override screenshot camera position as 4 values: X Y Z W
     #[arg(
         long,
@@ -91,6 +96,23 @@ struct Args {
     /// VTE traversal step budget per ray (quality/perf tradeoff)
     #[arg(long, default_value_t = 320)]
     vte_max_trace_steps: u32,
+
+    /// VTE max ray distance in world units before miss (quality/perf tradeoff)
+    #[arg(long, default_value_t = 160.0)]
+    vte_max_trace_distance: f32,
+
+    /// VTE Stage-B display operator (integral, slice, thick-slice, debug-compare, debug-integral)
+    #[arg(long, value_enum, default_value_t = VteDisplayModeArg::Integral)]
+    vte_display_mode: VteDisplayModeArg,
+
+    /// VTE slice center layer index (0..layers-1). Defaults to center layer.
+    #[arg(long)]
+    vte_slice_layer: Option<u32>,
+
+    /// VTE thick-slice half-width in layer indices.
+    #[arg(long, default_value_t = 2)]
+    vte_thick_half_width: u32,
+
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -110,6 +132,33 @@ impl BackendArg {
             BackendArg::VoxelTraversal => RenderBackend::VoxelTraversal,
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum VteDisplayModeArg {
+    Integral,
+    Slice,
+    ThickSlice,
+    DebugCompare,
+    DebugIntegral,
+}
+
+impl VteDisplayModeArg {
+    fn to_render_mode(self) -> VteDisplayMode {
+        match self {
+            Self::Integral => VteDisplayMode::Integral,
+            Self::Slice => VteDisplayMode::Slice,
+            Self::ThickSlice => VteDisplayMode::ThickSlice,
+            Self::DebugCompare => VteDisplayMode::DebugCompare,
+            Self::DebugIntegral => VteDisplayMode::DebugIntegral,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum GpuScreenshotSourceArg {
+    RenderBuffer,
+    Framebuffer,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -188,6 +237,14 @@ fn main() {
         );
     }
 
+    let vte_reference_mismatch_only_enabled =
+        env_flag_enabled("R4D_VTE_REFERENCE_MISMATCH_ONLY");
+    let vte_compare_slice_only_enabled = env_flag_enabled("R4D_VTE_COMPARE_SLICE_ONLY");
+    let vte_reference_compare_enabled =
+        env_flag_enabled("R4D_VTE_REFERENCE_COMPARE")
+            || vte_reference_mismatch_only_enabled
+            || vte_compare_slice_only_enabled;
+
     let mut app = App {
         instance,
         device,
@@ -200,12 +257,34 @@ fn main() {
         last_frame: Instant::now(),
         mouse_grabbed: false,
         should_exit_after_render: false,
-        gpu_screenshot_countdown: if gpu_screenshot { 3 } else { 0 },
+        gpu_screenshot_countdown: if gpu_screenshot {
+            match args.gpu_screenshot_source {
+                GpuScreenshotSourceArg::RenderBuffer => 3,
+                GpuScreenshotSourceArg::Framebuffer => 6,
+            }
+        } else {
+            0
+        },
         args,
         control_scheme: ControlScheme::SideButtonLayers,
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
+        vte_reference_compare_enabled,
+        vte_reference_mismatch_only_enabled,
+        vte_compare_slice_only_enabled,
     };
+
+    if app.vte_reference_compare_enabled {
+        eprintln!("VTE reference compare enabled via R4D_VTE_REFERENCE_COMPARE");
+    }
+    if app.vte_reference_mismatch_only_enabled {
+        eprintln!(
+            "VTE mismatch-only visualization enabled via R4D_VTE_REFERENCE_MISMATCH_ONLY"
+        );
+    }
+    if app.vte_compare_slice_only_enabled {
+        eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
+    }
 
     event_loop.run_app(&mut app).unwrap();
 }
@@ -292,6 +371,40 @@ struct App {
     control_scheme: ControlScheme,
     scroll_cycle_pair: RotationPair,
     move_speed: f32,
+    vte_reference_compare_enabled: bool,
+    vte_reference_mismatch_only_enabled: bool,
+    vte_compare_slice_only_enabled: bool,
+}
+
+fn latest_framebuffer_screenshot_path() -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let entries = std::fs::read_dir("frames").ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()?.to_string_lossy();
+        if !(name.starts_with("framebuffer_") && name.ends_with(".webp")) {
+            continue;
+        }
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        let replace = best
+            .as_ref()
+            .map(|(best_time, _)| modified > *best_time)
+            .unwrap_or(true);
+        if replace {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
+        }
+        Err(_) => false,
+    }
 }
 
 impl App {
@@ -420,16 +533,30 @@ impl App {
         } else {
             false
         };
-        let take_screenshot = self.input.take_screenshot();
+        let manual_screenshot = self.input.take_screenshot();
+        let mut take_screenshot = manual_screenshot;
+        if auto_screenshot && self.args.gpu_screenshot_source == GpuScreenshotSourceArg::Framebuffer
+        {
+            take_screenshot = true;
+        }
         if take_screenshot {
             let _ = std::fs::create_dir_all("frames");
-            self.should_exit_after_render = true;
+            if auto_screenshot {
+                self.should_exit_after_render = true;
+            }
         }
 
         let render_options = RenderOptions {
             do_raster: true,
             render_backend: backend,
             vte_max_trace_steps: self.args.vte_max_trace_steps.max(1),
+            vte_max_trace_distance: self.args.vte_max_trace_distance.max(1.0),
+            vte_display_mode: self.args.vte_display_mode.to_render_mode(),
+            vte_slice_layer: self.args.vte_slice_layer,
+            vte_thick_half_width: self.args.vte_thick_half_width,
+            vte_reference_compare: self.vte_reference_compare_enabled,
+            vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
+            vte_compare_slice_only: self.vte_compare_slice_only_enabled,
             do_navigation_hud: true,
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
@@ -486,10 +613,45 @@ impl App {
 
         if auto_screenshot {
             let _ = std::fs::create_dir_all("frames");
-            self.rcx
-                .as_mut()
-                .unwrap()
-                .save_rendered_frame_png("frames/gpu_render.png");
+            match self.args.gpu_screenshot_source {
+                GpuScreenshotSourceArg::RenderBuffer => {
+                    self.rcx
+                        .as_mut()
+                        .unwrap()
+                        .save_rendered_frame_png("frames/gpu_render.png");
+                }
+                GpuScreenshotSourceArg::Framebuffer => {
+                    if let Some(src_path) = latest_framebuffer_screenshot_path() {
+                        if let Err(err) = std::fs::copy(&src_path, "frames/gpu_render.webp") {
+                            eprintln!(
+                                "Failed to copy framebuffer screenshot {} -> frames/gpu_render.webp: {}",
+                                src_path.display(),
+                                err
+                            );
+                        }
+                        match image::open(&src_path) {
+                            Ok(img) => {
+                                if let Err(err) = img.save("frames/gpu_render.png") {
+                                    eprintln!("Failed to save frames/gpu_render.png: {err}");
+                                } else {
+                                    println!("Saved PNG to frames/gpu_render.png");
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "Failed to decode framebuffer screenshot {}: {}",
+                                    src_path.display(),
+                                    err
+                                );
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "No framebuffer screenshot found under frames/ after auto-capture."
+                        );
+                    }
+                }
+            }
             self.should_exit_after_render = true;
         }
     }
