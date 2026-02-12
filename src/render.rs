@@ -964,6 +964,81 @@ fn push_cross(lines: &mut Vec<OverlayLine>, center: Vec2, radius: f32, color: Ve
     );
 }
 
+fn push_minecraft_crosshair(
+    lines: &mut Vec<OverlayLine>,
+    present_size: [u32; 2],
+    center_ndc: Vec2,
+    color: Vec4,
+    outline_color: Vec4,
+) {
+    // Keep the crosshair in pixel units so it stays visually stable across resolutions.
+    const INNER_GAP_PX: f32 = 3.0;
+    const ARM_LENGTH_PX: f32 = 8.0;
+    const OUTLINE_PAD_PX: f32 = 1.0;
+
+    let inv_w = 2.0 / present_size[0].max(1) as f32;
+    let inv_h = 2.0 / present_size[1].max(1) as f32;
+
+    let inner_x = INNER_GAP_PX * inv_w;
+    let inner_y = INNER_GAP_PX * inv_h;
+    let arm_x = ARM_LENGTH_PX * inv_w;
+    let arm_y = ARM_LENGTH_PX * inv_h;
+    let pad_x = OUTLINE_PAD_PX * inv_w;
+    let pad_y = OUTLINE_PAD_PX * inv_h;
+
+    // Outline pass.
+    push_line(
+        lines,
+        center_ndc + Vec2::new(-(inner_x + arm_x + pad_x), 0.0),
+        center_ndc + Vec2::new(-(inner_x - pad_x), 0.0),
+        outline_color,
+    );
+    push_line(
+        lines,
+        center_ndc + Vec2::new(inner_x - pad_x, 0.0),
+        center_ndc + Vec2::new(inner_x + arm_x + pad_x, 0.0),
+        outline_color,
+    );
+    push_line(
+        lines,
+        center_ndc + Vec2::new(0.0, -(inner_y + arm_y + pad_y)),
+        center_ndc + Vec2::new(0.0, -(inner_y - pad_y)),
+        outline_color,
+    );
+    push_line(
+        lines,
+        center_ndc + Vec2::new(0.0, inner_y - pad_y),
+        center_ndc + Vec2::new(0.0, inner_y + arm_y + pad_y),
+        outline_color,
+    );
+
+    // Inner bright pass.
+    push_line(
+        lines,
+        center_ndc + Vec2::new(-(inner_x + arm_x), 0.0),
+        center_ndc + Vec2::new(-inner_x, 0.0),
+        color,
+    );
+    push_line(
+        lines,
+        center_ndc + Vec2::new(inner_x, 0.0),
+        center_ndc + Vec2::new(inner_x + arm_x, 0.0),
+        color,
+    );
+    push_line(
+        lines,
+        center_ndc + Vec2::new(0.0, -(inner_y + arm_y)),
+        center_ndc + Vec2::new(0.0, -inner_y),
+        color,
+    );
+    push_line(
+        lines,
+        center_ndc + Vec2::new(0.0, inner_y),
+        center_ndc + Vec2::new(0.0, inner_y + arm_y),
+        color,
+    );
+}
+
 fn map_to_panel(center: Vec2, half_size: Vec2, map_range: f32, a: f32, b: f32) -> Vec2 {
     let x = (a / map_range).clamp(-1.0, 1.0) * half_size.x;
     let y = (-b / map_range).clamp(-1.0, 1.0) * half_size.y; // negate for Vulkan +Y=down
@@ -3286,6 +3361,8 @@ impl RenderContext {
         let breadcrumb_zw_end = Vec4::new(1.00, 0.50, 0.95, 1.0);
         let altimeter_color = Vec4::new(1.00, 0.75, 0.25, 1.0);
         let drift_color = Vec4::new(0.95, 0.95, 0.35, 1.0);
+        let crosshair_color = Vec4::new(0.95, 0.95, 0.95, 1.0);
+        let crosshair_outline = Vec4::new(0.0, 0.0, 0.0, 1.0);
 
         let (present_size, text_scale) = match self.window.as_ref() {
             Some(window) => {
@@ -4042,6 +4119,14 @@ impl RenderContext {
                 present_size,
             );
         }
+
+        push_minecraft_crosshair(
+            &mut lines,
+            present_size,
+            Vec2::ZERO,
+            crosshair_color,
+            crosshair_outline,
+        );
 
         // Write line data to GPU buffer
         let lines_to_write = lines.len().min(max_lines - base_line_count);
