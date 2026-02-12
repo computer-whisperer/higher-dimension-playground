@@ -72,7 +72,9 @@ struct MaterialProperties
     float metallic;
     float roughness;
     float luminance;
-    uint padding;
+    // Optional integration contribution multiplier for VTE integral resolve.
+    // 1.0 = normal contribution, >1.0 = over-contribute.
+    float integrationWeight;
 }
 
 // Ray hit result for raytracing

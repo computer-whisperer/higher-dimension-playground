@@ -27,12 +27,14 @@ use input::{ControlScheme, InputState, RotationPair};
 use scene::{Scene, ScenePreset};
 
 const MOUSE_SENSITIVITY: f32 = 0.002;
-const BLOCK_EDIT_MAX_DISTANCE: f32 = 12.0;
+const BLOCK_EDIT_REACH_DEFAULT: f32 = 8.0;
+const BLOCK_EDIT_REACH_MIN: f32 = 1.0;
+const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
 const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 20;
-const TARGET_OUTLINE_COLOR: [f32; 4] = [0.20, 1.00, 1.00, 1.00];
-const PLACE_OUTLINE_COLOR: [f32; 4] = [1.00, 0.60, 0.20, 1.00];
+const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
+const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum EditHighlightModeArg {
@@ -152,6 +154,10 @@ struct Args {
     /// `edges` keeps the legacy overlay-line outline debug view.
     #[arg(long, value_enum, default_value_t = EditHighlightModeArg::Faces)]
     edit_highlight_mode: EditHighlightModeArg,
+
+    /// Block interaction reach limit in world units.
+    #[arg(long, default_value_t = BLOCK_EDIT_REACH_DEFAULT)]
+    edit_reach: f32,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -786,6 +792,10 @@ impl App {
         } else {
             self.camera.look_direction()
         };
+        let edit_reach = self
+            .args
+            .edit_reach
+            .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
         let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
         if self.control_scheme.is_upright_primary() {
             self.camera.apply_movement_upright(
@@ -830,7 +840,7 @@ impl App {
                     if let Some([x, y, z, w]) = self.scene.remove_block_along_ray(
                         self.camera.position,
                         look_dir,
-                        BLOCK_EDIT_MAX_DISTANCE,
+                        edit_reach,
                     ) {
                         eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
                     }
@@ -838,7 +848,7 @@ impl App {
                     if let Some([x, y, z, w]) = self.scene.place_block_along_ray(
                         self.camera.position,
                         look_dir,
-                        BLOCK_EDIT_MAX_DISTANCE,
+                        edit_reach,
                         voxel::VoxelType(self.place_material),
                     ) {
                         eprintln!(
@@ -863,11 +873,10 @@ impl App {
         let highlight_mode = self.args.edit_highlight_mode;
         let targets =
             if self.mouse_grabbed && (highlight_mode.uses_faces() || highlight_mode.uses_edges()) {
-                Some(self.scene.block_edit_targets(
-                    self.camera.position,
-                    look_dir,
-                    BLOCK_EDIT_MAX_DISTANCE,
-                ))
+                Some(
+                    self.scene
+                        .block_edit_targets(self.camera.position, look_dir, edit_reach),
+                )
             } else {
                 None
             };
@@ -957,7 +966,7 @@ impl App {
                 format!(
                     "{} [{}]  spd:{:.1}{}\n\
                      yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
-                     edit:LMB- RMB+ mat:{} hl:{}\n\
+                     edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                      mat:[ ]/wheel cycle, 1-0 direct",
                     pair.label(),
                     self.control_scheme.label(),
@@ -969,6 +978,7 @@ impl App {
                     self.camera.zw_angle.to_degrees(),
                     self.camera.yw_deviation.to_degrees(),
                     self.place_material,
+                    edit_reach,
                     highlight_mode.label(),
                 )
             }),

@@ -17,6 +17,7 @@ static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
 static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
 static const uint HIGHLIGHT_FLAG_HIT_VOXEL = 1u << 0u;
 static const uint HIGHLIGHT_FLAG_PLACE_VOXEL = 1u << 1u;
+static const float INTEGRAL_HIGHLIGHT_WEIGHT_BOOST = 15.0;
 
 static const uint MISS_REASON_NONE = 0u;
 static const uint MISS_REASON_TOUCHED_VISIBLE_CHUNK = 1u;
@@ -464,11 +465,13 @@ float3 shadeHighlightedVoxelSample(
     const float BAND_OUTER = 0.16;
     float faceBand = 1.0 - smoothstep(BAND_INNER, BAND_OUTER, minCellFaceDist);
 
-    float3 tint = highlightBaseTint(highlightKind);
-    float3 contrasted = float3(0.03, 0.03, 0.03);
-    float tintBlend = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL) ? 0.64 : 0.50;
-    float contrastBlend = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL) ? 0.85 : 0.60;
-    float3 shaded = lerp(lerp(litColor, tint, tintBlend), contrasted, faceBand * contrastBlend);
+    // Pure high-contrast treatment: drive edges toward black, but keep
+    // center contribution unchanged.
+    float edgeWeight = saturate(faceBand);
+    // Keep hit and place guides visually distinct:
+    // hit voxel gets near-black edge bands, placement voxel stays darker-gray.
+    float blackBlend = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL) ? 0.98 : 0.55;
+    float3 shaded = lerp(litColor, float3(0.0, 0.0, 0.0), edgeWeight * blackBlend);
 
     if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL && all(voxelCoord == meta.highlightHitVoxel))
     {
@@ -482,8 +485,8 @@ float3 shadeHighlightedVoxelSample(
         float faceMask = 1.0 - smoothstep(0.01, 0.06, guideFaceDist);
         float edgeMask = 1.0 - smoothstep(0.05, 0.13, minCellFaceDist);
         float accentMask = faceMask * edgeMask;
-        float3 accentColor = float3(1.0, 0.20, 0.86);
-        shaded = lerp(shaded, accentColor, accentMask);
+        // High-contrast indicator for the selected placement face on the hit voxel.
+        shaded = lerp(shaded, float3(1.0, 1.0, 1.0), accentMask * 0.92);
     }
 
     return shaded;
@@ -1395,10 +1398,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         float cosStep = cos(angleStep);
 
         float3 accumColor = float3(0.0, 0.0, 0.0);
-        float3 hitHighlightAccum = float3(0.0, 0.0, 0.0);
-        float3 placeHighlightAccum = float3(0.0, 0.0, 0.0);
-        float hitHighlightCount = 0.0;
-        float placeHighlightCount = 0.0;
+        float accumWeight = 0.0;
         uint hitMaterial = 0u;
         float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
         int4 hitChunkCoord = int4(0, 0, 0, 0);
@@ -1442,29 +1442,25 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                         worldDirection,
                         hitNormal,
                         highlightKind);
-                    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
-                    {
-                        hitHighlightAccum += highlighted;
-                        hitHighlightCount += 1.0;
-                    }
-                    else
-                    {
-                        placeHighlightAccum += highlighted;
-                        placeHighlightCount += 1.0;
-                    }
-                    accumColor += highlighted;
+                    float w = max(1e-4, mat.integrationWeight * INTEGRAL_HIGHLIGHT_WEIGHT_BOOST);
+                    accumColor += highlighted * w;
+                    accumWeight += w;
                 }
                 else
                 {
                     MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
-                    accumColor += shadeVoxelMaterial(mat, hitNormal);
+                    float w = max(1e-4, mat.integrationWeight);
+                    accumColor += shadeVoxelMaterial(mat, hitNormal) * w;
+                    accumWeight += w;
                 }
             }
             else
             {
                 float a = 0.5 + 0.5 * worldDirection.y;
-                accumColor += lerp(float3(0.02, 0.03, 0.06), float3(0.16, 0.22, 0.40), saturate(a));
+                float3 sky = lerp(float3(0.02, 0.03, 0.06), float3(0.16, 0.22, 0.40), saturate(a));
+                accumColor += sky;
+                accumWeight += 1.0;
             }
 
             float nextCos = cosAngle * cosStep - sinAngle * sinStep;
@@ -1473,16 +1469,9 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             sinAngle = nextSin;
         }
 
-        float3 collapsedColor = accumColor / float(layerCount);
-        if (hitHighlightCount > 0.0)
-        {
-            // Keep selected-cell guides solid in integral mode when present.
-            collapsedColor = hitHighlightAccum / hitHighlightCount;
-        }
-        else if (placeHighlightCount > 0.0)
-        {
-            collapsedColor = placeHighlightAccum / placeHighlightCount;
-        }
+        float3 collapsedColor = accumWeight > 1e-6
+            ? accumColor / accumWeight
+            : float3(0.0, 0.0, 0.0);
         pixelBuffer[pixelBase] = float4(collapsedColor, 1.0);
         return;
     }

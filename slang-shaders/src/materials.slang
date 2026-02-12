@@ -13,7 +13,7 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos)
     mat.metallic = 0.0;
     mat.roughness = 0.0;
     mat.luminance = basicLuminance;
-    mat.padding = 0;
+    mat.integrationWeight = 1.0;
 
     switch (textureId)
     {

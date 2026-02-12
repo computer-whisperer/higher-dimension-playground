@@ -183,6 +183,7 @@ Core runtime options:
 | `--scene <flat\|demo-cubes>` | Voxel scene preset |
 | `-W, --width` / `-H, --height` | Render size |
 | `--layers` | Hidden-dimension sample layers |
+| `--edit-reach` | Max block remove/place/highlight reach |
 | `--cpu-render` | CPU reference render to `frames/cpu_render.png`, then exit |
 
 VTE-specific options:
