@@ -246,4 +246,91 @@ mod tests {
             assert!((got[axis] - expected[axis]).abs() < 1e-4);
         }
     }
+
+    #[test]
+    fn mouse_right_turns_toward_positive_x_in_standard_mode() {
+        let mut cam = Camera4D::new();
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        cam.xw_angle = 0.0;
+        cam.zw_angle = 0.0;
+        cam.yw_deviation = 0.0;
+
+        let before_x = cam.look_direction()[0];
+        cam.apply_mouse_look_on(40.0, 0.0, 0.01, AngleTarget::Yaw, AngleTarget::Pitch);
+        let after_x = cam.look_direction()[0];
+        assert!(
+            after_x > before_x,
+            "mouse-right should increase look.x in standard yaw mode: before={before_x:.4} after={after_x:.4}"
+        );
+    }
+
+    #[test]
+    fn mouse_up_looks_up_when_not_y_inverted() {
+        let mut cam = Camera4D::new();
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        cam.xw_angle = 0.0;
+        cam.zw_angle = 0.0;
+        cam.yw_deviation = 0.0;
+        assert!(!cam.is_y_inverted(), "baseline camera should not be Y-inverted");
+
+        let before_y = cam.look_direction()[1];
+        cam.apply_mouse_look_on(0.0, -40.0, 0.01, AngleTarget::Yaw, AngleTarget::Pitch);
+        let after_y = cam.look_direction()[1];
+        assert!(
+            after_y > before_y,
+            "mouse-up should increase look.y when not Y-inverted: before={before_y:.4} after={after_y:.4}"
+        );
+    }
+
+    #[test]
+    fn pitch_response_can_reverse_at_some_orientations() {
+        let mut cam = Camera4D::new();
+
+        let mut found_mouse_up_moves_up = false;
+        let mut found_mouse_up_moves_down = false;
+
+        // Scan a coarse orientation grid and measure vertical response
+        // from the standard pitch control.
+        for yaw_step in -3..=3 {
+            for pitch_step in -2..=2 {
+                for xw_step in -3..=3 {
+                    for zw_step in -3..=3 {
+                        cam.yaw = yaw_step as f32 * (std::f32::consts::PI / 8.0);
+                        cam.pitch = pitch_step as f32 * (std::f32::consts::PI / 10.0);
+                        cam.xw_angle = xw_step as f32 * (std::f32::consts::PI / 8.0);
+                        cam.zw_angle = zw_step as f32 * (std::f32::consts::PI / 8.0);
+                        cam.yw_deviation = 0.0;
+
+                        let before_y = cam.look_direction()[1];
+                        cam.apply_mouse_look_on(
+                            0.0,
+                            -10.0,
+                            0.01,
+                            AngleTarget::Yaw,
+                            AngleTarget::Pitch,
+                        );
+                        let after_y = cam.look_direction()[1];
+                        let dy = after_y - before_y;
+
+                        if dy > 1e-4 {
+                            found_mouse_up_moves_up = true;
+                        } else if dy < -1e-4 {
+                            found_mouse_up_moves_down = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            found_mouse_up_moves_up,
+            "expected at least one orientation where mouse-up pitches upward"
+        );
+        assert!(
+            found_mouse_up_moves_down,
+            "expected at least one orientation where mouse-up pitches downward"
+        );
+    }
 }
