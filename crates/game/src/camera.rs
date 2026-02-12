@@ -80,12 +80,6 @@ impl Camera4D {
         world
     }
 
-    /// Convert a direction from view-space basis to world-space.
-    fn world_direction_from_view(&self, view_dir: [f32; 4]) -> [f32; 4] {
-        let rotation = self.rotation_matrix();
-        Self::world_direction_from_view_with_rotation(&rotation, view_dir)
-    }
-
     fn normalize_dir(dir: [f32; 4]) -> [f32; 4] {
         let len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] + dir[3] * dir[3];
         if len_sq <= 1e-8 {
@@ -97,6 +91,22 @@ impl Camera4D {
             dir[1] * inv_len,
             dir[2] * inv_len,
             dir[3] * inv_len,
+        ]
+    }
+
+    /// Normalize a direction after projecting it onto the world XZW hyperplane.
+    fn normalize_xzw(dir: [f32; 4]) -> [f32; 4] {
+        let planar = [dir[0], 0.0, dir[2], dir[3]];
+        let len_sq = planar[0] * planar[0] + planar[2] * planar[2] + planar[3] * planar[3];
+        if len_sq <= 1e-8 {
+            return [0.0, 0.0, 0.0, 0.0];
+        }
+        let inv_len = len_sq.sqrt().recip();
+        [
+            planar[0] * inv_len,
+            0.0,
+            planar[2] * inv_len,
+            planar[3] * inv_len,
         ]
     }
 
@@ -261,32 +271,62 @@ impl Camera4D {
         speed: f32,
     ) {
         let rotation = self.rotation_matrix();
-        let right = Self::world_direction_from_view_with_rotation(&rotation, [1.0, 0.0, 0.0, 0.0]);
-        let up = Self::world_direction_from_view_with_rotation(&rotation, [0.0, 1.0, 0.0, 0.0]);
-        let view_z = Self::world_direction_from_view_with_rotation(&rotation, [0.0, 0.0, 1.0, 0.0]);
-        let view_w = Self::world_direction_from_view_with_rotation(&rotation, [0.0, 0.0, 0.0, 1.0]);
+        let right = Self::normalize_xzw(Self::world_direction_from_view_with_rotation(
+            &rotation,
+            [1.0, 0.0, 0.0, 0.0],
+        ));
+        let view_z = Self::normalize_xzw(Self::world_direction_from_view_with_rotation(
+            &rotation,
+            [0.0, 0.0, 1.0, 0.0],
+        ));
+        let view_w = Self::normalize_xzw(Self::world_direction_from_view_with_rotation(
+            &rotation,
+            [0.0, 0.0, 0.0, 1.0],
+        ));
 
-        let movement_scale = speed * dt;
-        let mut delta = [0.0f32; 4];
-        for axis in 0..4 {
-            delta[axis] = (forward * view_z[axis] + strafe * right[axis] + w_axis * view_w[axis])
-                * movement_scale;
-            if self.is_flying {
-                delta[axis] += vertical * up[axis] * movement_scale;
-            }
+        let vertical_input = if self.is_flying { vertical } else { 0.0 };
+        let input_len = (forward * forward
+            + strafe * strafe
+            + w_axis * w_axis
+            + vertical_input * vertical_input)
+            .sqrt();
+        if input_len <= 1e-8 {
+            return;
         }
-        if !self.is_flying {
-            // Keep gravity-mode locomotion on the world XZW hyperplane.
-            delta[1] = 0.0;
-        }
+        let input_mag = input_len.min(1.0);
+        let input_scale = if input_len > 1.0 {
+            input_len.recip()
+        } else {
+            1.0
+        };
+        let forward_i = forward * input_scale;
+        let strafe_i = strafe * input_scale;
+        let w_i = w_axis * input_scale;
+        let vertical_i = vertical_input * input_scale;
+
+        let mut wish = [0.0f32; 4];
         for axis in 0..4 {
-            self.position[axis] += delta[axis];
+            wish[axis] = forward_i * view_z[axis] + strafe_i * right[axis] + w_i * view_w[axis];
+        }
+        // Minecraft-like vertical controls: Space/Shift move only along world Y.
+        wish[1] += vertical_i;
+
+        let wish_len_sq =
+            wish[0] * wish[0] + wish[1] * wish[1] + wish[2] * wish[2] + wish[3] * wish[3];
+        if wish_len_sq <= 1e-8 {
+            return;
+        }
+        let movement_scale = speed * dt * input_mag * wish_len_sq.sqrt().recip();
+        for axis in 0..4 {
+            self.position[axis] += wish[axis] * movement_scale;
         }
     }
 
     /// Friendly movement scheme:
     /// - forward follows the center look ray (between view-Z and view-W)
     /// - Q/E moves on the orthogonal hidden-dimension side axis in the ZW plane
+    /// - forward/strafe/QE are projected to world XZW (no Y drift from look pitch)
+    /// - Space/Shift moves exclusively on world Y when flying
     /// - input is normalized to avoid diagonal speed boost
     /// - in gravity mode, movement is re-normalized on XZW so pitch does not slow down walking
     pub fn apply_movement_upright(
@@ -299,18 +339,20 @@ impl Camera4D {
         speed: f32,
     ) {
         let rotation = self.rotation_matrix_upright();
-        let right = Self::world_direction_from_view_with_rotation(&rotation, [1.0, 0.0, 0.0, 0.0]);
-        let up = Self::world_direction_from_view_with_rotation(&rotation, [0.0, 1.0, 0.0, 0.0]);
+        let right = Self::normalize_xzw(Self::world_direction_from_view_with_rotation(
+            &rotation,
+            [1.0, 0.0, 0.0, 0.0],
+        ));
         let view_z = Self::world_direction_from_view_with_rotation(&rotation, [0.0, 0.0, 1.0, 0.0]);
         let view_w = Self::world_direction_from_view_with_rotation(&rotation, [0.0, 0.0, 0.0, 1.0]);
 
-        let center_forward = Self::normalize_dir([
+        let center_forward = Self::normalize_xzw([
             view_z[0] + view_w[0],
             view_z[1] + view_w[1],
             view_z[2] + view_w[2],
             view_z[3] + view_w[3],
         ]);
-        let side_w = Self::normalize_dir([
+        let side_w = Self::normalize_xzw([
             view_w[0] - view_z[0],
             view_w[1] - view_z[1],
             view_w[2] - view_z[2],
@@ -339,15 +381,11 @@ impl Camera4D {
 
         let mut wish = [0.0f32; 4];
         for axis in 0..4 {
-            wish[axis] = forward_i * center_forward[axis]
-                + strafe_i * right[axis]
-                + w_i * side_w[axis]
-                + vertical_i * up[axis];
+            wish[axis] =
+                forward_i * center_forward[axis] + strafe_i * right[axis] + w_i * side_w[axis];
         }
-
-        if !self.is_flying {
-            wish[1] = 0.0;
-        }
+        // Minecraft-like vertical controls: Space/Shift move only along world Y.
+        wish[1] += vertical_i;
 
         let wish_len_sq =
             wish[0] * wish[0] + wish[1] * wish[1] + wish[2] * wish[2] + wish[3] * wish[3];
@@ -475,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn movement_uses_full_view_rotation_basis() {
+    fn movement_forward_stays_on_xzw_plane() {
         let mut cam = Camera4D::new();
         cam.position = [0.0, 0.0, 0.0, 0.0];
         cam.yaw = 0.37;
@@ -485,11 +523,20 @@ mod tests {
         cam.yw_deviation = 0.19;
         cam.is_flying = true;
 
-        let expected = cam.world_direction_from_view([0.0, 0.0, 1.0, 0.0]);
         cam.apply_movement(1.0, 0.0, 0.0, 0.0, 1.0, 1.0);
-        for axis in 0..4 {
-            assert!((cam.position[axis] - expected[axis]).abs() < 1e-4);
-        }
+        assert!(
+            cam.position[1].abs() < 1e-6,
+            "forward movement should not change Y; got {}",
+            cam.position[1]
+        );
+        let xzw_len = (cam.position[0] * cam.position[0]
+            + cam.position[2] * cam.position[2]
+            + cam.position[3] * cam.position[3])
+            .sqrt();
+        assert!(
+            (xzw_len - 1.0).abs() < 1e-4,
+            "forward movement should be unit speed on XZW plane, len={xzw_len}"
+        );
     }
 
     #[test]
@@ -523,7 +570,7 @@ mod tests {
         cam.is_flying = true;
         cam.enforce_upright_constraints();
 
-        let expected = cam.look_direction_upright();
+        let expected = Camera4D::normalize_xzw(cam.look_direction_upright());
         cam.apply_movement_upright(1.0, 0.0, 0.0, 0.0, 1.0, 1.0);
         for axis in 0..4 {
             assert!(
@@ -533,6 +580,41 @@ mod tests {
                 expected[axis]
             );
         }
+    }
+
+    #[test]
+    fn flying_vertical_input_moves_only_world_y() {
+        let mut cam = Camera4D::new();
+        cam.position = [0.0, 0.0, 0.0, 0.0];
+        cam.yaw = 0.52;
+        cam.pitch = -0.63;
+        cam.xw_angle = 1.11;
+        cam.zw_angle = -0.44;
+        cam.is_flying = true;
+        cam.enforce_upright_constraints();
+
+        cam.apply_movement_upright(0.0, 0.0, 1.0, 0.0, 1.0, 1.0);
+
+        assert!(
+            cam.position[1] > 0.9999,
+            "expected positive world-Y movement, got y={}",
+            cam.position[1]
+        );
+        assert!(
+            cam.position[0].abs() < 1e-4,
+            "expected x≈0, got x={}",
+            cam.position[0]
+        );
+        assert!(
+            cam.position[2].abs() < 1e-4,
+            "expected z≈0, got z={}",
+            cam.position[2]
+        );
+        assert!(
+            cam.position[3].abs() < 1e-4,
+            "expected w≈0, got w={}",
+            cam.position[3]
+        );
     }
 
     #[test]

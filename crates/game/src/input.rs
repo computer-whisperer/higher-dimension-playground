@@ -5,6 +5,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::camera::AngleTarget;
 
 const DOUBLE_TAP_THRESHOLD_MS: u128 = 300;
+const DOUBLE_TAP_MIN_INTERVAL_MS: u128 = 90;
+const FLY_TOGGLE_COOLDOWN_MS: u128 = 700;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ControlScheme {
@@ -93,6 +95,7 @@ pub struct InputState {
     mouse_dy: f64,
     escape_pressed: bool,
     last_space_press: Option<Instant>,
+    last_fly_toggle: Option<Instant>,
     fly_toggle_requested: bool,
     jump_requested: bool,
     screenshot_requested: bool,
@@ -125,6 +128,7 @@ impl InputState {
             mouse_dy: 0.0,
             escape_pressed: false,
             last_space_press: None,
+            last_fly_toggle: None,
             fly_toggle_requested: false,
             jump_requested: false,
             screenshot_requested: false,
@@ -152,16 +156,11 @@ impl InputState {
                 KeyCode::KeyA => self.left = pressed,
                 KeyCode::KeyD => self.right = pressed,
                 KeyCode::Space => {
+                    let was_up = self.up;
                     self.up = pressed;
-                    if pressed {
-                        let now = Instant::now();
-                        if let Some(last) = self.last_space_press {
-                            if now.duration_since(last).as_millis() < DOUBLE_TAP_THRESHOLD_MS {
-                                self.fly_toggle_requested = true;
-                            }
-                        }
-                        self.last_space_press = Some(now);
-                        self.jump_requested = true;
+                    // Treat only the key-down edge as a tap; this filters key-repeat noise.
+                    if pressed && !was_up {
+                        self.handle_space_tap(Instant::now());
                     }
                 }
                 KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
@@ -260,6 +259,33 @@ impl InputState {
                 _ => {}
             }
         }
+    }
+
+    fn handle_space_tap(&mut self, now: Instant) {
+        self.jump_requested = true;
+
+        if let Some(last_toggle) = self.last_fly_toggle {
+            if now.duration_since(last_toggle).as_millis() < FLY_TOGGLE_COOLDOWN_MS {
+                self.last_space_press = Some(now);
+                return;
+            }
+        }
+
+        if let Some(last_press) = self.last_space_press {
+            let dt_ms = now.duration_since(last_press).as_millis();
+            if dt_ms < DOUBLE_TAP_MIN_INTERVAL_MS {
+                // Ignore implausibly fast "second taps" from switch bounce / repeat.
+                return;
+            }
+            if dt_ms <= DOUBLE_TAP_THRESHOLD_MS {
+                self.fly_toggle_requested = true;
+                self.last_fly_toggle = Some(now);
+                self.last_space_press = None;
+                return;
+            }
+        }
+
+        self.last_space_press = Some(now);
     }
 
     pub fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
