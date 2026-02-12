@@ -73,7 +73,7 @@ For each attempted fix, record:
 - `mode`: where evaluated (`integral`, `slice`, `debug-compare`, etc.)
 - `quality_result`: improved / unchanged / regressed
 - `perf_result`: measured impact (or `TBD`)
-- `decision`: `keep`, `revert`, or `pending`
+- `decision`: `keep`, `revert`, `pending`, or `on_ice`
 
 If `quality_result=unchanged` and `perf_result` is a regression in non-debug
 mode, default decision should be `revert`.
@@ -91,13 +91,21 @@ mode, default decision should be `revert`.
 | `EXP-20260211-HIGH-BUDGET-COMPARE` | Raised compare tracing budgets (`--vte-max-trace-steps 4096`, `--vte-max-trace-distance 4096`) | `debug-compare` | Necessary for stress diagnostics, not a fix by itself | Severe debug perf regression (~1 FPS) | keep (debug-only workflow) | Use only for targeted captures; not required for routine sweeps. |
 | `EXP-20260211-FIRST-MISMATCH-TRACE-META` | Added first-mismatch telemetry (`chunk_steps`, `final_t`, `remaining_voxels`, `last_chunk`) | `debug-compare` | Improved root-cause visibility | Debug-only overhead | keep | Supports diagnosing chunk-budget misses without full per-step trace dumps. |
 | `FIX-20260211-CHUNK-ENTRY-OWNERSHIP` | Direction-aware chunk boundary ownership (`entryChunkCoord`) | all VTE modes | Fixed chunk pop-in and compare mismatches (`mismatch=0` at repro) | `TBD` in normal mode | keep | Resolves boundary pinning that caused chunk-budget stalls near `t≈0`. |
-| `EXP-20260212-CHUNK-SLAB-HOTPATH-GATE` | Skip per-chunk slab interval recomputation on normal VTE path (keep for debug/compare) | all VTE modes | `TBD` (expected unchanged) | `TBD` (expected stage_a improvement) | pending | DDA interval already provides `[currentT, chunkExitT]`; slab kept for diagnostic strictness. |
-| `EXP-20260212-INTEGRAL-STAGEA-FUSION` | In integral mode, perform layer accumulation in Stage A and skip Stage B dispatch | integral | `TBD` (expected unchanged) | `TBD` (expected total frame reduction, especially Stage B) | pending | Avoids full-frame layer readback pass in Stage B for integral mode. |
-| `EXP-20260212-INTEGRAL-DIR-BASIS-RECURRENCE` | Integral fast path uses transformed direction basis + angle recurrence instead of per-layer matrix/trig recompute | integral | `TBD` (expected unchanged) | `TBD` (expected Stage A reduction at high resolutions/layers) | pending | Preserves identical angle sequence while reducing ALU/matrix work. |
-| `EXP-20260212-VISIBLE-BOUNDS-LOOKUP-CULL` | Upload visible chunk min/max bounds; skip hash lookup when chunk DDA coordinate is outside that bounds AABB | all VTE modes | `TBD` (expected unchanged) | `TBD` (expected stage_a reduction in sparse/out-of-bounds traversal) | pending | Prunes hot-path hash probes in guaranteed-empty chunk regions without affecting in-bounds behavior. |
-| `EXP-20260212-REANCHOR-RATE-GATE` | Keep frequent chunk-state re-anchor for debug/reference paths, reduce frequency on normal path | all VTE modes | `TBD` (expected unchanged) | `TBD` (expected minor stage_a reduction) | pending | Preserves robust diagnostics while trimming non-debug per-ray re-anchor overhead. |
-| `EXP-20260212-VISIBLE-BOUNDS-INTERVAL-CLIP` | Intersect ray against visible-chunk world AABB; start traversal at entry and cap by exit | all VTE modes | `TBD` (expected unchanged) | `TBD` (expected stage_a reduction and lower variance) | pending | Avoids stepping chunk DDA in regions that cannot contain visible chunks. |
-| `FIX-20260212-INTEGRAL-REDUCED-STORAGE-LAYERS` | Separate logical sample layers from pixel-buffer storage layers; use 1 storage layer for explicit VTE integral startup path | voxel integral | `TBD` (expected unchanged) | Prevents allocation blowups at high resolution/layer counts | pending | Keeps integral sampling count while avoiding `max_buffer_size` failures from `W*H*L*Vec4` storage. |
+| `EXP-20260212-CHUNK-SLAB-HOTPATH-GATE` | Skip per-chunk slab interval recomputation on normal VTE path (keep for debug/compare) | all VTE modes | Unchanged in reference compare (`mismatch=0`) | Part of measured stage-a reduction in aggregate | keep | DDA interval `[currentT, chunkExitT]` is sufficient on normal path; slab retained for strict debug/compare. |
+| `EXP-20260212-INTEGRAL-STAGEA-FUSION` | In integral mode, perform layer accumulation in Stage A and skip Stage B dispatch | integral | Unchanged in reference compare (`mismatch=0`) | `vte_stage_b` removed in integral mode (`0.000 ms`) | keep | Eliminates full-frame Stage B resolve dispatch for integral path. |
+| `EXP-20260212-INTEGRAL-DIR-BASIS-RECURRENCE` | Integral fast path uses transformed direction basis + angle recurrence instead of per-layer matrix/trig recompute | integral | Unchanged in reference compare (`mismatch=0`) | Contributes to lower Stage A ALU cost at high `layers` | keep | Preserves layer-angle sequence while reducing per-sample math overhead. |
+| `EXP-20260212-VISIBLE-BOUNDS-LOOKUP-CULL` | Upload visible chunk min/max bounds; skip hash lookup when chunk DDA coordinate is outside that bounds AABB | all VTE modes | Unchanged in reference compare (`mismatch=0`) | Reduces useless hash probes outside visible chunk region | keep | Effective empty-space pruning before lookup. |
+| `EXP-20260212-REANCHOR-RATE-GATE` | Keep frequent chunk-state re-anchor for debug/reference paths, reduce frequency on normal path | all VTE modes | Unchanged in reference compare (`mismatch=0`) | Reduces normal-path re-anchor overhead | keep | Keeps robust diagnostics while trimming hot-path work. |
+| `EXP-20260212-VISIBLE-BOUNDS-INTERVAL-CLIP` | Intersect ray against visible-chunk world AABB; start traversal at entry and cap by exit | all VTE modes | Unchanged in reference compare (`mismatch=0`) | Improves Stage A stability by clipping traversal interval | keep | Prevents stepping outside guaranteed-empty ray ranges. |
+| `FIX-20260212-INTEGRAL-REDUCED-STORAGE-LAYERS` | Separate logical sample layers from pixel-buffer storage layers; use 1 storage layer for explicit VTE integral startup path | voxel integral | Unchanged output in integral mode | Fixes 4K startup crash (`max_buffer_size`) and keeps high FPS | keep | Logical `--layers` sampling preserved; storage reduced to avoid `W*H*L` buffer blowup. |
 | `CLEANUP-20260211-COMPARE-READBACK-GATING` | Gate compare buffer reset/readback to debug-compare modes only | all VTE modes | No visual change outside debug compare | Reduces CPU-side overhead in normal rendering | keep | Prevents unconditional per-frame debug buffer map/reset work. |
 | `CLEANUP-20260211-TIE-FLAG-GATING` | Compute tie/zero-interval debug flags only in debug modes | all VTE modes | No visual change outside debug compare | Reduces per-chunk arithmetic in normal rendering | keep | Keeps diagnostics fidelity while trimming non-debug hot path. |
 | `CLEANUP-20260212-VISIBLE-HASH-GATING` | Compute/print `vh` visible-set hash only when reference compare is enabled | all VTE modes | No visual change | Reduces per-frame CPU hash work and HUD noise in normal mode | keep | Hash remains available for mismatch/debug runs. |
+
+### On-Ice Future Optimizations
+
+These are intentionally deferred while game features advance:
+
+- Investigate `frame_end` tail cost (~2.8 ms at 1080p/4K) in present/copy/sync path.
+- Add tiled/layer-chunked storage path for non-integral VTE display modes at very high resolutions.
+- Explore adaptive hidden-dimension sampling to preserve quality at lower effective layer cost.
