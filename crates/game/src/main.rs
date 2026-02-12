@@ -4,7 +4,7 @@ mod input;
 mod scene;
 mod voxel;
 
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 use higher_dimension_playground::render::{
     CustomOverlayLine, FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
     VteDisplayMode,
@@ -150,6 +150,11 @@ struct Args {
     /// VTE thick-slice half-width in layer indices.
     #[arg(long, default_value_t = 2)]
     vte_thick_half_width: u32,
+
+    /// Enable tetra-entity integration in VTE Stage A (test tesseract + entity BVH).
+    /// Set to false to profile pure voxel traversal without the secondary tetra pipeline.
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    vte_entities: bool,
 
     /// Edit highlight mode for pointed/placement voxel guides.
     /// `faces` uses in-VTE occlusion-correct face highlighting.
@@ -350,6 +355,9 @@ fn main() {
     }
     if app.vte_compare_slice_only_enabled {
         eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
+    }
+    if !app.args.vte_entities {
+        eprintln!("VTE tetra-entity pipeline disabled via --vte-entities=false");
     }
 
     event_loop.run_app(&mut app).unwrap();
@@ -1202,14 +1210,19 @@ impl App {
 
         if backend == RenderBackend::VoxelTraversal {
             let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
-            let vte_entity_instances = [build_vte_test_entity_instance(preview_time_s)];
+            let vte_entity_instance = build_vte_test_entity_instance(preview_time_s);
+            let vte_entity_instances: &[common::ModelInstance] = if self.args.vte_entities {
+                std::slice::from_ref(&vte_entity_instance)
+            } else {
+                &[]
+            };
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
-                &vte_entity_instances,
+                vte_entity_instances,
                 &preview_overlay_instances,
             );
         } else {

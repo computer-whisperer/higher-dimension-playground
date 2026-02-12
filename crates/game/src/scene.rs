@@ -3,7 +3,10 @@ use crate::voxel::cull::{self, SurfaceData};
 use crate::voxel::io as voxel_io;
 use crate::voxel::worldgen;
 use crate::voxel::{VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
-use higher_dimension_playground::render::{GpuVoxelChunkHeader, VoxelFrameInput};
+use higher_dimension_playground::render::{
+    GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput,
+};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -11,6 +14,12 @@ use std::path::Path;
 const RENDER_DISTANCE: f32 = 64.0;
 const OCCUPANCY_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 32;
 const MATERIAL_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 4; // packed 4x u8 per u32
+const MACRO_CELLS_PER_AXIS: usize = CHUNK_SIZE / 2; // 2x2x2x2 macro cells
+const MACRO_CELLS_PER_CHUNK: usize = MACRO_CELLS_PER_AXIS
+    * MACRO_CELLS_PER_AXIS
+    * MACRO_CELLS_PER_AXIS
+    * MACRO_CELLS_PER_AXIS;
+const MACRO_WORDS_PER_CHUNK: usize = MACRO_CELLS_PER_CHUNK / 32;
 const EDIT_RAY_EPSILON: f32 = 1e-4;
 const EDIT_RAY_MAX_STEPS: usize = 4096;
 const COLLISION_PUSHUP_STEP: f32 = 0.05;
@@ -37,7 +46,9 @@ pub struct VoxelFrameData {
     pub chunk_headers: Vec<GpuVoxelChunkHeader>,
     pub occupancy_words: Vec<u32>,
     pub material_words: Vec<u32>,
+    pub macro_words: Vec<u32>,
     pub visible_chunk_indices: Vec<u32>,
+    pub y_slice_bounds: Vec<GpuVoxelYSliceBounds>,
 }
 
 impl VoxelFrameData {
@@ -46,7 +57,9 @@ impl VoxelFrameData {
             chunk_headers: &self.chunk_headers,
             occupancy_words: &self.occupancy_words,
             material_words: &self.material_words,
+            macro_words: &self.macro_words,
             visible_chunk_indices: &self.visible_chunk_indices,
+            y_slice_bounds: &self.y_slice_bounds,
         }
     }
 }
@@ -184,7 +197,9 @@ impl Scene {
         let mut chunk_headers = Vec::new();
         let mut occupancy_words = Vec::new();
         let mut material_words = Vec::new();
+        let mut macro_words = Vec::new();
         let mut visible_chunk_indices = Vec::new();
+        let mut y_slice_bounds: BTreeMap<i32, GpuVoxelYSliceBounds> = BTreeMap::new();
         let render_dist_sq = RENDER_DISTANCE * RENDER_DISTANCE;
 
         let mut chunk_entries: Vec<_> = self.world.chunks.iter().collect();
@@ -230,6 +245,8 @@ impl Scene {
             occupancy_words.resize(occupancy_words.len() + OCCUPANCY_WORDS_PER_CHUNK, 0);
             let material_word_offset = material_words.len() as u32;
             material_words.resize(material_words.len() + MATERIAL_WORDS_PER_CHUNK, 0);
+            let macro_word_offset = macro_words.len() as u32;
+            macro_words.resize(macro_words.len() + MACRO_WORDS_PER_CHUNK, 0);
 
             for (voxel_idx, voxel) in chunk.voxels.iter().enumerate() {
                 let mat_word_idx = material_word_offset as usize + (voxel_idx / 4);
@@ -238,6 +255,21 @@ impl Scene {
                 if voxel.is_solid() {
                     let word_idx = occupancy_word_offset as usize + (voxel_idx / 32);
                     occupancy_words[word_idx] |= 1u32 << (voxel_idx % 32);
+
+                    let x = voxel_idx % CHUNK_SIZE;
+                    let y = (voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
+                    let z = (voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
+                    let w = voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+                    let mx = x / 2;
+                    let my = y / 2;
+                    let mz = z / 2;
+                    let mw = w / 2;
+                    let macro_idx = (((mw * MACRO_CELLS_PER_AXIS + mz) * MACRO_CELLS_PER_AXIS
+                        + my)
+                        * MACRO_CELLS_PER_AXIS)
+                        + mx;
+                    let macro_word_idx = macro_word_offset as usize + (macro_idx / 32);
+                    macro_words[macro_word_idx] |= 1u32 << (macro_idx % 32);
                 }
             }
 
@@ -255,16 +287,39 @@ impl Scene {
                 occupancy_word_offset,
                 material_word_offset,
                 flags,
-                _padding: 0,
+                macro_word_offset,
             });
             visible_chunk_indices.push(chunk_index);
+
+            y_slice_bounds
+                .entry(chunk_pos.y)
+                .and_modify(|bounds| {
+                    bounds.min_chunk_x = bounds.min_chunk_x.min(chunk_pos.x);
+                    bounds.max_chunk_x = bounds.max_chunk_x.max(chunk_pos.x);
+                    bounds.min_chunk_z = bounds.min_chunk_z.min(chunk_pos.z);
+                    bounds.max_chunk_z = bounds.max_chunk_z.max(chunk_pos.z);
+                    bounds.min_chunk_w = bounds.min_chunk_w.min(chunk_pos.w);
+                    bounds.max_chunk_w = bounds.max_chunk_w.max(chunk_pos.w);
+                })
+                .or_insert(GpuVoxelYSliceBounds {
+                    chunk_y: chunk_pos.y,
+                    min_chunk_x: chunk_pos.x,
+                    max_chunk_x: chunk_pos.x,
+                    min_chunk_z: chunk_pos.z,
+                    max_chunk_z: chunk_pos.z,
+                    min_chunk_w: chunk_pos.w,
+                    max_chunk_w: chunk_pos.w,
+                    _padding: 0,
+                });
         }
 
         VoxelFrameData {
             chunk_headers,
             occupancy_words,
             material_words,
+            macro_words,
             visible_chunk_indices,
+            y_slice_bounds: y_slice_bounds.into_values().collect(),
         }
     }
 

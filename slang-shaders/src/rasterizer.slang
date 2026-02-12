@@ -524,55 +524,6 @@ uint condenseZWLines(inout ZWLine lines[MAX_ZW_LINES], uint numLines)
     return count;
 }
 
-// ZW line rendering with occlusion culling
-// First removes fully occluded lines, then uses the simple closest-line-per-angle algorithm
-// on the reduced set for correct depth ordering.
-float4 renderZWLines2(inout ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingData workingData)
-{
-    // Stage 1: Remove completely occluded lines
-    for (uint i = 0; i < numLines; i++)
-    {
-        if (lines[i].textureId == 0)
-            continue;
-
-        bool completeOcclusion = false;
-        for (uint j = 0; j < numLines; j++)
-        {
-            if (j == i || lines[j].textureId == 0)
-                continue;
-
-            bool localFullOcclusion = true;
-            for (uint k = 0; k < 2; k++)
-            {
-                float2 lineA[2] = { float2(0), lines[i].zwPositions[k] };
-                float2 lineB[2] = { lines[j].zwPositions[0], lines[j].zwPositions[1] };
-                float2 intersection = getIntersection(lineA, lineB);
-                bool doesOcclude = intersection.x >= 0.0 && intersection.x <= 1.0 && intersection.y >= 0.0 && intersection.y <= 1.0;
-                if (!doesOcclude)
-                {
-                    localFullOcclusion = false;
-                    break;
-                }
-            }
-            if (localFullOcclusion)
-            {
-                completeOcclusion = true;
-                break;
-            }
-        }
-        if (completeOcclusion)
-            lines[i].textureId = 0;
-    }
-
-    numLines = condenseZWLines(lines, numLines);
-
-    // After culling fully occluded lines, use the simple closest-line-per-angle
-    // algorithm on the reduced set. Stages 2-3 (intersection detection, trimming,
-    // and per-line integration) can miss partial overlap configurations where
-    // neither line fully occludes the other, causing double-counted contributions.
-    return renderZWLinesSimple(lines, numLines, workingData);
-}
-
 // Simple ZW line rendering - samples along the ZW angle range
 // Uses incremental sin/cos rotation to avoid per-sample transcendentals.
 // Ray-from-origin intersection is specialized: for ray P(r)=r*(rayX,rayY)
@@ -581,11 +532,15 @@ float4 renderZWLines2(inout ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDa
 //   rDen = rayX*dy - rayY*dx
 //   sNum = Q0.x*rayY - Q0.y*rayX
 //   r = rNum/rDen, s = sNum/rDen
-float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingData workingData)
+float4 renderZWLinesSimple(
+    ZWLine lines[MAX_ZW_LINES],
+    uint numLines,
+    WorkingData workingData,
+    uint depthFactor)
 {
-    const uint DEPTH_FACTOR = 256;
+    uint sampleCount = max(1u, depthFactor);
     float2 angleRange = getZWAngleRange(workingData);
-    float angleStep = (angleRange.y - angleRange.x) / float(DEPTH_FACTOR);
+    float angleStep = (angleRange.y - angleRange.x) / float(sampleCount);
 
     // Transform sun direction from world space to view space (direction only, w5=0)
     float4 sunDirWorld = normalize(float4(0.3, 1.0, -0.3, 0.0));
@@ -622,7 +577,7 @@ float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDat
 
     float3 outputAccum = float3(0);
 
-    for (uint i = 0; i < DEPTH_FACTOR; i++)
+    for (uint i = 0; i < sampleCount; i++)
     {
         int closestLine = -1;
         float closestDist = 1e10;
@@ -667,7 +622,7 @@ float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDat
             float3 litColor = mat.albedo.xyz * (ambient + sunColor * diffuse)
                             + mat.luminance * mat.albedo.xyz;
 
-            outputAccum += litColor / float(DEPTH_FACTOR);
+            outputAccum += litColor / float(sampleCount);
         }
 
         // Incremental rotation: (cos(θ+Δ), sin(θ+Δ)) = rotate(cos(θ), sin(θ))
@@ -678,6 +633,63 @@ float4 renderZWLinesSimple(ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDat
     }
 
     return float4(outputAccum, 1.0);
+}
+
+// ZW line rendering with occlusion culling
+// First removes fully occluded lines, then uses the simple closest-line-per-angle algorithm
+// on the reduced set for correct depth ordering.
+float4 renderZWLines2(inout ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingData workingData)
+{
+    // VTE overlay mode only draws small post-raster previews. Use a cheaper path:
+    // skip O(n^2) occlusion prepass and reduce hidden-dimension sampling.
+    if (workingData.padding[0] != 0u)
+    {
+        return renderZWLinesSimple(lines, numLines, workingData, 64u);
+    }
+
+    // Stage 1: Remove completely occluded lines.
+    for (uint i = 0; i < numLines; i++)
+    {
+        if (lines[i].textureId == 0)
+            continue;
+
+        bool completeOcclusion = false;
+        for (uint j = 0; j < numLines; j++)
+        {
+            if (j == i || lines[j].textureId == 0)
+                continue;
+
+            bool localFullOcclusion = true;
+            for (uint k = 0; k < 2; k++)
+            {
+                float2 lineA[2] = { float2(0), lines[i].zwPositions[k] };
+                float2 lineB[2] = { lines[j].zwPositions[0], lines[j].zwPositions[1] };
+                float2 intersection = getIntersection(lineA, lineB);
+                bool doesOcclude = intersection.x >= 0.0 && intersection.x <= 1.0
+                    && intersection.y >= 0.0 && intersection.y <= 1.0;
+                if (!doesOcclude)
+                {
+                    localFullOcclusion = false;
+                    break;
+                }
+            }
+            if (localFullOcclusion)
+            {
+                completeOcclusion = true;
+                break;
+            }
+        }
+        if (completeOcclusion)
+            lines[i].textureId = 0;
+    }
+
+    numLines = condenseZWLines(lines, numLines);
+
+    // After culling fully occluded lines, use the simple closest-line-per-angle
+    // algorithm on the reduced set. Stages 2-3 (intersection detection, trimming,
+    // and per-line integration) can miss partial overlap configurations where
+    // neither line fully occludes the other, causing double-counted contributions.
+    return renderZWLinesSimple(lines, numLines, workingData, 256u);
 }
 
 // Bin clipped tetrahedra into screen-space tiles

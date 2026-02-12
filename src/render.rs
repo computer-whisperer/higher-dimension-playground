@@ -242,7 +242,7 @@ pub struct GpuVoxelChunkHeader {
     pub occupancy_word_offset: u32,
     pub material_word_offset: u32,
     pub flags: u32,
-    pub _padding: u32,
+    pub macro_word_offset: u32,
 }
 
 impl GpuVoxelChunkHeader {
@@ -250,11 +250,26 @@ impl GpuVoxelChunkHeader {
     pub const FLAG_FULL: u32 = 1 << 1;
 }
 
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+#[repr(C)]
+pub struct GpuVoxelYSliceBounds {
+    pub chunk_y: i32,
+    pub min_chunk_x: i32,
+    pub max_chunk_x: i32,
+    pub min_chunk_z: i32,
+    pub max_chunk_z: i32,
+    pub min_chunk_w: i32,
+    pub max_chunk_w: i32,
+    pub _padding: i32,
+}
+
 pub struct VoxelFrameInput<'a> {
     pub chunk_headers: &'a [GpuVoxelChunkHeader],
     pub occupancy_words: &'a [u32],
     pub material_words: &'a [u32],
+    pub macro_words: &'a [u32],
     pub visible_chunk_indices: &'a [u32],
+    pub y_slice_bounds: &'a [GpuVoxelYSliceBounds],
 }
 
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
@@ -264,9 +279,11 @@ struct GpuVoxelFrameMeta {
     visible_chunk_count: u32,
     occupancy_word_count: u32,
     material_word_count: u32,
+    macro_word_count: u32,
     max_trace_steps: u32,
     max_trace_distance: f32,
     chunk_lookup_capacity: u32,
+    y_slice_count: u32,
     stage_b_mode: u32,
     stage_b_slice_layer: u32,
     stage_b_thick_half_width: u32,
@@ -370,6 +387,8 @@ const FRAMES_IN_FLIGHT: usize = 2;
 const VTE_MAX_CHUNKS: usize = 8_192;
 const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
 const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
+const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
+const VTE_MAX_Y_SLICES: usize = VTE_MAX_CHUNKS;
 const VTE_CHUNK_LOOKUP_CAPACITY: usize = 32_768; // Must be power of two.
 const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
 const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
@@ -421,7 +440,9 @@ const VTE_FIRST_MISMATCH_LAST_CHUNK_X: usize = 23;
 const VTE_FIRST_MISMATCH_LAST_CHUNK_Y: usize = 24;
 const VTE_FIRST_MISMATCH_LAST_CHUNK_Z: usize = 25;
 const VTE_FIRST_MISMATCH_LAST_CHUNK_W: usize = 26;
-const VTE_ENTITY_LINEAR_THRESHOLD_TETS: usize = 8;
+// Always build/use the entity BVH when entity tetrahedra are present.
+// This avoids costly per-ray linear tetra loops for small dynamic entity sets.
+const VTE_ENTITY_LINEAR_THRESHOLD_TETS: usize = 0;
 
 #[inline]
 fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
@@ -1680,8 +1701,10 @@ pub struct LiveBuffers {
     voxel_chunk_headers_buffer: Subbuffer<[GpuVoxelChunkHeader]>,
     voxel_occupancy_words_buffer: Subbuffer<[u32]>,
     voxel_material_words_buffer: Subbuffer<[u32]>,
+    voxel_macro_words_buffer: Subbuffer<[u32]>,
     voxel_visible_chunk_indices_buffer: Subbuffer<[u32]>,
     voxel_chunk_lookup_buffer: Subbuffer<[GpuVoxelChunkLookupEntry]>,
+    voxel_y_slice_bounds_buffer: Subbuffer<[GpuVoxelYSliceBounds]>,
     vte_compare_stats_buffer: Subbuffer<[u32]>,
     vte_first_mismatch_buffer: Subbuffer<[u32]>,
     descriptor_set: Arc<DescriptorSet>,
@@ -1783,6 +1806,21 @@ impl LiveBuffers {
         )
         .unwrap();
 
+        let voxel_macro_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK],
+        )
+        .unwrap();
+
         let voxel_visible_chunk_indices_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -1810,6 +1848,21 @@ impl LiveBuffers {
                 ..Default::default()
             },
             vec![GpuVoxelChunkLookupEntry::empty(); VTE_CHUNK_LOOKUP_CAPACITY],
+        )
+        .unwrap();
+
+        let voxel_y_slice_bounds_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![GpuVoxelYSliceBounds::zeroed(); VTE_MAX_Y_SLICES],
         )
         .unwrap();
 
@@ -1855,8 +1908,10 @@ impl LiveBuffers {
                 WriteDescriptorSet::buffer(5, voxel_material_words_buffer.clone()),
                 WriteDescriptorSet::buffer(6, voxel_visible_chunk_indices_buffer.clone()),
                 WriteDescriptorSet::buffer(7, voxel_chunk_lookup_buffer.clone()),
-                WriteDescriptorSet::buffer(8, vte_compare_stats_buffer.clone()),
-                WriteDescriptorSet::buffer(9, vte_first_mismatch_buffer.clone()),
+                WriteDescriptorSet::buffer(8, voxel_y_slice_bounds_buffer.clone()),
+                WriteDescriptorSet::buffer(9, vte_compare_stats_buffer.clone()),
+                WriteDescriptorSet::buffer(10, vte_first_mismatch_buffer.clone()),
+                WriteDescriptorSet::buffer(11, voxel_macro_words_buffer.clone()),
             ],
             [],
         )
@@ -1868,8 +1923,10 @@ impl LiveBuffers {
             voxel_chunk_headers_buffer,
             voxel_occupancy_words_buffer,
             voxel_material_words_buffer,
+            voxel_macro_words_buffer,
             voxel_visible_chunk_indices_buffer,
             voxel_chunk_lookup_buffer,
+            voxel_y_slice_bounds_buffer,
             vte_compare_stats_buffer,
             vte_first_mismatch_buffer,
             descriptor_set,
@@ -1892,7 +1949,7 @@ impl LiveBuffers {
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             },
         );
-        for binding in 2..=9u32 {
+        for binding in 2..=11u32 {
             bindings.insert(
                 binding,
                 DescriptorSetLayoutBinding {
@@ -4642,6 +4699,8 @@ impl RenderContext {
         let mut vte_visible_chunk_count: usize = 0;
         let mut vte_occupancy_word_count: usize = 0;
         let mut vte_material_word_count: usize = 0;
+        let mut vte_macro_word_count: usize = 0;
+        let mut vte_y_slice_count: usize = 0;
         let mut vte_visible_chunk_min = [i32::MAX; 4];
         let mut vte_visible_chunk_max = [i32::MIN; 4];
         if let Some(input) = voxel_input {
@@ -4659,15 +4718,22 @@ impl RenderContext {
                 .material_words
                 .len()
                 .min(VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK);
+            vte_macro_word_count = input
+                .macro_words
+                .len()
+                .min(VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK);
+            vte_y_slice_count = input.y_slice_bounds.len().min(VTE_MAX_Y_SLICES);
 
             if self.frames_rendered == 0
                 && (input.chunk_headers.len() > vte_chunk_count
                     || input.visible_chunk_indices.len() > vte_visible_chunk_count
                     || input.occupancy_words.len() > vte_occupancy_word_count
-                    || input.material_words.len() > vte_material_word_count)
+                    || input.material_words.len() > vte_material_word_count
+                    || input.macro_words.len() > vte_macro_word_count
+                    || input.y_slice_bounds.len() > vte_y_slice_count)
             {
                 eprintln!(
-                    "VTE input truncated to capacities: chunks {}->{}, visible {}->{}, occupancy {}->{}, materials {}->{}",
+                    "VTE input truncated to capacities: chunks {}->{}, visible {}->{}, occupancy {}->{}, materials {}->{}, macro {}->{}, y_slices {}->{}",
                     input.chunk_headers.len(),
                     vte_chunk_count,
                     input.visible_chunk_indices.len(),
@@ -4675,7 +4741,11 @@ impl RenderContext {
                     input.occupancy_words.len(),
                     vte_occupancy_word_count,
                     input.material_words.len(),
-                    vte_material_word_count
+                    vte_material_word_count,
+                    input.macro_words.len(),
+                    vte_macro_word_count,
+                    input.y_slice_bounds.len(),
+                    vte_y_slice_count
                 );
             }
 
@@ -4707,6 +4777,26 @@ impl RenderContext {
                     .unwrap();
                 for i in 0..vte_material_word_count {
                     writer[i] = input.material_words[i];
+                }
+            }
+            {
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
+                    .voxel_macro_words_buffer
+                    .write()
+                    .unwrap();
+                for i in 0..vte_macro_word_count {
+                    writer[i] = input.macro_words[i];
+                }
+            }
+            {
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
+                    .voxel_y_slice_bounds_buffer
+                    .write()
+                    .unwrap();
+                for i in 0..vte_y_slice_count {
+                    writer[i] = input.y_slice_bounds[i];
                 }
             }
             {
@@ -4800,9 +4890,11 @@ impl RenderContext {
                 visible_chunk_count: vte_visible_chunk_count as u32,
                 occupancy_word_count: vte_occupancy_word_count as u32,
                 material_word_count: vte_material_word_count as u32,
+                macro_word_count: vte_macro_word_count as u32,
                 max_trace_steps: render_options.vte_max_trace_steps.max(1),
                 max_trace_distance: render_options.vte_max_trace_distance.max(1.0),
                 chunk_lookup_capacity: VTE_CHUNK_LOOKUP_CAPACITY as u32,
+                y_slice_count: vte_y_slice_count as u32,
                 stage_b_mode: render_options.vte_display_mode.as_u32(),
                 stage_b_slice_layer,
                 stage_b_thick_half_width: render_options.vte_thick_half_width,
