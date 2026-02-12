@@ -15,6 +15,8 @@ static const uint STAGE_B_MODE_SLICE = 1u;
 static const uint STAGE_B_MODE_THICK_SLICE = 2u;
 static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
 static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
+static const uint HIGHLIGHT_FLAG_HIT_VOXEL = 1u << 0u;
+static const uint HIGHLIGHT_FLAG_PLACE_VOXEL = 1u << 1u;
 
 static const uint MISS_REASON_NONE = 0u;
 static const uint MISS_REASON_TOUCHED_VISIBLE_CHUNK = 1u;
@@ -102,6 +104,12 @@ struct VoxelFrameMeta
     int visibleChunkMaxY;
     int visibleChunkMaxZ;
     int visibleChunkMaxW;
+    uint highlightFlags;
+    uint highlightPadding0;
+    uint highlightPadding1;
+    uint highlightPadding2;
+    int4 highlightHitVoxel;
+    int4 highlightPlaceVoxel;
 }
 
 struct VoxelChunkHeader
@@ -305,6 +313,180 @@ float3 shadeVoxelMaterial(MaterialProperties mat, float4 hitNormal)
 
     return mat.albedo.xyz * (ambient + sunColor * diffuse)
          + mat.albedo.xyz * mat.luminance;
+}
+
+int4 hitVoxelCoordFromHitPos(float4 hitPos, float4 rayDir)
+{
+    float4 p = hitPos + rayDir * 1e-4;
+    return int4(
+        int(floor(p.x)),
+        int(floor(p.y)),
+        int(floor(p.z)),
+        int(floor(p.w)));
+}
+
+uint highlightKindForVoxel(int4 voxelCoord, VoxelFrameMeta meta)
+{
+    if ((meta.highlightFlags & HIGHLIGHT_FLAG_HIT_VOXEL) != 0u
+        && all(voxelCoord == meta.highlightHitVoxel))
+    {
+        return HIGHLIGHT_FLAG_HIT_VOXEL;
+    }
+    if ((meta.highlightFlags & HIGHLIGHT_FLAG_PLACE_VOXEL) != 0u
+        && all(voxelCoord == meta.highlightPlaceVoxel))
+    {
+        return HIGHLIGHT_FLAG_PLACE_VOXEL;
+    }
+    return 0u;
+}
+
+uint dominantAxisFromNormal(float4 n)
+{
+    float4 absN = abs(n);
+    uint axis = 0u;
+    float best = absN.x;
+    if (absN.y > best)
+    {
+        axis = 1u;
+        best = absN.y;
+    }
+    if (absN.z > best)
+    {
+        axis = 2u;
+        best = absN.z;
+    }
+    if (absN.w > best)
+    {
+        axis = 3u;
+    }
+    return axis;
+}
+
+int normalSignOnAxis(float4 n, uint axis)
+{
+    if (axis == 0u) return n.x < 0.0 ? -1 : 1;
+    if (axis == 1u) return n.y < 0.0 ? -1 : 1;
+    if (axis == 2u) return n.z < 0.0 ? -1 : 1;
+    return n.w < 0.0 ? -1 : 1;
+}
+
+bool decodePlacementFace(VoxelFrameMeta meta, out uint axis, out int sign)
+{
+    axis = 0u;
+    sign = 0;
+    uint required = HIGHLIGHT_FLAG_HIT_VOXEL | HIGHLIGHT_FLAG_PLACE_VOXEL;
+    if ((meta.highlightFlags & required) != required)
+    {
+        return false;
+    }
+
+    int4 delta = meta.highlightPlaceVoxel - meta.highlightHitVoxel;
+    uint nonZeroAxes = 0u;
+
+    if (delta.x != 0)
+    {
+        if (abs(delta.x) != 1) return false;
+        axis = 0u;
+        sign = delta.x;
+        nonZeroAxes++;
+    }
+    if (delta.y != 0)
+    {
+        if (abs(delta.y) != 1) return false;
+        axis = 1u;
+        sign = delta.y;
+        nonZeroAxes++;
+    }
+    if (delta.z != 0)
+    {
+        if (abs(delta.z) != 1) return false;
+        axis = 2u;
+        sign = delta.z;
+        nonZeroAxes++;
+    }
+    if (delta.w != 0)
+    {
+        if (abs(delta.w) != 1) return false;
+        axis = 3u;
+        sign = delta.w;
+        nonZeroAxes++;
+    }
+
+    return nonZeroAxes == 1u;
+}
+
+float3 highlightBaseTint(uint highlightKind)
+{
+    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
+    {
+        return float3(0.08, 0.95, 1.0); // Cyan.
+    }
+    return float3(1.0, 0.55, 0.08); // Orange.
+}
+
+float3 shadeHighlightedVoxelSample(
+    float3 litColor,
+    int4 voxelCoord,
+    VoxelFrameMeta meta,
+    float4 hitPos,
+    float4 rayDir,
+    float4 hitNormal,
+    uint highlightKind)
+{
+    // 4D up-convert of "black edge lines":
+    // draw a contrasting band near 2D face boundaries of the 3D cell (the hit hyperface),
+    // so we intentionally ignore the entered axis.
+    float4 local = frac(hitPos + rayDir * 1e-4);
+    float4 faceDist = min(local, 1.0 - local);
+    uint guideAxis = dominantAxisFromNormal(hitNormal);
+    int guideSign = normalSignOnAxis(hitNormal, guideAxis);
+
+    // If this is the currently selected cell, prefer the explicit placement face
+    // inferred from hit/place voxel relation so the guide marks "where placement goes".
+    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL && all(voxelCoord == meta.highlightHitVoxel))
+    {
+        uint placementAxis = 0u;
+        int placementSign = 0;
+        if (decodePlacementFace(meta, placementAxis, placementSign))
+        {
+            guideAxis = placementAxis;
+            guideSign = placementSign;
+        }
+    }
+
+    float minCellFaceDist = 1e30;
+    if (guideAxis != 0u) minCellFaceDist = min(minCellFaceDist, faceDist.x);
+    if (guideAxis != 1u) minCellFaceDist = min(minCellFaceDist, faceDist.y);
+    if (guideAxis != 2u) minCellFaceDist = min(minCellFaceDist, faceDist.z);
+    if (guideAxis != 3u) minCellFaceDist = min(minCellFaceDist, faceDist.w);
+
+    const float BAND_INNER = 0.07;
+    const float BAND_OUTER = 0.16;
+    float faceBand = 1.0 - smoothstep(BAND_INNER, BAND_OUTER, minCellFaceDist);
+
+    float3 tint = highlightBaseTint(highlightKind);
+    float3 contrasted = float3(0.03, 0.03, 0.03);
+    float tintBlend = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL) ? 0.64 : 0.50;
+    float contrastBlend = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL) ? 0.85 : 0.60;
+    float3 shaded = lerp(lerp(litColor, tint, tintBlend), contrasted, faceBand * contrastBlend);
+
+    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL && all(voxelCoord == meta.highlightHitVoxel))
+    {
+        float guideFaceDist = 0.0;
+        if (guideAxis == 0u) guideFaceDist = (guideSign < 0) ? local.x : (1.0 - local.x);
+        else if (guideAxis == 1u) guideFaceDist = (guideSign < 0) ? local.y : (1.0 - local.y);
+        else if (guideAxis == 2u) guideFaceDist = (guideSign < 0) ? local.z : (1.0 - local.z);
+        else guideFaceDist = (guideSign < 0) ? local.w : (1.0 - local.w);
+
+        // Accent only the boundary of the currently looked-at 3D face.
+        float faceMask = 1.0 - smoothstep(0.01, 0.06, guideFaceDist);
+        float edgeMask = 1.0 - smoothstep(0.05, 0.13, minCellFaceDist);
+        float accentMask = faceMask * edgeMask;
+        float3 accentColor = float3(1.0, 0.20, 0.86);
+        shaded = lerp(shaded, accentColor, accentMask);
+    }
+
+    return shaded;
 }
 
 uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
@@ -1213,6 +1395,10 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         float cosStep = cos(angleStep);
 
         float3 accumColor = float3(0.0, 0.0, 0.0);
+        float3 hitHighlightAccum = float3(0.0, 0.0, 0.0);
+        float3 placeHighlightAccum = float3(0.0, 0.0, 0.0);
+        float hitHighlightCount = 0.0;
+        float placeHighlightCount = 0.0;
         uint hitMaterial = 0u;
         float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
         int4 hitChunkCoord = int4(0, 0, 0, 0);
@@ -1241,9 +1427,39 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
 
             if (hit)
             {
-                MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
-                float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
-                accumColor += shadeVoxelMaterial(mat, hitNormal);
+                int4 hitVoxelCoord = hitVoxelCoordFromHitPos(hitPos, worldDirection);
+                uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
+                if (highlightKind != 0u)
+                {
+                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+                    float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
+                    float3 litColor = shadeVoxelMaterial(mat, hitNormal);
+                    float3 highlighted = shadeHighlightedVoxelSample(
+                        litColor,
+                        hitVoxelCoord,
+                        meta,
+                        hitPos,
+                        worldDirection,
+                        hitNormal,
+                        highlightKind);
+                    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
+                    {
+                        hitHighlightAccum += highlighted;
+                        hitHighlightCount += 1.0;
+                    }
+                    else
+                    {
+                        placeHighlightAccum += highlighted;
+                        placeHighlightCount += 1.0;
+                    }
+                    accumColor += highlighted;
+                }
+                else
+                {
+                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+                    float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
+                    accumColor += shadeVoxelMaterial(mat, hitNormal);
+                }
             }
             else
             {
@@ -1257,7 +1473,17 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             sinAngle = nextSin;
         }
 
-        pixelBuffer[pixelBase] = float4(accumColor / float(layerCount), 1.0);
+        float3 collapsedColor = accumColor / float(layerCount);
+        if (hitHighlightCount > 0.0)
+        {
+            // Keep selected-cell guides solid in integral mode when present.
+            collapsedColor = hitHighlightAccum / hitHighlightCount;
+        }
+        else if (placeHighlightCount > 0.0)
+        {
+            collapsedColor = placeHighlightAccum / placeHighlightCount;
+        }
+        pixelBuffer[pixelBase] = float4(collapsedColor, 1.0);
         return;
     }
 
@@ -1577,9 +1803,28 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     }
     else if (hit)
     {
-        MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
-        float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
-        outColor = shadeVoxelMaterial(mat, hitNormal);
+        int4 hitVoxelCoord = hitVoxelCoordFromHitPos(hitPos, worldDirection);
+        uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
+        if (highlightKind != 0u)
+        {
+            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+            float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
+            float3 litColor = shadeVoxelMaterial(mat, hitNormal);
+            outColor = shadeHighlightedVoxelSample(
+                litColor,
+                hitVoxelCoord,
+                meta,
+                hitPos,
+                worldDirection,
+                hitNormal,
+                highlightKind);
+        }
+        else
+        {
+            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos.xyz));
+            float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
+            outColor = shadeVoxelMaterial(mat, hitNormal);
+        }
     }
     else
     {
