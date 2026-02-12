@@ -15,11 +15,7 @@ pub fn save_world<W: Write>(world: &VoxelWorld, writer: &mut W) -> io::Result<()
     writer.write_all(MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
 
-    let non_empty: Vec<_> = world
-        .chunks
-        .iter()
-        .filter(|(_, c)| !c.is_empty())
-        .collect();
+    let non_empty: Vec<_> = world.chunks.iter().filter(|(_, c)| !c.is_empty()).collect();
     writer.write_all(&(non_empty.len() as u32).to_le_bytes())?;
 
     for (&pos, chunk) in &non_empty {
@@ -148,10 +144,7 @@ fn read_chunk<R: Read>(reader: &mut R) -> io::Result<Chunk> {
                 let vt = VoxelType(val[0]);
 
                 if pos + length > CHUNK_VOLUME {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "RLE overflow",
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "RLE overflow"));
                 }
 
                 for v in &mut voxels[pos..pos + length] {

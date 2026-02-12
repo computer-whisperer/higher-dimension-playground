@@ -118,7 +118,8 @@ fn main() -> Result<(), impl Error> {
 
 fn run_headless(args: &Args) {
     let (instance, device, queue) = vulkan_setup(None);
-    let pixel_storage_layers = if args.backend.to_render_backend() == RenderBackend::VoxelTraversal {
+    let pixel_storage_layers = if args.backend.to_render_backend() == RenderBackend::VoxelTraversal
+    {
         Some(1)
     } else {
         None
@@ -220,6 +221,7 @@ impl DemoScene {
                     material_words: &[],
                     visible_chunk_indices: &[],
                 },
+                &[],
             );
         } else {
             rcx.render_tetra_frame(
@@ -426,6 +428,7 @@ impl DemoScene {
                     material_words: &[],
                     visible_chunk_indices: &[],
                 },
+                &[],
             );
         } else {
             rcx.render_tetra_frame(

@@ -161,6 +161,13 @@ impl RenderBackend {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct CustomOverlayLine {
+    pub start_ndc: [f32; 2],
+    pub end_ndc: [f32; 2],
+    pub color: [f32; 4],
+}
+
 pub struct RenderOptions {
     pub do_frame_clear: bool,
     pub do_raster: bool,
@@ -174,9 +181,12 @@ pub struct RenderOptions {
     pub vte_reference_compare: bool,
     pub vte_reference_mismatch_only: bool,
     pub vte_compare_slice_only: bool,
+    pub vte_highlight_hit_voxel: Option<[i32; 4]>,
+    pub vte_highlight_place_voxel: Option<[i32; 4]>,
     pub do_edges: bool,
     pub do_tetrahedron_edges: bool,
     pub do_navigation_hud: bool,
+    pub custom_overlay_lines: Vec<CustomOverlayLine>,
     pub take_framebuffer_screenshot: bool,
     pub prepare_render_screenshot: bool,
     pub hud_rotation_label: Option<String>,
@@ -197,9 +207,12 @@ impl Default for RenderOptions {
             vte_reference_compare: false,
             vte_reference_mismatch_only: false,
             vte_compare_slice_only: false,
+            vte_highlight_hit_voxel: None,
+            vte_highlight_place_voxel: None,
             do_edges: false,
             do_tetrahedron_edges: false,
             do_navigation_hud: false,
+            custom_overlay_lines: Vec::new(),
             take_framebuffer_screenshot: false,
             prepare_render_screenshot: false,
             hud_rotation_label: None,
@@ -262,6 +275,10 @@ struct GpuVoxelFrameMeta {
     visible_chunk_max_y: i32,
     visible_chunk_max_z: i32,
     visible_chunk_max_w: i32,
+    highlight_flags: u32,
+    _highlight_padding: [u32; 3],
+    highlight_hit_voxel: [i32; 4],
+    highlight_place_voxel: [i32; 4],
 }
 
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -353,6 +370,8 @@ const VTE_CHUNK_LOOKUP_CAPACITY: usize = 32_768; // Must be power of two.
 const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
 const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
 const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
+const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
+const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
 const VTE_COMPARE_STATS_WORD_COUNT: usize = 16;
 const VTE_COMPARE_STAT_COMPARED: usize = 0;
 const VTE_COMPARE_STAT_MATCHES: usize = 1;
@@ -2404,7 +2423,8 @@ impl GpuProfiler {
             let should_report = match self.last_slow_report_frame {
                 None => true,
                 Some(last_frame) => {
-                    self.total_frames.saturating_sub(last_frame) >= PROFILER_SLOW_FRAME_REPORT_INTERVAL
+                    self.total_frames.saturating_sub(last_frame)
+                        >= PROFILER_SLOW_FRAME_REPORT_INTERVAL
                 }
             };
             if should_report {
@@ -4051,6 +4071,34 @@ impl RenderContext {
         (lines_to_write, hud_verts_to_write)
     }
 
+    fn write_custom_overlay_lines(
+        &mut self,
+        frame_idx: usize,
+        base_line_count: usize,
+        custom_lines: &[CustomOverlayLine],
+    ) -> usize {
+        let max_lines = LINE_VERTEX_CAPACITY / 2;
+        if base_line_count >= max_lines || custom_lines.is_empty() {
+            return 0;
+        }
+
+        let lines_to_write = custom_lines.len().min(max_lines - base_line_count);
+        let mut writer = self.frames_in_flight[frame_idx]
+            .line_vertexes_buffer
+            .write()
+            .unwrap();
+        for (line_id, line) in custom_lines.iter().take(lines_to_write).enumerate() {
+            let vertex_id = (base_line_count + line_id) * 2;
+            let start = Vec2::from_array(line.start_ndc);
+            let end = Vec2::from_array(line.end_ndc);
+            let color = Vec4::from_array(line.color);
+            writer[vertex_id] = LineVertex::new(start, color);
+            writer[vertex_id + 1] = LineVertex::new(end, color);
+        }
+
+        lines_to_write
+    }
+
     pub fn recreate_swapchain(&mut self) {
         self.recreate_swapchain = true;
     }
@@ -4128,9 +4176,16 @@ impl RenderContext {
         queue: Arc<Queue>,
         mut frame_params: FrameParams,
         voxel_input: VoxelFrameInput<'_>,
+        tetra_overlay_instances: &[common::ModelInstance],
     ) {
         frame_params.render_options.render_backend = RenderBackend::VoxelTraversal;
-        self.render_internal(device, queue, frame_params, &[], Some(&voxel_input));
+        self.render_internal(
+            device,
+            queue,
+            frame_params,
+            tetra_overlay_instances,
+            Some(&voxel_input),
+        );
     }
 
     fn render_internal(
@@ -4280,8 +4335,7 @@ impl RenderContext {
             if requested_tetrahedron_count > total_tetrahedron_count {
                 eprintln!(
                     "Tetrahedron input truncated to buffer capacity: {} -> {}",
-                    requested_tetrahedron_count,
-                    total_tetrahedron_count
+                    requested_tetrahedron_count, total_tetrahedron_count
                 );
             }
             println!(
@@ -4424,8 +4478,8 @@ impl RenderContext {
                     .write()
                     .unwrap();
                 for i in 0..vte_visible_chunk_count {
-                    let chunk_index =
-                        input.visible_chunk_indices[i].min(vte_chunk_count.saturating_sub(1) as u32);
+                    let chunk_index = input.visible_chunk_indices[i]
+                        .min(vte_chunk_count.saturating_sub(1) as u32);
                     writer[i] = chunk_index;
                     let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
                     for axis in 0..4 {
@@ -4454,8 +4508,7 @@ impl RenderContext {
                         let chunk_index = input.visible_chunk_indices[i]
                             .min(vte_chunk_count.saturating_sub(1) as u32);
                         let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
-                        let mut slot =
-                            (vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
+                        let mut slot = (vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
 
                         for _ in 0..VTE_CHUNK_LOOKUP_CAPACITY {
                             let entry = &mut writer[slot];
@@ -4487,6 +4540,23 @@ impl RenderContext {
                 .vte_slice_layer
                 .unwrap_or(default_slice_layer)
                 .min(layer_count - 1);
+            let mut highlight_flags = 0u32;
+            let mut highlight_hit_voxel = [0; 4];
+            let mut highlight_place_voxel = [0; 4];
+            let highlight_mode_supported = matches!(
+                render_options.vte_display_mode,
+                VteDisplayMode::Integral | VteDisplayMode::Slice | VteDisplayMode::ThickSlice
+            );
+            if highlight_mode_supported {
+                if let Some(hit_voxel) = render_options.vte_highlight_hit_voxel {
+                    highlight_flags |= VTE_HIGHLIGHT_FLAG_HIT_VOXEL;
+                    highlight_hit_voxel = hit_voxel;
+                }
+                if let Some(place_voxel) = render_options.vte_highlight_place_voxel {
+                    highlight_flags |= VTE_HIGHLIGHT_FLAG_PLACE_VOXEL;
+                    highlight_place_voxel = place_voxel;
+                }
+            }
             *writer = GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 visible_chunk_count: vte_visible_chunk_count as u32,
@@ -4519,6 +4589,10 @@ impl RenderContext {
                 visible_chunk_max_y: vte_visible_chunk_max[1],
                 visible_chunk_max_z: vte_visible_chunk_max[2],
                 visible_chunk_max_w: vte_visible_chunk_max[3],
+                highlight_flags,
+                _highlight_padding: [0; 3],
+                highlight_hit_voxel,
+                highlight_place_voxel,
             };
         }
 
@@ -4545,7 +4619,10 @@ impl RenderContext {
         let (image_index, acquire_future) = match self.swapchain.clone() {
             Some(swapchain) => {
                 if self.stall_trace {
-                    eprintln!("[stall] frame={} acquire_next_image begin", self.frames_rendered);
+                    eprintln!(
+                        "[stall] frame={} acquire_next_image begin",
+                        self.frames_rendered
+                    );
                 }
                 let acquire_start = Instant::now();
                 let (image_index, suboptimal, acquire_future) =
@@ -4598,7 +4675,9 @@ impl RenderContext {
                 do_raytrace = true;
             }
             RenderBackend::VoxelTraversal => {
-                do_raster = false;
+                // VTE is the primary pass, but optional tetra overlays (e.g. held-item previews)
+                // can be rasterized on top in the same frame.
+                do_raster = !model_instances.is_empty();
                 do_raytrace = false;
                 do_edges = false;
                 do_tetrahedron_edges = false;
@@ -4627,44 +4706,44 @@ impl RenderContext {
                 visible_set_hash_valid,
                 visible_set_hash,
             ) = if let Some(input) = voxel_input {
-                    let empty = input
-                        .chunk_headers
-                        .iter()
-                        .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_EMPTY) != 0)
-                        .count() as u32;
-                    let full = input
-                        .chunk_headers
-                        .iter()
-                        .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0)
-                        .count() as u32;
-                    let collect_visible_set_hash = render_options.vte_reference_compare;
-                    let hash = if collect_visible_set_hash {
-                        let mut hash = 0x811C_9DC5u32;
-                        for &chunk_index in input.visible_chunk_indices.iter() {
-                            let Some(header) = input.chunk_headers.get(chunk_index as usize) else {
-                                continue;
-                            };
-                            let h = vte_hash_chunk_coord(header.chunk_coord);
-                            hash ^= h;
-                            hash = hash.wrapping_mul(0x0100_0193);
-                        }
-                        hash
-                    } else {
-                        0
-                    };
-                    (
-                        input.chunk_headers.len() as u32,
-                        input.visible_chunk_indices.len() as u32,
-                        empty,
-                        full,
-                        input.occupancy_words.len() as u64,
-                        input.material_words.len() as u64,
-                        collect_visible_set_hash,
-                        hash,
-                    )
+                let empty = input
+                    .chunk_headers
+                    .iter()
+                    .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_EMPTY) != 0)
+                    .count() as u32;
+                let full = input
+                    .chunk_headers
+                    .iter()
+                    .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0)
+                    .count() as u32;
+                let collect_visible_set_hash = render_options.vte_reference_compare;
+                let hash = if collect_visible_set_hash {
+                    let mut hash = 0x811C_9DC5u32;
+                    for &chunk_index in input.visible_chunk_indices.iter() {
+                        let Some(header) = input.chunk_headers.get(chunk_index as usize) else {
+                            continue;
+                        };
+                        let h = vte_hash_chunk_coord(header.chunk_coord);
+                        hash ^= h;
+                        hash = hash.wrapping_mul(0x0100_0193);
+                    }
+                    hash
                 } else {
-                    (0, 0, 0, 0, 0, 0, false, 0)
+                    0
                 };
+                (
+                    input.chunk_headers.len() as u32,
+                    input.visible_chunk_indices.len() as u32,
+                    empty,
+                    full,
+                    input.occupancy_words.len() as u64,
+                    input.material_words.len() as u64,
+                    collect_visible_set_hash,
+                    hash,
+                )
+            } else {
+                (0, 0, 0, 0, 0, 0, false, 0)
+            };
 
             self.vte_debug_counters = VteDebugCounters {
                 candidate_chunks,
@@ -5020,7 +5099,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
 
                 if raytrace_should_clear {
                     builder
-                        .bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone())
+                        .bind_pipeline_compute(
+                            self.compute_pipeline.raytrace_clear_pipeline.clone(),
+                        )
                         .unwrap();
                     unsafe {
                         builder.dispatch([
@@ -5253,6 +5334,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
         }
 
         let mut hud_vertex_count = 0usize;
+        line_render_count += self.write_custom_overlay_lines(
+            frame_idx,
+            line_render_count,
+            &render_options.custom_overlay_lines,
+        );
         if render_options.do_navigation_hud {
             let (hud_line_count, hud_quad_count) = self.write_navigation_hud_overlay(
                 frame_idx,
@@ -5579,8 +5665,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     println!("Saved screenshot to {}", screenshot_png_path);
                                 }
 
-                                let camera_h =
-                                    mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
+                                let camera_h = mat5_mul_vec5(
+                                    &view_matrix_nalgebra_inv,
+                                    [0.0, 0.0, 0.0, 0.0, 1.0],
+                                );
                                 let inv_w = if camera_h[4].abs() > 1e-6 {
                                     1.0 / camera_h[4]
                                 } else {
@@ -5963,8 +6051,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 let depth = if vte_collapsed {
                     1
                 } else {
-                    self.sized_buffers
-                        .render_dimensions[2]
+                    self.sized_buffers.render_dimensions[2]
                         .max(1)
                         .min(self.sized_buffers.pixel_storage_layers.max(1))
                 };

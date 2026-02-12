@@ -1,7 +1,7 @@
+use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::cull::{self, SurfaceData};
 use crate::voxel::worldgen;
 use crate::voxel::{VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
-use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use higher_dimension_playground::render::{GpuVoxelChunkHeader, VoxelFrameInput};
 
 const RENDER_DISTANCE: f32 = 64.0;
@@ -57,6 +57,12 @@ pub struct Scene {
 struct VoxelRayHit {
     solid_voxel: [i32; 4],
     last_empty_voxel: Option<[i32; 4]>,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockEditTargets {
+    pub hit_voxel: Option<[i32; 4]>,
+    pub place_voxel: Option<[i32; 4]>,
 }
 
 impl Scene {
@@ -441,6 +447,22 @@ impl Scene {
         Some(hit.solid_voxel)
     }
 
+    /// Query edit ray targets without mutating the world.
+    pub fn block_edit_targets(
+        &self,
+        ray_origin: [f32; 4],
+        ray_direction: [f32; 4],
+        max_distance: f32,
+    ) -> BlockEditTargets {
+        match self.trace_first_solid_voxel(ray_origin, ray_direction, max_distance) {
+            Some(hit) => BlockEditTargets {
+                hit_voxel: Some(hit.solid_voxel),
+                place_voxel: hit.last_empty_voxel,
+            },
+            None => BlockEditTargets::default(),
+        }
+    }
+
     /// Place a voxel in the last empty cell before the first solid hit.
     pub fn place_block_along_ray(
         &mut self,
@@ -507,6 +529,23 @@ mod tests {
         assert_eq!(placed, Some([0, 0, -1, 0]));
         assert!(scene.world.get_voxel(0, 0, -1, 0) == VoxelType(3));
         assert!(scene.world.get_voxel(0, 0, 0, 0) == VoxelType(7));
+    }
+
+    #[test]
+    fn block_edit_targets_reports_hit_and_placement_voxels() {
+        let mut world = VoxelWorld::new();
+        world.set_voxel(0, 0, 0, 0, VoxelType(7));
+        let scene = make_scene_with_world(world);
+
+        let targets = scene.block_edit_targets([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0);
+
+        assert_eq!(
+            targets,
+            BlockEditTargets {
+                hit_voxel: Some([0, 0, 0, 0]),
+                place_voxel: Some([0, 0, -1, 0]),
+            }
+        );
     }
 
     #[test]

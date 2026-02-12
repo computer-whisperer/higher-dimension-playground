@@ -92,10 +92,18 @@ pub fn cpu_render(
     ]);
     let sv = params.view_matrix * sun5;
     let sun_view = [sv[0], sv[1], sv[2], sv[3]];
-    let sun_len =
-        (sun_view[0] * sun_view[0] + sun_view[1] * sun_view[1] + sun_view[2] * sun_view[2] + sun_view[3] * sun_view[3]).sqrt();
+    let sun_len = (sun_view[0] * sun_view[0]
+        + sun_view[1] * sun_view[1]
+        + sun_view[2] * sun_view[2]
+        + sun_view[3] * sun_view[3])
+        .sqrt();
     let sun_view_dir = if sun_len > 1e-6 {
-        [sun_view[0] / sun_len, sun_view[1] / sun_len, sun_view[2] / sun_len, sun_view[3] / sun_len]
+        [
+            sun_view[0] / sun_len,
+            sun_view[1] / sun_len,
+            sun_view[2] / sun_len,
+            sun_view[3] / sun_len,
+        ]
     } else {
         [0.0, 1.0, 0.0, 0.0]
     };
@@ -148,7 +156,13 @@ fn vertex_shader(
     let proj_div = depth / f_xy;
 
     ClipVert {
-        pos: [view_pos[0], aspect * (-view_pos[1]), view_pos[2], view_pos[3], proj_div],
+        pos: [
+            view_pos[0],
+            aspect * (-view_pos[1]),
+            view_pos[2],
+            view_pos[3],
+            proj_div,
+        ],
         tex,
     }
 }
@@ -177,12 +191,7 @@ fn fix_depth(v: &mut ClipVert, f_xy: f32) {
     v.pos[4] = (v.pos[2] * v.pos[2] + v.pos[3] * v.pos[3]).sqrt() / f_xy;
 }
 
-fn clip_tet_generic(
-    tet: &ClipTet,
-    dist: [f32; 4],
-    f_xy: f32,
-    do_fix_depth: bool,
-) -> Vec<ClipTet> {
+fn clip_tet_generic(tet: &ClipTet, dist: [f32; 4], f_xy: f32, do_fix_depth: bool) -> Vec<ClipTet> {
     let mut inside_idx = Vec::new();
     let mut outside_idx = Vec::new();
     for i in 0..4 {
@@ -231,11 +240,21 @@ fn clip_tet_generic(
         let v_bd = maybe_fix(clip_edge(&tet.verts[b], &tet.verts[d], dist[b], dist[d]));
         vec![
             ClipTet {
-                verts: [tet.verts[a].clone(), tet.verts[b].clone(), v_ac.clone(), v_ad.clone()],
+                verts: [
+                    tet.verts[a].clone(),
+                    tet.verts[b].clone(),
+                    v_ac.clone(),
+                    v_ad.clone(),
+                ],
                 material_id: tet.material_id,
             },
             ClipTet {
-                verts: [tet.verts[b].clone(), v_ac.clone(), v_ad.clone(), v_bc.clone()],
+                verts: [
+                    tet.verts[b].clone(),
+                    v_ac.clone(),
+                    v_ad.clone(),
+                    v_bc.clone(),
+                ],
                 material_id: tet.material_id,
             },
             ClipTet {
@@ -254,11 +273,21 @@ fn clip_tet_generic(
         let v_cd = maybe_fix(clip_edge(&tet.verts[c], &tet.verts[d], dist[c], dist[d]));
         vec![
             ClipTet {
-                verts: [tet.verts[a].clone(), tet.verts[b].clone(), tet.verts[c].clone(), v_ad.clone()],
+                verts: [
+                    tet.verts[a].clone(),
+                    tet.verts[b].clone(),
+                    tet.verts[c].clone(),
+                    v_ad.clone(),
+                ],
                 material_id: tet.material_id,
             },
             ClipTet {
-                verts: [tet.verts[b].clone(), tet.verts[c].clone(), v_ad.clone(), v_bd.clone()],
+                verts: [
+                    tet.verts[b].clone(),
+                    tet.verts[c].clone(),
+                    v_ad.clone(),
+                    v_bd.clone(),
+                ],
                 material_id: tet.material_id,
             },
             ClipTet {
@@ -336,12 +365,26 @@ fn clip_and_project(
 
             // Pass 1: ZW cone lower boundary — dist = -sin(θ_min)*Z + cos(θ_min)*W
             let mut buf: Vec<ClipTet> = vec![initial];
-            buf = clip_pass(&buf, |v| -sin_min * v.pos[2] + cos_min * v.pos[3], f_xy, false);
-            if buf.is_empty() { continue; }
+            buf = clip_pass(
+                &buf,
+                |v| -sin_min * v.pos[2] + cos_min * v.pos[3],
+                f_xy,
+                false,
+            );
+            if buf.is_empty() {
+                continue;
+            }
 
             // Pass 2: ZW cone upper boundary — dist = sin(θ_max)*Z - cos(θ_max)*W
-            buf = clip_pass(&buf, |v| sin_max * v.pos[2] - cos_max * v.pos[3], f_xy, false);
-            if buf.is_empty() { continue; }
+            buf = clip_pass(
+                &buf,
+                |v| sin_max * v.pos[2] - cos_max * v.pos[3],
+                f_xy,
+                false,
+            );
+            if buf.is_empty() {
+                continue;
+            }
 
             // Recompute projDiv from actual Z,W
             for ct in &mut buf {
@@ -352,15 +395,37 @@ fn clip_and_project(
 
             // Pass 3: Near depth clip — dist = projDiv - MIN_DEPTH_DIVISOR
             buf = clip_pass(&buf, |v| v.pos[4] - MIN_DEPTH_DIVISOR, f_xy, true);
-            if buf.is_empty() { continue; }
+            if buf.is_empty() {
+                continue;
+            }
 
             // Project and emit
             for ct in &buf {
                 let pre_proj: [[f32; 4]; 4] = [
-                    [ct.verts[0].pos[0], ct.verts[0].pos[1], ct.verts[0].pos[2], ct.verts[0].pos[3]],
-                    [ct.verts[1].pos[0], ct.verts[1].pos[1], ct.verts[1].pos[2], ct.verts[1].pos[3]],
-                    [ct.verts[2].pos[0], ct.verts[2].pos[1], ct.verts[2].pos[2], ct.verts[2].pos[3]],
-                    [ct.verts[3].pos[0], ct.verts[3].pos[1], ct.verts[3].pos[2], ct.verts[3].pos[3]],
+                    [
+                        ct.verts[0].pos[0],
+                        ct.verts[0].pos[1],
+                        ct.verts[0].pos[2],
+                        ct.verts[0].pos[3],
+                    ],
+                    [
+                        ct.verts[1].pos[0],
+                        ct.verts[1].pos[1],
+                        ct.verts[1].pos[2],
+                        ct.verts[1].pos[3],
+                    ],
+                    [
+                        ct.verts[2].pos[0],
+                        ct.verts[2].pos[1],
+                        ct.verts[2].pos[2],
+                        ct.verts[2].pos[3],
+                    ],
+                    [
+                        ct.verts[3].pos[0],
+                        ct.verts[3].pos[1],
+                        ct.verts[3].pos[2],
+                        ct.verts[3].pos[3],
+                    ],
                 ];
                 let normal = normal4d(&pre_proj);
 
@@ -459,7 +524,13 @@ fn rasterize_pixel(
         let mut tri_indices = [0usize; 2];
         if in_tri[0] {
             tri_indices[0] = 0;
-            tri_indices[1] = if in_tri[1] { 1 } else if in_tri[2] { 2 } else { 3 };
+            tri_indices[1] = if in_tri[1] {
+                1
+            } else if in_tri[2] {
+                2
+            } else {
+                3
+            };
         } else if in_tri[1] {
             tri_indices[0] = 1;
             tri_indices[1] = if in_tri[2] { 2 } else { 3 };
@@ -589,7 +660,8 @@ fn render_zw_lines_simple(
                 lines[j].tex[0][2] * val + lines[j].tex[1][2] * (1.0 - val),
                 lines[j].tex[0][3] * val + lines[j].tex[1][3] * (1.0 - val),
             ];
-            let (albedo, luminance) = sample_material(lines[j].material_id, [tex[0], tex[1], tex[2]]);
+            let (albedo, luminance) =
+                sample_material(lines[j].material_id, [tex[0], tex[1], tex[2]]);
             let normal = lines[j].normal;
 
             // Two-sided Lambert diffuse
@@ -601,8 +673,7 @@ fn render_zw_lines_simple(
             let sun_color = [0.8, 0.76, 0.72]; // 1.0*0.8, 0.95*0.8, 0.9*0.8
 
             for c in 0..3 {
-                let lit = albedo[c] * (ambient[c] + sun_color[c] * diffuse)
-                    + luminance * albedo[c];
+                let lit = albedo[c] * (ambient[c] + sun_color[c] * diffuse) + luminance * albedo[c];
                 accum[c] += lit / DEPTH_FACTOR as f32;
             }
         }
@@ -622,14 +693,14 @@ fn render_zw_lines_simple(
 fn sample_material(id: u32, tex_pos: [f32; 3]) -> ([f32; 3], f32) {
     let basic_lum = 0.001;
     match id {
-        1 => ([1.0, 0.0, 0.0], basic_lum),             // Red
-        2 => ([1.0, 0.8, 0.0], basic_lum),             // Orange
-        3 => ([0.5, 1.0, 0.0], basic_lum),             // Yellow-green
-        4 => ([0.0, 1.0, 0.2], basic_lum),             // Green
-        5 => ([0.0, 1.0, 1.0], basic_lum),             // Cyan
-        6 => ([0.0, 0.2, 1.0], basic_lum),             // Blue
-        7 => ([0.5, 0.0, 1.0], basic_lum),             // Purple
-        8 => ([1.0, 0.0, 0.8], basic_lum),             // Magenta
+        1 => ([1.0, 0.0, 0.0], basic_lum), // Red
+        2 => ([1.0, 0.8, 0.0], basic_lum), // Orange
+        3 => ([0.5, 1.0, 0.0], basic_lum), // Yellow-green
+        4 => ([0.0, 1.0, 0.2], basic_lum), // Green
+        5 => ([0.0, 1.0, 1.0], basic_lum), // Cyan
+        6 => ([0.0, 0.2, 1.0], basic_lum), // Blue
+        7 => ([0.5, 0.0, 1.0], basic_lum), // Purple
+        8 => ([1.0, 0.0, 0.8], basic_lum), // Magenta
         9 => {
             let albedo = [
                 (tex_pos[0] + 1.0) / 2.0,
@@ -639,10 +710,10 @@ fn sample_material(id: u32, tex_pos: [f32; 3]) -> ([f32; 3], f32) {
             (albedo, 0.4)
         }
         10 => ([39.0 / 256.0, 69.0 / 256.0, 19.8 / 256.0], 0.0), // Brown
-        11 => ([0.1 * 0.4, 0.1 * 0.4, 0.1 * 0.4], 0.0),           // Floor
-        12 => ([1.0, 1.0, 1.0], 0.0),                               // White
-        13 => ([1.0, 1.0, 1.0], 40.0),                              // Light source
-        14 => ([1.0, 1.0, 1.0], 0.0),                               // Mirror walls
+        11 => ([0.1 * 0.4, 0.1 * 0.4, 0.1 * 0.4], 0.0),          // Floor
+        12 => ([1.0, 1.0, 1.0], 0.0),                            // White
+        13 => ([1.0, 1.0, 1.0], 40.0),                           // Light source
+        14 => ([1.0, 1.0, 1.0], 0.0),                            // Mirror walls
         _ => ([0.0, 0.0, 0.0], 0.0),
     }
 }
@@ -683,11 +754,7 @@ fn barycentric_2d(tri: &[[f32; 2]; 3], point: &[f32; 2]) -> [f32; 3] {
         return [-1.0, 1.0, 1.0];
     }
 
-    [
-        1.0 - (u[0] + u[1]) / u[2],
-        u[1] / u[2],
-        u[0] / u[2],
-    ]
+    [1.0 - (u[0] + u[1]) / u[2], u[1] / u[2], u[0] / u[2]]
 }
 
 fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -727,13 +794,17 @@ fn cross4d(a: [f32; 4], b: [f32; 4], c: [f32; 4]) -> [f32; 4] {
 }
 
 fn det3x3(
-    a00: f32, a01: f32, a02: f32,
-    a10: f32, a11: f32, a12: f32,
-    a20: f32, a21: f32, a22: f32,
+    a00: f32,
+    a01: f32,
+    a02: f32,
+    a10: f32,
+    a11: f32,
+    a12: f32,
+    a20: f32,
+    a21: f32,
+    a22: f32,
 ) -> f32 {
-    a00 * (a11 * a22 - a12 * a21)
-        - a01 * (a10 * a22 - a12 * a20)
-        + a02 * (a10 * a21 - a11 * a20)
+    a00 * (a11 * a22 - a12 * a21) - a01 * (a10 * a22 - a12 * a20) + a02 * (a10 * a21 - a11 * a20)
 }
 
 fn sub4(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {

@@ -531,6 +531,98 @@ fn append_voxel_outline_lines(
     }
 }
 
+fn normalize4(v: [f32; 4]) -> [f32; 4] {
+    let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
+    if len_sq <= 1e-8 {
+        return v;
+    }
+    let inv_len = len_sq.sqrt().recip();
+    [v[0] * inv_len, v[1] * inv_len, v[2] * inv_len, v[3] * inv_len]
+}
+
+fn rotate_basis_plane(basis: &mut [[f32; 4]; 4], axis_a: usize, axis_b: usize, angle: f32) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let old_a = basis[axis_a];
+    let old_b = basis[axis_b];
+    for i in 0..4 {
+        basis[axis_a][i] = c * old_a[i] + s * old_b[i];
+        basis[axis_b][i] = -s * old_a[i] + c * old_b[i];
+    }
+}
+
+fn build_place_preview_instance(
+    camera: &Camera4D,
+    selected_material: u8,
+    time_s: f32,
+    upright_mode: bool,
+) -> common::ModelInstance {
+    let material = selected_material.clamp(
+        BLOCK_EDIT_PLACE_MATERIAL_MIN,
+        BLOCK_EDIT_PLACE_MATERIAL_MAX,
+    ) as u32;
+    let (right, up, view_z, view_w) = if upright_mode {
+        camera.view_basis_upright()
+    } else {
+        camera.view_basis()
+    };
+
+    let center_forward = normalize4([
+        view_z[0] + view_w[0],
+        view_z[1] + view_w[1],
+        view_z[2] + view_w[2],
+        view_z[3] + view_w[3],
+    ]);
+    let side_w = normalize4([
+        view_w[0] - view_z[0],
+        view_w[1] - view_z[1],
+        view_w[2] - view_z[2],
+        view_w[3] - view_z[3],
+    ]);
+
+    let anchor = [
+        camera.position[0]
+            + 0.92 * right[0]
+            - 0.78 * up[0]
+            + 1.35 * center_forward[0]
+            + 0.52 * side_w[0],
+        camera.position[1]
+            + 0.92 * right[1]
+            - 0.78 * up[1]
+            + 1.35 * center_forward[1]
+            + 0.52 * side_w[1],
+        camera.position[2]
+            + 0.92 * right[2]
+            - 0.78 * up[2]
+            + 1.35 * center_forward[2]
+            + 0.52 * side_w[2],
+        camera.position[3]
+            + 0.92 * right[3]
+            - 0.78 * up[3]
+            + 1.35 * center_forward[3]
+            + 0.52 * side_w[3],
+    ];
+
+    let mut basis = [right, up, center_forward, side_w];
+    rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
+    rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
+
+    let scale = 0.23;
+    let mut model_transform = common::MatN::<5>::identity();
+    for row in 0..4 {
+        model_transform[[row, 0]] = basis[0][row] * scale;
+        model_transform[[row, 1]] = basis[1][row] * scale;
+        model_transform[[row, 2]] = basis[2][row] * scale;
+        model_transform[[row, 3]] = basis[3][row] * scale;
+        model_transform[[row, 4]] = anchor[row];
+    }
+
+    common::ModelInstance {
+        model_transform,
+        cell_material_ids: [material; 8],
+    }
+}
+
 impl App {
     fn grab_mouse(&mut self, window: &Window) {
         let result = window
@@ -696,6 +788,13 @@ impl App {
             self.camera
                 .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
         }
+        let preview_time_s = (now - self.start_time).as_secs_f32();
+        let preview_instance = build_place_preview_instance(
+            &self.camera,
+            self.place_material,
+            preview_time_s,
+            self.control_scheme.is_upright_primary(),
+        );
 
         // Apply gravity physics
         self.camera.update_physics(dt);
@@ -761,7 +860,7 @@ impl App {
                 None
             };
 
-        let mut custom_overlay_lines = Vec::with_capacity(32);
+        let mut custom_overlay_lines = Vec::with_capacity(64);
         if highlight_mode.uses_edges() {
             if let Some(targets) = targets {
                 let aspect = self.args.width.max(1) as f32 / self.args.height.max(1) as f32;
@@ -873,21 +972,26 @@ impl App {
 
         if backend == RenderBackend::VoxelTraversal {
             let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
+            let preview_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
+                &preview_instances,
             );
         } else {
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
+            let mut render_instances = Vec::with_capacity(instances.len() + 1);
+            render_instances.extend_from_slice(instances);
+            render_instances.push(preview_instance);
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
                 TetraFrameInput {
-                    model_instances: instances,
+                    model_instances: &render_instances,
                 },
             );
         }

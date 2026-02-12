@@ -31,10 +31,7 @@ impl Chunk {
     #[inline]
     pub fn local_index(x: usize, y: usize, z: usize, w: usize) -> usize {
         debug_assert!(x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE && w < CHUNK_SIZE);
-        w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
-            + z * CHUNK_SIZE * CHUNK_SIZE
-            + y * CHUNK_SIZE
-            + x
+        w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE + y * CHUNK_SIZE + x
     }
 
     pub fn get(&self, x: usize, y: usize, z: usize, w: usize) -> VoxelType {

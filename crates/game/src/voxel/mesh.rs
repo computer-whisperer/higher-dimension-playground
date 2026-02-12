@@ -85,13 +85,7 @@ pub fn mesh_stats(instances: &[common::ModelInstance]) -> (usize, usize) {
     // Each exposed face = 6 tetrahedra (from tesseract cell decomposition)
     let num_tets: usize = instances
         .iter()
-        .map(|inst| {
-            inst.cell_material_ids
-                .iter()
-                .filter(|&&id| id != 0)
-                .count()
-                * 6
-        })
+        .map(|inst| inst.cell_material_ids.iter().filter(|&&id| id != 0).count() * 6)
         .sum();
     (num_instances, num_tets)
 }

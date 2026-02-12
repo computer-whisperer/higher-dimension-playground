@@ -48,7 +48,10 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Tetrahedron, vertex_positions), 0);
         assert_eq!(std::mem::offset_of!(Tetrahedron, texture_positions), 64);
         assert_eq!(std::mem::offset_of!(Tetrahedron, normal), 128);
-        assert_eq!(std::mem::offset_of!(Tetrahedron, inv_projection_divisors), 144);
+        assert_eq!(
+            std::mem::offset_of!(Tetrahedron, inv_projection_divisors),
+            144
+        );
         assert_eq!(std::mem::offset_of!(Tetrahedron, material_id), 160);
         assert_eq!(std::mem::offset_of!(Tetrahedron, padding), 164);
     }

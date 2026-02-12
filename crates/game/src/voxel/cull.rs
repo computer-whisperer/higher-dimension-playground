@@ -66,8 +66,7 @@ pub fn extract_surfaces(world: &VoxelWorld) -> SurfaceData {
                         let mut exposed: u8 = 0;
                         for face in Face4D::ALL {
                             let [dx, dy, dz, dw] = face.neighbor_offset();
-                            let neighbor =
-                                world.get_voxel(wx + dx, wy + dy, wz + dz, ww + dw);
+                            let neighbor = world.get_voxel(wx + dx, wy + dy, wz + dz, ww + dw);
                             if neighbor.is_air() {
                                 exposed |= 1 << face.cell_id();
                             }
@@ -243,13 +242,7 @@ pub fn mesh_stats(instances: &[common::ModelInstance]) -> (usize, usize) {
     let num_instances = instances.len();
     let num_tets: usize = instances
         .iter()
-        .map(|inst| {
-            inst.cell_material_ids
-                .iter()
-                .filter(|&&id| id != 0)
-                .count()
-                * 6
-        })
+        .map(|inst| inst.cell_material_ids.iter().filter(|&&id| id != 0).count() * 6)
         .sum();
     (num_instances, num_tets)
 }
