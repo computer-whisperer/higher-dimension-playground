@@ -302,7 +302,11 @@ fn handle_message(
         ClientMessage::UpdatePlayer { position, look } => {
             install_or_update_player(state, client_id, None, Some(position), Some(look), start);
         }
-        ClientMessage::SetVoxel { position, material } => {
+        ClientMessage::SetVoxel {
+            position,
+            material,
+            client_edit_id,
+        } => {
             let revision = {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 guard.world.set_voxel(
@@ -322,6 +326,7 @@ fn handle_message(
                     position,
                     material,
                     source_client_id: Some(client_id),
+                    client_edit_id,
                     revision,
                 },
             );

@@ -168,6 +168,14 @@ pub struct CustomOverlayLine {
     pub color: [f32; 4],
 }
 
+#[derive(Clone, Debug)]
+pub struct HudPlayerTag {
+    pub text: String,
+    pub anchor_ndc: [f32; 2],
+    pub scale: f32,
+    pub bg_alpha: f32,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum HudReadoutMode {
     Full,
@@ -205,6 +213,7 @@ pub struct RenderOptions {
     pub hud_rotation_label: Option<String>,
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
+    pub hud_player_tags: Vec<HudPlayerTag>,
 }
 
 impl Default for RenderOptions {
@@ -240,6 +249,7 @@ impl Default for RenderOptions {
             hud_rotation_label: None,
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
+            hud_player_tags: Vec::new(),
         }
     }
 }
@@ -3490,6 +3500,7 @@ impl RenderContext {
         rotation_label: Option<&str>,
         target_hit_voxel: Option<[i32; 4]>,
         target_hit_face: Option<[i32; 4]>,
+        player_tags: &[HudPlayerTag],
     ) -> (usize, usize) {
         let max_lines = LINE_VERTEX_CAPACITY / 2;
         if base_line_count >= max_lines {
@@ -4305,6 +4316,95 @@ impl RenderContext {
                 map_axis_color,
                 present_size,
             );
+        }
+
+        if let Some(hud_res) = self.hud_resources.as_ref() {
+            if !player_tags.is_empty() {
+                let mut sorted_tags: Vec<&HudPlayerTag> = player_tags.iter().collect();
+                sorted_tags.sort_by(|a, b| {
+                    a.scale
+                        .partial_cmp(&b.scale)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                for tag in sorted_tags.into_iter().take(48) {
+                    let text = tag.text.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+
+                    let scale = tag.scale.clamp(0.55, 1.8);
+                    let text_size = (11.0 * text_scale * scale)
+                        .clamp(10.0 * ui_scale.max(1.0), 26.0 * ui_scale.max(1.0));
+                    let pad_px = (4.0 * ui_scale.max(1.0) * scale).clamp(2.0, 10.0);
+                    let estimated_char_width_px = text_size * 0.56;
+                    let panel_width_px =
+                        (text.chars().count().max(1) as f32 * estimated_char_width_px + pad_px * 2.0)
+                            .clamp(36.0, 540.0);
+                    let panel_height_px = (text_size * 1.25 + pad_px * 2.0).clamp(16.0, 88.0);
+
+                    let width_ndc = (panel_width_px / present_size[0] as f32) * 2.0;
+                    let height_ndc = (panel_height_px / present_size[1] as f32) * 2.0;
+                    let offset_ndc_y =
+                        (16.0 * ui_scale.max(1.0) * scale / present_size[1] as f32) * 2.0;
+                    let margin_ndc = 0.01;
+
+                    let center_x = tag.anchor_ndc[0].clamp(
+                        -1.0 + width_ndc * 0.5 + margin_ndc,
+                        1.0 - width_ndc * 0.5 - margin_ndc,
+                    );
+                    let top_y = (tag.anchor_ndc[1] - offset_ndc_y)
+                        .clamp(-1.0 + height_ndc + margin_ndc, 1.0 - margin_ndc);
+
+                    let bg_min = Vec2::new(center_x - width_ndc * 0.5, top_y - height_ndc);
+                    let bg_max = Vec2::new(center_x + width_ndc * 0.5, top_y);
+
+                    push_filled_rect_quads(
+                        &mut hud_quads,
+                        &hud_res.font_atlas,
+                        bg_min,
+                        bg_max,
+                        Vec4::new(0.0, 0.0, 0.0, tag.bg_alpha.clamp(0.25, 0.90)),
+                    );
+
+                    let text_anchor_ndc = Vec2::new(
+                        bg_min.x + (pad_px / present_size[0] as f32) * 2.0,
+                        bg_min.y + (pad_px / present_size[1] as f32) * 2.0,
+                    );
+                    let text_anchor_px = ndc_to_pixels(text_anchor_ndc, present_size);
+                    push_text_quads(
+                        &mut hud_quads,
+                        &hud_res.font_atlas,
+                        text,
+                        text_anchor_px,
+                        text_size,
+                        Vec4::new(0.96, 0.97, 1.00, 1.0),
+                        present_size,
+                    );
+                }
+            }
+        } else if let Some(font) = self.hud_font.as_ref() {
+            for tag in player_tags.iter().take(48) {
+                let text = tag.text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let scale = tag.scale.clamp(0.55, 1.8);
+                let text_size = (11.0 * text_scale * scale)
+                    .clamp(10.0 * ui_scale.max(1.0), 26.0 * ui_scale.max(1.0));
+                let anchor = Vec2::new(tag.anchor_ndc[0], tag.anchor_ndc[1]);
+                let label_ndc = anchor + Vec2::new(0.0, -0.035 * scale);
+                let label_px = ndc_to_pixels(label_ndc, present_size);
+                push_text_lines(
+                    &mut lines,
+                    font,
+                    text,
+                    label_px,
+                    text_size,
+                    Vec4::new(0.96, 0.97, 1.00, 1.0),
+                    present_size,
+                );
+            }
         }
 
         push_minecraft_crosshair(
@@ -6019,6 +6119,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 render_options.hud_rotation_label.as_deref(),
                 render_options.hud_target_hit_voxel,
                 render_options.hud_target_hit_face,
+                &render_options.hud_player_tags,
             );
             line_render_count += hud_line_count;
             hud_vertex_count = hud_quad_count;

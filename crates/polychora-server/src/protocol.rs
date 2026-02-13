@@ -28,7 +28,12 @@ pub struct PlayerSnapshot {
 pub enum ClientMessage {
     Hello { name: String },
     UpdatePlayer { position: [f32; 4], look: [f32; 4] },
-    SetVoxel { position: [i32; 4], material: u8 },
+    SetVoxel {
+        position: [i32; 4],
+        material: u8,
+        #[serde(default)]
+        client_edit_id: Option<u64>,
+    },
     RequestWorldSnapshot,
     Ping { nonce: u64 },
 }
@@ -59,6 +64,8 @@ pub enum ServerMessage {
         position: [i32; 4],
         material: u8,
         source_client_id: Option<u64>,
+        #[serde(default)]
+        client_edit_id: Option<u64>,
         revision: u64,
     },
     WorldSnapshot {

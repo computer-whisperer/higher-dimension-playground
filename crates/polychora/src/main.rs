@@ -8,8 +8,8 @@ mod voxel;
 use base64::Engine;
 use clap::{ArgAction, Parser, ValueEnum};
 use higher_dimension_playground::render::{
-    CustomOverlayLine, FrameParams, HudReadoutMode, RenderBackend, RenderContext, RenderOptions,
-    TetraFrameInput, VteDisplayMode,
+    CustomOverlayLine, FrameParams, HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext,
+    RenderOptions, TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::collections::HashMap;
@@ -62,6 +62,8 @@ const VTE_TRACE_STEPS_MIN: u32 = 16;
 const VTE_TRACE_STEPS_MAX: u32 = 4096;
 const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const MULTIPLAYER_PENDING_EDIT_TIMEOUT: Duration = Duration::from_secs(5);
+const MULTIPLAYER_PENDING_EDIT_MAX: usize = 512;
 const AVATAR_MATERIAL_ID: u32 = 21;
 const AVATAR_FORWARD_FRAGMENT_COUNT: usize = 4;
 const REMOTE_AVATAR_PART_COUNT_ESTIMATE: usize = 7 + AVATAR_FORWARD_FRAGMENT_COUNT;
@@ -73,6 +75,8 @@ const REMOTE_PLAYER_PREDICTION_LEAD_S: f32 = 0.05;
 const REMOTE_PLAYER_MAX_PREDICTION_S: f32 = 0.22;
 const REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE: f32 = 8.0;
 const REMOTE_PLAYER_MAX_PREDICTED_SPEED: f32 = 24.0;
+const REMOTE_PLAYER_TAG_FOV_DOT_MIN: f32 = 0.16;
+const REMOTE_PLAYER_TAG_MAX_COUNT: usize = 32;
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -551,6 +555,8 @@ fn main() {
         menu_selection: 0,
         multiplayer,
         multiplayer_self_id: None,
+        next_multiplayer_edit_id: 1,
+        pending_voxel_edits: Vec::new(),
         remote_players: HashMap::new(),
         last_multiplayer_player_update: Instant::now(),
     };
@@ -719,6 +725,8 @@ struct App {
     menu_selection: usize,
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
+    next_multiplayer_edit_id: u64,
+    pending_voxel_edits: Vec<PendingVoxelEdit>,
     remote_players: HashMap<u64, RemotePlayerState>,
     last_multiplayer_player_update: Instant,
 }
@@ -744,6 +752,14 @@ struct RemotePlayerState {
     render_look: [f32; 4],
     velocity: [f32; 4],
     last_received_at: Instant,
+}
+
+#[derive(Clone)]
+struct PendingVoxelEdit {
+    client_edit_id: u64,
+    position: [i32; 4],
+    material: u8,
+    created_at: Instant,
 }
 
 #[derive(Copy, Clone)]
@@ -845,12 +861,12 @@ fn default_multiplayer_player_name() -> String {
         .unwrap_or_else(|| "player".to_string())
 }
 
-fn project_world_point_to_ndc(
+fn project_world_point_to_ndc_with_depth(
     view_matrix: &ndarray::Array2<f32>,
     world_point: [f32; 4],
     focal_length_xy: f32,
     aspect: f32,
-) -> Option<[f32; 2]> {
+) -> Option<([f32; 2], f32)> {
     let input = [
         world_point[0],
         world_point[1],
@@ -885,10 +901,20 @@ fn project_world_point_to_ndc(
     let x = view[0] / projection_divisor;
     let y = aspect * (-view[1]) / projection_divisor;
     if x.is_finite() && y.is_finite() {
-        Some([x, y])
+        Some(([x, y], depth))
     } else {
         None
     }
+}
+
+fn project_world_point_to_ndc(
+    view_matrix: &ndarray::Array2<f32>,
+    world_point: [f32; 4],
+    focal_length_xy: f32,
+    aspect: f32,
+) -> Option<[f32; 2]> {
+    project_world_point_to_ndc_with_depth(view_matrix, world_point, focal_length_xy, aspect)
+        .map(|(ndc, _)| ndc)
 }
 
 fn append_voxel_outline_lines(
@@ -1577,6 +1603,8 @@ impl App {
                     eprintln!("Multiplayer disconnected: {reason}");
                     self.multiplayer = None;
                     self.multiplayer_self_id = None;
+                    self.next_multiplayer_edit_id = 1;
+                    self.pending_voxel_edits.clear();
                     self.remote_players.clear();
                     break;
                 }
@@ -1678,6 +1706,46 @@ impl App {
         }
     }
 
+    fn acknowledge_pending_voxel_edit(
+        &mut self,
+        client_edit_id: Option<u64>,
+        position: [i32; 4],
+        material: u8,
+    ) {
+        let index = if let Some(edit_id) = client_edit_id {
+            self.pending_voxel_edits
+                .iter()
+                .position(|entry| entry.client_edit_id == edit_id)
+        } else {
+            self.pending_voxel_edits
+                .iter()
+                .position(|entry| entry.position == position && entry.material == material)
+                .or_else(|| {
+                    self.pending_voxel_edits
+                        .iter()
+                        .position(|entry| entry.position == position)
+                })
+        };
+        if let Some(index) = index {
+            let _ = self.pending_voxel_edits.remove(index);
+        }
+    }
+
+    fn reapply_pending_voxel_edits(&mut self, now: Instant) {
+        self.pending_voxel_edits.retain(|entry| {
+            now.saturating_duration_since(entry.created_at) <= MULTIPLAYER_PENDING_EDIT_TIMEOUT
+        });
+        for entry in &self.pending_voxel_edits {
+            self.scene.world.set_voxel(
+                entry.position[0],
+                entry.position[1],
+                entry.position[2],
+                entry.position[3],
+                voxel::VoxelType(entry.material),
+            );
+        }
+    }
+
     fn handle_multiplayer_message(&mut self, message: multiplayer::ServerMessage) {
         let received_at = Instant::now();
         match message {
@@ -1688,6 +1756,8 @@ impl App {
                 ..
             } => {
                 self.multiplayer_self_id = Some(client_id);
+                self.next_multiplayer_edit_id = 1;
+                self.pending_voxel_edits.clear();
                 eprintln!(
                     "Multiplayer connected: client_id={} world_rev={} chunks={} server_tick_hz={:.2}",
                     client_id, world.revision, world.non_empty_chunks, tick_hz
@@ -1721,7 +1791,11 @@ impl App {
                     .retain(|client_id, _| seen.contains(client_id));
             }
             multiplayer::ServerMessage::WorldVoxelSet {
-                position, material, ..
+                position,
+                material,
+                source_client_id,
+                client_edit_id,
+                ..
             } => {
                 self.scene.world.set_voxel(
                     position[0],
@@ -1730,6 +1804,9 @@ impl App {
                     position[3],
                     voxel::VoxelType(material),
                 );
+                if source_client_id == self.multiplayer_self_id {
+                    self.acknowledge_pending_voxel_edit(client_edit_id, position, material);
+                }
             }
             multiplayer::ServerMessage::WorldSnapshot { world } => {
                 let decoded =
@@ -1771,9 +1848,31 @@ impl App {
         }
     }
 
-    fn send_multiplayer_voxel_update(&self, position: [i32; 4], material: u8) {
+    fn send_multiplayer_voxel_update(&mut self, now: Instant, position: [i32; 4], material: u8) {
+        if self.multiplayer.is_none() {
+            return;
+        }
+
+        let client_edit_id = self.next_multiplayer_edit_id;
+        self.next_multiplayer_edit_id = self.next_multiplayer_edit_id.wrapping_add(1).max(1);
+        self.pending_voxel_edits.push(PendingVoxelEdit {
+            client_edit_id,
+            position,
+            material,
+            created_at: now,
+        });
+
+        if self.pending_voxel_edits.len() > MULTIPLAYER_PENDING_EDIT_MAX {
+            let overflow = self.pending_voxel_edits.len() - MULTIPLAYER_PENDING_EDIT_MAX;
+            self.pending_voxel_edits.drain(0..overflow);
+        }
+
         if let Some(client) = self.multiplayer.as_ref() {
-            client.send(MultiplayerClientMessage::SetVoxel { position, material });
+            client.send(MultiplayerClientMessage::SetVoxel {
+                position,
+                material,
+                client_edit_id: Some(client_edit_id),
+            });
         }
     }
 
@@ -1793,6 +1892,83 @@ impl App {
             }
         }
         instances
+    }
+
+    fn remote_player_tags(
+        &self,
+        view_matrix: &ndarray::Array2<f32>,
+        look_dir: [f32; 4],
+        focal_length_xy: f32,
+        aspect: f32,
+    ) -> Vec<HudPlayerTag> {
+        let forward = normalize4_with_fallback(look_dir, [0.0, 0.0, 1.0, 0.0]);
+        let mut ids: Vec<u64> = self.remote_players.keys().copied().collect();
+        ids.sort_unstable();
+
+        let mut tags = Vec::with_capacity(ids.len().min(REMOTE_PLAYER_TAG_MAX_COUNT));
+        for client_id in ids {
+            if tags.len() >= REMOTE_PLAYER_TAG_MAX_COUNT {
+                break;
+            }
+            let Some(player) = self.remote_players.get(&client_id) else {
+                continue;
+            };
+
+            let anchor = [
+                player.render_position[0],
+                player.render_position[1] + 0.48,
+                player.render_position[2],
+                player.render_position[3],
+            ];
+            let to_anchor = [
+                anchor[0] - self.camera.position[0],
+                anchor[1] - self.camera.position[1],
+                anchor[2] - self.camera.position[2],
+                anchor[3] - self.camera.position[3],
+            ];
+            let distance_sq = dot4(to_anchor, to_anchor);
+            if !distance_sq.is_finite() || distance_sq <= 1e-6 {
+                continue;
+            }
+            let distance = distance_sq.sqrt();
+            let inv_distance = distance.recip();
+            let dir = [
+                to_anchor[0] * inv_distance,
+                to_anchor[1] * inv_distance,
+                to_anchor[2] * inv_distance,
+                to_anchor[3] * inv_distance,
+            ];
+
+            if dot4(dir, forward) < REMOTE_PLAYER_TAG_FOV_DOT_MIN {
+                continue;
+            }
+
+            let Some((ndc, _depth)) =
+                project_world_point_to_ndc_with_depth(view_matrix, anchor, focal_length_xy, aspect)
+            else {
+                continue;
+            };
+            if ndc[0].abs() > 1.10 || ndc[1].abs() > 1.10 {
+                continue;
+            }
+
+            let scale = (3.2 / (distance + 1.0)).clamp(0.55, 1.45);
+            let bg_alpha = (0.82 - distance * 0.05).clamp(0.35, 0.82);
+            let text = if player.name.trim().is_empty() {
+                format!("player-{client_id}")
+            } else {
+                player.name.clone()
+            };
+
+            tags.push(HudPlayerTag {
+                text,
+                anchor_ndc: ndc,
+                scale,
+                bg_alpha,
+            });
+        }
+
+        tags
     }
 
     fn toggle_vte_entities(&mut self) {
@@ -2390,6 +2566,7 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.poll_multiplayer_events();
+        self.reapply_pending_voxel_edits(now);
         self.smooth_remote_players(dt, now);
 
         if self.menu_open {
@@ -2630,6 +2807,7 @@ impl App {
                         ) {
                             eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
                             self.send_multiplayer_voxel_update(
+                                now,
                                 [x, y, z, w],
                                 voxel::VoxelType::AIR.0,
                             );
@@ -2645,7 +2823,11 @@ impl App {
                                 "Placed voxel material {} at ({x}, {y}, {z}, {w})",
                                 self.place_material
                             );
-                            self.send_multiplayer_voxel_update([x, y, z, w], self.place_material);
+                            self.send_multiplayer_voxel_update(
+                                now,
+                                [x, y, z, w],
+                                self.place_material,
+                            );
                         }
                     }
                 }
@@ -2671,8 +2853,11 @@ impl App {
 
         // Build view matrix and scene
         let view_matrix = self.current_view_matrix();
+        let aspect = self.args.width.max(1) as f32 / self.args.height.max(1) as f32;
         let backend = self.args.backend.to_render_backend();
         let highlight_mode = self.args.edit_highlight_mode;
+        let hud_player_tags =
+            self.remote_player_tags(&view_matrix, look_dir, self.focal_length_xy, aspect);
         let targets = if !self.menu_open
             && self.mouse_grabbed
             && (highlight_mode.uses_faces() || highlight_mode.uses_edges())
@@ -2705,7 +2890,6 @@ impl App {
         let mut custom_overlay_lines = Vec::with_capacity(64);
         if highlight_mode.uses_edges() {
             if let Some(targets) = targets {
-                let aspect = self.args.width.max(1) as f32 / self.args.height.max(1) as f32;
                 if let Some(hit_voxel) = targets.hit_voxel {
                     append_voxel_outline_lines(
                         &mut custom_overlay_lines,
@@ -2821,6 +3005,7 @@ impl App {
             hud_rotation_label,
             hud_target_hit_voxel,
             hud_target_hit_face,
+            hud_player_tags,
             ..Default::default()
         };
 
