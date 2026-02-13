@@ -41,7 +41,7 @@ This project renders 4D geometry with multiple backends. It supports three rende
   - Presentation: line wireframe rendering, buffer display
 
 - **Procedural Materials** (`slang-shaders/src/materials.slang`)
-  - 20 material presets (colors, floor, light source, mirrors, and volumetric variants)
+  - 21 material presets (colors, floor, light source, mirrors, and volumetric variants)
   - PBR properties: albedo, metallic, roughness, luminance
 
 - **Output Modes**

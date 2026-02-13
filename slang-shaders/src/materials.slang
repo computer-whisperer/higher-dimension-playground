@@ -173,6 +173,42 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos)
             mat.luminance = 0.15 * centerGlow;
         }
         break;
+    case 21:
+        // Avatar marker: dark edge bands with signed-axis accent lines.
+        {
+            float4 local = frac(p4 + 1e-4);
+            float4 faceDist = min(local, 1.0 - local);
+            float edgeDist = min(min(faceDist.x, faceDist.y), min(faceDist.z, faceDist.w));
+            float edgeBand = 1.0 - smoothstep(0.05, 0.16, edgeDist);
+
+            float4 axisLineDist = abs(local - 0.5);
+            float xLine = 1.0 - smoothstep(0.03, 0.12, axisLineDist.x);
+            float yLine = 1.0 - smoothstep(0.03, 0.12, axisLineDist.y);
+            float zLine = 1.0 - smoothstep(0.03, 0.12, axisLineDist.z);
+            float wLine = 1.0 - smoothstep(0.03, 0.12, axisLineDist.w);
+            float3 axisTint =
+                xLine * float3(0.95, 0.32, 0.32) +
+                yLine * float3(0.35, 0.95, 0.52) +
+                zLine * float3(0.34, 0.64, 0.98) +
+                wLine * float3(0.95, 0.74, 0.28);
+            float tintWeight = saturate((xLine + yLine + zLine + wLine) * 0.35);
+
+            float pulse = 0.5 + 0.5 * sin((p4.x * 9.0 + p4.y * 11.0 + p4.z * 7.0 + p4.w * 13.0) * tau);
+
+            float3 baseColor = float3(0.17, 0.20, 0.30);
+            float3 edgeColor = float3(0.05, 0.05, 0.07);
+            float3 color = lerp(baseColor, edgeColor, edgeBand * 0.88);
+            color = lerp(color, axisTint, tintWeight * (0.28 + 0.72 * edgeBand));
+            float responseBoost = 1.45;
+            color *= responseBoost;
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.08;
+            mat.roughness = 0.18;
+            mat.luminance = 0.16 + 0.70 * edgeBand + 0.45 * tintWeight * pulse;
+            mat.integrationWeight = 10.0;
+        }
+        break;
     default:
         mat.albedo = float4(0.0, 0.0, 0.0, 1.0);
         mat.luminance = 0.0;

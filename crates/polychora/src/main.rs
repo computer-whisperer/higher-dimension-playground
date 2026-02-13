@@ -25,7 +25,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use camera::Camera4D;
+use camera::{Camera4D, PLAYER_HEIGHT};
 use input::{ControlScheme, InputState, RotationPair};
 use multiplayer::{ClientMessage as MultiplayerClientMessage, MultiplayerClient, MultiplayerEvent};
 use scene::{Scene, ScenePreset};
@@ -62,6 +62,9 @@ const VTE_TRACE_STEPS_MIN: u32 = 16;
 const VTE_TRACE_STEPS_MAX: u32 = 4096;
 const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const AVATAR_MATERIAL_ID: u32 = 21;
+const REMOTE_AVATAR_PART_COUNT_ESTIMATE: usize = 7;
+const AVATAR_THICKNESS_SCALE: f32 = 1.30;
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -940,6 +943,140 @@ fn rotate_basis_plane(basis: &mut [[f32; 4]; 4], axis_a: usize, axis_b: usize, a
     }
 }
 
+fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
+    let len_sq = dot4(v, v);
+    if len_sq <= 1e-8 {
+        return fallback;
+    }
+    let inv_len = len_sq.sqrt().recip();
+    [
+        v[0] * inv_len,
+        v[1] * inv_len,
+        v[2] * inv_len,
+        v[3] * inv_len,
+    ]
+}
+
+fn orthonormal_basis_from_forward(forward: [f32; 4]) -> [[f32; 4]; 4] {
+    let forward = normalize4_with_fallback(forward, [0.0, 0.0, 1.0, 0.0]);
+    let mut ortho = [[0.0; 4]; 4];
+    ortho[0] = forward;
+    let mut count = 1usize;
+
+    let candidates = [
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [1.0, 0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 0.0],
+    ];
+
+    for candidate in candidates {
+        if count >= 4 {
+            break;
+        }
+        let mut v = candidate;
+        for basis_idx in 0..count {
+            let projection = dot4(v, ortho[basis_idx]);
+            for axis in 0..4 {
+                v[axis] -= projection * ortho[basis_idx][axis];
+            }
+        }
+
+        let len_sq = dot4(v, v);
+        if len_sq <= 1e-6 {
+            continue;
+        }
+
+        let inv_len = len_sq.sqrt().recip();
+        for axis in 0..4 {
+            v[axis] *= inv_len;
+        }
+        ortho[count] = v;
+        count += 1;
+    }
+
+    if count < 4 {
+        return [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+    }
+
+    // Return basis as [right, up, forward, side].
+    // `ortho[1]` is world-up for planar forward inputs, so keep it in the up slot.
+    [ortho[2], ortho[1], ortho[0], ortho[3]]
+}
+
+fn offset_point_along_basis(
+    origin: [f32; 4],
+    basis: &[[f32; 4]; 4],
+    local_offset: [f32; 4],
+) -> [f32; 4] {
+    let mut p = origin;
+    for row in 0..4 {
+        p[row] += basis[0][row] * local_offset[0]
+            + basis[1][row] * local_offset[1]
+            + basis[2][row] * local_offset[2]
+            + basis[3][row] * local_offset[3];
+    }
+    p
+}
+
+fn build_centered_model_instance(
+    center: [f32; 4],
+    basis: &[[f32; 4]; 4],
+    axis_scale: [f32; 4],
+    cell_material_ids: [u32; 8],
+) -> common::ModelInstance {
+    let mut model_transform = common::MatN::<5>::identity();
+    for row in 0..4 {
+        model_transform[[row, 0]] = basis[0][row] * axis_scale[0];
+        model_transform[[row, 1]] = basis[1][row] * axis_scale[1];
+        model_transform[[row, 2]] = basis[2][row] * axis_scale[2];
+        model_transform[[row, 3]] = basis[3][row] * axis_scale[3];
+
+        let center_offset = 0.5
+            * (model_transform[[row, 0]]
+                + model_transform[[row, 1]]
+                + model_transform[[row, 2]]
+                + model_transform[[row, 3]]);
+        model_transform[[row, 4]] = center[row] - center_offset;
+    }
+
+    common::ModelInstance {
+        model_transform,
+        cell_material_ids,
+    }
+}
+
+fn avatar_cell_mask(cell_indices: &[usize]) -> [u32; 8] {
+    let mut ids = [0u32; 8];
+    for &cell in cell_indices {
+        if cell < ids.len() {
+            ids[cell] = AVATAR_MATERIAL_ID;
+        }
+    }
+    ids
+}
+
+fn stable_name_hash(name: &str) -> u32 {
+    let mut hash = 0x811C_9DC5u32;
+    for b in name.bytes() {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash
+}
+
 fn build_place_preview_instance(
     camera: &Camera4D,
     selected_material: u8,
@@ -1038,22 +1175,123 @@ fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
     }
 }
 
-fn build_remote_player_marker_instance(
+fn build_remote_player_avatar_instances(
     client_id: u64,
+    name_hash: u32,
     position: [f32; 4],
-) -> common::ModelInstance {
-    let scale = 0.35f32;
-    let mut model_transform = common::MatN::<5>::identity();
-    for axis in 0..4 {
-        model_transform[[axis, axis]] = scale;
-        model_transform[[axis, 4]] = position[axis] - 0.5 * scale;
+    look: [f32; 4],
+    last_update_ms: u64,
+    time_s: f32,
+) -> Vec<common::ModelInstance> {
+    let mut instances = Vec::with_capacity(REMOTE_AVATAR_PART_COUNT_ESTIMATE);
+
+    let look_phase = (name_hash as f32) * 0.0078125;
+    let id_phase = ((client_id as f32) * 0.173205 + look_phase).rem_euclid(std::f32::consts::TAU);
+    let idle_bob = (time_s * 1.9 + id_phase).sin() * 0.04;
+    let sync_jitter = (last_update_ms as f32 * 0.001).sin() * 0.015;
+
+    let planar_forward =
+        normalize4_with_fallback([look[0], 0.0, look[2], look[3]], [0.0, 0.0, 1.0, 0.0]);
+    let mut avatar_basis = orthonormal_basis_from_forward(planar_forward);
+    rotate_basis_plane(&mut avatar_basis, 0, 3, 0.18 * id_phase.sin());
+
+    let head_center = offset_point_along_basis(
+        position,
+        &avatar_basis,
+        [0.0, 0.05 + idle_bob * 0.4 + sync_jitter, 0.0, 0.0],
+    );
+    let mut head_basis = avatar_basis;
+    rotate_basis_plane(&mut head_basis, 0, 2, time_s * 2.6 + id_phase * 0.6);
+    rotate_basis_plane(&mut head_basis, 1, 3, time_s * 1.7 + id_phase);
+    instances.push(build_centered_model_instance(
+        head_center,
+        &head_basis,
+        [
+            0.30 * AVATAR_THICKNESS_SCALE,
+            0.30 * AVATAR_THICKNESS_SCALE,
+            0.30 * AVATAR_THICKNESS_SCALE,
+            0.30 * AVATAR_THICKNESS_SCALE,
+        ],
+        [AVATAR_MATERIAL_ID; 8],
+    ));
+
+    let body_parts: [([f32; 4], [f32; 4], &[usize]); 6] = [
+        (
+            [0.0, -0.34 * PLAYER_HEIGHT + idle_bob, 0.03, 0.0],
+            [
+                0.22 * AVATAR_THICKNESS_SCALE,
+                0.20 * AVATAR_THICKNESS_SCALE,
+                0.18 * AVATAR_THICKNESS_SCALE,
+                0.16 * AVATAR_THICKNESS_SCALE,
+            ],
+            &[0, 6],
+        ),
+        (
+            [-0.20, -0.40 * PLAYER_HEIGHT + idle_bob, 0.0, 0.10],
+            [
+                0.13 * AVATAR_THICKNESS_SCALE,
+                0.14 * AVATAR_THICKNESS_SCALE,
+                0.12 * AVATAR_THICKNESS_SCALE,
+                0.12 * AVATAR_THICKNESS_SCALE,
+            ],
+            &[2],
+        ),
+        (
+            [0.20, -0.40 * PLAYER_HEIGHT + idle_bob, 0.0, -0.10],
+            [
+                0.13 * AVATAR_THICKNESS_SCALE,
+                0.14 * AVATAR_THICKNESS_SCALE,
+                0.12 * AVATAR_THICKNESS_SCALE,
+                0.12 * AVATAR_THICKNESS_SCALE,
+            ],
+            &[5],
+        ),
+        (
+            [-0.12, -0.72 * PLAYER_HEIGHT + idle_bob, 0.02, 0.08],
+            [
+                0.14 * AVATAR_THICKNESS_SCALE,
+                0.19 * AVATAR_THICKNESS_SCALE,
+                0.11 * AVATAR_THICKNESS_SCALE,
+                0.11 * AVATAR_THICKNESS_SCALE,
+            ],
+            &[7],
+        ),
+        (
+            [0.12, -0.72 * PLAYER_HEIGHT + idle_bob, -0.02, -0.08],
+            [
+                0.14 * AVATAR_THICKNESS_SCALE,
+                0.19 * AVATAR_THICKNESS_SCALE,
+                0.11 * AVATAR_THICKNESS_SCALE,
+                0.11 * AVATAR_THICKNESS_SCALE,
+            ],
+            &[1],
+        ),
+        (
+            [0.0, -0.58 * PLAYER_HEIGHT + idle_bob, -0.02, 0.0],
+            [
+                0.17 * AVATAR_THICKNESS_SCALE,
+                0.16 * AVATAR_THICKNESS_SCALE,
+                0.14 * AVATAR_THICKNESS_SCALE,
+                0.14 * AVATAR_THICKNESS_SCALE,
+            ],
+            &[3, 4],
+        ),
+    ];
+
+    for (part_index, (offset, scales, cells)) in body_parts.iter().enumerate() {
+        let mut part_basis = avatar_basis;
+        let part_phase = id_phase + part_index as f32 * 0.7;
+        rotate_basis_plane(&mut part_basis, 0, 2, 0.22 * part_phase.sin());
+        rotate_basis_plane(&mut part_basis, 2, 3, 0.17 * part_phase.cos());
+        instances.push(build_centered_model_instance(
+            offset_point_along_basis(position, &avatar_basis, *offset),
+            &part_basis,
+            *scales,
+            avatar_cell_mask(cells),
+        ));
     }
 
-    let material = (1 + (client_id % 20) as u32).clamp(1, 20);
-    common::ModelInstance {
-        model_transform,
-        cell_material_ids: [material; 8],
-    }
+    instances
 }
 
 impl App {
@@ -1386,16 +1624,19 @@ impl App {
         }
     }
 
-    fn remote_player_instances(&self) -> Vec<common::ModelInstance> {
+    fn remote_player_instances(&self, time_s: f32) -> Vec<common::ModelInstance> {
         let mut ids: Vec<u64> = self.remote_players.keys().copied().collect();
         ids.sort_unstable();
-        let mut instances = Vec::with_capacity(ids.len());
+        let mut instances = Vec::with_capacity(ids.len() * REMOTE_AVATAR_PART_COUNT_ESTIMATE);
         for client_id in ids {
             if let Some(player) = self.remote_players.get(&client_id) {
-                let _ = (&player.name, &player.look, player.last_update_ms);
-                instances.push(build_remote_player_marker_instance(
+                instances.extend(build_remote_player_avatar_instances(
                     client_id,
+                    stable_name_hash(&player.name),
                     player.position,
+                    player.look,
+                    player.last_update_ms,
+                    time_s,
                 ));
             }
         }
@@ -2443,7 +2684,7 @@ impl App {
             if self.vte_entities_enabled {
                 vte_entity_instances.push(build_vte_test_entity_instance(preview_time_s));
             }
-            vte_entity_instances.extend(self.remote_player_instances());
+            vte_entity_instances.extend(self.remote_player_instances(preview_time_s));
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
@@ -2454,7 +2695,7 @@ impl App {
                 &preview_overlay_instances,
             );
         } else {
-            let remote_instances = self.remote_player_instances();
+            let remote_instances = self.remote_player_instances(preview_time_s);
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
             let mut render_instances =
