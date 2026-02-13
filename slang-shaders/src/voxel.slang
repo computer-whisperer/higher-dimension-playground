@@ -17,6 +17,7 @@ static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
 static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
 static const uint HIGHLIGHT_FLAG_HIT_VOXEL = 1u << 0u;
 static const uint HIGHLIGHT_FLAG_PLACE_VOXEL = 1u << 1u;
+static const uint MATERIAL_ID_GROUND = 11u;
 static const float INTEGRAL_HIGHLIGHT_WEIGHT_BOOST = 15.0;
 // Keep shader-side traversal policy aligned with CPU-side BVH build policy:
 // any non-zero entity tetra set uses BVH traversal.
@@ -2254,8 +2255,14 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         float sinStep = sin(angleStep);
         float cosStep = cos(angleStep);
 
-        float3 accumColor = float3(0.0, 0.0, 0.0);
-        float accumWeight = 0.0;
+        float integralSkyScale = max(0.0, asfloat(meta.highlightPadding0));
+        float integralHitEmissiveBoost = max(0.0, asfloat(meta.highlightPadding1));
+        float integralLogMergeK = max(0.0, asfloat(meta.highlightPadding2));
+
+        float3 hitAccumColor = float3(0.0, 0.0, 0.0);
+        float hitAccumWeight = 0.0;
+        float3 skyAccumColor = float3(0.0, 0.0, 0.0);
+        float skyAccumWeight = 0.0;
         float maxEntityDistance = max(1.0, meta.maxTraceDistance);
         bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u;
         uint hitMaterial = 0u;
@@ -2303,8 +2310,14 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                     entityHit.materialId,
                     entityHit.textureCoordinates);
                 float w = max(1e-4, mat.integrationWeight);
-                accumColor += shadeVoxelMaterial(mat, entityHit.hitNormal) * w;
-                accumWeight += w;
+                float hitBrightnessScale = (entityHit.materialId == MATERIAL_ID_GROUND)
+                    ? integralSkyScale
+                    : 1.0;
+                float3 hitColor = shadeVoxelMaterial(mat, entityHit.hitNormal)
+                    + mat.albedo.xyz * integralHitEmissiveBoost;
+                hitColor *= hitBrightnessScale;
+                hitAccumColor += hitColor * w;
+                hitAccumWeight += w;
             }
             else if (hit)
             {
@@ -2324,24 +2337,33 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                         hitNormal,
                         highlightKind);
                     float w = max(1e-4, mat.integrationWeight * INTEGRAL_HIGHLIGHT_WEIGHT_BOOST);
-                    accumColor += highlighted * w;
-                    accumWeight += w;
+                    float hitBrightnessScale = (hitMaterial == MATERIAL_ID_GROUND)
+                        ? integralSkyScale
+                        : 1.0;
+                    hitAccumColor += (highlighted + mat.albedo.xyz * integralHitEmissiveBoost) * hitBrightnessScale * w;
+                    hitAccumWeight += w;
                 }
                 else
                 {
                     MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     float w = max(1e-4, mat.integrationWeight);
-                    accumColor += shadeVoxelMaterial(mat, hitNormal) * w;
-                    accumWeight += w;
+                    float hitBrightnessScale = (hitMaterial == MATERIAL_ID_GROUND)
+                        ? integralSkyScale
+                        : 1.0;
+                    float3 hitColor = shadeVoxelMaterial(mat, hitNormal)
+                        + mat.albedo.xyz * integralHitEmissiveBoost;
+                    hitColor *= hitBrightnessScale;
+                    hitAccumColor += hitColor * w;
+                    hitAccumWeight += w;
                 }
             }
             else
             {
                 float a = 0.5 + 0.5 * worldDirection.y;
                 float3 sky = lerp(float3(0.02, 0.03, 0.06), float3(0.16, 0.22, 0.40), saturate(a));
-                accumColor += sky;
-                accumWeight += 1.0;
+                skyAccumColor += sky * integralSkyScale;
+                skyAccumWeight += 1.0;
             }
 
             float nextCos = cosAngle * cosStep - sinAngle * sinStep;
@@ -2350,9 +2372,22 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             sinAngle = nextSin;
         }
 
-        float3 collapsedColor = accumWeight > 1e-6
-            ? accumColor / accumWeight
+        float totalWeight = hitAccumWeight + skyAccumWeight;
+        float3 collapsedColor = totalWeight > 1e-6
+            ? (hitAccumColor + skyAccumColor) / totalWeight
             : float3(0.0, 0.0, 0.0);
+        if (integralLogMergeK > 1e-6 && totalWeight > 1e-6)
+        {
+            float3 hitMean = hitAccumWeight > 1e-6
+                ? hitAccumColor / hitAccumWeight
+                : float3(0.0, 0.0, 0.0);
+            float3 skyMean = skyAccumWeight > 1e-6
+                ? skyAccumColor / skyAccumWeight
+                : float3(0.0, 0.0, 0.0);
+            float hitFraction = hitAccumWeight / totalWeight;
+            float blend = log(1.0 + integralLogMergeK * hitFraction) / log(1.0 + integralLogMergeK);
+            collapsedColor = lerp(skyMean, hitMean, saturate(blend));
+        }
         pixelBuffer[pixelBase] = float4(collapsedColor, 1.0);
         return;
     }

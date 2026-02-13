@@ -586,6 +586,8 @@ float4 renderZWLinesSimple(
         for (uint j = 0; j < numLines; j++)
         {
             float rDen = rayX * lineDy[j] - rayY * lineDx[j];
+            if (abs(rDen) < 1e-12)
+                continue;
             float invRDen = 1.0 / rDen;
             float r = lineRNum[j] * invRDen;
             float s = (lineQ0x[j] * rayY - lineQ0y[j] * rayX) * invRDen;
@@ -606,8 +608,8 @@ float4 renderZWLinesSimple(
         if (closestLine >= 0)
         {
             float val = closestVal;
-            float4 texPos = lines[closestLine].texturePositions[0] * val +
-                           lines[closestLine].texturePositions[1] * (1.0 - val);
+            float4 texPos = lines[closestLine].texturePositions[0] * (1.0 - val) +
+                           lines[closestLine].texturePositions[1] * val;
             MaterialProperties mat = sampleMaterial(lines[closestLine].textureId, texPos);
             float4 normal = lines[closestLine].normal;
 

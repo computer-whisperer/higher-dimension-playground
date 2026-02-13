@@ -127,6 +127,8 @@ pub struct InputState {
     vte_entities_toggle_requested: bool,
     vte_y_slice_lookup_cache_toggle_requested: bool,
     vte_sweep_requested: bool,
+    vte_integral_sky_emissive_toggle_requested: bool,
+    vte_integral_log_merge_toggle_requested: bool,
 }
 
 impl InputState {
@@ -163,6 +165,8 @@ impl InputState {
             vte_entities_toggle_requested: false,
             vte_y_slice_lookup_cache_toggle_requested: false,
             vte_sweep_requested: false,
+            vte_integral_sky_emissive_toggle_requested: false,
+            vte_integral_log_merge_toggle_requested: false,
         }
     }
 
@@ -283,6 +287,16 @@ impl InputState {
                 KeyCode::F8 => {
                     if pressed {
                         self.vte_sweep_requested = true;
+                    }
+                }
+                KeyCode::F10 => {
+                    if pressed {
+                        self.vte_integral_sky_emissive_toggle_requested = true;
+                    }
+                }
+                KeyCode::F11 => {
+                    if pressed {
+                        self.vte_integral_log_merge_toggle_requested = true;
                     }
                 }
                 KeyCode::Escape => {
@@ -467,6 +481,18 @@ impl InputState {
     pub fn take_vte_sweep(&mut self) -> bool {
         let v = self.vte_sweep_requested;
         self.vte_sweep_requested = false;
+        v
+    }
+
+    pub fn take_vte_integral_sky_emissive_toggle(&mut self) -> bool {
+        let v = self.vte_integral_sky_emissive_toggle_requested;
+        self.vte_integral_sky_emissive_toggle_requested = false;
+        v
+    }
+
+    pub fn take_vte_integral_log_merge_toggle(&mut self) -> bool {
+        let v = self.vte_integral_log_merge_toggle_requested;
+        self.vte_integral_log_merge_toggle_requested = false;
         v
     }
 

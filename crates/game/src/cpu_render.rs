@@ -655,10 +655,10 @@ fn render_zw_lines_simple(
             let j = closest_line as usize;
             let val = closest_s;
             let tex = [
-                lines[j].tex[0][0] * val + lines[j].tex[1][0] * (1.0 - val),
-                lines[j].tex[0][1] * val + lines[j].tex[1][1] * (1.0 - val),
-                lines[j].tex[0][2] * val + lines[j].tex[1][2] * (1.0 - val),
-                lines[j].tex[0][3] * val + lines[j].tex[1][3] * (1.0 - val),
+                lines[j].tex[0][0] * (1.0 - val) + lines[j].tex[1][0] * val,
+                lines[j].tex[0][1] * (1.0 - val) + lines[j].tex[1][1] * val,
+                lines[j].tex[0][2] * (1.0 - val) + lines[j].tex[1][2] * val,
+                lines[j].tex[0][3] * (1.0 - val) + lines[j].tex[1][3] * val,
             ];
             let (albedo, luminance) =
                 sample_material(lines[j].material_id, [tex[0], tex[1], tex[2], tex[3]]);

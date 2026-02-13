@@ -165,6 +165,10 @@ void mainRaytracerClear(uint3 globalId : SV_DispatchThreadID)
     WorkingData workingData = workingDataBuffer[0];
 
     uint2 pixelPos = globalId.xy;
+    if (pixelPos.x >= workingData.renderDimensions.x || pixelPos.y >= workingData.renderDimensions.y)
+    {
+        return;
+    }
     for (uint z = 0; z < workingData.renderDimensions.z; z++)
     {
         uint index = z * workingData.renderDimensions.x * workingData.renderDimensions.y
@@ -531,9 +535,10 @@ void mainRaytracerPixel(uint3 globalId : SV_DispatchThreadID)
     float aspectRatio = float(workingData.presentDimensions.x) / float(workingData.presentDimensions.y);
 
     const float PI = 3.14159;
+    uint layerCount = max(1u, workingData.renderDimensions.z);
     float viewAngle = (PI / 2.0) / workingData.focalLengthZW;
     float zwRand = rng.randFloat();
-    uint zwCoord = uint(zwRand * float(workingData.renderDimensions.z));
+    uint zwCoord = min(uint(zwRand * float(layerCount)), layerCount - 1u);
     float zwAngle = (zwRand - 0.5) * viewAngle + (PI / 4.0);
 
     // Construct ray in view space

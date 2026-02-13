@@ -182,6 +182,11 @@ pub struct RenderOptions {
     pub vte_reference_mismatch_only: bool,
     pub vte_compare_slice_only: bool,
     pub vte_y_slice_lookup_cache: bool,
+    pub vte_integral_sky_emissive_tweak: bool,
+    pub vte_integral_sky_scale: f32,
+    pub vte_integral_hit_emissive_boost: f32,
+    pub vte_integral_log_merge_tweak: bool,
+    pub vte_integral_log_merge_k: f32,
     pub vte_highlight_hit_voxel: Option<[i32; 4]>,
     pub vte_highlight_place_voxel: Option<[i32; 4]>,
     pub do_edges: bool,
@@ -211,6 +216,11 @@ impl Default for RenderOptions {
             vte_reference_mismatch_only: false,
             vte_compare_slice_only: false,
             vte_y_slice_lookup_cache: true,
+            vte_integral_sky_emissive_tweak: true,
+            vte_integral_sky_scale: 0.40,
+            vte_integral_hit_emissive_boost: 0.025,
+            vte_integral_log_merge_tweak: true,
+            vte_integral_log_merge_k: 8.0,
             vte_highlight_hit_voxel: None,
             vte_highlight_place_voxel: None,
             do_edges: false,
@@ -4953,6 +4963,23 @@ impl RenderContext {
                     highlight_place_voxel = place_voxel;
                 }
             }
+            // Reuse frame-meta padding words for fused-integral controls.
+            // Values are consumed in shader via asfloat().
+            let integral_sky_scale = if render_options.vte_integral_sky_emissive_tweak {
+                render_options.vte_integral_sky_scale.max(0.0)
+            } else {
+                1.0
+            };
+            let integral_hit_emissive_boost = if render_options.vte_integral_sky_emissive_tweak {
+                render_options.vte_integral_hit_emissive_boost.max(0.0)
+            } else {
+                0.0
+            };
+            let integral_log_merge_k = if render_options.vte_integral_log_merge_tweak {
+                render_options.vte_integral_log_merge_k.max(0.0)
+            } else {
+                0.0
+            };
             *writer = GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 visible_chunk_count: vte_visible_chunk_count as u32,
@@ -4992,7 +5019,11 @@ impl RenderContext {
                 visible_chunk_max_z: vte_visible_chunk_max[2],
                 visible_chunk_max_w: vte_visible_chunk_max[3],
                 highlight_flags,
-                _highlight_padding: [0; 3],
+                _highlight_padding: [
+                    integral_sky_scale.to_bits(),
+                    integral_hit_emissive_boost.to_bits(),
+                    integral_log_merge_k.to_bits(),
+                ],
                 highlight_hit_voxel,
                 highlight_place_voxel,
             };
@@ -5536,8 +5567,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 unsafe {
                     builder.dispatch([
-                        self.sized_buffers.render_dimensions[0] / 8,
-                        self.sized_buffers.render_dimensions[1] / 8,
+                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
+                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
                         1,
                     ])
                 }
@@ -5718,8 +5749,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         .unwrap();
                     unsafe {
                         builder.dispatch([
-                            self.sized_buffers.render_dimensions[0] / 8,
-                            self.sized_buffers.render_dimensions[1] / 8,
+                            (self.sized_buffers.render_dimensions[0] + 7) / 8,
+                            (self.sized_buffers.render_dimensions[1] + 7) / 8,
                             1,
                         ])
                     }

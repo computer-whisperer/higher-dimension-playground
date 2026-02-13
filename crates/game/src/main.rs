@@ -213,6 +213,26 @@ struct Args {
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
     vte_y_slice_lookup_cache: bool,
 
+    /// Enable fused-integral tweak: dim sky contribution and add small hit emissive floor.
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    vte_integral_sky_emissive_tweak: bool,
+
+    /// Sky scale applied in fused-integral tweak mode.
+    #[arg(long, default_value_t = 0.40)]
+    vte_integral_sky_scale: f32,
+
+    /// Extra emissive term added to hit samples in fused-integral tweak mode.
+    #[arg(long, default_value_t = 0.025)]
+    vte_integral_hit_emissive_boost: f32,
+
+    /// Enable fused-integral logarithmic hit-vs-sky merge curve.
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    vte_integral_log_merge_tweak: bool,
+
+    /// Curve strength k for log merge: blend = log(1+k*p) / log(1+k).
+    #[arg(long, default_value_t = 8.0)]
+    vte_integral_log_merge_k: f32,
+
     /// Edit highlight mode for pointed/placement voxel guides.
     /// `faces` uses in-VTE occlusion-correct face highlighting.
     /// `edges` keeps the legacy overlay-line outline debug view.
@@ -362,6 +382,8 @@ fn main() {
     let vte_sweep_include_no_entities = env_flag_enabled(VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV);
     let initial_vte_entities_enabled = args.vte_entities;
     let initial_vte_y_slice_lookup_cache_enabled = args.vte_y_slice_lookup_cache;
+    let initial_vte_integral_sky_emissive_enabled = args.vte_integral_sky_emissive_tweak;
+    let initial_vte_integral_log_merge_enabled = args.vte_integral_log_merge_tweak;
 
     let world_file = args.world_file.clone();
     let mut scene = Scene::new(args.scene.to_scene_preset());
@@ -407,6 +429,8 @@ fn main() {
         vte_compare_slice_only_enabled,
         vte_entities_enabled: initial_vte_entities_enabled,
         vte_y_slice_lookup_cache_enabled: initial_vte_y_slice_lookup_cache_enabled,
+        vte_integral_sky_emissive_enabled: initial_vte_integral_sky_emissive_enabled,
+        vte_integral_log_merge_enabled: initial_vte_integral_log_merge_enabled,
         vte_sweep_include_no_entities,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
@@ -436,6 +460,19 @@ fn main() {
     }
     if !app.vte_y_slice_lookup_cache_enabled {
         eprintln!("VTE y-slice lookup cache disabled via --vte-y-slice-lookup-cache=false");
+    }
+    if app.vte_integral_sky_emissive_enabled {
+        eprintln!(
+            "VTE integral sky/emissive tweak enabled via --vte-integral-sky-emissive-tweak=true (sky_scale={:.3}, hit_emissive_boost={:.3})",
+            app.args.vte_integral_sky_scale,
+            app.args.vte_integral_hit_emissive_boost
+        );
+    }
+    if app.vte_integral_log_merge_enabled {
+        eprintln!(
+            "VTE integral log-merge tweak enabled via --vte-integral-log-merge-tweak=true (k={:.3})",
+            app.args.vte_integral_log_merge_k
+        );
     }
     if app.vte_sweep_include_no_entities {
         eprintln!(
@@ -546,6 +583,8 @@ struct App {
     vte_compare_slice_only_enabled: bool,
     vte_entities_enabled: bool,
     vte_y_slice_lookup_cache_enabled: bool,
+    vte_integral_sky_emissive_enabled: bool,
+    vte_integral_log_merge_enabled: bool,
     vte_sweep_include_no_entities: bool,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
@@ -1114,6 +1153,33 @@ impl App {
             }
         }
 
+        if self.input.take_vte_integral_sky_emissive_toggle() {
+            self.vte_integral_sky_emissive_enabled = !self.vte_integral_sky_emissive_enabled;
+            eprintln!(
+                "VTE fused integral sky/emissive tweak: {} (sky_scale={:.3}, hit_emissive_boost={:.3})",
+                if self.vte_integral_sky_emissive_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                self.args.vte_integral_sky_scale.max(0.0),
+                self.args.vte_integral_hit_emissive_boost.max(0.0),
+            );
+        }
+
+        if self.input.take_vte_integral_log_merge_toggle() {
+            self.vte_integral_log_merge_enabled = !self.vte_integral_log_merge_enabled;
+            eprintln!(
+                "VTE fused integral log merge tweak: {} (k={:.3})",
+                if self.vte_integral_log_merge_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                self.args.vte_integral_log_merge_k.max(0.0),
+            );
+        }
+
         if self.input.take_save_world() {
             match self.scene.save_world_to_path(&self.world_file) {
                 Ok(chunks) => eprintln!(
@@ -1452,6 +1518,11 @@ impl App {
             vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
             vte_compare_slice_only: self.vte_compare_slice_only_enabled,
             vte_y_slice_lookup_cache: self.vte_y_slice_lookup_cache_enabled,
+            vte_integral_sky_emissive_tweak: self.vte_integral_sky_emissive_enabled,
+            vte_integral_sky_scale: self.args.vte_integral_sky_scale.max(0.0),
+            vte_integral_hit_emissive_boost: self.args.vte_integral_hit_emissive_boost.max(0.0),
+            vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
+            vte_integral_log_merge_k: self.args.vte_integral_log_merge_k.max(0.0),
             vte_highlight_hit_voxel,
             vte_highlight_place_voxel,
             do_navigation_hud: true,
@@ -1468,7 +1539,8 @@ impl App {
                          edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                          mat:[ ]/wheel cycle, 1-0 direct\n\
                          world:F5 save, F9 load\n\
-                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}",
+                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                         tweak:F10 sky+emi:{} F11 log:{}",
                         self.control_scheme.label(),
                         self.move_speed,
                         inv,
@@ -1490,6 +1562,16 @@ impl App {
                             "off"
                         },
                         vte_sweep_status,
+                        if self.vte_integral_sky_emissive_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        if self.vte_integral_log_merge_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
                     )
                 } else {
                     format!(
@@ -1498,7 +1580,8 @@ impl App {
                          edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                          mat:[ ]/wheel cycle, 1-0 direct\n\
                          world:F5 save, F9 load\n\
-                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}",
+                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                         tweak:F10 sky+emi:{} F11 log:{}",
                         pair.label(),
                         self.control_scheme.label(),
                         self.move_speed,
@@ -1522,6 +1605,16 @@ impl App {
                             "off"
                         },
                         vte_sweep_status,
+                        if self.vte_integral_sky_emissive_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        if self.vte_integral_log_merge_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
                     )
                 }
             }),
