@@ -20,6 +20,8 @@ pub const PLAYER_HEIGHT: f32 = 1.7;
 pub const PLAYER_RADIUS_XZW: f32 = 0.30;
 const LOOK_TRANSPORT_UPRIGHT_DAMPING: f32 = 0.06;
 const LOOK_TRANSPORT_YAW_UPRIGHT_LOCK: f32 = 1.0;
+const ORIENTATION_PULL_RATE_HOME: f32 = 10.0;
+const ORIENTATION_PULL_RATE_3D: f32 = 7.0;
 const UPRIGHT_YAW_ZERO_OFFSET: f32 = 0.0;
 const UPRIGHT_ZW_ZERO_OFFSET: f32 = std::f32::consts::FRAC_PI_4;
 const UPRIGHT_XW_ZERO_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
@@ -143,6 +145,109 @@ impl Camera4D {
             dir[2] * inv_len,
             dir[3] * inv_len,
         ]
+    }
+
+    fn unit_axis(axis: usize) -> [f32; 4] {
+        let mut v = [0.0f32; 4];
+        v[axis.min(3)] = 1.0;
+        v
+    }
+
+    fn project_out_axis(dir: [f32; 4], axis: usize) -> [f32; 4] {
+        let mut v = dir;
+        v[axis.min(3)] = 0.0;
+        v
+    }
+
+    fn complement_axes(drop_axis: usize) -> [usize; 3] {
+        let mut axes = [0usize; 3];
+        let mut write = 0usize;
+        for axis in 0..4 {
+            if axis == drop_axis {
+                continue;
+            }
+            axes[write] = axis;
+            write += 1;
+        }
+        axes
+    }
+
+    fn cross_in_hyperplane(a: [f32; 4], b: [f32; 4], drop_axis: usize) -> [f32; 4] {
+        let [i0, i1, i2] = Self::complement_axes(drop_axis);
+        let av = [a[i0], a[i1], a[i2]];
+        let bv = [b[i0], b[i1], b[i2]];
+        let cv = [
+            av[1] * bv[2] - av[2] * bv[1],
+            av[2] * bv[0] - av[0] * bv[2],
+            av[0] * bv[1] - av[1] * bv[0],
+        ];
+        let mut out = [0.0f32; 4];
+        out[i0] = cv[0];
+        out[i1] = cv[1];
+        out[i2] = cv[2];
+        out
+    }
+
+    fn hyperplane_fallback_axis(
+        drop_axis: usize,
+        avoid0: [f32; 4],
+        avoid1: Option<[f32; 4]>,
+    ) -> [f32; 4] {
+        let axes = Self::complement_axes(drop_axis);
+        let mut best = [0.0f32; 4];
+        let mut best_len_sq = -1.0f32;
+
+        for axis in axes {
+            let mut candidate = Self::unit_axis(axis);
+            candidate = Self::sub_projection(candidate, avoid0);
+            if let Some(avoid) = avoid1 {
+                candidate = Self::sub_projection(candidate, avoid);
+            }
+            let len_sq = Self::dot4(candidate, candidate);
+            if len_sq > best_len_sq {
+                best_len_sq = len_sq;
+                best = candidate;
+            }
+        }
+
+        Self::normalize_with_fallback(best, Self::unit_axis(axes[0]))
+    }
+
+    fn pull_alpha(rate: f32, dt: f32) -> f32 {
+        1.0 - (-rate * dt.max(0.0)).exp()
+    }
+
+    fn pull_wrapped_toward(current: &mut f32, target: f32, alpha: f32) {
+        let delta = wrap_angle(target - *current);
+        *current = wrap_angle(*current + delta * alpha);
+    }
+
+    fn pull_pitch_toward(current: &mut f32, target: f32, alpha: f32) {
+        *current += (target - *current) * alpha;
+        let max_pitch = 81.0_f32.to_radians();
+        *current = (*current).clamp(-max_pitch, max_pitch);
+    }
+
+    fn blend_look_frame_toward(
+        &mut self,
+        target_right: [f32; 4],
+        target_up: [f32; 4],
+        target_forward: [f32; 4],
+        target_side: [f32; 4],
+        alpha: f32,
+    ) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return;
+        }
+        for i in 0..4 {
+            self.look_right[i] = self.look_right[i] * (1.0 - alpha) + target_right[i] * alpha;
+            self.look_up[i] = self.look_up[i] * (1.0 - alpha) + target_up[i] * alpha;
+            self.look_forward[i] =
+                self.look_forward[i] * (1.0 - alpha) + target_forward[i] * alpha;
+            self.look_side[i] = self.look_side[i] * (1.0 - alpha) + target_side[i] * alpha;
+        }
+        self.reorthonormalize_look_frame();
     }
 
     fn rotate_axis_pair(a: &mut [f32; 4], b: &mut [f32; 4], angle: f32) {
@@ -585,17 +690,103 @@ impl Camera4D {
         }
     }
 
-    pub fn reset_orientation(&mut self) {
-        self.yaw = 0.0;
-        self.pitch = 0.0;
-        self.xw_angle = 0.0;
-        self.zw_angle = 0.0;
-        self.yw_deviation = 0.0;
-        self.look_right = [0.0, 0.0, 1.0, 0.0];
-        self.look_up = [0.0, 1.0, 0.0, 0.0];
-        self.look_forward = [1.0, 0.0, 0.0, 0.0];
-        self.look_side = [0.0, 0.0, 0.0, 1.0];
-        self.look_frame_initialized = true;
+    /// Smoothly pull look-frame orientation toward the canonical +X 3D home pose.
+    pub fn pull_toward_home_look_frame(&mut self, dt: f32) {
+        let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_HOME, dt);
+        self.blend_look_frame_toward(
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            alpha,
+        );
+        self.stabilize_look_up_axis(LOOK_TRANSPORT_YAW_UPRIGHT_LOCK);
+    }
+
+    /// Smoothly pull look-frame orientation toward the nearest 3D-native pose:
+    /// choose the hidden axis from current side dominance, then project the rest of
+    /// the frame into the complementary 3D hyperplane.
+    pub fn pull_toward_nearest_3d_look_frame(&mut self, dt: f32) {
+        let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_3D, dt);
+        let mut hidden_axis = 0usize;
+        let mut hidden_abs = self.look_side[0].abs();
+        for axis in 1..4 {
+            let a = self.look_side[axis].abs();
+            if a > hidden_abs {
+                hidden_abs = a;
+                hidden_axis = axis;
+            }
+        }
+        let mut target_side = Self::unit_axis(hidden_axis);
+        if self.look_side[hidden_axis] < 0.0 {
+            for v in &mut target_side {
+                *v = -*v;
+            }
+        }
+
+        let forward_fallback = Self::hyperplane_fallback_axis(hidden_axis, self.look_up, None);
+        let target_forward = Self::normalize_with_fallback(
+            Self::project_out_axis(self.look_forward, hidden_axis),
+            forward_fallback,
+        );
+
+        let mut target_up = Self::project_out_axis(self.look_up, hidden_axis);
+        target_up = Self::sub_projection(target_up, target_forward);
+        let up_fallback = Self::hyperplane_fallback_axis(hidden_axis, target_forward, None);
+        target_up = Self::normalize_with_fallback(
+            target_up,
+            up_fallback,
+        );
+
+        let mut target_right = Self::project_out_axis(self.look_right, hidden_axis);
+        target_right = Self::sub_projection(target_right, target_forward);
+        target_right = Self::sub_projection(target_right, target_up);
+        let right_fallback = Self::normalize_with_fallback(
+            Self::cross_in_hyperplane(target_forward, target_up, hidden_axis),
+            Self::hyperplane_fallback_axis(hidden_axis, target_forward, Some(target_up)),
+        );
+        target_right = Self::normalize_with_fallback(
+            target_right,
+            right_fallback,
+        );
+
+        target_up = Self::sub_projection(target_up, target_forward);
+        target_up = Self::sub_projection(target_up, target_right);
+        let up_final_fallback =
+            Self::hyperplane_fallback_axis(hidden_axis, target_forward, Some(target_right));
+        target_up = Self::normalize_with_fallback(
+            target_up,
+            up_final_fallback,
+        );
+
+        self.blend_look_frame_toward(
+            target_right,
+            target_up,
+            target_forward,
+            target_side,
+            alpha,
+        );
+        self.stabilize_look_up_axis(LOOK_TRANSPORT_UPRIGHT_DAMPING);
+    }
+
+    /// Smoothly pull angle-parameterized orientation toward canonical +X home.
+    pub fn pull_toward_home_angles(&mut self, dt: f32) {
+        let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_HOME, dt);
+        Self::pull_wrapped_toward(&mut self.yaw, 0.0, alpha);
+        Self::pull_pitch_toward(&mut self.pitch, 0.0, alpha);
+        Self::pull_wrapped_toward(&mut self.xw_angle, 0.0, alpha);
+        Self::pull_wrapped_toward(&mut self.zw_angle, 0.0, alpha);
+        Self::pull_wrapped_toward(&mut self.yw_deviation, 0.0, alpha);
+    }
+
+    /// Smoothly pull angle-parameterized orientation toward the nearest 3D-native pose.
+    /// For angle modes, this means removing hidden-dimension rotations while preserving
+    /// current yaw/pitch heading.
+    pub fn pull_toward_nearest_3d_angles(&mut self, dt: f32) {
+        let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_3D, dt);
+        Self::pull_wrapped_toward(&mut self.xw_angle, 0.0, alpha);
+        Self::pull_wrapped_toward(&mut self.zw_angle, 0.0, alpha);
+        Self::pull_wrapped_toward(&mut self.yw_deviation, 0.0, alpha);
     }
 
     /// Constrain camera orientation to an upright, no-roll/no-twist mode.
@@ -791,6 +982,25 @@ mod tests {
 
     fn len4(a: [f32; 4]) -> f32 {
         dot4(a, a).sqrt()
+    }
+
+    fn nearest_3d_pose_error(cam: &Camera4D) -> f32 {
+        let mut best = f32::INFINITY;
+        for hidden_axis in 0..4 {
+            let mut error = cam.look_forward[hidden_axis].abs()
+                + cam.look_up[hidden_axis].abs()
+                + cam.look_right[hidden_axis].abs()
+                + (1.0 - cam.look_side[hidden_axis].abs());
+            for axis in 0..4 {
+                if axis != hidden_axis {
+                    error += cam.look_side[axis].abs();
+                }
+            }
+            if error < best {
+                best = error;
+            }
+        }
+        best
     }
 
     #[test]
@@ -1358,6 +1568,90 @@ mod tests {
         assert!(
             alignment > 0.9999,
             "non-hidden yaw should immediately lock roll after pitch: alignment={alignment}"
+        );
+    }
+
+    #[test]
+    fn look_transport_pull_to_home_improves_alignment_with_plus_x() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(160.0, -90.0, 0.002, false);
+        cam.apply_mouse_look_transport(120.0, 40.0, 0.002, true);
+        let before = dot4(cam.look_direction_look_frame(), [1.0, 0.0, 0.0, 0.0]);
+        for _ in 0..12 {
+            cam.pull_toward_home_look_frame(1.0 / 60.0);
+        }
+        let after = dot4(cam.look_direction_look_frame(), [1.0, 0.0, 0.0, 0.0]);
+        assert!(
+            after > before,
+            "home pull should improve +X alignment: before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn look_transport_pull_to_nearest_3d_reduces_axis_agnostic_3d_error() {
+        let mut cam = Camera4D::new();
+
+        Camera4D::rotate_axis_pair(&mut cam.look_up, &mut cam.look_side, 0.95);
+        Camera4D::rotate_axis_pair(&mut cam.look_forward, &mut cam.look_side, 0.55);
+        Camera4D::rotate_axis_pair(&mut cam.look_right, &mut cam.look_side, -0.35);
+        cam.reorthonormalize_look_frame();
+
+        let before = nearest_3d_pose_error(&cam);
+        for _ in 0..12 {
+            cam.pull_toward_nearest_3d_look_frame(1.0 / 60.0);
+        }
+        let after = nearest_3d_pose_error(&cam);
+        assert!(
+            after < before,
+            "3D pull should reduce axis-agnostic 3D error: before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn angle_pull_to_nearest_3d_reduces_hidden_angles() {
+        let mut cam = Camera4D::new();
+        cam.xw_angle = 1.2;
+        cam.zw_angle = -0.9;
+        cam.yw_deviation = 0.8;
+        let before = (cam.xw_angle.abs(), cam.zw_angle.abs(), cam.yw_deviation.abs());
+        cam.pull_toward_nearest_3d_angles(0.2);
+        let after = (cam.xw_angle.abs(), cam.zw_angle.abs(), cam.yw_deviation.abs());
+        assert!(
+            after.0 < before.0 && after.1 < before.1 && after.2 < before.2,
+            "3D angle pull should reduce hidden angles: before={before:?} after={after:?}"
+        );
+    }
+
+    #[test]
+    fn angle_pull_to_home_reduces_all_angles() {
+        let mut cam = Camera4D::new();
+        cam.yaw = 0.9;
+        cam.pitch = -0.5;
+        cam.xw_angle = -1.1;
+        cam.zw_angle = 0.7;
+        cam.yw_deviation = -0.6;
+        let before = (
+            cam.yaw.abs(),
+            cam.pitch.abs(),
+            cam.xw_angle.abs(),
+            cam.zw_angle.abs(),
+            cam.yw_deviation.abs(),
+        );
+        cam.pull_toward_home_angles(0.2);
+        let after = (
+            cam.yaw.abs(),
+            cam.pitch.abs(),
+            cam.xw_angle.abs(),
+            cam.zw_angle.abs(),
+            cam.yw_deviation.abs(),
+        );
+        assert!(
+            after.0 < before.0
+                && after.1 < before.1
+                && after.2 < before.2
+                && after.3 < before.3
+                && after.4 < before.4,
+            "home angle pull should reduce all angles: before={before:?} after={after:?}"
         );
     }
 

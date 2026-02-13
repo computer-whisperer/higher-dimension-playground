@@ -2048,7 +2048,6 @@ impl App {
 
     fn drain_gameplay_inputs_while_menu_open(&mut self) {
         self.input.take_scheme_cycle();
-        self.input.take_reset_orientation();
         self.input.take_vte_sweep();
         self.input.take_vte_entities_toggle();
         self.input.take_vte_y_slice_lookup_cache_toggle();
@@ -2735,11 +2734,6 @@ impl App {
                 self.cycle_control_scheme();
             }
 
-            // Reset orientation (R)
-            if self.input.take_reset_orientation() {
-                self.camera.reset_orientation();
-            }
-
             if self.input.take_vte_sweep() {
                 self.toggle_vte_runtime_sweep();
             }
@@ -2827,6 +2821,28 @@ impl App {
                 }
             } else {
                 self.input.take_mouse_delta();
+            }
+
+            if self.input.reset_orientation_held() || self.input.pull_to_3d_held() {
+                let pull_home = self.input.reset_orientation_held();
+                match self.control_scheme {
+                    ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                        if pull_home {
+                            self.camera.pull_toward_home_look_frame(dt);
+                        } else {
+                            self.camera.pull_toward_nearest_3d_look_frame(dt);
+                        }
+                    }
+                    ControlScheme::IntuitiveUpright
+                    | ControlScheme::LegacySideButtonLayers
+                    | ControlScheme::LegacyScrollCycle => {
+                        if pull_home {
+                            self.camera.pull_toward_home_angles(dt);
+                        } else {
+                            self.camera.pull_toward_nearest_3d_angles(dt);
+                        }
+                    }
+                }
             }
 
             let pair = self.active_rotation_pair();

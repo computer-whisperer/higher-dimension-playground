@@ -123,7 +123,8 @@ pub struct InputState {
     mouse_forward_held: bool,
     scroll_accumulated: f32,
     scheme_cycle_requested: bool,
-    reset_orientation_requested: bool,
+    reset_orientation_held: bool,
+    pull_to_3d_held: bool,
     vte_entities_toggle_requested: bool,
     vte_y_slice_lookup_cache_toggle_requested: bool,
     vte_sweep_requested: bool,
@@ -166,7 +167,8 @@ impl InputState {
             mouse_forward_held: false,
             scroll_accumulated: 0.0,
             scheme_cycle_requested: false,
-            reset_orientation_requested: false,
+            reset_orientation_held: false,
+            pull_to_3d_held: false,
             vte_entities_toggle_requested: false,
             vte_y_slice_lookup_cache_toggle_requested: false,
             vte_sweep_requested: false,
@@ -280,9 +282,10 @@ impl InputState {
                     }
                 }
                 KeyCode::KeyR => {
-                    if pressed {
-                        self.reset_orientation_requested = true;
-                    }
+                    self.reset_orientation_held = pressed;
+                }
+                KeyCode::KeyF => {
+                    self.pull_to_3d_held = pressed;
                 }
                 KeyCode::F6 => {
                     if pressed {
@@ -501,10 +504,12 @@ impl InputState {
         v
     }
 
-    pub fn take_reset_orientation(&mut self) -> bool {
-        let v = self.reset_orientation_requested;
-        self.reset_orientation_requested = false;
-        v
+    pub fn reset_orientation_held(&self) -> bool {
+        self.reset_orientation_held
+    }
+
+    pub fn pull_to_3d_held(&self) -> bool {
+        self.pull_to_3d_held
     }
 
     pub fn take_vte_entities_toggle(&mut self) -> bool {

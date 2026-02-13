@@ -169,7 +169,8 @@ The default scene includes:
 | Mouse Back+Forward | Legacy only: double rotation (XZ yaw + YW) |
 | Scroll wheel | Cycle block material (`LEG-SCRL` keeps legacy rotation-pair cycling) |
 | Tab | Cycle control scheme (`LOOK-TR` -> `ROTOR` -> `LEG-SIDE` -> `LEG-SCRL` -> `UPRIGHT`) |
-| R | Reset camera orientation to defaults |
+| Hold R | Pull orientation toward canonical +X home pose |
+| Hold F | Pull orientation toward nearest 3D-native pose |
 | F5 / F9 | Save/load world (`--world-file`) |
 | F12 | Screenshot |
 | Escape | Toggle pause menu / mouse capture |
