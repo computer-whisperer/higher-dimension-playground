@@ -1,18 +1,21 @@
 mod camera;
 mod cpu_render;
 mod input;
+mod multiplayer;
 mod scene;
 mod voxel;
 
+use base64::Engine;
 use clap::{ArgAction, Parser, ValueEnum};
 use higher_dimension_playground::render::{
     CustomOverlayLine, FrameParams, HudReadoutMode, RenderBackend, RenderContext, RenderOptions,
     TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use vulkano::device::{Device, Queue};
 use vulkano::instance::Instance;
 use winit::{
@@ -24,6 +27,7 @@ use winit::{
 
 use camera::Camera4D;
 use input::{ControlScheme, InputState, RotationPair};
+use multiplayer::{ClientMessage as MultiplayerClientMessage, MultiplayerClient, MultiplayerEvent};
 use scene::{Scene, ScenePreset};
 
 const MOUSE_SENSITIVITY: f32 = 0.002;
@@ -56,6 +60,8 @@ const VTE_INTEGRAL_LOG_MERGE_K_MAX: f32 = 64.0;
 const VTE_INTEGRAL_LOG_MERGE_K_STEP: f32 = 0.5;
 const VTE_TRACE_STEPS_MIN: u32 = 16;
 const VTE_TRACE_STEPS_MAX: u32 = 4096;
+const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
+const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -131,15 +137,15 @@ impl EditHighlightModeArg {
 #[command(version, about = "4D polychora explorer")]
 struct Args {
     /// Render buffer width in pixels
-    #[arg(long, short = 'W', default_value_t = 480)]
+    #[arg(long, short = 'W', default_value_t = 1920)]
     width: u32,
 
     /// Render buffer height in pixels
-    #[arg(long, short = 'H', default_value_t = 270)]
+    #[arg(long, short = 'H', default_value_t = 1080)]
     height: u32,
 
     /// Number of depth layers (supersampling)
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 128)]
     layers: u32,
 
     /// Voxel scene preset (used by VTE backend)
@@ -190,7 +196,7 @@ struct Args {
     screenshot_yw: Option<f32>,
 
     /// Rendering backend to use
-    #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
+    #[arg(long, value_enum, default_value_t = BackendArg::VoxelTraversal)]
     backend: BackendArg,
 
     /// VTE traversal step budget per ray (quality/perf tradeoff)
@@ -267,6 +273,15 @@ struct Args {
     /// Load `--world-file` at startup.
     #[arg(long)]
     load_world: bool,
+
+    /// Multiplayer server address (`IP` or `IP:PORT`).
+    /// If the port is omitted, port 4000 is used.
+    #[arg(long)]
+    server: Option<String>,
+
+    /// Display name sent to multiplayer server on connect.
+    #[arg(long)]
+    player_name: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -450,6 +465,33 @@ fn main() {
         }
     }
 
+    let multiplayer = if let Some(server) = args.server.as_ref() {
+        let server_addr = normalize_server_addr(server);
+        let player_name = args
+            .player_name
+            .clone()
+            .unwrap_or_else(default_multiplayer_player_name);
+        match MultiplayerClient::connect(server_addr.clone(), player_name.clone()) {
+            Ok(client) => {
+                eprintln!(
+                    "Connecting to multiplayer server {} as '{}'",
+                    client.server_addr(),
+                    player_name
+                );
+                Some(client)
+            }
+            Err(error) => {
+                eprintln!(
+                    "Failed to connect multiplayer server {}: {}",
+                    server_addr, error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut app = App {
         instance,
         device,
@@ -496,6 +538,10 @@ fn main() {
         vte_sweep_run_id: 0,
         menu_open: false,
         menu_selection: 0,
+        multiplayer,
+        multiplayer_self_id: None,
+        remote_players: HashMap::new(),
+        last_multiplayer_player_update: Instant::now(),
     };
 
     if app.vte_reference_compare_enabled {
@@ -660,6 +706,10 @@ struct App {
     vte_sweep_run_id: u32,
     menu_open: bool,
     menu_selection: usize,
+    multiplayer: Option<MultiplayerClient>,
+    multiplayer_self_id: Option<u64>,
+    remote_players: HashMap<u64, RemotePlayerState>,
+    last_multiplayer_player_update: Instant,
 }
 
 #[derive(Copy, Clone)]
@@ -669,6 +719,14 @@ struct VteSweepState {
     frames_remaining: usize,
     previous_entities: bool,
     previous_y_slice_lookup_cache: bool,
+}
+
+#[derive(Clone)]
+struct RemotePlayerState {
+    name: String,
+    position: [f32; 4],
+    look: [f32; 4],
+    last_update_ms: u64,
 }
 
 #[derive(Copy, Clone)]
@@ -741,6 +799,33 @@ fn env_flag_enabled(name: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn normalize_server_addr(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return format!("127.0.0.1:{MULTIPLAYER_DEFAULT_PORT}");
+    }
+    if trimmed.contains(':') || trimmed.starts_with('[') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}:{MULTIPLAYER_DEFAULT_PORT}")
+    }
+}
+
+fn default_multiplayer_player_name() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .map(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                "player".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .unwrap_or_else(|| "player".to_string())
 }
 
 fn project_world_point_to_ndc(
@@ -953,6 +1038,24 @@ fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
     }
 }
 
+fn build_remote_player_marker_instance(
+    client_id: u64,
+    position: [f32; 4],
+) -> common::ModelInstance {
+    let scale = 0.35f32;
+    let mut model_transform = common::MatN::<5>::identity();
+    for axis in 0..4 {
+        model_transform[[axis, axis]] = scale;
+        model_transform[[axis, 4]] = position[axis] - 0.5 * scale;
+    }
+
+    let material = (1 + (client_id % 20) as u32).clamp(1, 20);
+    common::ModelInstance {
+        model_transform,
+        cell_material_ids: [material; 8],
+    }
+}
+
 impl App {
     fn vte_sweep_profiles(&self) -> &'static [VteRuntimeProfile] {
         if self.vte_sweep_include_no_entities {
@@ -1143,6 +1246,160 @@ impl App {
                 self.world_file.display()
             ),
         }
+    }
+
+    fn poll_multiplayer_events(&mut self) {
+        loop {
+            let event = match self
+                .multiplayer
+                .as_ref()
+                .and_then(|client| client.try_recv())
+            {
+                Some(event) => event,
+                None => break,
+            };
+
+            match event {
+                MultiplayerEvent::Message(message) => self.handle_multiplayer_message(message),
+                MultiplayerEvent::Disconnected(reason) => {
+                    eprintln!("Multiplayer disconnected: {reason}");
+                    self.multiplayer = None;
+                    self.multiplayer_self_id = None;
+                    self.remote_players.clear();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn handle_multiplayer_message(&mut self, message: multiplayer::ServerMessage) {
+        match message {
+            multiplayer::ServerMessage::Welcome {
+                client_id,
+                tick_hz,
+                world,
+                ..
+            } => {
+                self.multiplayer_self_id = Some(client_id);
+                eprintln!(
+                    "Multiplayer connected: client_id={} world_rev={} chunks={} server_tick_hz={:.2}",
+                    client_id, world.revision, world.non_empty_chunks, tick_hz
+                );
+                if let Some(client) = self.multiplayer.as_ref() {
+                    client.send(MultiplayerClientMessage::RequestWorldSnapshot);
+                }
+            }
+            multiplayer::ServerMessage::Error { message } => {
+                eprintln!("Multiplayer server error: {message}");
+            }
+            multiplayer::ServerMessage::PlayerJoined { player } => {
+                if Some(player.client_id) == self.multiplayer_self_id {
+                    return;
+                }
+                self.remote_players.insert(
+                    player.client_id,
+                    RemotePlayerState {
+                        name: player.name,
+                        position: player.position,
+                        look: player.look,
+                        last_update_ms: player.last_update_ms,
+                    },
+                );
+            }
+            multiplayer::ServerMessage::PlayerLeft { client_id } => {
+                self.remote_players.remove(&client_id);
+            }
+            multiplayer::ServerMessage::PlayerPositions { players, .. } => {
+                let mut seen = Vec::with_capacity(players.len());
+                for player in players {
+                    if Some(player.client_id) == self.multiplayer_self_id {
+                        continue;
+                    }
+                    seen.push(player.client_id);
+                    self.remote_players.insert(
+                        player.client_id,
+                        RemotePlayerState {
+                            name: player.name,
+                            position: player.position,
+                            look: player.look,
+                            last_update_ms: player.last_update_ms,
+                        },
+                    );
+                }
+                self.remote_players
+                    .retain(|client_id, _| seen.contains(client_id));
+            }
+            multiplayer::ServerMessage::WorldVoxelSet {
+                position, material, ..
+            } => {
+                self.scene.world.set_voxel(
+                    position[0],
+                    position[1],
+                    position[2],
+                    position[3],
+                    voxel::VoxelType(material),
+                );
+            }
+            multiplayer::ServerMessage::WorldSnapshot { world } => {
+                let decoded =
+                    base64::engine::general_purpose::STANDARD.decode(world.bytes_base64.as_bytes());
+                let Ok(bytes) = decoded else {
+                    eprintln!("Multiplayer world snapshot decode failed");
+                    return;
+                };
+                let mut cursor = &bytes[..];
+                match voxel::io::load_world(&mut cursor) {
+                    Ok(new_world) => {
+                        self.scene.replace_world(new_world);
+                        eprintln!(
+                            "Applied multiplayer world snapshot rev={} chunks={}",
+                            world.revision, world.non_empty_chunks
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to load multiplayer world snapshot: {error}");
+                    }
+                }
+            }
+            multiplayer::ServerMessage::Pong { .. } => {}
+        }
+    }
+
+    fn send_multiplayer_player_update(&mut self, now: Instant, look_dir: [f32; 4]) {
+        if now.duration_since(self.last_multiplayer_player_update)
+            < MULTIPLAYER_PLAYER_UPDATE_INTERVAL
+        {
+            return;
+        }
+        self.last_multiplayer_player_update = now;
+        if let Some(client) = self.multiplayer.as_ref() {
+            client.send(MultiplayerClientMessage::UpdatePlayer {
+                position: self.camera.position,
+                look: look_dir,
+            });
+        }
+    }
+
+    fn send_multiplayer_voxel_update(&self, position: [i32; 4], material: u8) {
+        if let Some(client) = self.multiplayer.as_ref() {
+            client.send(MultiplayerClientMessage::SetVoxel { position, material });
+        }
+    }
+
+    fn remote_player_instances(&self) -> Vec<common::ModelInstance> {
+        let mut ids: Vec<u64> = self.remote_players.keys().copied().collect();
+        ids.sort_unstable();
+        let mut instances = Vec::with_capacity(ids.len());
+        for client_id in ids {
+            if let Some(player) = self.remote_players.get(&client_id) {
+                let _ = (&player.name, &player.look, player.last_update_ms);
+                instances.push(build_remote_player_marker_instance(
+                    client_id,
+                    player.position,
+                ));
+            }
+        }
+        instances
     }
 
     fn toggle_vte_entities(&mut self) {
@@ -1739,6 +1996,7 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
+        self.poll_multiplayer_events();
 
         if self.menu_open {
             if self.input.take_menu_up() {
@@ -1977,6 +2235,10 @@ impl App {
                             edit_reach,
                         ) {
                             eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
+                            self.send_multiplayer_voxel_update(
+                                [x, y, z, w],
+                                voxel::VoxelType::AIR.0,
+                            );
                         }
                     } else if place_requested {
                         if let Some([x, y, z, w]) = self.scene.place_block_along_ray(
@@ -1989,6 +2251,7 @@ impl App {
                                 "Placed voxel material {} at ({x}, {y}, {z}, {w})",
                                 self.place_material
                             );
+                            self.send_multiplayer_voxel_update([x, y, z, w], self.place_material);
                         }
                     }
                 }
@@ -2003,6 +2266,7 @@ impl App {
         }
 
         let look_dir = self.current_look_direction();
+        self.send_multiplayer_player_update(now, look_dir);
         let preview_time_s = (now - self.start_time).as_secs_f32();
         let preview_instance = build_place_preview_instance(
             &self.camera,
@@ -2175,26 +2439,28 @@ impl App {
 
         if backend == RenderBackend::VoxelTraversal {
             let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
-            let vte_entity_instance = build_vte_test_entity_instance(preview_time_s);
-            let vte_entity_instances: &[common::ModelInstance] = if self.vte_entities_enabled {
-                std::slice::from_ref(&vte_entity_instance)
-            } else {
-                &[]
-            };
+            let mut vte_entity_instances = Vec::new();
+            if self.vte_entities_enabled {
+                vte_entity_instances.push(build_vte_test_entity_instance(preview_time_s));
+            }
+            vte_entity_instances.extend(self.remote_player_instances());
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
-                vte_entity_instances,
+                &vte_entity_instances,
                 &preview_overlay_instances,
             );
         } else {
+            let remote_instances = self.remote_player_instances();
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
-            let mut render_instances = Vec::with_capacity(instances.len() + 1);
+            let mut render_instances =
+                Vec::with_capacity(instances.len() + remote_instances.len() + 1);
             render_instances.extend_from_slice(instances);
+            render_instances.extend(remote_instances);
             render_instances.push(preview_instance);
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),

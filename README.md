@@ -79,6 +79,9 @@ cargo build --release
 # Interactive FPS-style explorer (WASD + mouse look, Q/E for W-axis)
 cargo run -p polychora --release
 
+# Basic multiplayer state server (TCP JSON protocol)
+cargo run -p polychora-server --release -- --bind 0.0.0.0:4000
+
 # Demo with pre-set camera (supports --headless, --raytrace, --edges, etc.)
 cargo run -p demo --release
 
@@ -102,9 +105,12 @@ higher-dimension-playground/
 │   │       ├── main.rs      # App struct, event loop, mouse grab
 │   │       ├── camera.rs    # Camera4D: 5-angle orientation, auto-leveling
 │   │       ├── input.rs     # InputState: keys, mouse buttons, scroll, rotation modes
-│   │       └── scene.rs     # Demo scene builder
+│   │       ├── scene.rs     # Demo scene builder
+│   │       └── multiplayer.rs # Multiplayer client protocol + socket threads
 │   ├── demo/                # CLI demo with pre-set camera angles
 │   │   └── src/main.rs      # Headless/windowed demo, CLI options
+│   ├── polychora-server/    # Basic multiplayer state server
+│   │   └── src/main.rs      # TCP listener, world state, player replication
 │   └── exr-converter/       # Standalone EXR recompression tool
 ├── common/                  # Shared math library (CPU + GPU compatible)
 │   └── src/
@@ -188,6 +194,8 @@ Core runtime options:
 | `--edit-reach` | Max block remove/place/highlight reach |
 | `--world-file <path>` | Save/load file path for `F5`/`F9` |
 | `--load-world` | Load `--world-file` at startup |
+| `--server <ip[:port]>` | Connect to multiplayer server (`:4000` default if omitted) |
+| `--player-name <name>` | Multiplayer display name for `--server` |
 | `--cpu-render` | CPU reference render to `frames/cpu_render.png`, then exit |
 
 VTE-specific options:
@@ -242,6 +250,27 @@ cargo run -p demo --release -- [OPTIONS]
 | `--walls` | Show wall enclosure |
 | `-W` / `-H` | Canvas width/height (default 960x540) |
 | `--layers` | Depth layers for ZW supersampling (default 4) |
+
+### Multiplayer Server (Early)
+
+```bash
+cargo run -p polychora-server --release -- --bind 0.0.0.0:4000
+```
+
+Server CLI options:
+
+| Flag | Effect |
+|------|--------|
+| `--bind <addr:port>` | TCP listen address |
+| `--world-file <path>` | Load/save world state in `.v4dw` format |
+| `--tick-hz <hz>` | Player position broadcast rate |
+| `--save-interval-secs <n>` | Autosave cadence (`0` disables autosave) |
+| `--snapshot-on-join <bool>` | Send full world snapshot (base64 `.v4dw`) on `hello` |
+
+Message protocol is line-delimited JSON:
+
+- Client -> server: `hello`, `update_player`, `set_voxel`, `request_world_snapshot`, `ping`
+- Server -> client: `welcome`, `player_joined`, `player_left`, `player_positions`, `world_voxel_set`, `world_snapshot`, `pong`, `error`
 
 
 ## Acknowledgments
