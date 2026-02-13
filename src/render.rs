@@ -2875,130 +2875,121 @@ impl RenderContext {
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
-        // Load shaders at runtime from embedded SPIR-V bytes
-        // (vulkano_shaders macro can't parse Slang's SPIR-V 1.4 output)
+        // Load shaders from SPIR-V bytes embedded at compile time
+        // (vulkano_shaders macro can't parse Slang's SPIR-V 1.4 output).
         fn load_shader(device: Arc<Device>, spirv: &[u8]) -> Arc<ShaderModule> {
             unsafe {
                 ShaderModule::from_bytes(device, spirv).expect("Failed to load shader module")
             }
         }
 
-        let spirv_dir = std::path::Path::new(env!("SPIRV_OUT_DIR"));
+        macro_rules! shader_spirv {
+            ($name:literal) => {
+                include_bytes!(concat!(env!("SPIRV_OUT_DIR"), "/", $name, ".spv"))
+            };
+        }
 
         let raytrace_pixel = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainRaytracerPixel.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainRaytracerPixel"),
         );
         let raytrace_preprocess = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainRaytracerTetrahedronPreprocessor.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainRaytracerTetrahedronPreprocessor"),
         );
         let raytrace_clear = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainRaytracerClear.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainRaytracerClear"),
         );
         let voxel_clear = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainVoxelClear.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainVoxelClear"),
         );
         let voxel_trace_stage_a = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainVoxelTraceStageA.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainVoxelTraceStageA"),
         );
         let voxel_display_stage_b = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainVoxelDisplayStageB.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainVoxelDisplayStageB"),
         );
         let raster_tet = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainTetrahedronCS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainTetrahedronCS"),
         );
         let raster_edge = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainEdgeCS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainEdgeCS"),
         );
         let raster_pixel = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainTetrahedronPixelCS.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainTetrahedronPixelCS"),
         );
         let bin_tets_cs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBinTetsCS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainBinTetsCS"),
         );
         let present_line_vs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainLineVS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainLineVS"),
         );
         let present_line_fs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainLineFS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainLineFS"),
         );
         let present_buffer_vs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBufferVS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainBufferVS"),
         );
         let present_buffer_fs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBufferFS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainBufferFS"),
         );
         // HUD shaders
         let hud_vs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainHudVS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainHudVS"),
         );
         let hud_fs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainHudFS.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainHudFS"),
         );
         // BVH shaders
         let bvh_scene_bounds = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHSceneBounds.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainBVHSceneBounds"),
         );
         let bvh_morton_codes = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHMortonCodes.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainBVHMortonCodes"),
         );
         let bvh_bitonic_sort_local = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHBitonicSortLocal.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainBVHBitonicSortLocal"),
         );
         let bvh_bitonic_sort = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHBitonicSort.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainBVHBitonicSort"),
         );
         let bvh_bitonic_sort_local_merge = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHBitonicSortLocalMerge.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainBVHBitonicSortLocalMerge"),
         );
         let bvh_init_leaves = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHInitLeaves.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainBVHInitLeaves"),
         );
         let bvh_build_tree = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHBuildTree.spv")).expect("Failed to read shader"),
+            shader_spirv!("mainBVHBuildTree"),
         );
         let bvh_compute_leaf_aabbs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHComputeLeafAABBs.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainBVHComputeLeafAABBs"),
         );
         let bvh_propagate_aabbs = load_shader(
             device.clone(),
-            &std::fs::read(spirv_dir.join("mainBVHPropagateAABBs.spv"))
-                .expect("Failed to read shader"),
+            shader_spirv!("mainBVHPropagateAABBs"),
         );
 
         let render_pass = match swapchain.clone() {
