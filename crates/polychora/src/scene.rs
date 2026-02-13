@@ -386,6 +386,50 @@ impl Scene {
         }
     }
 
+    fn sync_active_chunk_window(&mut self, cam_pos: [f32; 4]) {
+        let chunk_radius = (RENDER_DISTANCE / CHUNK_SIZE as f32).ceil() as i32 + 1;
+        let cam_chunk = Self::camera_chunk_key(cam_pos);
+        let min_chunk = [
+            cam_chunk[0] - chunk_radius,
+            cam_chunk[1] - chunk_radius,
+            cam_chunk[2] - chunk_radius,
+            cam_chunk[3] - chunk_radius,
+        ];
+        let max_chunk = [
+            cam_chunk[0] + chunk_radius,
+            cam_chunk[1] + chunk_radius,
+            cam_chunk[2] + chunk_radius,
+            cam_chunk[3] + chunk_radius,
+        ];
+
+        let mut required_chunks = Vec::new();
+        self.world
+            .gather_non_empty_chunks_in_bounds(min_chunk, max_chunk, &mut required_chunks);
+        required_chunks.sort_unstable_by_key(|pos| (pos.w, pos.z, pos.y, pos.x));
+
+        let required_set: HashSet<ChunkPos> = required_chunks.iter().copied().collect();
+        let mut stale_chunks = Vec::new();
+        for &chunk_pos in &self.voxel_active_chunks {
+            if !required_set.contains(&chunk_pos) {
+                stale_chunks.push(chunk_pos);
+            }
+        }
+        for chunk_pos in stale_chunks {
+            if let Some(old_mapping) = self.voxel_chunk_payload_cache.remove(&chunk_pos) {
+                self.release_cached_chunk_payload(old_mapping.payload_id);
+            }
+            self.remove_active_chunk(chunk_pos);
+        }
+
+        for chunk_pos in required_chunks {
+            if !self.voxel_active_chunk_indices.contains_key(&chunk_pos)
+                || !self.voxel_chunk_payload_cache.contains_key(&chunk_pos)
+            {
+                self.world.queue_chunk_refresh(chunk_pos);
+            }
+        }
+    }
+
     fn process_queued_voxel_payload_updates(&mut self) {
         let updated_chunks = self.world.drain_pending_chunk_updates();
         if updated_chunks.is_empty() {
@@ -397,8 +441,8 @@ impl Scene {
                 self.release_cached_chunk_payload(old_mapping.payload_id);
             }
 
-            match self.world.chunks.get(&chunk_pos) {
-                Some(chunk) if !chunk.is_empty() => {
+            match self.world.chunk_at(chunk_pos) {
+                Some(chunk) => {
                     if let Some(payload_id) =
                         self.intern_cached_chunk_payload(build_cached_chunk_payload(chunk))
                     {
@@ -759,6 +803,7 @@ impl Scene {
 
     /// Build the voxel-native frame payload for VTE.
     pub fn build_voxel_frame_data(&mut self, cam_pos: [f32; 4]) -> &VoxelFrameData {
+        self.sync_active_chunk_window(cam_pos);
         self.process_queued_voxel_payload_updates();
 
         let cam_chunk = Self::camera_chunk_key(cam_pos);

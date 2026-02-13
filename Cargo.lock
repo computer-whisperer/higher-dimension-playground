@@ -1589,6 +1589,7 @@ dependencies = [
  "higher-dimension-playground",
  "image",
  "ndarray",
+ "polychora-common",
  "serde",
  "serde_json",
  "vulkano",
@@ -1596,11 +1597,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "polychora-common"
+version = "0.1.0"
+
+[[package]]
 name = "polychora-server"
 version = "0.1.0"
 dependencies = [
  "base64",
  "clap",
+ "polychora-common",
  "serde",
  "serde_json",
 ]
