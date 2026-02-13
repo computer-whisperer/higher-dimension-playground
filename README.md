@@ -178,7 +178,7 @@ The default scene includes:
 | Up/Down + Left/Right + Enter | Navigate and tune pause-menu actions |
 | Click | Re-grab mouse |
 | Double-tap Space | Toggle fly/gravity mode |
-| Double-tap W | Toggle sprint |
+| Double-tap W | Start sprint (auto-cancels when stopping) |
 
 ### Game Options
 

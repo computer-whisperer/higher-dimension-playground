@@ -2868,12 +2868,9 @@ impl App {
             if self.input.take_fly_toggle() {
                 self.camera.toggle_flying();
             }
-            if self.input.take_sprint_toggle() {
-                self.sprint_enabled = !self.sprint_enabled;
-                eprintln!(
-                    "Sprint: {}",
-                    if self.sprint_enabled { "on" } else { "off" }
-                );
+            if self.input.take_sprint_toggle() && !self.sprint_enabled {
+                self.sprint_enabled = true;
+                eprintln!("Sprint: on");
             }
 
             // Block place material selection.
@@ -2911,6 +2908,14 @@ impl App {
             // Movement (vertical zeroed in gravity mode internally).
             let prev_position = self.camera.position;
             let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
+            let has_movement_input = forward.abs() > 1e-6
+                || strafe.abs() > 1e-6
+                || vertical.abs() > 1e-6
+                || w_axis.abs() > 1e-6;
+            if self.sprint_enabled && !has_movement_input {
+                self.sprint_enabled = false;
+                eprintln!("Sprint: off");
+            }
             let move_speed = if self.sprint_enabled && forward > 0.0 {
                 self.move_speed * SPRINT_SPEED_MULTIPLIER
             } else {
@@ -2949,19 +2954,15 @@ impl App {
                 }
             }
 
-            // Apply gravity physics.
+            // Apply gravity physics (no-op while flying), then always resolve voxel collisions.
             self.camera.update_physics(dt);
-            if self.camera.is_flying {
-                self.camera.is_grounded = false;
-            } else {
-                let (resolved_pos, grounded) = self.scene.resolve_player_collision(
-                    prev_position,
-                    self.camera.position,
-                    &mut self.camera.velocity_y,
-                );
-                self.camera.position = resolved_pos;
-                self.camera.is_grounded = grounded;
-            }
+            let (resolved_pos, grounded) = self.scene.resolve_player_collision(
+                prev_position,
+                self.camera.position,
+                &mut self.camera.velocity_y,
+            );
+            self.camera.position = resolved_pos;
+            self.camera.is_grounded = grounded;
 
             // Block edit actions.
             let look_dir_for_edit = self.current_look_direction();
