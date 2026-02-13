@@ -1146,6 +1146,7 @@ fn build_place_preview_instance(
     selected_material: u8,
     time_s: f32,
     control_scheme: ControlScheme,
+    aspect: f32,
 ) -> common::ModelInstance {
     let material = selected_material
         .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
@@ -1170,25 +1171,27 @@ fn build_place_preview_instance(
         view_w[2] - view_z[2],
         view_w[3] - view_z[3],
     ]);
+    let aspect = aspect.max(0.25);
+    let up_bias = -0.62 * ((16.0 / 9.0) / aspect).clamp(0.72, 1.35);
 
     let anchor = [
-        camera.position[0] + 0.92 * right[0] - 0.78 * up[0]
+        camera.position[0] + 0.92 * right[0] + up_bias * up[0]
             + 1.35 * center_forward[0]
             + 0.52 * side_w[0],
-        camera.position[1] + 0.92 * right[1] - 0.78 * up[1]
+        camera.position[1] + 0.92 * right[1] + up_bias * up[1]
             + 1.35 * center_forward[1]
             + 0.52 * side_w[1],
-        camera.position[2] + 0.92 * right[2] - 0.78 * up[2]
+        camera.position[2] + 0.92 * right[2] + up_bias * up[2]
             + 1.35 * center_forward[2]
             + 0.52 * side_w[2],
-        camera.position[3] + 0.92 * right[3] - 0.78 * up[3]
+        camera.position[3] + 0.92 * right[3] + up_bias * up[3]
             + 1.35 * center_forward[3]
             + 0.52 * side_w[3],
     ];
 
     let mut basis = [right, up, center_forward, side_w];
-    rotate_basis_plane(&mut basis, 0, 2, time_s * 0.9 + 0.2);
-    rotate_basis_plane(&mut basis, 1, 3, time_s * 1.35 + 0.9);
+    rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
+    rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
 
     build_centered_model_instance(anchor, &basis, [0.23; 4], [material; 8])
 }
@@ -3022,16 +3025,25 @@ impl App {
         let preview_elapsed = now - self.start_time;
         let preview_time_s = preview_elapsed.as_secs_f32();
         let preview_time_ticks_ms = preview_elapsed.as_millis() as u32;
+        let aspect = self
+            .rcx
+            .as_ref()
+            .and_then(|rcx| rcx.window.as_ref())
+            .map(|window| {
+                let size = window.inner_size();
+                size.width.max(1) as f32 / size.height.max(1) as f32
+            })
+            .unwrap_or_else(|| self.args.width.max(1) as f32 / self.args.height.max(1) as f32);
         let preview_instance = build_place_preview_instance(
             &self.camera,
             self.place_material,
             preview_time_s,
             self.control_scheme,
+            aspect,
         );
 
         // Build view matrix and scene
         let view_matrix = self.current_view_matrix();
-        let aspect = self.args.width.max(1) as f32 / self.args.height.max(1) as f32;
         let backend = self.args.backend.to_render_backend();
         let highlight_mode = self.args.edit_highlight_mode;
         let hud_player_tags =

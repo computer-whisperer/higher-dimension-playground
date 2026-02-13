@@ -1028,17 +1028,17 @@ fn push_rect(lines: &mut Vec<OverlayLine>, min: Vec2, max: Vec2, color: Vec4) {
     push_line(lines, d, a, color);
 }
 
-fn push_cross(lines: &mut Vec<OverlayLine>, center: Vec2, radius: f32, color: Vec4) {
+fn push_cross(lines: &mut Vec<OverlayLine>, center: Vec2, radius: Vec2, color: Vec4) {
     push_line(
         lines,
-        center + Vec2::new(-radius, 0.0),
-        center + Vec2::new(radius, 0.0),
+        center + Vec2::new(-radius.x, 0.0),
+        center + Vec2::new(radius.x, 0.0),
         color,
     );
     push_line(
         lines,
-        center + Vec2::new(0.0, -radius),
-        center + Vec2::new(0.0, radius),
+        center + Vec2::new(0.0, -radius.y),
+        center + Vec2::new(0.0, radius.y),
         color,
     );
 }
@@ -3520,11 +3520,10 @@ impl RenderContext {
         let crosshair_color = Vec4::new(0.95, 0.95, 0.95, 1.0);
         let crosshair_outline = Vec4::new(0.0, 0.0, 0.0, 1.0);
 
-        let (present_size, ui_scale, text_scale) = match self.window.as_ref() {
+        let (present_size, dpi_scale) = match self.window.as_ref() {
             Some(window) => {
                 let s = window.inner_size();
-                let sf = window.scale_factor() as f32;
-                ([s.width.max(1), s.height.max(1)], sf, sf * 1.5)
+                ([s.width.max(1), s.height.max(1)], window.scale_factor() as f32)
             }
             None => (
                 [
@@ -3532,10 +3531,22 @@ impl RenderContext {
                     self.sized_buffers.render_dimensions[1].max(1),
                 ],
                 1.0,
-                2.0,
             ),
         };
-        let aspect = present_size[0] as f32 / present_size[1] as f32;
+        let present_w = present_size[0] as f32;
+        let present_h = present_size[1] as f32;
+        let dpi_scale = dpi_scale.max(1.0);
+        let logical_height = present_h / dpi_scale;
+        let layout_scale = (logical_height / 1080.0).clamp(0.85, 1.30);
+        let hud_scale = dpi_scale * layout_scale;
+        let text_scale = hud_scale * 1.5;
+        let aspect = present_w / present_h;
+        let px_top_left_to_ndc = |p: Vec2| -> Vec2 {
+            Vec2::new((p.x / present_w) * 2.0 - 1.0, (p.y / present_h) * 2.0 - 1.0)
+        };
+        let px_delta_to_ndc = |d: Vec2| -> Vec2 {
+            Vec2::new((d.x / present_w) * 2.0, (d.y / present_h) * 2.0)
+        };
 
         let camera_h = mat5_mul_vec5(view_matrix_inverse, [0.0, 0.0, 0.0, 0.0, 1.0]);
         let inv_w = if camera_h[4].abs() > 1e-6 {
@@ -3614,8 +3625,13 @@ impl RenderContext {
         let mut lines = Vec::<OverlayLine>::with_capacity(2048);
 
         // Axis rose: orientation widget with labeled arrows and circle boundary.
-        let rose_origin = Vec2::new(-0.78, 0.72);
-        let rose_radius: f32 = 0.09;
+        let rose_margin_px = Vec2::new(24.0, 24.0) * hud_scale;
+        let rose_radius_px = 58.0 * hud_scale;
+        let rose_origin = px_top_left_to_ndc(Vec2::new(
+            rose_margin_px.x + rose_radius_px,
+            present_h - rose_margin_px.y - rose_radius_px,
+        ));
+        let rose_radius = px_delta_to_ndc(Vec2::splat(rose_radius_px));
 
         // Circle boundary (~32 segments)
         let circle_segments = 32;
@@ -3624,8 +3640,8 @@ impl RenderContext {
             let a1 = ((i + 1) as f32 / circle_segments as f32) * std::f32::consts::TAU;
             push_line(
                 &mut lines,
-                rose_origin + Vec2::new(a0.cos(), a0.sin()) * rose_radius,
-                rose_origin + Vec2::new(a1.cos(), a1.sin()) * rose_radius,
+                rose_origin + Vec2::new(a0.cos() * rose_radius.x, a0.sin() * rose_radius.y),
+                rose_origin + Vec2::new(a1.cos() * rose_radius.x, a1.sin() * rose_radius.y),
                 rose_frame_color,
             );
         }
@@ -3643,9 +3659,9 @@ impl RenderContext {
             Vec2::new(0.0, 1.0),  // W: down (Vulkan +Y=down)
         ];
         let axis_labels = ["X", "Y", "Z", "W"];
-        let arrow_len = rose_radius * 0.70;
-        let arrowhead_back = rose_radius * 0.12;
-        let arrowhead_side = rose_radius * 0.07;
+        let arrow_len_px = rose_radius_px * 0.70;
+        let arrowhead_back_px = rose_radius_px * 0.12;
+        let arrowhead_side_px = rose_radius_px * 0.07;
 
         // Compute arrow data for all axes, then draw lines and labels
         struct ArrowData {
@@ -3664,7 +3680,9 @@ impl RenderContext {
                 aspect,
             );
 
-            let mut ray_dir = projected.unwrap_or(fallback_dirs[axis_id]);
+            let mut ray_dir = projected
+                .map(|p| Vec2::new(p.x * present_w * 0.5, p.y * present_h * 0.5))
+                .unwrap_or(fallback_dirs[axis_id]);
             if ray_dir.length_squared() > 1e-8 {
                 ray_dir = ray_dir.normalize();
             } else {
@@ -3677,7 +3695,7 @@ impl RenderContext {
             let brightness = if depth_component > 0.0 { 0.45 } else { 1.0 };
             let axis_color = axis_colors[axis_id] * brightness;
 
-            let tip = rose_origin + ray_dir * arrow_len;
+            let tip = rose_origin + px_delta_to_ndc(ray_dir * arrow_len_px);
             push_line(&mut lines, rose_origin, tip, axis_color);
 
             // Arrowhead
@@ -3685,18 +3703,21 @@ impl RenderContext {
             push_line(
                 &mut lines,
                 tip,
-                tip - ray_dir * arrowhead_back + side * arrowhead_side,
+                tip - px_delta_to_ndc(ray_dir * arrowhead_back_px)
+                    + px_delta_to_ndc(side * arrowhead_side_px),
                 axis_color,
             );
             push_line(
                 &mut lines,
                 tip,
-                tip - ray_dir * arrowhead_back - side * arrowhead_side,
+                tip - px_delta_to_ndc(ray_dir * arrowhead_back_px)
+                    - px_delta_to_ndc(side * arrowhead_side_px),
                 axis_color,
             );
 
             // Label position: just beyond arrowhead
-            let label_pos = rose_origin + ray_dir * (arrow_len + rose_radius * 0.28);
+            let label_pos =
+                rose_origin + px_delta_to_ndc(ray_dir * (arrow_len_px + rose_radius_px * 0.28));
             arrows.push(ArrowData {
                 ray_dir,
                 color: axis_color,
@@ -3712,11 +3733,12 @@ impl RenderContext {
         // Rose background
         if let Some(hud_res) = self.hud_resources.as_ref() {
             let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
+            let rose_bg_half = px_delta_to_ndc(Vec2::splat(rose_radius_px * 1.15));
             push_filled_rect_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
-                rose_origin - Vec2::splat(rose_radius * 1.15),
-                rose_origin + Vec2::splat(rose_radius * 1.15),
+                rose_origin - rose_bg_half,
+                rose_origin + rose_bg_half,
                 panel_bg,
             );
         }
@@ -3724,7 +3746,10 @@ impl RenderContext {
         // Render axis labels at arrow tips
         for (axis_id, arrow) in arrows.iter().enumerate() {
             // Offset label position so text is centered on the label point
-            let label_offset = Vec2::new(-arrow.ray_dir.x.abs() * 0.012, arrow.ray_dir.y * 0.012);
+            let label_offset = px_delta_to_ndc(Vec2::new(
+                -arrow.ray_dir.x.abs() * 7.0 * hud_scale,
+                arrow.ray_dir.y * 7.0 * hud_scale,
+            ));
             let label_ndc = arrow.label_pos + label_offset;
             let label_px = ndc_to_pixels(label_ndc, present_size);
             if let Some(hud_res) = self.hud_resources.as_ref() {
@@ -3751,24 +3776,38 @@ impl RenderContext {
         }
 
         // Dual minimap: XZ on top (ground plane), YW below (height + 4th dim).
-        let panel_size = Vec2::new(0.34, 0.20);
-        let panel_half = panel_size * 0.5;
-        let panel_gap = 0.04;
-        let margin = Vec2::new(0.05, 0.06);
-        let right = 1.0 - margin.x;
-        let left = right - panel_size.x;
-        let lower_bottom = -1.0 + margin.y;
-        let lower_top = lower_bottom + panel_size.y;
-        let upper_bottom = lower_top + panel_gap;
-        let upper_top = upper_bottom + panel_size.y;
-        // In Vulkan clip space +Y=down, so lower clip Y = higher on screen.
-        // XZ on top (lower clip Y), YW below (higher clip Y).
-        let xz_center = Vec2::new((left + right) * 0.5, (lower_bottom + lower_top) * 0.5);
-        let yw_center = Vec2::new((left + right) * 0.5, (upper_bottom + upper_top) * 0.5);
-        let xz_min = Vec2::new(left, lower_bottom);
-        let xz_max = Vec2::new(right, lower_top);
-        let yw_min = Vec2::new(left, upper_bottom);
-        let yw_max = Vec2::new(right, upper_top);
+        let panel_margin_px = Vec2::new(24.0, 24.0) * hud_scale;
+        let panel_gap_px = 18.0 * hud_scale;
+        let min_panel_width_px = 220.0 * dpi_scale;
+        let max_panel_width_px = (present_w - panel_margin_px.x * 2.0).max(min_panel_width_px);
+        let panel_width_px = (300.0 * hud_scale).clamp(min_panel_width_px, max_panel_width_px);
+        let min_panel_height_px = 120.0 * dpi_scale;
+        let max_panel_height_px =
+            ((present_h - panel_margin_px.y * 2.0 - panel_gap_px) * 0.5).max(min_panel_height_px);
+        let panel_height_px = (168.0 * hud_scale).clamp(min_panel_height_px, max_panel_height_px);
+        let right_px = present_w - panel_margin_px.x;
+        let left_px = (right_px - panel_width_px).max(panel_margin_px.x);
+        let xz_top_px = panel_margin_px.y;
+        let xz_bottom_px = xz_top_px + panel_height_px;
+        let yw_top_px = xz_bottom_px + panel_gap_px;
+        let yw_bottom_px = yw_top_px + panel_height_px;
+
+        let xz_center = px_top_left_to_ndc(Vec2::new(
+            (left_px + right_px) * 0.5,
+            (xz_top_px + xz_bottom_px) * 0.5,
+        ));
+        let yw_center = px_top_left_to_ndc(Vec2::new(
+            (left_px + right_px) * 0.5,
+            (yw_top_px + yw_bottom_px) * 0.5,
+        ));
+        let xz_min = px_top_left_to_ndc(Vec2::new(left_px, xz_top_px));
+        let xz_max = px_top_left_to_ndc(Vec2::new(right_px, xz_bottom_px));
+        let yw_min = px_top_left_to_ndc(Vec2::new(left_px, yw_top_px));
+        let yw_max = px_top_left_to_ndc(Vec2::new(right_px, yw_bottom_px));
+        let panel_half = Vec2::new(
+            (right_px - left_px) / present_w,
+            (xz_bottom_px - xz_top_px) / present_h,
+        );
         let map_range = 12.0;
         let xz_frame_color = xy_frame_color;
         let yw_frame_color = zw_frame_color;
@@ -3810,7 +3849,7 @@ impl RenderContext {
         );
 
         // Scale tick marks every 4 world units along crosshairs (skip origin)
-        let tick_size = 0.008;
+        let tick_size = px_delta_to_ndc(Vec2::splat(4.0 * hud_scale));
         let tick_interval = 4.0;
         let max_ticks = (map_range / tick_interval) as i32;
         for panel_data in [(xz_center, xz_min, xz_max), (yw_center, yw_min, yw_max)] {
@@ -3823,8 +3862,8 @@ impl RenderContext {
                     if tx > pmin.x && tx < pmax.x {
                         push_line(
                             &mut lines,
-                            Vec2::new(tx, center.y - tick_size),
-                            Vec2::new(tx, center.y + tick_size),
+                            Vec2::new(tx, center.y - tick_size.y),
+                            Vec2::new(tx, center.y + tick_size.y),
                             map_axis_color * 0.6,
                         );
                     }
@@ -3833,8 +3872,8 @@ impl RenderContext {
                     if ty > pmin.y && ty < pmax.y {
                         push_line(
                             &mut lines,
-                            Vec2::new(center.x - tick_size, ty),
-                            Vec2::new(center.x + tick_size, ty),
+                            Vec2::new(center.x - tick_size.x, ty),
+                            Vec2::new(center.x + tick_size.x, ty),
                             map_axis_color * 0.6,
                         );
                     }
@@ -3855,12 +3894,16 @@ impl RenderContext {
                 let panel_aspect = panel_half.x / panel_half.y;
                 let wedge_dir = Vec2::new(dx, -dz * panel_aspect).normalize();
                 let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
-                let wedge_len = 0.025;
-                let wedge_width = 0.012;
-                let wedge_tip = xz_center + wedge_dir * wedge_len;
-                let wedge_left = xz_center - wedge_dir * wedge_len * 0.3 + wedge_side * wedge_width;
-                let wedge_right =
-                    xz_center - wedge_dir * wedge_len * 0.3 - wedge_side * wedge_width;
+                let wedge_len = px_delta_to_ndc(Vec2::splat(12.0 * hud_scale));
+                let wedge_width = px_delta_to_ndc(Vec2::splat(6.0 * hud_scale));
+                let wedge_tip = xz_center
+                    + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
+                let wedge_left = xz_center
+                    - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
+                    + Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
+                let wedge_right = xz_center
+                    - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
+                    - Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
                 let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
                 push_line(&mut lines, wedge_tip, wedge_left, wedge_color);
                 push_line(&mut lines, wedge_tip, wedge_right, wedge_color);
@@ -3881,12 +3924,16 @@ impl RenderContext {
                 let panel_aspect = panel_half.x / panel_half.y;
                 let wedge_dir = Vec2::new(dy, -dw * panel_aspect).normalize();
                 let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
-                let wedge_len = 0.025;
-                let wedge_width = 0.012;
-                let wedge_tip = yw_center + wedge_dir * wedge_len;
-                let wedge_left = yw_center - wedge_dir * wedge_len * 0.3 + wedge_side * wedge_width;
-                let wedge_right =
-                    yw_center - wedge_dir * wedge_len * 0.3 - wedge_side * wedge_width;
+                let wedge_len = px_delta_to_ndc(Vec2::splat(12.0 * hud_scale));
+                let wedge_width = px_delta_to_ndc(Vec2::splat(6.0 * hud_scale));
+                let wedge_tip = yw_center
+                    + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
+                let wedge_left = yw_center
+                    - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
+                    + Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
+                let wedge_right = yw_center
+                    - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
+                    - Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
                 let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
                 push_line(&mut lines, wedge_tip, wedge_left, wedge_color);
                 push_line(&mut lines, wedge_tip, wedge_right, wedge_color);
@@ -3896,10 +3943,12 @@ impl RenderContext {
 
         // Panel title labels and axis labels
         let minimap_label_size = 11.0 * text_scale;
+        let label_inset = px_delta_to_ndc(Vec2::new(10.0 * hud_scale, 8.0 * hud_scale));
+        let axis_inset = px_delta_to_ndc(Vec2::new(14.0 * hud_scale, 14.0 * hud_scale));
         if let Some(hud_res) = self.hud_resources.as_ref() {
             // Panel titles inside top-left corner (Vulkan: lower clip Y = higher on screen)
             let xz_title_px =
-                ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
+                ndc_to_pixels(Vec2::new(xz_min.x + label_inset.x, xz_min.y + label_inset.y), present_size);
             push_text_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
@@ -3910,7 +3959,7 @@ impl RenderContext {
                 present_size,
             );
             let yw_title_px =
-                ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
+                ndc_to_pixels(Vec2::new(yw_min.x + label_inset.x, yw_min.y + label_inset.y), present_size);
             push_text_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
@@ -3923,7 +3972,7 @@ impl RenderContext {
 
             // XZ panel axis labels: X at right edge, Z at top edge (lower clip Y)
             let xz_x_label_px = ndc_to_pixels(
-                Vec2::new(xz_max.x - 0.025, xz_center.y + 0.02),
+                Vec2::new(xz_max.x - axis_inset.x, xz_center.y + axis_inset.y),
                 present_size,
             );
             push_text_quads(
@@ -3936,7 +3985,7 @@ impl RenderContext {
                 present_size,
             );
             let xz_z_label_px = ndc_to_pixels(
-                Vec2::new(xz_center.x + 0.015, xz_min.y + 0.01),
+                Vec2::new(xz_center.x + label_inset.x, xz_min.y + label_inset.y),
                 present_size,
             );
             push_text_quads(
@@ -3951,7 +4000,7 @@ impl RenderContext {
 
             // YW panel axis labels: Y at right edge, W at top edge (lower clip Y)
             let yw_y_label_px = ndc_to_pixels(
-                Vec2::new(yw_max.x - 0.025, yw_center.y + 0.02),
+                Vec2::new(yw_max.x - axis_inset.x, yw_center.y + axis_inset.y),
                 present_size,
             );
             push_text_quads(
@@ -3964,7 +4013,7 @@ impl RenderContext {
                 present_size,
             );
             let yw_w_label_px = ndc_to_pixels(
-                Vec2::new(yw_center.x + 0.015, yw_min.y + 0.01),
+                Vec2::new(yw_center.x + label_inset.x, yw_min.y + label_inset.y),
                 present_size,
             );
             push_text_quads(
@@ -3978,7 +4027,7 @@ impl RenderContext {
             );
         } else if let Some(font) = self.hud_font.as_ref() {
             let xz_title_px =
-                ndc_to_pixels(Vec2::new(xz_min.x + 0.015, xz_min.y + 0.01), present_size);
+                ndc_to_pixels(Vec2::new(xz_min.x + label_inset.x, xz_min.y + label_inset.y), present_size);
             push_text_lines(
                 &mut lines,
                 font,
@@ -3989,7 +4038,7 @@ impl RenderContext {
                 present_size,
             );
             let yw_title_px =
-                ndc_to_pixels(Vec2::new(yw_min.x + 0.015, yw_min.y + 0.01), present_size);
+                ndc_to_pixels(Vec2::new(yw_min.x + label_inset.x, yw_min.y + label_inset.y), present_size);
             push_text_lines(
                 &mut lines,
                 font,
@@ -4002,6 +4051,7 @@ impl RenderContext {
         }
 
         // Instance markers: XZ panel uses indices [0]=X, [2]=Z; YW panel uses [1]=Y, [3]=W
+        let marker_radius = px_delta_to_ndc(Vec2::splat(3.0 * hud_scale));
         for center in &instance_centers {
             let xz_point = map_to_panel(
                 xz_center,
@@ -4017,8 +4067,8 @@ impl RenderContext {
                 center[1] - camera_position[1],
                 center[3] - camera_position[3],
             );
-            push_cross(&mut lines, xz_point, 0.005, marker_xz_color);
-            push_cross(&mut lines, yw_point, 0.005, marker_yw_color);
+            push_cross(&mut lines, xz_point, marker_radius, marker_xz_color);
+            push_cross(&mut lines, yw_point, marker_radius, marker_yw_color);
         }
 
         // Breadcrumb trails: XZ uses [0],[2]; YW uses [1],[3]
@@ -4066,16 +4116,18 @@ impl RenderContext {
         }
 
         // W altimeter and drift gauge to visualize W position and velocity.
-        let altimeter_x = left - 0.06;
-        let altimeter_min_y = lower_bottom;
-        let altimeter_max_y = upper_top;
+        let altimeter_x = px_top_left_to_ndc(Vec2::new(left_px - 34.0 * hud_scale, 0.0)).x;
+        let altimeter_min_y = xz_min.y;
+        let altimeter_max_y = yw_max.y;
         let altimeter_range = 12.0;
         let zero_ratio = 0.5;
-        // In Vulkan clip space, altimeter_min_y (lower value) is higher on screen.
-        // Higher W should be higher on screen (lower clip Y), so invert the mapping.
-        let zero_y = altimeter_max_y + (altimeter_min_y - altimeter_max_y) * zero_ratio;
+        let zero_y = altimeter_min_y + (altimeter_max_y - altimeter_min_y) * zero_ratio;
         let w_ratio = ((camera_position[3] / altimeter_range) * 0.5 + 0.5).clamp(0.0, 1.0);
-        let w_y = altimeter_max_y + (altimeter_min_y - altimeter_max_y) * w_ratio;
+        // Higher W should be higher on screen, so map to smaller NDC Y values.
+        let w_y = altimeter_min_y + (altimeter_max_y - altimeter_min_y) * (1.0 - w_ratio);
+        let alt_tick_small = px_delta_to_ndc(Vec2::new(8.0 * hud_scale, 0.0)).x;
+        let alt_tick_mid = px_delta_to_ndc(Vec2::new(12.0 * hud_scale, 0.0)).x;
+        let alt_tick_large = px_delta_to_ndc(Vec2::new(14.0 * hud_scale, 0.0)).x;
 
         push_line(
             &mut lines,
@@ -4085,31 +4137,36 @@ impl RenderContext {
         );
         push_line(
             &mut lines,
-            Vec2::new(altimeter_x - 0.012, altimeter_min_y),
-            Vec2::new(altimeter_x + 0.012, altimeter_min_y),
+            Vec2::new(altimeter_x - alt_tick_small, altimeter_min_y),
+            Vec2::new(altimeter_x + alt_tick_small, altimeter_min_y),
             altimeter_color,
         );
         push_line(
             &mut lines,
-            Vec2::new(altimeter_x - 0.012, altimeter_max_y),
-            Vec2::new(altimeter_x + 0.012, altimeter_max_y),
+            Vec2::new(altimeter_x - alt_tick_small, altimeter_max_y),
+            Vec2::new(altimeter_x + alt_tick_small, altimeter_max_y),
             altimeter_color,
         );
         push_line(
             &mut lines,
-            Vec2::new(altimeter_x - 0.018, zero_y),
-            Vec2::new(altimeter_x + 0.018, zero_y),
+            Vec2::new(altimeter_x - alt_tick_mid, zero_y),
+            Vec2::new(altimeter_x + alt_tick_mid, zero_y),
             altimeter_color * 0.8,
         );
         push_line(
             &mut lines,
-            Vec2::new(altimeter_x - 0.02, w_y),
-            Vec2::new(altimeter_x + 0.02, w_y),
+            Vec2::new(altimeter_x - alt_tick_large, w_y),
+            Vec2::new(altimeter_x + alt_tick_large, w_y),
             altimeter_color,
         );
 
-        let drift_center = Vec2::new(altimeter_x, lower_bottom - 0.08);
-        let drift_half_width = 0.065;
+        let drift_center = Vec2::new(
+            altimeter_x,
+            yw_max.y + px_delta_to_ndc(Vec2::new(0.0, 26.0 * hud_scale)).y,
+        );
+        let drift_half_width = px_delta_to_ndc(Vec2::new(52.0 * hud_scale, 0.0)).x;
+        let drift_minor_half_height = px_delta_to_ndc(Vec2::new(0.0, 5.0 * hud_scale)).y;
+        let drift_major_half_height = px_delta_to_ndc(Vec2::new(0.0, 8.0 * hud_scale)).y;
         let drift_ratio = (self.hud_w_velocity / 6.0).clamp(-1.0, 1.0);
         let drift_x = drift_center.x + drift_ratio * drift_half_width;
 
@@ -4121,14 +4178,14 @@ impl RenderContext {
         );
         push_line(
             &mut lines,
-            Vec2::new(drift_center.x, drift_center.y - 0.01),
-            Vec2::new(drift_center.x, drift_center.y + 0.01),
+            Vec2::new(drift_center.x, drift_center.y - drift_minor_half_height),
+            Vec2::new(drift_center.x, drift_center.y + drift_minor_half_height),
             drift_color * 0.8,
         );
         push_line(
             &mut lines,
-            Vec2::new(drift_x, drift_center.y - 0.015),
-            Vec2::new(drift_x, drift_center.y + 0.015),
+            Vec2::new(drift_x, drift_center.y - drift_major_half_height),
+            Vec2::new(drift_x, drift_center.y + drift_major_half_height),
             drift_color,
         );
 
@@ -4232,10 +4289,10 @@ impl RenderContext {
         } else if readout_text.is_empty() {
             readout_text.push_str("vectors");
         }
-        // Top-left text panel in Vulkan NDC (+Y is down).
-        let text_margin_ndc = Vec2::new(0.03, 0.03);
-        let readout_bg_min = Vec2::new(-1.0 + text_margin_ndc.x, -1.0 + text_margin_ndc.y);
-        let panel_padding_px = 10.0 * ui_scale.max(1.0);
+        // Top-left text panel in Vulkan NDC (+Y is down), anchored in pixel space.
+        let text_margin_px = Vec2::new(18.0, 18.0) * hud_scale;
+        let readout_bg_min = px_top_left_to_ndc(text_margin_px);
+        let panel_padding_px = 10.0 * hud_scale;
         let max_line_chars = readout_text
             .lines()
             .map(|line| line.chars().count())
@@ -4243,19 +4300,19 @@ impl RenderContext {
             .unwrap_or(1) as f32;
         let estimated_char_width_px = readout_text_size * 0.56;
         let panel_width_px = (max_line_chars * estimated_char_width_px + panel_padding_px * 2.0)
-            .clamp(360.0 * ui_scale.max(1.0), 560.0 * ui_scale.max(1.0));
-        let line_height_px = (readout_text_size * 1.25).max(12.0);
+            .clamp(320.0 * hud_scale, (present_w * 0.62).max(320.0 * hud_scale));
+        let line_height_px = (readout_text_size * 1.25).max(12.0 * dpi_scale);
         let readout_line_count = readout_text.lines().count().max(1) as f32;
         let panel_height_px = readout_line_count * line_height_px + panel_padding_px * 2.0;
-        let width_ndc = (panel_width_px / present_size[0] as f32) * 2.0;
-        let height_ndc = (panel_height_px / present_size[1] as f32) * 2.0;
+        let width_ndc = (panel_width_px / present_w) * 2.0;
+        let height_ndc = (panel_height_px / present_h) * 2.0;
         let readout_bg_max = Vec2::new(
             (readout_bg_min.x + width_ndc).min(0.95),
             (readout_bg_min.y + height_ndc).min(0.95),
         );
         let readout_anchor_ndc = Vec2::new(
-            readout_bg_min.x + (panel_padding_px / present_size[0] as f32) * 2.0,
-            readout_bg_min.y + (panel_padding_px / present_size[1] as f32) * 2.0,
+            readout_bg_min.x + (panel_padding_px / present_w) * 2.0,
+            readout_bg_min.y + (panel_padding_px / present_h) * 2.0,
         );
 
         if let Some(hud_res) = self.hud_resources.as_ref() {
@@ -4327,26 +4384,27 @@ impl RenderContext {
 
                     let scale = tag.scale.clamp(0.55, 1.8);
                     let text_size = (11.0 * text_scale * scale)
-                        .clamp(10.0 * ui_scale.max(1.0), 26.0 * ui_scale.max(1.0));
-                    let pad_px = (4.0 * ui_scale.max(1.0) * scale).clamp(2.0, 10.0);
+                        .clamp(10.0 * hud_scale, 26.0 * hud_scale);
+                    let pad_px = (4.0 * hud_scale * scale).clamp(2.0 * dpi_scale, 10.0 * hud_scale);
                     let estimated_char_width_px = text_size * 0.56;
                     let panel_width_px =
                         (text.chars().count().max(1) as f32 * estimated_char_width_px + pad_px * 2.0)
-                            .clamp(36.0, 540.0);
-                    let panel_height_px = (text_size * 1.25 + pad_px * 2.0).clamp(16.0, 88.0);
+                            .clamp(36.0 * dpi_scale, 540.0 * hud_scale);
+                    let panel_height_px =
+                        (text_size * 1.25 + pad_px * 2.0).clamp(16.0 * dpi_scale, 88.0 * hud_scale);
 
-                    let width_ndc = (panel_width_px / present_size[0] as f32) * 2.0;
-                    let height_ndc = (panel_height_px / present_size[1] as f32) * 2.0;
+                    let width_ndc = (panel_width_px / present_w) * 2.0;
+                    let height_ndc = (panel_height_px / present_h) * 2.0;
                     let offset_ndc_y =
-                        (16.0 * ui_scale.max(1.0) * scale / present_size[1] as f32) * 2.0;
-                    let margin_ndc = 0.01;
+                        (16.0 * hud_scale * scale / present_h) * 2.0;
+                    let margin_ndc = px_delta_to_ndc(Vec2::splat(8.0 * hud_scale));
 
                     let center_x = tag.anchor_ndc[0].clamp(
-                        -1.0 + width_ndc * 0.5 + margin_ndc,
-                        1.0 - width_ndc * 0.5 - margin_ndc,
+                        -1.0 + width_ndc * 0.5 + margin_ndc.x,
+                        1.0 - width_ndc * 0.5 - margin_ndc.x,
                     );
                     let top_y = (tag.anchor_ndc[1] - offset_ndc_y)
-                        .clamp(-1.0 + height_ndc + margin_ndc, 1.0 - margin_ndc);
+                        .clamp(-1.0 + height_ndc + margin_ndc.y, 1.0 - margin_ndc.y);
 
                     let bg_min = Vec2::new(center_x - width_ndc * 0.5, top_y - height_ndc);
                     let bg_max = Vec2::new(center_x + width_ndc * 0.5, top_y);
@@ -4360,8 +4418,8 @@ impl RenderContext {
                     );
 
                     let text_anchor_ndc = Vec2::new(
-                        bg_min.x + (pad_px / present_size[0] as f32) * 2.0,
-                        bg_min.y + (pad_px / present_size[1] as f32) * 2.0,
+                        bg_min.x + (pad_px / present_w) * 2.0,
+                        bg_min.y + (pad_px / present_h) * 2.0,
                     );
                     let text_anchor_px = ndc_to_pixels(text_anchor_ndc, present_size);
                     push_text_quads(
@@ -4383,9 +4441,9 @@ impl RenderContext {
                 }
                 let scale = tag.scale.clamp(0.55, 1.8);
                 let text_size = (11.0 * text_scale * scale)
-                    .clamp(10.0 * ui_scale.max(1.0), 26.0 * ui_scale.max(1.0));
+                    .clamp(10.0 * hud_scale, 26.0 * hud_scale);
                 let anchor = Vec2::new(tag.anchor_ndc[0], tag.anchor_ndc[1]);
-                let label_ndc = anchor + Vec2::new(0.0, -0.035 * scale);
+                let label_ndc = anchor + px_delta_to_ndc(Vec2::new(0.0, -18.0 * hud_scale * scale));
                 let label_px = ndc_to_pixels(label_ndc, present_size);
                 push_text_lines(
                     &mut lines,
@@ -4403,7 +4461,7 @@ impl RenderContext {
             &mut lines,
             present_size,
             Vec2::ZERO,
-            ui_scale,
+            dpi_scale,
             crosshair_color,
             crosshair_outline,
         );
