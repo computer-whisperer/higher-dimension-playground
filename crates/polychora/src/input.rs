@@ -129,6 +129,8 @@ pub struct InputState {
     vte_sweep_requested: bool,
     vte_integral_sky_emissive_toggle_requested: bool,
     vte_integral_log_merge_toggle_requested: bool,
+    menu_left_requested: bool,
+    menu_right_requested: bool,
     menu_up_requested: bool,
     menu_down_requested: bool,
     menu_activate_requested: bool,
@@ -170,6 +172,8 @@ impl InputState {
             vte_sweep_requested: false,
             vte_integral_sky_emissive_toggle_requested: false,
             vte_integral_log_merge_toggle_requested: false,
+            menu_left_requested: false,
+            menu_right_requested: false,
             menu_up_requested: false,
             menu_down_requested: false,
             menu_activate_requested: false,
@@ -308,6 +312,16 @@ impl InputState {
                 KeyCode::ArrowUp => {
                     if pressed {
                         self.menu_up_requested = true;
+                    }
+                }
+                KeyCode::ArrowLeft => {
+                    if pressed {
+                        self.menu_left_requested = true;
+                    }
+                }
+                KeyCode::ArrowRight => {
+                    if pressed {
+                        self.menu_right_requested = true;
                     }
                 }
                 KeyCode::ArrowDown => {
@@ -514,6 +528,18 @@ impl InputState {
     pub fn take_vte_integral_log_merge_toggle(&mut self) -> bool {
         let v = self.vte_integral_log_merge_toggle_requested;
         self.vte_integral_log_merge_toggle_requested = false;
+        v
+    }
+
+    pub fn take_menu_left(&mut self) -> bool {
+        let v = self.menu_left_requested;
+        self.menu_left_requested = false;
+        v
+    }
+
+    pub fn take_menu_right(&mut self) -> bool {
+        let v = self.menu_right_requested;
+        self.menu_right_requested = false;
         v
     }
 

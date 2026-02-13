@@ -168,6 +168,12 @@ pub struct CustomOverlayLine {
     pub color: [f32; 4],
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum HudReadoutMode {
+    Full,
+    CompactVectors,
+}
+
 pub struct RenderOptions {
     pub do_frame_clear: bool,
     pub do_raster: bool,
@@ -195,6 +201,7 @@ pub struct RenderOptions {
     pub custom_overlay_lines: Vec<CustomOverlayLine>,
     pub take_framebuffer_screenshot: bool,
     pub prepare_render_screenshot: bool,
+    pub hud_readout_mode: HudReadoutMode,
     pub hud_rotation_label: Option<String>,
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
@@ -229,6 +236,7 @@ impl Default for RenderOptions {
             custom_overlay_lines: Vec::new(),
             take_framebuffer_screenshot: false,
             prepare_render_screenshot: false,
+            hud_readout_mode: HudReadoutMode::Full,
             hud_rotation_label: None,
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
@@ -3478,6 +3486,7 @@ impl RenderContext {
         view_matrix_inverse: &nalgebra::Matrix5<f32>,
         focal_length_xy: f32,
         model_instances: &[common::ModelInstance],
+        readout_mode: HudReadoutMode,
         rotation_label: Option<&str>,
         target_hit_voxel: Option<[i32; 4]>,
         target_hit_face: Option<[i32; 4]>,
@@ -4128,91 +4137,97 @@ impl RenderContext {
         let mut readout_text = String::new();
         if let Some(label) = rotation_label {
             readout_text.push_str(label);
-            readout_text.push('\n');
         }
-        readout_text.push_str(&format!(
-            "frame {:>5.1} ms ({:>3.0} fps)\n\
-             gpu   {:>5.1} ms [{}]",
-            self.frame_time_ms,
-            fps,
-            self.profiler.last_gpu_total_ms,
-            self.last_backend.label()
-        ));
-        readout_text.push_str(
-            "\nvec       |        X |        Y |        Z |        W\n\
-             ----------+----------+----------+----------+----------",
-        );
-        readout_text.push_str(&format!(
-            "\n{:<9} | {:+8.2} | {:+8.2} | {:+8.2} | {:+8.2}",
-            "cam_pos",
-            camera_position[0],
-            camera_position[1],
-            camera_position[2],
-            camera_position[3],
-        ));
-        readout_text.push_str(&format!(
-            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-            "look_dir", look_world[0], look_world[1], look_world[2], look_world[3],
-        ));
-        if let Some(hit) = target_hit_voxel {
+        if readout_mode == HudReadoutMode::Full {
+            if !readout_text.is_empty() {
+                readout_text.push('\n');
+            }
             readout_text.push_str(&format!(
-                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
-                "block_hit", hit[0], hit[1], hit[2], hit[3]
+                "frame {:>5.1} ms ({:>3.0} fps)\n\
+                 gpu   {:>5.1} ms [{}]",
+                self.frame_time_ms,
+                fps,
+                self.profiler.last_gpu_total_ms,
+                self.last_backend.label()
             ));
-        } else {
+            readout_text.push_str(
+                "\nvec       |        X |        Y |        Z |        W\n\
+                 ----------+----------+----------+----------+----------",
+            );
             readout_text.push_str(&format!(
-                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
-                "block_hit", "--", "--", "--", "--"
-            ));
-        }
-        if let Some(face) = target_hit_face {
-            readout_text.push_str(&format!(
-                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
-                "face_n", face[0], face[1], face[2], face[3]
-            ));
-        } else {
-            readout_text.push_str(&format!(
-                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
-                "face_n", "--", "--", "--", "--"
-            ));
-        }
-        if self.last_backend == RenderBackend::VoxelTraversal {
-            readout_text.push_str(&format!(
-                "\nVTE c:{} f:{} e:{} m:{}",
-                self.vte_debug_counters.candidate_chunks,
-                self.vte_debug_counters.frustum_culled_chunks,
-                self.vte_debug_counters.empty_chunks_skipped,
-                self.vte_debug_counters.macro_cells_skipped,
+                "\n{:<9} | {:+8.2} | {:+8.2} | {:+8.2} | {:+8.2}",
+                "cam_pos",
+                camera_position[0],
+                camera_position[1],
+                camera_position[2],
+                camera_position[3],
             ));
             readout_text.push_str(&format!(
-                "\n    cs:{} vs:{} h:{} s:{}",
-                self.vte_debug_counters.chunk_steps,
-                self.vte_debug_counters.voxel_steps,
-                self.vte_debug_counters.primary_hits,
-                self.vte_debug_counters.s_samples
+                "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+                "look_dir", look_world[0], look_world[1], look_world[2], look_world[3],
             ));
-            if self.vte_debug_counters.visible_set_hash_valid {
+            if let Some(hit) = target_hit_voxel {
                 readout_text.push_str(&format!(
-                    "\n    vh:{:08x}",
-                    self.vte_debug_counters.visible_set_hash
+                    "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                    "block_hit", hit[0], hit[1], hit[2], hit[3]
+                ));
+            } else {
+                readout_text.push_str(&format!(
+                    "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                    "block_hit", "--", "--", "--", "--"
                 ));
             }
-            if self.vte_compare_stats.compared > 0 || self.vte_compare_stats.mismatches > 0 {
+            if let Some(face) = target_hit_face {
                 readout_text.push_str(&format!(
-                    "\n    cmp:{}/{} mm:{} hs:{} cm:{}",
-                    self.vte_compare_stats.matches,
-                    self.vte_compare_stats.compared,
-                    self.vte_compare_stats.mismatches,
-                    self.vte_compare_stats.hit_state_mismatches,
-                    self.vte_compare_stats.chunk_material_mismatches
+                    "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                    "face_n", face[0], face[1], face[2], face[3]
+                ));
+            } else {
+                readout_text.push_str(&format!(
+                    "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                    "face_n", "--", "--", "--", "--"
                 ));
             }
-        }
-        if !self.profiler.last_frame_phases.is_empty() {
-            readout_text.push('\n');
-            for (name, ms) in &self.profiler.last_frame_phases {
-                readout_text.push_str(&format!("\n {}:{:.1}", name, ms));
+            if self.last_backend == RenderBackend::VoxelTraversal {
+                readout_text.push_str(&format!(
+                    "\nVTE c:{} f:{} e:{} m:{}",
+                    self.vte_debug_counters.candidate_chunks,
+                    self.vte_debug_counters.frustum_culled_chunks,
+                    self.vte_debug_counters.empty_chunks_skipped,
+                    self.vte_debug_counters.macro_cells_skipped,
+                ));
+                readout_text.push_str(&format!(
+                    "\n    cs:{} vs:{} h:{} s:{}",
+                    self.vte_debug_counters.chunk_steps,
+                    self.vte_debug_counters.voxel_steps,
+                    self.vte_debug_counters.primary_hits,
+                    self.vte_debug_counters.s_samples
+                ));
+                if self.vte_debug_counters.visible_set_hash_valid {
+                    readout_text.push_str(&format!(
+                        "\n    vh:{:08x}",
+                        self.vte_debug_counters.visible_set_hash
+                    ));
+                }
+                if self.vte_compare_stats.compared > 0 || self.vte_compare_stats.mismatches > 0 {
+                    readout_text.push_str(&format!(
+                        "\n    cmp:{}/{} mm:{} hs:{} cm:{}",
+                        self.vte_compare_stats.matches,
+                        self.vte_compare_stats.compared,
+                        self.vte_compare_stats.mismatches,
+                        self.vte_compare_stats.hit_state_mismatches,
+                        self.vte_compare_stats.chunk_material_mismatches
+                    ));
+                }
             }
+            if !self.profiler.last_frame_phases.is_empty() {
+                readout_text.push('\n');
+                for (name, ms) in &self.profiler.last_frame_phases {
+                    readout_text.push_str(&format!("\n {}:{:.1}", name, ms));
+                }
+            }
+        } else if readout_text.is_empty() {
+            readout_text.push_str("vectors");
         }
         // Top-left text panel in Vulkan NDC (+Y is down).
         let text_margin_ndc = Vec2::new(0.03, 0.03);
@@ -6000,6 +6015,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 &view_matrix_nalgebra_inv,
                 focal_length_xy,
                 model_instances,
+                render_options.hud_readout_mode,
                 render_options.hud_rotation_label.as_deref(),
                 render_options.hud_target_hit_voxel,
                 render_options.hud_target_hit_face,

@@ -167,7 +167,7 @@ The default scene includes:
 | F5 / F9 | Save/load world (`--world-file`) |
 | F12 | Screenshot |
 | Escape | Toggle pause menu / mouse capture |
-| Up/Down + Enter | Navigate and activate pause-menu actions |
+| Up/Down + Left/Right + Enter | Navigate and tune pause-menu actions |
 | Click | Re-grab mouse |
 | Double-tap Space | Toggle fly/gravity mode |
 

@@ -6,8 +6,8 @@ mod voxel;
 
 use clap::{ArgAction, Parser, ValueEnum};
 use higher_dimension_playground::render::{
-    CustomOverlayLine, FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
-    VteDisplayMode,
+    CustomOverlayLine, FrameParams, HudReadoutMode, RenderBackend, RenderContext, RenderOptions,
+    TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::path::PathBuf;
@@ -39,6 +39,23 @@ const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
 const VTE_TEST_ENTITY_CENTER: [f32; 4] = [0.0, 3.0, 0.0, 0.0];
 const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
 const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
+const FOCAL_LENGTH_MIN: f32 = 0.20;
+const FOCAL_LENGTH_MAX: f32 = 4.00;
+const FOCAL_LENGTH_STEP: f32 = 0.05;
+const VTE_TRACE_DISTANCE_MIN: f32 = 10.0;
+const VTE_TRACE_DISTANCE_MAX: f32 = 4096.0;
+const VTE_TRACE_DISTANCE_STEP: f32 = 10.0;
+const VTE_INTEGRAL_SKY_SCALE_MIN: f32 = 0.0;
+const VTE_INTEGRAL_SKY_SCALE_MAX: f32 = 2.0;
+const VTE_INTEGRAL_SKY_SCALE_STEP: f32 = 0.05;
+const VTE_INTEGRAL_HIT_EMISSIVE_MIN: f32 = 0.0;
+const VTE_INTEGRAL_HIT_EMISSIVE_MAX: f32 = 0.20;
+const VTE_INTEGRAL_HIT_EMISSIVE_STEP: f32 = 0.005;
+const VTE_INTEGRAL_LOG_MERGE_K_MIN: f32 = 0.0;
+const VTE_INTEGRAL_LOG_MERGE_K_MAX: f32 = 64.0;
+const VTE_INTEGRAL_LOG_MERGE_K_STEP: f32 = 0.5;
+const VTE_TRACE_STEPS_MIN: u32 = 16;
+const VTE_TRACE_STEPS_MAX: u32 = 4096;
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -313,6 +330,36 @@ impl SceneArg {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum InfoPanelMode {
+    Full,
+    VectorTable,
+    Off,
+}
+
+impl InfoPanelMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::VectorTable => "vectors",
+            Self::Off => "off",
+        }
+    }
+
+    fn step(self, delta: i32) -> Self {
+        let index = match self {
+            Self::Full => 0,
+            Self::VectorTable => 1,
+            Self::Off => 2,
+        };
+        match (index + delta).rem_euclid(3) {
+            0 => Self::Full,
+            1 => Self::VectorTable,
+            _ => Self::Off,
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -384,6 +431,11 @@ fn main() {
     let initial_vte_y_slice_lookup_cache_enabled = args.vte_y_slice_lookup_cache;
     let initial_vte_integral_sky_emissive_enabled = args.vte_integral_sky_emissive_tweak;
     let initial_vte_integral_log_merge_enabled = args.vte_integral_log_merge_tweak;
+    let initial_vte_integral_sky_scale = args.vte_integral_sky_scale.max(0.0);
+    let initial_vte_integral_hit_emissive_boost = args.vte_integral_hit_emissive_boost.max(0.0);
+    let initial_vte_integral_log_merge_k = args.vte_integral_log_merge_k.max(0.0);
+    let initial_vte_max_trace_steps = args.vte_max_trace_steps.max(1);
+    let initial_vte_max_trace_distance = args.vte_max_trace_distance.max(1.0);
 
     let world_file = args.world_file.clone();
     let mut scene = Scene::new(args.scene.to_scene_preset());
@@ -422,6 +474,9 @@ fn main() {
         control_scheme: ControlScheme::LookTransport,
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
+        info_panel_mode: InfoPanelMode::Full,
+        focal_length_xy: 1.0,
+        focal_length_zw: 1.0,
         place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
         world_file,
         vte_reference_compare_enabled,
@@ -430,7 +485,12 @@ fn main() {
         vte_entities_enabled: initial_vte_entities_enabled,
         vte_y_slice_lookup_cache_enabled: initial_vte_y_slice_lookup_cache_enabled,
         vte_integral_sky_emissive_enabled: initial_vte_integral_sky_emissive_enabled,
+        vte_integral_sky_scale: initial_vte_integral_sky_scale,
+        vte_integral_hit_emissive_boost: initial_vte_integral_hit_emissive_boost,
         vte_integral_log_merge_enabled: initial_vte_integral_log_merge_enabled,
+        vte_integral_log_merge_k: initial_vte_integral_log_merge_k,
+        vte_max_trace_steps: initial_vte_max_trace_steps,
+        vte_max_trace_distance: initial_vte_max_trace_distance,
         vte_sweep_include_no_entities,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
@@ -466,14 +526,14 @@ fn main() {
     if app.vte_integral_sky_emissive_enabled {
         eprintln!(
             "VTE integral sky/emissive tweak enabled via --vte-integral-sky-emissive-tweak=true (sky_scale={:.3}, hit_emissive_boost={:.3})",
-            app.args.vte_integral_sky_scale,
-            app.args.vte_integral_hit_emissive_boost
+            app.vte_integral_sky_scale,
+            app.vte_integral_hit_emissive_boost
         );
     }
     if app.vte_integral_log_merge_enabled {
         eprintln!(
             "VTE integral log-merge tweak enabled via --vte-integral-log-merge-tweak=true (k={:.3})",
-            app.args.vte_integral_log_merge_k
+            app.vte_integral_log_merge_k
         );
     }
     if app.vte_sweep_include_no_entities {
@@ -578,6 +638,9 @@ struct App {
     control_scheme: ControlScheme,
     scroll_cycle_pair: RotationPair,
     move_speed: f32,
+    info_panel_mode: InfoPanelMode,
+    focal_length_xy: f32,
+    focal_length_zw: f32,
     place_material: u8,
     world_file: PathBuf,
     vte_reference_compare_enabled: bool,
@@ -586,7 +649,12 @@ struct App {
     vte_entities_enabled: bool,
     vte_y_slice_lookup_cache_enabled: bool,
     vte_integral_sky_emissive_enabled: bool,
+    vte_integral_sky_scale: f32,
+    vte_integral_hit_emissive_boost: f32,
     vte_integral_log_merge_enabled: bool,
+    vte_integral_log_merge_k: f32,
+    vte_max_trace_steps: u32,
+    vte_max_trace_distance: f32,
     vte_sweep_include_no_entities: bool,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
@@ -606,23 +674,39 @@ struct VteSweepState {
 #[derive(Copy, Clone)]
 enum PauseMenuItem {
     Resume,
+    InfoPanel,
     ControlScheme,
+    FocalLengthXy,
+    FocalLengthZw,
+    VteMaxTraceSteps,
+    VteMaxTraceDistance,
     VteEntities,
     VteYSliceLookupCache,
     IntegralSkyEmissive,
+    IntegralSkyScale,
+    IntegralHitEmissiveBoost,
     IntegralLogMerge,
+    IntegralLogMergeK,
     SaveWorld,
     LoadWorld,
     Quit,
 }
 
-const PAUSE_MENU_ITEMS: [PauseMenuItem; 9] = [
+const PAUSE_MENU_ITEMS: [PauseMenuItem; 17] = [
     PauseMenuItem::Resume,
+    PauseMenuItem::InfoPanel,
     PauseMenuItem::ControlScheme,
+    PauseMenuItem::FocalLengthXy,
+    PauseMenuItem::FocalLengthZw,
+    PauseMenuItem::VteMaxTraceSteps,
+    PauseMenuItem::VteMaxTraceDistance,
     PauseMenuItem::VteEntities,
     PauseMenuItem::VteYSliceLookupCache,
     PauseMenuItem::IntegralSkyEmissive,
+    PauseMenuItem::IntegralSkyScale,
+    PauseMenuItem::IntegralHitEmissiveBoost,
     PauseMenuItem::IntegralLogMerge,
+    PauseMenuItem::IntegralLogMergeK,
     PauseMenuItem::SaveWorld,
     PauseMenuItem::LoadWorld,
     PauseMenuItem::Quit,
@@ -937,6 +1021,102 @@ impl App {
         }
     }
 
+    fn cycle_control_scheme_by(&mut self, delta: i32) {
+        if delta >= 0 {
+            self.cycle_control_scheme();
+            return;
+        }
+        // ControlScheme currently has 5 variants, so 4 forward steps == one backward step.
+        for _ in 0..4 {
+            self.cycle_control_scheme();
+        }
+    }
+
+    fn step_f32(value: f32, delta: i32, step: f32, min: f32, max: f32) -> f32 {
+        let signed_step = if delta > 0 {
+            step
+        } else if delta < 0 {
+            -step
+        } else {
+            0.0
+        };
+        (value + signed_step).clamp(min, max)
+    }
+
+    fn adjust_info_panel_mode(&mut self, delta: i32) {
+        self.info_panel_mode = self.info_panel_mode.step(delta);
+    }
+
+    fn adjust_focal_length_xy(&mut self, delta: i32) {
+        self.focal_length_xy = Self::step_f32(
+            self.focal_length_xy,
+            delta,
+            FOCAL_LENGTH_STEP,
+            FOCAL_LENGTH_MIN,
+            FOCAL_LENGTH_MAX,
+        );
+    }
+
+    fn adjust_focal_length_zw(&mut self, delta: i32) {
+        self.focal_length_zw = Self::step_f32(
+            self.focal_length_zw,
+            delta,
+            FOCAL_LENGTH_STEP,
+            FOCAL_LENGTH_MIN,
+            FOCAL_LENGTH_MAX,
+        );
+    }
+
+    fn adjust_vte_max_trace_steps(&mut self, delta: i32) {
+        if delta > 0 {
+            self.vte_max_trace_steps = (self.vte_max_trace_steps.saturating_mul(2))
+                .clamp(VTE_TRACE_STEPS_MIN, VTE_TRACE_STEPS_MAX);
+        } else if delta < 0 {
+            self.vte_max_trace_steps =
+                (self.vte_max_trace_steps / 2).clamp(VTE_TRACE_STEPS_MIN, VTE_TRACE_STEPS_MAX);
+        }
+    }
+
+    fn adjust_vte_max_trace_distance(&mut self, delta: i32) {
+        self.vte_max_trace_distance = Self::step_f32(
+            self.vte_max_trace_distance,
+            delta,
+            VTE_TRACE_DISTANCE_STEP,
+            VTE_TRACE_DISTANCE_MIN,
+            VTE_TRACE_DISTANCE_MAX,
+        );
+    }
+
+    fn adjust_vte_integral_sky_scale(&mut self, delta: i32) {
+        self.vte_integral_sky_scale = Self::step_f32(
+            self.vte_integral_sky_scale,
+            delta,
+            VTE_INTEGRAL_SKY_SCALE_STEP,
+            VTE_INTEGRAL_SKY_SCALE_MIN,
+            VTE_INTEGRAL_SKY_SCALE_MAX,
+        );
+    }
+
+    fn adjust_vte_integral_hit_emissive_boost(&mut self, delta: i32) {
+        self.vte_integral_hit_emissive_boost = Self::step_f32(
+            self.vte_integral_hit_emissive_boost,
+            delta,
+            VTE_INTEGRAL_HIT_EMISSIVE_STEP,
+            VTE_INTEGRAL_HIT_EMISSIVE_MIN,
+            VTE_INTEGRAL_HIT_EMISSIVE_MAX,
+        );
+    }
+
+    fn adjust_vte_integral_log_merge_k(&mut self, delta: i32) {
+        self.vte_integral_log_merge_k = Self::step_f32(
+            self.vte_integral_log_merge_k,
+            delta,
+            VTE_INTEGRAL_LOG_MERGE_K_STEP,
+            VTE_INTEGRAL_LOG_MERGE_K_MIN,
+            VTE_INTEGRAL_LOG_MERGE_K_MAX,
+        );
+    }
+
     fn save_world(&mut self) {
         match self.scene.save_world_to_path(&self.world_file) {
             Ok(chunks) => eprintln!(
@@ -979,7 +1159,11 @@ impl App {
         }
         eprintln!(
             "VTE runtime entities: {}",
-            if self.vte_entities_enabled { "on" } else { "off" }
+            if self.vte_entities_enabled {
+                "on"
+            } else {
+                "off"
+            }
         );
     }
 
@@ -1014,8 +1198,8 @@ impl App {
             } else {
                 "off"
             },
-            self.args.vte_integral_sky_scale.max(0.0),
-            self.args.vte_integral_hit_emissive_boost.max(0.0),
+            self.vte_integral_sky_scale,
+            self.vte_integral_hit_emissive_boost,
         );
     }
 
@@ -1028,7 +1212,7 @@ impl App {
             } else {
                 "off"
             },
-            self.args.vte_integral_log_merge_k.max(0.0),
+            self.vte_integral_log_merge_k,
         );
     }
 
@@ -1063,6 +1247,30 @@ impl App {
         PAUSE_MENU_ITEMS[self.menu_selection]
     }
 
+    fn adjust_selected_menu_item(&mut self, delta: i32) {
+        match self.selected_menu_item() {
+            PauseMenuItem::InfoPanel => self.adjust_info_panel_mode(delta),
+            PauseMenuItem::ControlScheme => self.cycle_control_scheme_by(delta),
+            PauseMenuItem::FocalLengthXy => self.adjust_focal_length_xy(delta),
+            PauseMenuItem::FocalLengthZw => self.adjust_focal_length_zw(delta),
+            PauseMenuItem::VteMaxTraceSteps => self.adjust_vte_max_trace_steps(delta),
+            PauseMenuItem::VteMaxTraceDistance => self.adjust_vte_max_trace_distance(delta),
+            PauseMenuItem::VteEntities => self.toggle_vte_entities(),
+            PauseMenuItem::VteYSliceLookupCache => self.toggle_vte_y_slice_lookup_cache(),
+            PauseMenuItem::IntegralSkyEmissive => self.toggle_vte_integral_sky_emissive(),
+            PauseMenuItem::IntegralSkyScale => self.adjust_vte_integral_sky_scale(delta),
+            PauseMenuItem::IntegralHitEmissiveBoost => {
+                self.adjust_vte_integral_hit_emissive_boost(delta)
+            }
+            PauseMenuItem::IntegralLogMerge => self.toggle_vte_integral_log_merge(),
+            PauseMenuItem::IntegralLogMergeK => self.adjust_vte_integral_log_merge_k(delta),
+            PauseMenuItem::Resume
+            | PauseMenuItem::SaveWorld
+            | PauseMenuItem::LoadWorld
+            | PauseMenuItem::Quit => {}
+        }
+    }
+
     fn activate_selected_menu_item(&mut self) {
         match self.selected_menu_item() {
             PauseMenuItem::Resume => {
@@ -1072,26 +1280,41 @@ impl App {
                     self.grab_mouse(&window);
                 }
             }
-            PauseMenuItem::ControlScheme => self.cycle_control_scheme(),
-            PauseMenuItem::VteEntities => self.toggle_vte_entities(),
-            PauseMenuItem::VteYSliceLookupCache => self.toggle_vte_y_slice_lookup_cache(),
-            PauseMenuItem::IntegralSkyEmissive => self.toggle_vte_integral_sky_emissive(),
-            PauseMenuItem::IntegralLogMerge => self.toggle_vte_integral_log_merge(),
             PauseMenuItem::SaveWorld => self.save_world(),
             PauseMenuItem::LoadWorld => self.load_world(),
             PauseMenuItem::Quit => self.should_exit_after_render = true,
+            _ => self.adjust_selected_menu_item(1),
         }
     }
 
     fn pause_menu_item_text(&self, item: PauseMenuItem) -> String {
         match item {
             PauseMenuItem::Resume => "Resume".to_string(),
+            PauseMenuItem::InfoPanel => {
+                format!("Info panel: {}", self.info_panel_mode.label())
+            }
             PauseMenuItem::ControlScheme => {
                 format!("Control scheme: {}", self.control_scheme.label())
             }
+            PauseMenuItem::FocalLengthXy => {
+                format!("Focal XY: {:.2}", self.focal_length_xy)
+            }
+            PauseMenuItem::FocalLengthZw => {
+                format!("Focal ZW: {:.2}", self.focal_length_zw)
+            }
+            PauseMenuItem::VteMaxTraceSteps => {
+                format!("VTE max steps: {}", self.vte_max_trace_steps)
+            }
+            PauseMenuItem::VteMaxTraceDistance => {
+                format!("VTE max dist: {:.0}", self.vte_max_trace_distance)
+            }
             PauseMenuItem::VteEntities => format!(
                 "VTE entities: {}",
-                if self.vte_entities_enabled { "on" } else { "off" }
+                if self.vte_entities_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
             ),
             PauseMenuItem::VteYSliceLookupCache => format!(
                 "VTE y-cache: {}",
@@ -1109,6 +1332,13 @@ impl App {
                     "off"
                 }
             ),
+            PauseMenuItem::IntegralSkyScale => {
+                format!("Integral sky scale: {:.3}", self.vte_integral_sky_scale)
+            }
+            PauseMenuItem::IntegralHitEmissiveBoost => format!(
+                "Integral hit emissive: {:.3}",
+                self.vte_integral_hit_emissive_boost
+            ),
             PauseMenuItem::IntegralLogMerge => format!(
                 "Integral log merge: {}",
                 if self.vte_integral_log_merge_enabled {
@@ -1117,14 +1347,197 @@ impl App {
                     "off"
                 }
             ),
+            PauseMenuItem::IntegralLogMergeK => {
+                format!("Integral log K: {:.3}", self.vte_integral_log_merge_k)
+            }
             PauseMenuItem::SaveWorld => "Save world".to_string(),
             PauseMenuItem::LoadWorld => "Load world".to_string(),
             PauseMenuItem::Quit => "Quit".to_string(),
         }
     }
 
+    fn current_info_hud_text(
+        &self,
+        pair: RotationPair,
+        look_dir: [f32; 4],
+        edit_reach: f32,
+        highlight_mode: EditHighlightModeArg,
+        vte_sweep_status: &str,
+        target_hit_voxel: Option<[i32; 4]>,
+        target_hit_face: Option<[i32; 4]>,
+    ) -> Option<String> {
+        match self.info_panel_mode {
+            InfoPanelMode::Off => None,
+            InfoPanelMode::VectorTable => {
+                Some(self.vector_table_hud_text(look_dir, target_hit_voxel, target_hit_face))
+            }
+            InfoPanelMode::Full => Some(self.full_info_hud_text(
+                pair,
+                look_dir,
+                edit_reach,
+                highlight_mode,
+                vte_sweep_status,
+            )),
+        }
+    }
+
+    fn vector_table_hud_text(
+        &self,
+        look_dir: [f32; 4],
+        target_hit_voxel: Option<[i32; 4]>,
+        target_hit_face: Option<[i32; 4]>,
+    ) -> String {
+        let mut text = String::new();
+        text.push_str(
+            "vec       |        X |        Y |        Z |        W\n\
+             ----------+----------+----------+----------+----------",
+        );
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.2} | {:+8.2} | {:+8.2} | {:+8.2}",
+            "pos",
+            self.camera.position[0],
+            self.camera.position[1],
+            self.camera.position[2],
+            self.camera.position[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "look", look_dir[0], look_dir[1], look_dir[2], look_dir[3],
+        ));
+        if let Some(hit) = target_hit_voxel {
+            text.push_str(&format!(
+                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                "block", hit[0], hit[1], hit[2], hit[3]
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                "block", "--", "--", "--", "--"
+            ));
+        }
+        if let Some(face) = target_hit_face {
+            text.push_str(&format!(
+                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                "face", face[0], face[1], face[2], face[3]
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                "face", "--", "--", "--", "--"
+            ));
+        }
+        text
+    }
+
+    fn full_info_hud_text(
+        &self,
+        pair: RotationPair,
+        look_dir: [f32; 4],
+        edit_reach: f32,
+        highlight_mode: EditHighlightModeArg,
+        vte_sweep_status: &str,
+    ) -> String {
+        let inv = self.current_y_inverted();
+        let inv = if inv { " Y-INV" } else { "" };
+        if self.control_scheme.uses_look_frame() {
+            format!(
+                "LOOK-FRAME [{}]  spd:{:.1}{}\n\
+                 look:{:+.2} {:+.2} {:+.2} {:+.2}\n\
+                 lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
+                 edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
+                 mat:[ ]/wheel cycle, 1-0 direct\n\
+                 world:F5 save, F9 load\n\
+                 vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                 tweak:F10 sky+emi:{} F11 log:{}",
+                self.control_scheme.label(),
+                self.move_speed,
+                inv,
+                look_dir[0],
+                look_dir[1],
+                look_dir[2],
+                look_dir[3],
+                self.focal_length_xy,
+                self.focal_length_zw,
+                self.vte_max_trace_steps,
+                self.vte_max_trace_distance,
+                self.place_material,
+                edit_reach,
+                highlight_mode.label(),
+                if self.vte_entities_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                if self.vte_y_slice_lookup_cache_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                vte_sweep_status,
+                if self.vte_integral_sky_emissive_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                if self.vte_integral_log_merge_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+            )
+        } else {
+            format!(
+                "{} [{}]  spd:{:.1}{}\n\
+                 yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
+                 lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
+                 edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
+                 mat:[ ]/wheel cycle, 1-0 direct\n\
+                 world:F5 save, F9 load\n\
+                 vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                 tweak:F10 sky+emi:{} F11 log:{}",
+                pair.label(),
+                self.control_scheme.label(),
+                self.move_speed,
+                inv,
+                self.camera.yaw.to_degrees(),
+                self.camera.pitch.to_degrees(),
+                self.camera.xw_angle.to_degrees(),
+                self.camera.zw_angle.to_degrees(),
+                self.camera.yw_deviation.to_degrees(),
+                self.focal_length_xy,
+                self.focal_length_zw,
+                self.vte_max_trace_steps,
+                self.vte_max_trace_distance,
+                self.place_material,
+                edit_reach,
+                highlight_mode.label(),
+                if self.vte_entities_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                if self.vte_y_slice_lookup_cache_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                vte_sweep_status,
+                if self.vte_integral_sky_emissive_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                if self.vte_integral_log_merge_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+            )
+        }
+    }
+
     fn pause_menu_hud_text(&self) -> String {
-        let mut text = String::from("MENU  (Up/Down + Enter, Esc resume)\n");
+        let mut text = String::from("MENU  (Up/Down select, Left/Right tune, Enter action)\n");
         for (i, item) in PAUSE_MENU_ITEMS.iter().enumerate() {
             let prefix = if i == self.menu_selection { ">" } else { " " };
             text.push_str(prefix);
@@ -1331,6 +1744,12 @@ impl App {
             if self.input.take_menu_up() {
                 self.move_menu_selection(-1);
             }
+            if self.input.take_menu_left() {
+                self.adjust_selected_menu_item(-1);
+            }
+            if self.input.take_menu_right() {
+                self.adjust_selected_menu_item(1);
+            }
             if self.input.take_menu_down() {
                 self.move_menu_selection(1);
             }
@@ -1339,6 +1758,8 @@ impl App {
             }
             self.drain_gameplay_inputs_while_menu_open();
         } else {
+            self.input.take_menu_left();
+            self.input.take_menu_right();
             self.input.take_menu_up();
             self.input.take_menu_down();
             self.input.take_menu_activate();
@@ -1471,8 +1892,8 @@ impl App {
                 eprintln!("Selected place material: {}", self.place_material);
             }
             if let Some(material_digit) = self.input.take_place_material_digit() {
-                self.place_material =
-                    material_digit.clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
+                self.place_material = material_digit
+                    .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
                 eprintln!("Selected place material: {}", self.place_material);
             }
         }
@@ -1518,8 +1939,14 @@ impl App {
                     );
                 }
                 ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
-                    self.camera
-                        .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
+                    self.camera.apply_movement(
+                        forward,
+                        strafe,
+                        vertical,
+                        w_axis,
+                        dt,
+                        self.move_speed,
+                    );
                 }
             }
 
@@ -1588,18 +2015,17 @@ impl App {
         let view_matrix = self.current_view_matrix();
         let backend = self.args.backend.to_render_backend();
         let highlight_mode = self.args.edit_highlight_mode;
-        let targets =
-            if !self.menu_open
-                && self.mouse_grabbed
-                && (highlight_mode.uses_faces() || highlight_mode.uses_edges())
-            {
-                Some(
-                    self.scene
-                        .block_edit_targets(self.camera.position, look_dir, edit_reach),
-                )
-            } else {
-                None
-            };
+        let targets = if !self.menu_open
+            && self.mouse_grabbed
+            && (highlight_mode.uses_faces() || highlight_mode.uses_edges())
+        {
+            Some(
+                self.scene
+                    .block_edit_targets(self.camera.position, look_dir, edit_reach),
+            )
+        } else {
+            None
+        };
         let mut hud_target_hit_voxel = None;
         let mut hud_target_hit_face = None;
         if let Some(targets) = targets {
@@ -1689,12 +2115,32 @@ impl App {
         } else {
             "off".to_string()
         };
+        let do_navigation_hud = self.menu_open || self.info_panel_mode != InfoPanelMode::Off;
+        let hud_readout_mode =
+            if !self.menu_open && self.info_panel_mode == InfoPanelMode::VectorTable {
+                HudReadoutMode::CompactVectors
+            } else {
+                HudReadoutMode::Full
+            };
+        let hud_rotation_label = if self.menu_open {
+            Some(self.pause_menu_hud_text())
+        } else {
+            self.current_info_hud_text(
+                pair,
+                look_dir,
+                edit_reach,
+                highlight_mode,
+                &vte_sweep_status,
+                hud_target_hit_voxel,
+                hud_target_hit_face,
+            )
+        };
 
         let render_options = RenderOptions {
             do_raster: true,
             render_backend: backend,
-            vte_max_trace_steps: self.args.vte_max_trace_steps.max(1),
-            vte_max_trace_distance: self.args.vte_max_trace_distance.max(1.0),
+            vte_max_trace_steps: self.vte_max_trace_steps,
+            vte_max_trace_distance: self.vte_max_trace_distance,
             vte_display_mode: self.args.vte_display_mode.to_render_mode(),
             vte_slice_layer: self.args.vte_slice_layer,
             vte_thick_half_width: self.args.vte_thick_half_width,
@@ -1703,109 +2149,18 @@ impl App {
             vte_compare_slice_only: self.vte_compare_slice_only_enabled,
             vte_y_slice_lookup_cache: self.vte_y_slice_lookup_cache_enabled,
             vte_integral_sky_emissive_tweak: self.vte_integral_sky_emissive_enabled,
-            vte_integral_sky_scale: self.args.vte_integral_sky_scale.max(0.0),
-            vte_integral_hit_emissive_boost: self.args.vte_integral_hit_emissive_boost.max(0.0),
+            vte_integral_sky_scale: self.vte_integral_sky_scale,
+            vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,
             vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
-            vte_integral_log_merge_k: self.args.vte_integral_log_merge_k.max(0.0),
+            vte_integral_log_merge_k: self.vte_integral_log_merge_k,
             vte_highlight_hit_voxel,
             vte_highlight_place_voxel,
-            do_navigation_hud: true,
+            do_navigation_hud,
             custom_overlay_lines,
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
-            hud_rotation_label: Some({
-                if self.menu_open {
-                    self.pause_menu_hud_text()
-                } else {
-                    let inv = self.current_y_inverted();
-                    let inv = if inv { " Y-INV" } else { "" };
-                    if self.control_scheme.uses_look_frame() {
-                        format!(
-                            "LOOK-FRAME [{}]  spd:{:.1}{}\n\
-                             look:{:+.2} {:+.2} {:+.2} {:+.2}\n\
-                             edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                             mat:[ ]/wheel cycle, 1-0 direct\n\
-                             world:F5 save, F9 load\n\
-                             vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
-                             tweak:F10 sky+emi:{} F11 log:{}",
-                            self.control_scheme.label(),
-                            self.move_speed,
-                            inv,
-                            look_dir[0],
-                            look_dir[1],
-                            look_dir[2],
-                            look_dir[3],
-                            self.place_material,
-                            edit_reach,
-                            highlight_mode.label(),
-                            if self.vte_entities_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            if self.vte_y_slice_lookup_cache_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            vte_sweep_status,
-                            if self.vte_integral_sky_emissive_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            if self.vte_integral_log_merge_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                        )
-                    } else {
-                        format!(
-                            "{} [{}]  spd:{:.1}{}\n\
-                             yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
-                             edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                             mat:[ ]/wheel cycle, 1-0 direct\n\
-                             world:F5 save, F9 load\n\
-                             vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
-                             tweak:F10 sky+emi:{} F11 log:{}",
-                            pair.label(),
-                            self.control_scheme.label(),
-                            self.move_speed,
-                            inv,
-                            self.camera.yaw.to_degrees(),
-                            self.camera.pitch.to_degrees(),
-                            self.camera.xw_angle.to_degrees(),
-                            self.camera.zw_angle.to_degrees(),
-                            self.camera.yw_deviation.to_degrees(),
-                            self.place_material,
-                            edit_reach,
-                            highlight_mode.label(),
-                            if self.vte_entities_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            if self.vte_y_slice_lookup_cache_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            vte_sweep_status,
-                            if self.vte_integral_sky_emissive_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            if self.vte_integral_log_merge_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                        )
-                    }
-                }
-            }),
+            hud_readout_mode,
+            hud_rotation_label,
             hud_target_hit_voxel,
             hud_target_hit_face,
             ..Default::default()
@@ -1813,8 +2168,8 @@ impl App {
 
         let frame_params = FrameParams {
             view_matrix,
-            focal_length_xy: 1.0,
-            focal_length_zw: 1.0,
+            focal_length_xy: self.focal_length_xy,
+            focal_length_zw: self.focal_length_zw,
             render_options,
         };
 
