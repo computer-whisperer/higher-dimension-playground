@@ -10,9 +10,9 @@ use self::hud::{
 use ab_glyph::FontArc;
 use bytemuck::{Pod, Zeroable};
 use common::ModelTetrahedron;
-use exr::prelude::{ImageAttributes, WritableImage};
-use glam::{UVec3, Vec2, Vec4, Vec4Swizzles};
-use image::{ImageBuffer, Rgb, Rgba};
+use exr::prelude::WritableImage;
+use glam::{Vec2, Vec4, Vec4Swizzles};
+use image::{ImageBuffer, Rgba};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
