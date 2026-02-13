@@ -1187,23 +1187,10 @@ fn build_place_preview_instance(
     ];
 
     let mut basis = [right, up, center_forward, side_w];
-    rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
-    rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
+    rotate_basis_plane(&mut basis, 0, 2, time_s * 0.9 + 0.2);
+    rotate_basis_plane(&mut basis, 1, 3, time_s * 1.35 + 0.9);
 
-    let scale = 0.23;
-    let mut model_transform = common::MatN::<5>::identity();
-    for row in 0..4 {
-        model_transform[[row, 0]] = basis[0][row] * scale;
-        model_transform[[row, 1]] = basis[1][row] * scale;
-        model_transform[[row, 2]] = basis[2][row] * scale;
-        model_transform[[row, 3]] = basis[3][row] * scale;
-        model_transform[[row, 4]] = anchor[row];
-    }
-
-    common::ModelInstance {
-        model_transform,
-        cell_material_ids: [material; 8],
-    }
+    build_centered_model_instance(anchor, &basis, [0.23; 4], [material; 8])
 }
 
 fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
