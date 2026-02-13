@@ -765,9 +765,9 @@ fn sample_material(id: u32, tex_pos: [f32; 4]) -> ([f32; 3], f32) {
             col = lerp3(col, major_col, major_line);
             (col, 0.0)
         }
-        12 => ([1.0, 1.0, 1.0], 0.0),                            // White
-        13 => ([1.0, 1.0, 1.0], 40.0),                           // Light source
-        14 => ([1.0, 1.0, 1.0], 0.0),                            // Mirror walls
+        12 => ([1.0, 1.0, 1.0], 0.0),  // White
+        13 => ([1.0, 1.0, 1.0], 40.0), // Light source
+        14 => ([1.0, 1.0, 1.0], 0.0),  // Mirror walls
         15 => {
             // Lava-veined basalt
             let vein_field = 0.5 + 0.5 * ((p[0] * 11.0 + p[1] * 13.0 + p[2] * 17.0) * TAU).sin();

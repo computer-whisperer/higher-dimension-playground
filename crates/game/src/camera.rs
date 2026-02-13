@@ -1214,7 +1214,11 @@ mod tests {
         cam.apply_mouse_look_transport(0.0, -std::f32::consts::FRAC_PI_2, 1.0, true);
         let look = cam.look_direction_look_frame();
         assert!(look[1] > 0.9999, "expected +Y aim, got y={}", look[1]);
-        assert!(look[3].abs() < 1e-4, "expected w≈0 for pure pitch, got w={}", look[3]);
+        assert!(
+            look[3].abs() < 1e-4,
+            "expected w≈0 for pure pitch, got w={}",
+            look[3]
+        );
     }
 
     #[test]
