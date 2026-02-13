@@ -419,7 +419,7 @@ fn main() {
             0
         },
         args,
-        control_scheme: ControlScheme::IntuitiveUpright,
+        control_scheme: ControlScheme::LookTransport,
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
         place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,

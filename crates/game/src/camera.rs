@@ -19,6 +19,7 @@ const JUMP_SPEED: f32 = 8.0;
 pub const PLAYER_HEIGHT: f32 = 1.7;
 pub const PLAYER_RADIUS_XZW: f32 = 0.30;
 const LOOK_TRANSPORT_UPRIGHT_DAMPING: f32 = 0.06;
+const LOOK_TRANSPORT_YAW_UPRIGHT_LOCK: f32 = 1.0;
 const UPRIGHT_YAW_ZERO_OFFSET: f32 = 0.0;
 const UPRIGHT_ZW_ZERO_OFFSET: f32 = std::f32::consts::FRAC_PI_4;
 const UPRIGHT_XW_ZERO_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
@@ -153,6 +154,35 @@ impl Camera4D {
             a[i] = c * old_a[i] + s * old_b[i];
             b[i] = -s * old_a[i] + c * old_b[i];
         }
+    }
+
+    fn rotate_axis_pair_xzw(a: &mut [f32; 4], b: &mut [f32; 4], angle: f32) {
+        let c = angle.cos();
+        let s = angle.sin();
+        let old_a = *a;
+        let old_b = *b;
+        for i in [0usize, 2usize, 3usize] {
+            a[i] = c * old_a[i] + s * old_b[i];
+            b[i] = -s * old_a[i] + c * old_b[i];
+        }
+    }
+
+    fn renormalize_forward_preserve_y(&mut self, target_y: f32) {
+        let y = target_y.clamp(-1.0, 1.0);
+        let mut xzw = [self.look_forward[0], self.look_forward[2], self.look_forward[3]];
+        let len_sq = xzw[0] * xzw[0] + xzw[1] * xzw[1] + xzw[2] * xzw[2];
+        if len_sq <= 1e-12 {
+            return;
+        }
+        let inv_len = len_sq.sqrt().recip();
+        xzw[0] *= inv_len;
+        xzw[1] *= inv_len;
+        xzw[2] *= inv_len;
+        let horiz_len = (1.0 - y * y).max(0.0).sqrt();
+        self.look_forward[0] = xzw[0] * horiz_len;
+        self.look_forward[1] = y;
+        self.look_forward[2] = xzw[1] * horiz_len;
+        self.look_forward[3] = xzw[2] * horiz_len;
     }
 
     fn reorthonormalize_look_frame(&mut self) {
@@ -294,19 +324,29 @@ impl Camera4D {
     ) {
         let yaw_delta = dx * sensitivity;
         let pitch_delta = -dy * sensitivity;
+        let forward_y_before_yaw = self.look_forward[1];
 
         if hidden_mode {
-            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_side, yaw_delta);
+            // Keep yaw strictly on the world XZW hyperplane: do not mix Y into yaw turns.
+            Self::rotate_axis_pair_xzw(&mut self.look_forward, &mut self.look_side, yaw_delta);
         } else {
-            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_right, yaw_delta);
+            // Keep yaw strictly on the world XZW hyperplane: do not mix Y into yaw turns.
+            Self::rotate_axis_pair_xzw(&mut self.look_forward, &mut self.look_right, yaw_delta);
         }
+        // Preserve visual pitch across yaw so yaw never directly tilts toward/away from Y.
+        self.renormalize_forward_preserve_y(forward_y_before_yaw);
         // Keep vertical mouse motion on the visual up axis in both modes; hidden mode
         // only changes the horizontal plane from forward/right to forward/side.
         Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, pitch_delta);
 
         self.reorthonormalize_look_frame();
-        // Low-gain roll damping keeps the world horizon stable without fighting hidden turns.
-        self.stabilize_look_up_axis(LOOK_TRANSPORT_UPRIGHT_DAMPING);
+        // Regular yaw should feel horizon-locked; hidden turns keep the gentler damping.
+        let upright_blend = if !hidden_mode && yaw_delta != 0.0 {
+            LOOK_TRANSPORT_YAW_UPRIGHT_LOCK
+        } else {
+            LOOK_TRANSPORT_UPRIGHT_DAMPING
+        };
+        self.stabilize_look_up_axis(upright_blend);
     }
 
     pub fn apply_mouse_look_rotor(
@@ -1222,6 +1262,21 @@ mod tests {
     }
 
     #[test]
+    fn look_transport_yaw_does_not_change_look_y_after_pitch() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(0.0, -120.0, 0.002, false);
+        let before = cam.look_direction_look_frame();
+        cam.apply_mouse_look_transport(180.0, 0.0, 0.002, false);
+        let after = cam.look_direction_look_frame();
+        assert!(
+            (after[1] - before[1]).abs() < 1e-4,
+            "yaw should preserve look.y in LOOK-TR: before={} after={}",
+            before[1],
+            after[1]
+        );
+    }
+
+    #[test]
     fn look_transport_roll_damping_reduces_tilt() {
         let mut cam = Camera4D::new();
         Camera4D::rotate_axis_pair(
@@ -1242,6 +1297,27 @@ mod tests {
         assert!(
             after > before + 0.4,
             "expected look-transport damping to recover tilt: before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn look_transport_non_hidden_yaw_hard_locks_roll_after_pitch() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(0.0, -120.0, 0.002, false);
+
+        Camera4D::rotate_axis_pair(&mut cam.look_up, &mut cam.look_right, 0.35);
+        cam.reorthonormalize_look_frame();
+
+        cam.apply_mouse_look_transport(90.0, 0.0, 0.002, false);
+
+        let world_up = [0.0, 1.0, 0.0, 0.0];
+        let mut desired_up = Camera4D::sub_projection(world_up, cam.look_forward);
+        desired_up = Camera4D::sub_projection(desired_up, cam.look_side);
+        desired_up = Camera4D::normalize_with_fallback(desired_up, world_up);
+        let alignment = dot4(cam.look_up, desired_up);
+        assert!(
+            alignment > 0.9999,
+            "non-hidden yaw should immediately lock roll after pitch: alignment={alignment}"
         );
     }
 
