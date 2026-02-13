@@ -1,0 +1,55 @@
+name: Windows Builds
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }} (windows)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - polychora
+          - polychora-server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Vulkan SDK (polychora only)
+        if: matrix.package == 'polychora'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Verify shader toolchain (polychora only)
+        if: matrix.package == 'polychora'
+        shell: pwsh
+        run: |
+          Write-Host "VULKAN_SDK=$env:VULKAN_SDK"
+          slangc --version
+          spirv-link --version
+          spirv-val --version
+
+      - name: Build package
+        run: cargo build --release --locked -p ${{ matrix.package }}
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.package }}
+          path: target/release/${{ matrix.package }}.exe
+          if-no-files-found: error
