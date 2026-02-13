@@ -63,8 +63,16 @@ const VTE_TRACE_STEPS_MAX: u32 = 4096;
 const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 const AVATAR_MATERIAL_ID: u32 = 21;
-const REMOTE_AVATAR_PART_COUNT_ESTIMATE: usize = 7;
+const AVATAR_FORWARD_FRAGMENT_COUNT: usize = 4;
+const REMOTE_AVATAR_PART_COUNT_ESTIMATE: usize = 7 + AVATAR_FORWARD_FRAGMENT_COUNT;
 const AVATAR_THICKNESS_SCALE: f32 = 1.30;
+const AVATAR_FORWARD_FRAGMENT_LENGTH_SCALE: f32 = 0.50;
+const REMOTE_PLAYER_POSITION_SMOOTH_HZ: f32 = 12.0;
+const REMOTE_PLAYER_LOOK_SMOOTH_HZ: f32 = 16.0;
+const REMOTE_PLAYER_PREDICTION_LEAD_S: f32 = 0.05;
+const REMOTE_PLAYER_MAX_PREDICTION_S: f32 = 0.22;
+const REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE: f32 = 8.0;
+const REMOTE_PLAYER_MAX_PREDICTED_SPEED: f32 = 24.0;
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -519,7 +527,7 @@ fn main() {
         control_scheme: ControlScheme::LookTransport,
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
-        info_panel_mode: InfoPanelMode::Full,
+        info_panel_mode: InfoPanelMode::VectorTable,
         focal_length_xy: 1.0,
         focal_length_zw: 1.0,
         place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
@@ -727,9 +735,15 @@ struct VteSweepState {
 #[derive(Clone)]
 struct RemotePlayerState {
     name: String,
+    // Latest network-authoritative state from the server.
     position: [f32; 4],
     look: [f32; 4],
     last_update_ms: u64,
+    // Render-smoothed state.
+    render_position: [f32; 4],
+    render_look: [f32; 4],
+    velocity: [f32; 4],
+    last_received_at: Instant,
 }
 
 #[derive(Copy, Clone)]
@@ -945,6 +959,23 @@ fn rotate_basis_plane(basis: &mut [[f32; 4]; 4], axis_a: usize, axis_b: usize, a
 
 fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
+}
+
+fn distance4(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let d0 = a[0] - b[0];
+    let d1 = a[1] - b[1];
+    let d2 = a[2] - b[2];
+    let d3 = a[3] - b[3];
+    (d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3).sqrt()
 }
 
 fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
@@ -1180,7 +1211,6 @@ fn build_remote_player_avatar_instances(
     name_hash: u32,
     position: [f32; 4],
     look: [f32; 4],
-    last_update_ms: u64,
     time_s: f32,
 ) -> Vec<common::ModelInstance> {
     let mut instances = Vec::with_capacity(REMOTE_AVATAR_PART_COUNT_ESTIMATE);
@@ -1188,17 +1218,17 @@ fn build_remote_player_avatar_instances(
     let look_phase = (name_hash as f32) * 0.0078125;
     let id_phase = ((client_id as f32) * 0.173205 + look_phase).rem_euclid(std::f32::consts::TAU);
     let idle_bob = (time_s * 1.9 + id_phase).sin() * 0.04;
-    let sync_jitter = (last_update_ms as f32 * 0.001).sin() * 0.015;
 
     let planar_forward =
         normalize4_with_fallback([look[0], 0.0, look[2], look[3]], [0.0, 0.0, 1.0, 0.0]);
+    let full_forward = normalize4_with_fallback(look, planar_forward);
     let mut avatar_basis = orthonormal_basis_from_forward(planar_forward);
     rotate_basis_plane(&mut avatar_basis, 0, 3, 0.18 * id_phase.sin());
 
     let head_center = offset_point_along_basis(
         position,
         &avatar_basis,
-        [0.0, 0.05 + idle_bob * 0.4 + sync_jitter, 0.0, 0.0],
+        [0.0, 0.05 + idle_bob * 0.4, 0.0, 0.0],
     );
     let mut head_basis = avatar_basis;
     rotate_basis_plane(&mut head_basis, 0, 2, time_s * 2.6 + id_phase * 0.6);
@@ -1288,6 +1318,50 @@ fn build_remote_player_avatar_instances(
             &part_basis,
             *scales,
             avatar_cell_mask(cells),
+        ));
+    }
+
+    for fragment_idx in 0..AVATAR_FORWARD_FRAGMENT_COUNT {
+        let fragment_phase = id_phase + fragment_idx as f32 * 0.83;
+        let fragment_distance = (0.54 + fragment_idx as f32 * 0.30) * AVATAR_FORWARD_FRAGMENT_LENGTH_SCALE;
+        let swirl = time_s * 3.1 + fragment_phase;
+        let lateral_offset = [
+            0.10 * swirl.cos(),
+            -0.04 + 0.05 * (swirl * 0.9).sin(),
+            0.10 * (swirl + 1.1).sin(),
+        ];
+        let forward_distance =
+            fragment_distance + 0.06 * AVATAR_FORWARD_FRAGMENT_LENGTH_SCALE * (swirl * 1.2).sin();
+        let mut fragment_center = head_center;
+        for axis in 0..4 {
+            fragment_center[axis] += avatar_basis[0][axis] * lateral_offset[0]
+                + avatar_basis[1][axis] * lateral_offset[1]
+                + avatar_basis[3][axis] * lateral_offset[2]
+                + full_forward[axis] * forward_distance;
+        }
+
+        let mut fragment_basis = orthonormal_basis_from_forward(full_forward);
+        rotate_basis_plane(&mut fragment_basis, 0, 3, time_s * 1.7 + fragment_phase);
+        rotate_basis_plane(&mut fragment_basis, 1, 2, time_s * 2.3 + fragment_phase * 0.7);
+
+        let fragment_cells: &[usize] = match fragment_idx % 4 {
+            0 => &[0],
+            1 => &[2],
+            2 => &[5],
+            _ => &[7],
+        };
+
+        let depth_scale = 1.0 - fragment_idx as f32 * 0.12;
+        instances.push(build_centered_model_instance(
+            fragment_center,
+            &fragment_basis,
+            [
+                0.10 * AVATAR_THICKNESS_SCALE * depth_scale,
+                0.09 * AVATAR_THICKNESS_SCALE * depth_scale,
+                0.13 * AVATAR_THICKNESS_SCALE * depth_scale,
+                0.09 * AVATAR_THICKNESS_SCALE * depth_scale,
+            ],
+            avatar_cell_mask(fragment_cells),
         ));
     }
 
@@ -1510,7 +1584,102 @@ impl App {
         }
     }
 
+    fn upsert_remote_player_snapshot(
+        &mut self,
+        player: multiplayer::PlayerSnapshot,
+        received_at: Instant,
+    ) {
+        let normalized_look = normalize4_with_fallback(player.look, [0.0, 0.0, 1.0, 0.0]);
+        if let Some(existing) = self.remote_players.get_mut(&player.client_id) {
+            let previous_position = existing.position;
+            let previous_update_ms = existing.last_update_ms;
+
+            existing.name = player.name;
+            existing.position = player.position;
+            existing.look = normalized_look;
+            existing.last_update_ms = player.last_update_ms;
+            existing.last_received_at = received_at;
+
+            let update_delta_ms = player.last_update_ms.saturating_sub(previous_update_ms);
+            if update_delta_ms > 0 {
+                let dt_s = (update_delta_ms as f32) * 0.001;
+                if dt_s > 1e-4 {
+                    let mut velocity = [0.0f32; 4];
+                    for axis in 0..4 {
+                        velocity[axis] = (player.position[axis] - previous_position[axis]) / dt_s;
+                    }
+                    let speed = dot4(velocity, velocity).sqrt();
+                    if speed.is_finite() && speed > REMOTE_PLAYER_MAX_PREDICTED_SPEED {
+                        let clamp = REMOTE_PLAYER_MAX_PREDICTED_SPEED / speed;
+                        for v in &mut velocity {
+                            *v *= clamp;
+                        }
+                    }
+                    existing.velocity = velocity;
+                }
+            } else {
+                for v in &mut existing.velocity {
+                    *v *= 0.85;
+                }
+            }
+
+            if distance4(previous_position, player.position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE {
+                existing.render_position = existing.position;
+                existing.render_look = existing.look;
+                existing.velocity = [0.0; 4];
+            }
+            return;
+        }
+
+        self.remote_players.insert(
+            player.client_id,
+            RemotePlayerState {
+                name: player.name,
+                position: player.position,
+                look: normalized_look,
+                last_update_ms: player.last_update_ms,
+                render_position: player.position,
+                render_look: normalized_look,
+                velocity: [0.0; 4],
+                last_received_at: received_at,
+            },
+        );
+    }
+
+    fn smooth_remote_players(&mut self, dt: f32, now: Instant) {
+        let dt = dt.clamp(0.0, 0.25);
+        if dt <= 0.0 {
+            return;
+        }
+        let pos_alpha = 1.0 - (-REMOTE_PLAYER_POSITION_SMOOTH_HZ * dt).exp();
+        let look_alpha = 1.0 - (-REMOTE_PLAYER_LOOK_SMOOTH_HZ * dt).exp();
+        for player in self.remote_players.values_mut() {
+            let network_age = now.duration_since(player.last_received_at).as_secs_f32();
+            let predict_time = (network_age + REMOTE_PLAYER_PREDICTION_LEAD_S)
+                .clamp(0.0, REMOTE_PLAYER_MAX_PREDICTION_S);
+
+            let mut predicted_position = player.position;
+            for axis in 0..4 {
+                predicted_position[axis] += player.velocity[axis] * predict_time;
+            }
+
+            if distance4(player.render_position, predicted_position)
+                > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
+            {
+                player.render_position = predicted_position;
+            } else {
+                player.render_position = lerp4(player.render_position, predicted_position, pos_alpha);
+            }
+
+            player.render_look = normalize4_with_fallback(
+                lerp4(player.render_look, player.look, look_alpha),
+                player.look,
+            );
+        }
+    }
+
     fn handle_multiplayer_message(&mut self, message: multiplayer::ServerMessage) {
+        let received_at = Instant::now();
         match message {
             multiplayer::ServerMessage::Welcome {
                 client_id,
@@ -1534,15 +1703,7 @@ impl App {
                 if Some(player.client_id) == self.multiplayer_self_id {
                     return;
                 }
-                self.remote_players.insert(
-                    player.client_id,
-                    RemotePlayerState {
-                        name: player.name,
-                        position: player.position,
-                        look: player.look,
-                        last_update_ms: player.last_update_ms,
-                    },
-                );
+                self.upsert_remote_player_snapshot(player, received_at);
             }
             multiplayer::ServerMessage::PlayerLeft { client_id } => {
                 self.remote_players.remove(&client_id);
@@ -1554,15 +1715,7 @@ impl App {
                         continue;
                     }
                     seen.push(player.client_id);
-                    self.remote_players.insert(
-                        player.client_id,
-                        RemotePlayerState {
-                            name: player.name,
-                            position: player.position,
-                            look: player.look,
-                            last_update_ms: player.last_update_ms,
-                        },
-                    );
+                    self.upsert_remote_player_snapshot(player, received_at);
                 }
                 self.remote_players
                     .retain(|client_id, _| seen.contains(client_id));
@@ -1633,9 +1786,8 @@ impl App {
                 instances.extend(build_remote_player_avatar_instances(
                     client_id,
                     stable_name_hash(&player.name),
-                    player.position,
-                    player.look,
-                    player.last_update_ms,
+                    player.render_position,
+                    player.render_look,
                     time_s,
                 ));
             }
@@ -2238,6 +2390,7 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.poll_multiplayer_events();
+        self.smooth_remote_players(dt, now);
 
         if self.menu_open {
             if self.input.take_menu_up() {
