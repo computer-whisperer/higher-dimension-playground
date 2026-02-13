@@ -77,7 +77,7 @@ yay -S shader-slang-bin spirv-tools
 cargo build --release
 
 # Interactive FPS-style explorer (WASD + mouse look, Q/E for W-axis)
-cargo run -p game --release
+cargo run -p polychora --release
 
 # Demo with pre-set camera (supports --headless, --raytrace, --edges, etc.)
 cargo run -p demo --release
@@ -97,7 +97,7 @@ higher-dimension-playground/
 │   ├── matrix_operations.rs # 4D transformation matrices
 │   └── vulkan_setup.rs      # Vulkan device/instance initialization
 ├── crates/
-│   ├── game/                # Interactive FPS-style 4D explorer
+│   ├── polychora/           # Interactive FPS-style 4D explorer
 │   │   └── src/
 │   │       ├── main.rs      # App struct, event loop, mouse grab
 │   │       ├── camera.rs    # Camera4D: 5-angle orientation, auto-leveling
@@ -156,24 +156,25 @@ The default scene includes:
 | Input | Action |
 |-------|--------|
 | W/A/S/D | Move forward/left/back/right |
-| Mouse | Look around (`UPRIGHT` default: yaw/pitch) |
+| Mouse | Look around (`LOOK-TR` default: transport yaw/pitch) |
 | Space/Shift | Move up/down (Y axis) |
 | Q/E | Hidden-dimension strafe (friendly side axis in `UPRIGHT`) |
 | Mouse Back | Hold for XW turning (`UPRIGHT`/`LEG-SIDE`: XW/ZW) |
 | Mouse Back+Forward | Legacy only: double rotation (XZ yaw + YW) |
 | Scroll wheel | Cycle block material (`LEG-SCRL` keeps legacy rotation-pair cycling) |
-| Tab | Cycle control scheme (`UPRIGHT` default -> `LEG-SIDE` -> `LEG-SCRL`) |
+| Tab | Cycle control scheme (`LOOK-TR` -> `ROTOR` -> `LEG-SIDE` -> `LEG-SCRL` -> `UPRIGHT`) |
 | R | Reset camera orientation to defaults |
 | F5 / F9 | Save/load world (`--world-file`) |
 | F12 | Screenshot |
-| Escape | Release mouse (press again to exit) |
+| Escape | Toggle pause menu / mouse capture |
+| Up/Down + Enter | Navigate and activate pause-menu actions |
 | Click | Re-grab mouse |
 | Double-tap Space | Toggle fly/gravity mode |
 
 ### Game Options
 
 ```bash
-cargo run -p game --release -- [OPTIONS]
+cargo run -p polychora --release -- [OPTIONS]
 ```
 
 Core runtime options:

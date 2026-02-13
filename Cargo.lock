@@ -720,19 +720,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
-name = "game"
-version = "0.1.0"
-dependencies = [
- "clap",
- "common",
- "higher-dimension-playground",
- "image",
- "ndarray",
- "vulkano",
- "winit",
-]
-
-[[package]]
 name = "gethostname"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1584,6 +1571,19 @@ dependencies = [
  "rustix",
  "tracing",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "polychora"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "common",
+ "higher-dimension-playground",
+ "image",
+ "ndarray",
+ "vulkano",
+ "winit",
 ]
 
 [[package]]

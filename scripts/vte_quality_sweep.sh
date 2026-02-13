@@ -68,7 +68,7 @@ for shot in "${SHOTS[@]}"; do
   for layers in $LAYERS_LIST; do
     for steps in $TRACE_STEPS_LIST; do
       echo "Rendering scene=$scene shot=$shot_name layers=$layers steps=$steps"
-      cargo run -p game --release -- \
+      cargo run -p polychora --release -- \
         --backend voxel-traversal \
         --scene "$scene" \
         --width "$WIDTH" \

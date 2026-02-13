@@ -8,10 +8,10 @@ Define a control mapping and transform math spec for first-person 4D navigation 
 - Minimizes mode confusion while still exposing genuine 4D motion.
 - Is mathematically explicit enough to prevent long-term acclimation to a flawed scheme.
 
-This document is scoped to the interactive explorer in `crates/game` and references current behavior in:
-- `crates/game/src/input.rs`
-- `crates/game/src/camera.rs`
-- `crates/game/src/main.rs`
+This document is scoped to the interactive explorer in `crates/polychora` and references current behavior in:
+- `crates/polychora/src/input.rs`
+- `crates/polychora/src/camera.rs`
+- `crates/polychora/src/main.rs`
 
 ## 2. Current Engine Baseline (Observed)
 
@@ -56,7 +56,7 @@ Camera tests currently verify:
 - Upright diagonal normalization.
 
 All camera tests passed on 2026-02-12 via:
-- `cargo test -p game camera::tests -- --nocapture`
+- `cargo test -p polychora camera::tests -- --nocapture`
 
 ## 3. External Research Findings (Condensed)
 

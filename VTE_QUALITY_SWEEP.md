@@ -10,7 +10,7 @@ vs. performance, with fixed scenes/cameras so artifacts are comparable.
   - 2x2x2x2 outer lattice of colored blocks (materials 1..5 cycling)
   - bright center block (material 13)
 
-Use `--scene flat` or `--scene demo-cubes` with `game`.
+Use `--scene flat` or `--scene demo-cubes` with `polychora`.
 
 ## Sweep Script
 

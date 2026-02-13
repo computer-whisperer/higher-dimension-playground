@@ -1,14 +1,14 @@
-# Non-Voxel Entities in `game` (Pill Avatar Subproject)
+# Non-Voxel Entities in `polychora` (Pill Avatar Subproject)
 
 ## Goal
 
-Render a small number of non-voxel entities (example: primitive pill-like player avatars) in the `crates/game` world while preserving current voxel rendering behavior.
+Render a small number of non-voxel entities (example: primitive pill-like player avatars) in the `crates/polychora` world while preserving current voxel rendering behavior.
 
 
 ## Current State (What Exists Today)
 
-1. `game` already sends non-voxel `ModelInstance`s to the renderer.
-- A held-item preview tesseract is built every frame in `crates/game/src/main.rs:597` and rendered in both backends at `crates/game/src/main.rs:1073`.
+1. `polychora` already sends non-voxel `ModelInstance`s to the renderer.
+- A held-item preview tesseract is built every frame in `crates/polychora/src/main.rs:597` and rendered in both backends at `crates/polychora/src/main.rs:1073`.
 
 2. All tetra instances currently share one hardcoded model mesh (tesseract tetra decomposition).
 - `OneTimeBuffers` always loads `generate_tesseract_tetrahedrons()` in `src/render.rs:1230`.
@@ -43,10 +43,10 @@ Use existing tesseract model instances to build approximate capsule/pill avatars
 ### Changes
 
 1. Add game-level dynamic entity data model.
-- New module in `crates/game/src/` (e.g. `entities.rs`) with entity id, position/orientation, material, and simple avatar primitive parameters.
+- New module in `crates/polychora/src/` (e.g. `entities.rs`) with entity id, position/orientation, material, and simple avatar primitive parameters.
 
 2. Build avatar render instances each frame.
-- Extend scene/app flow to append avatar instances to the same `Vec<ModelInstance>` path used today (`crates/game/src/main.rs:1084`).
+- Extend scene/app flow to append avatar instances to the same `Vec<ModelInstance>` path used today (`crates/polychora/src/main.rs:1084`).
 
 3. Keep VTE behavior explicit for milestone 1.
 - Option A1: Render avatars only on tetra backends.

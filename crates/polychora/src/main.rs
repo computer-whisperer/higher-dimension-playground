@@ -111,7 +111,7 @@ impl EditHighlightModeArg {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(version, about = "4D game explorer")]
+#[command(version, about = "4D polychora explorer")]
 struct Args {
     /// Render buffer width in pixels
     #[arg(long, short = 'W', default_value_t = 480)]
@@ -434,6 +434,8 @@ fn main() {
         vte_sweep_include_no_entities,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
+        menu_open: false,
+        menu_selection: 0,
     };
 
     if app.vte_reference_compare_enabled {
@@ -588,6 +590,8 @@ struct App {
     vte_sweep_include_no_entities: bool,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
+    menu_open: bool,
+    menu_selection: usize,
 }
 
 #[derive(Copy, Clone)]
@@ -598,6 +602,31 @@ struct VteSweepState {
     previous_entities: bool,
     previous_y_slice_lookup_cache: bool,
 }
+
+#[derive(Copy, Clone)]
+enum PauseMenuItem {
+    Resume,
+    ControlScheme,
+    VteEntities,
+    VteYSliceLookupCache,
+    IntegralSkyEmissive,
+    IntegralLogMerge,
+    SaveWorld,
+    LoadWorld,
+    Quit,
+}
+
+const PAUSE_MENU_ITEMS: [PauseMenuItem; 9] = [
+    PauseMenuItem::Resume,
+    PauseMenuItem::ControlScheme,
+    PauseMenuItem::VteEntities,
+    PauseMenuItem::VteYSliceLookupCache,
+    PauseMenuItem::IntegralSkyEmissive,
+    PauseMenuItem::IntegralLogMerge,
+    PauseMenuItem::SaveWorld,
+    PauseMenuItem::LoadWorld,
+    PauseMenuItem::Quit,
+];
 
 fn latest_framebuffer_screenshot_path() -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -891,6 +920,222 @@ impl App {
         };
     }
 
+    fn cycle_control_scheme(&mut self) {
+        let previous_scheme = self.control_scheme;
+        self.control_scheme = self.control_scheme.next();
+        self.scroll_cycle_pair = RotationPair::Standard;
+        if self.control_scheme.is_upright_primary() {
+            self.camera.enforce_upright_constraints();
+        } else if self.control_scheme.uses_look_frame()
+            && (!previous_scheme.uses_look_frame() || !self.camera.look_frame_initialized())
+        {
+            if previous_scheme.is_upright_primary() {
+                self.camera.sync_look_frame_from_upright_rotation();
+            } else {
+                self.camera.sync_look_frame_from_standard_rotation();
+            }
+        }
+    }
+
+    fn save_world(&mut self) {
+        match self.scene.save_world_to_path(&self.world_file) {
+            Ok(chunks) => eprintln!(
+                "Saved world to {} ({} non-empty chunks)",
+                self.world_file.display(),
+                chunks
+            ),
+            Err(err) => eprintln!(
+                "Failed to save world to {}: {err}",
+                self.world_file.display()
+            ),
+        }
+    }
+
+    fn load_world(&mut self) {
+        match self.scene.load_world_from_path(&self.world_file) {
+            Ok(chunks) => eprintln!(
+                "Loaded world from {} ({} non-empty chunks)",
+                self.world_file.display(),
+                chunks
+            ),
+            Err(err) => eprintln!(
+                "Failed to load world from {}: {err}",
+                self.world_file.display()
+            ),
+        }
+    }
+
+    fn toggle_vte_entities(&mut self) {
+        if let Some(state) = self.vte_sweep_state {
+            eprintln!(
+                "[VTE sweep #{}] ignoring manual entities toggle while sweep is active.",
+                state.run_id
+            );
+            return;
+        }
+        self.vte_entities_enabled = !self.vte_entities_enabled;
+        if let Some(rcx) = self.rcx.as_mut() {
+            rcx.reset_gpu_profile_window();
+        }
+        eprintln!(
+            "VTE runtime entities: {}",
+            if self.vte_entities_enabled { "on" } else { "off" }
+        );
+    }
+
+    fn toggle_vte_y_slice_lookup_cache(&mut self) {
+        if let Some(state) = self.vte_sweep_state {
+            eprintln!(
+                "[VTE sweep #{}] ignoring manual y-slice lookup cache toggle while sweep is active.",
+                state.run_id
+            );
+            return;
+        }
+        self.vte_y_slice_lookup_cache_enabled = !self.vte_y_slice_lookup_cache_enabled;
+        if let Some(rcx) = self.rcx.as_mut() {
+            rcx.reset_gpu_profile_window();
+        }
+        eprintln!(
+            "VTE runtime y-slice lookup cache: {}",
+            if self.vte_y_slice_lookup_cache_enabled {
+                "on"
+            } else {
+                "off"
+            }
+        );
+    }
+
+    fn toggle_vte_integral_sky_emissive(&mut self) {
+        self.vte_integral_sky_emissive_enabled = !self.vte_integral_sky_emissive_enabled;
+        eprintln!(
+            "VTE fused integral sky/emissive tweak: {} (sky_scale={:.3}, hit_emissive_boost={:.3})",
+            if self.vte_integral_sky_emissive_enabled {
+                "on"
+            } else {
+                "off"
+            },
+            self.args.vte_integral_sky_scale.max(0.0),
+            self.args.vte_integral_hit_emissive_boost.max(0.0),
+        );
+    }
+
+    fn toggle_vte_integral_log_merge(&mut self) {
+        self.vte_integral_log_merge_enabled = !self.vte_integral_log_merge_enabled;
+        eprintln!(
+            "VTE fused integral log merge tweak: {} (k={:.3})",
+            if self.vte_integral_log_merge_enabled {
+                "on"
+            } else {
+                "off"
+            },
+            self.args.vte_integral_log_merge_k.max(0.0),
+        );
+    }
+
+    fn drain_gameplay_inputs_while_menu_open(&mut self) {
+        self.input.take_scheme_cycle();
+        self.input.take_reset_orientation();
+        self.input.take_vte_sweep();
+        self.input.take_vte_entities_toggle();
+        self.input.take_vte_y_slice_lookup_cache_toggle();
+        self.input.take_vte_integral_sky_emissive_toggle();
+        self.input.take_vte_integral_log_merge_toggle();
+        self.input.take_save_world();
+        self.input.take_load_world();
+        self.input.take_scroll_steps();
+        self.input.take_fly_toggle();
+        self.input.take_jump();
+        self.input.take_place_material_prev();
+        self.input.take_place_material_next();
+        self.input.take_place_material_digit();
+        self.input.take_remove_block();
+        self.input.take_place_block();
+        self.input.take_mouse_delta();
+    }
+
+    fn move_menu_selection(&mut self, delta: i32) {
+        let len = PAUSE_MENU_ITEMS.len() as i32;
+        let index = self.menu_selection as i32;
+        self.menu_selection = (index + delta).rem_euclid(len) as usize;
+    }
+
+    fn selected_menu_item(&self) -> PauseMenuItem {
+        PAUSE_MENU_ITEMS[self.menu_selection]
+    }
+
+    fn activate_selected_menu_item(&mut self) {
+        match self.selected_menu_item() {
+            PauseMenuItem::Resume => {
+                self.menu_open = false;
+                let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+                if let Some(window) = window {
+                    self.grab_mouse(&window);
+                }
+            }
+            PauseMenuItem::ControlScheme => self.cycle_control_scheme(),
+            PauseMenuItem::VteEntities => self.toggle_vte_entities(),
+            PauseMenuItem::VteYSliceLookupCache => self.toggle_vte_y_slice_lookup_cache(),
+            PauseMenuItem::IntegralSkyEmissive => self.toggle_vte_integral_sky_emissive(),
+            PauseMenuItem::IntegralLogMerge => self.toggle_vte_integral_log_merge(),
+            PauseMenuItem::SaveWorld => self.save_world(),
+            PauseMenuItem::LoadWorld => self.load_world(),
+            PauseMenuItem::Quit => self.should_exit_after_render = true,
+        }
+    }
+
+    fn pause_menu_item_text(&self, item: PauseMenuItem) -> String {
+        match item {
+            PauseMenuItem::Resume => "Resume".to_string(),
+            PauseMenuItem::ControlScheme => {
+                format!("Control scheme: {}", self.control_scheme.label())
+            }
+            PauseMenuItem::VteEntities => format!(
+                "VTE entities: {}",
+                if self.vte_entities_enabled { "on" } else { "off" }
+            ),
+            PauseMenuItem::VteYSliceLookupCache => format!(
+                "VTE y-cache: {}",
+                if self.vte_y_slice_lookup_cache_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+            PauseMenuItem::IntegralSkyEmissive => format!(
+                "Integral sky+emi: {}",
+                if self.vte_integral_sky_emissive_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+            PauseMenuItem::IntegralLogMerge => format!(
+                "Integral log merge: {}",
+                if self.vte_integral_log_merge_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+            PauseMenuItem::SaveWorld => "Save world".to_string(),
+            PauseMenuItem::LoadWorld => "Load world".to_string(),
+            PauseMenuItem::Quit => "Quit".to_string(),
+        }
+    }
+
+    fn pause_menu_hud_text(&self) -> String {
+        let mut text = String::from("MENU  (Up/Down + Enter, Esc resume)\n");
+        for (i, item) in PAUSE_MENU_ITEMS.iter().enumerate() {
+            let prefix = if i == self.menu_selection { ">" } else { " " };
+            text.push_str(prefix);
+            text.push(' ');
+            text.push_str(&self.pause_menu_item_text(*item));
+            text.push('\n');
+        }
+        text.push_str("Click window or Resume to return to capture.");
+        text
+    }
+
     fn active_rotation_pair(&self) -> RotationPair {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => {
@@ -1082,156 +1327,152 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
 
-        // Scheme cycle (Tab)
-        if self.input.take_scheme_cycle() {
-            let previous_scheme = self.control_scheme;
-            self.control_scheme = self.control_scheme.next();
-            self.scroll_cycle_pair = RotationPair::Standard;
-            if self.control_scheme.is_upright_primary() {
-                self.camera.enforce_upright_constraints();
-            } else if self.control_scheme.uses_look_frame()
-                && (!previous_scheme.uses_look_frame() || !self.camera.look_frame_initialized())
-            {
-                if previous_scheme.is_upright_primary() {
-                    self.camera.sync_look_frame_from_upright_rotation();
-                } else {
-                    self.camera.sync_look_frame_from_standard_rotation();
-                }
+        if self.menu_open {
+            if self.input.take_menu_up() {
+                self.move_menu_selection(-1);
             }
-        }
+            if self.input.take_menu_down() {
+                self.move_menu_selection(1);
+            }
+            if self.input.take_menu_activate() {
+                self.activate_selected_menu_item();
+            }
+            self.drain_gameplay_inputs_while_menu_open();
+        } else {
+            self.input.take_menu_up();
+            self.input.take_menu_down();
+            self.input.take_menu_activate();
 
-        // Reset orientation (R)
-        if self.input.take_reset_orientation() {
-            self.camera.reset_orientation();
-        }
+            // Scheme cycle (Tab)
+            if self.input.take_scheme_cycle() {
+                self.cycle_control_scheme();
+            }
 
-        if self.input.take_vte_sweep() {
-            self.toggle_vte_runtime_sweep();
-        }
+            // Reset orientation (R)
+            if self.input.take_reset_orientation() {
+                self.camera.reset_orientation();
+            }
 
-        if self.input.take_vte_entities_toggle() {
-            if let Some(state) = self.vte_sweep_state {
-                eprintln!(
-                    "[VTE sweep #{}] ignoring manual entities toggle while sweep is active.",
-                    state.run_id
-                );
-            } else {
-                self.vte_entities_enabled = !self.vte_entities_enabled;
-                if let Some(rcx) = self.rcx.as_mut() {
-                    rcx.reset_gpu_profile_window();
-                }
-                eprintln!(
-                    "VTE runtime entities: {}",
-                    if self.vte_entities_enabled {
-                        "on"
-                    } else {
-                        "off"
+            if self.input.take_vte_sweep() {
+                self.toggle_vte_runtime_sweep();
+            }
+            if self.input.take_vte_entities_toggle() {
+                self.toggle_vte_entities();
+            }
+            if self.input.take_vte_y_slice_lookup_cache_toggle() {
+                self.toggle_vte_y_slice_lookup_cache();
+            }
+            if self.input.take_vte_integral_sky_emissive_toggle() {
+                self.toggle_vte_integral_sky_emissive();
+            }
+            if self.input.take_vte_integral_log_merge_toggle() {
+                self.toggle_vte_integral_log_merge();
+            }
+
+            if self.input.take_save_world() {
+                self.save_world();
+            }
+            if self.input.take_load_world() {
+                self.load_world();
+            }
+
+            // Scroll wheel
+            let scroll_steps = self.input.take_scroll_steps();
+            if scroll_steps != 0 {
+                if self.control_scheme.uses_scroll_pair_cycle() {
+                    for _ in 0..scroll_steps.abs() {
+                        if scroll_steps > 0 {
+                            self.scroll_cycle_pair = self.scroll_cycle_pair.next();
+                        } else {
+                            // Reverse cycle for the legacy scroll mode.
+                            self.scroll_cycle_pair = match self.scroll_cycle_pair {
+                                RotationPair::Standard => RotationPair::FourD,
+                                RotationPair::FourD => RotationPair::Standard,
+                                RotationPair::DoubleRotation => RotationPair::Standard,
+                            };
+                        }
                     }
-                );
-            }
-        }
-
-        if self.input.take_vte_y_slice_lookup_cache_toggle() {
-            if let Some(state) = self.vte_sweep_state {
-                eprintln!(
-                    "[VTE sweep #{}] ignoring manual y-slice lookup cache toggle while sweep is active.",
-                    state.run_id
-                );
-            } else {
-                self.vte_y_slice_lookup_cache_enabled = !self.vte_y_slice_lookup_cache_enabled;
-                if let Some(rcx) = self.rcx.as_mut() {
-                    rcx.reset_gpu_profile_window();
-                }
-                eprintln!(
-                    "VTE runtime y-slice lookup cache: {}",
-                    if self.vte_y_slice_lookup_cache_enabled {
-                        "on"
-                    } else {
-                        "off"
+                } else {
+                    for _ in 0..scroll_steps.abs() {
+                        if scroll_steps > 0 {
+                            self.cycle_place_material_next();
+                        } else {
+                            self.cycle_place_material_prev();
+                        }
                     }
-                );
+                    eprintln!("Selected place material: {}", self.place_material);
+                }
             }
-        }
 
-        if self.input.take_vte_integral_sky_emissive_toggle() {
-            self.vte_integral_sky_emissive_enabled = !self.vte_integral_sky_emissive_enabled;
-            eprintln!(
-                "VTE fused integral sky/emissive tweak: {} (sky_scale={:.3}, hit_emissive_boost={:.3})",
-                if self.vte_integral_sky_emissive_enabled {
-                    "on"
-                } else {
-                    "off"
-                },
-                self.args.vte_integral_sky_scale.max(0.0),
-                self.args.vte_integral_hit_emissive_boost.max(0.0),
-            );
-        }
-
-        if self.input.take_vte_integral_log_merge_toggle() {
-            self.vte_integral_log_merge_enabled = !self.vte_integral_log_merge_enabled;
-            eprintln!(
-                "VTE fused integral log merge tweak: {} (k={:.3})",
-                if self.vte_integral_log_merge_enabled {
-                    "on"
-                } else {
-                    "off"
-                },
-                self.args.vte_integral_log_merge_k.max(0.0),
-            );
-        }
-
-        if self.input.take_save_world() {
-            match self.scene.save_world_to_path(&self.world_file) {
-                Ok(chunks) => eprintln!(
-                    "Saved world to {} ({} non-empty chunks)",
-                    self.world_file.display(),
-                    chunks
-                ),
-                Err(err) => eprintln!(
-                    "Failed to save world to {}: {err}",
-                    self.world_file.display()
-                ),
-            }
-        }
-
-        if self.input.take_load_world() {
-            match self.scene.load_world_from_path(&self.world_file) {
-                Ok(chunks) => eprintln!(
-                    "Loaded world from {} ({} non-empty chunks)",
-                    self.world_file.display(),
-                    chunks
-                ),
-                Err(err) => eprintln!(
-                    "Failed to load world from {}: {err}",
-                    self.world_file.display()
-                ),
-            }
-        }
-
-        // Scroll wheel
-        let scroll_steps = self.input.take_scroll_steps();
-        if scroll_steps != 0 {
-            if self.control_scheme.uses_scroll_pair_cycle() {
-                for _ in 0..scroll_steps.abs() {
-                    if scroll_steps > 0 {
-                        self.scroll_cycle_pair = self.scroll_cycle_pair.next();
-                    } else {
-                        // Reverse cycle for the legacy scroll mode.
-                        self.scroll_cycle_pair = match self.scroll_cycle_pair {
-                            RotationPair::Standard => RotationPair::FourD,
-                            RotationPair::FourD => RotationPair::Standard,
-                            RotationPair::DoubleRotation => RotationPair::Standard,
-                        };
+            // Mouse look
+            if self.mouse_grabbed {
+                let pair = self.active_rotation_pair();
+                let (dx, dy) = self.input.take_mouse_delta();
+                match self.control_scheme {
+                    ControlScheme::LookTransport => {
+                        self.camera.apply_mouse_look_transport(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            self.input.mouse_back_held(),
+                        );
+                    }
+                    ControlScheme::RotorFree => {
+                        self.camera.apply_mouse_look_rotor(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            self.input.mouse_back_held(),
+                            self.input.mouse_forward_held(),
+                        );
+                    }
+                    ControlScheme::IntuitiveUpright
+                    | ControlScheme::LegacySideButtonLayers
+                    | ControlScheme::LegacyScrollCycle => {
+                        self.camera.apply_mouse_look_on(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            pair.h_target(),
+                            pair.v_target(),
+                        );
                     }
                 }
             } else {
-                for _ in 0..scroll_steps.abs() {
-                    if scroll_steps > 0 {
-                        self.cycle_place_material_next();
-                    } else {
-                        self.cycle_place_material_prev();
+                self.input.take_mouse_delta();
+            }
+
+            let pair = self.active_rotation_pair();
+            match self.control_scheme {
+                ControlScheme::IntuitiveUpright => {
+                    self.camera.enforce_upright_constraints();
+                }
+                ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                    // Auto-level when not in double rotation
+                    if pair != RotationPair::DoubleRotation {
+                        self.camera.auto_level(dt);
                     }
                 }
+                ControlScheme::LookTransport | ControlScheme::RotorFree => {}
+            }
+
+            // Toggle flight mode on double-tap space
+            if self.input.take_fly_toggle() {
+                self.camera.toggle_flying();
+            }
+
+            // Block place material selection.
+            if self.input.take_place_material_prev() {
+                self.cycle_place_material_prev();
+                eprintln!("Selected place material: {}", self.place_material);
+            }
+            if self.input.take_place_material_next() {
+                self.cycle_place_material_next();
+                eprintln!("Selected place material: {}", self.place_material);
+            }
+            if let Some(material_digit) = self.input.take_place_material_digit() {
+                self.place_material =
+                    material_digit.clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
                 eprintln!("Selected place material: {}", self.place_material);
             }
         }
@@ -1239,117 +1480,102 @@ impl App {
         // Determine active rotation pair
         let pair = self.active_rotation_pair();
 
-        // Mouse look
-        if self.mouse_grabbed {
-            let (dx, dy) = self.input.take_mouse_delta();
-            match self.control_scheme {
-                ControlScheme::LookTransport => {
-                    self.camera.apply_mouse_look_transport(
-                        dx,
-                        dy,
-                        MOUSE_SENSITIVITY,
-                        self.input.mouse_back_held(),
-                    );
-                }
-                ControlScheme::RotorFree => {
-                    self.camera.apply_mouse_look_rotor(
-                        dx,
-                        dy,
-                        MOUSE_SENSITIVITY,
-                        self.input.mouse_back_held(),
-                        self.input.mouse_forward_held(),
-                    );
-                }
-                ControlScheme::IntuitiveUpright
-                | ControlScheme::LegacySideButtonLayers
-                | ControlScheme::LegacyScrollCycle => {
-                    self.camera.apply_mouse_look_on(
-                        dx,
-                        dy,
-                        MOUSE_SENSITIVITY,
-                        pair.h_target(),
-                        pair.v_target(),
-                    );
-                }
-            }
-        } else {
-            self.input.take_mouse_delta();
-        }
-
-        match self.control_scheme {
-            ControlScheme::IntuitiveUpright => {
-                self.camera.enforce_upright_constraints();
-            }
-            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
-                // Auto-level when not in double rotation
-                if pair != RotationPair::DoubleRotation {
-                    self.camera.auto_level(dt);
-                }
-            }
-            ControlScheme::LookTransport | ControlScheme::RotorFree => {}
-        }
-
-        // Toggle flight mode on double-tap space
-        if self.input.take_fly_toggle() {
-            self.camera.toggle_flying();
-        }
-
-        // Block place material selection.
-        if self.input.take_place_material_prev() {
-            self.cycle_place_material_prev();
-            eprintln!("Selected place material: {}", self.place_material);
-        }
-        if self.input.take_place_material_next() {
-            self.cycle_place_material_next();
-            eprintln!("Selected place material: {}", self.place_material);
-        }
-        if let Some(material_digit) = self.input.take_place_material_digit() {
-            self.place_material =
-                material_digit.clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
-            eprintln!("Selected place material: {}", self.place_material);
-        }
-
-        // Jump when in gravity mode, consume jump either way
-        if self.camera.is_flying {
-            self.input.take_jump();
-        } else if self.input.take_jump() {
-            self.camera.jump();
-        }
-
-        // Movement (vertical zeroed in gravity mode internally)
-        let prev_position = self.camera.position;
-        let look_dir = self.current_look_direction();
         let edit_reach = self
             .args
             .edit_reach
             .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
-        let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
-        match self.control_scheme {
-            ControlScheme::IntuitiveUpright => {
-                self.camera.apply_movement_upright(
-                    forward,
-                    strafe,
-                    vertical,
-                    w_axis,
-                    dt,
-                    self.move_speed,
+
+        if !self.menu_open {
+            // Jump when in gravity mode, consume jump either way.
+            if self.camera.is_flying {
+                self.input.take_jump();
+            } else if self.input.take_jump() {
+                self.camera.jump();
+            }
+
+            // Movement (vertical zeroed in gravity mode internally).
+            let prev_position = self.camera.position;
+            let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
+            match self.control_scheme {
+                ControlScheme::IntuitiveUpright => {
+                    self.camera.apply_movement_upright(
+                        forward,
+                        strafe,
+                        vertical,
+                        w_axis,
+                        dt,
+                        self.move_speed,
+                    );
+                }
+                ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                    self.camera.apply_movement_look_frame(
+                        forward,
+                        strafe,
+                        vertical,
+                        w_axis,
+                        dt,
+                        self.move_speed,
+                    );
+                }
+                ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                    self.camera
+                        .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
+                }
+            }
+
+            // Apply gravity physics.
+            self.camera.update_physics(dt);
+            if self.camera.is_flying {
+                self.camera.is_grounded = false;
+            } else {
+                let (resolved_pos, grounded) = self.scene.resolve_player_collision(
+                    prev_position,
+                    self.camera.position,
+                    &mut self.camera.velocity_y,
                 );
+                self.camera.position = resolved_pos;
+                self.camera.is_grounded = grounded;
             }
-            ControlScheme::LookTransport | ControlScheme::RotorFree => {
-                self.camera.apply_movement_look_frame(
-                    forward,
-                    strafe,
-                    vertical,
-                    w_axis,
-                    dt,
-                    self.move_speed,
-                );
+
+            // Block edit actions.
+            let look_dir_for_edit = self.current_look_direction();
+            if self.mouse_grabbed {
+                let remove_requested = self.input.take_remove_block();
+                let place_requested = self.input.take_place_block();
+                if remove_requested || place_requested {
+                    if remove_requested {
+                        if let Some([x, y, z, w]) = self.scene.remove_block_along_ray(
+                            self.camera.position,
+                            look_dir_for_edit,
+                            edit_reach,
+                        ) {
+                            eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
+                        }
+                    } else if place_requested {
+                        if let Some([x, y, z, w]) = self.scene.place_block_along_ray(
+                            self.camera.position,
+                            look_dir_for_edit,
+                            edit_reach,
+                            voxel::VoxelType(self.place_material),
+                        ) {
+                            eprintln!(
+                                "Placed voxel material {} at ({x}, {y}, {z}, {w})",
+                                self.place_material
+                            );
+                        }
+                    }
+                }
+            } else {
+                self.input.take_remove_block();
+                self.input.take_place_block();
             }
-            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
-                self.camera
-                    .apply_movement(forward, strafe, vertical, w_axis, dt, self.move_speed);
-            }
+        } else {
+            self.input.take_jump();
+            self.input.take_remove_block();
+            self.input.take_place_block();
         }
+
+        let look_dir = self.current_look_direction();
         let preview_time_s = (now - self.start_time).as_secs_f32();
         let preview_instance = build_place_preview_instance(
             &self.camera,
@@ -1358,57 +1584,15 @@ impl App {
             self.control_scheme,
         );
 
-        // Apply gravity physics
-        self.camera.update_physics(dt);
-        if self.camera.is_flying {
-            self.camera.is_grounded = false;
-        } else {
-            let (resolved_pos, grounded) = self.scene.resolve_player_collision(
-                prev_position,
-                self.camera.position,
-                &mut self.camera.velocity_y,
-            );
-            self.camera.position = resolved_pos;
-            self.camera.is_grounded = grounded;
-        }
-
-        if self.mouse_grabbed {
-            let remove_requested = self.input.take_remove_block();
-            let place_requested = self.input.take_place_block();
-            if remove_requested || place_requested {
-                if remove_requested {
-                    if let Some([x, y, z, w]) = self.scene.remove_block_along_ray(
-                        self.camera.position,
-                        look_dir,
-                        edit_reach,
-                    ) {
-                        eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
-                    }
-                } else if place_requested {
-                    if let Some([x, y, z, w]) = self.scene.place_block_along_ray(
-                        self.camera.position,
-                        look_dir,
-                        edit_reach,
-                        voxel::VoxelType(self.place_material),
-                    ) {
-                        eprintln!(
-                            "Placed voxel material {} at ({x}, {y}, {z}, {w})",
-                            self.place_material
-                        );
-                    }
-                }
-            }
-        } else {
-            self.input.take_remove_block();
-            self.input.take_place_block();
-        }
-
         // Build view matrix and scene
         let view_matrix = self.current_view_matrix();
         let backend = self.args.backend.to_render_backend();
         let highlight_mode = self.args.edit_highlight_mode;
         let targets =
-            if self.mouse_grabbed && (highlight_mode.uses_faces() || highlight_mode.uses_edges()) {
+            if !self.menu_open
+                && self.mouse_grabbed
+                && (highlight_mode.uses_faces() || highlight_mode.uses_edges())
+            {
                 Some(
                     self.scene
                         .block_edit_targets(self.camera.position, look_dir, edit_reach),
@@ -1530,92 +1714,96 @@ impl App {
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
             hud_rotation_label: Some({
-                let inv = self.current_y_inverted();
-                let inv = if inv { " Y-INV" } else { "" };
-                if self.control_scheme.uses_look_frame() {
-                    format!(
-                        "LOOK-FRAME [{}]  spd:{:.1}{}\n\
-                         look:{:+.2} {:+.2} {:+.2} {:+.2}\n\
-                         edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                         mat:[ ]/wheel cycle, 1-0 direct\n\
-                         world:F5 save, F9 load\n\
-                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
-                         tweak:F10 sky+emi:{} F11 log:{}",
-                        self.control_scheme.label(),
-                        self.move_speed,
-                        inv,
-                        look_dir[0],
-                        look_dir[1],
-                        look_dir[2],
-                        look_dir[3],
-                        self.place_material,
-                        edit_reach,
-                        highlight_mode.label(),
-                        if self.vte_entities_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        if self.vte_y_slice_lookup_cache_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        vte_sweep_status,
-                        if self.vte_integral_sky_emissive_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        if self.vte_integral_log_merge_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                    )
+                if self.menu_open {
+                    self.pause_menu_hud_text()
                 } else {
-                    format!(
-                        "{} [{}]  spd:{:.1}{}\n\
-                         yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
-                         edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                         mat:[ ]/wheel cycle, 1-0 direct\n\
-                         world:F5 save, F9 load\n\
-                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
-                         tweak:F10 sky+emi:{} F11 log:{}",
-                        pair.label(),
-                        self.control_scheme.label(),
-                        self.move_speed,
-                        inv,
-                        self.camera.yaw.to_degrees(),
-                        self.camera.pitch.to_degrees(),
-                        self.camera.xw_angle.to_degrees(),
-                        self.camera.zw_angle.to_degrees(),
-                        self.camera.yw_deviation.to_degrees(),
-                        self.place_material,
-                        edit_reach,
-                        highlight_mode.label(),
-                        if self.vte_entities_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        if self.vte_y_slice_lookup_cache_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        vte_sweep_status,
-                        if self.vte_integral_sky_emissive_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        if self.vte_integral_log_merge_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                    )
+                    let inv = self.current_y_inverted();
+                    let inv = if inv { " Y-INV" } else { "" };
+                    if self.control_scheme.uses_look_frame() {
+                        format!(
+                            "LOOK-FRAME [{}]  spd:{:.1}{}\n\
+                             look:{:+.2} {:+.2} {:+.2} {:+.2}\n\
+                             edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
+                             mat:[ ]/wheel cycle, 1-0 direct\n\
+                             world:F5 save, F9 load\n\
+                             vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                             tweak:F10 sky+emi:{} F11 log:{}",
+                            self.control_scheme.label(),
+                            self.move_speed,
+                            inv,
+                            look_dir[0],
+                            look_dir[1],
+                            look_dir[2],
+                            look_dir[3],
+                            self.place_material,
+                            edit_reach,
+                            highlight_mode.label(),
+                            if self.vte_entities_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            if self.vte_y_slice_lookup_cache_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            vte_sweep_status,
+                            if self.vte_integral_sky_emissive_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            if self.vte_integral_log_merge_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                        )
+                    } else {
+                        format!(
+                            "{} [{}]  spd:{:.1}{}\n\
+                             yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
+                             edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
+                             mat:[ ]/wheel cycle, 1-0 direct\n\
+                             world:F5 save, F9 load\n\
+                             vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                             tweak:F10 sky+emi:{} F11 log:{}",
+                            pair.label(),
+                            self.control_scheme.label(),
+                            self.move_speed,
+                            inv,
+                            self.camera.yaw.to_degrees(),
+                            self.camera.pitch.to_degrees(),
+                            self.camera.xw_angle.to_degrees(),
+                            self.camera.zw_angle.to_degrees(),
+                            self.camera.yw_deviation.to_degrees(),
+                            self.place_material,
+                            edit_reach,
+                            highlight_mode.label(),
+                            if self.vte_entities_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            if self.vte_y_slice_lookup_cache_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            vte_sweep_status,
+                            if self.vte_integral_sky_emissive_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            if self.vte_integral_log_merge_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                        )
+                    }
                 }
             }),
             hud_target_hit_voxel,
@@ -1758,9 +1946,18 @@ impl ApplicationHandler for App {
                 self.input.handle_key_event(&event);
 
                 if self.input.take_escape() {
-                    if self.mouse_grabbed {
-                        let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
-                        self.release_mouse(&window);
+                    let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+                    if self.menu_open {
+                        self.menu_open = false;
+                        if let Some(window) = window {
+                            self.grab_mouse(&window);
+                        }
+                    } else if self.mouse_grabbed {
+                        if let Some(window) = window {
+                            self.release_mouse(&window);
+                        }
+                        self.menu_open = true;
+                        self.menu_selection = 0;
                     } else {
                         event_loop.exit();
                     }
@@ -1772,6 +1969,7 @@ impl ApplicationHandler for App {
                         if !self.mouse_grabbed {
                             let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
                             self.grab_mouse(&window);
+                            self.menu_open = false;
                         } else {
                             self.input.handle_mouse_button(button, state);
                         }
@@ -1793,6 +1991,8 @@ impl ApplicationHandler for App {
                 if self.mouse_grabbed {
                     let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
                     self.release_mouse(&window);
+                    self.menu_open = true;
+                    self.menu_selection = 0;
                 }
             }
             WindowEvent::RedrawRequested => {

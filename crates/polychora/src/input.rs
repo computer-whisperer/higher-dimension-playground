@@ -129,6 +129,9 @@ pub struct InputState {
     vte_sweep_requested: bool,
     vte_integral_sky_emissive_toggle_requested: bool,
     vte_integral_log_merge_toggle_requested: bool,
+    menu_up_requested: bool,
+    menu_down_requested: bool,
+    menu_activate_requested: bool,
 }
 
 impl InputState {
@@ -167,6 +170,9 @@ impl InputState {
             vte_sweep_requested: false,
             vte_integral_sky_emissive_toggle_requested: false,
             vte_integral_log_merge_toggle_requested: false,
+            menu_up_requested: false,
+            menu_down_requested: false,
+            menu_activate_requested: false,
         }
     }
 
@@ -297,6 +303,21 @@ impl InputState {
                 KeyCode::F11 => {
                     if pressed {
                         self.vte_integral_log_merge_toggle_requested = true;
+                    }
+                }
+                KeyCode::ArrowUp => {
+                    if pressed {
+                        self.menu_up_requested = true;
+                    }
+                }
+                KeyCode::ArrowDown => {
+                    if pressed {
+                        self.menu_down_requested = true;
+                    }
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    if pressed {
+                        self.menu_activate_requested = true;
                     }
                 }
                 KeyCode::Escape => {
@@ -493,6 +514,24 @@ impl InputState {
     pub fn take_vte_integral_log_merge_toggle(&mut self) -> bool {
         let v = self.vte_integral_log_merge_toggle_requested;
         self.vte_integral_log_merge_toggle_requested = false;
+        v
+    }
+
+    pub fn take_menu_up(&mut self) -> bool {
+        let v = self.menu_up_requested;
+        self.menu_up_requested = false;
+        v
+    }
+
+    pub fn take_menu_down(&mut self) -> bool {
+        let v = self.menu_down_requested;
+        self.menu_down_requested = false;
+        v
+    }
+
+    pub fn take_menu_activate(&mut self) -> bool {
+        let v = self.menu_activate_requested;
+        self.menu_activate_requested = false;
         v
     }
 
