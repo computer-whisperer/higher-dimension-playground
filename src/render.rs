@@ -5,7 +5,7 @@ use common::{get_normal, ModelTetrahedron};
 use exr::prelude::{ImageAttributes, WritableImage};
 use glam::{UVec3, Vec2, Vec4, Vec4Swizzles};
 use image::{ImageBuffer, Rgb, Rgba};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
@@ -302,7 +302,9 @@ pub struct GpuVoxelYSliceBounds {
 }
 
 pub struct VoxelFrameInput<'a> {
+    pub metadata_generation: u64,
     pub chunk_headers: &'a [GpuVoxelChunkHeader],
+    pub payload_update_slots: &'a [u32],
     pub occupancy_words: &'a [u32],
     pub material_words: &'a [u32],
     pub macro_words: &'a [u32],
@@ -424,7 +426,7 @@ const LINE_VERTEX_CAPACITY: usize = 100_000;
 const HUD_BREADCRUMB_CAPACITY: usize = 128;
 const HUD_BREADCRUMB_MIN_STEP: f32 = 0.2;
 const FRAMES_IN_FLIGHT: usize = 2;
-const VTE_MAX_CHUNKS: usize = 8_192;
+pub const VTE_MAX_CHUNKS: usize = 8_192;
 const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
 const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
 const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
@@ -508,6 +510,9 @@ struct FrameInFlight {
     query_pool: Arc<QueryPool>,
     fence: Option<Box<dyn GpuFuture>>,
     vte_compare_enabled: bool,
+    pending_voxel_payload_slots: Vec<u32>,
+    pending_voxel_payload_slot_set: HashSet<u32>,
+    last_voxel_metadata_generation: Option<u64>,
 }
 
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -2736,6 +2741,9 @@ pub struct RenderContext {
     vte_first_mismatch: VteFirstMismatch,
     vte_backend_notice_printed: bool,
     drop_next_profile_sample: bool,
+    voxel_payload_cache_occupancy_words: Vec<u32>,
+    voxel_payload_cache_material_words: Vec<u32>,
+    voxel_payload_cache_macro_words: Vec<u32>,
 }
 
 impl RenderContext {
@@ -2890,108 +2898,44 @@ impl RenderContext {
             };
         }
 
-        let raytrace_pixel = load_shader(
-            device.clone(),
-            shader_spirv!("mainRaytracerPixel"),
-        );
+        let raytrace_pixel = load_shader(device.clone(), shader_spirv!("mainRaytracerPixel"));
         let raytrace_preprocess = load_shader(
             device.clone(),
             shader_spirv!("mainRaytracerTetrahedronPreprocessor"),
         );
-        let raytrace_clear = load_shader(
-            device.clone(),
-            shader_spirv!("mainRaytracerClear"),
-        );
-        let voxel_clear = load_shader(
-            device.clone(),
-            shader_spirv!("mainVoxelClear"),
-        );
-        let voxel_trace_stage_a = load_shader(
-            device.clone(),
-            shader_spirv!("mainVoxelTraceStageA"),
-        );
-        let voxel_display_stage_b = load_shader(
-            device.clone(),
-            shader_spirv!("mainVoxelDisplayStageB"),
-        );
-        let raster_tet = load_shader(
-            device.clone(),
-            shader_spirv!("mainTetrahedronCS"),
-        );
-        let raster_edge = load_shader(
-            device.clone(),
-            shader_spirv!("mainEdgeCS"),
-        );
-        let raster_pixel = load_shader(
-            device.clone(),
-            shader_spirv!("mainTetrahedronPixelCS"),
-        );
-        let bin_tets_cs = load_shader(
-            device.clone(),
-            shader_spirv!("mainBinTetsCS"),
-        );
-        let present_line_vs = load_shader(
-            device.clone(),
-            shader_spirv!("mainLineVS"),
-        );
-        let present_line_fs = load_shader(
-            device.clone(),
-            shader_spirv!("mainLineFS"),
-        );
-        let present_buffer_vs = load_shader(
-            device.clone(),
-            shader_spirv!("mainBufferVS"),
-        );
-        let present_buffer_fs = load_shader(
-            device.clone(),
-            shader_spirv!("mainBufferFS"),
-        );
+        let raytrace_clear = load_shader(device.clone(), shader_spirv!("mainRaytracerClear"));
+        let voxel_clear = load_shader(device.clone(), shader_spirv!("mainVoxelClear"));
+        let voxel_trace_stage_a =
+            load_shader(device.clone(), shader_spirv!("mainVoxelTraceStageA"));
+        let voxel_display_stage_b =
+            load_shader(device.clone(), shader_spirv!("mainVoxelDisplayStageB"));
+        let raster_tet = load_shader(device.clone(), shader_spirv!("mainTetrahedronCS"));
+        let raster_edge = load_shader(device.clone(), shader_spirv!("mainEdgeCS"));
+        let raster_pixel = load_shader(device.clone(), shader_spirv!("mainTetrahedronPixelCS"));
+        let bin_tets_cs = load_shader(device.clone(), shader_spirv!("mainBinTetsCS"));
+        let present_line_vs = load_shader(device.clone(), shader_spirv!("mainLineVS"));
+        let present_line_fs = load_shader(device.clone(), shader_spirv!("mainLineFS"));
+        let present_buffer_vs = load_shader(device.clone(), shader_spirv!("mainBufferVS"));
+        let present_buffer_fs = load_shader(device.clone(), shader_spirv!("mainBufferFS"));
         // HUD shaders
-        let hud_vs = load_shader(
-            device.clone(),
-            shader_spirv!("mainHudVS"),
-        );
-        let hud_fs = load_shader(
-            device.clone(),
-            shader_spirv!("mainHudFS"),
-        );
+        let hud_vs = load_shader(device.clone(), shader_spirv!("mainHudVS"));
+        let hud_fs = load_shader(device.clone(), shader_spirv!("mainHudFS"));
         // BVH shaders
-        let bvh_scene_bounds = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHSceneBounds"),
-        );
-        let bvh_morton_codes = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHMortonCodes"),
-        );
-        let bvh_bitonic_sort_local = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHBitonicSortLocal"),
-        );
-        let bvh_bitonic_sort = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHBitonicSort"),
-        );
+        let bvh_scene_bounds = load_shader(device.clone(), shader_spirv!("mainBVHSceneBounds"));
+        let bvh_morton_codes = load_shader(device.clone(), shader_spirv!("mainBVHMortonCodes"));
+        let bvh_bitonic_sort_local =
+            load_shader(device.clone(), shader_spirv!("mainBVHBitonicSortLocal"));
+        let bvh_bitonic_sort = load_shader(device.clone(), shader_spirv!("mainBVHBitonicSort"));
         let bvh_bitonic_sort_local_merge = load_shader(
             device.clone(),
             shader_spirv!("mainBVHBitonicSortLocalMerge"),
         );
-        let bvh_init_leaves = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHInitLeaves"),
-        );
-        let bvh_build_tree = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHBuildTree"),
-        );
-        let bvh_compute_leaf_aabbs = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHComputeLeafAABBs"),
-        );
-        let bvh_propagate_aabbs = load_shader(
-            device.clone(),
-            shader_spirv!("mainBVHPropagateAABBs"),
-        );
+        let bvh_init_leaves = load_shader(device.clone(), shader_spirv!("mainBVHInitLeaves"));
+        let bvh_build_tree = load_shader(device.clone(), shader_spirv!("mainBVHBuildTree"));
+        let bvh_compute_leaf_aabbs =
+            load_shader(device.clone(), shader_spirv!("mainBVHComputeLeafAABBs"));
+        let bvh_propagate_aabbs =
+            load_shader(device.clone(), shader_spirv!("mainBVHPropagateAABBs"));
 
         let render_pass = match swapchain.clone() {
             Some(swapchain) => {
@@ -3332,6 +3276,9 @@ impl RenderContext {
                 query_pool,
                 fence: None,
                 vte_compare_enabled: false,
+                pending_voxel_payload_slots: Vec::new(),
+                pending_voxel_payload_slot_set: HashSet::new(),
+                last_voxel_metadata_generation: None,
             });
         }
 
@@ -3371,6 +3318,15 @@ impl RenderContext {
             vte_first_mismatch: VteFirstMismatch::default(),
             vte_backend_notice_printed: false,
             drop_next_profile_sample: false,
+            voxel_payload_cache_occupancy_words: vec![
+                0u32;
+                VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK
+            ],
+            voxel_payload_cache_material_words: vec![
+                0u32;
+                VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK
+            ],
+            voxel_payload_cache_macro_words: vec![0u32; VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK],
         }
     }
 
@@ -3523,7 +3479,10 @@ impl RenderContext {
         let (present_size, dpi_scale) = match self.window.as_ref() {
             Some(window) => {
                 let s = window.inner_size();
-                ([s.width.max(1), s.height.max(1)], window.scale_factor() as f32)
+                (
+                    [s.width.max(1), s.height.max(1)],
+                    window.scale_factor() as f32,
+                )
             }
             None => (
                 [
@@ -3544,9 +3503,8 @@ impl RenderContext {
         let px_top_left_to_ndc = |p: Vec2| -> Vec2 {
             Vec2::new((p.x / present_w) * 2.0 - 1.0, (p.y / present_h) * 2.0 - 1.0)
         };
-        let px_delta_to_ndc = |d: Vec2| -> Vec2 {
-            Vec2::new((d.x / present_w) * 2.0, (d.y / present_h) * 2.0)
-        };
+        let px_delta_to_ndc =
+            |d: Vec2| -> Vec2 { Vec2::new((d.x / present_w) * 2.0, (d.y / present_h) * 2.0) };
 
         let camera_h = mat5_mul_vec5(view_matrix_inverse, [0.0, 0.0, 0.0, 0.0, 1.0]);
         let inv_w = if camera_h[4].abs() > 1e-6 {
@@ -3896,8 +3854,8 @@ impl RenderContext {
                 let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
                 let wedge_len = px_delta_to_ndc(Vec2::splat(12.0 * hud_scale));
                 let wedge_width = px_delta_to_ndc(Vec2::splat(6.0 * hud_scale));
-                let wedge_tip = xz_center
-                    + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
+                let wedge_tip =
+                    xz_center + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
                 let wedge_left = xz_center
                     - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
                     + Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
@@ -3926,8 +3884,8 @@ impl RenderContext {
                 let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
                 let wedge_len = px_delta_to_ndc(Vec2::splat(12.0 * hud_scale));
                 let wedge_width = px_delta_to_ndc(Vec2::splat(6.0 * hud_scale));
-                let wedge_tip = yw_center
-                    + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
+                let wedge_tip =
+                    yw_center + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
                 let wedge_left = yw_center
                     - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
                     + Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
@@ -3947,8 +3905,10 @@ impl RenderContext {
         let axis_inset = px_delta_to_ndc(Vec2::new(14.0 * hud_scale, 14.0 * hud_scale));
         if let Some(hud_res) = self.hud_resources.as_ref() {
             // Panel titles inside top-left corner (Vulkan: lower clip Y = higher on screen)
-            let xz_title_px =
-                ndc_to_pixels(Vec2::new(xz_min.x + label_inset.x, xz_min.y + label_inset.y), present_size);
+            let xz_title_px = ndc_to_pixels(
+                Vec2::new(xz_min.x + label_inset.x, xz_min.y + label_inset.y),
+                present_size,
+            );
             push_text_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
@@ -3958,8 +3918,10 @@ impl RenderContext {
                 xz_frame_color,
                 present_size,
             );
-            let yw_title_px =
-                ndc_to_pixels(Vec2::new(yw_min.x + label_inset.x, yw_min.y + label_inset.y), present_size);
+            let yw_title_px = ndc_to_pixels(
+                Vec2::new(yw_min.x + label_inset.x, yw_min.y + label_inset.y),
+                present_size,
+            );
             push_text_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
@@ -4026,8 +3988,10 @@ impl RenderContext {
                 present_size,
             );
         } else if let Some(font) = self.hud_font.as_ref() {
-            let xz_title_px =
-                ndc_to_pixels(Vec2::new(xz_min.x + label_inset.x, xz_min.y + label_inset.y), present_size);
+            let xz_title_px = ndc_to_pixels(
+                Vec2::new(xz_min.x + label_inset.x, xz_min.y + label_inset.y),
+                present_size,
+            );
             push_text_lines(
                 &mut lines,
                 font,
@@ -4037,8 +4001,10 @@ impl RenderContext {
                 xz_frame_color,
                 present_size,
             );
-            let yw_title_px =
-                ndc_to_pixels(Vec2::new(yw_min.x + label_inset.x, yw_min.y + label_inset.y), present_size);
+            let yw_title_px = ndc_to_pixels(
+                Vec2::new(yw_min.x + label_inset.x, yw_min.y + label_inset.y),
+                present_size,
+            );
             push_text_lines(
                 &mut lines,
                 font,
@@ -4383,20 +4349,20 @@ impl RenderContext {
                     }
 
                     let scale = tag.scale.clamp(0.55, 1.8);
-                    let text_size = (11.0 * text_scale * scale)
-                        .clamp(10.0 * hud_scale, 26.0 * hud_scale);
+                    let text_size =
+                        (11.0 * text_scale * scale).clamp(10.0 * hud_scale, 26.0 * hud_scale);
                     let pad_px = (4.0 * hud_scale * scale).clamp(2.0 * dpi_scale, 10.0 * hud_scale);
                     let estimated_char_width_px = text_size * 0.56;
-                    let panel_width_px =
-                        (text.chars().count().max(1) as f32 * estimated_char_width_px + pad_px * 2.0)
-                            .clamp(36.0 * dpi_scale, 540.0 * hud_scale);
+                    let panel_width_px = (text.chars().count().max(1) as f32
+                        * estimated_char_width_px
+                        + pad_px * 2.0)
+                        .clamp(36.0 * dpi_scale, 540.0 * hud_scale);
                     let panel_height_px =
                         (text_size * 1.25 + pad_px * 2.0).clamp(16.0 * dpi_scale, 88.0 * hud_scale);
 
                     let width_ndc = (panel_width_px / present_w) * 2.0;
                     let height_ndc = (panel_height_px / present_h) * 2.0;
-                    let offset_ndc_y =
-                        (16.0 * hud_scale * scale / present_h) * 2.0;
+                    let offset_ndc_y = (16.0 * hud_scale * scale / present_h) * 2.0;
                     let margin_ndc = px_delta_to_ndc(Vec2::splat(8.0 * hud_scale));
 
                     let center_x = tag.anchor_ndc[0].clamp(
@@ -4440,8 +4406,8 @@ impl RenderContext {
                     continue;
                 }
                 let scale = tag.scale.clamp(0.55, 1.8);
-                let text_size = (11.0 * text_scale * scale)
-                    .clamp(10.0 * hud_scale, 26.0 * hud_scale);
+                let text_size =
+                    (11.0 * text_scale * scale).clamp(10.0 * hud_scale, 26.0 * hud_scale);
                 let anchor = Vec2::new(tag.anchor_ndc[0], tag.anchor_ndc[1]);
                 let label_ndc = anchor + px_delta_to_ndc(Vec2::new(0.0, -18.0 * hud_scale * scale));
                 let label_px = ndc_to_pixels(label_ndc, present_size);
@@ -4626,6 +4592,124 @@ impl RenderContext {
             tetra_overlay_instances,
             Some(&voxel_input),
         );
+    }
+
+    fn stage_voxel_payload_updates(&mut self, input: &VoxelFrameInput<'_>) -> usize {
+        let max_updates = input
+            .payload_update_slots
+            .len()
+            .min(input.occupancy_words.len() / VTE_OCCUPANCY_WORDS_PER_CHUNK)
+            .min(input.material_words.len() / VTE_MATERIAL_WORDS_PER_CHUNK)
+            .min(input.macro_words.len() / VTE_MACRO_WORDS_PER_CHUNK);
+
+        for update_idx in 0..max_updates {
+            let slot = input.payload_update_slots[update_idx] as usize;
+            if slot >= VTE_MAX_CHUNKS {
+                continue;
+            }
+
+            let src_occ_base = update_idx * VTE_OCCUPANCY_WORDS_PER_CHUNK;
+            let src_mat_base = update_idx * VTE_MATERIAL_WORDS_PER_CHUNK;
+            let src_macro_base = update_idx * VTE_MACRO_WORDS_PER_CHUNK;
+            let dst_occ_base = slot * VTE_OCCUPANCY_WORDS_PER_CHUNK;
+            let dst_mat_base = slot * VTE_MATERIAL_WORDS_PER_CHUNK;
+            let dst_macro_base = slot * VTE_MACRO_WORDS_PER_CHUNK;
+
+            self.voxel_payload_cache_occupancy_words
+                [dst_occ_base..dst_occ_base + VTE_OCCUPANCY_WORDS_PER_CHUNK]
+                .copy_from_slice(
+                    &input.occupancy_words
+                        [src_occ_base..src_occ_base + VTE_OCCUPANCY_WORDS_PER_CHUNK],
+                );
+            self.voxel_payload_cache_material_words
+                [dst_mat_base..dst_mat_base + VTE_MATERIAL_WORDS_PER_CHUNK]
+                .copy_from_slice(
+                    &input.material_words
+                        [src_mat_base..src_mat_base + VTE_MATERIAL_WORDS_PER_CHUNK],
+                );
+            self.voxel_payload_cache_macro_words
+                [dst_macro_base..dst_macro_base + VTE_MACRO_WORDS_PER_CHUNK]
+                .copy_from_slice(
+                    &input.macro_words[src_macro_base..src_macro_base + VTE_MACRO_WORDS_PER_CHUNK],
+                );
+
+            let slot_u32 = slot as u32;
+            for frame in &mut self.frames_in_flight {
+                if frame.pending_voxel_payload_slot_set.insert(slot_u32) {
+                    frame.pending_voxel_payload_slots.push(slot_u32);
+                }
+            }
+        }
+
+        max_updates
+    }
+
+    fn apply_pending_voxel_payload_updates_for_frame(&mut self, frame_idx: usize) -> usize {
+        let mut slots =
+            std::mem::take(&mut self.frames_in_flight[frame_idx].pending_voxel_payload_slots);
+        self.frames_in_flight[frame_idx]
+            .pending_voxel_payload_slot_set
+            .clear();
+        if slots.is_empty() {
+            return 0;
+        }
+        slots.sort_unstable();
+
+        {
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .voxel_occupancy_words_buffer
+                .write()
+                .unwrap();
+            for &slot_u32 in &slots {
+                let slot = slot_u32 as usize;
+                if slot >= VTE_MAX_CHUNKS {
+                    continue;
+                }
+                let base = slot * VTE_OCCUPANCY_WORDS_PER_CHUNK;
+                writer[base..base + VTE_OCCUPANCY_WORDS_PER_CHUNK].copy_from_slice(
+                    &self.voxel_payload_cache_occupancy_words
+                        [base..base + VTE_OCCUPANCY_WORDS_PER_CHUNK],
+                );
+            }
+        }
+        {
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .voxel_material_words_buffer
+                .write()
+                .unwrap();
+            for &slot_u32 in &slots {
+                let slot = slot_u32 as usize;
+                if slot >= VTE_MAX_CHUNKS {
+                    continue;
+                }
+                let base = slot * VTE_MATERIAL_WORDS_PER_CHUNK;
+                writer[base..base + VTE_MATERIAL_WORDS_PER_CHUNK].copy_from_slice(
+                    &self.voxel_payload_cache_material_words
+                        [base..base + VTE_MATERIAL_WORDS_PER_CHUNK],
+                );
+            }
+        }
+        {
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .voxel_macro_words_buffer
+                .write()
+                .unwrap();
+            for &slot_u32 in &slots {
+                let slot = slot_u32 as usize;
+                if slot >= VTE_MAX_CHUNKS {
+                    continue;
+                }
+                let base = slot * VTE_MACRO_WORDS_PER_CHUNK;
+                writer[base..base + VTE_MACRO_WORDS_PER_CHUNK].copy_from_slice(
+                    &self.voxel_payload_cache_macro_words[base..base + VTE_MACRO_WORDS_PER_CHUNK],
+                );
+            }
+        }
+
+        slots.len()
     }
 
     fn render_internal(
@@ -4916,6 +5000,8 @@ impl RenderContext {
         let mut vte_chunk_count: usize = 0;
         let mut vte_visible_chunk_count: usize = 0;
         let mut vte_chunk_lookup_capacity: usize = 0;
+        let mut vte_payload_update_count: usize = 0;
+        let mut vte_payload_updates_applied: usize = 0;
         let mut vte_occupancy_word_count: usize = 0;
         let mut vte_material_word_count: usize = 0;
         let mut vte_macro_word_count: usize = 0;
@@ -4924,51 +5010,43 @@ impl RenderContext {
         let mut vte_visible_chunk_min = [i32::MAX; 4];
         let mut vte_visible_chunk_max = [i32::MIN; 4];
         if let Some(input) = voxel_input {
+            vte_payload_update_count = self.stage_voxel_payload_updates(input);
             vte_chunk_count = input.chunk_headers.len().min(VTE_MAX_CHUNKS);
             vte_visible_chunk_count = input
                 .visible_chunk_indices
                 .len()
                 .min(VTE_MAX_CHUNKS)
                 .min(vte_chunk_count);
-            vte_occupancy_word_count = input
-                .occupancy_words
-                .len()
-                .min(VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK);
-            vte_material_word_count = input
-                .material_words
-                .len()
-                .min(VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK);
-            vte_macro_word_count = input
-                .macro_words
-                .len()
-                .min(VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK);
+            vte_occupancy_word_count = VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK;
+            vte_material_word_count = VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK;
+            vte_macro_word_count = VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK;
             vte_y_slice_count = input.y_slice_bounds.len().min(VTE_MAX_Y_SLICES);
             vte_y_slice_lookup_entry_count = input
                 .y_slice_lookup_entries
                 .len()
                 .min(VTE_MAX_Y_SLICE_LOOKUP_ENTRIES);
 
+            let max_payload_updates = input
+                .payload_update_slots
+                .len()
+                .min(input.occupancy_words.len() / VTE_OCCUPANCY_WORDS_PER_CHUNK)
+                .min(input.material_words.len() / VTE_MATERIAL_WORDS_PER_CHUNK)
+                .min(input.macro_words.len() / VTE_MACRO_WORDS_PER_CHUNK);
             if self.frames_rendered == 0
                 && (input.chunk_headers.len() > vte_chunk_count
                     || input.visible_chunk_indices.len() > vte_visible_chunk_count
-                    || input.occupancy_words.len() > vte_occupancy_word_count
-                    || input.material_words.len() > vte_material_word_count
-                    || input.macro_words.len() > vte_macro_word_count
                     || input.y_slice_bounds.len() > vte_y_slice_count
-                    || input.y_slice_lookup_entries.len() > vte_y_slice_lookup_entry_count)
+                    || input.y_slice_lookup_entries.len() > vte_y_slice_lookup_entry_count
+                    || max_payload_updates < input.payload_update_slots.len())
             {
                 eprintln!(
-                    "VTE input truncated to capacities: chunks {}->{}, visible {}->{}, occupancy {}->{}, materials {}->{}, macro {}->{}, y_slices {}->{}, y_slice_lookup_entries {}->{}",
+                    "VTE input truncated to capacities: chunks {}->{}, visible {}->{}, payload_updates {}->{}, y_slices {}->{}, y_slice_lookup_entries {}->{}",
                     input.chunk_headers.len(),
                     vte_chunk_count,
                     input.visible_chunk_indices.len(),
                     vte_visible_chunk_count,
-                    input.occupancy_words.len(),
-                    vte_occupancy_word_count,
-                    input.material_words.len(),
-                    vte_material_word_count,
-                    input.macro_words.len(),
-                    vte_macro_word_count,
+                    input.payload_update_slots.len(),
+                    max_payload_updates,
                     input.y_slice_bounds.len(),
                     vte_y_slice_count,
                     input.y_slice_lookup_entries.len(),
@@ -4976,76 +5054,108 @@ impl RenderContext {
                 );
             }
 
-            {
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_chunk_headers_buffer
-                    .write()
-                    .unwrap();
-                for i in 0..vte_chunk_count {
-                    writer[i] = input.chunk_headers[i];
+            let metadata_dirty = self.frames_in_flight[frame_idx].last_voxel_metadata_generation
+                != Some(input.metadata_generation);
+            vte_chunk_lookup_capacity = if vte_visible_chunk_count == 0 {
+                0
+            } else {
+                let requested = (vte_visible_chunk_count.saturating_mul(2)).next_power_of_two();
+                requested.clamp(1, VTE_CHUNK_LOOKUP_CAPACITY)
+            };
+
+            if metadata_dirty {
+                {
+                    let mut writer = self.frames_in_flight[frame_idx]
+                        .live_buffers
+                        .voxel_chunk_headers_buffer
+                        .write()
+                        .unwrap();
+                    for i in 0..vte_chunk_count {
+                        writer[i] = input.chunk_headers[i];
+                    }
                 }
-            }
-            {
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_occupancy_words_buffer
-                    .write()
-                    .unwrap();
-                for i in 0..vte_occupancy_word_count {
-                    writer[i] = input.occupancy_words[i];
+                {
+                    let mut writer = self.frames_in_flight[frame_idx]
+                        .live_buffers
+                        .voxel_y_slice_bounds_buffer
+                        .write()
+                        .unwrap();
+                    for i in 0..vte_y_slice_count {
+                        writer[i] = input.y_slice_bounds[i];
+                    }
                 }
-            }
-            {
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_material_words_buffer
-                    .write()
-                    .unwrap();
-                for i in 0..vte_material_word_count {
-                    writer[i] = input.material_words[i];
+                {
+                    let mut writer = self.frames_in_flight[frame_idx]
+                        .live_buffers
+                        .voxel_y_slice_lookup_entries_buffer
+                        .write()
+                        .unwrap();
+                    for i in 0..vte_y_slice_lookup_entry_count {
+                        writer[i] = input.y_slice_lookup_entries[i];
+                    }
                 }
-            }
-            {
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_macro_words_buffer
-                    .write()
-                    .unwrap();
-                for i in 0..vte_macro_word_count {
-                    writer[i] = input.macro_words[i];
+                {
+                    let mut writer = self.frames_in_flight[frame_idx]
+                        .live_buffers
+                        .voxel_visible_chunk_indices_buffer
+                        .write()
+                        .unwrap();
+                    for i in 0..vte_visible_chunk_count {
+                        let chunk_index = input.visible_chunk_indices[i]
+                            .min(vte_chunk_count.saturating_sub(1) as u32);
+                        writer[i] = chunk_index;
+                        let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                        for axis in 0..4 {
+                            vte_visible_chunk_min[axis] =
+                                vte_visible_chunk_min[axis].min(chunk_coord[axis]);
+                            vte_visible_chunk_max[axis] =
+                                vte_visible_chunk_max[axis].max(chunk_coord[axis]);
+                        }
+                    }
                 }
-            }
-            {
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_y_slice_bounds_buffer
-                    .write()
-                    .unwrap();
-                for i in 0..vte_y_slice_count {
-                    writer[i] = input.y_slice_bounds[i];
+                {
+                    debug_assert!(VTE_CHUNK_LOOKUP_CAPACITY.is_power_of_two());
+                    let mut writer = self.frames_in_flight[frame_idx]
+                        .live_buffers
+                        .voxel_chunk_lookup_buffer
+                        .write()
+                        .unwrap();
+
+                    for entry in writer.iter_mut().take(vte_chunk_lookup_capacity) {
+                        *entry = GpuVoxelChunkLookupEntry::empty();
+                    }
+
+                    if vte_chunk_count > 0 && vte_chunk_lookup_capacity > 0 {
+                        let hash_mask = (vte_chunk_lookup_capacity as u32) - 1;
+                        for i in 0..vte_visible_chunk_count {
+                            let chunk_index = input.visible_chunk_indices[i]
+                                .min(vte_chunk_count.saturating_sub(1) as u32);
+                            let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                            let mut slot = (vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
+
+                            for _ in 0..vte_chunk_lookup_capacity {
+                                let entry = &mut writer[slot];
+                                if entry.chunk_index == GpuVoxelChunkLookupEntry::INVALID_INDEX
+                                    || entry.chunk_coord == chunk_coord
+                                {
+                                    *entry = GpuVoxelChunkLookupEntry {
+                                        chunk_coord,
+                                        chunk_index,
+                                        _padding: [0; 3],
+                                    };
+                                    break;
+                                }
+                                slot = (slot + 1) & (vte_chunk_lookup_capacity - 1);
+                            }
+                        }
+                    }
                 }
-            }
-            {
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_y_slice_lookup_entries_buffer
-                    .write()
-                    .unwrap();
-                for i in 0..vte_y_slice_lookup_entry_count {
-                    writer[i] = input.y_slice_lookup_entries[i];
-                }
-            }
-            {
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_visible_chunk_indices_buffer
-                    .write()
-                    .unwrap();
+                self.frames_in_flight[frame_idx].last_voxel_metadata_generation =
+                    Some(input.metadata_generation);
+            } else {
                 for i in 0..vte_visible_chunk_count {
                     let chunk_index = input.visible_chunk_indices[i]
                         .min(vte_chunk_count.saturating_sub(1) as u32);
-                    writer[i] = chunk_index;
                     let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
                     for axis in 0..4 {
                         vte_visible_chunk_min[axis] =
@@ -5055,50 +5165,9 @@ impl RenderContext {
                     }
                 }
             }
-            {
-                debug_assert!(VTE_CHUNK_LOOKUP_CAPACITY.is_power_of_two());
-                let mut writer = self.frames_in_flight[frame_idx]
-                    .live_buffers
-                    .voxel_chunk_lookup_buffer
-                    .write()
-                    .unwrap();
 
-                vte_chunk_lookup_capacity = if vte_visible_chunk_count == 0 {
-                    0
-                } else {
-                    let requested = (vte_visible_chunk_count.saturating_mul(2)).next_power_of_two();
-                    requested.clamp(1, VTE_CHUNK_LOOKUP_CAPACITY)
-                };
-
-                for entry in writer.iter_mut().take(vte_chunk_lookup_capacity) {
-                    *entry = GpuVoxelChunkLookupEntry::empty();
-                }
-
-                if vte_chunk_count > 0 && vte_chunk_lookup_capacity > 0 {
-                    let hash_mask = (vte_chunk_lookup_capacity as u32) - 1;
-                    for i in 0..vte_visible_chunk_count {
-                        let chunk_index = input.visible_chunk_indices[i]
-                            .min(vte_chunk_count.saturating_sub(1) as u32);
-                        let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
-                        let mut slot = (vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
-
-                        for _ in 0..vte_chunk_lookup_capacity {
-                            let entry = &mut writer[slot];
-                            if entry.chunk_index == GpuVoxelChunkLookupEntry::INVALID_INDEX
-                                || entry.chunk_coord == chunk_coord
-                            {
-                                *entry = GpuVoxelChunkLookupEntry {
-                                    chunk_coord,
-                                    chunk_index,
-                                    _padding: [0; 3],
-                                };
-                                break;
-                            }
-                            slot = (slot + 1) & (vte_chunk_lookup_capacity - 1);
-                        }
-                    }
-                }
-            }
+            vte_payload_updates_applied =
+                self.apply_pending_voxel_payload_updates_for_frame(frame_idx);
         }
         {
             let mut writer = self.frames_in_flight[frame_idx]
@@ -5301,8 +5370,8 @@ impl RenderContext {
                 visible_chunks,
                 empty_chunks,
                 full_chunks,
-                occupancy_words,
-                material_words,
+                payload_updates_received,
+                payload_updates_applied,
                 visible_set_hash_valid,
                 visible_set_hash,
             ) = if let Some(input) = voxel_input {
@@ -5336,8 +5405,8 @@ impl RenderContext {
                     input.visible_chunk_indices.len() as u32,
                     empty,
                     full,
-                    input.occupancy_words.len() as u64,
-                    input.material_words.len() as u64,
+                    vte_payload_update_count as u64,
+                    vte_payload_updates_applied as u64,
                     collect_visible_set_hash,
                     hash,
                 )
@@ -5361,12 +5430,12 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
-                    occupancy_words,
-                    material_words,
+                    payload_updates_received,
+                    payload_updates_applied,
                     render_options.vte_max_trace_steps.max(1),
                     render_options.vte_max_trace_distance.max(1.0),
                     render_options.vte_display_mode.label(),

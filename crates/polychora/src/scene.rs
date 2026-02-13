@@ -4,9 +4,9 @@ use crate::voxel::io as voxel_io;
 use crate::voxel::worldgen;
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
-    GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput,
+    GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VTE_MAX_CHUNKS,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -26,12 +26,14 @@ const COLLISION_PUSHUP_STEP: f32 = 0.05;
 const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
 const HARD_WORLD_FLOOR_Y: f32 = -4.0;
+const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
 
 struct CachedChunkPayload {
     hash: u64,
     solid_count: u32,
     is_full: bool,
     ref_count: u32,
+    gpu_slot: u32,
     occupancy_words: Box<[u32; OCCUPANCY_WORDS_PER_CHUNK]>,
     material_words: Box<[u32; MATERIAL_WORDS_PER_CHUNK]>,
     macro_words: Box<[u32; MACRO_WORDS_PER_CHUNK]>,
@@ -130,31 +132,13 @@ fn build_cached_chunk_payload(chunk: &crate::voxel::chunk::Chunk) -> CachedChunk
         solid_count: chunk.solid_count,
         is_full: chunk.is_full(),
         ref_count: 0,
+        gpu_slot: u32::MAX,
         occupancy_words,
         material_words,
         macro_words,
         solid_local_min,
         solid_local_max,
     }
-}
-
-fn append_cached_chunk_payload_words(
-    chunk_payload: &CachedChunkPayload,
-    occupancy_words: &mut Vec<u32>,
-    material_words: &mut Vec<u32>,
-    macro_words: &mut Vec<u32>,
-) -> (u32, u32, u32) {
-    let occupancy_word_offset = occupancy_words.len() as u32;
-    occupancy_words.extend_from_slice(&chunk_payload.occupancy_words[..]);
-    let material_word_offset = material_words.len() as u32;
-    material_words.extend_from_slice(&chunk_payload.material_words[..]);
-    let macro_word_offset = macro_words.len() as u32;
-    macro_words.extend_from_slice(&chunk_payload.macro_words[..]);
-    (
-        occupancy_word_offset,
-        material_word_offset,
-        macro_word_offset,
-    )
 }
 
 fn cached_chunk_payloads_match(a: &CachedChunkPayload, b: &CachedChunkPayload) -> bool {
@@ -183,7 +167,9 @@ impl ScenePreset {
 }
 
 pub struct VoxelFrameData {
+    pub metadata_generation: u64,
     pub chunk_headers: Vec<GpuVoxelChunkHeader>,
+    pub payload_update_slots: Vec<u32>,
     pub occupancy_words: Vec<u32>,
     pub material_words: Vec<u32>,
     pub macro_words: Vec<u32>,
@@ -195,7 +181,9 @@ pub struct VoxelFrameData {
 impl VoxelFrameData {
     pub fn as_input(&self) -> VoxelFrameInput<'_> {
         VoxelFrameInput {
+            metadata_generation: self.metadata_generation,
             chunk_headers: &self.chunk_headers,
+            payload_update_slots: &self.payload_update_slots,
             occupancy_words: &self.occupancy_words,
             material_words: &self.material_words,
             macro_words: &self.macro_words,
@@ -215,6 +203,18 @@ pub struct Scene {
     voxel_chunk_payloads: Vec<Option<CachedChunkPayload>>,
     voxel_chunk_payload_free_ids: Vec<u32>,
     voxel_chunk_payload_hash_buckets: HashMap<u64, Vec<u32>>,
+    voxel_payload_slot_to_payload: Vec<Option<u32>>,
+    voxel_payload_free_slots: Vec<u32>,
+    voxel_pending_payload_uploads: Vec<u32>,
+    voxel_pending_payload_upload_set: HashSet<u32>,
+    voxel_active_chunks: Vec<ChunkPos>,
+    voxel_active_chunk_indices: HashMap<ChunkPos, usize>,
+    voxel_world_revision: u64,
+    voxel_visibility_generation: u64,
+    voxel_cached_visibility_camera_chunk: Option<[i32; 4]>,
+    voxel_cached_visibility_world_revision: u64,
+    voxel_payload_slot_overflow_logged: bool,
+    voxel_frame_data: VoxelFrameData,
 }
 
 #[derive(Copy, Clone)]
@@ -250,7 +250,56 @@ impl Scene {
         );
     }
 
-    fn intern_cached_chunk_payload(&mut self, payload: CachedChunkPayload) -> u32 {
+    fn camera_chunk_key(cam_pos: [f32; 4]) -> [i32; 4] {
+        let cs = CHUNK_SIZE as i32;
+        [
+            (cam_pos[0].floor() as i32).div_euclid(cs),
+            (cam_pos[1].floor() as i32).div_euclid(cs),
+            (cam_pos[2].floor() as i32).div_euclid(cs),
+            (cam_pos[3].floor() as i32).div_euclid(cs),
+        ]
+    }
+
+    fn queue_payload_upload(&mut self, payload_id: u32) {
+        if self.voxel_pending_payload_upload_set.insert(payload_id) {
+            self.voxel_pending_payload_uploads.push(payload_id);
+        }
+    }
+
+    fn add_active_chunk(&mut self, chunk_pos: ChunkPos) {
+        if self.voxel_active_chunk_indices.contains_key(&chunk_pos) {
+            return;
+        }
+        let idx = self.voxel_active_chunks.len();
+        self.voxel_active_chunks.push(chunk_pos);
+        self.voxel_active_chunk_indices.insert(chunk_pos, idx);
+    }
+
+    fn remove_active_chunk(&mut self, chunk_pos: ChunkPos) {
+        let Some(remove_idx) = self.voxel_active_chunk_indices.remove(&chunk_pos) else {
+            return;
+        };
+        let last_idx = self.voxel_active_chunks.len().saturating_sub(1);
+        self.voxel_active_chunks.swap_remove(remove_idx);
+        if remove_idx < last_idx {
+            let moved = self.voxel_active_chunks[remove_idx];
+            self.voxel_active_chunk_indices.insert(moved, remove_idx);
+        }
+    }
+
+    fn allocate_payload_slot(&mut self) -> Option<u32> {
+        if let Some(slot) = self.voxel_payload_free_slots.pop() {
+            return Some(slot);
+        }
+        let next_slot = self.voxel_payload_slot_to_payload.len();
+        if next_slot >= GPU_PAYLOAD_SLOT_CAPACITY {
+            return None;
+        }
+        self.voxel_payload_slot_to_payload.push(None);
+        Some(next_slot as u32)
+    }
+
+    fn intern_cached_chunk_payload(&mut self, payload: CachedChunkPayload) -> Option<u32> {
         let payload_hash = payload.hash;
         let candidate_ids = self
             .voxel_chunk_payload_hash_buckets
@@ -266,12 +315,22 @@ impl Scene {
             {
                 if cached_chunk_payloads_match(existing_payload, &payload) {
                     existing_payload.ref_count = existing_payload.ref_count.saturating_add(1);
-                    return payload_id;
+                    return Some(payload_id);
                 }
             }
         }
 
         let mut payload = payload;
+        let Some(gpu_slot) = self.allocate_payload_slot() else {
+            if !self.voxel_payload_slot_overflow_logged {
+                eprintln!(
+                    "VTE payload slot capacity ({GPU_PAYLOAD_SLOT_CAPACITY}) exhausted; skipping new unique payloads."
+                );
+                self.voxel_payload_slot_overflow_logged = true;
+            }
+            return None;
+        };
+        payload.gpu_slot = gpu_slot;
         payload.ref_count = 1;
         let payload_id = if let Some(reused_id) = self.voxel_chunk_payload_free_ids.pop() {
             self.voxel_chunk_payloads[reused_id as usize] = Some(payload);
@@ -285,7 +344,9 @@ impl Scene {
             .entry(payload_hash)
             .or_default()
             .push(payload_id);
-        payload_id
+        self.voxel_payload_slot_to_payload[gpu_slot as usize] = Some(payload_id);
+        self.queue_payload_upload(payload_id);
+        Some(payload_id)
     }
 
     fn release_cached_chunk_payload(&mut self, payload_id: u32) {
@@ -302,9 +363,18 @@ impl Scene {
             return;
         }
         let payload_hash = existing_payload.hash;
+        let gpu_slot = existing_payload.gpu_slot;
 
         self.voxel_chunk_payloads[payload_idx] = None;
         self.voxel_chunk_payload_free_ids.push(payload_id);
+        if self.voxel_pending_payload_upload_set.remove(&payload_id) {
+            self.voxel_pending_payload_uploads
+                .retain(|&queued_id| queued_id != payload_id);
+        }
+        if (gpu_slot as usize) < self.voxel_payload_slot_to_payload.len() {
+            self.voxel_payload_slot_to_payload[gpu_slot as usize] = None;
+            self.voxel_payload_free_slots.push(gpu_slot);
+        }
 
         let mut remove_bucket = false;
         if let Some(bucket) = self.voxel_chunk_payload_hash_buckets.get_mut(&payload_hash) {
@@ -317,125 +387,38 @@ impl Scene {
     }
 
     fn process_queued_voxel_payload_updates(&mut self) {
-        for chunk_pos in self.world.drain_pending_chunk_updates() {
+        let updated_chunks = self.world.drain_pending_chunk_updates();
+        if updated_chunks.is_empty() {
+            return;
+        }
+
+        for chunk_pos in updated_chunks {
             if let Some(old_mapping) = self.voxel_chunk_payload_cache.remove(&chunk_pos) {
                 self.release_cached_chunk_payload(old_mapping.payload_id);
             }
 
             match self.world.chunks.get(&chunk_pos) {
                 Some(chunk) if !chunk.is_empty() => {
-                    let payload_id =
-                        self.intern_cached_chunk_payload(build_cached_chunk_payload(chunk));
-                    self.voxel_chunk_payload_cache
-                        .insert(chunk_pos, ChunkPayloadCacheEntry { payload_id });
+                    if let Some(payload_id) =
+                        self.intern_cached_chunk_payload(build_cached_chunk_payload(chunk))
+                    {
+                        self.voxel_chunk_payload_cache
+                            .insert(chunk_pos, ChunkPayloadCacheEntry { payload_id });
+                        self.add_active_chunk(chunk_pos);
+                    } else {
+                        self.remove_active_chunk(chunk_pos);
+                    }
                 }
                 _ => {
-                    self.voxel_chunk_payload_cache.remove(&chunk_pos);
+                    self.remove_active_chunk(chunk_pos);
                 }
             }
         }
+
+        self.voxel_world_revision = self.voxel_world_revision.wrapping_add(1);
     }
 
-    pub fn new(preset: ScenePreset) -> Self {
-        let world = match preset {
-            ScenePreset::Flat => worldgen::generate_flat_world(
-                5,             // 5×5×5 chunks in X, Z, W
-                VoxelType(11), // neutral grid floor
-            ),
-            ScenePreset::DemoCubes => worldgen::generate_demo_cube_layout_world(),
-        };
-
-        let surface = cull::extract_surfaces(&world);
-        let scene = Self {
-            world,
-            surface,
-            culled_instances: Vec::new(),
-            cull_log_counter: 0,
-            voxel_chunk_payload_cache: HashMap::new(),
-            voxel_chunk_payloads: Vec::new(),
-            voxel_chunk_payload_free_ids: Vec::new(),
-            voxel_chunk_payload_hash_buckets: HashMap::new(),
-        };
-        let total_voxels = Self::surface_voxel_count(&scene.surface);
-        eprintln!(
-            "Voxel surface ({}): {} chunks, {} surface voxels",
-            preset.label(),
-            scene.surface.chunks.len(),
-            total_voxels
-        );
-        scene
-    }
-
-    pub fn replace_world(&mut self, world: crate::voxel::world::VoxelWorld) {
-        self.world = world;
-        self.voxel_chunk_payload_cache.clear();
-        self.voxel_chunk_payloads.clear();
-        self.voxel_chunk_payload_free_ids.clear();
-        self.voxel_chunk_payload_hash_buckets.clear();
-        self.rebuild_surface("Voxel surface (loaded)");
-    }
-
-    pub fn save_world_to_path(&self, path: &Path) -> io::Result<usize> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-
-        let mut writer = BufWriter::new(File::create(path)?);
-        voxel_io::save_world(&self.world, &mut writer)?;
-        writer.flush()?;
-
-        Ok(self
-            .world
-            .chunks
-            .values()
-            .filter(|chunk| !chunk.is_empty())
-            .count())
-    }
-
-    pub fn load_world_from_path(&mut self, path: &Path) -> io::Result<usize> {
-        let mut reader = BufReader::new(File::open(path)?);
-        let world = voxel_io::load_world(&mut reader)?;
-        let non_empty_chunks = world
-            .chunks
-            .values()
-            .filter(|chunk| !chunk.is_empty())
-            .count();
-        self.replace_world(world);
-        Ok(non_empty_chunks)
-    }
-
-    /// Rebuild surface data if any chunk is dirty.
-    pub fn update_surfaces_if_dirty(&mut self) {
-        if self.world.any_dirty() {
-            self.rebuild_surface("Voxel surface rebuilt");
-        }
-    }
-
-    /// Per-frame: cull and build ModelInstances for the current camera position.
-    pub fn build_instances(&mut self, cam_pos: [f32; 4]) -> &[common::ModelInstance] {
-        self.culled_instances.clear();
-        cull::cull_and_build(
-            &self.surface,
-            cam_pos,
-            RENDER_DISTANCE,
-            &mut self.culled_instances,
-        );
-
-        let (num_instances, num_tets) = cull::mesh_stats(&self.culled_instances);
-        if self.cull_log_counter == 0 || self.cull_log_counter % 120 == 0 {
-            eprintln!("Culled: {num_instances} instances, {num_tets} tetrahedra");
-        }
-        self.cull_log_counter = self.cull_log_counter.wrapping_add(1);
-
-        &self.culled_instances
-    }
-
-    /// Build the voxel-native frame payload for VTE.
-    pub fn build_voxel_frame_data(&mut self, cam_pos: [f32; 4]) -> VoxelFrameData {
-        self.process_queued_voxel_payload_updates();
-
+    fn rebuild_visible_voxel_metadata(&mut self, cam_pos: [f32; 4]) {
         struct YSliceBuildData {
             min_chunk_x: i32,
             max_chunk_x: i32,
@@ -445,35 +428,14 @@ impl Scene {
             max_chunk_w: i32,
             chunk_coords_xzw: Vec<([i32; 3], u32)>,
         }
-        #[derive(Copy, Clone)]
-        struct FramePayloadBinding {
-            occupancy_word_offset: u32,
-            material_word_offset: u32,
-            macro_word_offset: u32,
-            solid_local_min: [i32; 4],
-            solid_local_max: [i32; 4],
-            is_full: bool,
-        }
 
         let mut chunk_headers = Vec::new();
-        let mut occupancy_words = Vec::new();
-        let mut material_words = Vec::new();
-        let mut macro_words = Vec::new();
         let mut visible_chunk_indices = Vec::new();
         let mut y_slice_build: BTreeMap<i32, YSliceBuildData> = BTreeMap::new();
         let mut y_slice_lookup_entries = Vec::new();
-        let mut payload_frame_bindings: Vec<Option<FramePayloadBinding>> =
-            vec![None; self.voxel_chunk_payloads.len()];
         let render_dist_sq = RENDER_DISTANCE * RENDER_DISTANCE;
 
-        let mut chunk_entries: Vec<_> = self.world.chunks.iter().collect();
-        chunk_entries.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z, pos.w));
-
-        for (chunk_pos, chunk) in chunk_entries {
-            if chunk.is_empty() {
-                continue;
-            }
-
+        for &chunk_pos in &self.voxel_active_chunks {
             // L0 culling: skip chunks outside the same camera radius used by tetra path.
             let chunk_min = [
                 chunk_pos.x * CHUNK_SIZE as i32,
@@ -505,7 +467,7 @@ impl Scene {
                 continue;
             }
 
-            let Some(chunk_payload_mapping) = self.voxel_chunk_payload_cache.get(chunk_pos) else {
+            let Some(chunk_payload_mapping) = self.voxel_chunk_payload_cache.get(&chunk_pos) else {
                 continue;
             };
             let payload_idx = chunk_payload_mapping.payload_id as usize;
@@ -517,42 +479,28 @@ impl Scene {
                 continue;
             };
 
-            let frame_binding = if let Some(binding) = payload_frame_bindings[payload_idx] {
-                binding
-            } else {
-                let (occupancy_word_offset, material_word_offset, macro_word_offset) =
-                    append_cached_chunk_payload_words(
-                        chunk_payload,
-                        &mut occupancy_words,
-                        &mut material_words,
-                        &mut macro_words,
-                    );
-                let binding = FramePayloadBinding {
-                    occupancy_word_offset,
-                    material_word_offset,
-                    macro_word_offset,
-                    solid_local_min: chunk_payload.solid_local_min,
-                    solid_local_max: chunk_payload.solid_local_max,
-                    is_full: chunk_payload.is_full,
-                };
-                payload_frame_bindings[payload_idx] = Some(binding);
-                binding
-            };
+            let slot = chunk_payload.gpu_slot as usize;
+            if slot >= GPU_PAYLOAD_SLOT_CAPACITY {
+                continue;
+            }
+            let occupancy_word_offset = (slot * OCCUPANCY_WORDS_PER_CHUNK) as u32;
+            let material_word_offset = (slot * MATERIAL_WORDS_PER_CHUNK) as u32;
+            let macro_word_offset = (slot * MACRO_WORDS_PER_CHUNK) as u32;
 
             let mut flags = 0u32;
-            if frame_binding.is_full {
+            if chunk_payload.is_full {
                 flags |= GpuVoxelChunkHeader::FLAG_FULL;
             }
 
             let chunk_index = chunk_headers.len() as u32;
             chunk_headers.push(GpuVoxelChunkHeader {
                 chunk_coord: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                occupancy_word_offset: frame_binding.occupancy_word_offset,
-                material_word_offset: frame_binding.material_word_offset,
+                occupancy_word_offset,
+                material_word_offset,
                 flags,
-                macro_word_offset: frame_binding.macro_word_offset,
-                solid_local_min: frame_binding.solid_local_min,
-                solid_local_max: frame_binding.solid_local_max,
+                macro_word_offset,
+                solid_local_min: chunk_payload.solid_local_min,
+                solid_local_max: chunk_payload.solid_local_max,
             });
             visible_chunk_indices.push(chunk_index);
 
@@ -627,15 +575,203 @@ impl Scene {
             });
         }
 
-        VoxelFrameData {
-            chunk_headers,
-            occupancy_words,
-            material_words,
-            macro_words,
-            visible_chunk_indices,
-            y_slice_bounds,
-            y_slice_lookup_entries,
+        self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
+        self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
+        self.voxel_frame_data.chunk_headers = chunk_headers;
+        self.voxel_frame_data.visible_chunk_indices = visible_chunk_indices;
+        self.voxel_frame_data.y_slice_bounds = y_slice_bounds;
+        self.voxel_frame_data.y_slice_lookup_entries = y_slice_lookup_entries;
+    }
+
+    fn rebuild_pending_payload_upload_words(&mut self) {
+        let pending_ids = std::mem::take(&mut self.voxel_pending_payload_uploads);
+        self.voxel_pending_payload_upload_set.clear();
+
+        let mut payload_update_slots = Vec::new();
+        let mut occupancy_words = Vec::new();
+        let mut material_words = Vec::new();
+        let mut macro_words = Vec::new();
+        payload_update_slots.reserve(pending_ids.len());
+        occupancy_words.reserve(pending_ids.len() * OCCUPANCY_WORDS_PER_CHUNK);
+        material_words.reserve(pending_ids.len() * MATERIAL_WORDS_PER_CHUNK);
+        macro_words.reserve(pending_ids.len() * MACRO_WORDS_PER_CHUNK);
+
+        for payload_id in pending_ids {
+            let Some(payload) = self
+                .voxel_chunk_payloads
+                .get(payload_id as usize)
+                .and_then(|entry| entry.as_ref())
+            else {
+                continue;
+            };
+            if (payload.gpu_slot as usize) >= GPU_PAYLOAD_SLOT_CAPACITY {
+                continue;
+            }
+            payload_update_slots.push(payload.gpu_slot);
+            occupancy_words.extend_from_slice(&payload.occupancy_words[..]);
+            material_words.extend_from_slice(&payload.material_words[..]);
+            macro_words.extend_from_slice(&payload.macro_words[..]);
         }
+
+        self.voxel_frame_data.payload_update_slots = payload_update_slots;
+        self.voxel_frame_data.occupancy_words = occupancy_words;
+        self.voxel_frame_data.material_words = material_words;
+        self.voxel_frame_data.macro_words = macro_words;
+    }
+
+    pub fn new(preset: ScenePreset) -> Self {
+        let world = match preset {
+            ScenePreset::Flat => worldgen::generate_flat_world(
+                5,             // 5×5×5 chunks in X, Z, W
+                VoxelType(11), // neutral grid floor
+            ),
+            ScenePreset::DemoCubes => worldgen::generate_demo_cube_layout_world(),
+        };
+
+        let surface = cull::extract_surfaces(&world);
+        let scene = Self {
+            world,
+            surface,
+            culled_instances: Vec::new(),
+            cull_log_counter: 0,
+            voxel_chunk_payload_cache: HashMap::new(),
+            voxel_chunk_payloads: Vec::new(),
+            voxel_chunk_payload_free_ids: Vec::new(),
+            voxel_chunk_payload_hash_buckets: HashMap::new(),
+            voxel_payload_slot_to_payload: Vec::new(),
+            voxel_payload_free_slots: Vec::new(),
+            voxel_pending_payload_uploads: Vec::new(),
+            voxel_pending_payload_upload_set: HashSet::new(),
+            voxel_active_chunks: Vec::new(),
+            voxel_active_chunk_indices: HashMap::new(),
+            voxel_world_revision: 0,
+            voxel_visibility_generation: 0,
+            voxel_cached_visibility_camera_chunk: None,
+            voxel_cached_visibility_world_revision: 0,
+            voxel_payload_slot_overflow_logged: false,
+            voxel_frame_data: VoxelFrameData {
+                metadata_generation: 0,
+                chunk_headers: Vec::new(),
+                payload_update_slots: Vec::new(),
+                occupancy_words: Vec::new(),
+                material_words: Vec::new(),
+                macro_words: Vec::new(),
+                visible_chunk_indices: Vec::new(),
+                y_slice_bounds: Vec::new(),
+                y_slice_lookup_entries: Vec::new(),
+            },
+        };
+        let total_voxels = Self::surface_voxel_count(&scene.surface);
+        eprintln!(
+            "Voxel surface ({}): {} chunks, {} surface voxels",
+            preset.label(),
+            scene.surface.chunks.len(),
+            total_voxels
+        );
+        scene
+    }
+
+    pub fn replace_world(&mut self, world: crate::voxel::world::VoxelWorld) {
+        self.world = world;
+        self.voxel_chunk_payload_cache.clear();
+        self.voxel_chunk_payloads.clear();
+        self.voxel_chunk_payload_free_ids.clear();
+        self.voxel_chunk_payload_hash_buckets.clear();
+        self.voxel_payload_slot_to_payload.clear();
+        self.voxel_payload_free_slots.clear();
+        self.voxel_pending_payload_uploads.clear();
+        self.voxel_pending_payload_upload_set.clear();
+        self.voxel_active_chunks.clear();
+        self.voxel_active_chunk_indices.clear();
+        self.voxel_world_revision = 0;
+        self.voxel_visibility_generation = 0;
+        self.voxel_cached_visibility_camera_chunk = None;
+        self.voxel_cached_visibility_world_revision = 0;
+        self.voxel_payload_slot_overflow_logged = false;
+        self.voxel_frame_data.metadata_generation = 0;
+        self.voxel_frame_data.chunk_headers.clear();
+        self.voxel_frame_data.payload_update_slots.clear();
+        self.voxel_frame_data.occupancy_words.clear();
+        self.voxel_frame_data.material_words.clear();
+        self.voxel_frame_data.macro_words.clear();
+        self.voxel_frame_data.visible_chunk_indices.clear();
+        self.voxel_frame_data.y_slice_bounds.clear();
+        self.voxel_frame_data.y_slice_lookup_entries.clear();
+        self.rebuild_surface("Voxel surface (loaded)");
+    }
+
+    pub fn save_world_to_path(&self, path: &Path) -> io::Result<usize> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        let mut writer = BufWriter::new(File::create(path)?);
+        voxel_io::save_world(&self.world, &mut writer)?;
+        writer.flush()?;
+
+        Ok(self
+            .world
+            .chunks
+            .values()
+            .filter(|chunk| !chunk.is_empty())
+            .count())
+    }
+
+    pub fn load_world_from_path(&mut self, path: &Path) -> io::Result<usize> {
+        let mut reader = BufReader::new(File::open(path)?);
+        let world = voxel_io::load_world(&mut reader)?;
+        let non_empty_chunks = world
+            .chunks
+            .values()
+            .filter(|chunk| !chunk.is_empty())
+            .count();
+        self.replace_world(world);
+        Ok(non_empty_chunks)
+    }
+
+    /// Rebuild surface data if any chunk is dirty.
+    pub fn update_surfaces_if_dirty(&mut self) {
+        if self.world.any_dirty() {
+            self.rebuild_surface("Voxel surface rebuilt");
+        }
+    }
+
+    /// Per-frame: cull and build ModelInstances for the current camera position.
+    pub fn build_instances(&mut self, cam_pos: [f32; 4]) -> &[common::ModelInstance] {
+        self.culled_instances.clear();
+        cull::cull_and_build(
+            &self.surface,
+            cam_pos,
+            RENDER_DISTANCE,
+            &mut self.culled_instances,
+        );
+
+        let (num_instances, num_tets) = cull::mesh_stats(&self.culled_instances);
+        if self.cull_log_counter == 0 || self.cull_log_counter % 120 == 0 {
+            eprintln!("Culled: {num_instances} instances, {num_tets} tetrahedra");
+        }
+        self.cull_log_counter = self.cull_log_counter.wrapping_add(1);
+
+        &self.culled_instances
+    }
+
+    /// Build the voxel-native frame payload for VTE.
+    pub fn build_voxel_frame_data(&mut self, cam_pos: [f32; 4]) -> &VoxelFrameData {
+        self.process_queued_voxel_payload_updates();
+
+        let cam_chunk = Self::camera_chunk_key(cam_pos);
+        let visibility_cache_valid = self.voxel_cached_visibility_camera_chunk == Some(cam_chunk)
+            && self.voxel_cached_visibility_world_revision == self.voxel_world_revision;
+        if !visibility_cache_valid {
+            self.rebuild_visible_voxel_metadata(cam_pos);
+            self.voxel_cached_visibility_camera_chunk = Some(cam_chunk);
+            self.voxel_cached_visibility_world_revision = self.voxel_world_revision;
+        }
+
+        self.rebuild_pending_payload_upload_words();
+        &self.voxel_frame_data
     }
 
     fn player_aabb(pos: [f32; 4]) -> ([f32; 4], [f32; 4]) {
@@ -921,6 +1057,28 @@ mod tests {
             voxel_chunk_payloads: Vec::new(),
             voxel_chunk_payload_free_ids: Vec::new(),
             voxel_chunk_payload_hash_buckets: std::collections::HashMap::new(),
+            voxel_payload_slot_to_payload: Vec::new(),
+            voxel_payload_free_slots: Vec::new(),
+            voxel_pending_payload_uploads: Vec::new(),
+            voxel_pending_payload_upload_set: std::collections::HashSet::new(),
+            voxel_active_chunks: Vec::new(),
+            voxel_active_chunk_indices: std::collections::HashMap::new(),
+            voxel_world_revision: 0,
+            voxel_visibility_generation: 0,
+            voxel_cached_visibility_camera_chunk: None,
+            voxel_cached_visibility_world_revision: 0,
+            voxel_payload_slot_overflow_logged: false,
+            voxel_frame_data: VoxelFrameData {
+                metadata_generation: 0,
+                chunk_headers: Vec::new(),
+                payload_update_slots: Vec::new(),
+                occupancy_words: Vec::new(),
+                material_words: Vec::new(),
+                macro_words: Vec::new(),
+                visible_chunk_indices: Vec::new(),
+                y_slice_bounds: Vec::new(),
+                y_slice_lookup_entries: Vec::new(),
+            },
         }
     }
 

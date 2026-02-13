@@ -217,7 +217,9 @@ impl DemoScene {
                 queue,
                 frame_params,
                 VoxelFrameInput {
+                    metadata_generation: 0,
                     chunk_headers: &[],
+                    payload_update_slots: &[],
                     occupancy_words: &[],
                     material_words: &[],
                     macro_words: &[],
@@ -429,7 +431,9 @@ impl DemoScene {
                 queue,
                 frame_params,
                 VoxelFrameInput {
+                    metadata_generation: 0,
                     chunk_headers: &[],
+                    payload_update_slots: &[],
                     occupancy_words: &[],
                     material_words: &[],
                     macro_words: &[],

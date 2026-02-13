@@ -3211,12 +3211,12 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
             let mut vte_entity_instances = Vec::new();
             if self.vte_entities_enabled {
                 vte_entity_instances.push(build_vte_test_entity_instance(preview_time_s));
             }
             vte_entity_instances.extend(self.remote_player_instances(preview_time_s));
+            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
