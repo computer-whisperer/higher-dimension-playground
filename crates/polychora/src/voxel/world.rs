@@ -1,16 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::chunk::Chunk;
 use super::{world_to_chunk, ChunkPos, VoxelType, CHUNK_SIZE};
 
 pub struct VoxelWorld {
     pub chunks: HashMap<ChunkPos, Chunk>,
+    pending_chunk_updates: Vec<ChunkPos>,
+    pending_chunk_update_set: HashSet<ChunkPos>,
 }
 
 impl VoxelWorld {
     pub fn new() -> Self {
         Self {
             chunks: HashMap::new(),
+            pending_chunk_updates: Vec::new(),
+            pending_chunk_update_set: HashSet::new(),
+        }
+    }
+
+    fn queue_chunk_update(&mut self, pos: ChunkPos) {
+        if self.pending_chunk_update_set.insert(pos) {
+            self.pending_chunk_updates.push(pos);
         }
     }
 
@@ -37,6 +47,7 @@ impl VoxelWorld {
         }
         chunk.voxels[idx] = v;
         chunk.dirty = true;
+        self.queue_chunk_update(cp);
 
         // Mark neighbor chunks dirty at boundaries
         let cs = CHUNK_SIZE as i32;
@@ -69,6 +80,12 @@ impl VoxelWorld {
     /// Insert a pre-built chunk at the given position.
     pub fn insert_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
         self.chunks.insert(pos, chunk);
+        self.queue_chunk_update(pos);
+    }
+
+    pub fn drain_pending_chunk_updates(&mut self) -> Vec<ChunkPos> {
+        self.pending_chunk_update_set.clear();
+        std::mem::take(&mut self.pending_chunk_updates)
     }
 
     pub fn any_dirty(&self) -> bool {

@@ -2,11 +2,11 @@ use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::cull::{self, SurfaceData};
 use crate::voxel::io as voxel_io;
 use crate::voxel::worldgen;
-use crate::voxel::{VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -26,6 +26,146 @@ const COLLISION_PUSHUP_STEP: f32 = 0.05;
 const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
 const HARD_WORLD_FLOOR_Y: f32 = -4.0;
+
+struct CachedChunkPayload {
+    hash: u64,
+    solid_count: u32,
+    is_full: bool,
+    ref_count: u32,
+    occupancy_words: Box<[u32; OCCUPANCY_WORDS_PER_CHUNK]>,
+    material_words: Box<[u32; MATERIAL_WORDS_PER_CHUNK]>,
+    macro_words: Box<[u32; MACRO_WORDS_PER_CHUNK]>,
+    solid_local_min: [i32; 4],
+    solid_local_max: [i32; 4],
+}
+
+#[derive(Copy, Clone)]
+struct ChunkPayloadCacheEntry {
+    payload_id: u32,
+}
+
+fn chunk_payload_hash(voxels: &[VoxelType; CHUNK_VOLUME], solid_count: u32) -> u64 {
+    // FNV-1a over voxel material IDs + solid count.
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    hash ^= solid_count as u64;
+    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for voxel in voxels.iter() {
+        hash ^= voxel.0 as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn pack_chunk_payload_words(
+    chunk: &crate::voxel::chunk::Chunk,
+    occupancy_words: &mut [u32],
+    material_words: &mut [u32],
+    macro_words: &mut [u32],
+) -> ([i32; 4], [i32; 4]) {
+    occupancy_words.fill(0);
+    material_words.fill(0);
+    macro_words.fill(0);
+    let mut chunk_solid_local_min = [i32::MAX; 4];
+    let mut chunk_solid_local_max = [i32::MIN; 4];
+
+    for (voxel_idx, voxel) in chunk.voxels.iter().enumerate() {
+        let mat_word_idx = voxel_idx / 4;
+        let mat_shift = ((voxel_idx & 3) * 8) as u32;
+        material_words[mat_word_idx] |= (voxel.0 as u32) << mat_shift;
+        if voxel.is_solid() {
+            let word_idx = voxel_idx / 32;
+            occupancy_words[word_idx] |= 1u32 << (voxel_idx % 32);
+
+            let x = voxel_idx % CHUNK_SIZE;
+            let y = (voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
+            let z = (voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
+            let w = voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+            chunk_solid_local_min[0] = chunk_solid_local_min[0].min(x as i32);
+            chunk_solid_local_min[1] = chunk_solid_local_min[1].min(y as i32);
+            chunk_solid_local_min[2] = chunk_solid_local_min[2].min(z as i32);
+            chunk_solid_local_min[3] = chunk_solid_local_min[3].min(w as i32);
+            chunk_solid_local_max[0] = chunk_solid_local_max[0].max(x as i32);
+            chunk_solid_local_max[1] = chunk_solid_local_max[1].max(y as i32);
+            chunk_solid_local_max[2] = chunk_solid_local_max[2].max(z as i32);
+            chunk_solid_local_max[3] = chunk_solid_local_max[3].max(w as i32);
+            let mx = x / 2;
+            let my = y / 2;
+            let mz = z / 2;
+            let mw = w / 2;
+            let macro_idx = (((mw * MACRO_CELLS_PER_AXIS + mz) * MACRO_CELLS_PER_AXIS + my)
+                * MACRO_CELLS_PER_AXIS)
+                + mx;
+            let macro_word_idx = macro_idx / 32;
+            macro_words[macro_word_idx] |= 1u32 << (macro_idx % 32);
+        }
+    }
+
+    (
+        if chunk_solid_local_min[0] == i32::MAX {
+            [0, 0, 0, 0]
+        } else {
+            chunk_solid_local_min
+        },
+        if chunk_solid_local_max[0] == i32::MIN {
+            [0, 0, 0, 0]
+        } else {
+            chunk_solid_local_max
+        },
+    )
+}
+
+fn build_cached_chunk_payload(chunk: &crate::voxel::chunk::Chunk) -> CachedChunkPayload {
+    let mut occupancy_words = Box::new([0u32; OCCUPANCY_WORDS_PER_CHUNK]);
+    let mut material_words = Box::new([0u32; MATERIAL_WORDS_PER_CHUNK]);
+    let mut macro_words = Box::new([0u32; MACRO_WORDS_PER_CHUNK]);
+    let (solid_local_min, solid_local_max) = pack_chunk_payload_words(
+        chunk,
+        &mut occupancy_words[..],
+        &mut material_words[..],
+        &mut macro_words[..],
+    );
+
+    CachedChunkPayload {
+        hash: chunk_payload_hash(chunk.voxels.as_ref(), chunk.solid_count),
+        solid_count: chunk.solid_count,
+        is_full: chunk.is_full(),
+        ref_count: 0,
+        occupancy_words,
+        material_words,
+        macro_words,
+        solid_local_min,
+        solid_local_max,
+    }
+}
+
+fn append_cached_chunk_payload_words(
+    chunk_payload: &CachedChunkPayload,
+    occupancy_words: &mut Vec<u32>,
+    material_words: &mut Vec<u32>,
+    macro_words: &mut Vec<u32>,
+) -> (u32, u32, u32) {
+    let occupancy_word_offset = occupancy_words.len() as u32;
+    occupancy_words.extend_from_slice(&chunk_payload.occupancy_words[..]);
+    let material_word_offset = material_words.len() as u32;
+    material_words.extend_from_slice(&chunk_payload.material_words[..]);
+    let macro_word_offset = macro_words.len() as u32;
+    macro_words.extend_from_slice(&chunk_payload.macro_words[..]);
+    (
+        occupancy_word_offset,
+        material_word_offset,
+        macro_word_offset,
+    )
+}
+
+fn cached_chunk_payloads_match(a: &CachedChunkPayload, b: &CachedChunkPayload) -> bool {
+    a.solid_count == b.solid_count
+        && a.is_full == b.is_full
+        && a.solid_local_min == b.solid_local_min
+        && a.solid_local_max == b.solid_local_max
+        && a.occupancy_words[..] == b.occupancy_words[..]
+        && a.material_words[..] == b.material_words[..]
+        && a.macro_words[..] == b.macro_words[..]
+}
 
 #[derive(Copy, Clone, Debug)]
 pub enum ScenePreset {
@@ -71,6 +211,10 @@ pub struct Scene {
     surface: SurfaceData,
     culled_instances: Vec<common::ModelInstance>,
     cull_log_counter: u64,
+    voxel_chunk_payload_cache: HashMap<ChunkPos, ChunkPayloadCacheEntry>,
+    voxel_chunk_payloads: Vec<Option<CachedChunkPayload>>,
+    voxel_chunk_payload_free_ids: Vec<u32>,
+    voxel_chunk_payload_hash_buckets: HashMap<u64, Vec<u32>>,
 }
 
 #[derive(Copy, Clone)]
@@ -106,6 +250,92 @@ impl Scene {
         );
     }
 
+    fn intern_cached_chunk_payload(&mut self, payload: CachedChunkPayload) -> u32 {
+        let payload_hash = payload.hash;
+        let candidate_ids = self
+            .voxel_chunk_payload_hash_buckets
+            .get(&payload_hash)
+            .cloned()
+            .unwrap_or_default();
+
+        for payload_id in candidate_ids {
+            if let Some(existing_payload) = self
+                .voxel_chunk_payloads
+                .get_mut(payload_id as usize)
+                .and_then(|entry| entry.as_mut())
+            {
+                if cached_chunk_payloads_match(existing_payload, &payload) {
+                    existing_payload.ref_count = existing_payload.ref_count.saturating_add(1);
+                    return payload_id;
+                }
+            }
+        }
+
+        let mut payload = payload;
+        payload.ref_count = 1;
+        let payload_id = if let Some(reused_id) = self.voxel_chunk_payload_free_ids.pop() {
+            self.voxel_chunk_payloads[reused_id as usize] = Some(payload);
+            reused_id
+        } else {
+            let new_id = self.voxel_chunk_payloads.len() as u32;
+            self.voxel_chunk_payloads.push(Some(payload));
+            new_id
+        };
+        self.voxel_chunk_payload_hash_buckets
+            .entry(payload_hash)
+            .or_default()
+            .push(payload_id);
+        payload_id
+    }
+
+    fn release_cached_chunk_payload(&mut self, payload_id: u32) {
+        let payload_idx = payload_id as usize;
+        if payload_idx >= self.voxel_chunk_payloads.len() {
+            return;
+        }
+
+        let Some(existing_payload) = self.voxel_chunk_payloads[payload_idx].as_mut() else {
+            return;
+        };
+        if existing_payload.ref_count > 1 {
+            existing_payload.ref_count -= 1;
+            return;
+        }
+        let payload_hash = existing_payload.hash;
+
+        self.voxel_chunk_payloads[payload_idx] = None;
+        self.voxel_chunk_payload_free_ids.push(payload_id);
+
+        let mut remove_bucket = false;
+        if let Some(bucket) = self.voxel_chunk_payload_hash_buckets.get_mut(&payload_hash) {
+            bucket.retain(|&candidate_id| candidate_id != payload_id);
+            remove_bucket = bucket.is_empty();
+        }
+        if remove_bucket {
+            self.voxel_chunk_payload_hash_buckets.remove(&payload_hash);
+        }
+    }
+
+    fn process_queued_voxel_payload_updates(&mut self) {
+        for chunk_pos in self.world.drain_pending_chunk_updates() {
+            if let Some(old_mapping) = self.voxel_chunk_payload_cache.remove(&chunk_pos) {
+                self.release_cached_chunk_payload(old_mapping.payload_id);
+            }
+
+            match self.world.chunks.get(&chunk_pos) {
+                Some(chunk) if !chunk.is_empty() => {
+                    let payload_id =
+                        self.intern_cached_chunk_payload(build_cached_chunk_payload(chunk));
+                    self.voxel_chunk_payload_cache
+                        .insert(chunk_pos, ChunkPayloadCacheEntry { payload_id });
+                }
+                _ => {
+                    self.voxel_chunk_payload_cache.remove(&chunk_pos);
+                }
+            }
+        }
+    }
+
     pub fn new(preset: ScenePreset) -> Self {
         let world = match preset {
             ScenePreset::Flat => worldgen::generate_flat_world(
@@ -121,6 +351,10 @@ impl Scene {
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,
+            voxel_chunk_payload_cache: HashMap::new(),
+            voxel_chunk_payloads: Vec::new(),
+            voxel_chunk_payload_free_ids: Vec::new(),
+            voxel_chunk_payload_hash_buckets: HashMap::new(),
         };
         let total_voxels = Self::surface_voxel_count(&scene.surface);
         eprintln!(
@@ -134,6 +368,10 @@ impl Scene {
 
     pub fn replace_world(&mut self, world: crate::voxel::world::VoxelWorld) {
         self.world = world;
+        self.voxel_chunk_payload_cache.clear();
+        self.voxel_chunk_payloads.clear();
+        self.voxel_chunk_payload_free_ids.clear();
+        self.voxel_chunk_payload_hash_buckets.clear();
         self.rebuild_surface("Voxel surface (loaded)");
     }
 
@@ -195,7 +433,9 @@ impl Scene {
     }
 
     /// Build the voxel-native frame payload for VTE.
-    pub fn build_voxel_frame_data(&self, cam_pos: [f32; 4]) -> VoxelFrameData {
+    pub fn build_voxel_frame_data(&mut self, cam_pos: [f32; 4]) -> VoxelFrameData {
+        self.process_queued_voxel_payload_updates();
+
         struct YSliceBuildData {
             min_chunk_x: i32,
             max_chunk_x: i32,
@@ -205,6 +445,15 @@ impl Scene {
             max_chunk_w: i32,
             chunk_coords_xzw: Vec<([i32; 3], u32)>,
         }
+        #[derive(Copy, Clone)]
+        struct FramePayloadBinding {
+            occupancy_word_offset: u32,
+            material_word_offset: u32,
+            macro_word_offset: u32,
+            solid_local_min: [i32; 4],
+            solid_local_max: [i32; 4],
+            is_full: bool,
+        }
 
         let mut chunk_headers = Vec::new();
         let mut occupancy_words = Vec::new();
@@ -213,6 +462,8 @@ impl Scene {
         let mut visible_chunk_indices = Vec::new();
         let mut y_slice_build: BTreeMap<i32, YSliceBuildData> = BTreeMap::new();
         let mut y_slice_lookup_entries = Vec::new();
+        let mut payload_frame_bindings: Vec<Option<FramePayloadBinding>> =
+            vec![None; self.voxel_chunk_payloads.len()];
         let render_dist_sq = RENDER_DISTANCE * RENDER_DISTANCE;
 
         let mut chunk_entries: Vec<_> = self.world.chunks.iter().collect();
@@ -254,73 +505,54 @@ impl Scene {
                 continue;
             }
 
-            let occupancy_word_offset = occupancy_words.len() as u32;
-            occupancy_words.resize(occupancy_words.len() + OCCUPANCY_WORDS_PER_CHUNK, 0);
-            let material_word_offset = material_words.len() as u32;
-            material_words.resize(material_words.len() + MATERIAL_WORDS_PER_CHUNK, 0);
-            let macro_word_offset = macro_words.len() as u32;
-            macro_words.resize(macro_words.len() + MACRO_WORDS_PER_CHUNK, 0);
-            let mut chunk_solid_local_min = [i32::MAX; 4];
-            let mut chunk_solid_local_max = [i32::MIN; 4];
+            let Some(chunk_payload_mapping) = self.voxel_chunk_payload_cache.get(chunk_pos) else {
+                continue;
+            };
+            let payload_idx = chunk_payload_mapping.payload_id as usize;
+            let Some(chunk_payload) = self
+                .voxel_chunk_payloads
+                .get(payload_idx)
+                .and_then(|entry| entry.as_ref())
+            else {
+                continue;
+            };
 
-            for (voxel_idx, voxel) in chunk.voxels.iter().enumerate() {
-                let mat_word_idx = material_word_offset as usize + (voxel_idx / 4);
-                let mat_shift = ((voxel_idx & 3) * 8) as u32;
-                material_words[mat_word_idx] |= (voxel.0 as u32) << mat_shift;
-                if voxel.is_solid() {
-                    let word_idx = occupancy_word_offset as usize + (voxel_idx / 32);
-                    occupancy_words[word_idx] |= 1u32 << (voxel_idx % 32);
-
-                    let x = voxel_idx % CHUNK_SIZE;
-                    let y = (voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
-                    let z = (voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
-                    let w = voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
-                    chunk_solid_local_min[0] = chunk_solid_local_min[0].min(x as i32);
-                    chunk_solid_local_min[1] = chunk_solid_local_min[1].min(y as i32);
-                    chunk_solid_local_min[2] = chunk_solid_local_min[2].min(z as i32);
-                    chunk_solid_local_min[3] = chunk_solid_local_min[3].min(w as i32);
-                    chunk_solid_local_max[0] = chunk_solid_local_max[0].max(x as i32);
-                    chunk_solid_local_max[1] = chunk_solid_local_max[1].max(y as i32);
-                    chunk_solid_local_max[2] = chunk_solid_local_max[2].max(z as i32);
-                    chunk_solid_local_max[3] = chunk_solid_local_max[3].max(w as i32);
-                    let mx = x / 2;
-                    let my = y / 2;
-                    let mz = z / 2;
-                    let mw = w / 2;
-                    let macro_idx = (((mw * MACRO_CELLS_PER_AXIS + mz) * MACRO_CELLS_PER_AXIS
-                        + my)
-                        * MACRO_CELLS_PER_AXIS)
-                        + mx;
-                    let macro_word_idx = macro_word_offset as usize + (macro_idx / 32);
-                    macro_words[macro_word_idx] |= 1u32 << (macro_idx % 32);
-                }
-            }
+            let frame_binding = if let Some(binding) = payload_frame_bindings[payload_idx] {
+                binding
+            } else {
+                let (occupancy_word_offset, material_word_offset, macro_word_offset) =
+                    append_cached_chunk_payload_words(
+                        chunk_payload,
+                        &mut occupancy_words,
+                        &mut material_words,
+                        &mut macro_words,
+                    );
+                let binding = FramePayloadBinding {
+                    occupancy_word_offset,
+                    material_word_offset,
+                    macro_word_offset,
+                    solid_local_min: chunk_payload.solid_local_min,
+                    solid_local_max: chunk_payload.solid_local_max,
+                    is_full: chunk_payload.is_full,
+                };
+                payload_frame_bindings[payload_idx] = Some(binding);
+                binding
+            };
 
             let mut flags = 0u32;
-            if chunk.is_empty() {
-                flags |= GpuVoxelChunkHeader::FLAG_EMPTY;
-            }
-            if chunk.is_full() {
+            if frame_binding.is_full {
                 flags |= GpuVoxelChunkHeader::FLAG_FULL;
             }
 
             let chunk_index = chunk_headers.len() as u32;
             chunk_headers.push(GpuVoxelChunkHeader {
                 chunk_coord: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                occupancy_word_offset,
-                material_word_offset,
+                occupancy_word_offset: frame_binding.occupancy_word_offset,
+                material_word_offset: frame_binding.material_word_offset,
                 flags,
-                macro_word_offset,
-                solid_local_min: if chunk_solid_local_min[0] == i32::MAX {
-                    [0, 0, 0, 0]
-                } else {
-                    chunk_solid_local_min
-                },
-                solid_local_max: if chunk_solid_local_max[0] == i32::MIN {
-                    [0, 0, 0, 0]
-                } else {
-                    chunk_solid_local_max
-                },
+                macro_word_offset: frame_binding.macro_word_offset,
+                solid_local_min: frame_binding.solid_local_min,
+                solid_local_max: frame_binding.solid_local_max,
             });
             visible_chunk_indices.push(chunk_index);
 
@@ -685,6 +917,10 @@ mod tests {
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,
+            voxel_chunk_payload_cache: std::collections::HashMap::new(),
+            voxel_chunk_payloads: Vec::new(),
+            voxel_chunk_payload_free_ids: Vec::new(),
+            voxel_chunk_payload_hash_buckets: std::collections::HashMap::new(),
         }
     }
 
