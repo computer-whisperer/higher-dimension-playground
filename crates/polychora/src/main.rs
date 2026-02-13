@@ -364,6 +364,7 @@ impl SceneArg {
 enum InfoPanelMode {
     Full,
     VectorTable,
+    VectorTable2,
     Off,
 }
 
@@ -372,6 +373,7 @@ impl InfoPanelMode {
         match self {
             Self::Full => "full",
             Self::VectorTable => "vectors",
+            Self::VectorTable2 => "vectors2",
             Self::Off => "off",
         }
     }
@@ -380,11 +382,13 @@ impl InfoPanelMode {
         let index = match self {
             Self::Full => 0,
             Self::VectorTable => 1,
-            Self::Off => 2,
+            Self::VectorTable2 => 2,
+            Self::Off => 3,
         };
-        match (index + delta).rem_euclid(3) {
+        match (index + delta).rem_euclid(4) {
             0 => Self::Full,
             1 => Self::VectorTable,
+            2 => Self::VectorTable2,
             _ => Self::Off,
         }
     }
@@ -2197,6 +2201,11 @@ impl App {
             InfoPanelMode::VectorTable => {
                 Some(self.vector_table_hud_text(look_dir, target_hit_voxel, target_hit_face))
             }
+            InfoPanelMode::VectorTable2 => Some(self.vector_table2_hud_text(
+                look_dir,
+                target_hit_voxel,
+                target_hit_face,
+            )),
             InfoPanelMode::Full => Some(self.full_info_hud_text(
                 pair,
                 look_dir,
@@ -2209,10 +2218,24 @@ impl App {
 
     fn vector_table_hud_text(
         &self,
-        look_dir: [f32; 4],
+        _look_dir: [f32; 4],
         target_hit_voxel: Option<[i32; 4]>,
         target_hit_face: Option<[i32; 4]>,
     ) -> String {
+        let (_view_x, _view_y, view_z, view_w) = self.current_view_basis();
+        let center_forward = normalize4([
+            view_z[0] + view_w[0],
+            view_z[1] + view_w[1],
+            view_z[2] + view_w[2],
+            view_z[3] + view_w[3],
+        ]);
+        let hidden_side = normalize4([
+            view_w[0] - view_z[0],
+            view_w[1] - view_z[1],
+            view_w[2] - view_z[2],
+            view_w[3] - view_z[3],
+        ]);
+
         let mut text = String::new();
         text.push_str(
             "vec       |        X |        Y |        Z |        W\n\
@@ -2228,7 +2251,109 @@ impl App {
         ));
         text.push_str(&format!(
             "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-            "look", look_dir[0], look_dir[1], look_dir[2], look_dir[3],
+            "fwd_ctr",
+            center_forward[0],
+            center_forward[1],
+            center_forward[2],
+            center_forward[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "side_w",
+            hidden_side[0],
+            hidden_side[1],
+            hidden_side[2],
+            hidden_side[3],
+        ));
+        if let Some(hit) = target_hit_voxel {
+            text.push_str(&format!(
+                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                "block", hit[0], hit[1], hit[2], hit[3]
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                "block", "--", "--", "--", "--"
+            ));
+        }
+        if let Some(face) = target_hit_face {
+            text.push_str(&format!(
+                "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
+                "face", face[0], face[1], face[2], face[3]
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                "face", "--", "--", "--", "--"
+            ));
+        }
+        text
+    }
+
+    fn vector_table2_hud_text(
+        &self,
+        _look_dir: [f32; 4],
+        target_hit_voxel: Option<[i32; 4]>,
+        target_hit_face: Option<[i32; 4]>,
+    ) -> String {
+        let (view_x, view_y, view_z, view_w) = self.current_view_basis();
+        let center_forward = normalize4([
+            view_z[0] + view_w[0],
+            view_z[1] + view_w[1],
+            view_z[2] + view_w[2],
+            view_z[3] + view_w[3],
+        ]);
+        let hidden_side = normalize4([
+            view_w[0] - view_z[0],
+            view_w[1] - view_z[1],
+            view_w[2] - view_z[2],
+            view_w[3] - view_z[3],
+        ]);
+
+        let mut text = String::new();
+        text.push_str(
+            "vec       |        X |        Y |        Z |        W\n\
+             ----------+----------+----------+----------+----------",
+        );
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.2} | {:+8.2} | {:+8.2} | {:+8.2}",
+            "pos",
+            self.camera.position[0],
+            self.camera.position[1],
+            self.camera.position[2],
+            self.camera.position[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "fwd_ctr",
+            center_forward[0],
+            center_forward[1],
+            center_forward[2],
+            center_forward[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "side_w",
+            hidden_side[0],
+            hidden_side[1],
+            hidden_side[2],
+            hidden_side[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "view_x", view_x[0], view_x[1], view_x[2], view_x[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "view_y", view_y[0], view_y[1], view_y[2], view_y[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "view_z", view_z[0], view_z[1], view_z[2], view_z[3],
+        ));
+        text.push_str(&format!(
+            "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
+            "view_w", view_w[0], view_w[1], view_w[2], view_w[3],
         ));
         if let Some(hit) = target_hit_voxel {
             text.push_str(&format!(
@@ -2419,6 +2544,18 @@ impl App {
             }
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 self.camera.view_matrix()
+            }
+        }
+    }
+
+    fn current_view_basis(&self) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => self.camera.view_basis_upright(),
+            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                self.camera.view_basis_look_frame()
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                self.camera.view_basis()
             }
         }
     }
@@ -2958,12 +3095,15 @@ impl App {
             "off".to_string()
         };
         let do_navigation_hud = self.menu_open || self.info_panel_mode != InfoPanelMode::Off;
-        let hud_readout_mode =
-            if !self.menu_open && self.info_panel_mode == InfoPanelMode::VectorTable {
-                HudReadoutMode::CompactVectors
-            } else {
-                HudReadoutMode::Full
-            };
+        let hud_readout_mode = if !self.menu_open
+            && matches!(
+                self.info_panel_mode,
+                InfoPanelMode::VectorTable | InfoPanelMode::VectorTable2
+            ) {
+            HudReadoutMode::CompactVectors
+        } else {
+            HudReadoutMode::Full
+        };
         let hud_rotation_label = if self.menu_open {
             Some(self.pause_menu_hud_text())
         } else {

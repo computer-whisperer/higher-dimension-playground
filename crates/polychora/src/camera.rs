@@ -323,7 +323,7 @@ impl Camera4D {
         hidden_mode: bool,
     ) {
         let yaw_delta = dx * sensitivity;
-        let pitch_delta = -dy * sensitivity;
+        let vertical_delta = -dy * sensitivity;
         let forward_y_before_yaw = self.look_forward[1];
 
         if hidden_mode {
@@ -335,9 +335,14 @@ impl Camera4D {
         }
         // Preserve visual pitch across yaw so yaw never directly tilts toward/away from Y.
         self.renormalize_forward_preserve_y(forward_y_before_yaw);
-        // Keep vertical mouse motion on the visual up axis in both modes; hidden mode
-        // only changes the horizontal plane from forward/right to forward/side.
-        Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, pitch_delta);
+        if hidden_mode {
+            // Hidden vertical maps to a direct ZW-like turn in baseline orientation.
+            // This gives LOOK-TR a first-order hidden-plane axis like UPRIGHT's mod+mouse-Y.
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_side, vertical_delta);
+        } else {
+            // Normal vertical keeps classic visual pitch.
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, vertical_delta);
+        }
 
         self.reorthonormalize_look_frame();
         // Regular yaw should feel horizon-locked; hidden turns keep the gentler damping.
@@ -1249,15 +1254,50 @@ mod tests {
     }
 
     #[test]
-    fn look_transport_hidden_mode_vertical_uses_visual_pitch() {
+    fn look_transport_non_hidden_vertical_uses_visual_pitch() {
         let mut cam = Camera4D::new();
-        cam.apply_mouse_look_transport(0.0, -std::f32::consts::FRAC_PI_2, 1.0, true);
+        cam.apply_mouse_look_transport(0.0, -std::f32::consts::FRAC_PI_2, 1.0, false);
         let look = cam.look_direction_look_frame();
         assert!(look[1] > 0.9999, "expected +Y aim, got y={}", look[1]);
         assert!(
             look[3].abs() < 1e-4,
             "expected w≈0 for pure pitch, got w={}",
             look[3]
+        );
+    }
+
+    #[test]
+    fn look_transport_hidden_mode_vertical_rotates_hidden_side_axis() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport(0.0, -std::f32::consts::FRAC_PI_2, 1.0, true);
+        let look = cam.look_direction_look_frame();
+        assert!(look[0] > 0.9999, "expected look to stay +X, got x={}", look[0]);
+        assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
+        assert!(look[2].abs() < 1e-4, "expected z≈0, got z={}", look[2]);
+        assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
+
+        let (_, _, view_z, view_w) = cam.view_basis_look_frame();
+        let hidden_side = Camera4D::normalize_dir([
+            view_w[0] - view_z[0],
+            view_w[1] - view_z[1],
+            view_w[2] - view_z[2],
+            view_w[3] - view_z[3],
+        ]);
+        assert!(hidden_side[2] < -0.9999, "expected hidden side near -Z, got z={}", hidden_side[2]);
+        assert!(
+            hidden_side[0].abs() < 1e-4,
+            "expected hidden side x≈0, got x={}",
+            hidden_side[0]
+        );
+        assert!(
+            hidden_side[1].abs() < 1e-4,
+            "expected hidden side y≈0, got y={}",
+            hidden_side[1]
+        );
+        assert!(
+            hidden_side[3].abs() < 1e-4,
+            "expected hidden side w≈0, got w={}",
+            hidden_side[3]
         );
     }
 
