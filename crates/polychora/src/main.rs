@@ -37,6 +37,7 @@ const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
 const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 34;
+const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
 const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
 const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
@@ -535,6 +536,7 @@ fn main() {
         control_scheme: ControlScheme::LookTransport,
         scroll_cycle_pair: RotationPair::Standard,
         move_speed: 5.0,
+        sprint_enabled: false,
         info_panel_mode: InfoPanelMode::VectorTable,
         focal_length_xy: 1.0,
         focal_length_zw: 1.0,
@@ -705,6 +707,7 @@ struct App {
     control_scheme: ControlScheme,
     scroll_cycle_pair: RotationPair,
     move_speed: f32,
+    sprint_enabled: bool,
     info_panel_mode: InfoPanelMode,
     focal_length_xy: f32,
     focal_length_zw: f32,
@@ -2057,12 +2060,14 @@ impl App {
         self.input.take_load_world();
         self.input.take_scroll_steps();
         self.input.take_fly_toggle();
+        self.input.take_sprint_toggle();
         self.input.take_jump();
         self.input.take_place_material_prev();
         self.input.take_place_material_next();
         self.input.take_place_material_digit();
         self.input.take_remove_block();
         self.input.take_place_block();
+        self.input.take_pick_material();
         self.input.take_mouse_delta();
     }
 
@@ -2863,6 +2868,13 @@ impl App {
             if self.input.take_fly_toggle() {
                 self.camera.toggle_flying();
             }
+            if self.input.take_sprint_toggle() {
+                self.sprint_enabled = !self.sprint_enabled;
+                eprintln!(
+                    "Sprint: {}",
+                    if self.sprint_enabled { "on" } else { "off" }
+                );
+            }
 
             // Block place material selection.
             if self.input.take_place_material_prev() {
@@ -2899,6 +2911,11 @@ impl App {
             // Movement (vertical zeroed in gravity mode internally).
             let prev_position = self.camera.position;
             let (forward, strafe, vertical, w_axis) = self.input.movement_axes();
+            let move_speed = if self.sprint_enabled && forward > 0.0 {
+                self.move_speed * SPRINT_SPEED_MULTIPLIER
+            } else {
+                self.move_speed
+            };
             match self.control_scheme {
                 ControlScheme::IntuitiveUpright => {
                     self.camera.apply_movement_upright(
@@ -2907,7 +2924,7 @@ impl App {
                         vertical,
                         w_axis,
                         dt,
-                        self.move_speed,
+                        move_speed,
                     );
                 }
                 ControlScheme::LookTransport | ControlScheme::RotorFree => {
@@ -2917,7 +2934,7 @@ impl App {
                         vertical,
                         w_axis,
                         dt,
-                        self.move_speed,
+                        move_speed,
                     );
                 }
                 ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
@@ -2927,7 +2944,7 @@ impl App {
                         vertical,
                         w_axis,
                         dt,
-                        self.move_speed,
+                        move_speed,
                     );
                 }
             }
@@ -2949,8 +2966,24 @@ impl App {
             // Block edit actions.
             let look_dir_for_edit = self.current_look_direction();
             if self.mouse_grabbed {
+                let pick_requested = self.input.take_pick_material();
                 let remove_requested = self.input.take_remove_block();
                 let place_requested = self.input.take_place_block();
+                if pick_requested {
+                    if let Some([x, y, z, w]) = self
+                        .scene
+                        .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
+                        .hit_voxel
+                    {
+                        let material = self.scene.world.get_voxel(x, y, z, w).0;
+                        self.place_material = material
+                            .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
+                        eprintln!(
+                            "Picked voxel material {} from ({x}, {y}, {z}, {w})",
+                            self.place_material
+                        );
+                    }
+                }
                 if remove_requested || place_requested {
                     if remove_requested {
                         if let Some([x, y, z, w]) = self.scene.remove_block_along_ray(
@@ -2987,11 +3020,13 @@ impl App {
             } else {
                 self.input.take_remove_block();
                 self.input.take_place_block();
+                self.input.take_pick_material();
             }
         } else {
             self.input.take_jump();
             self.input.take_remove_block();
             self.input.take_place_block();
+            self.input.take_pick_material();
         }
 
         let look_dir = self.current_look_direction();
@@ -3334,7 +3369,10 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
-                MouseButton::Right | MouseButton::Back | MouseButton::Forward => {
+                MouseButton::Middle
+                | MouseButton::Right
+                | MouseButton::Back
+                | MouseButton::Forward => {
                     self.input.handle_mouse_button(button, state);
                 }
                 _ => {}

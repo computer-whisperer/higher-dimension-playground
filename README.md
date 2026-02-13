@@ -167,6 +167,7 @@ The default scene includes:
 | Q/E | Hidden-dimension strafe (friendly side axis in `UPRIGHT`) |
 | Mouse Back | Hold for XW turning (`UPRIGHT`/`LEG-SIDE`: XW/ZW) |
 | Mouse Back+Forward | Legacy only: double rotation (XZ yaw + YW) |
+| Middle click | Pick pointed block's material |
 | Scroll wheel | Cycle block material (`LEG-SCRL` keeps legacy rotation-pair cycling) |
 | Tab | Cycle control scheme (`LOOK-TR` -> `ROTOR` -> `LEG-SIDE` -> `LEG-SCRL` -> `UPRIGHT`) |
 | Hold R | Pull orientation toward canonical +X home pose |
@@ -177,6 +178,7 @@ The default scene includes:
 | Up/Down + Left/Right + Enter | Navigate and tune pause-menu actions |
 | Click | Re-grab mouse |
 | Double-tap Space | Toggle fly/gravity mode |
+| Double-tap W | Toggle sprint |
 
 ### Game Options
 

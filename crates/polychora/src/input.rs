@@ -108,12 +108,15 @@ pub struct InputState {
     mouse_dy: f64,
     escape_pressed: bool,
     last_space_press: Option<Instant>,
+    last_forward_press: Option<Instant>,
     last_fly_toggle: Option<Instant>,
     fly_toggle_requested: bool,
+    sprint_toggle_requested: bool,
     jump_requested: bool,
     screenshot_requested: bool,
     remove_block_requested: bool,
     place_block_requested: bool,
+    pick_material_requested: bool,
     place_material_prev_requested: bool,
     place_material_next_requested: bool,
     place_material_digit_requested: Option<u8>,
@@ -152,12 +155,15 @@ impl InputState {
             mouse_dy: 0.0,
             escape_pressed: false,
             last_space_press: None,
+            last_forward_press: None,
             last_fly_toggle: None,
             fly_toggle_requested: false,
+            sprint_toggle_requested: false,
             jump_requested: false,
             screenshot_requested: false,
             remove_block_requested: false,
             place_block_requested: false,
+            pick_material_requested: false,
             place_material_prev_requested: false,
             place_material_next_requested: false,
             place_material_digit_requested: None,
@@ -186,7 +192,13 @@ impl InputState {
         let pressed = event.state.is_pressed();
         if let PhysicalKey::Code(code) = event.physical_key {
             match code {
-                KeyCode::KeyW => self.forward = pressed,
+                KeyCode::KeyW => {
+                    let was_forward = self.forward;
+                    self.forward = pressed;
+                    if pressed && !was_forward {
+                        self.handle_forward_tap(Instant::now());
+                    }
+                }
                 KeyCode::KeyS => self.backward = pressed,
                 KeyCode::KeyA => self.left = pressed,
                 KeyCode::KeyD => self.right = pressed,
@@ -380,6 +392,21 @@ impl InputState {
         self.last_space_press = Some(now);
     }
 
+    fn handle_forward_tap(&mut self, now: Instant) {
+        if let Some(last_press) = self.last_forward_press {
+            let dt_ms = now.duration_since(last_press).as_millis();
+            if dt_ms < DOUBLE_TAP_MIN_INTERVAL_MS {
+                return;
+            }
+            if dt_ms <= DOUBLE_TAP_THRESHOLD_MS {
+                self.sprint_toggle_requested = true;
+                self.last_forward_press = None;
+                return;
+            }
+        }
+        self.last_forward_press = Some(now);
+    }
+
     pub fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         let pressed = state.is_pressed();
         match button {
@@ -391,6 +418,11 @@ impl InputState {
             MouseButton::Right => {
                 if pressed {
                     self.place_block_requested = true;
+                }
+            }
+            MouseButton::Middle => {
+                if pressed {
+                    self.pick_material_requested = true;
                 }
             }
             MouseButton::Back => self.mouse_back_held = pressed,
@@ -440,6 +472,12 @@ impl InputState {
         v
     }
 
+    pub fn take_sprint_toggle(&mut self) -> bool {
+        let v = self.sprint_toggle_requested;
+        self.sprint_toggle_requested = false;
+        v
+    }
+
     pub fn take_jump(&mut self) -> bool {
         let v = self.jump_requested;
         self.jump_requested = false;
@@ -461,6 +499,12 @@ impl InputState {
     pub fn take_place_block(&mut self) -> bool {
         let v = self.place_block_requested;
         self.place_block_requested = false;
+        v
+    }
+
+    pub fn take_pick_material(&mut self) -> bool {
+        let v = self.pick_material_requested;
+        self.pick_material_requested = false;
         v
     }
 
