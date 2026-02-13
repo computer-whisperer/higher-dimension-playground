@@ -1,6 +1,6 @@
 use std::time::Instant;
 use winit::event::{ElementState, KeyEvent, MouseButton};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
 use crate::camera::AngleTarget;
 
@@ -335,12 +335,18 @@ impl InputState {
                     }
                 }
                 KeyCode::Escape => {
-                    if pressed {
+                    // Ignore key-repeat so Escape cannot toggle menu open/close in one hold.
+                    if pressed && !event.repeat {
                         self.escape_pressed = true;
                     }
                 }
                 _ => {}
             }
+        }
+
+        // Fallback for platforms/layouts where Escape may not map to a physical code.
+        if pressed && !event.repeat && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.escape_pressed = true;
         }
     }
 
