@@ -206,6 +206,7 @@ impl DemoScene {
         let backend = render_options.render_backend;
         let frame_params = FrameParams {
             view_matrix,
+            time_ticks_ms: 0,
             focal_length_xy,
             focal_length_zw,
             render_options,
@@ -417,6 +418,7 @@ impl DemoScene {
         let backend = render_options.render_backend;
         let frame_params = FrameParams {
             view_matrix,
+            time_ticks_ms: (self.sub_frame_num as u64).wrapping_mul(16) as u32,
             focal_length_xy,
             focal_length_zw,
             render_options,

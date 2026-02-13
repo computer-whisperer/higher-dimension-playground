@@ -54,7 +54,7 @@ struct WorkingData
     MatN<5> viewMatrix;
     MatN<5> viewMatrixInverse;
     uint totalNumTetrahedrons;
-    uint shaderFault;
+    uint timeTicksMs;
     float focalLengthXY;
     float focalLengthZW;
     uint padding[2];

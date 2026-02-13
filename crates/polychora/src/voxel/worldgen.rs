@@ -2,6 +2,10 @@ use super::chunk::Chunk;
 use super::world::VoxelWorld;
 use super::{ChunkPos, VoxelType, CHUNK_SIZE};
 
+const SHOWCASE_MATERIALS: [u8; 19] = [
+    15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+];
+
 /// Generate a flat 4D ground world as a two-voxel-thick slab.
 ///
 /// - `extent_xzw`: number of chunks in each of X, Z, W (centered around origin)
@@ -32,6 +36,8 @@ pub fn generate_flat_world(extent_xzw: i32, material: VoxelType) -> VoxelWorld {
         }
     }
 
+    place_material_showcase(&mut world, [-10, 0, -14, -4]);
+
     world
 }
 
@@ -44,6 +50,20 @@ fn fill_hypercube(world: &mut VoxelWorld, min: [i32; 4], edge: i32, material: Vo
                 }
             }
         }
+    }
+}
+
+fn place_material_showcase(world: &mut VoxelWorld, origin: [i32; 4]) {
+    for (idx, material) in SHOWCASE_MATERIALS.iter().copied().enumerate() {
+        let col = (idx % 6) as i32;
+        let row = (idx / 6) as i32;
+        let min = [
+            origin[0] + col * 4,
+            origin[1],
+            origin[2] + row * 4,
+            origin[3],
+        ];
+        fill_hypercube(world, min, 2, VoxelType(material));
     }
 }
 
@@ -71,6 +91,7 @@ pub fn generate_demo_cube_layout_world() -> VoxelWorld {
 
     // Central bright cube, analogous to the demo light block.
     fill_hypercube(&mut world, [0, 0, 0, 0], 2, VoxelType(13));
+    place_material_showcase(&mut world, [-10, -2, 8, -4]);
 
     world
 }

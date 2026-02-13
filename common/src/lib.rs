@@ -89,7 +89,7 @@ pub struct WorkingData {
     pub view_matrix: MatN<5>,
     pub view_matrix_inverse: MatN<5>,
     pub total_num_tetrahedrons: u32,
-    pub shader_fault: u32,
+    pub time_ticks_ms: u32,
     pub focal_length_xy: f32,
     pub focal_length_zw: f32,
     pub padding: [u32; 2],

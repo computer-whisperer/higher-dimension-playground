@@ -2308,7 +2308,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             {
                 MaterialProperties mat = sampleMaterial(
                     entityHit.materialId,
-                    entityHit.textureCoordinates);
+                    entityHit.textureCoordinates,
+                    wd.timeTicksMs);
                 float w = max(1e-4, mat.integrationWeight);
                 float hitBrightnessScale = (entityHit.materialId == MATERIAL_ID_GROUND)
                     ? integralSkyScale
@@ -2325,7 +2326,10 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
                 if (highlightKind != 0u)
                 {
-                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
+                    MaterialProperties mat = sampleMaterial(
+                        hitMaterial,
+                        frac(hitPos),
+                        wd.timeTicksMs);
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     float3 litColor = shadeVoxelMaterial(mat, hitNormal);
                     float3 highlighted = shadeHighlightedVoxelSample(
@@ -2345,7 +2349,10 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 }
                 else
                 {
-                    MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
+                    MaterialProperties mat = sampleMaterial(
+                        hitMaterial,
+                        frac(hitPos),
+                        wd.timeTicksMs);
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     float w = max(1e-4, mat.integrationWeight);
                     float hitBrightnessScale = (hitMaterial == MATERIAL_ID_GROUND)
@@ -2728,7 +2735,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     {
         MaterialProperties mat = sampleMaterial(
             entityHit.materialId,
-            entityHit.textureCoordinates);
+            entityHit.textureCoordinates,
+            wd.timeTicksMs);
         outColor = shadeVoxelMaterial(mat, entityHit.hitNormal);
     }
     else if (hit)
@@ -2737,7 +2745,10 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
         if (highlightKind != 0u)
         {
-            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
+            MaterialProperties mat = sampleMaterial(
+                hitMaterial,
+                frac(hitPos),
+                wd.timeTicksMs);
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             float3 litColor = shadeVoxelMaterial(mat, hitNormal);
             outColor = shadeHighlightedVoxelSample(
@@ -2751,7 +2762,10 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         }
         else
         {
-            MaterialProperties mat = sampleMaterial(hitMaterial, frac(hitPos));
+            MaterialProperties mat = sampleMaterial(
+                hitMaterial,
+                frac(hitPos),
+                wd.timeTicksMs);
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             outColor = shadeVoxelMaterial(mat, hitNormal);
         }

@@ -433,6 +433,7 @@ float4 raycastSample(
     float4 start,
     float4 direction,
     uint numTetrahedrons,
+    uint timeTicksMs,
     inout BasicRNG rng)
 {
     direction = normalize(direction);
@@ -448,7 +449,10 @@ float4 raycastSample(
         if (hit.didHit != 0)
         {
             Tetrahedron tet = outputTetrahedrons[hit.tetrahedronIndex];
-            MaterialProperties mat = sampleMaterial(tet.materialId, hit.textureCoordinates);
+            MaterialProperties mat = sampleMaterial(
+                tet.materialId,
+                hit.textureCoordinates,
+                timeTicksMs);
 
             // Compute reflection
             float4 reflection = direction - 2.0 * dot(direction, hit.hitNormal) * hit.hitNormal;
@@ -502,7 +506,10 @@ float4 raycastSample(
     {
         RayHit hit = hitStack[numHits - i - 1];
         Tetrahedron tet = outputTetrahedrons[hit.tetrahedronIndex];
-        MaterialProperties mat = sampleMaterial(tet.materialId, hit.textureCoordinates);
+        MaterialProperties mat = sampleMaterial(
+            tet.materialId,
+            hit.textureCoordinates,
+            timeTicksMs);
 
         lightValue = lightValue * mat.albedo.xyz + mat.luminance * mat.albedo.xyz;
     }
@@ -565,6 +572,7 @@ void mainRaytracerPixel(uint3 globalId : SV_DispatchThreadID)
         worldOrigin,
         worldDirection,
         workingData.totalNumTetrahedrons,
+        workingData.timeTicksMs,
         rng);
 
     // Write to buffer

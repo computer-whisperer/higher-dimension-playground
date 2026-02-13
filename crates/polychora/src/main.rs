@@ -36,7 +36,7 @@ const BLOCK_EDIT_REACH_MIN: f32 = 1.0;
 const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
 const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
-const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 20;
+const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 34;
 const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
 const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
@@ -2996,7 +2996,9 @@ impl App {
 
         let look_dir = self.current_look_direction();
         self.send_multiplayer_player_update(now, look_dir);
-        let preview_time_s = (now - self.start_time).as_secs_f32();
+        let preview_elapsed = now - self.start_time;
+        let preview_time_s = preview_elapsed.as_secs_f32();
+        let preview_time_ticks_ms = preview_elapsed.as_millis() as u32;
         let preview_instance = build_place_preview_instance(
             &self.camera,
             self.place_material,
@@ -3167,6 +3169,7 @@ impl App {
 
         let frame_params = FrameParams {
             view_matrix,
+            time_ticks_ms: preview_time_ticks_ms,
             focal_length_xy: self.focal_length_xy,
             focal_length_zw: self.focal_length_zw,
             render_options,

@@ -256,6 +256,7 @@ impl Default for RenderOptions {
 
 pub struct FrameParams {
     pub view_matrix: ndarray::Array2<f32>,
+    pub time_ticks_ms: u32,
     pub focal_length_xy: f32,
     pub focal_length_zw: f32,
     pub render_options: RenderOptions,
@@ -4515,6 +4516,7 @@ impl RenderContext {
             queue,
             FrameParams {
                 view_matrix,
+                time_ticks_ms: (self.frames_rendered as u64).wrapping_mul(16) as u32,
                 focal_length_xy,
                 focal_length_zw,
                 render_options,
@@ -4579,6 +4581,7 @@ impl RenderContext {
     ) {
         let FrameParams {
             view_matrix,
+            time_ticks_ms,
             focal_length_xy,
             focal_length_zw,
             render_options,
@@ -4825,10 +4828,9 @@ impl RenderContext {
             writer.raytrace_seed = 6364136223846793005u64
                 .wrapping_mul(self.frames_rendered as u64)
                 .wrapping_add(1442695040888963407);
+            writer.time_ticks_ms = time_ticks_ms;
             writer.focal_length_xy = focal_length_xy;
             writer.focal_length_zw = focal_length_zw;
-            // writer.total_num_tetrahedrons = 1;
-            writer.shader_fault = 0;
             // Flag used by present shader:
             // 0 = legacy per-layer accumulation, 1 = VTE Stage-B-collapsed output in layer 0.
             // padding[1] carries VTE stage_b_mode so present shader can conditionally

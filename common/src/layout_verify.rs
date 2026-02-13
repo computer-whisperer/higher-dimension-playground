@@ -87,7 +87,7 @@ mod tests {
         // Slang: viewMatrix: offset=32, size=100
         // Slang: viewMatrixInverse: offset=132, size=100
         // Slang: totalNumTetrahedrons: offset=232, size=4
-        // Slang: shaderFault: offset=236, size=4
+        // Slang: timeTicksMs: offset=236, size=4
         // Slang: focalLengthXY: offset=240, size=4
         // Slang: focalLengthZW: offset=244, size=4
         // Slang: padding: offset=248, size=8
@@ -100,7 +100,7 @@ mod tests {
             std::mem::offset_of!(WorkingData, total_num_tetrahedrons),
             232
         );
-        assert_eq!(std::mem::offset_of!(WorkingData, shader_fault), 236);
+        assert_eq!(std::mem::offset_of!(WorkingData, time_ticks_ms), 236);
         assert_eq!(std::mem::offset_of!(WorkingData, focal_length_xy), 240);
         assert_eq!(std::mem::offset_of!(WorkingData, focal_length_zw), 244);
         assert_eq!(std::mem::offset_of!(WorkingData, padding), 248);
