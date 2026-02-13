@@ -124,6 +124,9 @@ pub struct InputState {
     scroll_accumulated: f32,
     scheme_cycle_requested: bool,
     reset_orientation_requested: bool,
+    vte_entities_toggle_requested: bool,
+    vte_y_slice_lookup_cache_toggle_requested: bool,
+    vte_sweep_requested: bool,
 }
 
 impl InputState {
@@ -157,6 +160,9 @@ impl InputState {
             scroll_accumulated: 0.0,
             scheme_cycle_requested: false,
             reset_orientation_requested: false,
+            vte_entities_toggle_requested: false,
+            vte_y_slice_lookup_cache_toggle_requested: false,
+            vte_sweep_requested: false,
         }
     }
 
@@ -262,6 +268,21 @@ impl InputState {
                 KeyCode::KeyR => {
                     if pressed {
                         self.reset_orientation_requested = true;
+                    }
+                }
+                KeyCode::F6 => {
+                    if pressed {
+                        self.vte_entities_toggle_requested = true;
+                    }
+                }
+                KeyCode::F7 => {
+                    if pressed {
+                        self.vte_y_slice_lookup_cache_toggle_requested = true;
+                    }
+                }
+                KeyCode::F8 => {
+                    if pressed {
+                        self.vte_sweep_requested = true;
                     }
                 }
                 KeyCode::Escape => {
@@ -428,6 +449,24 @@ impl InputState {
     pub fn take_reset_orientation(&mut self) -> bool {
         let v = self.reset_orientation_requested;
         self.reset_orientation_requested = false;
+        v
+    }
+
+    pub fn take_vte_entities_toggle(&mut self) -> bool {
+        let v = self.vte_entities_toggle_requested;
+        self.vte_entities_toggle_requested = false;
+        v
+    }
+
+    pub fn take_vte_y_slice_lookup_cache_toggle(&mut self) -> bool {
+        let v = self.vte_y_slice_lookup_cache_toggle_requested;
+        self.vte_y_slice_lookup_cache_toggle_requested = false;
+        v
+    }
+
+    pub fn take_vte_sweep(&mut self) -> bool {
+        let v = self.vte_sweep_requested;
+        self.vte_sweep_requested = false;
         v
     }
 

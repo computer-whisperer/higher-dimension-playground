@@ -181,6 +181,7 @@ pub struct RenderOptions {
     pub vte_reference_compare: bool,
     pub vte_reference_mismatch_only: bool,
     pub vte_compare_slice_only: bool,
+    pub vte_y_slice_lookup_cache: bool,
     pub vte_highlight_hit_voxel: Option<[i32; 4]>,
     pub vte_highlight_place_voxel: Option<[i32; 4]>,
     pub do_edges: bool,
@@ -209,6 +210,7 @@ impl Default for RenderOptions {
             vte_reference_compare: false,
             vte_reference_mismatch_only: false,
             vte_compare_slice_only: false,
+            vte_y_slice_lookup_cache: true,
             vte_highlight_hit_voxel: None,
             vte_highlight_place_voxel: None,
             do_edges: false,
@@ -243,6 +245,8 @@ pub struct GpuVoxelChunkHeader {
     pub material_word_offset: u32,
     pub flags: u32,
     pub macro_word_offset: u32,
+    pub solid_local_min: [i32; 4],
+    pub solid_local_max: [i32; 4],
 }
 
 impl GpuVoxelChunkHeader {
@@ -260,7 +264,12 @@ pub struct GpuVoxelYSliceBounds {
     pub max_chunk_z: i32,
     pub min_chunk_w: i32,
     pub max_chunk_w: i32,
-    pub _padding: i32,
+    pub lookup_entry_offset: u32,
+    pub lookup_entry_count: u32,
+    pub lookup_dim_x: u32,
+    pub lookup_dim_z: u32,
+    pub lookup_dim_w: u32,
+    pub _padding: u32,
 }
 
 pub struct VoxelFrameInput<'a> {
@@ -270,6 +279,7 @@ pub struct VoxelFrameInput<'a> {
     pub macro_words: &'a [u32],
     pub visible_chunk_indices: &'a [u32],
     pub y_slice_bounds: &'a [GpuVoxelYSliceBounds],
+    pub y_slice_lookup_entries: &'a [u32],
 }
 
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
@@ -284,6 +294,7 @@ struct GpuVoxelFrameMeta {
     max_trace_distance: f32,
     chunk_lookup_capacity: u32,
     y_slice_count: u32,
+    y_slice_lookup_entry_count: u32,
     stage_b_mode: u32,
     stage_b_slice_layer: u32,
     stage_b_thick_half_width: u32,
@@ -389,10 +400,12 @@ const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
 const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
 const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
 const VTE_MAX_Y_SLICES: usize = VTE_MAX_CHUNKS;
+const VTE_MAX_Y_SLICE_LOOKUP_ENTRIES: usize = 131_072;
 const VTE_CHUNK_LOOKUP_CAPACITY: usize = 32_768; // Must be power of two.
 const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
 const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
 const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
+const VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE: u32 = 1 << 3;
 const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
 const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
 const VTE_COMPARE_STATS_WORD_COUNT: usize = 16;
@@ -1035,39 +1048,33 @@ fn push_minecraft_crosshair(
         .max(0.0)
         .round() as i32;
 
-    let push_hbar = |lines: &mut Vec<OverlayLine>,
-                     x0: f32,
-                     x1: f32,
-                     half_steps: i32,
-                     bar_color: Vec4| {
-        for step in -half_steps..=half_steps {
-            let y_offset = step as f32 * inv_h;
-            push_line_with_style(
-                lines,
-                center_ndc + Vec2::new(x0, y_offset),
-                center_ndc + Vec2::new(x1, y_offset),
-                bar_color,
-                1.0,
-            );
-        }
-    };
+    let push_hbar =
+        |lines: &mut Vec<OverlayLine>, x0: f32, x1: f32, half_steps: i32, bar_color: Vec4| {
+            for step in -half_steps..=half_steps {
+                let y_offset = step as f32 * inv_h;
+                push_line_with_style(
+                    lines,
+                    center_ndc + Vec2::new(x0, y_offset),
+                    center_ndc + Vec2::new(x1, y_offset),
+                    bar_color,
+                    1.0,
+                );
+            }
+        };
 
-    let push_vbar = |lines: &mut Vec<OverlayLine>,
-                     y0: f32,
-                     y1: f32,
-                     half_steps: i32,
-                     bar_color: Vec4| {
-        for step in -half_steps..=half_steps {
-            let x_offset = step as f32 * inv_w;
-            push_line_with_style(
-                lines,
-                center_ndc + Vec2::new(x_offset, y0),
-                center_ndc + Vec2::new(x_offset, y1),
-                bar_color,
-                1.0,
-            );
-        }
-    };
+    let push_vbar =
+        |lines: &mut Vec<OverlayLine>, y0: f32, y1: f32, half_steps: i32, bar_color: Vec4| {
+            for step in -half_steps..=half_steps {
+                let x_offset = step as f32 * inv_w;
+                push_line_with_style(
+                    lines,
+                    center_ndc + Vec2::new(x_offset, y0),
+                    center_ndc + Vec2::new(x_offset, y1),
+                    bar_color,
+                    1.0,
+                );
+            }
+        };
 
     // Outline pass.
     push_hbar(
@@ -1705,6 +1712,7 @@ pub struct LiveBuffers {
     voxel_visible_chunk_indices_buffer: Subbuffer<[u32]>,
     voxel_chunk_lookup_buffer: Subbuffer<[GpuVoxelChunkLookupEntry]>,
     voxel_y_slice_bounds_buffer: Subbuffer<[GpuVoxelYSliceBounds]>,
+    voxel_y_slice_lookup_entries_buffer: Subbuffer<[u32]>,
     vte_compare_stats_buffer: Subbuffer<[u32]>,
     vte_first_mismatch_buffer: Subbuffer<[u32]>,
     descriptor_set: Arc<DescriptorSet>,
@@ -1866,6 +1874,21 @@ impl LiveBuffers {
         )
         .unwrap();
 
+        let voxel_y_slice_lookup_entries_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; VTE_MAX_Y_SLICE_LOOKUP_ENTRIES],
+        )
+        .unwrap();
+
         let vte_compare_stats_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -1912,6 +1935,7 @@ impl LiveBuffers {
                 WriteDescriptorSet::buffer(9, vte_compare_stats_buffer.clone()),
                 WriteDescriptorSet::buffer(10, vte_first_mismatch_buffer.clone()),
                 WriteDescriptorSet::buffer(11, voxel_macro_words_buffer.clone()),
+                WriteDescriptorSet::buffer(12, voxel_y_slice_lookup_entries_buffer.clone()),
             ],
             [],
         )
@@ -1927,6 +1951,7 @@ impl LiveBuffers {
             voxel_visible_chunk_indices_buffer,
             voxel_chunk_lookup_buffer,
             voxel_y_slice_bounds_buffer,
+            voxel_y_slice_lookup_entries_buffer,
             vte_compare_stats_buffer,
             vte_first_mismatch_buffer,
             descriptor_set,
@@ -1949,7 +1974,7 @@ impl LiveBuffers {
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             },
         );
-        for binding in 2..=11u32 {
+        for binding in 2..=12u32 {
             bindings.insert(
                 binding,
                 DescriptorSetLayoutBinding {
@@ -2681,6 +2706,7 @@ pub struct RenderContext {
     vte_compare_stats: VteCompareStats,
     vte_first_mismatch: VteFirstMismatch,
     vte_backend_notice_printed: bool,
+    drop_next_profile_sample: bool,
 }
 
 impl RenderContext {
@@ -3324,6 +3350,7 @@ impl RenderContext {
             vte_compare_stats: VteCompareStats::default(),
             vte_first_mismatch: VteFirstMismatch::default(),
             vte_backend_notice_printed: false,
+            drop_next_profile_sample: false,
         }
     }
 
@@ -4115,11 +4142,7 @@ impl RenderContext {
         ));
         readout_text.push_str(&format!(
             "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-            "look_dir",
-            look_world[0],
-            look_world[1],
-            look_world[2],
-            look_world[3],
+            "look_dir", look_world[0], look_world[1], look_world[2], look_world[3],
         ));
         if let Some(hit) = target_hit_voxel {
             readout_text.push_str(&format!(
@@ -4127,8 +4150,10 @@ impl RenderContext {
                 "block_hit", hit[0], hit[1], hit[2], hit[3]
             ));
         } else {
-            readout_text
-                .push_str(&format!("\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}", "block_hit", "--", "--", "--", "--"));
+            readout_text.push_str(&format!(
+                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                "block_hit", "--", "--", "--", "--"
+            ));
         }
         if let Some(face) = target_hit_face {
             readout_text.push_str(&format!(
@@ -4136,8 +4161,10 @@ impl RenderContext {
                 "face_n", face[0], face[1], face[2], face[3]
             ));
         } else {
-            readout_text
-                .push_str(&format!("\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}", "face_n", "--", "--", "--", "--"));
+            readout_text.push_str(&format!(
+                "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
+                "face_n", "--", "--", "--", "--"
+            ));
         }
         if self.last_backend == RenderBackend::VoxelTraversal {
             readout_text.push_str(&format!(
@@ -4324,6 +4351,17 @@ impl RenderContext {
 
     pub fn recreate_swapchain(&mut self) {
         self.recreate_swapchain = true;
+    }
+
+    pub fn reset_gpu_profile_window(&mut self) {
+        self.profiler.next_query = 0;
+        self.profiler.phase_names.clear();
+        self.profiler.accum.clear();
+        self.profiler.total_frames = 0;
+        self.profiler.last_frame_phases.clear();
+        self.profiler.last_gpu_total_ms = 0.0;
+        self.profiler.last_slow_report_frame = None;
+        self.drop_next_profile_sample = true;
     }
 
     fn wait_for_all_frames(&mut self) {
@@ -4546,9 +4584,12 @@ impl RenderContext {
         .unwrap_or(usize::MAX);
         let use_split_voxel_instances = voxel_input.is_some();
         let entity_used_instance_count = model_instances.len().min(model_instance_capacity);
-        let overlay_instance_capacity = model_instance_capacity.saturating_sub(entity_used_instance_count);
+        let overlay_instance_capacity =
+            model_instance_capacity.saturating_sub(entity_used_instance_count);
         let overlay_used_instance_count = if use_split_voxel_instances {
-            raster_overlay_instances.len().min(overlay_instance_capacity)
+            raster_overlay_instances
+                .len()
+                .min(overlay_instance_capacity)
         } else {
             0
         };
@@ -4599,7 +4640,8 @@ impl RenderContext {
                 if requested_raster_overlay_tetrahedron_count > raster_overlay_tetrahedron_count {
                     eprintln!(
                         "VTE raster overlay tetrahedrons truncated to buffer capacity: {} -> {}",
-                        requested_raster_overlay_tetrahedron_count, raster_overlay_tetrahedron_count
+                        requested_raster_overlay_tetrahedron_count,
+                        raster_overlay_tetrahedron_count
                     );
                 }
                 println!(
@@ -4697,10 +4739,12 @@ impl RenderContext {
 
         let mut vte_chunk_count: usize = 0;
         let mut vte_visible_chunk_count: usize = 0;
+        let mut vte_chunk_lookup_capacity: usize = 0;
         let mut vte_occupancy_word_count: usize = 0;
         let mut vte_material_word_count: usize = 0;
         let mut vte_macro_word_count: usize = 0;
         let mut vte_y_slice_count: usize = 0;
+        let mut vte_y_slice_lookup_entry_count: usize = 0;
         let mut vte_visible_chunk_min = [i32::MAX; 4];
         let mut vte_visible_chunk_max = [i32::MIN; 4];
         if let Some(input) = voxel_input {
@@ -4723,6 +4767,10 @@ impl RenderContext {
                 .len()
                 .min(VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK);
             vte_y_slice_count = input.y_slice_bounds.len().min(VTE_MAX_Y_SLICES);
+            vte_y_slice_lookup_entry_count = input
+                .y_slice_lookup_entries
+                .len()
+                .min(VTE_MAX_Y_SLICE_LOOKUP_ENTRIES);
 
             if self.frames_rendered == 0
                 && (input.chunk_headers.len() > vte_chunk_count
@@ -4730,10 +4778,11 @@ impl RenderContext {
                     || input.occupancy_words.len() > vte_occupancy_word_count
                     || input.material_words.len() > vte_material_word_count
                     || input.macro_words.len() > vte_macro_word_count
-                    || input.y_slice_bounds.len() > vte_y_slice_count)
+                    || input.y_slice_bounds.len() > vte_y_slice_count
+                    || input.y_slice_lookup_entries.len() > vte_y_slice_lookup_entry_count)
             {
                 eprintln!(
-                    "VTE input truncated to capacities: chunks {}->{}, visible {}->{}, occupancy {}->{}, materials {}->{}, macro {}->{}, y_slices {}->{}",
+                    "VTE input truncated to capacities: chunks {}->{}, visible {}->{}, occupancy {}->{}, materials {}->{}, macro {}->{}, y_slices {}->{}, y_slice_lookup_entries {}->{}",
                     input.chunk_headers.len(),
                     vte_chunk_count,
                     input.visible_chunk_indices.len(),
@@ -4745,7 +4794,9 @@ impl RenderContext {
                     input.macro_words.len(),
                     vte_macro_word_count,
                     input.y_slice_bounds.len(),
-                    vte_y_slice_count
+                    vte_y_slice_count,
+                    input.y_slice_lookup_entries.len(),
+                    vte_y_slice_lookup_entry_count
                 );
             }
 
@@ -4802,6 +4853,16 @@ impl RenderContext {
             {
                 let mut writer = self.frames_in_flight[frame_idx]
                     .live_buffers
+                    .voxel_y_slice_lookup_entries_buffer
+                    .write()
+                    .unwrap();
+                for i in 0..vte_y_slice_lookup_entry_count {
+                    writer[i] = input.y_slice_lookup_entries[i];
+                }
+            }
+            {
+                let mut writer = self.frames_in_flight[frame_idx]
+                    .live_buffers
                     .voxel_visible_chunk_indices_buffer
                     .write()
                     .unwrap();
@@ -4826,19 +4887,26 @@ impl RenderContext {
                     .write()
                     .unwrap();
 
-                for entry in writer.iter_mut() {
+                vte_chunk_lookup_capacity = if vte_visible_chunk_count == 0 {
+                    0
+                } else {
+                    let requested = (vte_visible_chunk_count.saturating_mul(2)).next_power_of_two();
+                    requested.clamp(1, VTE_CHUNK_LOOKUP_CAPACITY)
+                };
+
+                for entry in writer.iter_mut().take(vte_chunk_lookup_capacity) {
                     *entry = GpuVoxelChunkLookupEntry::empty();
                 }
 
-                if vte_chunk_count > 0 {
-                    let hash_mask = (VTE_CHUNK_LOOKUP_CAPACITY as u32) - 1;
+                if vte_chunk_count > 0 && vte_chunk_lookup_capacity > 0 {
+                    let hash_mask = (vte_chunk_lookup_capacity as u32) - 1;
                     for i in 0..vte_visible_chunk_count {
                         let chunk_index = input.visible_chunk_indices[i]
                             .min(vte_chunk_count.saturating_sub(1) as u32);
                         let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
                         let mut slot = (vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
 
-                        for _ in 0..VTE_CHUNK_LOOKUP_CAPACITY {
+                        for _ in 0..vte_chunk_lookup_capacity {
                             let entry = &mut writer[slot];
                             if entry.chunk_index == GpuVoxelChunkLookupEntry::INVALID_INDEX
                                 || entry.chunk_coord == chunk_coord
@@ -4850,7 +4918,7 @@ impl RenderContext {
                                 };
                                 break;
                             }
-                            slot = (slot + 1) & (VTE_CHUNK_LOOKUP_CAPACITY - 1);
+                            slot = (slot + 1) & (vte_chunk_lookup_capacity - 1);
                         }
                     }
                 }
@@ -4893,8 +4961,9 @@ impl RenderContext {
                 macro_word_count: vte_macro_word_count as u32,
                 max_trace_steps: render_options.vte_max_trace_steps.max(1),
                 max_trace_distance: render_options.vte_max_trace_distance.max(1.0),
-                chunk_lookup_capacity: VTE_CHUNK_LOOKUP_CAPACITY as u32,
+                chunk_lookup_capacity: vte_chunk_lookup_capacity as u32,
                 y_slice_count: vte_y_slice_count as u32,
+                y_slice_lookup_entry_count: vte_y_slice_lookup_entry_count as u32,
                 stage_b_mode: render_options.vte_display_mode.as_u32(),
                 stage_b_slice_layer,
                 stage_b_thick_half_width: render_options.vte_thick_half_width,
@@ -4908,6 +4977,9 @@ impl RenderContext {
                     }
                     if render_options.vte_compare_slice_only {
                         flags |= VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
+                    }
+                    if render_options.vte_y_slice_lookup_cache {
+                        flags |= VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
                     }
                     flags
                 },
@@ -5092,7 +5164,7 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, occupancy_words={}, material_words={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
@@ -5106,6 +5178,7 @@ impl RenderContext {
                     render_options.vte_reference_compare,
                     render_options.vte_reference_mismatch_only,
                     render_options.vte_compare_slice_only,
+                    render_options.vte_y_slice_lookup_cache,
                     storage_layers,
                     logical_layers,
                 );
@@ -5251,11 +5324,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([
-                                (entity_tetrahedron_count as u32 + 63) / 64u32,
-                                1,
-                                1,
-                            ])
+                            builder.dispatch([(entity_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
                         }
                         .unwrap();
                         {
@@ -5369,7 +5438,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 .unwrap();
                             unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
 
-                            let num_internal_nodes = entity_tetrahedron_count.saturating_sub(1) as u32;
+                            let num_internal_nodes =
+                                entity_tetrahedron_count.saturating_sub(1) as u32;
                             if num_internal_nodes > 0 {
                                 let num_passes =
                                     2 * (32 - num_internal_nodes.leading_zeros()).max(1);
@@ -6068,10 +6138,14 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .map(|data| data[0])
                     .unwrap_or(0);
                 self.last_clipped_tet_count = clipped_count;
-                self.profiler.read_results_and_accumulate(
-                    &self.frames_in_flight[prev_idx].query_pool,
-                    clipped_count,
-                );
+                if self.drop_next_profile_sample {
+                    self.drop_next_profile_sample = false;
+                } else {
+                    self.profiler.read_results_and_accumulate(
+                        &self.frames_in_flight[prev_idx].query_pool,
+                        clipped_count,
+                    );
+                }
             }
         }
 
@@ -6267,7 +6341,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 );
                                 if self.last_backend == RenderBackend::VoxelTraversal {
                                     println!(
-                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} reference_compare={} mismatch_only={} compare_slice_only={}",
+                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} reference_compare={} mismatch_only={} compare_slice_only={} yslice_fastpath=true chunk_solid_clip=true yslice_lookup_cache={}",
                                         render_options.vte_display_mode.label(),
                                         render_options.vte_slice_layer,
                                         render_options.vte_thick_half_width,
@@ -6276,6 +6350,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         render_options.vte_reference_compare,
                                         render_options.vte_reference_mismatch_only,
                                         render_options.vte_compare_slice_only,
+                                        render_options.vte_y_slice_lookup_cache,
                                     );
                                     if self.vte_compare_stats.compared > 0
                                         || self.vte_compare_stats.mismatches > 0

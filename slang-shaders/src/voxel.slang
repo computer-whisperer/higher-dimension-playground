@@ -34,6 +34,7 @@ static const uint DEBUG_FLAG_LOOKUP_FALLBACK_USED = 1u;
 static const uint META_DEBUG_FLAG_REFERENCE_COMPARE = 1u;
 static const uint META_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY = 1u << 1u;
 static const uint META_DEBUG_FLAG_COMPARE_SLICE_ONLY = 1u << 2u;
+static const uint META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE = 1u << 3u;
 static const uint DEBUG_FLAG_CHUNK_TIE_STEPPED = 1u << 1u;
 static const uint DEBUG_FLAG_CHUNK_ZERO_INTERVAL = 1u << 2u;
 
@@ -99,6 +100,7 @@ struct VoxelFrameMeta
     float maxTraceDistance;
     uint chunkLookupCapacity;
     uint ySliceCount;
+    uint ySliceLookupEntryCount;
     uint stageBMode;
     uint stageBSliceLayer;
     uint stageBThickHalfWidth;
@@ -126,6 +128,8 @@ struct VoxelChunkHeader
     uint materialWordOffset;
     uint flags;
     uint macroWordOffset;
+    int4 solidLocalMin;
+    int4 solidLocalMax;
 }
 
 struct VoxelChunkLookupEntry
@@ -146,7 +150,12 @@ struct VoxelYSliceBounds
     int maxChunkZ;
     int minChunkW;
     int maxChunkW;
-    int padding0;
+    uint lookupEntryOffset;
+    uint lookupEntryCount;
+    uint lookupDimX;
+    uint lookupDimZ;
+    uint lookupDimW;
+    uint padding0;
 }
 
 // Set 1: SizedBuffers
@@ -166,6 +175,7 @@ struct VoxelYSliceBounds
 [[vk::binding(9, 2)]] RWStructuredBuffer<uint> vteCompareStats;
 [[vk::binding(10, 2)]] RWStructuredBuffer<uint> vteFirstMismatchRecord;
 [[vk::binding(11, 2)]] StructuredBuffer<uint> voxelMacroWords;
+[[vk::binding(12, 2)]] StructuredBuffer<uint> voxelYSliceLookupEntries;
 
 void incrementCompareStat(uint statIndex)
 {
@@ -832,6 +842,52 @@ uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
     return INVALID_INDEX;
 }
 
+uint findChunkIndexFromYSliceLookup(int4 chunkCoord, VoxelYSliceBounds slice, VoxelFrameMeta meta)
+{
+    if (slice.lookupEntryCount == 0u)
+    {
+        return INVALID_INDEX;
+    }
+
+    int localX = chunkCoord.x - slice.minChunkX;
+    int localZ = chunkCoord.z - slice.minChunkZ;
+    int localW = chunkCoord.w - slice.minChunkW;
+    if (localX < 0 || localZ < 0 || localW < 0
+        || uint(localX) >= slice.lookupDimX
+        || uint(localZ) >= slice.lookupDimZ
+        || uint(localW) >= slice.lookupDimW)
+    {
+        return INVALID_INDEX;
+    }
+
+    uint linear = (uint(localW) * slice.lookupDimZ + uint(localZ)) * slice.lookupDimX
+        + uint(localX);
+    if (linear >= slice.lookupEntryCount)
+    {
+        return INVALID_INDEX;
+    }
+
+    uint entryIndex = slice.lookupEntryOffset + linear;
+    if (entryIndex >= meta.ySliceLookupEntryCount)
+    {
+        return INVALID_INDEX;
+    }
+
+    // 0 means "no chunk"; non-zero values encode (chunkIndex + 1).
+    uint encoded = voxelYSliceLookupEntries[entryIndex];
+    if (encoded == 0u)
+    {
+        return INVALID_INDEX;
+    }
+
+    uint chunkIndex = encoded - 1u;
+    if (chunkIndex >= meta.chunkCount)
+    {
+        return INVALID_INDEX;
+    }
+    return chunkIndex;
+}
+
 uint findChunkIndexLinearVisible(int4 chunkCoord, VoxelFrameMeta meta)
 {
     for (uint i = 0; i < meta.visibleChunkCount; i++)
@@ -909,6 +965,17 @@ float safeInvAbs(float d)
 {
     const float EPS = 1e-6;
     return abs(d) > EPS ? (1.0 / abs(d)) : 1e30;
+}
+
+uint estimateChunkCrossings(float intervalLength, float tDeltaAxis)
+{
+    if (intervalLength <= 0.0 || tDeltaAxis > 1e29)
+    {
+        return 0u;
+    }
+    float ratio = intervalLength / max(tDeltaAxis, 1e-6);
+    // Conservative pad for boundary ownership and numeric jitter.
+    return uint(ceil(ratio)) + 3u;
 }
 
 int entryChunkCoord(float position, float direction)
@@ -1172,6 +1239,17 @@ bool macroCellMayContainSolid(
     return (macroWord & (1u << (macroIdx & 31u))) != 0u;
 }
 
+int4 macroCoordForVoxel(int4 voxelCoord, int4 chunkMin)
+{
+    int4 local = voxelCoord - chunkMin;
+    return int4(
+        local.x >> 1,
+        local.y >> 1,
+        local.z >> 1,
+        local.w >> 1
+    );
+}
+
 bool traceVoxelsInChunk(
     float4 rayOrigin,
     float4 rayDir,
@@ -1195,6 +1273,37 @@ bool traceVoxelsInChunk(
         return false;
     }
 
+    int4 chunkMin = chunkCoord * int(CHUNK_SIZE);
+    // Conservative per-chunk solid AABB clip:
+    // for sparse edited chunks this rejects rays that only traverse empty chunk space.
+    int4 solidLocalMin = h.solidLocalMin;
+    int4 solidLocalMax = h.solidLocalMax;
+    float4 solidBMin = float4(
+        float(chunkMin.x + solidLocalMin.x),
+        float(chunkMin.y + solidLocalMin.y),
+        float(chunkMin.z + solidLocalMin.z),
+        float(chunkMin.w + solidLocalMin.w)
+    );
+    float4 solidBMax = float4(
+        float(chunkMin.x + solidLocalMax.x + 1),
+        float(chunkMin.y + solidLocalMax.y + 1),
+        float(chunkMin.z + solidLocalMax.z + 1),
+        float(chunkMin.w + solidLocalMax.w + 1)
+    );
+    float solidEnter = 0.0;
+    float solidExit = 0.0;
+    if (!intersectAABB(rayOrigin, rayDir, solidBMin, solidBMax, solidEnter, solidExit))
+    {
+        return false;
+    }
+    tEnter = max(tEnter, solidEnter);
+    tExit = min(tExit, solidExit);
+    intervalEps = max(EPS, max(abs(tEnter), abs(tExit)) * 1e-7);
+    if (tExit <= tEnter + intervalEps)
+    {
+        return false;
+    }
+
     float tStart = max(0.0, tEnter);
     float startBias = max(intervalEps, abs(tStart) * 1e-7);
     float tTraceStart = tStart + startBias;
@@ -1210,7 +1319,6 @@ bool traceVoxelsInChunk(
         return false;
     }
 
-    int4 chunkMin = chunkCoord * int(CHUNK_SIZE);
     int4 chunkMax = chunkMin + int(CHUNK_SIZE);
 
     float4 startPos = rayOrigin + rayDir * tTraceStart;
@@ -1256,6 +1364,8 @@ bool traceVoxelsInChunk(
 
     float localT = 0.0;
     bool canMacroSkip = ((h.flags & CHUNK_FLAG_FULL) == 0u) && (meta.macroWordCount > 0u);
+    int4 cachedMacroCoord = int4(-1, -1, -1, -1);
+    bool cachedMacroHasSolid = true;
     while (remainingVoxelSteps > 0)
     {
         if (localT > localTExit + intervalEps)
@@ -1270,7 +1380,18 @@ bool traceVoxelsInChunk(
         if (hasInterior)
         {
             remainingVoxelSteps--;
-            if (!canMacroSkip || macroCellMayContainSolid(voxelCoord, chunkMin, h, meta))
+            bool macroHasSolid = true;
+            if (canMacroSkip)
+            {
+                int4 macroCoord = macroCoordForVoxel(voxelCoord, chunkMin);
+                if (!all(macroCoord == cachedMacroCoord))
+                {
+                    cachedMacroCoord = macroCoord;
+                    cachedMacroHasSolid = macroCellMayContainSolid(voxelCoord, chunkMin, h, meta);
+                }
+                macroHasSolid = cachedMacroHasSolid;
+            }
+            if (macroHasSolid)
             {
                 uint materialId = 0;
                 if (sampleVoxelInChunk(voxelCoord, chunkMin, h, meta, materialId))
@@ -1527,7 +1648,19 @@ bool traceVoxelRayDDAByYSlicesFast(
             }
             else
             {
-                uint chunkIndex = findChunkIndex(chunkCoord4, meta);
+                uint chunkIndex = INVALID_INDEX;
+                bool useLookupCache =
+                    (meta.debugFlags & META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE) != 0u
+                    && slice.lookupEntryCount > 0u;
+                if (useLookupCache)
+                {
+                    chunkIndex = findChunkIndexFromYSliceLookup(chunkCoord4, slice, meta);
+                }
+                else
+                {
+                    chunkIndex = findChunkIndex(chunkCoord4, meta);
+                }
+
                 if (chunkIndex != INVALID_INDEX)
                 {
                     touchedVisibleChunk = true;
@@ -1699,31 +1832,98 @@ bool traceVoxelRayDDA(
     int4 chunkCoord = int4(0, 0, 0, 0);
     float4 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
     bool chunkStateValid = false;
+    bool ySliceLookupEnabled =
+        (meta.debugFlags & META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE) != 0u
+        && meta.ySliceCount > 0u;
+    int cachedSliceY = 0;
+    int cachedSliceIndex = -1;
     const float CHUNK_EPS = 1e-6;
     float chunkSizeF = float(CHUNK_SIZE);
-    float4 visibleBMin = float4(
-        float(meta.visibleChunkMinX) * chunkSizeF,
-        float(meta.visibleChunkMinY) * chunkSizeF,
-        float(meta.visibleChunkMinZ) * chunkSizeF,
-        float(meta.visibleChunkMinW) * chunkSizeF
-    );
-    float4 visibleBMax = float4(
-        float(meta.visibleChunkMaxX + 1) * chunkSizeF,
-        float(meta.visibleChunkMaxY + 1) * chunkSizeF,
-        float(meta.visibleChunkMaxZ + 1) * chunkSizeF,
-        float(meta.visibleChunkMaxW + 1) * chunkSizeF
-    );
-    float visibleEnter = 0.0;
-    float visibleExit = 0.0;
-    if (!intersectAABB(rayOrigin, rayDir, visibleBMin, visibleBMax, visibleEnter, visibleExit))
+    bool useSliceIntervalCull = !collectDebugFlags
+        && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u
+        && meta.ySliceCount > 0u
+        && meta.ySliceCount <= FAST_Y_SLICE_LIMIT;
+    if (useSliceIntervalCull)
     {
-        return false;
+        bool sliceAnyHit = false;
+        float sliceMinEnter = 1e30;
+        float sliceMaxExit = 0.0;
+        for (uint sliceIdx = 0u; sliceIdx < meta.ySliceCount; sliceIdx++)
+        {
+            VoxelYSliceBounds slice = voxelYSliceBounds[sliceIdx];
+            float4 sliceBMin = float4(
+                float(slice.minChunkX) * chunkSizeF,
+                float(slice.chunkY) * chunkSizeF,
+                float(slice.minChunkZ) * chunkSizeF,
+                float(slice.minChunkW) * chunkSizeF
+            );
+            float4 sliceBMax = float4(
+                float(slice.maxChunkX + 1) * chunkSizeF,
+                float(slice.chunkY + 1) * chunkSizeF,
+                float(slice.maxChunkZ + 1) * chunkSizeF,
+                float(slice.maxChunkW + 1) * chunkSizeF
+            );
+            float sliceEnter = 0.0;
+            float sliceExit = 0.0;
+            if (!intersectAABB(rayOrigin, rayDir, sliceBMin, sliceBMax, sliceEnter, sliceExit))
+            {
+                continue;
+            }
+            sliceEnter = max(0.0, sliceEnter);
+            sliceExit = min(MAX_DISTANCE, sliceExit);
+            if (sliceExit <= sliceEnter + CHUNK_EPS)
+            {
+                continue;
+            }
+            sliceAnyHit = true;
+            sliceMinEnter = min(sliceMinEnter, sliceEnter);
+            sliceMaxExit = max(sliceMaxExit, sliceExit);
+        }
+        if (!sliceAnyHit)
+        {
+            return false;
+        }
+        currentT = sliceMinEnter;
+        traversalMaxT = sliceMaxExit;
     }
-    currentT = max(0.0, visibleEnter);
-    traversalMaxT = min(MAX_DISTANCE, visibleExit);
+    else
+    {
+        float4 visibleBMin = float4(
+            float(meta.visibleChunkMinX) * chunkSizeF,
+            float(meta.visibleChunkMinY) * chunkSizeF,
+            float(meta.visibleChunkMinZ) * chunkSizeF,
+            float(meta.visibleChunkMinW) * chunkSizeF
+        );
+        float4 visibleBMax = float4(
+            float(meta.visibleChunkMaxX + 1) * chunkSizeF,
+            float(meta.visibleChunkMaxY + 1) * chunkSizeF,
+            float(meta.visibleChunkMaxZ + 1) * chunkSizeF,
+            float(meta.visibleChunkMaxW + 1) * chunkSizeF
+        );
+        float visibleEnter = 0.0;
+        float visibleExit = 0.0;
+        if (!intersectAABB(rayOrigin, rayDir, visibleBMin, visibleBMax, visibleEnter, visibleExit))
+        {
+            return false;
+        }
+        currentT = max(0.0, visibleEnter);
+        traversalMaxT = min(MAX_DISTANCE, visibleExit);
+    }
     if (traversalMaxT <= currentT + CHUNK_EPS)
     {
         return false;
+    }
+    if (!collectDebugFlags
+        && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u)
+    {
+        float traversalInterval = max(0.0, traversalMaxT - currentT);
+        uint estimatedChunkSteps = estimateChunkCrossings(traversalInterval, tDeltaChunk.x)
+            + estimateChunkCrossings(traversalInterval, tDeltaChunk.y)
+            + estimateChunkCrossings(traversalInterval, tDeltaChunk.z)
+            + estimateChunkCrossings(traversalInterval, tDeltaChunk.w)
+            + 4u;
+        estimatedChunkSteps = min(estimatedChunkSteps, 4096u);
+        maxChunkSteps = max(1u, min(maxChunkSteps, estimatedChunkSteps));
     }
     uint chunkReanchorMask = forceFrequentReanchor ? 31u : 255u;
     for (uint chunkStepIdx = 0; chunkStepIdx < maxChunkSteps; chunkStepIdx++)
@@ -1825,7 +2025,35 @@ bool traceVoxelRayDDA(
         }
 
         uint chunkIndex = INVALID_INDEX;
-        if (inVisibleChunkBounds)
+        bool lookupDecidesMiss = false;
+        if (inVisibleChunkBounds && ySliceLookupEnabled)
+        {
+            if (cachedSliceIndex < 0 || chunkCoord.y != cachedSliceY)
+            {
+                cachedSliceIndex = -1;
+                for (uint sliceIdx = 0u; sliceIdx < meta.ySliceCount; sliceIdx++)
+                {
+                    if (voxelYSliceBounds[sliceIdx].chunkY == chunkCoord.y)
+                    {
+                        cachedSliceIndex = int(sliceIdx);
+                        cachedSliceY = chunkCoord.y;
+                        break;
+                    }
+                }
+            }
+
+            if (cachedSliceIndex >= 0)
+            {
+                VoxelYSliceBounds lookupSlice = voxelYSliceBounds[uint(cachedSliceIndex)];
+                if (lookupSlice.lookupEntryCount > 0u)
+                {
+                    lookupDecidesMiss = true;
+                    chunkIndex = findChunkIndexFromYSliceLookup(chunkCoord, lookupSlice, meta);
+                }
+            }
+        }
+
+        if (chunkIndex == INVALID_INDEX && inVisibleChunkBounds && !lookupDecidesMiss)
         {
             chunkIndex = findChunkIndex(chunkCoord, meta);
         }

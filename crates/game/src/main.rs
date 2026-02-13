@@ -37,6 +37,51 @@ const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
 const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
 const VTE_TEST_ENTITY_CENTER: [f32; 4] = [0.0, 3.0, 0.0, 0.0];
+const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
+const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
+
+#[derive(Copy, Clone)]
+struct VteRuntimeProfile {
+    label: &'static str,
+    entities: bool,
+    y_slice_lookup_cache: bool,
+}
+
+const VTE_SWEEP_PROFILES_ENTITIES: [VteRuntimeProfile; 2] = [
+    VteRuntimeProfile {
+        label: "A baseline",
+        entities: true,
+        y_slice_lookup_cache: true,
+    },
+    VteRuntimeProfile {
+        label: "B no-lookup-cache",
+        entities: true,
+        y_slice_lookup_cache: false,
+    },
+];
+
+const VTE_SWEEP_PROFILES_EXTENDED: [VteRuntimeProfile; 4] = [
+    VteRuntimeProfile {
+        label: "A baseline",
+        entities: true,
+        y_slice_lookup_cache: true,
+    },
+    VteRuntimeProfile {
+        label: "B no-entities",
+        entities: false,
+        y_slice_lookup_cache: true,
+    },
+    VteRuntimeProfile {
+        label: "C no-lookup-cache",
+        entities: true,
+        y_slice_lookup_cache: false,
+    },
+    VteRuntimeProfile {
+        label: "D no-entities-no-lookup-cache",
+        entities: false,
+        y_slice_lookup_cache: false,
+    },
+];
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum EditHighlightModeArg {
@@ -155,6 +200,18 @@ struct Args {
     /// Set to false to profile pure voxel traversal without the secondary tetra pipeline.
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
     vte_entities: bool,
+
+    /// Deprecated no-op: y-slice fastpath is now always enabled on normal VTE path.
+    #[arg(long, action = ArgAction::Set, default_value_t = true, hide = true)]
+    vte_y_slice_fastpath: bool,
+
+    /// Deprecated no-op: chunk solid clipping is now always enabled.
+    #[arg(long, action = ArgAction::Set, default_value_t = true, hide = true)]
+    vte_chunk_solid_clip: bool,
+
+    /// Enable y-slice direct chunk-lookup table in Stage A.
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    vte_y_slice_lookup_cache: bool,
 
     /// Edit highlight mode for pointed/placement voxel guides.
     /// `faces` uses in-VTE occlusion-correct face highlighting.
@@ -302,6 +359,9 @@ fn main() {
     let vte_reference_compare_enabled = env_flag_enabled("R4D_VTE_REFERENCE_COMPARE")
         || vte_reference_mismatch_only_enabled
         || vte_compare_slice_only_enabled;
+    let vte_sweep_include_no_entities = env_flag_enabled(VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV);
+    let initial_vte_entities_enabled = args.vte_entities;
+    let initial_vte_y_slice_lookup_cache_enabled = args.vte_y_slice_lookup_cache;
 
     let world_file = args.world_file.clone();
     let mut scene = Scene::new(args.scene.to_scene_preset());
@@ -345,6 +405,11 @@ fn main() {
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
         vte_compare_slice_only_enabled,
+        vte_entities_enabled: initial_vte_entities_enabled,
+        vte_y_slice_lookup_cache_enabled: initial_vte_y_slice_lookup_cache_enabled,
+        vte_sweep_include_no_entities,
+        vte_sweep_state: None,
+        vte_sweep_run_id: 0,
     };
 
     if app.vte_reference_compare_enabled {
@@ -356,8 +421,29 @@ fn main() {
     if app.vte_compare_slice_only_enabled {
         eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
     }
-    if !app.args.vte_entities {
+    if !app.vte_entities_enabled {
         eprintln!("VTE tetra-entity pipeline disabled via --vte-entities=false");
+    }
+    if !app.args.vte_y_slice_fastpath {
+        eprintln!(
+            "Ignoring deprecated --vte-y-slice-fastpath=false; y-slice fastpath is always enabled."
+        );
+    }
+    if !app.args.vte_chunk_solid_clip {
+        eprintln!(
+            "Ignoring deprecated --vte-chunk-solid-clip=false; chunk solid clipping is always enabled."
+        );
+    }
+    if !app.vte_y_slice_lookup_cache_enabled {
+        eprintln!("VTE y-slice lookup cache disabled via --vte-y-slice-lookup-cache=false");
+    }
+    if app.vte_sweep_include_no_entities {
+        eprintln!(
+            "VTE sweep: extended mode enabled via {} (includes no-entities profiles).",
+            VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV
+        );
+    } else {
+        eprintln!("VTE sweep: entities mode (default, entities stay enabled).");
     }
 
     event_loop.run_app(&mut app).unwrap();
@@ -458,6 +544,20 @@ struct App {
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
     vte_compare_slice_only_enabled: bool,
+    vte_entities_enabled: bool,
+    vte_y_slice_lookup_cache_enabled: bool,
+    vte_sweep_include_no_entities: bool,
+    vte_sweep_state: Option<VteSweepState>,
+    vte_sweep_run_id: u32,
+}
+
+#[derive(Copy, Clone)]
+struct VteSweepState {
+    run_id: u32,
+    profile_index: usize,
+    frames_remaining: usize,
+    previous_entities: bool,
+    previous_y_slice_lookup_cache: bool,
 }
 
 fn latest_framebuffer_screenshot_path() -> Option<PathBuf> {
@@ -702,6 +802,22 @@ fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
 }
 
 impl App {
+    fn vte_sweep_profiles(&self) -> &'static [VteRuntimeProfile] {
+        if self.vte_sweep_include_no_entities {
+            &VTE_SWEEP_PROFILES_EXTENDED
+        } else {
+            &VTE_SWEEP_PROFILES_ENTITIES
+        }
+    }
+
+    fn vte_sweep_mode_label(&self) -> &'static str {
+        if self.vte_sweep_include_no_entities {
+            "extended"
+        } else {
+            "entities"
+        }
+    }
+
     fn grab_mouse(&mut self, window: &Window) {
         let result = window
             .set_cursor_grab(CursorGrabMode::Locked)
@@ -796,6 +912,132 @@ impl App {
         }
     }
 
+    fn set_vte_runtime_flags(&mut self, entities: bool, y_slice_lookup_cache: bool) {
+        self.vte_entities_enabled = entities;
+        self.vte_y_slice_lookup_cache_enabled = y_slice_lookup_cache;
+    }
+
+    fn toggle_vte_runtime_sweep(&mut self) {
+        if self.args.backend.to_render_backend() != RenderBackend::VoxelTraversal {
+            eprintln!(
+                "VTE runtime sweep requires --backend voxel-traversal (current: {:?}).",
+                self.args.backend.to_render_backend()
+            );
+            return;
+        }
+
+        if let Some(state) = self.vte_sweep_state.take() {
+            self.set_vte_runtime_flags(
+                state.previous_entities,
+                state.previous_y_slice_lookup_cache,
+            );
+            if let Some(rcx) = self.rcx.as_mut() {
+                rcx.reset_gpu_profile_window();
+            }
+            eprintln!(
+                "[VTE sweep #{}] cancelled; restored runtime flags (entities={}, y_slice_lookup_cache={}).",
+                state.run_id,
+                self.vte_entities_enabled,
+                self.vte_y_slice_lookup_cache_enabled
+            );
+            return;
+        }
+
+        self.vte_sweep_run_id = self.vte_sweep_run_id.wrapping_add(1);
+        if self.vte_sweep_run_id == 0 {
+            self.vte_sweep_run_id = 1;
+        }
+        let run_id = self.vte_sweep_run_id;
+        let previous_entities = self.vte_entities_enabled;
+        let previous_y_slice_lookup_cache = self.vte_y_slice_lookup_cache_enabled;
+        let profiles = self.vte_sweep_profiles();
+        let profile_count = profiles.len();
+        let first_profile = profiles[0];
+        self.set_vte_runtime_flags(first_profile.entities, first_profile.y_slice_lookup_cache);
+        if let Some(rcx) = self.rcx.as_mut() {
+            rcx.reset_gpu_profile_window();
+        }
+        self.vte_sweep_state = Some(VteSweepState {
+            run_id,
+            profile_index: 0,
+            frames_remaining: VTE_SWEEP_SAMPLE_FRAMES,
+            previous_entities,
+            previous_y_slice_lookup_cache,
+        });
+        eprintln!(
+            "[VTE sweep #{}] started on live scene (mode={}): {} profiles × {} frames/profile.",
+            run_id,
+            self.vte_sweep_mode_label(),
+            profile_count,
+            VTE_SWEEP_SAMPLE_FRAMES
+        );
+        eprintln!(
+            "[VTE sweep #{}] profile 1/{} '{}' (entities={}, y_slice_lookup_cache={}).",
+            run_id,
+            profile_count,
+            first_profile.label,
+            first_profile.entities,
+            first_profile.y_slice_lookup_cache
+        );
+    }
+
+    fn advance_vte_runtime_sweep_after_frame(&mut self) {
+        let Some(mut state) = self.vte_sweep_state else {
+            return;
+        };
+        if state.frames_remaining > 0 {
+            state.frames_remaining -= 1;
+        }
+        if state.frames_remaining > 0 {
+            self.vte_sweep_state = Some(state);
+            return;
+        }
+
+        let profiles = self.vte_sweep_profiles();
+        let profile_count = profiles.len();
+        let finished_profile = profiles[state.profile_index];
+        eprintln!(
+            "[VTE sweep #{}] finished profile {}/{} '{}'.",
+            state.run_id,
+            state.profile_index + 1,
+            profile_count,
+            finished_profile.label
+        );
+
+        if state.profile_index + 1 < profile_count {
+            state.profile_index += 1;
+            state.frames_remaining = VTE_SWEEP_SAMPLE_FRAMES;
+            let next_profile = profiles[state.profile_index];
+            self.set_vte_runtime_flags(next_profile.entities, next_profile.y_slice_lookup_cache);
+            if let Some(rcx) = self.rcx.as_mut() {
+                rcx.reset_gpu_profile_window();
+            }
+            eprintln!(
+                "[VTE sweep #{}] profile {}/{} '{}' (entities={}, y_slice_lookup_cache={}).",
+                state.run_id,
+                state.profile_index + 1,
+                profile_count,
+                next_profile.label,
+                next_profile.entities,
+                next_profile.y_slice_lookup_cache
+            );
+            self.vte_sweep_state = Some(state);
+            return;
+        }
+
+        self.set_vte_runtime_flags(state.previous_entities, state.previous_y_slice_lookup_cache);
+        if let Some(rcx) = self.rcx.as_mut() {
+            rcx.reset_gpu_profile_window();
+        }
+        eprintln!(
+            "[VTE sweep #{}] completed; restored runtime flags (entities={}, y_slice_lookup_cache={}).",
+            state.run_id,
+            self.vte_entities_enabled,
+            self.vte_y_slice_lookup_cache_enabled
+        );
+        self.vte_sweep_state = None;
+    }
+
     fn update_and_render(&mut self) {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
@@ -822,6 +1064,54 @@ impl App {
         // Reset orientation (R)
         if self.input.take_reset_orientation() {
             self.camera.reset_orientation();
+        }
+
+        if self.input.take_vte_sweep() {
+            self.toggle_vte_runtime_sweep();
+        }
+
+        if self.input.take_vte_entities_toggle() {
+            if let Some(state) = self.vte_sweep_state {
+                eprintln!(
+                    "[VTE sweep #{}] ignoring manual entities toggle while sweep is active.",
+                    state.run_id
+                );
+            } else {
+                self.vte_entities_enabled = !self.vte_entities_enabled;
+                if let Some(rcx) = self.rcx.as_mut() {
+                    rcx.reset_gpu_profile_window();
+                }
+                eprintln!(
+                    "VTE runtime entities: {}",
+                    if self.vte_entities_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+            }
+        }
+
+        if self.input.take_vte_y_slice_lookup_cache_toggle() {
+            if let Some(state) = self.vte_sweep_state {
+                eprintln!(
+                    "[VTE sweep #{}] ignoring manual y-slice lookup cache toggle while sweep is active.",
+                    state.run_id
+                );
+            } else {
+                self.vte_y_slice_lookup_cache_enabled = !self.vte_y_slice_lookup_cache_enabled;
+                if let Some(rcx) = self.rcx.as_mut() {
+                    rcx.reset_gpu_profile_window();
+                }
+                eprintln!(
+                    "VTE runtime y-slice lookup cache: {}",
+                    if self.vte_y_slice_lookup_cache_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+            }
         }
 
         if self.input.take_save_world() {
@@ -1135,6 +1425,20 @@ impl App {
                 self.should_exit_after_render = true;
             }
         }
+        let vte_sweep_status = if let Some(state) = self.vte_sweep_state {
+            let profiles = self.vte_sweep_profiles();
+            let profile = profiles[state.profile_index];
+            format!(
+                "#{} {}/{}:{} {}f",
+                state.run_id,
+                state.profile_index + 1,
+                profiles.len(),
+                profile.label,
+                state.frames_remaining
+            )
+        } else {
+            "off".to_string()
+        };
 
         let render_options = RenderOptions {
             do_raster: true,
@@ -1147,6 +1451,7 @@ impl App {
             vte_reference_compare: self.vte_reference_compare_enabled,
             vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
             vte_compare_slice_only: self.vte_compare_slice_only_enabled,
+            vte_y_slice_lookup_cache: self.vte_y_slice_lookup_cache_enabled,
             vte_highlight_hit_voxel,
             vte_highlight_place_voxel,
             do_navigation_hud: true,
@@ -1162,7 +1467,8 @@ impl App {
                          look:{:+.2} {:+.2} {:+.2} {:+.2}\n\
                          edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                          mat:[ ]/wheel cycle, 1-0 direct\n\
-                         world:F5 save, F9 load",
+                         world:F5 save, F9 load\n\
+                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}",
                         self.control_scheme.label(),
                         self.move_speed,
                         inv,
@@ -1173,6 +1479,17 @@ impl App {
                         self.place_material,
                         edit_reach,
                         highlight_mode.label(),
+                        if self.vte_entities_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        if self.vte_y_slice_lookup_cache_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        vte_sweep_status,
                     )
                 } else {
                     format!(
@@ -1180,7 +1497,8 @@ impl App {
                          yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
                          edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                          mat:[ ]/wheel cycle, 1-0 direct\n\
-                         world:F5 save, F9 load",
+                         world:F5 save, F9 load\n\
+                         vte:F6 ent:{} F7 ycache:{} F8 sweep:{}",
                         pair.label(),
                         self.control_scheme.label(),
                         self.move_speed,
@@ -1193,6 +1511,17 @@ impl App {
                         self.place_material,
                         edit_reach,
                         highlight_mode.label(),
+                        if self.vte_entities_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        if self.vte_y_slice_lookup_cache_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        vte_sweep_status,
                     )
                 }
             }),
@@ -1211,7 +1540,7 @@ impl App {
         if backend == RenderBackend::VoxelTraversal {
             let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
             let vte_entity_instance = build_vte_test_entity_instance(preview_time_s);
-            let vte_entity_instances: &[common::ModelInstance] = if self.args.vte_entities {
+            let vte_entity_instances: &[common::ModelInstance] = if self.vte_entities_enabled {
                 std::slice::from_ref(&vte_entity_instance)
             } else {
                 &[]
@@ -1284,6 +1613,8 @@ impl App {
             }
             self.should_exit_after_render = true;
         }
+
+        self.advance_vte_runtime_sweep_after_frame();
     }
 }
 

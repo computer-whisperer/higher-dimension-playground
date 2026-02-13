@@ -15,11 +15,11 @@ const RENDER_DISTANCE: f32 = 64.0;
 const OCCUPANCY_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 32;
 const MATERIAL_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 4; // packed 4x u8 per u32
 const MACRO_CELLS_PER_AXIS: usize = CHUNK_SIZE / 2; // 2x2x2x2 macro cells
-const MACRO_CELLS_PER_CHUNK: usize = MACRO_CELLS_PER_AXIS
-    * MACRO_CELLS_PER_AXIS
-    * MACRO_CELLS_PER_AXIS
-    * MACRO_CELLS_PER_AXIS;
+const MACRO_CELLS_PER_CHUNK: usize =
+    MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS;
 const MACRO_WORDS_PER_CHUNK: usize = MACRO_CELLS_PER_CHUNK / 32;
+const Y_SLICE_LOOKUP_MAX_ENTRIES: usize = 131_072;
+const Y_SLICE_LOOKUP_MAX_ENTRIES_PER_SLICE: usize = 65_536;
 const EDIT_RAY_EPSILON: f32 = 1e-4;
 const EDIT_RAY_MAX_STEPS: usize = 4096;
 const COLLISION_PUSHUP_STEP: f32 = 0.05;
@@ -49,6 +49,7 @@ pub struct VoxelFrameData {
     pub macro_words: Vec<u32>,
     pub visible_chunk_indices: Vec<u32>,
     pub y_slice_bounds: Vec<GpuVoxelYSliceBounds>,
+    pub y_slice_lookup_entries: Vec<u32>,
 }
 
 impl VoxelFrameData {
@@ -60,6 +61,7 @@ impl VoxelFrameData {
             macro_words: &self.macro_words,
             visible_chunk_indices: &self.visible_chunk_indices,
             y_slice_bounds: &self.y_slice_bounds,
+            y_slice_lookup_entries: &self.y_slice_lookup_entries,
         }
     }
 }
@@ -194,12 +196,23 @@ impl Scene {
 
     /// Build the voxel-native frame payload for VTE.
     pub fn build_voxel_frame_data(&self, cam_pos: [f32; 4]) -> VoxelFrameData {
+        struct YSliceBuildData {
+            min_chunk_x: i32,
+            max_chunk_x: i32,
+            min_chunk_z: i32,
+            max_chunk_z: i32,
+            min_chunk_w: i32,
+            max_chunk_w: i32,
+            chunk_coords_xzw: Vec<([i32; 3], u32)>,
+        }
+
         let mut chunk_headers = Vec::new();
         let mut occupancy_words = Vec::new();
         let mut material_words = Vec::new();
         let mut macro_words = Vec::new();
         let mut visible_chunk_indices = Vec::new();
-        let mut y_slice_bounds: BTreeMap<i32, GpuVoxelYSliceBounds> = BTreeMap::new();
+        let mut y_slice_build: BTreeMap<i32, YSliceBuildData> = BTreeMap::new();
+        let mut y_slice_lookup_entries = Vec::new();
         let render_dist_sq = RENDER_DISTANCE * RENDER_DISTANCE;
 
         let mut chunk_entries: Vec<_> = self.world.chunks.iter().collect();
@@ -247,6 +260,8 @@ impl Scene {
             material_words.resize(material_words.len() + MATERIAL_WORDS_PER_CHUNK, 0);
             let macro_word_offset = macro_words.len() as u32;
             macro_words.resize(macro_words.len() + MACRO_WORDS_PER_CHUNK, 0);
+            let mut chunk_solid_local_min = [i32::MAX; 4];
+            let mut chunk_solid_local_max = [i32::MIN; 4];
 
             for (voxel_idx, voxel) in chunk.voxels.iter().enumerate() {
                 let mat_word_idx = material_word_offset as usize + (voxel_idx / 4);
@@ -260,6 +275,14 @@ impl Scene {
                     let y = (voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
                     let z = (voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
                     let w = voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+                    chunk_solid_local_min[0] = chunk_solid_local_min[0].min(x as i32);
+                    chunk_solid_local_min[1] = chunk_solid_local_min[1].min(y as i32);
+                    chunk_solid_local_min[2] = chunk_solid_local_min[2].min(z as i32);
+                    chunk_solid_local_min[3] = chunk_solid_local_min[3].min(w as i32);
+                    chunk_solid_local_max[0] = chunk_solid_local_max[0].max(x as i32);
+                    chunk_solid_local_max[1] = chunk_solid_local_max[1].max(y as i32);
+                    chunk_solid_local_max[2] = chunk_solid_local_max[2].max(z as i32);
+                    chunk_solid_local_max[3] = chunk_solid_local_max[3].max(w as i32);
                     let mx = x / 2;
                     let my = y / 2;
                     let mz = z / 2;
@@ -288,29 +311,88 @@ impl Scene {
                 material_word_offset,
                 flags,
                 macro_word_offset,
+                solid_local_min: if chunk_solid_local_min[0] == i32::MAX {
+                    [0, 0, 0, 0]
+                } else {
+                    chunk_solid_local_min
+                },
+                solid_local_max: if chunk_solid_local_max[0] == i32::MIN {
+                    [0, 0, 0, 0]
+                } else {
+                    chunk_solid_local_max
+                },
             });
             visible_chunk_indices.push(chunk_index);
 
-            y_slice_bounds
+            y_slice_build
                 .entry(chunk_pos.y)
-                .and_modify(|bounds| {
-                    bounds.min_chunk_x = bounds.min_chunk_x.min(chunk_pos.x);
-                    bounds.max_chunk_x = bounds.max_chunk_x.max(chunk_pos.x);
-                    bounds.min_chunk_z = bounds.min_chunk_z.min(chunk_pos.z);
-                    bounds.max_chunk_z = bounds.max_chunk_z.max(chunk_pos.z);
-                    bounds.min_chunk_w = bounds.min_chunk_w.min(chunk_pos.w);
-                    bounds.max_chunk_w = bounds.max_chunk_w.max(chunk_pos.w);
+                .and_modify(|slice| {
+                    slice.min_chunk_x = slice.min_chunk_x.min(chunk_pos.x);
+                    slice.max_chunk_x = slice.max_chunk_x.max(chunk_pos.x);
+                    slice.min_chunk_z = slice.min_chunk_z.min(chunk_pos.z);
+                    slice.max_chunk_z = slice.max_chunk_z.max(chunk_pos.z);
+                    slice.min_chunk_w = slice.min_chunk_w.min(chunk_pos.w);
+                    slice.max_chunk_w = slice.max_chunk_w.max(chunk_pos.w);
+                    slice
+                        .chunk_coords_xzw
+                        .push(([chunk_pos.x, chunk_pos.z, chunk_pos.w], chunk_index));
                 })
-                .or_insert(GpuVoxelYSliceBounds {
-                    chunk_y: chunk_pos.y,
+                .or_insert_with(|| YSliceBuildData {
                     min_chunk_x: chunk_pos.x,
                     max_chunk_x: chunk_pos.x,
                     min_chunk_z: chunk_pos.z,
                     max_chunk_z: chunk_pos.z,
                     min_chunk_w: chunk_pos.w,
                     max_chunk_w: chunk_pos.w,
-                    _padding: 0,
+                    chunk_coords_xzw: vec![([chunk_pos.x, chunk_pos.z, chunk_pos.w], chunk_index)],
                 });
+        }
+
+        let mut y_slice_bounds = Vec::with_capacity(y_slice_build.len());
+        for (chunk_y, slice) in y_slice_build {
+            let dim_x = (slice.max_chunk_x - slice.min_chunk_x + 1).max(0) as usize;
+            let dim_z = (slice.max_chunk_z - slice.min_chunk_z + 1).max(0) as usize;
+            let dim_w = (slice.max_chunk_w - slice.min_chunk_w + 1).max(0) as usize;
+            let volume = dim_x
+                .checked_mul(dim_z)
+                .and_then(|v| v.checked_mul(dim_w))
+                .unwrap_or(0);
+            let mut lookup_entry_offset = 0u32;
+            let mut lookup_entry_count = 0u32;
+            if volume > 0 && volume <= Y_SLICE_LOOKUP_MAX_ENTRIES_PER_SLICE {
+                if y_slice_lookup_entries.len().saturating_add(volume) <= Y_SLICE_LOOKUP_MAX_ENTRIES
+                {
+                    lookup_entry_offset = y_slice_lookup_entries.len() as u32;
+                    lookup_entry_count = volume as u32;
+                    y_slice_lookup_entries.resize(y_slice_lookup_entries.len() + volume, 0);
+                    for ([chunk_x, chunk_z, chunk_w], chunk_index) in slice.chunk_coords_xzw {
+                        let local_x = (chunk_x - slice.min_chunk_x) as usize;
+                        let local_z = (chunk_z - slice.min_chunk_z) as usize;
+                        let local_w = (chunk_w - slice.min_chunk_w) as usize;
+                        let linear =
+                            ((local_w * dim_z + local_z) * dim_x + local_x).min(volume - 1);
+                        let entry_idx = (lookup_entry_offset as usize) + linear;
+                        // 0 means "no chunk", so store chunk indices + 1.
+                        y_slice_lookup_entries[entry_idx] = chunk_index.saturating_add(1);
+                    }
+                }
+            }
+
+            y_slice_bounds.push(GpuVoxelYSliceBounds {
+                chunk_y,
+                min_chunk_x: slice.min_chunk_x,
+                max_chunk_x: slice.max_chunk_x,
+                min_chunk_z: slice.min_chunk_z,
+                max_chunk_z: slice.max_chunk_z,
+                min_chunk_w: slice.min_chunk_w,
+                max_chunk_w: slice.max_chunk_w,
+                lookup_entry_offset,
+                lookup_entry_count,
+                lookup_dim_x: dim_x as u32,
+                lookup_dim_z: dim_z as u32,
+                lookup_dim_w: dim_w as u32,
+                _padding: 0,
+            });
         }
 
         VoxelFrameData {
@@ -319,7 +401,8 @@ impl Scene {
             material_words,
             macro_words,
             visible_chunk_indices,
-            y_slice_bounds: y_slice_bounds.into_values().collect(),
+            y_slice_bounds,
+            y_slice_lookup_entries,
         }
     }
 
