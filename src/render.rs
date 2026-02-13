@@ -1,5 +1,6 @@
 mod geometry;
 mod hud;
+mod vte;
 
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
@@ -7,8 +8,11 @@ use self::hud::{
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
     push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine, HUD_VERTEX_CAPACITY,
 };
+pub use self::vte::{
+    GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VteDebugCounters, VTE_MAX_CHUNKS,
+};
 use ab_glyph::FontArc;
-use bytemuck::{Pod, Zeroable};
+use bytemuck::Zeroable;
 use common::ModelTetrahedron;
 use exr::prelude::WritableImage;
 use glam::{Vec2, Vec4, Vec4Swizzles};
@@ -282,239 +286,10 @@ pub struct TetraFrameInput<'a> {
     pub model_instances: &'a [common::ModelInstance],
 }
 
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-#[repr(C)]
-pub struct GpuVoxelChunkHeader {
-    pub chunk_coord: [i32; 4],
-    pub occupancy_word_offset: u32,
-    pub material_word_offset: u32,
-    pub flags: u32,
-    pub macro_word_offset: u32,
-    pub solid_local_min: [i32; 4],
-    pub solid_local_max: [i32; 4],
-}
-
-impl GpuVoxelChunkHeader {
-    pub const FLAG_EMPTY: u32 = 1 << 0;
-    pub const FLAG_FULL: u32 = 1 << 1;
-}
-
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-#[repr(C)]
-pub struct GpuVoxelYSliceBounds {
-    pub chunk_y: i32,
-    pub min_chunk_x: i32,
-    pub max_chunk_x: i32,
-    pub min_chunk_z: i32,
-    pub max_chunk_z: i32,
-    pub min_chunk_w: i32,
-    pub max_chunk_w: i32,
-    pub lookup_entry_offset: u32,
-    pub lookup_entry_count: u32,
-    pub lookup_dim_x: u32,
-    pub lookup_dim_z: u32,
-    pub lookup_dim_w: u32,
-    pub _padding: u32,
-}
-
-pub struct VoxelFrameInput<'a> {
-    pub metadata_generation: u64,
-    pub chunk_headers: &'a [GpuVoxelChunkHeader],
-    pub payload_update_slots: &'a [u32],
-    pub occupancy_words: &'a [u32],
-    pub material_words: &'a [u32],
-    pub macro_words: &'a [u32],
-    pub visible_chunk_indices: &'a [u32],
-    pub y_slice_bounds: &'a [GpuVoxelYSliceBounds],
-    pub y_slice_lookup_entries: &'a [u32],
-}
-
-#[derive(Copy, Clone, Default, Pod, Zeroable)]
-#[repr(C)]
-struct GpuVoxelFrameMeta {
-    chunk_count: u32,
-    visible_chunk_count: u32,
-    occupancy_word_count: u32,
-    material_word_count: u32,
-    macro_word_count: u32,
-    max_trace_steps: u32,
-    max_trace_distance: f32,
-    chunk_lookup_capacity: u32,
-    y_slice_count: u32,
-    y_slice_lookup_entry_count: u32,
-    stage_b_mode: u32,
-    stage_b_slice_layer: u32,
-    stage_b_thick_half_width: u32,
-    debug_flags: u32,
-    visible_chunk_min_x: i32,
-    visible_chunk_min_y: i32,
-    visible_chunk_min_z: i32,
-    visible_chunk_min_w: i32,
-    visible_chunk_max_x: i32,
-    visible_chunk_max_y: i32,
-    visible_chunk_max_z: i32,
-    visible_chunk_max_w: i32,
-    highlight_flags: u32,
-    _highlight_padding: [u32; 3],
-    highlight_hit_voxel: [i32; 4],
-    highlight_place_voxel: [i32; 4],
-}
-
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-#[repr(C)]
-struct GpuVoxelChunkLookupEntry {
-    chunk_coord: [i32; 4],
-    chunk_index: u32,
-    _padding: [u32; 3],
-}
-
-impl GpuVoxelChunkLookupEntry {
-    const INVALID_INDEX: u32 = u32::MAX;
-
-    fn empty() -> Self {
-        Self {
-            chunk_coord: [0; 4],
-            chunk_index: Self::INVALID_INDEX,
-            _padding: [0; 3],
-        }
-    }
-}
-
-impl Default for GpuVoxelChunkLookupEntry {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-#[derive(Copy, Clone, Default)]
-pub struct VteDebugCounters {
-    pub candidate_chunks: u32,
-    pub frustum_culled_chunks: u32,
-    pub empty_chunks_skipped: u32,
-    pub macro_cells_skipped: u32,
-    pub chunk_steps: u64,
-    pub voxel_steps: u64,
-    pub primary_hits: u64,
-    pub s_samples: u64,
-    pub visible_set_hash_valid: bool,
-    pub visible_set_hash: u32,
-}
-
-#[derive(Copy, Clone, Default)]
-struct VteCompareStats {
-    compared: u32,
-    matches: u32,
-    mismatches: u32,
-    hit_state_mismatches: u32,
-    chunk_material_mismatches: u32,
-    fast_miss_ref_hit: u32,
-    fast_hit_ref_miss: u32,
-    miss_reason_counts: [u32; 6],
-    zero_interval_flags: u32,
-    tie_stepped_flags: u32,
-    lookup_fallback_flags: u32,
-}
-
-#[derive(Copy, Clone, Default)]
-struct VteFirstMismatch {
-    valid: bool,
-    pixel_x: u32,
-    pixel_y: u32,
-    layer: u32,
-    mismatch_kind: u32,
-    miss_reason: u32,
-    debug_flags: u32,
-    fast_hit: bool,
-    ref_hit: bool,
-    fast_chunk: [i32; 4],
-    ref_chunk: [i32; 4],
-    fast_material: u32,
-    ref_material: u32,
-    fast_hit_t: f32,
-    ref_hit_t: f32,
-    chunk_steps_taken: u32,
-    remaining_voxel_steps: u32,
-    final_t: f32,
-    last_chunk: [i32; 4],
-}
-
 const LINE_VERTEX_CAPACITY: usize = 100_000;
 const HUD_BREADCRUMB_CAPACITY: usize = 128;
 const HUD_BREADCRUMB_MIN_STEP: f32 = 0.2;
 const FRAMES_IN_FLIGHT: usize = 2;
-pub const VTE_MAX_CHUNKS: usize = 8_192;
-const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
-const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
-const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
-const VTE_MAX_Y_SLICES: usize = VTE_MAX_CHUNKS;
-const VTE_MAX_Y_SLICE_LOOKUP_ENTRIES: usize = 131_072;
-const VTE_CHUNK_LOOKUP_CAPACITY: usize = 32_768; // Must be power of two.
-const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
-const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
-const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
-const VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE: u32 = 1 << 3;
-const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
-const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
-const VTE_COMPARE_STATS_WORD_COUNT: usize = 16;
-const VTE_COMPARE_STAT_COMPARED: usize = 0;
-const VTE_COMPARE_STAT_MATCHES: usize = 1;
-const VTE_COMPARE_STAT_MISMATCHES: usize = 2;
-const VTE_COMPARE_STAT_HIT_STATE_MISMATCHES: usize = 3;
-const VTE_COMPARE_STAT_CHUNK_MATERIAL_MISMATCHES: usize = 4;
-const VTE_COMPARE_STAT_FAST_MISS_REF_HIT: usize = 5;
-const VTE_COMPARE_STAT_FAST_HIT_REF_MISS: usize = 6;
-const VTE_COMPARE_STAT_REASON_NONE: usize = 7;
-const VTE_COMPARE_STAT_REASON_TOUCHED_VISIBLE: usize = 8;
-const VTE_COMPARE_STAT_REASON_VOXEL_BUDGET: usize = 9;
-const VTE_COMPARE_STAT_REASON_CHUNK_BUDGET: usize = 10;
-const VTE_COMPARE_STAT_REASON_MAX_DISTANCE: usize = 11;
-const VTE_COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE: usize = 12;
-const VTE_COMPARE_STAT_ZERO_INTERVAL_FLAG: usize = 13;
-const VTE_COMPARE_STAT_TIE_STEPPED_FLAG: usize = 14;
-const VTE_COMPARE_STAT_LOOKUP_FALLBACK_FLAG: usize = 15;
-const VTE_FIRST_MISMATCH_WORD_COUNT: usize = 27;
-const VTE_FIRST_MISMATCH_VALID: usize = 0;
-const VTE_FIRST_MISMATCH_PIXEL_X: usize = 1;
-const VTE_FIRST_MISMATCH_PIXEL_Y: usize = 2;
-const VTE_FIRST_MISMATCH_LAYER: usize = 3;
-const VTE_FIRST_MISMATCH_KIND: usize = 4;
-const VTE_FIRST_MISMATCH_MISS_REASON: usize = 5;
-const VTE_FIRST_MISMATCH_DEBUG_FLAGS: usize = 6;
-const VTE_FIRST_MISMATCH_HIT_MASK: usize = 7;
-const VTE_FIRST_MISMATCH_FAST_CHUNK_X: usize = 8;
-const VTE_FIRST_MISMATCH_FAST_CHUNK_Y: usize = 9;
-const VTE_FIRST_MISMATCH_FAST_CHUNK_Z: usize = 10;
-const VTE_FIRST_MISMATCH_FAST_CHUNK_W: usize = 11;
-const VTE_FIRST_MISMATCH_REF_CHUNK_X: usize = 12;
-const VTE_FIRST_MISMATCH_REF_CHUNK_Y: usize = 13;
-const VTE_FIRST_MISMATCH_REF_CHUNK_Z: usize = 14;
-const VTE_FIRST_MISMATCH_REF_CHUNK_W: usize = 15;
-const VTE_FIRST_MISMATCH_FAST_MATERIAL: usize = 16;
-const VTE_FIRST_MISMATCH_REF_MATERIAL: usize = 17;
-const VTE_FIRST_MISMATCH_FAST_HIT_T: usize = 18;
-const VTE_FIRST_MISMATCH_REF_HIT_T: usize = 19;
-const VTE_FIRST_MISMATCH_CHUNK_STEPS: usize = 20;
-const VTE_FIRST_MISMATCH_REMAINING_VOXELS: usize = 21;
-const VTE_FIRST_MISMATCH_FINAL_T: usize = 22;
-const VTE_FIRST_MISMATCH_LAST_CHUNK_X: usize = 23;
-const VTE_FIRST_MISMATCH_LAST_CHUNK_Y: usize = 24;
-const VTE_FIRST_MISMATCH_LAST_CHUNK_Z: usize = 25;
-const VTE_FIRST_MISMATCH_LAST_CHUNK_W: usize = 26;
-// Always build/use the entity BVH when entity tetrahedra are present.
-// This avoids costly per-ray linear tetra loops for small dynamic entity sets.
-const VTE_ENTITY_LINEAR_THRESHOLD_TETS: usize = 0;
-
-#[inline]
-fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
-    let x = chunk_coord[0] as u32;
-    let y = chunk_coord[1] as u32;
-    let z = chunk_coord[2] as u32;
-    let w = chunk_coord[3] as u32;
-    x.wrapping_mul(0x8DA6_B343)
-        ^ y.wrapping_mul(0xD816_3841)
-        ^ z.wrapping_mul(0xCB1A_B31F)
-        ^ w.wrapping_mul(0x1656_67B1)
-}
 
 struct FrameInFlight {
     live_buffers: LiveBuffers,
@@ -993,13 +768,13 @@ impl SizedBuffers {
 pub struct LiveBuffers {
     model_instance_buffer: Subbuffer<[common::ModelInstance]>,
     working_data_buffer: Subbuffer<common::WorkingData>,
-    voxel_frame_meta_buffer: Subbuffer<GpuVoxelFrameMeta>,
+    voxel_frame_meta_buffer: Subbuffer<vte::GpuVoxelFrameMeta>,
     voxel_chunk_headers_buffer: Subbuffer<[GpuVoxelChunkHeader]>,
     voxel_occupancy_words_buffer: Subbuffer<[u32]>,
     voxel_material_words_buffer: Subbuffer<[u32]>,
     voxel_macro_words_buffer: Subbuffer<[u32]>,
     voxel_visible_chunk_indices_buffer: Subbuffer<[u32]>,
-    voxel_chunk_lookup_buffer: Subbuffer<[GpuVoxelChunkLookupEntry]>,
+    voxel_chunk_lookup_buffer: Subbuffer<[vte::GpuVoxelChunkLookupEntry]>,
     voxel_y_slice_bounds_buffer: Subbuffer<[GpuVoxelYSliceBounds]>,
     voxel_y_slice_lookup_entries_buffer: Subbuffer<[u32]>,
     vte_compare_stats_buffer: Subbuffer<[u32]>,
@@ -1054,7 +829,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            GpuVoxelFrameMeta::zeroed(),
+            vte::GpuVoxelFrameMeta::zeroed(),
         )
         .unwrap();
 
@@ -1069,7 +844,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![GpuVoxelChunkHeader::zeroed(); VTE_MAX_CHUNKS],
+            vec![GpuVoxelChunkHeader::zeroed(); vte::VTE_MAX_CHUNKS],
         )
         .unwrap();
 
@@ -1084,7 +859,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK],
+            vec![0u32; vte::VTE_MAX_CHUNKS * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK],
         )
         .unwrap();
 
@@ -1099,7 +874,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK],
+            vec![0u32; vte::VTE_MAX_CHUNKS * vte::VTE_MATERIAL_WORDS_PER_CHUNK],
         )
         .unwrap();
 
@@ -1114,7 +889,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK],
+            vec![0u32; vte::VTE_MAX_CHUNKS * vte::VTE_MACRO_WORDS_PER_CHUNK],
         )
         .unwrap();
 
@@ -1129,7 +904,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; VTE_MAX_CHUNKS],
+            vec![0u32; vte::VTE_MAX_CHUNKS],
         )
         .unwrap();
 
@@ -1144,7 +919,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![GpuVoxelChunkLookupEntry::empty(); VTE_CHUNK_LOOKUP_CAPACITY],
+            vec![vte::GpuVoxelChunkLookupEntry::empty(); vte::VTE_CHUNK_LOOKUP_CAPACITY],
         )
         .unwrap();
 
@@ -1159,7 +934,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![GpuVoxelYSliceBounds::zeroed(); VTE_MAX_Y_SLICES],
+            vec![GpuVoxelYSliceBounds::zeroed(); vte::VTE_MAX_Y_SLICES],
         )
         .unwrap();
 
@@ -1174,7 +949,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; VTE_MAX_Y_SLICE_LOOKUP_ENTRIES],
+            vec![0u32; vte::VTE_MAX_Y_SLICE_LOOKUP_ENTRIES],
         )
         .unwrap();
 
@@ -1189,7 +964,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; VTE_COMPARE_STATS_WORD_COUNT],
+            vec![0u32; vte::VTE_COMPARE_STATS_WORD_COUNT],
         )
         .unwrap();
 
@@ -1204,7 +979,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; VTE_FIRST_MISMATCH_WORD_COUNT],
+            vec![0u32; vte::VTE_FIRST_MISMATCH_WORD_COUNT],
         )
         .unwrap();
 
@@ -1992,8 +1767,8 @@ pub struct RenderContext {
     stall_trace: bool,
     last_backend: RenderBackend,
     vte_debug_counters: VteDebugCounters,
-    vte_compare_stats: VteCompareStats,
-    vte_first_mismatch: VteFirstMismatch,
+    vte_compare_stats: vte::VteCompareStats,
+    vte_first_mismatch: vte::VteFirstMismatch,
     vte_backend_notice_printed: bool,
     drop_next_profile_sample: bool,
     voxel_payload_cache_occupancy_words: Vec<u32>,
@@ -2569,19 +2344,25 @@ impl RenderContext {
             stall_trace: std::env::var_os("R4D_TRACE_STALLS").is_some(),
             last_backend: RenderBackend::Auto,
             vte_debug_counters: VteDebugCounters::default(),
-            vte_compare_stats: VteCompareStats::default(),
-            vte_first_mismatch: VteFirstMismatch::default(),
+            vte_compare_stats: vte::VteCompareStats::default(),
+            vte_first_mismatch: vte::VteFirstMismatch::default(),
             vte_backend_notice_printed: false,
             drop_next_profile_sample: false,
             voxel_payload_cache_occupancy_words: vec![
                 0u32;
-                VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK
+                vte::VTE_MAX_CHUNKS
+                    * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK
             ],
             voxel_payload_cache_material_words: vec![
                 0u32;
-                VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK
+                vte::VTE_MAX_CHUNKS
+                    * vte::VTE_MATERIAL_WORDS_PER_CHUNK
             ],
-            voxel_payload_cache_macro_words: vec![0u32; VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK],
+            voxel_payload_cache_macro_words: vec![
+                0u32;
+                vte::VTE_MAX_CHUNKS
+                    * vte::VTE_MACRO_WORDS_PER_CHUNK
+            ],
         }
     }
 
@@ -2605,8 +2386,8 @@ impl RenderContext {
     }
 
     fn clear_vte_compare_diagnostics(&mut self) {
-        self.vte_compare_stats = VteCompareStats::default();
-        self.vte_first_mismatch = VteFirstMismatch::default();
+        self.vte_compare_stats = vte::VteCompareStats::default();
+        self.vte_first_mismatch = vte::VteFirstMismatch::default();
     }
 
     fn refresh_vte_compare_diagnostics(&mut self, frame_idx: usize) {
@@ -2615,29 +2396,30 @@ impl RenderContext {
             .vte_compare_stats_buffer
             .read()
             .unwrap();
-        if stats_words.len() >= VTE_COMPARE_STATS_WORD_COUNT {
-            self.vte_compare_stats = VteCompareStats {
-                compared: stats_words[VTE_COMPARE_STAT_COMPARED],
-                matches: stats_words[VTE_COMPARE_STAT_MATCHES],
-                mismatches: stats_words[VTE_COMPARE_STAT_MISMATCHES],
-                hit_state_mismatches: stats_words[VTE_COMPARE_STAT_HIT_STATE_MISMATCHES],
-                chunk_material_mismatches: stats_words[VTE_COMPARE_STAT_CHUNK_MATERIAL_MISMATCHES],
-                fast_miss_ref_hit: stats_words[VTE_COMPARE_STAT_FAST_MISS_REF_HIT],
-                fast_hit_ref_miss: stats_words[VTE_COMPARE_STAT_FAST_HIT_REF_MISS],
+        if stats_words.len() >= vte::VTE_COMPARE_STATS_WORD_COUNT {
+            self.vte_compare_stats = vte::VteCompareStats {
+                compared: stats_words[vte::VTE_COMPARE_STAT_COMPARED],
+                matches: stats_words[vte::VTE_COMPARE_STAT_MATCHES],
+                mismatches: stats_words[vte::VTE_COMPARE_STAT_MISMATCHES],
+                hit_state_mismatches: stats_words[vte::VTE_COMPARE_STAT_HIT_STATE_MISMATCHES],
+                chunk_material_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_CHUNK_MATERIAL_MISMATCHES],
+                fast_miss_ref_hit: stats_words[vte::VTE_COMPARE_STAT_FAST_MISS_REF_HIT],
+                fast_hit_ref_miss: stats_words[vte::VTE_COMPARE_STAT_FAST_HIT_REF_MISS],
                 miss_reason_counts: [
-                    stats_words[VTE_COMPARE_STAT_REASON_NONE],
-                    stats_words[VTE_COMPARE_STAT_REASON_TOUCHED_VISIBLE],
-                    stats_words[VTE_COMPARE_STAT_REASON_VOXEL_BUDGET],
-                    stats_words[VTE_COMPARE_STAT_REASON_CHUNK_BUDGET],
-                    stats_words[VTE_COMPARE_STAT_REASON_MAX_DISTANCE],
-                    stats_words[VTE_COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE],
+                    stats_words[vte::VTE_COMPARE_STAT_REASON_NONE],
+                    stats_words[vte::VTE_COMPARE_STAT_REASON_TOUCHED_VISIBLE],
+                    stats_words[vte::VTE_COMPARE_STAT_REASON_VOXEL_BUDGET],
+                    stats_words[vte::VTE_COMPARE_STAT_REASON_CHUNK_BUDGET],
+                    stats_words[vte::VTE_COMPARE_STAT_REASON_MAX_DISTANCE],
+                    stats_words[vte::VTE_COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE],
                 ],
-                zero_interval_flags: stats_words[VTE_COMPARE_STAT_ZERO_INTERVAL_FLAG],
-                tie_stepped_flags: stats_words[VTE_COMPARE_STAT_TIE_STEPPED_FLAG],
-                lookup_fallback_flags: stats_words[VTE_COMPARE_STAT_LOOKUP_FALLBACK_FLAG],
+                zero_interval_flags: stats_words[vte::VTE_COMPARE_STAT_ZERO_INTERVAL_FLAG],
+                tie_stepped_flags: stats_words[vte::VTE_COMPARE_STAT_TIE_STEPPED_FLAG],
+                lookup_fallback_flags: stats_words[vte::VTE_COMPARE_STAT_LOOKUP_FALLBACK_FLAG],
             };
         } else {
-            self.vte_compare_stats = VteCompareStats::default();
+            self.vte_compare_stats = vte::VteCompareStats::default();
         }
 
         let first_words = self.frames_in_flight[frame_idx]
@@ -2645,48 +2427,48 @@ impl RenderContext {
             .vte_first_mismatch_buffer
             .read()
             .unwrap();
-        if first_words.len() >= VTE_FIRST_MISMATCH_WORD_COUNT
-            && first_words[VTE_FIRST_MISMATCH_VALID] != 0
+        if first_words.len() >= vte::VTE_FIRST_MISMATCH_WORD_COUNT
+            && first_words[vte::VTE_FIRST_MISMATCH_VALID] != 0
         {
-            let hit_mask = first_words[VTE_FIRST_MISMATCH_HIT_MASK];
-            self.vte_first_mismatch = VteFirstMismatch {
+            let hit_mask = first_words[vte::VTE_FIRST_MISMATCH_HIT_MASK];
+            self.vte_first_mismatch = vte::VteFirstMismatch {
                 valid: true,
-                pixel_x: first_words[VTE_FIRST_MISMATCH_PIXEL_X],
-                pixel_y: first_words[VTE_FIRST_MISMATCH_PIXEL_Y],
-                layer: first_words[VTE_FIRST_MISMATCH_LAYER],
-                mismatch_kind: first_words[VTE_FIRST_MISMATCH_KIND],
-                miss_reason: first_words[VTE_FIRST_MISMATCH_MISS_REASON],
-                debug_flags: first_words[VTE_FIRST_MISMATCH_DEBUG_FLAGS],
+                pixel_x: first_words[vte::VTE_FIRST_MISMATCH_PIXEL_X],
+                pixel_y: first_words[vte::VTE_FIRST_MISMATCH_PIXEL_Y],
+                layer: first_words[vte::VTE_FIRST_MISMATCH_LAYER],
+                mismatch_kind: first_words[vte::VTE_FIRST_MISMATCH_KIND],
+                miss_reason: first_words[vte::VTE_FIRST_MISMATCH_MISS_REASON],
+                debug_flags: first_words[vte::VTE_FIRST_MISMATCH_DEBUG_FLAGS],
                 fast_hit: (hit_mask & 0x1) != 0,
                 ref_hit: (hit_mask & 0x2) != 0,
                 fast_chunk: [
-                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_X] as i32,
-                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_Y] as i32,
-                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_Z] as i32,
-                    first_words[VTE_FIRST_MISMATCH_FAST_CHUNK_W] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_FAST_CHUNK_X] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_FAST_CHUNK_Y] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_FAST_CHUNK_Z] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_FAST_CHUNK_W] as i32,
                 ],
                 ref_chunk: [
-                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_X] as i32,
-                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_Y] as i32,
-                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_Z] as i32,
-                    first_words[VTE_FIRST_MISMATCH_REF_CHUNK_W] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_REF_CHUNK_X] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_REF_CHUNK_Y] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_REF_CHUNK_Z] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_REF_CHUNK_W] as i32,
                 ],
-                fast_material: first_words[VTE_FIRST_MISMATCH_FAST_MATERIAL],
-                ref_material: first_words[VTE_FIRST_MISMATCH_REF_MATERIAL],
-                fast_hit_t: f32::from_bits(first_words[VTE_FIRST_MISMATCH_FAST_HIT_T]),
-                ref_hit_t: f32::from_bits(first_words[VTE_FIRST_MISMATCH_REF_HIT_T]),
-                chunk_steps_taken: first_words[VTE_FIRST_MISMATCH_CHUNK_STEPS],
-                remaining_voxel_steps: first_words[VTE_FIRST_MISMATCH_REMAINING_VOXELS],
-                final_t: f32::from_bits(first_words[VTE_FIRST_MISMATCH_FINAL_T]),
+                fast_material: first_words[vte::VTE_FIRST_MISMATCH_FAST_MATERIAL],
+                ref_material: first_words[vte::VTE_FIRST_MISMATCH_REF_MATERIAL],
+                fast_hit_t: f32::from_bits(first_words[vte::VTE_FIRST_MISMATCH_FAST_HIT_T]),
+                ref_hit_t: f32::from_bits(first_words[vte::VTE_FIRST_MISMATCH_REF_HIT_T]),
+                chunk_steps_taken: first_words[vte::VTE_FIRST_MISMATCH_CHUNK_STEPS],
+                remaining_voxel_steps: first_words[vte::VTE_FIRST_MISMATCH_REMAINING_VOXELS],
+                final_t: f32::from_bits(first_words[vte::VTE_FIRST_MISMATCH_FINAL_T]),
                 last_chunk: [
-                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_X] as i32,
-                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_Y] as i32,
-                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_Z] as i32,
-                    first_words[VTE_FIRST_MISMATCH_LAST_CHUNK_W] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_LAST_CHUNK_X] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_LAST_CHUNK_Y] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_LAST_CHUNK_Z] as i32,
+                    first_words[vte::VTE_FIRST_MISMATCH_LAST_CHUNK_W] as i32,
                 ],
             };
         } else {
-            self.vte_first_mismatch = VteFirstMismatch::default();
+            self.vte_first_mismatch = vte::VteFirstMismatch::default();
         }
     }
 
@@ -3850,45 +3632,16 @@ impl RenderContext {
     }
 
     fn stage_voxel_payload_updates(&mut self, input: &VoxelFrameInput<'_>) -> usize {
-        let max_updates = input
-            .payload_update_slots
-            .len()
-            .min(input.occupancy_words.len() / VTE_OCCUPANCY_WORDS_PER_CHUNK)
-            .min(input.material_words.len() / VTE_MATERIAL_WORDS_PER_CHUNK)
-            .min(input.macro_words.len() / VTE_MACRO_WORDS_PER_CHUNK);
+        let mut touched_slots = Vec::new();
+        let max_updates = vte::stage_voxel_payload_updates(
+            input,
+            &mut self.voxel_payload_cache_occupancy_words,
+            &mut self.voxel_payload_cache_material_words,
+            &mut self.voxel_payload_cache_macro_words,
+            &mut touched_slots,
+        );
 
-        for update_idx in 0..max_updates {
-            let slot = input.payload_update_slots[update_idx] as usize;
-            if slot >= VTE_MAX_CHUNKS {
-                continue;
-            }
-
-            let src_occ_base = update_idx * VTE_OCCUPANCY_WORDS_PER_CHUNK;
-            let src_mat_base = update_idx * VTE_MATERIAL_WORDS_PER_CHUNK;
-            let src_macro_base = update_idx * VTE_MACRO_WORDS_PER_CHUNK;
-            let dst_occ_base = slot * VTE_OCCUPANCY_WORDS_PER_CHUNK;
-            let dst_mat_base = slot * VTE_MATERIAL_WORDS_PER_CHUNK;
-            let dst_macro_base = slot * VTE_MACRO_WORDS_PER_CHUNK;
-
-            self.voxel_payload_cache_occupancy_words
-                [dst_occ_base..dst_occ_base + VTE_OCCUPANCY_WORDS_PER_CHUNK]
-                .copy_from_slice(
-                    &input.occupancy_words
-                        [src_occ_base..src_occ_base + VTE_OCCUPANCY_WORDS_PER_CHUNK],
-                );
-            self.voxel_payload_cache_material_words
-                [dst_mat_base..dst_mat_base + VTE_MATERIAL_WORDS_PER_CHUNK]
-                .copy_from_slice(
-                    &input.material_words
-                        [src_mat_base..src_mat_base + VTE_MATERIAL_WORDS_PER_CHUNK],
-                );
-            self.voxel_payload_cache_macro_words
-                [dst_macro_base..dst_macro_base + VTE_MACRO_WORDS_PER_CHUNK]
-                .copy_from_slice(
-                    &input.macro_words[src_macro_base..src_macro_base + VTE_MACRO_WORDS_PER_CHUNK],
-                );
-
-            let slot_u32 = slot as u32;
+        for slot_u32 in touched_slots {
             for frame in &mut self.frames_in_flight {
                 if frame.pending_voxel_payload_slot_set.insert(slot_u32) {
                     frame.pending_voxel_payload_slots.push(slot_u32);
@@ -3900,71 +3653,17 @@ impl RenderContext {
     }
 
     fn apply_pending_voxel_payload_updates_for_frame(&mut self, frame_idx: usize) -> usize {
-        let mut slots =
-            std::mem::take(&mut self.frames_in_flight[frame_idx].pending_voxel_payload_slots);
-        self.frames_in_flight[frame_idx]
-            .pending_voxel_payload_slot_set
-            .clear();
-        if slots.is_empty() {
-            return 0;
-        }
-        slots.sort_unstable();
-
-        {
-            let mut writer = self.frames_in_flight[frame_idx]
-                .live_buffers
-                .voxel_occupancy_words_buffer
-                .write()
-                .unwrap();
-            for &slot_u32 in &slots {
-                let slot = slot_u32 as usize;
-                if slot >= VTE_MAX_CHUNKS {
-                    continue;
-                }
-                let base = slot * VTE_OCCUPANCY_WORDS_PER_CHUNK;
-                writer[base..base + VTE_OCCUPANCY_WORDS_PER_CHUNK].copy_from_slice(
-                    &self.voxel_payload_cache_occupancy_words
-                        [base..base + VTE_OCCUPANCY_WORDS_PER_CHUNK],
-                );
-            }
-        }
-        {
-            let mut writer = self.frames_in_flight[frame_idx]
-                .live_buffers
-                .voxel_material_words_buffer
-                .write()
-                .unwrap();
-            for &slot_u32 in &slots {
-                let slot = slot_u32 as usize;
-                if slot >= VTE_MAX_CHUNKS {
-                    continue;
-                }
-                let base = slot * VTE_MATERIAL_WORDS_PER_CHUNK;
-                writer[base..base + VTE_MATERIAL_WORDS_PER_CHUNK].copy_from_slice(
-                    &self.voxel_payload_cache_material_words
-                        [base..base + VTE_MATERIAL_WORDS_PER_CHUNK],
-                );
-            }
-        }
-        {
-            let mut writer = self.frames_in_flight[frame_idx]
-                .live_buffers
-                .voxel_macro_words_buffer
-                .write()
-                .unwrap();
-            for &slot_u32 in &slots {
-                let slot = slot_u32 as usize;
-                if slot >= VTE_MAX_CHUNKS {
-                    continue;
-                }
-                let base = slot * VTE_MACRO_WORDS_PER_CHUNK;
-                writer[base..base + VTE_MACRO_WORDS_PER_CHUNK].copy_from_slice(
-                    &self.voxel_payload_cache_macro_words[base..base + VTE_MACRO_WORDS_PER_CHUNK],
-                );
-            }
-        }
-
-        slots.len()
+        let frame = &mut self.frames_in_flight[frame_idx];
+        vte::apply_pending_voxel_payload_updates_for_frame(
+            &mut frame.pending_voxel_payload_slots,
+            &mut frame.pending_voxel_payload_slot_set,
+            &frame.live_buffers.voxel_occupancy_words_buffer,
+            &frame.live_buffers.voxel_material_words_buffer,
+            &frame.live_buffers.voxel_macro_words_buffer,
+            &self.voxel_payload_cache_occupancy_words,
+            &self.voxel_payload_cache_material_words,
+            &self.voxel_payload_cache_macro_words,
+        )
     }
 
     fn render_internal(
@@ -4266,27 +3965,27 @@ impl RenderContext {
         let mut vte_visible_chunk_max = [i32::MIN; 4];
         if let Some(input) = voxel_input {
             vte_payload_update_count = self.stage_voxel_payload_updates(input);
-            vte_chunk_count = input.chunk_headers.len().min(VTE_MAX_CHUNKS);
+            vte_chunk_count = input.chunk_headers.len().min(vte::VTE_MAX_CHUNKS);
             vte_visible_chunk_count = input
                 .visible_chunk_indices
                 .len()
-                .min(VTE_MAX_CHUNKS)
+                .min(vte::VTE_MAX_CHUNKS)
                 .min(vte_chunk_count);
-            vte_occupancy_word_count = VTE_MAX_CHUNKS * VTE_OCCUPANCY_WORDS_PER_CHUNK;
-            vte_material_word_count = VTE_MAX_CHUNKS * VTE_MATERIAL_WORDS_PER_CHUNK;
-            vte_macro_word_count = VTE_MAX_CHUNKS * VTE_MACRO_WORDS_PER_CHUNK;
-            vte_y_slice_count = input.y_slice_bounds.len().min(VTE_MAX_Y_SLICES);
+            vte_occupancy_word_count = vte::VTE_MAX_CHUNKS * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK;
+            vte_material_word_count = vte::VTE_MAX_CHUNKS * vte::VTE_MATERIAL_WORDS_PER_CHUNK;
+            vte_macro_word_count = vte::VTE_MAX_CHUNKS * vte::VTE_MACRO_WORDS_PER_CHUNK;
+            vte_y_slice_count = input.y_slice_bounds.len().min(vte::VTE_MAX_Y_SLICES);
             vte_y_slice_lookup_entry_count = input
                 .y_slice_lookup_entries
                 .len()
-                .min(VTE_MAX_Y_SLICE_LOOKUP_ENTRIES);
+                .min(vte::VTE_MAX_Y_SLICE_LOOKUP_ENTRIES);
 
             let max_payload_updates = input
                 .payload_update_slots
                 .len()
-                .min(input.occupancy_words.len() / VTE_OCCUPANCY_WORDS_PER_CHUNK)
-                .min(input.material_words.len() / VTE_MATERIAL_WORDS_PER_CHUNK)
-                .min(input.macro_words.len() / VTE_MACRO_WORDS_PER_CHUNK);
+                .min(input.occupancy_words.len() / vte::VTE_OCCUPANCY_WORDS_PER_CHUNK)
+                .min(input.material_words.len() / vte::VTE_MATERIAL_WORDS_PER_CHUNK)
+                .min(input.macro_words.len() / vte::VTE_MACRO_WORDS_PER_CHUNK);
             if self.frames_rendered == 0
                 && (input.chunk_headers.len() > vte_chunk_count
                     || input.visible_chunk_indices.len() > vte_visible_chunk_count
@@ -4315,7 +4014,7 @@ impl RenderContext {
                 0
             } else {
                 let requested = (vte_visible_chunk_count.saturating_mul(2)).next_power_of_two();
-                requested.clamp(1, VTE_CHUNK_LOOKUP_CAPACITY)
+                requested.clamp(1, vte::VTE_CHUNK_LOOKUP_CAPACITY)
             };
 
             if metadata_dirty {
@@ -4369,7 +4068,7 @@ impl RenderContext {
                     }
                 }
                 {
-                    debug_assert!(VTE_CHUNK_LOOKUP_CAPACITY.is_power_of_two());
+                    debug_assert!(vte::VTE_CHUNK_LOOKUP_CAPACITY.is_power_of_two());
                     let mut writer = self.frames_in_flight[frame_idx]
                         .live_buffers
                         .voxel_chunk_lookup_buffer
@@ -4377,7 +4076,7 @@ impl RenderContext {
                         .unwrap();
 
                     for entry in writer.iter_mut().take(vte_chunk_lookup_capacity) {
-                        *entry = GpuVoxelChunkLookupEntry::empty();
+                        *entry = vte::GpuVoxelChunkLookupEntry::empty();
                     }
 
                     if vte_chunk_count > 0 && vte_chunk_lookup_capacity > 0 {
@@ -4386,14 +4085,15 @@ impl RenderContext {
                             let chunk_index = input.visible_chunk_indices[i]
                                 .min(vte_chunk_count.saturating_sub(1) as u32);
                             let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
-                            let mut slot = (vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
+                            let mut slot =
+                                (vte::vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
 
                             for _ in 0..vte_chunk_lookup_capacity {
                                 let entry = &mut writer[slot];
-                                if entry.chunk_index == GpuVoxelChunkLookupEntry::INVALID_INDEX
+                                if entry.chunk_index == vte::GpuVoxelChunkLookupEntry::INVALID_INDEX
                                     || entry.chunk_coord == chunk_coord
                                 {
-                                    *entry = GpuVoxelChunkLookupEntry {
+                                    *entry = vte::GpuVoxelChunkLookupEntry {
                                         chunk_coord,
                                         chunk_index,
                                         _padding: [0; 3],
@@ -4445,11 +4145,11 @@ impl RenderContext {
             );
             if highlight_mode_supported {
                 if let Some(hit_voxel) = render_options.vte_highlight_hit_voxel {
-                    highlight_flags |= VTE_HIGHLIGHT_FLAG_HIT_VOXEL;
+                    highlight_flags |= vte::VTE_HIGHLIGHT_FLAG_HIT_VOXEL;
                     highlight_hit_voxel = hit_voxel;
                 }
                 if let Some(place_voxel) = render_options.vte_highlight_place_voxel {
-                    highlight_flags |= VTE_HIGHLIGHT_FLAG_PLACE_VOXEL;
+                    highlight_flags |= vte::VTE_HIGHLIGHT_FLAG_PLACE_VOXEL;
                     highlight_place_voxel = place_voxel;
                 }
             }
@@ -4470,7 +4170,7 @@ impl RenderContext {
             } else {
                 0.0
             };
-            *writer = GpuVoxelFrameMeta {
+            *writer = vte::GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 visible_chunk_count: vte_visible_chunk_count as u32,
                 occupancy_word_count: vte_occupancy_word_count as u32,
@@ -4487,16 +4187,16 @@ impl RenderContext {
                 debug_flags: {
                     let mut flags = 0;
                     if render_options.vte_reference_compare {
-                        flags |= VTE_DEBUG_FLAG_REFERENCE_COMPARE;
+                        flags |= vte::VTE_DEBUG_FLAG_REFERENCE_COMPARE;
                     }
                     if render_options.vte_reference_mismatch_only {
-                        flags |= VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY;
+                        flags |= vte::VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY;
                     }
                     if render_options.vte_compare_slice_only {
-                        flags |= VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
+                        flags |= vte::VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
                     }
                     if render_options.vte_y_slice_lookup_cache {
-                        flags |= VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
+                        flags |= vte::VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
                     }
                     flags
                 },
@@ -4647,7 +4347,7 @@ impl RenderContext {
                         let Some(header) = input.chunk_headers.get(chunk_index as usize) else {
                             continue;
                         };
-                        let h = vte_hash_chunk_coord(header.chunk_coord);
+                        let h = vte::vte_hash_chunk_coord(header.chunk_coord);
                         hash ^= h;
                         hash = hash.wrapping_mul(0x0100_0193);
                     }
@@ -4860,7 +4560,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .unwrap();
                         }
 
-                        if entity_tetrahedron_count > VTE_ENTITY_LINEAR_THRESHOLD_TETS {
+                        if entity_tetrahedron_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
                             // Build an entity-only BVH used by the VTE Stage A tetra pass.
                             let n = entity_tetrahedron_count as u32;
                             let n_pow2 = n.next_power_of_two();
