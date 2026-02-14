@@ -1,5 +1,6 @@
 {
   "name": "lattice_hall",
+  "description": "A large enclosed chamber framed by void-mirror walls with a suspended tidal-glass lattice canopy.",
   "spawn_weight": 1,
   "ground_offset_y": 0,
   "fills": [

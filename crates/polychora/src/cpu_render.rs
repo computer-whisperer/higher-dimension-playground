@@ -1,3 +1,4 @@
+use crate::materials;
 use common::{MatN, ModelInstance, ModelTetrahedron, VecN};
 use std::f32::consts::PI;
 
@@ -118,7 +119,7 @@ pub fn cpu_render(
             let ndc_x = (px as f32) / (w as f32) * 2.0 - 1.0;
             let ndc_y = (py as f32) / (h as f32) * 2.0 - 1.0;
 
-            let rgb = rasterize_pixel(
+            let (rgb_premul, alpha_frac) = rasterize_pixel(
                 ndc_x,
                 ndc_y,
                 &projected,
@@ -127,12 +128,22 @@ pub fn cpu_render(
                 theta_max,
             );
 
-            // Tone map + gamma
-            let mapped = aces_tone_map(rgb);
-            let r = (linear_to_gamma(mapped[0]) * 255.0).clamp(0.0, 255.0) as u8;
-            let g = (linear_to_gamma(mapped[1]) * 255.0).clamp(0.0, 255.0) as u8;
-            let b = (linear_to_gamma(mapped[2]) * 255.0).clamp(0.0, 255.0) as u8;
-            img.put_pixel(px as u32, py as u32, image::Rgba([r, g, b, 255]));
+            if alpha_frac > 1e-6 {
+                // Un-premultiply to get true albedo color
+                let rgb = [
+                    rgb_premul[0] / alpha_frac,
+                    rgb_premul[1] / alpha_frac,
+                    rgb_premul[2] / alpha_frac,
+                ];
+                let mapped = aces_tone_map(rgb);
+                let r = (linear_to_gamma(mapped[0]) * 255.0).clamp(0.0, 255.0) as u8;
+                let g = (linear_to_gamma(mapped[1]) * 255.0).clamp(0.0, 255.0) as u8;
+                let b = (linear_to_gamma(mapped[2]) * 255.0).clamp(0.0, 255.0) as u8;
+                let a = (alpha_frac * 255.0).clamp(0.0, 255.0) as u8;
+                img.put_pixel(px as u32, py as u32, image::Rgba([r, g, b, a]));
+            } else {
+                img.put_pixel(px as u32, py as u32, image::Rgba([0, 0, 0, 0]));
+            }
         }
     }
 
@@ -482,7 +493,7 @@ fn rasterize_pixel(
     sun_view_dir: &[f32; 4],
     theta_min: f32,
     theta_max: f32,
-) -> [f32; 3] {
+) -> ([f32; 3], f32) {
     let mut zw_lines: Vec<ZWLine> = Vec::new();
     let point = [ndc_x, ndc_y];
 
@@ -588,7 +599,7 @@ fn rasterize_pixel(
     }
 
     if zw_lines.is_empty() {
-        return [0.0; 3];
+        return ([0.0; 3], 0.0);
     }
 
     render_zw_lines_simple(&zw_lines, theta_min, theta_max, sun_view_dir)
@@ -601,7 +612,7 @@ fn render_zw_lines_simple(
     theta_min: f32,
     theta_max: f32,
     sun_view_dir: &[f32; 4],
-) -> [f32; 3] {
+) -> ([f32; 3], f32) {
     let angle_step = (theta_max - theta_min) / DEPTH_FACTOR as f32;
 
     // Precompute per-line constants
@@ -625,6 +636,7 @@ fn render_zw_lines_simple(
     let sin_step = angle_step.sin();
 
     let mut accum = [0.0f32; 3];
+    let mut alpha_accum = 0.0f32;
 
     for _ in 0..DEPTH_FACTOR {
         let mut closest_line: i32 = -1;
@@ -676,6 +688,7 @@ fn render_zw_lines_simple(
                 let lit = albedo[c] * (ambient[c] + sun_color[c] * diffuse) + luminance * albedo[c];
                 accum[c] += lit / DEPTH_FACTOR as f32;
             }
+            alpha_accum += 1.0 / DEPTH_FACTOR as f32;
         }
 
         // Rotate ray
@@ -685,7 +698,7 @@ fn render_zw_lines_simple(
         ray_y = new_y;
     }
 
-    accum
+    (accum, alpha_accum)
 }
 
 // ─── Material sampling ──────────────────────────────────────────────
@@ -831,7 +844,10 @@ fn sample_material(id: u32, tex_pos: [f32; 4]) -> ([f32; 3], f32) {
                 0.15 * center_glow,
             )
         }
-        _ => ([0.0, 0.0, 0.0], 0.0),
+        _ => {
+            let [r, g, b] = materials::material_color(id.min(u8::MAX as u32) as u8);
+            ([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], 0.0)
+        }
     }
 }
 

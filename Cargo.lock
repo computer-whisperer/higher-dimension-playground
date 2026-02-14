@@ -1905,6 +1905,7 @@ dependencies = [
  "common",
  "egui",
  "egui-winit",
+ "flate2",
  "higher-dimension-playground",
  "image",
  "ndarray",

@@ -41,7 +41,7 @@ const BLOCK_EDIT_REACH_MIN: f32 = 1.0;
 const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
 const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
-const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 54;
+const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
 const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
@@ -344,7 +344,7 @@ struct Args {
     vte_integral_sky_emissive_tweak: bool,
 
     /// Sky scale applied in fused-integral tweak mode.
-    #[arg(long, default_value_t = 0.40)]
+    #[arg(long, default_value_t = 0.25)]
     vte_integral_sky_scale: f32,
 
     /// Extra emissive term added to hit samples in fused-integral tweak mode.
@@ -697,6 +697,10 @@ fn main() {
         VecDeque::new()
     };
 
+    let initial_render_width = args.width;
+    let initial_render_height = args.height;
+    let initial_render_layers = args.layers;
+
     let mut app = App {
         instance,
         device,
@@ -766,6 +770,18 @@ fn main() {
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
         main_menu_connect_error: None,
+        menu_camera: {
+            let mut c = Camera4D::new();
+            c.position = [5.0, 3.0, 5.0, 2.0];
+            c.yaw = -0.8;
+            c.pitch = -0.3;
+            c.xw_angle = 0.4;
+            c
+        },
+        menu_time: 0.0,
+        pending_render_width: initial_render_width,
+        pending_render_height: initial_render_height,
+        pending_render_layers: initial_render_layers,
     };
 
     if app.vte_reference_compare_enabled {
@@ -988,6 +1004,12 @@ struct App {
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
     main_menu_connect_error: Option<String>,
+    menu_camera: Camera4D,
+    menu_time: f32,
+    // Runtime resolution UI state (edited values before Apply)
+    pending_render_width: u32,
+    pending_render_height: u32,
+    pending_render_layers: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -3205,6 +3227,46 @@ impl App {
                 );
 
                 ui.separator();
+                ui.label("Render Resolution");
+                ui.horizontal(|ui| {
+                    ui.label("Width:");
+                    ui.add(egui::DragValue::new(&mut self.pending_render_width)
+                        .range(128..=3840)
+                        .speed(16));
+                    ui.label("Height:");
+                    ui.add(egui::DragValue::new(&mut self.pending_render_height)
+                        .range(128..=2160)
+                        .speed(16));
+                    ui.label("Layers:");
+                    ui.add(egui::DragValue::new(&mut self.pending_render_layers)
+                        .range(1..=512)
+                        .speed(1));
+                });
+                let dims_changed = self.pending_render_width != self.args.width
+                    || self.pending_render_height != self.args.height
+                    || self.pending_render_layers != self.args.layers;
+                ui.horizontal(|ui| {
+                    let apply_btn = ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
+                    if apply_btn.clicked() {
+                        self.args.width = self.pending_render_width;
+                        self.args.height = self.pending_render_height;
+                        self.args.layers = self.pending_render_layers;
+                        if let Some(rcx) = self.rcx.as_mut() {
+                            rcx.recreate_sized_buffers(
+                                [self.args.width, self.args.height, self.args.layers],
+                                None,
+                            );
+                        }
+                    }
+                    if dims_changed {
+                        ui.label(format!(
+                            "(current: {}x{}x{})",
+                            self.args.width, self.args.height, self.args.layers
+                        ));
+                    }
+                });
+
+                ui.separator();
 
                 let mut entities_enabled = self.vte_entities_enabled;
                 if ui.checkbox(&mut entities_enabled, "VTE Entities").changed() {
@@ -3260,8 +3322,8 @@ impl App {
 
     fn draw_egui_hotbar(&self, ctx: &egui::Context) {
         let screen_rect = ctx.screen_rect();
-        let slot_size = 48.0;
-        let gap = 4.0;
+        let slot_size = 62.0;
+        let gap = 5.0;
         let total_width = 9.0 * slot_size + 8.0 * gap;
         let start_x = (screen_rect.width() - total_width) / 2.0;
         let start_y = screen_rect.height() - slot_size - 50.0;
@@ -3387,8 +3449,8 @@ impl App {
 
                 // Material grid
                 let items_per_row = 10;
-                let cell_size = 44.0;
-                let cell_gap = 3.0;
+                let cell_size = 57.0;
+                let cell_gap = 4.0;
 
                 egui::ScrollArea::vertical()
                     .max_height(320.0)
@@ -3989,6 +4051,14 @@ impl App {
         self.main_menu_connect_error = None;
         self.menu_open = false;
         self.inventory_open = false;
+        // Reset the menu demo camera
+        self.menu_time = 0.0;
+        self.menu_camera.position = [5.0, 3.0, 5.0, 2.0];
+        self.menu_camera.yaw = -0.8;
+        self.menu_camera.pitch = -0.3;
+        self.menu_camera.xw_angle = 0.4;
+        self.menu_camera.zw_angle = 0.0;
+        self.menu_camera.yw_deviation = 0.0;
         self.release_mouse(window);
     }
 
@@ -4001,13 +4071,22 @@ impl App {
         self.input.take_pick_material();
         let _ = self.input.take_scroll_steps();
 
+        // Advance menu camera animation
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
+        self.menu_time += dt;
+
+        // Slowly orbit: rotate yaw and xw_angle for a gentle 4D tumble
+        self.menu_camera.yaw = -0.8 + self.menu_time * 0.08;
+        self.menu_camera.xw_angle = 0.4 + self.menu_time * 0.05;
+
         let egui_paint = if self.args.no_hud {
             None
         } else {
             self.run_egui_frame()
         };
 
-        let view_matrix = self.current_view_matrix();
+        let view_matrix = self.menu_camera.view_matrix();
         let backend = self.args.backend.to_render_backend();
         let render_options = RenderOptions {
             do_raster: true,
@@ -4042,7 +4121,7 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
+            let voxel_frame = self.scene.build_voxel_frame_data(self.menu_camera.position);
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
@@ -4053,7 +4132,7 @@ impl App {
             );
         } else {
             self.scene.update_surfaces_if_dirty();
-            let instances = self.scene.build_instances(self.camera.position);
+            let instances = self.scene.build_instances(self.menu_camera.position);
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),
                 self.queue.clone(),
@@ -4303,10 +4382,7 @@ impl App {
             self.input.take_menu_down();
             self.input.take_menu_activate();
 
-            // Scheme cycle (Tab)
-            if self.input.take_scheme_cycle() {
-                self.cycle_control_scheme();
-            }
+            // (Tab scheme cycling removed - Tab now opens inventory)
 
             if self.input.take_vte_sweep() {
                 self.toggle_vte_runtime_sweep();

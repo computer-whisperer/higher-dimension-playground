@@ -833,6 +833,327 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
             mat.luminance = 0.0;
         }
         break;
+    case 55:
+        // Basalt tiles
+        {
+            float4 tileUv = frac(p4 * 2.4);
+            float4 tileDist = min(tileUv, 1.0 - tileUv);
+            float seam = 1.0 - smoothstep(
+                0.04,
+                0.10,
+                min(min(tileDist.x, tileDist.y), min(tileDist.z, tileDist.w)));
+            float4 tileCell = floor(p4 * 2.4);
+            float grain = frac(sin(dot(tileCell, float4(97.17, 59.31, 83.71, 41.93))) * 65731.193);
+            float crack = 0.5 + 0.5 * sin((p4.x * 9.0 + p4.z * 11.0 + p4.w * 7.0) * tau);
+            float crackMask = smoothstep(0.78, 0.96, crack);
+
+            float3 base = float3(0.20, 0.21, 0.24);
+            float3 high = float3(0.31, 0.32, 0.36);
+            float3 color = lerp(base, high, grain * 0.45);
+            color = lerp(color, float3(0.08, 0.08, 0.09), seam * 0.85);
+            color = lerp(color, float3(0.11, 0.11, 0.12), crackMask * 0.35);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.05;
+            mat.roughness = 0.88;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 56:
+        // Copper weave
+        {
+            float4 weave = abs(frac((p4 + float4(t * 0.08, 0.0, -t * 0.04, t * 0.06)) * 8.0) - 0.5);
+            float strands = 1.0 - saturate(min(min(weave.x, weave.z), weave.w) * 22.0);
+            float cross = 1.0 - saturate(abs(frac((p4.y + p4.w) * 4.0) - 0.5) * 8.0);
+            float4 cell = floor((p4 + 64.0) * 10.0);
+            float patinaNoise = frac(sin(dot(cell, float4(101.17, 67.93, 43.71, 89.31))) * 67731.391);
+            float patina = smoothstep(0.72, 0.94, patinaNoise);
+
+            float3 copper = float3(0.67, 0.39, 0.20);
+            float3 bright = float3(0.86, 0.55, 0.28);
+            float3 oxide = float3(0.20, 0.42, 0.36);
+            float3 color = lerp(copper, bright, strands * 0.45 + cross * 0.2);
+            color = lerp(color, oxide, patina * 0.55);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.82;
+            mat.roughness = lerp(0.20, 0.55, patina);
+            mat.luminance = 0.02 + 0.08 * strands;
+        }
+        break;
+    case 57:
+        // Nebula strata
+        {
+            float4 q4 = p4 * 0.55 + float4(t * 0.05, -t * 0.03, t * 0.07, -t * 0.04);
+            float flowA = sin((q4.x * 5.0 + q4.z * 4.0 + q4.w * 6.0) * tau);
+            float flowB = sin((q4.y * 7.0 - q4.z * 3.0 + q4.w * 8.0) * tau);
+            float cloud = smoothstep(0.25, 0.85, 0.5 + 0.3 * flowA + 0.2 * flowB);
+            float4 cell = floor((q4 + 32.0) * 14.0);
+            float star = smoothstep(
+                0.97,
+                1.0,
+                frac(sin(dot(cell, float4(109.17, 71.93, 53.71, 97.31))) * 69731.731));
+
+            float3 deep = float3(0.06, 0.07, 0.16);
+            float3 mid = float3(0.28, 0.18, 0.42);
+            float3 high = float3(0.46, 0.44, 0.78);
+            float3 color = lerp(deep, mid, cloud);
+            color = lerp(color, high, cloud * cloud * 0.5);
+            color = lerp(color, float3(0.92, 0.88, 1.0), star);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.05;
+            mat.roughness = 0.35;
+            mat.luminance = 0.05 + 0.35 * cloud + 1.2 * star;
+        }
+        break;
+    case 58:
+        // Starforged core
+        {
+            float4 local = frac(p4) - 0.5;
+            float radius = length(local.xyz) + abs(local.w) * 0.6;
+            float core = pow(saturate(1.0 - radius * 1.9), 3.0);
+            float corona = 0.5 + 0.5 * sin((radius * 14.0 - t * 3.2) * tau);
+            float filaments = 0.5 + 0.5 * sin(
+                (p4.x * 9.0 + p4.y * 7.0 + p4.z * 5.0 + p4.w * 11.0 + t * 2.8) * tau);
+
+            float3 shell = float3(0.38, 0.30, 0.14);
+            float3 hot = float3(1.0, 0.84, 0.42);
+            float3 color = lerp(shell, hot, core);
+            color = lerp(color, float3(1.0, 0.95, 0.75), filaments * core * 0.5);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.10;
+            mat.roughness = 0.18;
+            mat.luminance = 6.0 + 24.0 * core * (0.7 + 0.3 * corona);
+        }
+        break;
+    case 59:
+        // Cryo circuit
+        {
+            float4 grid = abs(frac((p4 + float4(0.0, t * 0.10, 0.0, -t * 0.10)) * 7.0) - 0.5);
+            float traces = 1.0 - saturate(min(min(grid.x, grid.z), grid.w) * 18.0);
+            float frost = 0.5 + 0.5 * sin((p4.x * 12.0 + p4.y * 9.0 + p4.w * 8.0) * tau);
+            float crystal = smoothstep(0.82, 0.97, frost);
+
+            float3 base = float3(0.08, 0.16, 0.20);
+            float3 traceColor = float3(0.36, 0.78, 0.86);
+            float3 frostColor = float3(0.74, 0.92, 0.97);
+            float3 color = lerp(base, traceColor, traces * 0.7);
+            color = lerp(color, frostColor, crystal * 0.45);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.15;
+            mat.roughness = 0.20;
+            mat.luminance = 0.08 + 0.7 * traces + 0.3 * crystal;
+        }
+        break;
+    case 60:
+        // Smoked glass
+        {
+            float4 cell = floor((p4 + 256.0) * 18.0);
+            float impurity = frac(sin(dot(cell, float4(113.17, 79.93, 59.71, 101.31))) * 71731.193);
+            float streak = 0.5 + 0.5 * sin((p4.x * 10.0 + p4.z * 9.0 + p4.w * 7.0) * tau);
+            float haze = smoothstep(0.65, 0.93, impurity * streak);
+
+            float3 base = float3(0.21, 0.28, 0.34);
+            float3 tint = float3(0.32, 0.39, 0.46);
+            float3 color = lerp(base, tint, haze * 0.45);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.02;
+            mat.roughness = 0.04;
+            mat.luminance = 0.0;
+            mat.integrationWeight = 0.10;
+        }
+        break;
+    case 61:
+        // Ivory marble
+        {
+            float swirl = sin(
+                (p4.x * 9.0 + p4.z * 7.0 + p4.w * 5.0) * tau
+                + sin(p4.y * tau * 4.0) * 1.4);
+            float veins = smoothstep(0.68, 0.91, 0.5 + 0.5 * swirl);
+            float warm = 0.5 + 0.5 * sin((p4.y * 3.0 + p4.w * 2.0 + t * 0.2) * tau);
+
+            float3 base = float3(0.87, 0.88, 0.90);
+            float3 veinColor = float3(0.96, 0.96, 0.98);
+            float3 warmTint = float3(0.91, 0.89, 0.84);
+            float3 color = lerp(base, veinColor, veins * 0.8);
+            color = lerp(color, warmTint, warm * 0.18);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.02;
+            mat.roughness = 0.24;
+            mat.luminance = 0.01 + veins * 0.04;
+        }
+        break;
+    case 62:
+        // Runic alloy
+        {
+            float4 local = frac((p4 + float4(t * 0.03, 0.0, -t * 0.02, t * 0.04)) * 4.0);
+            float4 dist = abs(local - 0.5);
+            float strokes = 1.0 - smoothstep(0.05, 0.16, min(min(dist.x, dist.z), dist.w));
+            float glyph = 1.0 - smoothstep(
+                0.03,
+                0.10,
+                abs(frac((local.x + local.z * 0.5 + local.w * 0.75) * 3.0) - 0.5));
+            float pulse = 0.5 + 0.5 * sin((p4.x * 2.0 + p4.w * 3.0 + t * 1.8) * tau);
+
+            float3 base = float3(0.42, 0.45, 0.50);
+            float3 plate = float3(0.30, 0.33, 0.37);
+            float3 rune = float3(0.72, 0.84, 0.95);
+            float3 color = lerp(base, plate, strokes * 0.55);
+            color = lerp(color, rune, glyph * (0.25 + 0.75 * pulse));
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.72;
+            mat.roughness = 0.28;
+            mat.luminance = glyph * (0.08 + 0.42 * pulse);
+        }
+        break;
+    case 63:
+        // Hyperphase gel
+        {
+            float4 q4 = p4 * 0.72 + float4(t * 0.28, -t * 0.22, t * 0.19, t * 0.31);
+            float waveA = sin((q4.x * 4.0 + q4.y * 6.0 + q4.w * 5.0) * tau);
+            float waveB = sin((q4.z * 7.0 - q4.x * 3.0 + q4.w * 4.0) * tau);
+            float foam = smoothstep(0.50, 0.92, 0.5 + 0.3 * waveA + 0.2 * waveB);
+            float bubble = smoothstep(
+                0.95,
+                1.0,
+                frac(sin(dot(floor((q4 + 32.0) * 11.0), float4(121.17, 67.93, 83.71, 59.11))) * 73731.193));
+
+            float3 deep = float3(0.08, 0.21, 0.33);
+            float3 bright = float3(0.34, 0.82, 0.98);
+            float3 color = lerp(deep, bright, foam);
+            color = lerp(color, float3(0.78, 0.97, 1.0), bubble * 0.6);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.02;
+            mat.roughness = 0.07;
+            mat.luminance = 0.10 + 0.30 * foam + 0.35 * bubble;
+            mat.integrationWeight = 0.22;
+        }
+        break;
+    case 64:
+        // Singularity core
+        {
+            float4 local = frac(p4) - 0.5;
+            float radial = length(local.xyz) + abs(local.w) * 0.85;
+            float core = pow(saturate(1.0 - radial * 2.2), 4.0);
+            float accretion = 0.5 + 0.5 * sin(
+                (local.x * 6.0 - local.z * 7.0 + local.w * 6.0 - t * 3.2) * tau);
+            float jets = smoothstep(
+                0.75,
+                0.97,
+                0.5 + 0.5 * sin((local.y * 9.0 + local.w * 11.0 + t * 4.0) * tau));
+
+            float3 horizon = float3(0.09, 0.07, 0.10);
+            float3 ring = float3(0.98, 0.54, 0.22);
+            float3 flare = float3(1.0, 0.89, 0.62);
+            float3 color = lerp(horizon, ring, accretion * (0.35 + 0.65 * core));
+            color = lerp(color, flare, jets * core);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.18;
+            mat.roughness = 0.10;
+            mat.luminance = 1.4 + 16.0 * core + 4.0 * jets * core;
+        }
+        break;
+    case 65:
+        // Chrono bloom
+        {
+            float4 q4 = p4 + float4(t * 0.14, -t * 0.09, t * 0.12, t * 0.17);
+            float4 fold = abs(frac(q4 * 2.2) - 0.5);
+            float petals = 1.0 - saturate(min(min(fold.x, fold.y), min(fold.z, fold.w)) * 7.5);
+            float rings = 0.5 + 0.5 * sin((length(q4 * 0.75) * 9.0 - t * 1.6) * tau);
+            float pollen = smoothstep(
+                0.97,
+                1.0,
+                frac(sin(dot(floor((q4 + 48.0) * 13.0), float4(131.17, 73.93, 97.71, 61.31))) * 75731.391));
+
+            float3 stem = float3(0.10, 0.22, 0.14);
+            float3 bloom = float3(0.38, 0.89, 0.56);
+            float3 flare = float3(0.92, 1.0, 0.84);
+            float3 color = lerp(stem, bloom, petals * (0.5 + 0.5 * rings));
+            color = lerp(color, flare, pollen);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.04;
+            mat.roughness = 0.42;
+            mat.luminance = 0.10 + 0.55 * petals * rings + 0.70 * pollen;
+        }
+        break;
+    case 66:
+        // Tesseract weave
+        {
+            float4 weave = abs(frac((p4 + float4(t * 0.16, -t * 0.11, t * 0.08, t * 0.20)) * 9.0) - 0.5);
+            float xzwBands = 1.0 - saturate(min(min(weave.x, weave.z), weave.w) * 20.0);
+            float yBands = 1.0 - saturate(weave.y * 14.0);
+            float knots = smoothstep(0.84, 0.97, xzwBands * yBands);
+            float drift = 0.5 + 0.5 * sin((p4.x * 5.0 + p4.z * 7.0 + p4.w * 9.0 + t * 2.6) * tau);
+
+            float3 dark = float3(0.11, 0.09, 0.18);
+            float3 thread = float3(0.47, 0.30, 0.88);
+            float3 knotColor = float3(0.84, 0.68, 1.0);
+            float3 color = lerp(dark, thread, xzwBands * (0.6 + 0.4 * drift));
+            color = lerp(color, knotColor, knots * 0.9);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.36;
+            mat.roughness = 0.18;
+            mat.luminance = 0.08 + 0.45 * xzwBands + 0.90 * knots;
+        }
+        break;
+    case 67:
+        // Eventide alloy
+        {
+            float4 q4 = p4 * 0.6 + float4(t * 0.05, t * 0.08, -t * 0.07, t * 0.09);
+            float sheen = 0.5 + 0.5 * sin((q4.x * 8.0 + q4.y * 6.0 - q4.z * 5.0 + q4.w * 7.0) * tau);
+            float strata = 0.5 + 0.5 * sin((q4.y * 17.0 + q4.w * 13.0) * tau);
+            float inclusions = smoothstep(
+                0.94,
+                1.0,
+                frac(sin(dot(floor((q4 + 80.0) * 9.0), float4(139.17, 79.93, 109.71, 71.31))) * 77731.193));
+
+            float3 steel = float3(0.26, 0.30, 0.38);
+            float3 violet = float3(0.36, 0.30, 0.52);
+            float3 cyan = float3(0.34, 0.54, 0.62);
+            float3 color = lerp(steel, violet, sheen * 0.7);
+            color = lerp(color, cyan, strata * 0.35);
+            color = lerp(color, float3(0.92, 0.96, 1.0), inclusions * 0.4);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.84;
+            mat.roughness = 0.24 + 0.20 * (1.0 - sheen);
+            mat.luminance = 0.02 + 0.12 * inclusions;
+        }
+        break;
+    case 68:
+        // Beacon matrix
+        {
+            float4 local = frac((p4 + float4(0.0, t * 0.20, 0.0, t * 0.14)) * 6.0);
+            float4 dist = abs(local - 0.5);
+            float rails = 1.0 - smoothstep(0.05, 0.17, min(min(dist.x, dist.z), dist.w));
+            float nodes = smoothstep(
+                0.92,
+                1.0,
+                frac(sin(dot(floor((p4 + 96.0) * 6.0), float4(149.17, 83.93, 113.71, 73.31))) * 79731.193));
+            float pulse = 0.5 + 0.5 * sin((p4.y * 2.0 + t * 3.5) * tau);
+
+            float3 base = float3(0.24, 0.24, 0.20);
+            float3 rail = float3(0.92, 0.86, 0.54);
+            float3 node = float3(1.0, 0.98, 0.82);
+            float3 color = lerp(base, rail, rails);
+            color = lerp(color, node, nodes * pulse);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.22;
+            mat.roughness = 0.26;
+            mat.luminance = 0.35 + 2.4 * rails * pulse + 3.2 * nodes * pulse;
+        }
+        break;
     default:
         mat.albedo = float4(0.0, 0.0, 0.0, 1.0);
         mat.luminance = 0.0;

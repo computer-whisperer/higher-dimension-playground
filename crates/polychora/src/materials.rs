@@ -45,7 +45,9 @@ pub struct MaterialInfo {
     pub color: [u8; 3],
 }
 
-// All material definitions (IDs 1-54)
+pub const MAX_MATERIAL_ID: u8 = 68;
+
+// All material definitions (IDs 1-68)
 pub const MATERIALS: &[MaterialInfo] = &[
     // Basic colored blocks (1-8)
     MaterialInfo {
@@ -381,6 +383,92 @@ pub const MATERIALS: &[MaterialInfo] = &[
         category: MaterialCategory::Building,
         color: [233, 236, 236],
     },
+    // Advanced structural materials (55-62)
+    MaterialInfo {
+        id: 55,
+        name: "Basalt Tiles",
+        category: MaterialCategory::Building,
+        color: [68, 70, 76],
+    },
+    MaterialInfo {
+        id: 56,
+        name: "Copper Weave",
+        category: MaterialCategory::Special,
+        color: [168, 105, 72],
+    },
+    MaterialInfo {
+        id: 57,
+        name: "Nebula Strata",
+        category: MaterialCategory::Special,
+        color: [69, 78, 126],
+    },
+    MaterialInfo {
+        id: 58,
+        name: "Starforged Core",
+        category: MaterialCategory::Light,
+        color: [255, 236, 168],
+    },
+    MaterialInfo {
+        id: 59,
+        name: "Cryo Circuit",
+        category: MaterialCategory::Special,
+        color: [118, 188, 206],
+    },
+    MaterialInfo {
+        id: 60,
+        name: "Smoked Glass",
+        category: MaterialCategory::Glass,
+        color: [78, 98, 115],
+    },
+    MaterialInfo {
+        id: 61,
+        name: "Ivory Marble",
+        category: MaterialCategory::Building,
+        color: [226, 228, 232],
+    },
+    MaterialInfo {
+        id: 62,
+        name: "Runic Alloy",
+        category: MaterialCategory::Special,
+        color: [140, 146, 158],
+    },
+    // Volumetric animated materials (63-68)
+    MaterialInfo {
+        id: 63,
+        name: "Hyperphase Gel",
+        category: MaterialCategory::Glass,
+        color: [102, 208, 255],
+    },
+    MaterialInfo {
+        id: 64,
+        name: "Singularity Core",
+        category: MaterialCategory::Light,
+        color: [255, 168, 110],
+    },
+    MaterialInfo {
+        id: 65,
+        name: "Chrono Bloom",
+        category: MaterialCategory::Special,
+        color: [146, 255, 164],
+    },
+    MaterialInfo {
+        id: 66,
+        name: "Tesseract Weave",
+        category: MaterialCategory::Special,
+        color: [170, 132, 255],
+    },
+    MaterialInfo {
+        id: 67,
+        name: "Eventide Alloy",
+        category: MaterialCategory::Special,
+        color: [112, 130, 168],
+    },
+    MaterialInfo {
+        id: 68,
+        name: "Beacon Matrix",
+        category: MaterialCategory::Light,
+        color: [255, 248, 196],
+    },
 ];
 
 /// Get material info by ID
@@ -427,7 +515,7 @@ pub fn all_materials() -> &'static [MaterialInfo] {
 
 /// Get the maximum material ID
 pub fn max_material_id() -> u8 {
-    MATERIALS.iter().map(|m| m.id).max().unwrap_or(0)
+    MAX_MATERIAL_ID
 }
 
 #[cfg(test)]
@@ -439,12 +527,16 @@ mod tests {
         assert_eq!(material_name(1), "Red");
         assert_eq!(material_name(27), "Stone");
         assert_eq!(material_name(35), "Sand");
-        assert_eq!(material_name(54), "Wool (White)");
+        assert_eq!(material_name(68), "Beacon Matrix");
     }
 
     #[test]
     fn test_max_material_id() {
-        assert_eq!(max_material_id(), 54);
+        assert_eq!(max_material_id(), 68);
+        assert_eq!(
+            MATERIALS.iter().map(|m| m.id).max().unwrap_or(0),
+            MAX_MATERIAL_ID
+        );
     }
 
     #[test]
@@ -461,5 +553,7 @@ mod tests {
         assert_eq!(material_color(1), [255, 0, 0]); // Red
         assert_eq!(material_color(12), [255, 255, 255]); // White
         assert_eq!(material_color(35), [237, 201, 175]); // Sand
+        assert_eq!(material_color(58), [255, 236, 168]); // Starforged Core
+        assert_eq!(material_color(68), [255, 248, 196]); // Beacon Matrix
     }
 }

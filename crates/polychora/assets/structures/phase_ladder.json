@@ -1,0 +1,40 @@
+{
+  "name": "phase_ladder",
+  "description": "A climbing route that rises in Y while cycling through Z and W offsets, forcing a phase-shift path through hyperspace.",
+  "spawn_weight": 1,
+  "ground_offset_y": 0,
+  "fills": [
+    { "min": [-14, 0, -6, -2], "size": [4, 1, 6, 6], "material": 55 },
+    { "min": [10, 12, 0, 2], "size": [5, 1, 5, 5], "material": 61 },
+
+    { "min": [-12, 0, -4, 0], "size": [2, 1, 2, 2], "material": 56 },
+    { "min": [-10, 1, -2, 2], "size": [2, 1, 2, 2], "material": 57 },
+    { "min": [-8, 2, 0, 4], "size": [2, 1, 2, 2], "material": 56 },
+    { "min": [-6, 3, 2, 2], "size": [2, 1, 2, 2], "material": 57 },
+    { "min": [-4, 4, 4, 0], "size": [2, 1, 2, 2], "material": 56 },
+    { "min": [-2, 5, 2, -2], "size": [2, 1, 2, 2], "material": 57 },
+    { "min": [0, 6, 0, -4], "size": [2, 1, 2, 2], "material": 56 },
+    { "min": [2, 7, -2, -2], "size": [2, 1, 2, 2], "material": 57 },
+    { "min": [4, 8, -4, 0], "size": [2, 1, 2, 2], "material": 56 },
+    { "min": [6, 9, -2, 2], "size": [2, 1, 2, 2], "material": 57 },
+    { "min": [8, 10, 0, 4], "size": [2, 1, 2, 2], "material": 56 },
+    { "min": [10, 11, 2, 2], "size": [2, 1, 2, 2], "material": 57 },
+
+    { "min": [-12, 6, -3, 1], "size": [24, 1, 1, 1], "material": 60 },
+    { "min": [-12, 6, 1, -3], "size": [24, 1, 1, 1], "material": 60 },
+
+    { "min": [-12, -2, -4, 0], "size": [1, 2, 1, 1], "material": 62 },
+    { "min": [-8, -2, 0, 4], "size": [1, 2, 1, 1], "material": 62 },
+    { "min": [-4, -2, 4, 0], "size": [1, 2, 1, 1], "material": 62 },
+    { "min": [0, -2, 0, -4], "size": [1, 2, 1, 1], "material": 62 },
+    { "min": [4, -2, -4, 0], "size": [1, 2, 1, 1], "material": 62 },
+    { "min": [8, -2, 0, 4], "size": [1, 2, 1, 1], "material": 62 }
+  ],
+  "voxels": [
+    { "offset": [-11, 1, -3, 1], "material": 58 },
+    { "offset": [-5, 4, 3, 1], "material": 58 },
+    { "offset": [1, 7, -1, -3], "material": 58 },
+    { "offset": [7, 10, -1, 3], "material": 58 },
+    { "offset": [12, 13, 2, 2], "material": 58 }
+  ]
+}
