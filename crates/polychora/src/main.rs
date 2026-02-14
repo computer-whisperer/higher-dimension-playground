@@ -770,6 +770,15 @@ fn main() {
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
         main_menu_connect_error: None,
+        menu_camera: {
+            let mut c = Camera4D::new();
+            c.position = [5.0, 3.0, 5.0, 2.0];
+            c.yaw = -0.8;
+            c.pitch = -0.3;
+            c.xw_angle = 0.4;
+            c
+        },
+        menu_time: 0.0,
         pending_render_width: initial_render_width,
         pending_render_height: initial_render_height,
         pending_render_layers: initial_render_layers,
@@ -995,6 +1004,8 @@ struct App {
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
     main_menu_connect_error: Option<String>,
+    menu_camera: Camera4D,
+    menu_time: f32,
     // Runtime resolution UI state (edited values before Apply)
     pending_render_width: u32,
     pending_render_height: u32,
@@ -4030,6 +4041,14 @@ impl App {
         self.main_menu_connect_error = None;
         self.menu_open = false;
         self.inventory_open = false;
+        // Reset the menu demo camera
+        self.menu_time = 0.0;
+        self.menu_camera.position = [5.0, 3.0, 5.0, 2.0];
+        self.menu_camera.yaw = -0.8;
+        self.menu_camera.pitch = -0.3;
+        self.menu_camera.xw_angle = 0.4;
+        self.menu_camera.zw_angle = 0.0;
+        self.menu_camera.yw_deviation = 0.0;
         self.release_mouse(window);
     }
 
@@ -4042,13 +4061,22 @@ impl App {
         self.input.take_pick_material();
         let _ = self.input.take_scroll_steps();
 
+        // Advance menu camera animation
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
+        self.menu_time += dt;
+
+        // Slowly orbit: rotate yaw and xw_angle for a gentle 4D tumble
+        self.menu_camera.yaw = -0.8 + self.menu_time * 0.08;
+        self.menu_camera.xw_angle = 0.4 + self.menu_time * 0.05;
+
         let egui_paint = if self.args.no_hud {
             None
         } else {
             self.run_egui_frame()
         };
 
-        let view_matrix = self.current_view_matrix();
+        let view_matrix = self.menu_camera.view_matrix();
         let backend = self.args.backend.to_render_backend();
         let render_options = RenderOptions {
             do_raster: true,
@@ -4083,7 +4111,7 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
+            let voxel_frame = self.scene.build_voxel_frame_data(self.menu_camera.position);
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
@@ -4094,7 +4122,7 @@ impl App {
             );
         } else {
             self.scene.update_surfaces_if_dirty();
-            let instances = self.scene.build_instances(self.camera.position);
+            let instances = self.scene.build_instances(self.menu_camera.position);
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),
                 self.queue.clone(),
