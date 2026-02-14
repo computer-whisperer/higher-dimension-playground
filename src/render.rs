@@ -2860,12 +2860,12 @@ impl RenderContext {
                     break;
                 }
                 let position = pixels_to_ndc(
-                    Vec2::new(v.position_px[0], v.position_px[1]),
+                    Vec2::new(v.position_px[0], present_h - v.position_px[1]),
                     present_size,
                 );
                 writer[cursor] = HudVertex::new(
                     position,
-                    Vec2::new(v.uv[0], 1.0 - v.uv[1]),
+                    Vec2::new(v.uv[0], v.uv[1]),
                     Vec4::new(v.color[0], v.color[1], v.color[2], v.color[3]),
                 );
                 cursor += 1;
