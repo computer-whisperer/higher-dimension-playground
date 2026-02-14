@@ -16,7 +16,7 @@ use higher_dimension_playground::render::{
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vulkano::device::{Device, Queue};
@@ -580,6 +580,20 @@ fn main() {
     let initial_vte_max_trace_distance = args.vte_max_trace_distance.max(1.0);
 
     let world_file = args.world_file.clone();
+    // Determine whether to skip the main menu and go straight to playing.
+    // Skip if any CLI arg implies the user wants to play immediately.
+    let skip_main_menu = args.load_world
+        || args.server.is_some()
+        || args.gpu_screenshot
+        || args.cpu_render
+        || args.commands.is_some()
+        || !matches!(args.scene, SceneArg::Flat);
+    let initial_app_state = if skip_main_menu {
+        AppState::Playing
+    } else {
+        AppState::MainMenu
+    };
+
     let mut scene = Scene::new(args.scene.to_scene_preset());
     if args.load_world {
         match scene.load_world_from_path(&world_file) {
@@ -685,6 +699,12 @@ fn main() {
         last_multiplayer_player_update: Instant::now(),
         command_queue,
         command_wait_frames: 0,
+        app_state: initial_app_state,
+        main_menu_page: MainMenuPage::Root,
+        main_menu_server_address: "localhost:4000".to_string(),
+        main_menu_world_files: Vec::new(),
+        main_menu_selected_world: None,
+        main_menu_connect_error: None,
     };
 
     if app.vte_reference_compare_enabled {
@@ -810,6 +830,41 @@ fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
     eprintln!("Saved frames/cpu_render.png");
 }
 
+#[derive(Clone, PartialEq)]
+enum AppState {
+    MainMenu,
+    Playing,
+}
+
+#[derive(Clone, PartialEq)]
+enum MainMenuPage {
+    Root,
+    Singleplayer,
+    Multiplayer,
+}
+
+enum MainMenuTransition {
+    NewWorld,
+    LoadWorld(PathBuf),
+    ConnectMultiplayer(String),
+}
+
+struct WorldFileEntry {
+    path: PathBuf,
+    display_name: String,
+    size_bytes: u64,
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 struct App {
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -863,6 +918,12 @@ struct App {
     last_multiplayer_player_update: Instant,
     command_queue: VecDeque<AutoCommand>,
     command_wait_frames: u32,
+    app_state: AppState,
+    main_menu_page: MainMenuPage,
+    main_menu_server_address: String,
+    main_menu_world_files: Vec<WorldFileEntry>,
+    main_menu_selected_world: Option<usize>,
+    main_menu_connect_error: Option<String>,
 }
 
 #[derive(Copy, Clone)]
@@ -2742,7 +2803,7 @@ impl App {
         text
     }
 
-    fn draw_egui_pause_menu(&mut self, ctx: &egui::Context, close_menu: &mut bool) {
+    fn draw_egui_pause_menu(&mut self, ctx: &egui::Context, close_menu: &mut bool, return_to_main_menu: &mut bool) {
         egui::Window::new("Polychora")
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .resizable(false)
@@ -2762,6 +2823,9 @@ impl App {
                     }
                     if ui.button("Load World").clicked() {
                         self.load_world();
+                    }
+                    if ui.button("Main Menu").clicked() {
+                        *return_to_main_menu = true;
                     }
                     if ui.button("Quit").clicked() {
                         self.should_exit_after_render = true;
@@ -3085,14 +3149,20 @@ impl App {
         let mut close_menu = false;
         let mut close_inventory = false;
         let mut inventory_pick: Option<u8> = None;
+        let mut transition_to_playing: Option<MainMenuTransition> = None;
+        let mut return_to_main_menu = false;
         let full_output = egui_ctx.run(raw_input, |ctx| {
-            if self.menu_open {
-                self.draw_egui_pause_menu(ctx, &mut close_menu);
+            if self.app_state == AppState::MainMenu {
+                self.draw_egui_main_menu(ctx, &mut transition_to_playing);
+            } else {
+                if self.menu_open {
+                    self.draw_egui_pause_menu(ctx, &mut close_menu, &mut return_to_main_menu);
+                }
+                if self.inventory_open {
+                    self.draw_egui_inventory(ctx, &mut close_inventory, &mut inventory_pick);
+                }
+                self.draw_egui_hotbar(ctx);
             }
-            if self.inventory_open {
-                self.draw_egui_inventory(ctx, &mut close_inventory, &mut inventory_pick);
-            }
-            self.draw_egui_hotbar(ctx);
         });
 
         let egui::FullOutput {
@@ -3106,6 +3176,12 @@ impl App {
             egui_state.handle_platform_output(&window, platform_output);
         }
 
+        if let Some(transition) = transition_to_playing {
+            self.handle_main_menu_transition(transition, &window);
+        }
+        if return_to_main_menu {
+            self.transition_to_main_menu(&window);
+        }
         if close_menu {
             self.menu_open = false;
             self.grab_mouse(&window);
@@ -3398,10 +3474,378 @@ impl App {
         self.vte_sweep_state = None;
     }
 
+    fn scan_world_files(&mut self) {
+        self.main_menu_world_files.clear();
+        self.main_menu_selected_world = None;
+        let saves_dir = Path::new("saves");
+        let dirs_to_scan: Vec<&Path> = if saves_dir.is_dir() {
+            vec![saves_dir]
+        } else {
+            vec![]
+        };
+        // Also scan current directory for .v4dw files
+        let cwd = Path::new(".");
+        let all_dirs: Vec<&Path> = {
+            let mut v = vec![cwd];
+            v.extend(dirs_to_scan);
+            v
+        };
+        let mut seen = std::collections::HashSet::new();
+        for dir in all_dirs {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("v4dw") {
+                    continue;
+                }
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                if !seen.insert(canonical) {
+                    continue;
+                }
+                let display_name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                self.main_menu_world_files.push(WorldFileEntry {
+                    path,
+                    display_name,
+                    size_bytes,
+                });
+            }
+        }
+        self.main_menu_world_files
+            .sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    }
+
+    fn handle_main_menu_transition(&mut self, transition: MainMenuTransition, window: &Window) {
+        match transition {
+            MainMenuTransition::NewWorld => {
+                self.scene = Scene::new(ScenePreset::Flat);
+                self.camera = Camera4D::new();
+                self.app_state = AppState::Playing;
+                self.menu_open = false;
+                self.grab_mouse(window);
+                eprintln!("Started new flat world");
+            }
+            MainMenuTransition::LoadWorld(path) => {
+                self.scene = Scene::new(ScenePreset::Flat);
+                self.camera = Camera4D::new();
+                match self.scene.load_world_from_path(&path) {
+                    Ok(chunks) => {
+                        eprintln!(
+                            "Loaded world from {} ({} non-empty chunks)",
+                            path.display(),
+                            chunks
+                        );
+                        self.world_file = path;
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to load world from {}: {err}", path.display());
+                    }
+                }
+                self.app_state = AppState::Playing;
+                self.menu_open = false;
+                self.grab_mouse(window);
+            }
+            MainMenuTransition::ConnectMultiplayer(addr) => {
+                let server_addr = normalize_server_addr(&addr);
+                let player_name = self
+                    .args
+                    .player_name
+                    .clone()
+                    .unwrap_or_else(default_multiplayer_player_name);
+                match MultiplayerClient::connect(server_addr.clone(), player_name.clone()) {
+                    Ok(client) => {
+                        eprintln!(
+                            "Connecting to multiplayer server {} as '{}'",
+                            client.server_addr(),
+                            player_name
+                        );
+                        self.multiplayer = Some(client);
+                        self.multiplayer_self_id = None;
+                        self.scene = Scene::new(ScenePreset::Flat);
+                        self.camera = Camera4D::new();
+                        self.app_state = AppState::Playing;
+                        self.menu_open = false;
+                        self.grab_mouse(window);
+                    }
+                    Err(error) => {
+                        let msg = format!("Failed to connect to {}: {}", server_addr, error);
+                        eprintln!("{}", msg);
+                        self.main_menu_connect_error = Some(msg);
+                    }
+                }
+            }
+        }
+    }
+
+    fn transition_to_main_menu(&mut self, window: &Window) {
+        // Disconnect multiplayer if connected
+        if self.multiplayer.is_some() {
+            self.multiplayer = None;
+            self.multiplayer_self_id = None;
+            self.next_multiplayer_edit_id = 1;
+            self.pending_voxel_edits.clear();
+            self.remote_players.clear();
+            eprintln!("Disconnected from multiplayer server");
+        }
+        self.app_state = AppState::MainMenu;
+        self.main_menu_page = MainMenuPage::Root;
+        self.main_menu_connect_error = None;
+        self.menu_open = false;
+        self.inventory_open = false;
+        self.release_mouse(window);
+    }
+
+    fn update_and_render_main_menu(&mut self) {
+        // Drain any inputs that accumulated
+        self.input.take_mouse_delta();
+        self.input.take_jump();
+        self.input.take_remove_block();
+        self.input.take_place_block();
+        self.input.take_pick_material();
+        let _ = self.input.take_scroll_steps();
+
+        let egui_paint = if self.args.no_hud {
+            None
+        } else {
+            self.run_egui_frame()
+        };
+
+        let view_matrix = self.current_view_matrix();
+        let backend = self.args.backend.to_render_backend();
+        let render_options = RenderOptions {
+            do_raster: true,
+            render_backend: backend,
+            vte_max_trace_steps: self.vte_max_trace_steps,
+            vte_max_trace_distance: self.vte_max_trace_distance,
+            vte_display_mode: self.args.vte_display_mode.to_render_mode(),
+            vte_slice_layer: self.args.vte_slice_layer,
+            vte_thick_half_width: self.args.vte_thick_half_width,
+            vte_reference_compare: self.vte_reference_compare_enabled,
+            vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
+            vte_compare_slice_only: self.vte_compare_slice_only_enabled,
+            vte_y_slice_lookup_cache: self.vte_y_slice_lookup_cache_enabled,
+            vte_integral_sky_emissive_tweak: self.vte_integral_sky_emissive_enabled,
+            vte_integral_sky_scale: self.vte_integral_sky_scale,
+            vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,
+            vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
+            vte_integral_log_merge_k: self.vte_integral_log_merge_k,
+            do_navigation_hud: false,
+            egui_paint,
+            ..Default::default()
+        };
+
+        let preview_elapsed = Instant::now() - self.start_time;
+        let preview_time_ticks_ms = preview_elapsed.as_millis() as u32;
+        let frame_params = FrameParams {
+            view_matrix,
+            time_ticks_ms: preview_time_ticks_ms,
+            focal_length_xy: self.focal_length_xy,
+            focal_length_zw: self.focal_length_zw,
+            render_options,
+        };
+
+        if backend == RenderBackend::VoxelTraversal {
+            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
+            self.rcx.as_mut().unwrap().render_voxel_frame(
+                self.device.clone(),
+                self.queue.clone(),
+                frame_params,
+                voxel_frame.as_input(),
+                &[],
+                &[],
+            );
+        } else {
+            self.scene.update_surfaces_if_dirty();
+            let instances = self.scene.build_instances(self.camera.position);
+            self.rcx.as_mut().unwrap().render_tetra_frame(
+                self.device.clone(),
+                self.queue.clone(),
+                frame_params,
+                TetraFrameInput {
+                    model_instances: instances,
+                },
+            );
+        }
+    }
+
+    fn draw_egui_main_menu(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+        match self.main_menu_page {
+            MainMenuPage::Root => {
+                self.draw_egui_main_menu_root(ctx, transition);
+            }
+            MainMenuPage::Singleplayer => {
+                self.draw_egui_main_menu_singleplayer(ctx, transition);
+            }
+            MainMenuPage::Multiplayer => {
+                self.draw_egui_main_menu_multiplayer(ctx, transition);
+            }
+        }
+    }
+
+    fn draw_egui_main_menu_root(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+        egui::Window::new("main_menu_root")
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .collapsible(false)
+            .fixed_size([300.0, 260.0])
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(16.0);
+                    ui.heading(RichText::new("Polychora").size(32.0).strong());
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("4D Voxel Explorer").size(14.0).weak());
+                    ui.add_space(24.0);
+
+                    let button_size = egui::vec2(200.0, 36.0);
+                    if ui.add_sized(button_size, egui::Button::new(
+                        RichText::new("Singleplayer").size(16.0),
+                    )).clicked() {
+                        self.main_menu_page = MainMenuPage::Singleplayer;
+                        self.scan_world_files();
+                    }
+                    ui.add_space(8.0);
+                    if ui.add_sized(button_size, egui::Button::new(
+                        RichText::new("Multiplayer").size(16.0),
+                    )).clicked() {
+                        self.main_menu_page = MainMenuPage::Multiplayer;
+                        self.main_menu_connect_error = None;
+                    }
+                    ui.add_space(8.0);
+                    if ui.add_sized(button_size, egui::Button::new(
+                        RichText::new("Quit").size(16.0),
+                    )).clicked() {
+                        self.should_exit_after_render = true;
+                    }
+                    ui.add_space(16.0);
+                });
+            });
+    }
+
+    fn draw_egui_main_menu_singleplayer(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+        egui::Window::new("main_menu_singleplayer")
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .collapsible(false)
+            .fixed_size([400.0, 400.0])
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading(RichText::new("Singleplayer").size(24.0).strong());
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.label(RichText::new("Saved Worlds").strong());
+                ui.add_space(4.0);
+
+                if self.main_menu_world_files.is_empty() {
+                    ui.label("No .v4dw world files found in saves/ or current directory.");
+                } else {
+                    let selected = self.main_menu_selected_world;
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (i, entry) in self.main_menu_world_files.iter().enumerate() {
+                                let is_selected = selected == Some(i);
+                                let size_label = format_file_size(entry.size_bytes);
+                                let label = format!("{} ({})", entry.display_name, size_label);
+                                if ui
+                                    .selectable_label(is_selected, &label)
+                                    .clicked()
+                                {
+                                    self.main_menu_selected_world = Some(i);
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    let has_selection = self.main_menu_selected_world.is_some();
+                    if ui
+                        .add_enabled(
+                            has_selection,
+                            egui::Button::new("Load Selected"),
+                        )
+                        .clicked()
+                    {
+                        if let Some(idx) = self.main_menu_selected_world {
+                            if let Some(entry) = self.main_menu_world_files.get(idx) {
+                                *transition = Some(MainMenuTransition::LoadWorld(entry.path.clone()));
+                            }
+                        }
+                    }
+                    if ui.button("Create New World").clicked() {
+                        *transition = Some(MainMenuTransition::NewWorld);
+                    }
+                    if ui.button("Back").clicked() {
+                        self.main_menu_page = MainMenuPage::Root;
+                    }
+                });
+            });
+    }
+
+    fn draw_egui_main_menu_multiplayer(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+        egui::Window::new("main_menu_multiplayer")
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .collapsible(false)
+            .fixed_size([400.0, 200.0])
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading(RichText::new("Multiplayer").size(24.0).strong());
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Server address:");
+                    ui.text_edit_singleline(&mut self.main_menu_server_address);
+                });
+                ui.add_space(8.0);
+
+                if let Some(error) = &self.main_menu_connect_error {
+                    ui.colored_label(egui::Color32::from_rgb(255, 100, 100), error.as_str());
+                    ui.add_space(4.0);
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Connect").clicked() {
+                        let addr = self.main_menu_server_address.clone();
+                        *transition = Some(MainMenuTransition::ConnectMultiplayer(addr));
+                    }
+                    if ui.button("Back").clicked() {
+                        self.main_menu_page = MainMenuPage::Root;
+                        self.main_menu_connect_error = None;
+                    }
+                });
+            });
+    }
+
     fn update_and_render(&mut self) {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
+
+        if self.app_state == AppState::MainMenu {
+            self.update_and_render_main_menu();
+            return;
+        }
+
         self.poll_multiplayer_events();
         self.reapply_pending_voxel_edits(now);
         self.smooth_remote_players(dt, now);
@@ -4134,7 +4578,9 @@ impl ApplicationHandler for App {
             None,
         ));
 
-        self.grab_mouse(&window);
+        if self.app_state == AppState::Playing {
+            self.grab_mouse(&window);
+        }
         let backend = self.args.backend.to_render_backend();
         let vte_mode = self.args.vte_display_mode.to_render_mode();
         let pixel_storage_layers =
@@ -4161,10 +4607,13 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+        let show_egui_overlay = self.app_state == AppState::MainMenu
+            || self.menu_open
+            || self.inventory_open;
         let egui_consumed = if let (Some(egui_state), Some(window)) =
             (self.egui_winit_state.as_mut(), window.as_ref())
         {
-            (self.menu_open || self.inventory_open) && egui_state.on_window_event(window, &event).consumed
+            show_egui_overlay && egui_state.on_window_event(window, &event).consumed
         } else {
             false
         };
@@ -4184,7 +4633,15 @@ impl ApplicationHandler for App {
                 }
 
                 if is_escape_pressed(&event) {
-                    if self.inventory_open {
+                    if self.app_state == AppState::MainMenu {
+                        // In main menu, Escape goes back or quits
+                        if self.main_menu_page != MainMenuPage::Root {
+                            self.main_menu_page = MainMenuPage::Root;
+                            self.main_menu_connect_error = None;
+                        } else {
+                            event_loop.exit();
+                        }
+                    } else if self.inventory_open {
                         self.inventory_open = false;
                         if let Some(window) = window.as_ref() {
                             self.grab_mouse(window);
@@ -4208,7 +4665,9 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { button, state, .. } => match button {
                 MouseButton::Left => {
                     if state.is_pressed() {
-                        if self.mouse_grabbed {
+                        if self.app_state == AppState::MainMenu {
+                            // Don't grab mouse in main menu -- egui handles clicks
+                        } else if self.mouse_grabbed {
                             if !egui_consumed {
                                 self.input.handle_mouse_button(button, state);
                             }
