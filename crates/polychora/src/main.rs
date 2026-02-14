@@ -14,7 +14,7 @@ use higher_dimension_playground::render::{
     TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -151,6 +151,87 @@ impl EditHighlightModeArg {
             Self::Off => "off",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum AutoCommand {
+    Press(KeyCode),
+    Wait(u32),
+    Screenshot,
+}
+
+fn parse_keycode(key: &str) -> Option<KeyCode> {
+    match key.to_lowercase().as_str() {
+        "escape" => Some(KeyCode::Escape),
+        "e" => Some(KeyCode::KeyE),
+        "w" => Some(KeyCode::KeyW),
+        "a" => Some(KeyCode::KeyA),
+        "s" => Some(KeyCode::KeyS),
+        "d" => Some(KeyCode::KeyD),
+        "q" => Some(KeyCode::KeyQ),
+        "r" => Some(KeyCode::KeyR),
+        "f" => Some(KeyCode::KeyF),
+        "tab" => Some(KeyCode::Tab),
+        "space" => Some(KeyCode::Space),
+        "shift" => Some(KeyCode::ShiftLeft),
+        "1" => Some(KeyCode::Digit1),
+        "2" => Some(KeyCode::Digit2),
+        "3" => Some(KeyCode::Digit3),
+        "4" => Some(KeyCode::Digit4),
+        "5" => Some(KeyCode::Digit5),
+        "6" => Some(KeyCode::Digit6),
+        "7" => Some(KeyCode::Digit7),
+        "8" => Some(KeyCode::Digit8),
+        "9" => Some(KeyCode::Digit9),
+        "0" => Some(KeyCode::Digit0),
+        "f5" => Some(KeyCode::F5),
+        "f9" => Some(KeyCode::F9),
+        "f12" => Some(KeyCode::F12),
+        "enter" => Some(KeyCode::Enter),
+        "up" => Some(KeyCode::ArrowUp),
+        "down" => Some(KeyCode::ArrowDown),
+        "left" => Some(KeyCode::ArrowLeft),
+        "right" => Some(KeyCode::ArrowRight),
+        "lbracket" => Some(KeyCode::BracketLeft),
+        "rbracket" => Some(KeyCode::BracketRight),
+        _ => None,
+    }
+}
+
+fn parse_commands(input: &str) -> Vec<AutoCommand> {
+    let mut commands = Vec::new();
+    for cmd_str in input.split(';') {
+        let cmd_str = cmd_str.trim();
+        if cmd_str.is_empty() {
+            continue;
+        }
+        if let Some((cmd_type, arg)) = cmd_str.split_once(':') {
+            match cmd_type.trim() {
+                "press" => {
+                    if let Some(keycode) = parse_keycode(arg.trim()) {
+                        commands.push(AutoCommand::Press(keycode));
+                    } else {
+                        eprintln!("Warning: unknown key '{}'", arg.trim());
+                    }
+                }
+                "wait" => {
+                    if let Ok(frames) = arg.trim().parse::<u32>() {
+                        commands.push(AutoCommand::Wait(frames));
+                    } else {
+                        eprintln!("Warning: invalid wait frames '{}'", arg.trim());
+                    }
+                }
+                _ => {
+                    eprintln!("Warning: unknown command type '{}'", cmd_type.trim());
+                }
+            }
+        } else if cmd_str == "screenshot" {
+            commands.push(AutoCommand::Screenshot);
+        } else {
+            eprintln!("Warning: invalid command '{}'", cmd_str);
+        }
+    }
+    commands
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -318,6 +399,11 @@ struct Args {
     /// Suppress all HUD/overlay elements in screenshot
     #[arg(long)]
     no_hud: bool,
+
+    /// Automated command sequence (semicolon-separated).
+    /// Commands: press:<key>, wait:<frames>, screenshot
+    #[arg(long)]
+    commands: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -532,6 +618,12 @@ fn main() {
         None
     };
 
+    let command_queue: VecDeque<AutoCommand> = if let Some(cmd_str) = &args.commands {
+        parse_commands(cmd_str).into()
+    } else {
+        VecDeque::new()
+    };
+
     let mut app = App {
         instance,
         device,
@@ -544,7 +636,7 @@ fn main() {
         last_frame: Instant::now(),
         mouse_grabbed: false,
         should_exit_after_render: false,
-        gpu_screenshot_countdown: if gpu_screenshot {
+        gpu_screenshot_countdown: if gpu_screenshot && args.commands.is_none() {
             match args.gpu_screenshot_source {
                 GpuScreenshotSourceArg::RenderBuffer => 3,
                 GpuScreenshotSourceArg::Framebuffer => 6,
@@ -590,6 +682,8 @@ fn main() {
         pending_voxel_edits: Vec::new(),
         remote_players: HashMap::new(),
         last_multiplayer_player_update: Instant::now(),
+        command_queue,
+        command_wait_frames: 0,
     };
 
     if app.vte_reference_compare_enabled {
@@ -766,6 +860,8 @@ struct App {
     pending_voxel_edits: Vec<PendingVoxelEdit>,
     remote_players: HashMap<u64, RemotePlayerState>,
     last_multiplayer_player_update: Instant,
+    command_queue: VecDeque<AutoCommand>,
+    command_wait_frames: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -1434,6 +1530,65 @@ fn build_remote_player_avatar_instances(
 }
 
 impl App {
+    fn inject_key_press(&mut self, keycode: KeyCode) {
+        match keycode {
+            KeyCode::Escape => {
+                if self.inventory_open {
+                    self.inventory_open = false;
+                } else {
+                    self.menu_open = !self.menu_open;
+                }
+            }
+            KeyCode::KeyE => {
+                self.inventory_open = !self.inventory_open;
+            }
+            KeyCode::Digit1 => self.hotbar_selected_index = 0,
+            KeyCode::Digit2 => self.hotbar_selected_index = 1,
+            KeyCode::Digit3 => self.hotbar_selected_index = 2,
+            KeyCode::Digit4 => self.hotbar_selected_index = 3,
+            KeyCode::Digit5 => self.hotbar_selected_index = 4,
+            KeyCode::Digit6 => self.hotbar_selected_index = 5,
+            KeyCode::Digit7 => self.hotbar_selected_index = 6,
+            KeyCode::Digit8 => self.hotbar_selected_index = 7,
+            KeyCode::Digit9 => self.hotbar_selected_index = 8,
+            KeyCode::F5 => {
+                // Save world
+                if let Err(e) = self.scene.save_world_to_path(&self.world_file) {
+                    eprintln!("Failed to save world: {}", e);
+                } else {
+                    eprintln!("Saved world to {}", self.world_file.display());
+                }
+            }
+            KeyCode::F9 => {
+                // Load world
+                if let Err(e) = self.scene.load_world_from_path(&self.world_file) {
+                    eprintln!("Failed to load world: {}", e);
+                } else {
+                    eprintln!("Loaded world from {}", self.world_file.display());
+                }
+            }
+            KeyCode::F12 => {
+                // Screenshot will be handled by setting the flag
+            }
+            KeyCode::ArrowUp => {
+                if self.menu_open && self.menu_selection > 0 {
+                    self.menu_selection -= 1;
+                }
+            }
+            KeyCode::ArrowDown => {
+                if self.menu_open && self.menu_selection < 2 {
+                    self.menu_selection += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if self.menu_open {
+                    // Handle menu activation
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn vte_sweep_profiles(&self) -> &'static [VteRuntimeProfile] {
         if self.vte_sweep_include_no_entities {
             &VTE_SWEEP_PROFILES_EXTENDED
@@ -3249,6 +3404,29 @@ impl App {
         self.reapply_pending_voxel_edits(now);
         self.smooth_remote_players(dt, now);
 
+        // Process command queue
+        let mut command_screenshot_requested = false;
+        if self.command_wait_frames > 0 {
+            self.command_wait_frames -= 1;
+        } else if let Some(cmd) = self.command_queue.pop_front() {
+            match cmd {
+                AutoCommand::Press(keycode) => {
+                    self.inject_key_press(keycode);
+                }
+                AutoCommand::Wait(n) => {
+                    self.command_wait_frames = n;
+                }
+                AutoCommand::Screenshot => {
+                    command_screenshot_requested = true;
+                }
+            }
+        } else if !self.command_queue.is_empty() || self.command_wait_frames > 0 {
+            // Still processing commands
+        } else if self.args.commands.is_some() && self.args.gpu_screenshot {
+            // Commands finished and we're in screenshot mode, exit
+            self.should_exit_after_render = true;
+        }
+
         if self.menu_open || self.inventory_open {
             self.drain_gameplay_inputs_while_menu_open();
         } else {
@@ -3679,11 +3857,12 @@ impl App {
             false
         };
         let manual_screenshot = self.input.take_screenshot();
-        let mut take_screenshot = manual_screenshot;
+        let mut take_screenshot = manual_screenshot || command_screenshot_requested;
         if auto_screenshot && self.args.gpu_screenshot_source == GpuScreenshotSourceArg::Framebuffer
         {
             take_screenshot = true;
         }
+        let auto_screenshot = auto_screenshot || command_screenshot_requested;
         if take_screenshot {
             if let Some(parent) = self.args.screenshot_output.parent() {
                 if !parent.as_os_str().is_empty() {

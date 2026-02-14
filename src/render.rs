@@ -5890,6 +5890,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             if self.frames_rendered > 3 && render_options.take_framebuffer_screenshot {
                 self.wait_for_all_frames();
 
+                let _ = std::fs::create_dir_all("frames");
                 let result = self.cpu_screen_capture_buffer.read();
                 match result {
                     Ok(buffer_content) => {
