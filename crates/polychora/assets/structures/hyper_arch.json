@@ -1,0 +1,11 @@
+{
+  "name": "hyper_arch",
+  "spawn_weight": 3,
+  "fills": [
+    { "min": [-2, 0, -1, -1], "size": [1, 4, 3, 3], "material": 24 },
+    { "min": [2, 0, -1, -1], "size": [1, 4, 3, 3], "material": 24 },
+    { "min": [-2, 4, -1, -1], "size": [5, 1, 3, 3], "material": 29 },
+    { "min": [-1, 2, 0, 0], "size": [3, 1, 1, 1], "material": 33 },
+    { "min": [0, 1, 0, 0], "size": [1, 3, 1, 1], "material": 33 }
+  ]
+}

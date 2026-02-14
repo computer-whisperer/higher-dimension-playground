@@ -2091,6 +2091,60 @@ impl App {
         }
     }
 
+    fn apply_multiplayer_chunk_batch(
+        &mut self,
+        revision: u64,
+        chunks: Vec<multiplayer::WorldChunkPayload>,
+    ) {
+        let mut applied_chunks = 0usize;
+
+        for payload in chunks {
+            if payload.voxels.len() != voxel::CHUNK_VOLUME {
+                eprintln!(
+                    "Ignoring malformed multiplayer chunk payload at ({}, {}, {}, {}): expected {} voxels, got {}",
+                    payload.chunk_pos[0],
+                    payload.chunk_pos[1],
+                    payload.chunk_pos[2],
+                    payload.chunk_pos[3],
+                    voxel::CHUNK_VOLUME,
+                    payload.voxels.len()
+                );
+                continue;
+            }
+
+            let mut voxels = Box::new([voxel::VoxelType::AIR; voxel::CHUNK_VOLUME]);
+            let mut solid_count = 0u32;
+            for (idx, material) in payload.voxels.into_iter().enumerate() {
+                let voxel_type = voxel::VoxelType(material);
+                if voxel_type.is_solid() {
+                    solid_count += 1;
+                }
+                voxels[idx] = voxel_type;
+            }
+
+            let chunk = voxel::chunk::Chunk {
+                voxels,
+                solid_count,
+                dirty: true,
+            };
+            let chunk_pos = voxel::ChunkPos::new(
+                payload.chunk_pos[0],
+                payload.chunk_pos[1],
+                payload.chunk_pos[2],
+                payload.chunk_pos[3],
+            );
+            self.scene.world.insert_chunk(chunk_pos, chunk);
+            applied_chunks += 1;
+        }
+
+        if applied_chunks > 0 {
+            eprintln!(
+                "Applied multiplayer chunk batch rev={} chunks={}",
+                revision, applied_chunks
+            );
+        }
+    }
+
     fn handle_multiplayer_message(&mut self, message: multiplayer::ServerMessage) {
         let received_at = Instant::now();
         match message {
@@ -2167,6 +2221,9 @@ impl App {
                         eprintln!("Failed to load multiplayer world snapshot: {error}");
                     }
                 }
+            }
+            multiplayer::ServerMessage::WorldChunkBatch { revision, chunks } => {
+                self.apply_multiplayer_chunk_batch(revision, chunks);
             }
             multiplayer::ServerMessage::Pong { .. } => {}
             multiplayer::ServerMessage::EntitySpawned { entity } => {

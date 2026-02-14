@@ -1932,6 +1932,7 @@ dependencies = [
  "polychora-common",
  "postcard",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
