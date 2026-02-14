@@ -783,6 +783,13 @@ fn main() {
         hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
         hotbar_selected_index: 0,
         inventory_open: false,
+        teleport_dialog_open: false,
+        teleport_coords: [
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+        ],
         menu_open: false,
         menu_selection: 0,
         egui_ctx: egui::Context::default(),
@@ -1020,6 +1027,8 @@ struct App {
     hotbar_slots: [u8; 9],
     hotbar_selected_index: usize,
     inventory_open: bool,
+    teleport_dialog_open: bool,
+    teleport_coords: [String; 4],
     menu_open: bool,
     menu_selection: usize,
     egui_ctx: egui::Context,
@@ -1788,7 +1797,9 @@ impl App {
     fn inject_key_press(&mut self, keycode: KeyCode) {
         match keycode {
             KeyCode::Escape => {
-                if self.inventory_open {
+                if self.teleport_dialog_open {
+                    self.teleport_dialog_open = false;
+                } else if self.inventory_open {
                     self.inventory_open = false;
                 } else {
                     self.menu_open = !self.menu_open;
@@ -2785,6 +2796,7 @@ impl App {
         self.input.take_place_block();
         self.input.take_pick_material();
         self.input.take_inventory_toggle();
+        self.input.take_teleport_dialog();
         self.input.take_mouse_delta();
     }
 
@@ -3505,6 +3517,84 @@ impl App {
             });
     }
 
+    fn draw_egui_teleport_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        teleport_target: &mut Option<[f32; 4]>,
+        close_teleport: &mut bool,
+    ) {
+        let mut open = true;
+        egui::Window::new("Teleport")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(260.0)
+            .show(ctx, |ui| {
+                ui.label("Coordinates:");
+                let labels = ["X:", "Y:", "Z:", "W:"];
+                for (i, label) in labels.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(*label);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.teleport_coords[i])
+                                .desired_width(120.0),
+                        );
+                    });
+                }
+
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Teleport").clicked() {
+                        let parsed: Option<[f32; 4]> = (|| {
+                            Some([
+                                self.teleport_coords[0].parse().ok()?,
+                                self.teleport_coords[1].parse().ok()?,
+                                self.teleport_coords[2].parse().ok()?,
+                                self.teleport_coords[3].parse().ok()?,
+                            ])
+                        })();
+                        if let Some(pos) = parsed {
+                            *teleport_target = Some(pos);
+                        }
+                    }
+
+                    if ui.button("Go to Origin").clicked() {
+                        *teleport_target = Some([0.0, 0.0, 0.0, 0.0]);
+                    }
+                });
+
+                if self.multiplayer.is_some() && !self.remote_players.is_empty() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label("Players:");
+                    let mut sorted_ids: Vec<u64> =
+                        self.remote_players.keys().copied().collect();
+                    sorted_ids.sort();
+                    for id in sorted_ids {
+                        if let Some(player) = self.remote_players.get(&id) {
+                            let name = if player.name.is_empty() {
+                                format!("Player {}", id)
+                            } else {
+                                player.name.clone()
+                            };
+                            let pos = player.position;
+                            let label = format!(
+                                "{} ({:.1}, {:.1}, {:.1}, {:.1})",
+                                name, pos[0], pos[1], pos[2], pos[3],
+                            );
+                            if ui.button(label).clicked() {
+                                *teleport_target = Some(pos);
+                            }
+                        }
+                    }
+                }
+            });
+        if !open {
+            *close_teleport = true;
+        }
+    }
+
     fn draw_egui_inventory(
         &self,
         ctx: &egui::Context,
@@ -3629,6 +3719,8 @@ impl App {
         let mut close_menu = false;
         let mut close_inventory = false;
         let mut inventory_pick: Option<u8> = None;
+        let mut teleport_target: Option<[f32; 4]> = None;
+        let mut close_teleport = false;
         let mut transition_to_playing: Option<MainMenuTransition> = None;
         let mut return_to_main_menu = false;
         let full_output = egui_ctx.run(raw_input, |ctx| {
@@ -3640,6 +3732,13 @@ impl App {
                 }
                 if self.inventory_open {
                     self.draw_egui_inventory(ctx, &mut close_inventory, &mut inventory_pick);
+                }
+                if self.teleport_dialog_open {
+                    self.draw_egui_teleport_dialog(
+                        ctx,
+                        &mut teleport_target,
+                        &mut close_teleport,
+                    );
                 }
                 self.draw_egui_hotbar(ctx);
             }
@@ -3678,6 +3777,17 @@ impl App {
                 self.hotbar_selected_index + 1,
                 material_id,
                 materials::material_name(material_id),
+            );
+        }
+        if close_teleport {
+            self.teleport_dialog_open = false;
+        }
+        if let Some(pos) = teleport_target {
+            self.camera.position = pos;
+            self.teleport_dialog_open = false;
+            eprintln!(
+                "Teleported to ({:.1}, {:.1}, {:.1}, {:.1})",
+                pos[0], pos[1], pos[2], pos[3],
             );
         }
 
@@ -4140,6 +4250,7 @@ impl App {
         self.main_menu_connect_error = None;
         self.menu_open = false;
         self.inventory_open = false;
+        self.teleport_dialog_open = false;
         // Reset the menu demo camera
         self.menu_time = 0.0;
         self.menu_camera.position = [5.0, 3.0, 5.0, 2.0];
@@ -4637,6 +4748,20 @@ impl App {
             // E key toggles inventory.
             if self.input.take_inventory_toggle() {
                 self.toggle_inventory();
+            }
+            // T key toggles teleport dialog.
+            if self.input.take_teleport_dialog() {
+                self.teleport_dialog_open = !self.teleport_dialog_open;
+                if self.teleport_dialog_open {
+                    // Pre-fill with current position
+                    let pos = self.camera.position;
+                    self.teleport_coords = [
+                        format!("{:.1}", pos[0]),
+                        format!("{:.1}", pos[1]),
+                        format!("{:.1}", pos[2]),
+                        format!("{:.1}", pos[3]),
+                    ];
+                }
             }
         }
 
@@ -5264,8 +5389,10 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
-        let show_egui_overlay =
-            self.app_state == AppState::MainMenu || self.menu_open || self.inventory_open;
+        let show_egui_overlay = self.app_state == AppState::MainMenu
+            || self.menu_open
+            || self.inventory_open
+            || self.teleport_dialog_open;
         let egui_consumed = if let (Some(egui_state), Some(window)) =
             (self.egui_winit_state.as_mut(), window.as_ref())
         {
@@ -5297,6 +5424,8 @@ impl ApplicationHandler for App {
                         } else {
                             event_loop.exit();
                         }
+                    } else if self.teleport_dialog_open {
+                        self.teleport_dialog_open = false;
                     } else if self.inventory_open {
                         self.inventory_open = false;
                         if let Some(window) = window.as_ref() {
