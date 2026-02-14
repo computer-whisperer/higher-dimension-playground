@@ -4133,6 +4133,8 @@ impl App {
             self.reset_multiplayer_connection_state();
             eprintln!("Disconnected from multiplayer server");
         }
+        // Reset scene to show demo background
+        self.scene = Scene::new(ScenePreset::Flat);
         self.app_state = AppState::MainMenu;
         self.main_menu_page = MainMenuPage::Root;
         self.main_menu_connect_error = None;
