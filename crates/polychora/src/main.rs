@@ -344,7 +344,7 @@ struct Args {
     vte_integral_sky_emissive_tweak: bool,
 
     /// Sky scale applied in fused-integral tweak mode.
-    #[arg(long, default_value_t = 0.40)]
+    #[arg(long, default_value_t = 0.25)]
     vte_integral_sky_scale: f32,
 
     /// Extra emissive term added to hit samples in fused-integral tweak mode.
@@ -3205,8 +3205,8 @@ impl App {
 
     fn draw_egui_hotbar(&self, ctx: &egui::Context) {
         let screen_rect = ctx.screen_rect();
-        let slot_size = 48.0;
-        let gap = 4.0;
+        let slot_size = 62.0;
+        let gap = 5.0;
         let total_width = 9.0 * slot_size + 8.0 * gap;
         let start_x = (screen_rect.width() - total_width) / 2.0;
         let start_y = screen_rect.height() - slot_size - 50.0;
@@ -3327,8 +3327,8 @@ impl App {
 
                 // Material grid
                 let items_per_row = 10;
-                let cell_size = 44.0;
-                let cell_gap = 3.0;
+                let cell_size = 57.0;
+                let cell_gap = 4.0;
 
                 egui::ScrollArea::vertical()
                     .max_height(320.0)
@@ -4221,10 +4221,7 @@ impl App {
             self.input.take_menu_down();
             self.input.take_menu_activate();
 
-            // Scheme cycle (Tab)
-            if self.input.take_scheme_cycle() {
-                self.cycle_control_scheme();
-            }
+            // (Tab scheme cycling removed - Tab now opens inventory)
 
             if self.input.take_vte_sweep() {
                 self.toggle_vte_runtime_sweep();
