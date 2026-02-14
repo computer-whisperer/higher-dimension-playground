@@ -80,6 +80,7 @@ const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 const MULTIPLAYER_PENDING_EDIT_TIMEOUT: Duration = Duration::from_secs(5);
 const MULTIPLAYER_PENDING_EDIT_MAX: usize = 512;
+const CLIENT_PROFILE_REPORT_INTERVAL: Duration = Duration::from_secs(2);
 const AVATAR_MATERIAL_ID: u32 = 21;
 const AVATAR_FORWARD_FRAGMENT_COUNT: usize = 4;
 const REMOTE_AVATAR_PART_COUNT_ESTIMATE: usize = 7 + AVATAR_FORWARD_FRAGMENT_COUNT;
@@ -857,6 +858,13 @@ fn main() {
         pending_render_width: initial_render_width,
         pending_render_height: initial_render_height,
         pending_render_layers: initial_render_layers,
+        profile_window_start: Instant::now(),
+        profile_frame_samples: 0,
+        profile_client_cpu_ms_sum: 0.0,
+        profile_client_cpu_ms_max: 0.0,
+        profile_gpu_ms_sum: 0.0,
+        profile_gpu_ms_max: 0.0,
+        profile_gpu_samples: 0,
     };
 
     if app.vte_reference_compare_enabled {
@@ -1105,6 +1113,13 @@ struct App {
     pending_render_width: u32,
     pending_render_height: u32,
     pending_render_layers: u32,
+    profile_window_start: Instant,
+    profile_frame_samples: u32,
+    profile_client_cpu_ms_sum: f64,
+    profile_client_cpu_ms_max: f64,
+    profile_gpu_ms_sum: f64,
+    profile_gpu_ms_max: f64,
+    profile_gpu_samples: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -1923,6 +1938,65 @@ impl App {
         } else {
             "entities"
         }
+    }
+
+    fn record_runtime_profile_sample(&mut self, frame_start: Instant) {
+        let client_cpu_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        self.profile_frame_samples = self.profile_frame_samples.saturating_add(1);
+        self.profile_client_cpu_ms_sum += client_cpu_ms;
+        self.profile_client_cpu_ms_max = self.profile_client_cpu_ms_max.max(client_cpu_ms);
+
+        if let Some(rcx) = self.rcx.as_ref() {
+            let gpu_ms = rcx.last_gpu_frame_ms().max(0.0) as f64;
+            self.profile_gpu_samples = self.profile_gpu_samples.saturating_add(1);
+            self.profile_gpu_ms_sum += gpu_ms;
+            self.profile_gpu_ms_max = self.profile_gpu_ms_max.max(gpu_ms);
+        }
+
+        if self.profile_window_start.elapsed() < CLIENT_PROFILE_REPORT_INTERVAL {
+            return;
+        }
+
+        if self.profile_frame_samples > 0 {
+            let frame_samples = self.profile_frame_samples as f64;
+            let client_avg_ms = self.profile_client_cpu_ms_sum / frame_samples;
+            let client_max_ms = self.profile_client_cpu_ms_max;
+            let (gpu_avg_ms, gpu_max_ms, gpu_samples) = if self.profile_gpu_samples > 0 {
+                (
+                    self.profile_gpu_ms_sum / self.profile_gpu_samples as f64,
+                    self.profile_gpu_ms_max,
+                    self.profile_gpu_samples,
+                )
+            } else {
+                (0.0, 0.0, 0)
+            };
+            if gpu_samples > 0 {
+                eprintln!(
+                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu avg={:.3}ms max={:.3}ms samples={}",
+                    client_avg_ms,
+                    client_max_ms,
+                    self.profile_frame_samples,
+                    gpu_avg_ms,
+                    gpu_max_ms,
+                    gpu_samples,
+                );
+            } else {
+                eprintln!(
+                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu unavailable",
+                    client_avg_ms,
+                    client_max_ms,
+                    self.profile_frame_samples,
+                );
+            }
+        }
+
+        self.profile_window_start = Instant::now();
+        self.profile_frame_samples = 0;
+        self.profile_client_cpu_ms_sum = 0.0;
+        self.profile_client_cpu_ms_max = 0.0;
+        self.profile_gpu_ms_sum = 0.0;
+        self.profile_gpu_ms_max = 0.0;
+        self.profile_gpu_samples = 0;
     }
 
     fn grab_mouse(&mut self, window: &Window) {
@@ -4583,7 +4657,12 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let voxel_frame = self.scene.build_voxel_frame_data(self.menu_camera.position);
+            let voxel_frame = self.scene.build_voxel_frame_data(
+                self.menu_camera.position,
+                self.vte_lod_near_max_distance,
+                self.vte_lod_mid_max_distance,
+                self.vte_max_trace_distance,
+            );
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
@@ -4798,12 +4877,14 @@ impl App {
     }
 
     fn update_and_render(&mut self) {
+        let frame_start = Instant::now();
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
 
         if self.app_state == AppState::MainMenu {
             self.update_and_render_main_menu();
+            self.record_runtime_profile_sample(frame_start);
             return;
         }
 
@@ -5496,7 +5577,12 @@ impl App {
             }
             vte_entity_instances.extend(self.remote_player_instances(preview_time_s));
             vte_entity_instances.extend(self.remote_entity_instances(preview_time_s));
-            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
+            let voxel_frame = self.scene.build_voxel_frame_data(
+                self.camera.position,
+                self.vte_lod_near_max_distance,
+                self.vte_lod_mid_max_distance,
+                self.vte_max_trace_distance,
+            );
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
@@ -5637,6 +5723,7 @@ impl App {
         }
 
         self.advance_vte_runtime_sweep_after_frame();
+        self.record_runtime_profile_sample(frame_start);
     }
 }
 

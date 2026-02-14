@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 
 const STREAM_MID_LOD_SCALE: i32 = 2;
 const STREAM_FAR_LOD_SCALE: i32 = 4;
+const STREAM_RESYNC_INTERVAL_MS: u64 = 500;
+const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
+const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -72,6 +75,7 @@ struct PlayerState {
     last_update_ms: u64,
     streamed_chunks: HashSet<StreamChunkKey>,
     last_stream_center_chunk: Option<[i32; 4]>,
+    last_stream_sync_ms: u64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -89,6 +93,84 @@ struct EntityState {
     scale: f32,
     material: u8,
     last_update_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ServerCpuProfile {
+    window_start: Instant,
+    message_samples: u64,
+    message_cpu_ms_sum: f64,
+    message_cpu_ms_max: f64,
+    tick_samples: u64,
+    tick_cpu_ms_sum: f64,
+    tick_cpu_ms_max: f64,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct ServerCpuProfileReport {
+    message_samples: u64,
+    message_cpu_ms_sum: f64,
+    message_cpu_ms_max: f64,
+    tick_samples: u64,
+    tick_cpu_ms_sum: f64,
+    tick_cpu_ms_max: f64,
+}
+
+impl ServerCpuProfile {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_start: now,
+            message_samples: 0,
+            message_cpu_ms_sum: 0.0,
+            message_cpu_ms_max: 0.0,
+            tick_samples: 0,
+            tick_cpu_ms_sum: 0.0,
+            tick_cpu_ms_max: 0.0,
+        }
+    }
+
+    fn record_message_sample(&mut self, elapsed: Duration) {
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        self.message_samples = self.message_samples.saturating_add(1);
+        self.message_cpu_ms_sum += elapsed_ms;
+        self.message_cpu_ms_max = self.message_cpu_ms_max.max(elapsed_ms);
+    }
+
+    fn record_tick_sample(&mut self, elapsed: Duration) {
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        self.tick_samples = self.tick_samples.saturating_add(1);
+        self.tick_cpu_ms_sum += elapsed_ms;
+        self.tick_cpu_ms_max = self.tick_cpu_ms_max.max(elapsed_ms);
+    }
+
+    fn take_report_if_due(&mut self, now: Instant) -> Option<ServerCpuProfileReport> {
+        if now.duration_since(self.window_start) < SERVER_CPU_PROFILE_INTERVAL {
+            return None;
+        }
+
+        let report = ServerCpuProfileReport {
+            message_samples: self.message_samples,
+            message_cpu_ms_sum: self.message_cpu_ms_sum,
+            message_cpu_ms_max: self.message_cpu_ms_max,
+            tick_samples: self.tick_samples,
+            tick_cpu_ms_sum: self.tick_cpu_ms_sum,
+            tick_cpu_ms_max: self.tick_cpu_ms_max,
+        };
+
+        self.window_start = now;
+        self.message_samples = 0;
+        self.message_cpu_ms_sum = 0.0;
+        self.message_cpu_ms_max = 0.0;
+        self.tick_samples = 0;
+        self.tick_cpu_ms_sum = 0.0;
+        self.tick_cpu_ms_max = 0.0;
+
+        if report.message_samples == 0 && report.tick_samples == 0 {
+            None
+        } else {
+            Some(report)
+        }
+    }
 }
 
 fn entity_snapshot(entity: &EntityState) -> EntitySnapshot {
@@ -113,12 +195,60 @@ struct ServerState {
     players: HashMap<u64, PlayerState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
     entities: HashMap<u64, EntityState>,
+    cpu_profile: ServerCpuProfile,
 }
 
 type SharedState = Arc<Mutex<ServerState>>;
 
 fn monotonic_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn record_server_cpu_sample(
+    state: &SharedState,
+    message_elapsed: Option<Duration>,
+    tick_elapsed: Option<Duration>,
+) {
+    let maybe_report = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        if let Some(elapsed) = message_elapsed {
+            guard.cpu_profile.record_message_sample(elapsed);
+        }
+        if let Some(elapsed) = tick_elapsed {
+            guard.cpu_profile.record_tick_sample(elapsed);
+        }
+        guard
+            .cpu_profile
+            .take_report_if_due(Instant::now())
+            .map(|report| (report, guard.players.len(), guard.entities.len()))
+    };
+
+    let Some((report, player_count, entity_count)) = maybe_report else {
+        return;
+    };
+
+    let msg_avg_ms = if report.message_samples > 0 {
+        report.message_cpu_ms_sum / report.message_samples as f64
+    } else {
+        0.0
+    };
+    let tick_avg_ms = if report.tick_samples > 0 {
+        report.tick_cpu_ms_sum / report.tick_samples as f64
+    } else {
+        0.0
+    };
+
+    eprintln!(
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} players={} entities={}",
+        msg_avg_ms,
+        report.message_cpu_ms_max,
+        report.message_samples,
+        tick_avg_ms,
+        report.tick_cpu_ms_max,
+        report.tick_samples,
+        player_count,
+        entity_count,
+    );
 }
 
 fn sanitize_player_name(name: &str, client_id: u64) -> String {
@@ -205,16 +335,22 @@ fn build_effective_stream_chunk_l0(
     procgen_structures: bool,
 ) -> Option<voxel::Chunk> {
     if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
-        return (!override_chunk.is_empty()).then(|| override_chunk.clone());
+        // Preserve explicit empty overrides (carved holes) instead of falling back
+        // to virtual base generation on the client.
+        return Some(override_chunk.clone());
     }
+
+    let mut chunk = state.world.clone_base_chunk_or_empty_at(chunk_pos);
     if procgen_structures {
-        return procgen::generate_structure_chunk_with_keepout(
+        if let Some(structure_chunk) = procgen::generate_structure_chunk_with_keepout(
             world_seed,
             chunk_pos,
             Some(&state.procgen_blocked_cells),
-        );
+        ) {
+            merge_non_air_voxels(&mut chunk, &structure_chunk);
+        }
     }
-    None
+    (!chunk.is_empty()).then_some(chunk)
 }
 
 fn build_effective_l0_chunk_for_sampling(
@@ -238,6 +374,14 @@ fn build_effective_l0_chunk_for_sampling(
         }
     }
     (!chunk.is_empty()).then_some(chunk)
+}
+
+fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
+    let dx = (chunk_pos.x - center_chunk[0]) as i64;
+    let dy = (chunk_pos.y - center_chunk[1]) as i64;
+    let dz = (chunk_pos.z - center_chunk[2]) as i64;
+    let dw = (chunk_pos.w - center_chunk[3]) as i64;
+    dx * dx + dy * dy + dz * dz + dw * dw
 }
 
 fn scaled_lod_child_l0_chunk_pos(parent_chunk_pos: ChunkPos, lod_scale: i32, child: [i32; 4]) -> ChunkPos {
@@ -475,31 +619,29 @@ fn plan_stream_window_update(
     ];
 
     let mut desired_set = HashSet::<StreamChunkKey>::new();
-    if procgen_structures {
-        let (min_structure_chunk_y, max_structure_chunk_y) = procgen::structure_chunk_y_bounds();
-        for chunk_x in min_chunk[0]..=max_chunk[0] {
-            for chunk_z in min_chunk[2]..=max_chunk[2] {
-                for chunk_w in min_chunk[3]..=max_chunk[3] {
-                    for chunk_y in min_structure_chunk_y..=max_structure_chunk_y {
-                        let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
-                        if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
-                            if !override_chunk.is_empty() {
+    if let Some((worldgen_min_near_y, worldgen_max_near_y)) =
+        stream_lod_worldgen_y_bounds(state, WORLD_CHUNK_LOD_NEAR, procgen_structures)
+    {
+        let scan_min_near_y = worldgen_min_near_y.max(min_chunk[1]);
+        let scan_max_near_y = worldgen_max_near_y.min(max_chunk[1]);
+        if scan_min_near_y <= scan_max_near_y {
+            for chunk_x in min_chunk[0]..=max_chunk[0] {
+                for chunk_z in min_chunk[2]..=max_chunk[2] {
+                    for chunk_w in min_chunk[3]..=max_chunk[3] {
+                        for chunk_y in scan_min_near_y..=scan_max_near_y {
+                            let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
+                            if stream_lod_worldgen_has_content(
+                                state,
+                                WORLD_CHUNK_LOD_NEAR,
+                                chunk_pos,
+                                world_seed,
+                                procgen_structures,
+                            ) {
                                 desired_set.insert(StreamChunkKey {
                                     lod_level: WORLD_CHUNK_LOD_NEAR,
                                     chunk_pos,
                                 });
                             }
-                            continue;
-                        }
-                        if procgen::structure_chunk_has_content_with_keepout(
-                            world_seed,
-                            chunk_pos,
-                            Some(&state.procgen_blocked_cells),
-                        ) {
-                            desired_set.insert(StreamChunkKey {
-                                lod_level: WORLD_CHUNK_LOD_NEAR,
-                                chunk_pos,
-                            });
                         }
                     }
                 }
@@ -679,8 +821,15 @@ fn plan_stream_window_update(
     let mut load_chunk_keys: Vec<StreamChunkKey> =
         desired_set.difference(&old_streamed).copied().collect();
     load_chunk_keys.sort_unstable_by_key(|key| {
+        let center = match key.lod_level {
+            WORLD_CHUNK_LOD_NEAR => center_chunk,
+            WORLD_CHUNK_LOD_MID => center_mid_chunk,
+            WORLD_CHUNK_LOD_FAR => center_far_chunk,
+            _ => center_chunk,
+        };
         (
             key.lod_level,
+            stream_chunk_distance2(key.chunk_pos, center),
             key.chunk_pos.w,
             key.chunk_pos.z,
             key.chunk_pos.y,
@@ -688,8 +837,8 @@ fn plan_stream_window_update(
         )
     });
 
-    let mut load_payloads = Vec::with_capacity(load_chunk_keys.len());
     let mut realized_desired = desired_set;
+    let mut load_payloads = Vec::with_capacity(load_chunk_keys.len());
     for key in load_chunk_keys {
         let chunk = match key.lod_level {
             WORLD_CHUNK_LOD_NEAR => build_effective_stream_chunk_l0(
@@ -849,6 +998,7 @@ fn sync_streamed_chunks_for_client(
     state: &SharedState,
     client_id: u64,
     center_chunk: [i32; 4],
+    now_ms: u64,
     world_seed: u64,
     procgen_structures: bool,
     near_chunk_radius: i32,
@@ -861,8 +1011,11 @@ fn sync_streamed_chunks_for_client(
         let should_sync = match guard.players.get_mut(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
-                if force || changed {
+                let retry_due = now_ms.saturating_sub(player.last_stream_sync_ms)
+                    >= STREAM_RESYNC_INTERVAL_MS;
+                if force || changed || retry_due {
                     player.last_stream_center_chunk = Some(center_chunk);
+                    player.last_stream_sync_ms = now_ms;
                     true
                 } else {
                     false
@@ -892,25 +1045,29 @@ fn sync_streamed_chunks_for_client(
     };
 
     if !chunk_loads.is_empty() {
-        send_to_client(
-            state,
-            client_id,
-            ServerMessage::WorldChunkBatch {
-                revision,
-                chunks: chunk_loads,
-            },
-        );
+        for chunk_batch in chunk_loads.chunks(STREAM_MESSAGE_CHUNK_LIMIT) {
+            send_to_client(
+                state,
+                client_id,
+                ServerMessage::WorldChunkBatch {
+                    revision,
+                    chunks: chunk_batch.to_vec(),
+                },
+            );
+        }
     }
 
     if !chunk_unloads.is_empty() {
-        send_to_client(
-            state,
-            client_id,
-            ServerMessage::WorldChunkUnloadBatch {
-                revision,
-                chunks: chunk_unloads,
-            },
-        );
+        for chunk_batch in chunk_unloads.chunks(STREAM_MESSAGE_CHUNK_LIMIT) {
+            send_to_client(
+                state,
+                client_id,
+                ServerMessage::WorldChunkUnloadBatch {
+                    revision,
+                    chunks: chunk_batch.to_vec(),
+                },
+            );
+        }
     }
 }
 
@@ -1075,6 +1232,7 @@ fn start_broadcast_thread(
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
+            let tick_cpu_start = Instant::now();
             let (players, entities) = {
                 let guard = state.lock().expect("server state lock poisoned");
                 let players = if guard.players.is_empty() {
@@ -1093,6 +1251,7 @@ fn start_broadcast_thread(
                 };
                 (players, entities)
             };
+            let did_broadcast = players.is_some() || entities.is_some();
             let now = monotonic_ms(start);
             if let Some(players) = players {
                 broadcast(
@@ -1111,6 +1270,9 @@ fn start_broadcast_thread(
                         entities,
                     },
                 );
+            }
+            if did_broadcast {
+                record_server_cpu_sample(&state, None, Some(tick_cpu_start.elapsed()));
             }
         }
     });
@@ -1192,6 +1354,7 @@ fn install_or_update_player(
             last_update_ms: now,
             streamed_chunks: HashSet::new(),
             last_stream_center_chunk: None,
+            last_stream_sync_ms: 0,
         });
 
     if let Some(n) = name {
@@ -1220,6 +1383,7 @@ fn handle_message(
     world_seed: u64,
     start: Instant,
 ) {
+    let message_cpu_start = Instant::now();
     match message {
         ClientMessage::Hello { name } => {
             let snapshot =
@@ -1275,6 +1439,7 @@ fn handle_message(
                 state,
                 client_id,
                 center_chunk,
+                snapshot.last_update_ms,
                 world_seed,
                 procgen_structures,
                 near_chunk_radius,
@@ -1285,12 +1450,14 @@ fn handle_message(
             broadcast(state, ServerMessage::PlayerJoined { player: snapshot });
         }
         ClientMessage::UpdatePlayer { position, look } => {
-            install_or_update_player(state, client_id, None, Some(position), Some(look), start);
+            let snapshot =
+                install_or_update_player(state, client_id, None, Some(position), Some(look), start);
             let center_chunk = world_chunk_from_position(position);
             sync_streamed_chunks_for_client(
                 state,
                 client_id,
                 center_chunk,
+                snapshot.last_update_ms,
                 world_seed,
                 procgen_structures,
                 near_chunk_radius,
@@ -1369,6 +1536,7 @@ fn handle_message(
                 state,
                 client_id,
                 center_chunk,
+                monotonic_ms(start),
                 world_seed,
                 procgen_structures,
                 near_chunk_radius,
@@ -1381,6 +1549,7 @@ fn handle_message(
             send_to_client(state, client_id, ServerMessage::Pong { nonce });
         }
     }
+    record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None);
 }
 
 fn spawn_client_thread(
@@ -1606,6 +1775,7 @@ fn initialize_state(
         players: HashMap::new(),
         clients: HashMap::new(),
         entities: HashMap::new(),
+        cpu_profile: ServerCpuProfile::new(start),
     }));
 
     spawn_default_test_entities(&state, start);
