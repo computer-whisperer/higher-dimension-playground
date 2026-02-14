@@ -1,3 +1,4 @@
+use crate::materials;
 use common::{MatN, ModelInstance, ModelTetrahedron, VecN};
 use std::f32::consts::PI;
 
@@ -831,7 +832,10 @@ fn sample_material(id: u32, tex_pos: [f32; 4]) -> ([f32; 3], f32) {
                 0.15 * center_glow,
             )
         }
-        _ => ([0.0, 0.0, 0.0], 0.0),
+        _ => {
+            let [r, g, b] = materials::material_color(id.min(u8::MAX as u32) as u8);
+            ([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], 0.0)
+        }
     }
 }
 

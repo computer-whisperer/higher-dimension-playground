@@ -283,6 +283,18 @@ fn structure_set() -> &'static StructureSet {
                 "portal_axis.json",
                 include_str!("../../polychora/assets/structures/portal_axis.json"),
             ),
+            (
+                "resonance_forge.json",
+                include_str!("../../polychora/assets/structures/resonance_forge.json"),
+            ),
+            (
+                "void_colonnade.json",
+                include_str!("../../polychora/assets/structures/void_colonnade.json"),
+            ),
+            (
+                "lumen_orrery.json",
+                include_str!("../../polychora/assets/structures/lumen_orrery.json"),
+            ),
         ];
 
         let blueprints: Vec<_> = sources
