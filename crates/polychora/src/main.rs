@@ -646,7 +646,12 @@ fn main() {
         AppState::MainMenu
     };
 
-    let mut scene = Scene::new(args.scene.to_scene_preset());
+    let scene_preset = if initial_app_state == AppState::MainMenu {
+        ScenePreset::DemoCubes
+    } else {
+        args.scene.to_scene_preset()
+    };
+    let mut scene = Scene::new(scene_preset);
     if args.load_world && !start_with_integrated_singleplayer {
         match scene.load_world_from_path(&world_file) {
             Ok(chunks) => eprintln!(
@@ -4253,8 +4258,8 @@ impl App {
             self.reset_multiplayer_connection_state();
             eprintln!("Disconnected from multiplayer server");
         }
-        // Reset scene to show demo background
-        self.scene = Scene::new(ScenePreset::Flat);
+        // Reset scene to show demo background (DemoCubes has visible geometry near origin)
+        self.scene = Scene::new(ScenePreset::DemoCubes);
         self.app_state = AppState::MainMenu;
         self.main_menu_page = MainMenuPage::Root;
         self.main_menu_connect_error = None;
