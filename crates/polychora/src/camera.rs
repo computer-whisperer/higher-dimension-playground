@@ -1916,7 +1916,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn angles_for_direction_upright_roundtrip() {
         // Test various angle combinations: compute look direction, then recover angles,
         // then verify the recovered angles produce the same look direction.
