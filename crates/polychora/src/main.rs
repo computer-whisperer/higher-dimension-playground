@@ -4503,11 +4503,12 @@ impl App {
         self.teleport_dialog_open = false;
         // Reset the menu demo camera
         // DemoCubes geometry: 2x2x2x2 lattice centered at [1,1,1,1], cubes from [-2,-2,-2,-2] to [4,4,4,4]
-        // Position camera to look at the main cluster, not the material showcase at [-10,-2,8,-4]
+        // Position camera at [6,3,6,1] looking toward the cluster center [1,1,1,1]
+        // Direction [-5,-2,-5,0]: yaw=-0.75 (rotate toward -X), pitch=-0.38 (tilt down)
         self.menu_time = 0.0;
-        self.menu_camera.position = [6.0, 3.0, 1.0, 1.0];
-        self.menu_camera.yaw = -0.8;
-        self.menu_camera.pitch = -0.3;
+        self.menu_camera.position = [6.0, 3.0, 6.0, 1.0];
+        self.menu_camera.yaw = -0.75;
+        self.menu_camera.pitch = -0.38;
         self.menu_camera.xw_angle = 0.2;
         self.menu_camera.zw_angle = 0.0;
         self.menu_camera.yw_deviation = 0.0;
@@ -4529,7 +4530,7 @@ impl App {
         self.menu_time += dt;
 
         // Slowly orbit: rotate yaw and xw_angle for a gentle 4D tumble around the main cube cluster
-        self.menu_camera.yaw = -0.8 + self.menu_time * 0.08;
+        self.menu_camera.yaw = -0.75 + self.menu_time * 0.08;
         self.menu_camera.xw_angle = 0.2 + self.menu_time * 0.05;
 
         let egui_paint = if self.args.no_hud {
