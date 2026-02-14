@@ -1012,6 +1012,148 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
             mat.luminance = glyph * (0.08 + 0.42 * pulse);
         }
         break;
+    case 63:
+        // Hyperphase gel
+        {
+            float4 q4 = p4 * 0.72 + float4(t * 0.28, -t * 0.22, t * 0.19, t * 0.31);
+            float waveA = sin((q4.x * 4.0 + q4.y * 6.0 + q4.w * 5.0) * tau);
+            float waveB = sin((q4.z * 7.0 - q4.x * 3.0 + q4.w * 4.0) * tau);
+            float foam = smoothstep(0.50, 0.92, 0.5 + 0.3 * waveA + 0.2 * waveB);
+            float bubble = smoothstep(
+                0.95,
+                1.0,
+                frac(sin(dot(floor((q4 + 32.0) * 11.0), float4(121.17, 67.93, 83.71, 59.11))) * 73731.193));
+
+            float3 deep = float3(0.08, 0.21, 0.33);
+            float3 bright = float3(0.34, 0.82, 0.98);
+            float3 color = lerp(deep, bright, foam);
+            color = lerp(color, float3(0.78, 0.97, 1.0), bubble * 0.6);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.02;
+            mat.roughness = 0.07;
+            mat.luminance = 0.10 + 0.30 * foam + 0.35 * bubble;
+            mat.integrationWeight = 0.22;
+        }
+        break;
+    case 64:
+        // Singularity core
+        {
+            float4 local = frac(p4) - 0.5;
+            float radial = length(local.xyz) + abs(local.w) * 0.85;
+            float core = pow(saturate(1.0 - radial * 2.2), 4.0);
+            float accretion = 0.5 + 0.5 * sin(
+                (local.x * 6.0 - local.z * 7.0 + local.w * 6.0 - t * 3.2) * tau);
+            float jets = smoothstep(
+                0.75,
+                0.97,
+                0.5 + 0.5 * sin((local.y * 9.0 + local.w * 11.0 + t * 4.0) * tau));
+
+            float3 horizon = float3(0.09, 0.07, 0.10);
+            float3 ring = float3(0.98, 0.54, 0.22);
+            float3 flare = float3(1.0, 0.89, 0.62);
+            float3 color = lerp(horizon, ring, accretion * (0.35 + 0.65 * core));
+            color = lerp(color, flare, jets * core);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.18;
+            mat.roughness = 0.10;
+            mat.luminance = 1.4 + 16.0 * core + 4.0 * jets * core;
+        }
+        break;
+    case 65:
+        // Chrono bloom
+        {
+            float4 q4 = p4 + float4(t * 0.14, -t * 0.09, t * 0.12, t * 0.17);
+            float4 fold = abs(frac(q4 * 2.2) - 0.5);
+            float petals = 1.0 - saturate(min(min(fold.x, fold.y), min(fold.z, fold.w)) * 7.5);
+            float rings = 0.5 + 0.5 * sin((length(q4 * 0.75) * 9.0 - t * 1.6) * tau);
+            float pollen = smoothstep(
+                0.97,
+                1.0,
+                frac(sin(dot(floor((q4 + 48.0) * 13.0), float4(131.17, 73.93, 97.71, 61.31))) * 75731.391));
+
+            float3 stem = float3(0.10, 0.22, 0.14);
+            float3 bloom = float3(0.38, 0.89, 0.56);
+            float3 flare = float3(0.92, 1.0, 0.84);
+            float3 color = lerp(stem, bloom, petals * (0.5 + 0.5 * rings));
+            color = lerp(color, flare, pollen);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.04;
+            mat.roughness = 0.42;
+            mat.luminance = 0.10 + 0.55 * petals * rings + 0.70 * pollen;
+        }
+        break;
+    case 66:
+        // Tesseract weave
+        {
+            float4 weave = abs(frac((p4 + float4(t * 0.16, -t * 0.11, t * 0.08, t * 0.20)) * 9.0) - 0.5);
+            float xzwBands = 1.0 - saturate(min(min(weave.x, weave.z), weave.w) * 20.0);
+            float yBands = 1.0 - saturate(weave.y * 14.0);
+            float knots = smoothstep(0.84, 0.97, xzwBands * yBands);
+            float drift = 0.5 + 0.5 * sin((p4.x * 5.0 + p4.z * 7.0 + p4.w * 9.0 + t * 2.6) * tau);
+
+            float3 dark = float3(0.11, 0.09, 0.18);
+            float3 thread = float3(0.47, 0.30, 0.88);
+            float3 knotColor = float3(0.84, 0.68, 1.0);
+            float3 color = lerp(dark, thread, xzwBands * (0.6 + 0.4 * drift));
+            color = lerp(color, knotColor, knots * 0.9);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.36;
+            mat.roughness = 0.18;
+            mat.luminance = 0.08 + 0.45 * xzwBands + 0.90 * knots;
+        }
+        break;
+    case 67:
+        // Eventide alloy
+        {
+            float4 q4 = p4 * 0.6 + float4(t * 0.05, t * 0.08, -t * 0.07, t * 0.09);
+            float sheen = 0.5 + 0.5 * sin((q4.x * 8.0 + q4.y * 6.0 - q4.z * 5.0 + q4.w * 7.0) * tau);
+            float strata = 0.5 + 0.5 * sin((q4.y * 17.0 + q4.w * 13.0) * tau);
+            float inclusions = smoothstep(
+                0.94,
+                1.0,
+                frac(sin(dot(floor((q4 + 80.0) * 9.0), float4(139.17, 79.93, 109.71, 71.31))) * 77731.193));
+
+            float3 steel = float3(0.26, 0.30, 0.38);
+            float3 violet = float3(0.36, 0.30, 0.52);
+            float3 cyan = float3(0.34, 0.54, 0.62);
+            float3 color = lerp(steel, violet, sheen * 0.7);
+            color = lerp(color, cyan, strata * 0.35);
+            color = lerp(color, float3(0.92, 0.96, 1.0), inclusions * 0.4);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.84;
+            mat.roughness = 0.24 + 0.20 * (1.0 - sheen);
+            mat.luminance = 0.02 + 0.12 * inclusions;
+        }
+        break;
+    case 68:
+        // Beacon matrix
+        {
+            float4 local = frac((p4 + float4(0.0, t * 0.20, 0.0, t * 0.14)) * 6.0);
+            float4 dist = abs(local - 0.5);
+            float rails = 1.0 - smoothstep(0.05, 0.17, min(min(dist.x, dist.z), dist.w));
+            float nodes = smoothstep(
+                0.92,
+                1.0,
+                frac(sin(dot(floor((p4 + 96.0) * 6.0), float4(149.17, 83.93, 113.71, 73.31))) * 79731.193));
+            float pulse = 0.5 + 0.5 * sin((p4.y * 2.0 + t * 3.5) * tau);
+
+            float3 base = float3(0.24, 0.24, 0.20);
+            float3 rail = float3(0.92, 0.86, 0.54);
+            float3 node = float3(1.0, 0.98, 0.82);
+            float3 color = lerp(base, rail, rails);
+            color = lerp(color, node, nodes * pulse);
+
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.22;
+            mat.roughness = 0.26;
+            mat.luminance = 0.35 + 2.4 * rails * pulse + 3.2 * nodes * pulse;
+        }
+        break;
     default:
         mat.albedo = float4(0.0, 0.0, 0.0, 1.0);
         mat.luminance = 0.0;
