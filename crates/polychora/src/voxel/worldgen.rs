@@ -1,9 +1,9 @@
 use super::world::{BaseWorldKind, VoxelWorld};
 use super::VoxelType;
 
-const SHOWCASE_MATERIALS: [u8; 31] = [
-    15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50,
-    55, 56, 57, 58, 59, 60, 61, 62,
+const SHOWCASE_MATERIALS: [u8; 37] = [
+    15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50, 55,
+    56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
 ];
 
 /// Generate a flat 4D ground world as a two-voxel-thick slab.

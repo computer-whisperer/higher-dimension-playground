@@ -1,6 +1,8 @@
 use crate::shared::voxel::{Chunk, ChunkPos, VoxelType, CHUNK_SIZE};
+use flate2::read::GzDecoder;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::io::Read;
 use std::sync::OnceLock;
 
 const STRUCTURE_CELL_SIZE: i32 = 32;
@@ -15,6 +17,41 @@ const JITTER_X_SALT: u64 = 0x1c69_b3f7_4d87_2ba1;
 const JITTER_Z_SALT: u64 = 0x8ab3_d165_52cc_91f3;
 const JITTER_W_SALT: u64 = 0xf2c6_0c4a_0a8a_d53d;
 const ROTATION_VARIANTS: u64 = 48;
+
+const MAZE_CELL_SIZE: i32 = 128;
+const MAZE_CELL_JITTER: i32 = 20;
+const MAZE_SPAWN_NUMERATOR: u64 = 1;
+const MAZE_SPAWN_DENOMINATOR: u64 = 20;
+const MAZE_ORIGIN_EXCLUSION_RADIUS: i32 = 24;
+const MAZE_HASH_SALT: u64 = 0x6f1d_05ce_294a_719b;
+const MAZE_LAYOUT_SALT: u64 = 0x49ec_66d6_0d13_9e75;
+const MAZE_PARENT_SALT: u64 = 0x932f_b43c_f1f9_746d;
+const MAZE_JITTER_X_SALT: u64 = 0x5fa7_6d28_0f8b_81c3;
+const MAZE_JITTER_Z_SALT: u64 = 0x8af0_1f7a_cc99_20be;
+const MAZE_JITTER_W_SALT: u64 = 0x163a_8b39_b0a2_6741;
+const MAZE_GATE_X_NEG_Z_SALT: u64 = 0x7270_6f63_6765_6e31;
+const MAZE_GATE_X_NEG_W_SALT: u64 = 0x7270_6f63_6765_6e32;
+const MAZE_GATE_X_POS_Z_SALT: u64 = 0x7270_6f63_6765_6e33;
+const MAZE_GATE_X_POS_W_SALT: u64 = 0x7270_6f63_6765_6e34;
+const MAZE_GATE_Z_NEG_X_SALT: u64 = 0x7270_6f63_6765_6e35;
+const MAZE_GATE_Z_NEG_W_SALT: u64 = 0x7270_6f63_6765_6e36;
+const MAZE_GATE_Z_POS_X_SALT: u64 = 0x7270_6f63_6765_6e37;
+const MAZE_GATE_Z_POS_W_SALT: u64 = 0x7270_6f63_6765_6e38;
+const MAZE_GATE_W_NEG_X_SALT: u64 = 0x7270_6f63_6765_6e39;
+const MAZE_GATE_W_NEG_Z_SALT: u64 = 0x7270_6f63_6765_6e3a;
+const MAZE_GATE_W_POS_X_SALT: u64 = 0x7270_6f63_6765_6e3b;
+const MAZE_GATE_W_POS_Z_SALT: u64 = 0x7270_6f63_6765_6e3c;
+const MAZE_GRID_CELLS: i32 = 11;
+const MAZE_STRIDE: i32 = 4;
+const MAZE_SPAN: i32 = MAZE_GRID_CELLS * MAZE_STRIDE + 1;
+const MAZE_HALF_SPAN: i32 = MAZE_SPAN / 2;
+const MAZE_HEIGHT: i32 = 7;
+const MAZE_WORLD_Y_MIN: i32 = 0;
+const MAZE_FLOOR_MATERIAL: u8 = 55;
+const MAZE_CEILING_MATERIAL: u8 = 63;
+const MAZE_WALL_MATERIAL: u8 = 66;
+const MAZE_GATE_FRAME_MATERIAL: u8 = 68;
+const MAZE_BEACON_MATERIAL: u8 = 64;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,8 +108,8 @@ fn default_spawn_weight() -> u32 {
 }
 
 impl StructureBlueprint {
-    fn from_embedded_json(file_name: &str, json: &str) -> Self {
-        let parsed: StructureBlueprintFile = serde_json::from_str(json)
+    fn from_embedded_json_bytes(file_name: &str, json: &[u8]) -> Self {
+        let parsed: StructureBlueprintFile = serde_json::from_slice(json)
             .unwrap_or_else(|error| panic!("invalid structure blueprint {file_name}: {error}"));
         if parsed.name.trim().is_empty() {
             panic!("structure blueprint {file_name} has an empty name");
@@ -140,6 +177,21 @@ impl StructureBlueprint {
             voxels: parsed.voxels,
             min_offset,
             max_offset,
+        }
+    }
+
+    fn from_embedded_source(file_name: &str, source: &[u8]) -> Self {
+        if let Some(base_name) = file_name.strip_suffix(".gz") {
+            let mut decoder = GzDecoder::new(source);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .unwrap_or_else(|error| {
+                    panic!("failed to decompress structure blueprint {file_name}: {error}")
+                });
+            Self::from_embedded_json_bytes(base_name, &decompressed)
+        } else {
+            Self::from_embedded_json_bytes(file_name, source)
         }
     }
 
@@ -252,6 +304,17 @@ impl StructureBlueprint {
             }
         }
         (min_offset, max_offset)
+    }
+
+    fn intersects_chunk(&self, origin: [i32; 4], chunk_min: [i32; 4], chunk_max: [i32; 4]) -> bool {
+        for axis in 0..4 {
+            let min = origin[axis] + self.min_offset[axis];
+            let max = origin[axis] + self.max_offset[axis];
+            if max < chunk_min[axis] || min > chunk_max[axis] {
+                return false;
+            }
+        }
+        true
     }
 
     fn intersects_chunk_oriented(
@@ -457,80 +520,84 @@ static STRUCTURE_SET: OnceLock<StructureSet> = OnceLock::new();
 
 fn structure_set() -> &'static StructureSet {
     STRUCTURE_SET.get_or_init(|| {
-        let sources = [
+        let sources: [(&str, &[u8]); 18] = [
             (
                 "cross_shrine.json",
-                include_str!("../../assets/structures/cross_shrine.json"),
+                &include_bytes!("../../assets/structures/cross_shrine.json")[..],
             ),
             (
                 "hyper_arch.json",
-                include_str!("../../assets/structures/hyper_arch.json"),
+                &include_bytes!("../../assets/structures/hyper_arch.json")[..],
             ),
             (
                 "tetra_spire.json",
-                include_str!("../../assets/structures/tetra_spire.json"),
+                &include_bytes!("../../assets/structures/tetra_spire.json")[..],
             ),
             (
                 "sky_bridge.json",
-                include_str!("../../assets/structures/sky_bridge.json"),
+                &include_bytes!("../../assets/structures/sky_bridge.json")[..],
             ),
             (
                 "ring_keep.json",
-                include_str!("../../assets/structures/ring_keep.json"),
+                &include_bytes!("../../assets/structures/ring_keep.json")[..],
             ),
             (
                 "terraced_pyramid.json",
-                include_str!("../../assets/structures/terraced_pyramid.json"),
+                &include_bytes!("../../assets/structures/terraced_pyramid.json")[..],
             ),
             (
                 "cathedral_spine.json",
-                include_str!("../../assets/structures/cathedral_spine.json"),
+                &include_bytes!("../../assets/structures/cathedral_spine.json")[..],
             ),
             (
                 "lattice_hall.json",
-                include_str!("../../assets/structures/lattice_hall.json"),
+                &include_bytes!("../../assets/structures/lattice_hall.json")[..],
             ),
             (
                 "shard_garden.json",
-                include_str!("../../assets/structures/shard_garden.json"),
+                &include_bytes!("../../assets/structures/shard_garden.json")[..],
             ),
             (
                 "portal_axis.json",
-                include_str!("../../assets/structures/portal_axis.json"),
+                &include_bytes!("../../assets/structures/portal_axis.json")[..],
             ),
             (
                 "resonance_forge.json",
-                include_str!("../../assets/structures/resonance_forge.json"),
+                &include_bytes!("../../assets/structures/resonance_forge.json")[..],
             ),
             (
                 "void_colonnade.json",
-                include_str!("../../assets/structures/void_colonnade.json"),
+                &include_bytes!("../../assets/structures/void_colonnade.json")[..],
             ),
             (
                 "lumen_orrery.json",
-                include_str!("../../assets/structures/lumen_orrery.json"),
+                &include_bytes!("../../assets/structures/lumen_orrery.json")[..],
             ),
             (
                 "clifford_atrium.json",
-                include_str!("../../assets/structures/clifford_atrium.json"),
+                &include_bytes!("../../assets/structures/clifford_atrium.json")[..],
             ),
             (
                 "braided_transit.json",
-                include_str!("../../assets/structures/braided_transit.json"),
+                &include_bytes!("../../assets/structures/braided_transit.json")[..],
             ),
             (
                 "phase_ladder.json",
-                include_str!("../../assets/structures/phase_ladder.json"),
+                &include_bytes!("../../assets/structures/phase_ladder.json")[..],
             ),
             (
                 "orthoplex_nexus.json",
-                include_str!("../../assets/structures/orthoplex_nexus.json"),
+                &include_bytes!("../../assets/structures/orthoplex_nexus.json")[..],
+            ),
+            (
+                "hyper_maze.json.gz",
+                &include_bytes!("../../assets/structures/hyper_maze.json.gz")[..],
             ),
         ];
 
         let blueprints: Vec<_> = sources
             .iter()
-            .map(|(name, source)| StructureBlueprint::from_embedded_json(name, source))
+            .map(|(name, source)| StructureBlueprint::from_embedded_source(name, source))
             .collect();
 
         let total_weight = blueprints
@@ -578,9 +645,12 @@ fn structure_set() -> &'static StructureSet {
 pub fn structure_chunk_y_bounds() -> (i32, i32) {
     let set = structure_set();
     let chunk_size = CHUNK_SIZE as i32;
+    let maze_max_world_y = MAZE_WORLD_Y_MIN + MAZE_HEIGHT - 1;
+    let min_world_y = set.min_world_y.min(MAZE_WORLD_Y_MIN);
+    let max_world_y = set.max_world_y.max(maze_max_world_y);
     (
-        set.min_world_y.div_euclid(chunk_size),
-        set.max_world_y.div_euclid(chunk_size),
+        min_world_y.div_euclid(chunk_size),
+        max_world_y.div_euclid(chunk_size),
     )
 }
 
@@ -592,6 +662,12 @@ struct StructurePlacement {
     origin: [i32; 4],
     orientation: u8,
     cell: StructureCell,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct MazePlacement {
+    origin: [i32; 4],
+    layout_seed: u64,
 }
 
 fn chunk_bounds(chunk_pos: ChunkPos) -> ([i32; 4], [i32; 4]) {
@@ -724,6 +800,355 @@ pub fn structure_cells_affecting_chunk(world_seed: u64, chunk_pos: ChunkPos) -> 
     out
 }
 
+fn maze_bounds(origin: [i32; 4]) -> ([i32; 4], [i32; 4]) {
+    (
+        [
+            origin[0] - MAZE_HALF_SPAN,
+            MAZE_WORLD_Y_MIN,
+            origin[2] - MAZE_HALF_SPAN,
+            origin[3] - MAZE_HALF_SPAN,
+        ],
+        [
+            origin[0] + MAZE_HALF_SPAN,
+            MAZE_WORLD_Y_MIN + MAZE_HEIGHT - 1,
+            origin[2] + MAZE_HALF_SPAN,
+            origin[3] + MAZE_HALF_SPAN,
+        ],
+    )
+}
+
+fn maze_intersects_chunk(origin: [i32; 4], chunk_min: [i32; 4], chunk_max: [i32; 4]) -> bool {
+    let (maze_min, maze_max) = maze_bounds(origin);
+    for axis in 0..4 {
+        if maze_max[axis] < chunk_min[axis] || maze_min[axis] > chunk_max[axis] {
+            return false;
+        }
+    }
+    true
+}
+
+fn maze_layout_seed(world_seed: u64, origin: [i32; 4]) -> u64 {
+    let mut seed = hash_structure_cell(
+        world_seed,
+        origin[0],
+        origin[2],
+        origin[3],
+        MAZE_LAYOUT_SALT,
+    );
+    seed ^= (origin[1] as i64 as u64).wrapping_mul(0xa24b_aed4_963e_e407);
+    splitmix64(seed)
+}
+
+fn maze_gate_cell(layout_seed: u64, salt: u64) -> i32 {
+    (splitmix64(layout_seed ^ salt) % MAZE_GRID_CELLS as u64) as i32
+}
+
+fn maze_gate_band(cell_idx: i32) -> (i32, i32) {
+    let start = cell_idx * MAZE_STRIDE + 1;
+    (start, start + 2)
+}
+
+fn maze_gate_open(u0: i32, u1: i32, gate0: i32, gate1: i32) -> bool {
+    let (g0_min, g0_max) = maze_gate_band(gate0);
+    let (g1_min, g1_max) = maze_gate_band(gate1);
+    u0 >= g0_min && u0 <= g0_max && u1 >= g1_min && u1 <= g1_max
+}
+
+fn maze_cell_in_bounds(cell: [i32; 3]) -> bool {
+    cell[0] >= 0
+        && cell[0] < MAZE_GRID_CELLS
+        && cell[1] >= 0
+        && cell[1] < MAZE_GRID_CELLS
+        && cell[2] >= 0
+        && cell[2] < MAZE_GRID_CELLS
+}
+
+fn maze_parent_cell(layout_seed: u64, cell: [i32; 3]) -> Option<[i32; 3]> {
+    let center = MAZE_GRID_CELLS / 2;
+    if cell == [center, center, center] {
+        return None;
+    }
+
+    let mut candidates = [[0i32; 3]; 3];
+    let mut count = 0usize;
+    if cell[0] != center {
+        candidates[count] = [
+            cell[0] + if cell[0] < center { 1 } else { -1 },
+            cell[1],
+            cell[2],
+        ];
+        count += 1;
+    }
+    if cell[1] != center {
+        candidates[count] = [
+            cell[0],
+            cell[1] + if cell[1] < center { 1 } else { -1 },
+            cell[2],
+        ];
+        count += 1;
+    }
+    if cell[2] != center {
+        candidates[count] = [
+            cell[0],
+            cell[1],
+            cell[2] + if cell[2] < center { 1 } else { -1 },
+        ];
+        count += 1;
+    }
+
+    let roll_seed = hash_structure_cell(layout_seed, cell[0], cell[1], cell[2], MAZE_PARENT_SALT);
+    let idx = (splitmix64(roll_seed) % count as u64) as usize;
+    Some(candidates[idx])
+}
+
+fn maze_edge_open(layout_seed: u64, a: [i32; 3], b: [i32; 3]) -> bool {
+    if !maze_cell_in_bounds(a) || !maze_cell_in_bounds(b) {
+        return false;
+    }
+
+    let distance = (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs();
+    if distance != 1 {
+        return false;
+    }
+
+    maze_parent_cell(layout_seed, a) == Some(b) || maze_parent_cell(layout_seed, b) == Some(a)
+}
+
+fn collect_maze_placements_for_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Vec<MazePlacement> {
+    let maze_min_chunk_y = MAZE_WORLD_Y_MIN.div_euclid(CHUNK_SIZE as i32);
+    let maze_max_chunk_y = (MAZE_WORLD_Y_MIN + MAZE_HEIGHT - 1).div_euclid(CHUNK_SIZE as i32);
+    if chunk_pos.y < maze_min_chunk_y || chunk_pos.y > maze_max_chunk_y {
+        return Vec::new();
+    }
+
+    let chunk_size = CHUNK_SIZE as i32;
+    let (chunk_min, chunk_max) = chunk_bounds(chunk_pos);
+
+    let search_margin = MAZE_CELL_JITTER + MAZE_HALF_SPAN + chunk_size;
+    let cell_min_x = (chunk_min[0] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
+    let cell_max_x = (chunk_max[0] + search_margin).div_euclid(MAZE_CELL_SIZE) + 1;
+    let cell_min_z = (chunk_min[2] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
+    let cell_max_z = (chunk_max[2] + search_margin).div_euclid(MAZE_CELL_SIZE) + 1;
+    let cell_min_w = (chunk_min[3] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
+    let cell_max_w = (chunk_max[3] + search_margin).div_euclid(MAZE_CELL_SIZE) + 1;
+
+    let mut placements = Vec::new();
+
+    for cell_x in cell_min_x..=cell_max_x {
+        for cell_z in cell_min_z..=cell_max_z {
+            for cell_w in cell_min_w..=cell_max_w {
+                let cell_hash =
+                    hash_structure_cell(world_seed, cell_x, cell_z, cell_w, MAZE_HASH_SALT);
+                if cell_hash % MAZE_SPAWN_DENOMINATOR >= MAZE_SPAWN_NUMERATOR {
+                    continue;
+                }
+
+                let origin_x = cell_x * MAZE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ MAZE_JITTER_X_SALT,
+                        MAZE_CELL_JITTER,
+                    );
+                let origin_z = cell_z * MAZE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ MAZE_JITTER_Z_SALT,
+                        MAZE_CELL_JITTER,
+                    );
+                let origin_w = cell_w * MAZE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ MAZE_JITTER_W_SALT,
+                        MAZE_CELL_JITTER,
+                    );
+                if origin_x.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                    && origin_z.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                    && origin_w.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                {
+                    continue;
+                }
+
+                let origin = [origin_x, MAZE_WORLD_Y_MIN, origin_z, origin_w];
+                if !maze_intersects_chunk(origin, chunk_min, chunk_max) {
+                    continue;
+                }
+
+                placements.push(MazePlacement {
+                    origin,
+                    layout_seed: maze_layout_seed(world_seed, origin),
+                });
+            }
+        }
+    }
+
+    placements
+}
+
+fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &mut Chunk) {
+    let chunk_max = [
+        chunk_min[0] + CHUNK_SIZE as i32 - 1,
+        chunk_min[1] + CHUNK_SIZE as i32 - 1,
+        chunk_min[2] + CHUNK_SIZE as i32 - 1,
+        chunk_min[3] + CHUNK_SIZE as i32 - 1,
+    ];
+    if !maze_intersects_chunk(placement.origin, chunk_min, chunk_max) {
+        return;
+    }
+
+    let (maze_min, maze_max) = maze_bounds(placement.origin);
+    let mut loop_min = [0i32; 4];
+    let mut loop_max = [0i32; 4];
+    for axis in 0..4 {
+        loop_min[axis] = maze_min[axis].max(chunk_min[axis]);
+        loop_max[axis] = maze_max[axis].min(chunk_max[axis]);
+        if loop_min[axis] > loop_max[axis] {
+            return;
+        }
+    }
+
+    let layout_seed = placement.layout_seed;
+    let x_neg_gate = [
+        maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_Z_SALT),
+        maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_W_SALT),
+    ];
+    let x_pos_gate = [
+        maze_gate_cell(layout_seed, MAZE_GATE_X_POS_Z_SALT),
+        maze_gate_cell(layout_seed, MAZE_GATE_X_POS_W_SALT),
+    ];
+    let z_neg_gate = [
+        maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_X_SALT),
+        maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_W_SALT),
+    ];
+    let z_pos_gate = [
+        maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_X_SALT),
+        maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_W_SALT),
+    ];
+    let w_neg_gate = [
+        maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_X_SALT),
+        maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_Z_SALT),
+    ];
+    let w_pos_gate = [
+        maze_gate_cell(layout_seed, MAZE_GATE_W_POS_X_SALT),
+        maze_gate_cell(layout_seed, MAZE_GATE_W_POS_Z_SALT),
+    ];
+    let center_u = (MAZE_GRID_CELLS / 2) * MAZE_STRIDE + 2;
+
+    for wx in loop_min[0]..=loop_max[0] {
+        for wy in loop_min[1]..=loop_max[1] {
+            for wz in loop_min[2]..=loop_max[2] {
+                for ww in loop_min[3]..=loop_max[3] {
+                    let ux = wx - maze_min[0];
+                    let uy = wy - MAZE_WORLD_Y_MIN;
+                    let uz = wz - maze_min[2];
+                    let uw = ww - maze_min[3];
+
+                    let material = if uy == 0 {
+                        Some(MAZE_FLOOR_MATERIAL)
+                    } else if uy == MAZE_HEIGHT - 1 {
+                        Some(MAZE_CEILING_MATERIAL)
+                    } else {
+                        let on_x_neg = ux == 0;
+                        let on_x_pos = ux == MAZE_SPAN - 1;
+                        let on_z_neg = uz == 0;
+                        let on_z_pos = uz == MAZE_SPAN - 1;
+                        let on_w_neg = uw == 0;
+                        let on_w_pos = uw == MAZE_SPAN - 1;
+
+                        if on_x_neg || on_x_pos || on_z_neg || on_z_pos || on_w_neg || on_w_pos {
+                            let gate_open = if on_x_neg {
+                                maze_gate_open(uz, uw, x_neg_gate[0], x_neg_gate[1])
+                            } else if on_x_pos {
+                                maze_gate_open(uz, uw, x_pos_gate[0], x_pos_gate[1])
+                            } else if on_z_neg {
+                                maze_gate_open(ux, uw, z_neg_gate[0], z_neg_gate[1])
+                            } else if on_z_pos {
+                                maze_gate_open(ux, uw, z_pos_gate[0], z_pos_gate[1])
+                            } else if on_w_neg {
+                                maze_gate_open(ux, uz, w_neg_gate[0], w_neg_gate[1])
+                            } else {
+                                maze_gate_open(ux, uz, w_pos_gate[0], w_pos_gate[1])
+                            };
+
+                            if gate_open {
+                                None
+                            } else {
+                                Some(MAZE_GATE_FRAME_MATERIAL)
+                            }
+                        } else {
+                            let wall_x = ux % MAZE_STRIDE == 0;
+                            let wall_z = uz % MAZE_STRIDE == 0;
+                            let wall_w = uw % MAZE_STRIDE == 0;
+                            let wall_count = wall_x as i32 + wall_z as i32 + wall_w as i32;
+
+                            if wall_count == 0 {
+                                if ux == center_u
+                                    && uz == center_u
+                                    && uw == center_u
+                                    && uy == MAZE_HEIGHT / 2
+                                {
+                                    Some(MAZE_BEACON_MATERIAL)
+                                } else {
+                                    None
+                                }
+                            } else if wall_count > 1 {
+                                Some(MAZE_WALL_MATERIAL)
+                            } else if wall_x {
+                                if uz % MAZE_STRIDE != 0 && uw % MAZE_STRIDE != 0 {
+                                    let left = ux / MAZE_STRIDE - 1;
+                                    let right = left + 1;
+                                    let cz = uz / MAZE_STRIDE;
+                                    let cw = uw / MAZE_STRIDE;
+                                    if maze_edge_open(layout_seed, [left, cz, cw], [right, cz, cw])
+                                    {
+                                        None
+                                    } else {
+                                        Some(MAZE_WALL_MATERIAL)
+                                    }
+                                } else {
+                                    Some(MAZE_WALL_MATERIAL)
+                                }
+                            } else if wall_z {
+                                if ux % MAZE_STRIDE != 0 && uw % MAZE_STRIDE != 0 {
+                                    let near = uz / MAZE_STRIDE - 1;
+                                    let far = near + 1;
+                                    let cx = ux / MAZE_STRIDE;
+                                    let cw = uw / MAZE_STRIDE;
+                                    if maze_edge_open(layout_seed, [cx, near, cw], [cx, far, cw]) {
+                                        None
+                                    } else {
+                                        Some(MAZE_WALL_MATERIAL)
+                                    }
+                                } else {
+                                    Some(MAZE_WALL_MATERIAL)
+                                }
+                            } else if ux % MAZE_STRIDE != 0 && uz % MAZE_STRIDE != 0 {
+                                let near = uw / MAZE_STRIDE - 1;
+                                let far = near + 1;
+                                let cx = ux / MAZE_STRIDE;
+                                let cz = uz / MAZE_STRIDE;
+                                if maze_edge_open(layout_seed, [cx, cz, near], [cx, cz, far]) {
+                                    None
+                                } else {
+                                    Some(MAZE_WALL_MATERIAL)
+                                }
+                            } else {
+                                Some(MAZE_WALL_MATERIAL)
+                            }
+                        }
+                    };
+
+                    let Some(material) = material else {
+                        continue;
+                    };
+
+                    let lx = (wx - chunk_min[0]) as usize;
+                    let ly = (wy - chunk_min[1]) as usize;
+                    let lz = (wz - chunk_min[2]) as usize;
+                    let lw = (ww - chunk_min[3]) as usize;
+                    chunk.set(lx, ly, lz, lw, VoxelType(material));
+                }
+            }
+        }
+    }
+}
+
 pub fn generate_structure_chunk_with_keepout(
     world_seed: u64,
     chunk_pos: ChunkPos,
@@ -731,10 +1156,11 @@ pub fn generate_structure_chunk_with_keepout(
 ) -> Option<Chunk> {
     let set = structure_set();
     let (chunk_min, _) = chunk_bounds(chunk_pos);
-    let placements = collect_structure_placements_for_chunk(world_seed, chunk_pos);
+    let structure_placements = collect_structure_placements_for_chunk(world_seed, chunk_pos);
+    let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_pos);
 
     let mut chunk = Chunk::new();
-    for placement in placements {
+    for placement in structure_placements {
         if !placement_allowed(&placement, blocked_cells) {
             continue;
         }
@@ -745,6 +1171,9 @@ pub fn generate_structure_chunk_with_keepout(
             chunk_min,
             &mut chunk,
         );
+    }
+    for placement in maze_placements {
+        place_maze_into_chunk(placement, chunk_min, &mut chunk);
     }
 
     if chunk.is_empty() {
@@ -786,8 +1215,12 @@ pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool
 }
 
 fn jitter_from_hash(hash: u64) -> i32 {
-    let span = (STRUCTURE_CELL_JITTER * 2 + 1) as u64;
-    (splitmix64(hash) % span) as i32 - STRUCTURE_CELL_JITTER
+    jitter_from_hash_with_radius(hash, STRUCTURE_CELL_JITTER)
+}
+
+fn jitter_from_hash_with_radius(hash: u64, radius: i32) -> i32 {
+    let span = (radius * 2 + 1) as u64;
+    (splitmix64(hash) % span) as i32 - radius
 }
 
 fn hash_structure_cell(seed: u64, x: i32, z: i32, w: i32, salt: u64) -> u64 {
@@ -812,6 +1245,54 @@ fn splitmix64(mut value: u64) -> u64 {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    fn find_chunk_with_maze(seed: u64) -> Option<ChunkPos> {
+        let chunk_y = MAZE_WORLD_Y_MIN.div_euclid(CHUNK_SIZE as i32);
+        for cell_x in -8..=8 {
+            for cell_z in -8..=8 {
+                for cell_w in -8..=8 {
+                    let cell_hash =
+                        hash_structure_cell(seed, cell_x, cell_z, cell_w, MAZE_HASH_SALT);
+                    if cell_hash % MAZE_SPAWN_DENOMINATOR >= MAZE_SPAWN_NUMERATOR {
+                        continue;
+                    }
+
+                    let origin_x = cell_x * MAZE_CELL_SIZE
+                        + jitter_from_hash_with_radius(
+                            cell_hash ^ MAZE_JITTER_X_SALT,
+                            MAZE_CELL_JITTER,
+                        );
+                    let origin_z = cell_z * MAZE_CELL_SIZE
+                        + jitter_from_hash_with_radius(
+                            cell_hash ^ MAZE_JITTER_Z_SALT,
+                            MAZE_CELL_JITTER,
+                        );
+                    let origin_w = cell_w * MAZE_CELL_SIZE
+                        + jitter_from_hash_with_radius(
+                            cell_hash ^ MAZE_JITTER_W_SALT,
+                            MAZE_CELL_JITTER,
+                        );
+                    if origin_x.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                        && origin_z.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                        && origin_w.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                    {
+                        continue;
+                    }
+
+                    let chunk_pos = ChunkPos::new(
+                        origin_x.div_euclid(CHUNK_SIZE as i32),
+                        chunk_y,
+                        origin_z.div_euclid(CHUNK_SIZE as i32),
+                        origin_w.div_euclid(CHUNK_SIZE as i32),
+                    );
+                    if !collect_maze_placements_for_chunk(seed, chunk_pos).is_empty() {
+                        return Some(chunk_pos);
+                    }
+                }
+            }
+        }
+        None
+    }
 
     #[test]
     fn structure_chunk_generation_is_seed_deterministic() {
@@ -862,6 +1343,41 @@ mod tests {
     fn structure_blueprints_are_loaded() {
         let set = structure_set();
         assert!(!set.blueprints.is_empty());
+    }
+
+    #[test]
+    fn procedural_mazes_generate_chunks() {
+        let seed = 0x5eed_1234_5678_9abc;
+        let chunk_pos =
+            find_chunk_with_maze(seed).expect("expected to find at least one maze chunk");
+        let chunk = generate_structure_chunk(seed, chunk_pos)
+            .expect("maze placement should generate chunk");
+        let has_maze_material = chunk.voxels.iter().any(|voxel| {
+            matches!(
+                voxel.0,
+                MAZE_CEILING_MATERIAL
+                    | MAZE_WALL_MATERIAL
+                    | MAZE_GATE_FRAME_MATERIAL
+                    | MAZE_BEACON_MATERIAL
+            )
+        });
+        assert!(
+            has_maze_material,
+            "expected generated chunk to contain procedural maze materials"
+        );
+    }
+
+    #[test]
+    fn procedural_maze_generation_is_seed_deterministic() {
+        let seed = 0x9d6f_21a5_7784_0031;
+        let chunk_pos =
+            find_chunk_with_maze(seed).expect("expected to find at least one maze chunk");
+        let chunk_a = generate_structure_chunk(seed, chunk_pos)
+            .expect("maze placement should generate chunk");
+        let chunk_b = generate_structure_chunk(seed, chunk_pos)
+            .expect("maze placement should generate chunk");
+        assert_eq!(chunk_a.solid_count, chunk_b.solid_count);
+        assert_eq!(chunk_a.voxels[..], chunk_b.voxels[..]);
     }
 
     #[test]
