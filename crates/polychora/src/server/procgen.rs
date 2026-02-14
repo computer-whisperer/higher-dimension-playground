@@ -1194,7 +1194,7 @@ pub fn structure_chunk_has_content_with_keepout(
 ) -> bool {
     let set = structure_set();
     let (chunk_min, chunk_max) = chunk_bounds(chunk_pos);
-    collect_structure_placements_for_chunk(world_seed, chunk_pos)
+    let has_structure = collect_structure_placements_for_chunk(world_seed, chunk_pos)
         .into_iter()
         .any(|placement| {
             if !placement_allowed(&placement, blocked_cells) {
@@ -1207,7 +1207,12 @@ pub fn structure_chunk_has_content_with_keepout(
                 chunk_min,
                 chunk_max,
             )
-        })
+        });
+    if has_structure {
+        return true;
+    }
+    // Also check for maze content in this chunk
+    !collect_maze_placements_for_chunk(world_seed, chunk_pos).is_empty()
 }
 
 pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool {
