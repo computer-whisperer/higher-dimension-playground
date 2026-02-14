@@ -342,6 +342,7 @@ struct EguiResources {
     atlas_sampler: Arc<Sampler>,
     texture_size: [u32; 2],
     texture_pixels: Vec<u8>,
+    retired_atlas_views: Vec<(Arc<ImageView>, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2403,6 +2404,7 @@ impl RenderContext {
                     atlas_sampler,
                     texture_size: [1, 1],
                     texture_pixels,
+                    retired_atlas_views: Vec::new(),
                 })
             }
             None => None,
@@ -2799,7 +2801,15 @@ impl RenderContext {
             &new_pixels,
         );
         if let Some(egui_resources) = self.egui_resources.as_mut() {
-            egui_resources.atlas_view = new_view;
+            let old_view = std::mem::replace(&mut egui_resources.atlas_view, new_view);
+            egui_resources
+                .retired_atlas_views
+                .push((old_view, self.frames_rendered));
+            egui_resources
+                .retired_atlas_views
+                .retain(|&(_, retired_frame)| {
+                    self.frames_rendered.saturating_sub(retired_frame) < FRAMES_IN_FLIGHT
+                });
         }
         self.refresh_egui_descriptor_sets();
     }

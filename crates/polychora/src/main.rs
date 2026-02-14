@@ -1529,6 +1529,15 @@ fn build_remote_player_avatar_instances(
     instances
 }
 
+fn srgb_byte_to_linear(s: u8) -> f32 {
+    let s = s as f32 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 impl App {
     fn inject_key_press(&mut self, keycode: KeyCode) {
         match keycode {
@@ -2744,9 +2753,9 @@ impl App {
     fn draw_egui_pause_menu(&mut self, ctx: &egui::Context, close_menu: &mut bool) {
         egui::Window::new("Polychora")
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .resizable(true)
+            .resizable(false)
             .collapsible(false)
-            .default_width(460.0)
+            .fixed_size([460.0, 500.0])
             .show(ctx, |ui| {
                 ui.heading(RichText::new("Immediate Menu").strong());
                 ui.label("Adjust runtime settings while paused.");
@@ -3171,9 +3180,9 @@ impl App {
                     position_px: [vertex.pos.x * pixels_per_point, vertex.pos.y * pixels_per_point],
                     uv: [vertex.uv.x, vertex.uv.y],
                     color: [
-                        r as f32 / 255.0,
-                        g as f32 / 255.0,
-                        b as f32 / 255.0,
+                        srgb_byte_to_linear(r),
+                        srgb_byte_to_linear(g),
+                        srgb_byte_to_linear(b),
                         a as f32 / 255.0,
                     ],
                 });
