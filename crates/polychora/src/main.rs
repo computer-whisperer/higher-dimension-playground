@@ -165,6 +165,7 @@ fn parse_keycode(key: &str) -> Option<KeyCode> {
     match key.to_lowercase().as_str() {
         "escape" => Some(KeyCode::Escape),
         "e" => Some(KeyCode::KeyE),
+        "i" => Some(KeyCode::KeyI),
         "w" => Some(KeyCode::KeyW),
         "a" => Some(KeyCode::KeyA),
         "s" => Some(KeyCode::KeyS),
@@ -1540,7 +1541,7 @@ impl App {
                     self.menu_open = !self.menu_open;
                 }
             }
-            KeyCode::KeyE => {
+            KeyCode::KeyI => {
                 self.inventory_open = !self.inventory_open;
             }
             KeyCode::Digit1 => self.hotbar_selected_index = 0,
@@ -3063,7 +3064,7 @@ impl App {
                     });
 
                 ui.separator();
-                ui.label("Click a material to place it in the selected hotbar slot. Press E or Esc to close.");
+                ui.label("Click a material to place it in the selected hotbar slot. Press I or Esc to close.");
             });
 
         if !open {

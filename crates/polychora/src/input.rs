@@ -214,8 +214,8 @@ impl InputState {
                 }
                 KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
                 KeyCode::KeyQ => self.w_neg = pressed,
-                KeyCode::KeyE => {
-                    self.w_pos = pressed;
+                KeyCode::KeyE => self.w_pos = pressed,
+                KeyCode::KeyI => {
                     if pressed && !event.repeat {
                         self.inventory_toggle_requested = true;
                     }
