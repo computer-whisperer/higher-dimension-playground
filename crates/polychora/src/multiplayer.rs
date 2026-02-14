@@ -1,10 +1,13 @@
-pub use polychora_common::protocol::{ClientMessage, ServerMessage};
+pub use polychora::shared::protocol::{ClientMessage, ServerMessage};
+use polychora::server::RuntimeConfig as ServerRuntimeConfig;
 use std::io::{self, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-pub use polychora_common::protocol::{EntityKind, EntitySnapshot, PlayerSnapshot, WorldChunkPayload, WorldSnapshotPayload, WorldSummary};
+pub use polychora::shared::protocol::{
+    EntityKind, PlayerSnapshot, WorldChunkPayload,
+};
 
 #[derive(Debug)]
 pub enum MultiplayerEvent {
@@ -19,6 +22,29 @@ pub struct MultiplayerClient {
 }
 
 impl MultiplayerClient {
+    pub fn connect_local(config: ServerRuntimeConfig, player_name: String) -> io::Result<Self> {
+        let endpoint = polychora::server::connect_local_client(&config)?;
+        let (incoming_tx, incoming_rx) = mpsc::channel::<MultiplayerEvent>();
+        thread::spawn(move || {
+            while let Ok(message) = endpoint.incoming.recv() {
+                if incoming_tx.send(MultiplayerEvent::Message(message)).is_err() {
+                    return;
+                }
+            }
+            let _ = incoming_tx.send(MultiplayerEvent::Disconnected(
+                "local server connection closed".to_string(),
+            ));
+        });
+
+        let client = Self {
+            server_addr: "local".to_string(),
+            outgoing: endpoint.outgoing,
+            incoming: incoming_rx,
+        };
+        client.send(ClientMessage::Hello { name: player_name });
+        Ok(client)
+    }
+
     pub fn connect(server_addr: String, player_name: String) -> io::Result<Self> {
         let stream = TcpStream::connect(&server_addr)?;
         let _ = stream.set_nodelay(true);
@@ -109,10 +135,7 @@ impl MultiplayerClient {
 
                     match postcard::from_bytes::<ServerMessage>(&msg_buf) {
                         Ok(message) => {
-                            if incoming_tx
-                                .send(MultiplayerEvent::Message(message))
-                                .is_err()
-                            {
+                            if incoming_tx.send(MultiplayerEvent::Message(message)).is_err() {
                                 break;
                             }
                         }

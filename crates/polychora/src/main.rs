@@ -18,7 +18,7 @@ use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vulkano::device::{Device, Queue};
 use vulkano::instance::Instance;
 use winit::{
@@ -386,6 +386,30 @@ struct Args {
     #[arg(long)]
     player_name: Option<String>,
 
+    /// Integrated singleplayer server tick rate in Hz.
+    #[arg(long, default_value_t = 10.0)]
+    singleplayer_tick_hz: f32,
+
+    /// Autosave interval for integrated singleplayer server (seconds).
+    #[arg(long, default_value_t = 5)]
+    singleplayer_save_interval_secs: u64,
+
+    /// Send full world snapshot on join for integrated singleplayer server.
+    #[arg(long, default_value_t = true)]
+    singleplayer_snapshot_on_join: bool,
+
+    /// Enable server-managed random structure generation in singleplayer.
+    #[arg(long, default_value_t = true)]
+    singleplayer_procgen_structures: bool,
+
+    /// Chunk radius around player to evaluate server-side procgen in singleplayer.
+    #[arg(long, default_value_t = 6)]
+    singleplayer_procgen_chunk_radius: i32,
+
+    /// World seed used by integrated singleplayer server procgen.
+    #[arg(long, default_value_t = 1337)]
+    singleplayer_world_seed: u64,
+
     /// Window inner width (overrides OS default)
     #[arg(long)]
     window_width: Option<u32>,
@@ -589,6 +613,7 @@ fn main() {
         || args.cpu_render
         || args.commands.is_some()
         || !matches!(args.scene, SceneArg::Flat);
+    let start_with_integrated_singleplayer = args.server.is_none() && skip_main_menu;
     let initial_app_state = if skip_main_menu {
         AppState::Playing
     } else {
@@ -596,7 +621,7 @@ fn main() {
     };
 
     let mut scene = Scene::new(args.scene.to_scene_preset());
-    if args.load_world {
+    if args.load_world && !start_with_integrated_singleplayer {
         match scene.load_world_from_path(&world_file) {
             Ok(chunks) => eprintln!(
                 "Loaded world from {} ({} non-empty chunks)",
@@ -626,6 +651,30 @@ fn main() {
                 eprintln!(
                     "Failed to connect multiplayer server {}: {}",
                     server_addr, error
+                );
+                None
+            }
+        }
+    } else if start_with_integrated_singleplayer {
+        let player_name = args
+            .player_name
+            .clone()
+            .unwrap_or_else(default_multiplayer_player_name);
+        let runtime_config = build_singleplayer_runtime_config(&args, world_file.clone());
+        match MultiplayerClient::connect_local(runtime_config, player_name.clone()) {
+            Ok(client) => {
+                eprintln!(
+                    "Starting integrated singleplayer server for {} as '{}'",
+                    world_file.display(),
+                    player_name
+                );
+                Some(client)
+            }
+            Err(error) => {
+                eprintln!(
+                    "Failed to start integrated singleplayer server for {}: {}",
+                    world_file.display(),
+                    error
                 );
                 None
             }
@@ -1060,6 +1109,45 @@ fn normalize_server_addr(raw: &str) -> String {
     } else {
         format!("{trimmed}:{MULTIPLAYER_DEFAULT_PORT}")
     }
+}
+
+fn build_singleplayer_runtime_config(
+    args: &Args,
+    world_file: PathBuf,
+) -> polychora::server::RuntimeConfig {
+    polychora::server::RuntimeConfig {
+        bind: "127.0.0.1:0".to_string(),
+        world_file,
+        tick_hz: args.singleplayer_tick_hz.max(0.1),
+        save_interval_secs: args.singleplayer_save_interval_secs,
+        snapshot_on_join: args.singleplayer_snapshot_on_join,
+        procgen_structures: args.singleplayer_procgen_structures,
+        procgen_chunk_radius: args.singleplayer_procgen_chunk_radius,
+        world_seed: args.singleplayer_world_seed,
+    }
+}
+
+fn generate_new_singleplayer_world_path() -> PathBuf {
+    let saves_dir = PathBuf::from("saves");
+    let _ = std::fs::create_dir_all(&saves_dir);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    for suffix in 0u32..1000 {
+        let file_name = if suffix == 0 {
+            format!("world-{timestamp}.v4dw")
+        } else {
+            format!("world-{timestamp}-{suffix}.v4dw")
+        };
+        let candidate = saves_dir.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    saves_dir.join("world-new.v4dw")
 }
 
 fn default_multiplayer_player_name() -> String {
@@ -1928,12 +2016,7 @@ impl App {
                 MultiplayerEvent::Message(message) => self.handle_multiplayer_message(message),
                 MultiplayerEvent::Disconnected(reason) => {
                     eprintln!("Multiplayer disconnected: {reason}");
-                    self.multiplayer = None;
-                    self.multiplayer_self_id = None;
-                    self.next_multiplayer_edit_id = 1;
-                    self.pending_voxel_edits.clear();
-                    self.remote_players.clear();
-                    self.remote_entities.clear();
+                    self.reset_multiplayer_connection_state();
                     break;
                 }
             }
@@ -3723,61 +3806,112 @@ impl App {
             .sort_by(|a, b| a.display_name.cmp(&b.display_name));
     }
 
+    fn reset_multiplayer_connection_state(&mut self) {
+        self.multiplayer = None;
+        self.multiplayer_self_id = None;
+        self.next_multiplayer_edit_id = 1;
+        self.pending_voxel_edits.clear();
+        self.remote_players.clear();
+        self.remote_entities.clear();
+        self.last_multiplayer_player_update = Instant::now();
+    }
+
+    fn connect_multiplayer_remote(&mut self, server_addr: String) -> Result<(), String> {
+        let player_name = self
+            .args
+            .player_name
+            .clone()
+            .unwrap_or_else(default_multiplayer_player_name);
+        match MultiplayerClient::connect(server_addr.clone(), player_name.clone()) {
+            Ok(client) => {
+                eprintln!(
+                    "Connecting to multiplayer server {} as '{}'",
+                    client.server_addr(),
+                    player_name
+                );
+                self.reset_multiplayer_connection_state();
+                self.multiplayer = Some(client);
+                Ok(())
+            }
+            Err(error) => Err(format!("Failed to connect to {}: {}", server_addr, error)),
+        }
+    }
+
+    fn connect_singleplayer_local(&mut self, world_file: PathBuf) -> Result<(), String> {
+        let player_name = self
+            .args
+            .player_name
+            .clone()
+            .unwrap_or_else(default_multiplayer_player_name);
+        let config = build_singleplayer_runtime_config(&self.args, world_file.clone());
+        match MultiplayerClient::connect_local(config, player_name.clone()) {
+            Ok(client) => {
+                eprintln!(
+                    "Starting integrated singleplayer server for {} as '{}'",
+                    world_file.display(),
+                    player_name
+                );
+                self.reset_multiplayer_connection_state();
+                self.multiplayer = Some(client);
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "Failed to start integrated singleplayer server for {}: {}",
+                world_file.display(),
+                error
+            )),
+        }
+    }
+
+    fn enter_play_state(&mut self, window: &Window) {
+        self.scene = Scene::new(ScenePreset::Flat);
+        self.camera = Camera4D::new();
+        self.app_state = AppState::Playing;
+        self.menu_open = false;
+        self.main_menu_connect_error = None;
+        self.grab_mouse(window);
+    }
+
     fn handle_main_menu_transition(&mut self, transition: MainMenuTransition, window: &Window) {
         match transition {
             MainMenuTransition::NewWorld => {
-                self.scene = Scene::new(ScenePreset::Flat);
-                self.camera = Camera4D::new();
-                self.app_state = AppState::Playing;
-                self.menu_open = false;
-                self.grab_mouse(window);
-                eprintln!("Started new flat world");
-            }
-            MainMenuTransition::LoadWorld(path) => {
-                self.scene = Scene::new(ScenePreset::Flat);
-                self.camera = Camera4D::new();
-                match self.scene.load_world_from_path(&path) {
-                    Ok(chunks) => {
-                        eprintln!(
-                            "Loaded world from {} ({} non-empty chunks)",
-                            path.display(),
-                            chunks
-                        );
-                        self.world_file = path;
+                let path = generate_new_singleplayer_world_path();
+                match self.connect_singleplayer_local(path.clone()) {
+                    Ok(()) => {
+                        self.world_file = path.clone();
+                        self.enter_play_state(window);
+                        eprintln!("Started new integrated singleplayer world {}", path.display());
                     }
-                    Err(err) => {
-                        eprintln!("Failed to load world from {}: {err}", path.display());
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        self.main_menu_connect_error = Some(msg);
                     }
                 }
-                self.app_state = AppState::Playing;
-                self.menu_open = false;
-                self.grab_mouse(window);
+            }
+            MainMenuTransition::LoadWorld(path) => {
+                match self.connect_singleplayer_local(path.clone()) {
+                    Ok(()) => {
+                        self.world_file = path.clone();
+                        self.enter_play_state(window);
+                        eprintln!(
+                            "Loaded integrated singleplayer world from {}",
+                            path.display()
+                        );
+                    }
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        self.main_menu_connect_error = Some(msg);
+                    }
+                }
             }
             MainMenuTransition::ConnectMultiplayer(addr) => {
                 let server_addr = normalize_server_addr(&addr);
-                let player_name = self
-                    .args
-                    .player_name
-                    .clone()
-                    .unwrap_or_else(default_multiplayer_player_name);
-                match MultiplayerClient::connect(server_addr.clone(), player_name.clone()) {
-                    Ok(client) => {
-                        eprintln!(
-                            "Connecting to multiplayer server {} as '{}'",
-                            client.server_addr(),
-                            player_name
-                        );
-                        self.multiplayer = Some(client);
-                        self.multiplayer_self_id = None;
-                        self.scene = Scene::new(ScenePreset::Flat);
-                        self.camera = Camera4D::new();
-                        self.app_state = AppState::Playing;
-                        self.menu_open = false;
-                        self.grab_mouse(window);
+                match self.connect_multiplayer_remote(server_addr.clone()) {
+                    Ok(()) => {
+                        self.enter_play_state(window);
                     }
-                    Err(error) => {
-                        let msg = format!("Failed to connect to {}: {}", server_addr, error);
-                        eprintln!("{}", msg);
+                    Err(msg) => {
+                        eprintln!("{msg}");
                         self.main_menu_connect_error = Some(msg);
                     }
                 }
@@ -3788,11 +3922,7 @@ impl App {
     fn transition_to_main_menu(&mut self, window: &Window) {
         // Disconnect multiplayer if connected
         if self.multiplayer.is_some() {
-            self.multiplayer = None;
-            self.multiplayer_self_id = None;
-            self.next_multiplayer_edit_id = 1;
-            self.pending_voxel_edits.clear();
-            self.remote_players.clear();
+            self.reset_multiplayer_connection_state();
             eprintln!("Disconnected from multiplayer server");
         }
         self.app_state = AppState::MainMenu;
@@ -3910,6 +4040,7 @@ impl App {
                         RichText::new("Singleplayer").size(16.0),
                     )).clicked() {
                         self.main_menu_page = MainMenuPage::Singleplayer;
+                        self.main_menu_connect_error = None;
                         self.scan_world_files();
                     }
                     ui.add_space(8.0);
@@ -3969,6 +4100,11 @@ impl App {
                         });
                 }
 
+                if let Some(error) = &self.main_menu_connect_error {
+                    ui.add_space(6.0);
+                    ui.colored_label(egui::Color32::from_rgb(255, 100, 100), error.as_str());
+                }
+
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(8.0);
@@ -3993,6 +4129,7 @@ impl App {
                     }
                     if ui.button("Back").clicked() {
                         self.main_menu_page = MainMenuPage::Root;
+                        self.main_menu_connect_error = None;
                     }
                 });
             });

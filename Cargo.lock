@@ -1908,31 +1908,11 @@ dependencies = [
  "higher-dimension-playground",
  "image",
  "ndarray",
- "polychora-common",
  "postcard",
  "serde",
  "serde_json",
  "vulkano",
  "winit",
-]
-
-[[package]]
-name = "polychora-common"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
-]
-
-[[package]]
-name = "polychora-server"
-version = "0.1.0"
-dependencies = [
- "clap",
- "polychora-common",
- "postcard",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3363,7 +3343,7 @@ name = "worldgen-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "polychora-common",
+ "polychora",
 ]
 
 [[package]]

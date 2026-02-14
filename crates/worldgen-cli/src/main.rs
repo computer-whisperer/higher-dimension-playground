@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use polychora_common::voxel::{BaseWorldKind, VoxelType, VoxelWorld, save_world};
+use polychora::shared::voxel::{save_world, BaseWorldKind, VoxelType, VoxelWorld};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;

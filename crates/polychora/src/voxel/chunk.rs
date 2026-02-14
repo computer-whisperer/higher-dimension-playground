@@ -1,1 +1,1 @@
-pub use polychora_common::voxel::Chunk;
+pub use polychora::shared::voxel::Chunk;

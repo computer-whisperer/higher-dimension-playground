@@ -8,5 +8,5 @@ name = "worldgen-cli"
 path = "src/main.rs"
 
 [dependencies]
-polychora-common = { path = "../polychora-common" }
+polychora = { path = "../polychora" }
 clap = { version = "4.5", features = ["derive"] }
