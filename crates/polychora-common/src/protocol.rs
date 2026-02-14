@@ -11,7 +11,7 @@ pub struct WorldSnapshotPayload {
     pub format: String,
     pub non_empty_chunks: usize,
     pub revision: u64,
-    pub bytes_base64: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,14 +24,12 @@ pub struct PlayerSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Hello { name: String },
     UpdatePlayer { position: [f32; 4], look: [f32; 4] },
     SetVoxel {
         position: [i32; 4],
         material: u8,
-        #[serde(default)]
         client_edit_id: Option<u64>,
     },
     RequestWorldSnapshot,
@@ -39,7 +37,6 @@ pub enum ClientMessage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Welcome {
         client_id: u64,
@@ -64,7 +61,6 @@ pub enum ServerMessage {
         position: [i32; 4],
         material: u8,
         source_client_id: Option<u64>,
-        #[serde(default)]
         client_edit_id: Option<u64>,
         revision: u64,
     },

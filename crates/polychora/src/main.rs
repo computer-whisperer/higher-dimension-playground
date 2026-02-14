@@ -5,7 +5,6 @@ mod multiplayer;
 mod scene;
 mod voxel;
 
-use base64::Engine;
 use clap::{ArgAction, Parser, ValueEnum};
 use egui::RichText;
 use higher_dimension_playground::render::{
@@ -1831,13 +1830,7 @@ impl App {
                 }
             }
             multiplayer::ServerMessage::WorldSnapshot { world } => {
-                let decoded =
-                    base64::engine::general_purpose::STANDARD.decode(world.bytes_base64.as_bytes());
-                let Ok(bytes) = decoded else {
-                    eprintln!("Multiplayer world snapshot decode failed");
-                    return;
-                };
-                let mut cursor = &bytes[..];
+                let mut cursor = &world.bytes[..];
                 match voxel::io::load_world(&mut cursor) {
                     Ok(new_world) => {
                         self.scene.replace_world(new_world);

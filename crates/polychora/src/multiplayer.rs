@@ -1,84 +1,10 @@
-use serde::{Deserialize, Serialize};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use polychora_common::protocol::{ClientMessage, ServerMessage};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WorldSummary {
-    pub non_empty_chunks: usize,
-    pub revision: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WorldSnapshotPayload {
-    pub format: String,
-    pub non_empty_chunks: usize,
-    pub revision: u64,
-    pub bytes_base64: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PlayerSnapshot {
-    pub client_id: u64,
-    pub name: String,
-    pub position: [f32; 4],
-    pub look: [f32; 4],
-    pub last_update_ms: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientMessage {
-    Hello { name: String },
-    UpdatePlayer { position: [f32; 4], look: [f32; 4] },
-    SetVoxel {
-        position: [i32; 4],
-        material: u8,
-        #[serde(default)]
-        client_edit_id: Option<u64>,
-    },
-    RequestWorldSnapshot,
-    Ping { nonce: u64 },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerMessage {
-    Welcome {
-        client_id: u64,
-        server_time_ms: u64,
-        tick_hz: f32,
-        world: WorldSummary,
-    },
-    Error {
-        message: String,
-    },
-    PlayerJoined {
-        player: PlayerSnapshot,
-    },
-    PlayerLeft {
-        client_id: u64,
-    },
-    PlayerPositions {
-        server_time_ms: u64,
-        players: Vec<PlayerSnapshot>,
-    },
-    WorldVoxelSet {
-        position: [i32; 4],
-        material: u8,
-        source_client_id: Option<u64>,
-        #[serde(default)]
-        client_edit_id: Option<u64>,
-        revision: u64,
-    },
-    WorldSnapshot {
-        world: WorldSnapshotPayload,
-    },
-    Pong {
-        nonce: u64,
-    },
-}
+pub use polychora_common::protocol::{PlayerSnapshot, WorldSnapshotPayload, WorldSummary};
 
 #[derive(Debug)]
 pub enum MultiplayerEvent {
@@ -106,7 +32,7 @@ impl MultiplayerClient {
             thread::spawn(move || {
                 let mut writer = BufWriter::new(writer_stream);
                 while let Ok(message) = outgoing_rx.recv() {
-                    let serialized = match serde_json::to_string(&message) {
+                    let encoded = match postcard::to_stdvec(&message) {
                         Ok(v) => v,
                         Err(error) => {
                             let _ = incoming_tx.send(MultiplayerEvent::Disconnected(format!(
@@ -116,7 +42,14 @@ impl MultiplayerClient {
                         }
                     };
 
-                    if writeln!(writer, "{serialized}").is_err() {
+                    let len = (encoded.len() as u32).to_le_bytes();
+                    if writer.write_all(&len).is_err() {
+                        let _ = incoming_tx.send(MultiplayerEvent::Disconnected(
+                            "server connection closed while writing".to_string(),
+                        ));
+                        break;
+                    }
+                    if writer.write_all(&encoded).is_err() {
                         let _ = incoming_tx.send(MultiplayerEvent::Disconnected(
                             "server connection closed while writing".to_string(),
                         ));
@@ -135,12 +68,17 @@ impl MultiplayerClient {
         {
             let incoming_tx = incoming_tx.clone();
             thread::spawn(move || {
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
+                let mut reader = stream;
+                let mut len_buf = [0u8; 4];
                 loop {
-                    line.clear();
-                    let count = match reader.read_line(&mut line) {
-                        Ok(n) => n,
+                    match reader.read_exact(&mut len_buf) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                            let _ = incoming_tx.send(MultiplayerEvent::Disconnected(
+                                "server connection closed".to_string(),
+                            ));
+                            break;
+                        }
                         Err(error) => {
                             let _ = incoming_tx.send(MultiplayerEvent::Disconnected(format!(
                                 "read error: {error}"
@@ -148,19 +86,27 @@ impl MultiplayerClient {
                             break;
                         }
                     };
-                    if count == 0 {
-                        let _ = incoming_tx.send(MultiplayerEvent::Disconnected(
-                            "server connection closed".to_string(),
-                        ));
+
+                    let len = u32::from_le_bytes(len_buf) as usize;
+                    if len > 100_000_000 {
+                        let _ = incoming_tx.send(MultiplayerEvent::Disconnected(format!(
+                            "oversized message: {} bytes", len
+                        )));
                         break;
                     }
 
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
+                    let mut msg_buf = vec![0u8; len];
+                    match reader.read_exact(&mut msg_buf) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            let _ = incoming_tx.send(MultiplayerEvent::Disconnected(format!(
+                                "read error: {error}"
+                            )));
+                            break;
+                        }
+                    };
 
-                    match serde_json::from_str::<ServerMessage>(trimmed) {
+                    match postcard::from_bytes::<ServerMessage>(&msg_buf) {
                         Ok(message) => {
                             if incoming_tx
                                 .send(MultiplayerEvent::Message(message))
