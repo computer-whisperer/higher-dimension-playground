@@ -5074,6 +5074,25 @@ impl App {
             }
         }
 
+        // WAILA: show targeted block name below crosshair
+        let waila_text = if !self.menu_open && self.mouse_grabbed && !self.args.no_hud {
+            let waila_targets =
+                self.scene
+                    .block_edit_targets(self.camera.position, look_dir, edit_reach);
+            if let Some([x, y, z, w]) = waila_targets.hit_voxel {
+                let voxel = self.scene.world.get_voxel(x, y, z, w);
+                if voxel.0 != 0 {
+                    Some(materials::material_name(voxel.0).to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut custom_overlay_lines = Vec::with_capacity(64);
         if highlight_mode.uses_edges() {
             if let Some(targets) = targets {
@@ -5225,6 +5244,7 @@ impl App {
             } else {
                 hud_player_tags
             },
+            waila_text,
             egui_paint,
             ..Default::default()
         };
