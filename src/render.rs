@@ -6,7 +6,8 @@ use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_p
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
-    push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine, HUD_VERTEX_CAPACITY,
+    push_text_quads, text_width_px, HudResources, HudVertex, LineVertex, OverlayLine,
+    HUD_VERTEX_CAPACITY,
 };
 pub use self::vte::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VteDebugCounters, VTE_MAX_CHUNKS,
@@ -267,6 +268,7 @@ pub struct RenderOptions {
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
     pub hud_player_tags: Vec<HudPlayerTag>,
+    pub waila_text: Option<String>,
     pub egui_paint: Option<EguiPaintData>,
 }
 
@@ -304,6 +306,7 @@ impl Default for RenderOptions {
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
             hud_player_tags: Vec::new(),
+            waila_text: None,
             egui_paint: None,
         }
     }
@@ -3004,6 +3007,7 @@ impl RenderContext {
         target_hit_voxel: Option<[i32; 4]>,
         target_hit_face: Option<[i32; 4]>,
         player_tags: &[HudPlayerTag],
+        waila_text: Option<&str>,
     ) -> (usize, usize) {
         let max_lines = LINE_VERTEX_CAPACITY / 2;
         if base_line_count >= max_lines {
@@ -4159,6 +4163,29 @@ impl RenderContext {
             crosshair_color,
             crosshair_outline,
         );
+
+        // WAILA: show targeted block name below crosshair
+        if let Some(name) = waila_text {
+            if let Some(hud_res) = self.hud_resources.as_ref() {
+                let waila_size = 16.0 * hud_scale;
+                let waila_color = Vec4::new(0.95, 0.95, 0.95, 0.85);
+                let tw = text_width_px(&hud_res.font_atlas, name, waila_size);
+                // Center horizontally, place 30px (scaled) below screen center
+                let center_x = present_w * 0.5;
+                let center_y = present_h * 0.5; // Y-up: center of screen
+                let top_left_px =
+                    Vec2::new(center_x - tw * 0.5, center_y - 30.0 * hud_scale);
+                push_text_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    name,
+                    top_left_px,
+                    waila_size,
+                    waila_color,
+                    present_size,
+                );
+            }
+        }
 
         // Write line data to GPU buffer
         let lines_to_write = lines.len().min(max_lines - base_line_count);
@@ -5944,6 +5971,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 render_options.hud_target_hit_voxel,
                 render_options.hud_target_hit_face,
                 &render_options.hud_player_tags,
+                render_options.waila_text.as_deref(),
             );
             line_render_count += hud_line_count;
             hud_vertex_count = hud_quad_count;
