@@ -126,14 +126,6 @@ impl Scene {
         ]
     }
 
-    fn lod_cell_scale(lod_level: u8) -> Option<i32> {
-        match lod_level {
-            VOXEL_LOD_LEVEL_NEAR => Some(1),
-            VOXEL_LOD_LEVEL_MID => Some(2),
-            _ => None,
-        }
-    }
-
     fn queue_payload_upload(&mut self, payload_id: u32) {
         if self.voxel_pending_payload_upload_set.insert(payload_id) {
             self.voxel_pending_payload_uploads.push(payload_id);
@@ -373,7 +365,7 @@ impl Scene {
         self.voxel_world_revision = self.voxel_world_revision.wrapping_add(1);
     }
 
-    fn rebuild_visible_voxel_metadata(&mut self, cam_pos: [f32; 4]) {
+    fn rebuild_visible_voxel_metadata(&mut self, _cam_pos: [f32; 4]) {
         struct YSliceBuildData {
             min_chunk_x: i32,
             max_chunk_x: i32,
@@ -388,51 +380,10 @@ impl Scene {
         let mut visible_chunk_indices = Vec::new();
         let mut y_slice_build: BTreeMap<i32, YSliceBuildData> = BTreeMap::new();
         let mut y_slice_lookup_entries = Vec::new();
-        let near_render_dist_sq = RENDER_DISTANCE * RENDER_DISTANCE;
-        let mid_render_dist = (RENDER_DISTANCE * 3.0).max(RENDER_DISTANCE + CHUNK_SIZE as f32);
-        let mid_render_dist_sq = mid_render_dist * mid_render_dist;
-
         for &key in &self.voxel_active_chunks {
-            let Some(chunk_scale) = Self::lod_cell_scale(key.lod_level) else {
-                continue;
-            };
             let chunk_pos = key.chunk_pos;
-            let chunk_span = (CHUNK_SIZE as i32).saturating_mul(chunk_scale);
-            let chunk_min = [
-                chunk_pos.x * chunk_span,
-                chunk_pos.y * chunk_span,
-                chunk_pos.z * chunk_span,
-                chunk_pos.w * chunk_span,
-            ];
-            let chunk_max = [
-                chunk_min[0] + chunk_span,
-                chunk_min[1] + chunk_span,
-                chunk_min[2] + chunk_span,
-                chunk_min[3] + chunk_span,
-            ];
 
-            let mut dist_sq = 0.0f32;
-            for d in 0..4 {
-                let lo = chunk_min[d] as f32;
-                let hi = chunk_max[d] as f32;
-                let c = cam_pos[d];
-                if c < lo {
-                    let delta = lo - c;
-                    dist_sq += delta * delta;
-                } else if c > hi {
-                    let delta = c - hi;
-                    dist_sq += delta * delta;
-                }
-            }
-            if key.lod_level == VOXEL_LOD_LEVEL_NEAR {
-                if dist_sq > near_render_dist_sq {
-                    continue;
-                }
-            } else if key.lod_level == VOXEL_LOD_LEVEL_MID {
-                if dist_sq <= near_render_dist_sq || dist_sq > mid_render_dist_sq {
-                    continue;
-                }
-            } else {
+            if key.lod_level != VOXEL_LOD_LEVEL_NEAR && key.lod_level != VOXEL_LOD_LEVEL_MID {
                 continue;
             }
 
