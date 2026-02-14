@@ -2981,10 +2981,11 @@ impl App {
                     let size = [image.size[0] as u32, image.size[1] as u32];
                     let mut pixels = Vec::with_capacity(image.pixels.len() * 4);
                     for pixel in image.pixels.iter() {
-                        pixels.push(pixel.r());
-                        pixels.push(pixel.g());
-                        pixels.push(pixel.b());
-                        pixels.push(pixel.a());
+                        let [r, g, b, a] = pixel.to_srgba_unmultiplied();
+                        pixels.push(r);
+                        pixels.push(g);
+                        pixels.push(b);
+                        pixels.push(a);
                     }
                     (size, pixels)
                 }
