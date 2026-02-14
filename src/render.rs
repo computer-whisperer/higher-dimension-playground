@@ -212,7 +212,7 @@ pub struct EguiPaintMesh {
 pub struct EguiTextureUpdate {
     pub size: [u32; 2],
     pub pos: Option<[u32; 2]>,
-    pub pixels_alpha: Vec<u8>,
+    pub pixels: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1843,6 +1843,67 @@ fn create_r8_texture_view(
     ImageView::new_default(atlas_image).unwrap()
 }
 
+fn create_rgba8_srgb_texture_view(
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    queue: Arc<Queue>,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Arc<ImageView> {
+    let staging_buffer = Buffer::from_iter(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        pixels.iter().copied(),
+    )
+    .unwrap();
+
+    let atlas_image = Image::new(
+        memory_allocator,
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R8G8B8A8_SRGB,
+            extent: [width.max(1), height.max(1), 1],
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let mut upload_builder = AutoCommandBufferBuilder::primary(
+        command_buffer_allocator,
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+    upload_builder
+        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            staging_buffer,
+            atlas_image.clone(),
+        ))
+        .unwrap();
+    let upload_cmd = upload_builder.build().unwrap();
+    let upload_future = sync::now(queue.device().clone())
+        .then_execute(queue.clone(), upload_cmd)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+    upload_future.wait(None).unwrap();
+
+    ImageView::new_default(atlas_image).unwrap()
+}
+
 fn create_hud_descriptor_set(
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     descriptor_set_layout: Arc<DescriptorSetLayout>,
@@ -2684,8 +2745,8 @@ impl RenderContext {
             for update in updates {
                 let width = update.size[0].max(1);
                 let height = update.size[1].max(1);
-                let expected_len = (width as usize).saturating_mul(height as usize);
-                if update.pixels_alpha.len() != expected_len {
+                let expected_len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+                if update.pixels.len() != expected_len {
                     continue;
                 }
 
@@ -2695,14 +2756,14 @@ impl RenderContext {
                         egui_resources.texture_pixels.clear();
                         egui_resources
                             .texture_pixels
-                            .extend_from_slice(&update.pixels_alpha);
+                            .extend_from_slice(&update.pixels);
                         did_change = true;
                     }
                     Some([x, y]) => {
                         let atlas_w = egui_resources.texture_size[0].max(1);
                         let atlas_h = egui_resources.texture_size[1].max(1);
                         if egui_resources.texture_pixels.len()
-                            != (atlas_w as usize).saturating_mul(atlas_h as usize)
+                            != (atlas_w as usize).saturating_mul(atlas_h as usize).saturating_mul(4)
                         {
                             continue;
                         }
@@ -2711,12 +2772,12 @@ impl RenderContext {
                         }
 
                         for row in 0..height as usize {
-                            let src_start = row * width as usize;
-                            let src_end = src_start + width as usize;
-                            let dst_start = ((y as usize + row) * atlas_w as usize) + x as usize;
-                            let dst_end = dst_start + width as usize;
+                            let src_start = row * width as usize * 4;
+                            let src_end = src_start + width as usize * 4;
+                            let dst_start = ((y as usize + row) * atlas_w as usize + x as usize) * 4;
+                            let dst_end = dst_start + width as usize * 4;
                             egui_resources.texture_pixels[dst_start..dst_end]
-                                .copy_from_slice(&update.pixels_alpha[src_start..src_end]);
+                                .copy_from_slice(&update.pixels[src_start..src_end]);
                         }
                         did_change = true;
                     }
@@ -2729,7 +2790,7 @@ impl RenderContext {
             (egui_resources.texture_size, egui_resources.texture_pixels.clone())
         };
 
-        let new_view = create_r8_texture_view(
+        let new_view = create_rgba8_srgb_texture_view(
             self.memory_allocator.clone(),
             self.command_buffer_allocator.clone(),
             queue,

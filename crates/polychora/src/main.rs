@@ -2711,18 +2711,34 @@ impl App {
             if !matches!(texture_id, egui::TextureId::Managed(0)) {
                 continue;
             }
-            let image = match delta.image {
-                egui::ImageData::Color(image) => image,
+            let (size, pixels) = match delta.image {
+                egui::ImageData::Color(image) => {
+                    let size = [image.size[0] as u32, image.size[1] as u32];
+                    let mut pixels = Vec::with_capacity(image.pixels.len() * 4);
+                    for pixel in image.pixels.iter() {
+                        pixels.push(pixel.r());
+                        pixels.push(pixel.g());
+                        pixels.push(pixel.b());
+                        pixels.push(pixel.a());
+                    }
+                    (size, pixels)
+                }
+                egui::ImageData::Font(image) => {
+                    let size = [image.size[0] as u32, image.size[1] as u32];
+                    let mut pixels = Vec::with_capacity(image.pixels.len() * 4);
+                    for &alpha in image.pixels.iter() {
+                        pixels.push(255); // R
+                        pixels.push(255); // G
+                        pixels.push(255); // B
+                        pixels.push(alpha); // A
+                    }
+                    (size, pixels)
+                }
             };
-            let size = [image.size[0] as u32, image.size[1] as u32];
-            let mut pixels_alpha = Vec::with_capacity(image.pixels.len());
-            for pixel in image.pixels.iter() {
-                pixels_alpha.push(pixel.a());
-            }
             texture_updates.push(EguiTextureUpdate {
                 size,
                 pos: delta.pos.map(|[x, y]| [x as u32, y as u32]),
-                pixels_alpha,
+                pixels,
             });
         }
 

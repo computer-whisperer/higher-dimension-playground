@@ -9,7 +9,7 @@ struct HudVertex
 }
 
 [[vk::binding(0, 0)]] StructuredBuffer<HudVertex> hudVertices;
-[[vk::binding(1, 0)]] Sampler2D<float> fontAtlas;
+[[vk::binding(1, 0)]] Sampler2D<float4> fontAtlas;
 
 struct HudVSOutput
 {
@@ -32,6 +32,6 @@ HudVSOutput mainHudVS(uint vertexId : SV_VertexID)
 [shader("fragment")]
 float4 mainHudFS(HudVSOutput input) : SV_Target
 {
-    float alpha = fontAtlas.Sample(input.texcoord).x;
-    return float4(input.color.rgb, input.color.a * alpha);
+    float4 texColor = fontAtlas.Sample(input.texcoord);
+    return input.color * texColor;
 }
