@@ -29,6 +29,8 @@ const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
 const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
+pub const VOXEL_LOD_LEVEL_NEAR: u8 = 0;
+pub const VOXEL_LOD_LEVEL_MID: u8 = 1;
 
 struct CachedChunkPayload {
     hash: u64,
@@ -46,6 +48,12 @@ struct CachedChunkPayload {
 #[derive(Copy, Clone)]
 struct ChunkPayloadCacheEntry {
     payload_id: u32,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct RuntimeChunkKey {
+    lod_level: u8,
+    chunk_pos: ChunkPos,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -93,10 +101,13 @@ impl VoxelFrameData {
 
 pub struct Scene {
     pub world: crate::voxel::world::VoxelWorld,
+    voxel_lod_chunks: HashMap<RuntimeChunkKey, crate::voxel::chunk::Chunk>,
+    voxel_pending_lod_chunk_updates: Vec<RuntimeChunkKey>,
+    voxel_pending_lod_chunk_update_set: HashSet<RuntimeChunkKey>,
     surface: SurfaceData,
     culled_instances: Vec<common::ModelInstance>,
     cull_log_counter: u64,
-    voxel_chunk_payload_cache: HashMap<ChunkPos, ChunkPayloadCacheEntry>,
+    voxel_chunk_payload_cache: HashMap<RuntimeChunkKey, ChunkPayloadCacheEntry>,
     voxel_chunk_payloads: Vec<Option<CachedChunkPayload>>,
     voxel_chunk_payload_free_ids: Vec<u32>,
     voxel_chunk_payload_hash_buckets: HashMap<u64, Vec<u32>>,
@@ -104,11 +115,11 @@ pub struct Scene {
     voxel_payload_free_slots: Vec<u32>,
     voxel_pending_payload_uploads: Vec<u32>,
     voxel_pending_payload_upload_set: HashSet<u32>,
-    voxel_active_chunks: Vec<ChunkPos>,
-    voxel_active_chunk_indices: HashMap<ChunkPos, usize>,
+    voxel_active_chunks: Vec<RuntimeChunkKey>,
+    voxel_active_chunk_indices: HashMap<RuntimeChunkKey, usize>,
     voxel_world_revision: u64,
     voxel_visibility_generation: u64,
-    voxel_cached_visibility_camera_chunk: Option<[i32; 4]>,
+    voxel_cached_visibility_camera_chunk: Option<[i32; 8]>,
     voxel_cached_visibility_world_revision: u64,
     voxel_payload_slot_overflow_logged: bool,
     voxel_frame_data: VoxelFrameData,
@@ -159,6 +170,9 @@ impl Scene {
         let surface = cull::extract_surfaces(&world);
         let scene = Self {
             world,
+            voxel_lod_chunks: HashMap::new(),
+            voxel_pending_lod_chunk_updates: Vec::new(),
+            voxel_pending_lod_chunk_update_set: HashSet::new(),
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,
@@ -201,6 +215,9 @@ impl Scene {
 
     pub fn replace_world(&mut self, world: crate::voxel::world::VoxelWorld) {
         self.world = world;
+        self.voxel_lod_chunks.clear();
+        self.voxel_pending_lod_chunk_updates.clear();
+        self.voxel_pending_lod_chunk_update_set.clear();
         self.voxel_chunk_payload_cache.clear();
         self.voxel_chunk_payloads.clear();
         self.voxel_chunk_payload_free_ids.clear();
@@ -257,6 +274,52 @@ impl Scene {
             .count();
         self.replace_world(world);
         Ok(non_empty_chunks)
+    }
+
+    fn queue_lod_chunk_update(&mut self, key: RuntimeChunkKey) {
+        if self.voxel_pending_lod_chunk_update_set.insert(key) {
+            self.voxel_pending_lod_chunk_updates.push(key);
+        }
+    }
+
+    pub fn insert_lod_chunk(
+        &mut self,
+        lod_level: u8,
+        chunk_pos: ChunkPos,
+        mut chunk: crate::voxel::chunk::Chunk,
+    ) {
+        if lod_level == VOXEL_LOD_LEVEL_NEAR {
+            self.world.insert_chunk(chunk_pos, chunk);
+            return;
+        }
+
+        let key = RuntimeChunkKey {
+            lod_level,
+            chunk_pos,
+        };
+        chunk.dirty = true;
+        if chunk.is_empty() {
+            self.voxel_lod_chunks.remove(&key);
+        } else {
+            self.voxel_lod_chunks.insert(key, chunk);
+        }
+        self.queue_lod_chunk_update(key);
+    }
+
+    pub fn remove_lod_chunk(&mut self, lod_level: u8, chunk_pos: ChunkPos) -> bool {
+        if lod_level == VOXEL_LOD_LEVEL_NEAR {
+            return self.world.remove_chunk_override(chunk_pos);
+        }
+
+        let key = RuntimeChunkKey {
+            lod_level,
+            chunk_pos,
+        };
+        let removed = self.voxel_lod_chunks.remove(&key).is_some();
+        if removed {
+            self.queue_lod_chunk_update(key);
+        }
+        removed
     }
 
     /// Rebuild surface data if any chunk is dirty.
@@ -561,6 +624,9 @@ mod tests {
         let surface = cull::extract_surfaces(&world);
         Scene {
             world,
+            voxel_lod_chunks: std::collections::HashMap::new(),
+            voxel_pending_lod_chunk_updates: Vec::new(),
+            voxel_pending_lod_chunk_update_set: std::collections::HashSet::new(),
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,

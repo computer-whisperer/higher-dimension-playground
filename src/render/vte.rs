@@ -6,6 +6,8 @@ use vulkano::buffer::Subbuffer;
 #[repr(C)]
 pub struct GpuVoxelChunkHeader {
     pub chunk_coord: [i32; 4],
+    pub lod_level: u32,
+    pub _lod_padding: [u32; 3],
     pub occupancy_word_offset: u32,
     pub material_word_offset: u32,
     pub flags: u32,
@@ -85,7 +87,8 @@ pub(super) struct GpuVoxelFrameMeta {
 pub(super) struct GpuVoxelChunkLookupEntry {
     pub(super) chunk_coord: [i32; 4],
     pub(super) chunk_index: u32,
-    pub(super) _padding: [u32; 3],
+    pub(super) lod_level: u32,
+    pub(super) _padding: [u32; 2],
 }
 
 impl GpuVoxelChunkLookupEntry {
@@ -95,7 +98,8 @@ impl GpuVoxelChunkLookupEntry {
         Self {
             chunk_coord: [0; 4],
             chunk_index: Self::INVALID_INDEX,
-            _padding: [0; 3],
+            lod_level: 0,
+            _padding: [0; 2],
         }
     }
 }
@@ -230,6 +234,11 @@ pub(super) fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
         ^ y.wrapping_mul(0xD816_3841)
         ^ z.wrapping_mul(0xCB1A_B31F)
         ^ w.wrapping_mul(0x1656_67B1)
+}
+
+#[inline]
+pub(super) fn vte_hash_chunk_coord_with_lod(chunk_coord: [i32; 4], lod_level: u32) -> u32 {
+    vte_hash_chunk_coord(chunk_coord) ^ lod_level.wrapping_mul(0x9E37_79B9)
 }
 
 pub(super) fn stage_voxel_payload_updates(

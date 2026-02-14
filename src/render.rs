@@ -4618,8 +4618,10 @@ impl RenderContext {
                             let chunk_index = input.visible_chunk_indices[i]
                                 .min(vte_chunk_count.saturating_sub(1) as u32);
                             let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                            let lod_level = input.chunk_headers[chunk_index as usize].lod_level;
                             let mut slot =
-                                (vte::vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
+                                (vte::vte_hash_chunk_coord_with_lod(chunk_coord, lod_level)
+                                    & hash_mask) as usize;
 
                             for _ in 0..vte_chunk_lookup_capacity {
                                 let entry = &mut writer[slot];
@@ -4629,7 +4631,8 @@ impl RenderContext {
                                     *entry = vte::GpuVoxelChunkLookupEntry {
                                         chunk_coord,
                                         chunk_index,
-                                        _padding: [0; 3],
+                                        lod_level,
+                                        _padding: [0; 2],
                                     };
                                     break;
                                 }
@@ -4880,7 +4883,10 @@ impl RenderContext {
                         let Some(header) = input.chunk_headers.get(chunk_index as usize) else {
                             continue;
                         };
-                        let h = vte::vte_hash_chunk_coord(header.chunk_coord);
+                        let h = vte::vte_hash_chunk_coord_with_lod(
+                            header.chunk_coord,
+                            header.lod_level,
+                        );
                         hash ^= h;
                         hash = hash.wrapping_mul(0x0100_0193);
                     }

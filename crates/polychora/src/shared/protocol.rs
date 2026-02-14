@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub const WORLD_CHUNK_LOD_NEAR: u8 = 0;
+pub const WORLD_CHUNK_LOD_MID: u8 = 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityKind {
     TestCube,
@@ -32,8 +35,15 @@ pub struct WorldSnapshotPayload {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldChunkPayload {
+    pub lod_level: u8,
     pub chunk_pos: [i32; 4],
     pub voxels: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct WorldChunkCoordPayload {
+    pub lod_level: u8,
+    pub chunk_pos: [i32; 4],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,7 +112,7 @@ pub enum ServerMessage {
     },
     WorldChunkUnloadBatch {
         revision: u64,
-        chunks: Vec<[i32; 4]>,
+        chunks: Vec<WorldChunkCoordPayload>,
     },
     Pong {
         nonce: u64,

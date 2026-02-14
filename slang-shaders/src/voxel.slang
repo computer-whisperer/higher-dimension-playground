@@ -9,6 +9,8 @@ import materials;
 static const uint CHUNK_SIZE = 8;
 static const uint CHUNK_VOLUME = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
 static const uint INVALID_INDEX = 0xFFFFFFFF;
+static const float LOD_RING_NEAR_MAX_DISTANCE = 64.0;
+static const float LOD_MID_SCALE = 2.0;
 static const uint CHUNK_FLAG_FULL = 1u << 1u;
 static const uint STAGE_B_MODE_INTEGRAL = 0u;
 static const uint STAGE_B_MODE_SLICE = 1u;
@@ -125,6 +127,10 @@ struct VoxelFrameMeta
 struct VoxelChunkHeader
 {
     int4 chunkCoord;
+    uint lodLevel;
+    uint lodPadding0;
+    uint lodPadding1;
+    uint lodPadding2;
     uint occupancyWordOffset;
     uint materialWordOffset;
     uint flags;
@@ -137,9 +143,9 @@ struct VoxelChunkLookupEntry
 {
     int4 chunkCoord;
     uint chunkIndex;
+    uint lodLevel;
     uint padding0;
     uint padding1;
-    uint padding2;
 }
 
 struct VoxelYSliceBounds
@@ -311,6 +317,11 @@ uint hashChunkCoord(int4 chunkCoord)
          ^ y * 0xD8163841u
          ^ z * 0xCB1AB31Fu
          ^ w * 0x165667B1u;
+}
+
+uint hashChunkCoordWithLod(int4 chunkCoord, uint lodLevel)
+{
+    return hashChunkCoord(chunkCoord) ^ (lodLevel * 0x9E3779B9u);
 }
 
 struct EntityTetraHit
@@ -817,7 +828,7 @@ float3 shadeHighlightedVoxelSample(
     return shaded;
 }
 
-uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
+uint findChunkIndex(int4 chunkCoord, uint lodLevel, VoxelFrameMeta meta)
 {
     if (meta.chunkLookupCapacity == 0)
     {
@@ -825,7 +836,7 @@ uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
     }
 
     uint mask = meta.chunkLookupCapacity - 1;
-    uint slot = hashChunkCoord(chunkCoord) & mask;
+    uint slot = hashChunkCoordWithLod(chunkCoord, lodLevel) & mask;
 
     for (uint probe = 0; probe < meta.chunkLookupCapacity; probe++)
     {
@@ -834,7 +845,9 @@ uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
         {
             return INVALID_INDEX;
         }
-        if (entry.chunkIndex < meta.chunkCount && all(entry.chunkCoord == chunkCoord))
+        if (entry.chunkIndex < meta.chunkCount
+            && entry.lodLevel == lodLevel
+            && all(entry.chunkCoord == chunkCoord))
         {
             return entry.chunkIndex;
         }
@@ -843,8 +856,16 @@ uint findChunkIndex(int4 chunkCoord, VoxelFrameMeta meta)
     return INVALID_INDEX;
 }
 
-uint findChunkIndexFromYSliceLookup(int4 chunkCoord, VoxelYSliceBounds slice, VoxelFrameMeta meta)
+uint findChunkIndexFromYSliceLookup(
+    int4 chunkCoord,
+    uint lodLevel,
+    VoxelYSliceBounds slice,
+    VoxelFrameMeta meta)
 {
+    if (lodLevel != 0u)
+    {
+        return INVALID_INDEX;
+    }
     if (slice.lookupEntryCount == 0u)
     {
         return INVALID_INDEX;
@@ -886,15 +907,22 @@ uint findChunkIndexFromYSliceLookup(int4 chunkCoord, VoxelYSliceBounds slice, Vo
     {
         return INVALID_INDEX;
     }
+    VoxelChunkHeader h = voxelChunkHeaders[chunkIndex];
+    if (h.lodLevel != lodLevel || !all(h.chunkCoord == chunkCoord))
+    {
+        return INVALID_INDEX;
+    }
     return chunkIndex;
 }
 
-uint findChunkIndexLinearVisible(int4 chunkCoord, VoxelFrameMeta meta)
+uint findChunkIndexLinearVisible(int4 chunkCoord, uint lodLevel, VoxelFrameMeta meta)
 {
     for (uint i = 0; i < meta.visibleChunkCount; i++)
     {
         uint chunkIndex = voxelVisibleChunkIndices[i];
-        if (chunkIndex < meta.chunkCount && all(voxelChunkHeaders[chunkIndex].chunkCoord == chunkCoord))
+        if (chunkIndex < meta.chunkCount
+            && voxelChunkHeaders[chunkIndex].lodLevel == lodLevel
+            && all(voxelChunkHeaders[chunkIndex].chunkCoord == chunkCoord))
         {
             return chunkIndex;
         }
@@ -1449,6 +1477,10 @@ bool traceVoxelRayReferenceVisible(
         }
 
         VoxelChunkHeader h = voxelChunkHeaders[chunkIndex];
+        if (h.lodLevel != 0u)
+        {
+            continue;
+        }
         float tEnter = 0.0;
         float tExit = 0.0;
         if (!intersectChunkAABB(rayOrigin, rayDir, h.chunkCoord, tEnter, tExit))
@@ -1501,6 +1533,7 @@ bool traceVoxelRayDDAByYSlicesFast(
     float4 rayOrigin,
     float4 rayDir,
     VoxelFrameMeta meta,
+    uint targetLodLevel,
     out uint hitMaterial,
     out float4 hitPos,
     out int4 hitChunkCoord,
@@ -1519,6 +1552,10 @@ bool traceVoxelRayDDAByYSlicesFast(
     outRemainingVoxelSteps = 0u;
     outFinalT = 0.0;
     outLastChunkCoord = int4(0, 0, 0, 0);
+    if (targetLodLevel != 0u)
+    {
+        return false;
+    }
 
     uint sliceCount = min(meta.ySliceCount, FAST_Y_SLICE_LIMIT);
     if (sliceCount == 0u)
@@ -1655,11 +1692,12 @@ bool traceVoxelRayDDAByYSlicesFast(
                     && slice.lookupEntryCount > 0u;
                 if (useLookupCache)
                 {
-                    chunkIndex = findChunkIndexFromYSliceLookup(chunkCoord4, slice, meta);
+                    chunkIndex =
+                        findChunkIndexFromYSliceLookup(chunkCoord4, targetLodLevel, slice, meta);
                 }
                 else
                 {
-                    chunkIndex = findChunkIndex(chunkCoord4, meta);
+                    chunkIndex = findChunkIndex(chunkCoord4, targetLodLevel, meta);
                 }
 
                 if (chunkIndex != INVALID_INDEX)
@@ -1761,6 +1799,7 @@ bool traceVoxelRayDDA(
     float4 rayOrigin,
     float4 rayDir,
     VoxelFrameMeta meta,
+    uint targetLodLevel,
     out uint hitMaterial,
     out float4 hitPos,
     out int4 hitChunkCoord,
@@ -1791,6 +1830,7 @@ bool traceVoxelRayDDA(
     bool collectDebugFlags = (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
         || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL);
     if (!collectDebugFlags
+        && targetLodLevel == 0u
         && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u
         && meta.ySliceCount > 1u
         && meta.ySliceCount <= FAST_Y_SLICE_LIMIT)
@@ -1799,6 +1839,7 @@ bool traceVoxelRayDDA(
             rayOrigin,
             rayDir,
             meta,
+            targetLodLevel,
             hitMaterial,
             hitPos,
             hitChunkCoord,
@@ -2049,20 +2090,21 @@ bool traceVoxelRayDDA(
                 if (lookupSlice.lookupEntryCount > 0u)
                 {
                     lookupDecidesMiss = true;
-                    chunkIndex = findChunkIndexFromYSliceLookup(chunkCoord, lookupSlice, meta);
+                    chunkIndex =
+                        findChunkIndexFromYSliceLookup(chunkCoord, targetLodLevel, lookupSlice, meta);
                 }
             }
         }
 
         if (chunkIndex == INVALID_INDEX && inVisibleChunkBounds && !lookupDecidesMiss)
         {
-            chunkIndex = findChunkIndex(chunkCoord, meta);
+            chunkIndex = findChunkIndex(chunkCoord, targetLodLevel, meta);
         }
         if (chunkIndex == INVALID_INDEX && inVisibleChunkBounds
             && (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
                 || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL))
         {
-            uint linearChunkIndex = findChunkIndexLinearVisible(chunkCoord, meta);
+            uint linearChunkIndex = findChunkIndexLinearVisible(chunkCoord, targetLodLevel, meta);
             if (linearChunkIndex != INVALID_INDEX)
             {
                 // Hash lookup false negative: fall back so debug mode can keep tracing.
@@ -2164,6 +2206,135 @@ bool traceVoxelRayDDA(
     outFinalT = currentT;
     outLastChunkCoord = lastChunkCoord;
     return false;
+}
+
+bool traceVoxelRayDDAWithLodRings(
+    float4 rayOrigin,
+    float4 rayDir,
+    VoxelFrameMeta meta,
+    out uint hitMaterial,
+    out float4 hitPos,
+    out int4 hitChunkCoord,
+    out uint missReason,
+    out uint debugFlags,
+    out uint outChunkStepsTaken,
+    out uint outRemainingVoxelSteps,
+    out float outFinalT,
+    out int4 outLastChunkCoord)
+{
+    hitMaterial = 0u;
+    hitPos = float4(0.0, 0.0, 0.0, 0.0);
+    hitChunkCoord = int4(0, 0, 0, 0);
+    missReason = MISS_REASON_NONE;
+    debugFlags = 0u;
+    outChunkStepsTaken = 0u;
+    outRemainingVoxelSteps = 0u;
+    outFinalT = 0.0;
+    outLastChunkCoord = int4(0, 0, 0, 0);
+
+    float nearMaxDistance = min(max(1.0, meta.maxTraceDistance), LOD_RING_NEAR_MAX_DISTANCE);
+    VoxelFrameMeta nearMeta = meta;
+    nearMeta.maxTraceDistance = nearMaxDistance;
+
+    uint nearHitMaterial = 0u;
+    float4 nearHitPos = float4(0.0, 0.0, 0.0, 0.0);
+    int4 nearHitChunkCoord = int4(0, 0, 0, 0);
+    uint nearMissReason = MISS_REASON_NONE;
+    uint nearDebugFlags = 0u;
+    uint nearChunkStepsTaken = 0u;
+    uint nearRemainingVoxelSteps = 0u;
+    float nearFinalT = 0.0;
+    int4 nearLastChunkCoord = int4(0, 0, 0, 0);
+    bool nearHit = traceVoxelRayDDA(
+        rayOrigin,
+        rayDir,
+        nearMeta,
+        0u,
+        nearHitMaterial,
+        nearHitPos,
+        nearHitChunkCoord,
+        nearMissReason,
+        nearDebugFlags,
+        nearChunkStepsTaken,
+        nearRemainingVoxelSteps,
+        nearFinalT,
+        nearLastChunkCoord);
+
+    hitMaterial = nearHitMaterial;
+    hitPos = nearHitPos;
+    hitChunkCoord = nearHitChunkCoord;
+    missReason = nearMissReason;
+    debugFlags = nearDebugFlags;
+    outChunkStepsTaken = nearChunkStepsTaken;
+    outRemainingVoxelSteps = nearRemainingVoxelSteps;
+    outFinalT = nearFinalT;
+    outLastChunkCoord = nearLastChunkCoord;
+
+    if (nearHit)
+    {
+        return true;
+    }
+
+    bool allowMidLod = meta.stageBMode != STAGE_B_MODE_DEBUG_COMPARE
+        && meta.stageBMode != STAGE_B_MODE_DEBUG_INTEGRAL
+        && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u;
+    if (!allowMidLod || meta.maxTraceDistance <= nearMaxDistance + 1e-6)
+    {
+        return false;
+    }
+
+    float midBudget = max(0.0, meta.maxTraceDistance - nearMaxDistance);
+    if (midBudget <= 1e-6)
+    {
+        return false;
+    }
+
+    float4 midOrigin = (rayOrigin + rayDir * nearMaxDistance) / LOD_MID_SCALE;
+    float4 midDir = rayDir / LOD_MID_SCALE;
+    VoxelFrameMeta midMeta = meta;
+    midMeta.maxTraceDistance = midBudget;
+    midMeta.debugFlags &= ~META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
+
+    uint midHitMaterial = 0u;
+    float4 midHitPosScaled = float4(0.0, 0.0, 0.0, 0.0);
+    int4 midHitChunkCoord = int4(0, 0, 0, 0);
+    uint midMissReason = MISS_REASON_NONE;
+    uint midDebugFlags = 0u;
+    uint midChunkStepsTaken = 0u;
+    uint midRemainingVoxelSteps = 0u;
+    float midFinalT = 0.0;
+    int4 midLastChunkCoord = int4(0, 0, 0, 0);
+    bool midHit = traceVoxelRayDDA(
+        midOrigin,
+        midDir,
+        midMeta,
+        1u,
+        midHitMaterial,
+        midHitPosScaled,
+        midHitChunkCoord,
+        midMissReason,
+        midDebugFlags,
+        midChunkStepsTaken,
+        midRemainingVoxelSteps,
+        midFinalT,
+        midLastChunkCoord);
+
+    outChunkStepsTaken = nearChunkStepsTaken + midChunkStepsTaken;
+    outRemainingVoxelSteps = midRemainingVoxelSteps;
+    outFinalT = nearMaxDistance + midFinalT;
+    outLastChunkCoord = midLastChunkCoord;
+    debugFlags = nearDebugFlags | midDebugFlags;
+    missReason = midMissReason;
+
+    if (!midHit)
+    {
+        return false;
+    }
+
+    hitMaterial = midHitMaterial;
+    hitPos = midHitPosScaled * LOD_MID_SCALE;
+    hitChunkCoord = midHitChunkCoord;
+    return true;
 }
 
 [shader("compute")]
@@ -2277,7 +2448,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         for (uint sampleLayer = 0u; sampleLayer < layerCount; sampleLayer++)
         {
             float4 worldDirection = normalize(worldXY + worldDirZ * cosAngle + worldDirW * sinAngle);
-            bool hit = traceVoxelRayDDA(
+            bool hit = traceVoxelRayDDAWithLodRings(
                 worldOrigin,
                 worldDirection,
                 meta,
@@ -2435,7 +2606,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     uint remainingVoxelSteps = 0u;
     float finalT = 0.0;
     int4 lastChunkCoord = int4(0, 0, 0, 0);
-    bool hit = traceVoxelRayDDA(
+    bool hit = traceVoxelRayDDAWithLodRings(
         worldOrigin,
         worldDirection,
         meta,

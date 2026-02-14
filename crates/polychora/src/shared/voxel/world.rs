@@ -118,6 +118,40 @@ impl VoxelWorld {
         self.base_kind
     }
 
+    /// Returns coarse Y bounds (inclusive) where base terrain can be non-empty
+    /// for a given chunk scale. `None` means no base chunks at that scale.
+    pub fn base_chunk_y_bounds_for_scale(&self, chunk_scale: i32) -> Option<(i32, i32)> {
+        let scale = chunk_scale.max(1);
+        match self.base_kind {
+            BaseWorldKind::Empty => None,
+            BaseWorldKind::FlatFloor { .. } => {
+                if self.flat_floor_chunk.is_empty() {
+                    None
+                } else {
+                    let y = FLAT_FLOOR_CHUNK_Y.div_euclid(scale);
+                    Some((y, y))
+                }
+            }
+        }
+    }
+
+    /// Returns whether the base terrain alone has any solid voxel in a chunk
+    /// region at the given chunk scale.
+    pub fn base_chunk_has_content_for_scale(&self, pos: ChunkPos, chunk_scale: i32) -> bool {
+        let scale = chunk_scale.max(1);
+        match self.base_kind {
+            BaseWorldKind::Empty => false,
+            BaseWorldKind::FlatFloor { .. } => {
+                if self.flat_floor_chunk.is_empty() {
+                    return false;
+                }
+                let min_y = pos.y.saturating_mul(scale);
+                let max_y = min_y.saturating_add(scale - 1);
+                FLAT_FLOOR_CHUNK_Y >= min_y && FLAT_FLOOR_CHUNK_Y <= max_y
+            }
+        }
+    }
+
     pub fn has_chunk_override(&self, pos: ChunkPos) -> bool {
         self.chunks.contains_key(&pos)
     }
@@ -312,5 +346,34 @@ impl VoxelWorld {
         for chunk in self.chunks.values_mut() {
             chunk.dirty = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flat_floor_scaled_bounds_and_content_are_consistent() {
+        let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            material: VoxelType(1),
+        });
+
+        assert_eq!(world.base_chunk_y_bounds_for_scale(1), Some((-1, -1)));
+        assert_eq!(world.base_chunk_y_bounds_for_scale(2), Some((-1, -1)));
+        assert_eq!(world.base_chunk_y_bounds_for_scale(4), Some((-1, -1)));
+
+        assert!(world.base_chunk_has_content_for_scale(ChunkPos::new(0, -1, 0, 0), 2));
+        assert!(!world.base_chunk_has_content_for_scale(ChunkPos::new(0, 0, 0, 0), 2));
+        assert!(world.base_chunk_has_content_for_scale(ChunkPos::new(0, -1, 0, 0), 4));
+        assert!(!world.base_chunk_has_content_for_scale(ChunkPos::new(0, 0, 0, 0), 4));
+    }
+
+    #[test]
+    fn empty_base_has_no_scaled_content() {
+        let world = VoxelWorld::new_with_base(BaseWorldKind::Empty);
+        assert_eq!(world.base_chunk_y_bounds_for_scale(1), None);
+        assert_eq!(world.base_chunk_y_bounds_for_scale(2), None);
+        assert!(!world.base_chunk_has_content_for_scale(ChunkPos::new(12, -4, -3, 7), 2));
     }
 }

@@ -2242,7 +2242,8 @@ impl App {
                 payload.chunk_pos[2],
                 payload.chunk_pos[3],
             );
-            self.scene.world.insert_chunk(chunk_pos, chunk);
+            self.scene
+                .insert_lod_chunk(payload.lod_level, chunk_pos, chunk);
             applied_chunks += 1;
         }
 
@@ -2254,11 +2255,20 @@ impl App {
         }
     }
 
-    fn apply_multiplayer_chunk_unload_batch(&mut self, revision: u64, chunks: Vec<[i32; 4]>) {
+    fn apply_multiplayer_chunk_unload_batch(
+        &mut self,
+        revision: u64,
+        chunks: Vec<multiplayer::WorldChunkCoordPayload>,
+    ) {
         let mut removed_chunks = 0usize;
-        for chunk_pos in chunks {
-            let pos = voxel::ChunkPos::new(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]);
-            if self.scene.world.remove_chunk_override(pos) {
+        for payload in chunks {
+            let pos = voxel::ChunkPos::new(
+                payload.chunk_pos[0],
+                payload.chunk_pos[1],
+                payload.chunk_pos[2],
+                payload.chunk_pos[3],
+            );
+            if self.scene.remove_lod_chunk(payload.lod_level, pos) {
                 removed_chunks += 1;
             }
         }
