@@ -132,7 +132,9 @@ pub fn cpu_render(
             let r = (linear_to_gamma(mapped[0]) * 255.0).clamp(0.0, 255.0) as u8;
             let g = (linear_to_gamma(mapped[1]) * 255.0).clamp(0.0, 255.0) as u8;
             let b = (linear_to_gamma(mapped[2]) * 255.0).clamp(0.0, 255.0) as u8;
-            img.put_pixel(px as u32, py as u32, image::Rgba([r, g, b, 255]));
+            // Background pixels (no geometry hit) are black — make them transparent
+            let alpha = if rgb == [0.0; 3] { 0 } else { 255 };
+            img.put_pixel(px as u32, py as u32, image::Rgba([r, g, b, alpha]));
         }
     }
 
@@ -831,7 +833,19 @@ fn sample_material(id: u32, tex_pos: [f32; 4]) -> ([f32; 3], f32) {
                 0.15 * center_glow,
             )
         }
-        _ => ([0.0, 0.0, 0.0], 0.0),
+        _ => {
+            // Look up material color from database
+            if let Some(mat_info) = crate::materials::MATERIALS.iter().find(|m| m.id as u32 == id) {
+                let color = [
+                    mat_info.color[0] as f32 / 255.0,
+                    mat_info.color[1] as f32 / 255.0,
+                    mat_info.color[2] as f32 / 255.0,
+                ];
+                (color, 0.0) // basic_lum = 0.0, standard lit material
+            } else {
+                ([0.0, 0.0, 0.0], 0.0) // truly unknown material
+            }
+        }
     }
 }
 
