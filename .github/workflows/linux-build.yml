@@ -1,0 +1,66 @@
+name: Linux Builds
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  build:
+    name: Build workspace (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan-dev \
+            spirv-tools \
+            libx11-dev \
+            libxext-dev \
+            libxcb1-dev \
+            libwayland-dev
+
+      - name: Download and install Slang compiler
+        run: |
+          wget https://github.com/shader-slang/slang/releases/download/v2026.2.1/slang-2026.2.1-linux-x86_64.tar.gz
+          tar -xzf slang-2026.2.1-linux-x86_64.tar.gz
+          echo "$GITHUB_WORKSPACE/slang-2026.2.1-linux-x86_64/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/slang-2026.2.1-linux-x86_64/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Verify shader toolchain
+        run: |
+          slangc --version
+          spirv-link --version
+          spirv-val --version
+
+      - name: Build workspace
+        run: cargo build --release --workspace
+
+      - name: Package binaries
+        run: |
+          mkdir -p polychora-linux-x86_64
+          cp target/release/polychora polychora-linux-x86_64/
+          cp target/release/polychora-server polychora-linux-x86_64/
+          cp target/release/worldgen-cli polychora-linux-x86_64/
+          cp target/release/demo polychora-linux-x86_64/
+          tar -czf polychora-linux-x86_64.tar.gz polychora-linux-x86_64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: polychora-linux-x86_64.tar.gz
+          if-no-files-found: error
