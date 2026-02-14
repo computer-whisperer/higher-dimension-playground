@@ -1294,6 +1294,11 @@ impl PresentPipelineContext {
             device.clone(),
             PipelineLayoutCreateInfo {
                 set_layouts: vec![hud_descriptor_set_layout],
+                push_constant_ranges: vec![PushConstantRange {
+                    stages: ShaderStages::VERTEX,
+                    offset: 0,
+                    size: 4, // u32 vertex base into HUD SSBO
+                }],
                 ..Default::default()
             },
         )
@@ -2501,11 +2506,7 @@ impl RenderContext {
                             )
                         });
 
-                        (
-                            Some(hud_vertex_buffer),
-                            hud_descriptor_set,
-                            egui_descriptor_set,
-                        )
+                        (Some(hud_vertex_buffer), hud_descriptor_set, egui_descriptor_set)
                     }
                     None => (None, None, None),
                 };
@@ -5752,8 +5753,15 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             builder
                                 .set_scissor(0, [batch.scissor].into_iter().collect())
                                 .unwrap();
+                            builder
+                                .push_constants(
+                                    present_pipeline.hud_pipeline_layout.clone(),
+                                    0,
+                                    [batch.first_vertex],
+                                )
+                                .unwrap();
                             unsafe {
-                                builder.draw(batch.vertex_count, 1, batch.first_vertex, 0)
+                                builder.draw(batch.vertex_count, 1, 0, 0)
                             }
                             .unwrap();
                         }

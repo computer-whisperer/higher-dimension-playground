@@ -11,6 +11,15 @@ struct HudVertex
 [[vk::binding(0, 0)]] StructuredBuffer<HudVertex> hudVertices;
 [[vk::binding(1, 0)]] Sampler2D<float4> fontAtlas;
 
+// Per-draw base vertex into the shared HUD/egui vertex buffer.
+struct HudDrawParams
+{
+    uint vertexBase;
+}
+
+[[vk::push_constant]]
+HudDrawParams hudDrawParams;
+
 struct HudVSOutput
 {
     float4 position : SV_Position;
@@ -22,7 +31,7 @@ struct HudVSOutput
 HudVSOutput mainHudVS(uint vertexId : SV_VertexID)
 {
     HudVSOutput output;
-    HudVertex v = hudVertices[vertexId];
+    HudVertex v = hudVertices[hudDrawParams.vertexBase + vertexId];
     output.position = float4(v.position.x, v.position.y, 0.0, 1.0);
     output.texcoord = v.texcoord;
     output.color = v.color;

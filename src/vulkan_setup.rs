@@ -39,6 +39,9 @@ pub fn vulkan_setup(
         vulkan_memory_model_device_scope: true,
         variable_pointers: true,
         variable_pointers_storage_buffer: true,
+        // Required by our Slang compile flags (`-fvk-use-scalar-layout`) and
+        // validated by `spirv-val --scalar-block-layout`.
+        scalar_block_layout: true,
         shader_int64: true,
         shader_int8: true,
         shader_draw_parameters: true,
