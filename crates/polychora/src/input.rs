@@ -607,6 +607,10 @@ impl InputState {
         v
     }
 
+    pub fn request_look_at(&mut self) {
+        self.look_at_requested = true;
+    }
+
     pub fn take_look_at(&mut self) -> bool {
         let v = self.look_at_requested;
         self.look_at_requested = false;

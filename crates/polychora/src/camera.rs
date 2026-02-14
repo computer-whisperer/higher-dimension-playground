@@ -757,6 +757,42 @@ impl Camera4D {
         self.stabilize_look_up_axis(LOOK_TRANSPORT_UPRIGHT_DAMPING);
     }
 
+    /// Smoothly pull look-frame orientation to face a target direction.
+    /// Constructs a target frame from the direction, keeping the side axis
+    /// as close to the current one as possible and the up axis close to world +Y.
+    /// Returns true when converged.
+    pub fn pull_toward_target_direction_look_frame(
+        &mut self,
+        target_dir: [f32; 4],
+        dt: f32,
+    ) -> bool {
+        let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_HOME, dt);
+        let target_forward = Self::normalize_with_fallback(target_dir, self.look_forward);
+
+        // Side: project current side out of target_forward, normalize
+        let mut target_side = Self::sub_projection(self.look_side, target_forward);
+        target_side = Self::normalize_with_fallback(target_side, [0.0, 0.0, 0.0, 1.0]);
+
+        // Up: world +Y projected away from forward and side
+        let world_up = [0.0, 1.0, 0.0, 0.0];
+        let mut target_up = Self::sub_projection(world_up, target_forward);
+        target_up = Self::sub_projection(target_up, target_side);
+        target_up = Self::normalize_with_fallback(target_up, self.look_up);
+
+        // Right: whatever is left in the orthogonal complement
+        let mut target_right = Self::sub_projection(self.look_right, target_forward);
+        target_right = Self::sub_projection(target_right, target_side);
+        target_right = Self::sub_projection(target_right, target_up);
+        target_right = Self::normalize_with_fallback(target_right, [0.0, 0.0, 1.0, 0.0]);
+
+        self.blend_look_frame_toward(target_right, target_up, target_forward, target_side, alpha);
+        self.stabilize_look_up_axis(LOOK_TRANSPORT_YAW_UPRIGHT_LOCK);
+
+        // Check convergence
+        let dot = Self::dot4(self.look_forward, target_forward);
+        dot > 0.9999
+    }
+
     /// Smoothly pull angle-parameterized orientation toward canonical +X home.
     pub fn pull_toward_home_angles(&mut self, dt: f32) {
         let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_HOME, dt);

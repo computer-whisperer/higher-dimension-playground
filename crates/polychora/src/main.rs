@@ -183,6 +183,7 @@ fn parse_keycode(key: &str) -> Option<KeyCode> {
         "q" => Some(KeyCode::KeyQ),
         "r" => Some(KeyCode::KeyR),
         "f" => Some(KeyCode::KeyF),
+        "g" => Some(KeyCode::KeyG),
         "tab" => Some(KeyCode::Tab),
         "space" => Some(KeyCode::Space),
         "shift" => Some(KeyCode::ShiftLeft),
@@ -1017,11 +1018,14 @@ fn format_file_size(bytes: u64) -> String {
 }
 
 #[derive(Copy, Clone)]
-struct LookAtTarget {
-    yaw: f32,
-    pitch: f32,
-    xw_angle: f32,
-    zw_angle: f32,
+enum LookAtTarget {
+    Angles {
+        yaw: f32,
+        pitch: f32,
+        xw_angle: f32,
+        zw_angle: f32,
+    },
+    Direction([f32; 4]),
 }
 
 struct App {
@@ -1897,6 +1901,9 @@ impl App {
                 if self.menu_open {
                     // Handle menu activation
                 }
+            }
+            KeyCode::KeyG => {
+                self.input.request_look_at();
             }
             _ => {}
         }
@@ -4961,8 +4968,8 @@ impl App {
                 }
             }
 
-            // Look-at: on G press, find nearest solid block and set target angles.
-            // Works with any angle-based control scheme.
+            // Look-at: on G press, find nearest solid block and smoothly
+            // rotate the camera toward it.
             if self.input.take_look_at() && self.mouse_grabbed {
                 let look_dir = self.current_look_direction();
                 let edit_reach = self
@@ -4985,26 +4992,36 @@ impl App {
                         target_pos[2] - self.camera.position[2],
                         target_pos[3] - self.camera.position[3],
                     ];
-                    let (ty, tp, txw, tzw) =
-                        Camera4D::angles_for_direction_upright(dir);
-                    self.look_at_target = Some(LookAtTarget {
-                        yaw: ty,
-                        pitch: tp,
-                        xw_angle: txw,
-                        zw_angle: tzw,
-                    });
+                    match self.control_scheme {
+                        ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                            self.look_at_target = Some(LookAtTarget::Direction(dir));
+                        }
+                        _ => {
+                            let (ty, tp, txw, tzw) =
+                                Camera4D::angles_for_direction_upright(dir);
+                            self.look_at_target = Some(LookAtTarget::Angles {
+                                yaw: ty,
+                                pitch: tp,
+                                xw_angle: txw,
+                                zw_angle: tzw,
+                            });
+                        }
+                    }
                 }
             }
 
             // Apply smooth pull toward look-at target
             if let Some(target) = self.look_at_target {
-                let converged = self.camera.pull_toward_target_angles(
-                    target.yaw,
-                    target.pitch,
-                    target.xw_angle,
-                    target.zw_angle,
-                    dt,
-                );
+                let converged = match target {
+                    LookAtTarget::Angles { yaw, pitch, xw_angle, zw_angle } => {
+                        self.camera.pull_toward_target_angles(
+                            yaw, pitch, xw_angle, zw_angle, dt,
+                        )
+                    }
+                    LookAtTarget::Direction(dir) => {
+                        self.camera.pull_toward_target_direction_look_frame(dir, dt)
+                    }
+                };
                 if converged {
                     self.look_at_target = None;
                 }
