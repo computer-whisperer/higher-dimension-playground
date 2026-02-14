@@ -1,4 +1,4 @@
-use polychora_common::protocol::{ClientMessage, ServerMessage};
+pub use polychora_common::protocol::{ClientMessage, ServerMessage};
 use std::io::{self, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;

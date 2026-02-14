@@ -21,6 +21,7 @@ use vulkano::device::{Device, Queue};
 use vulkano::instance::Instance;
 use winit::{
     application::ApplicationHandler,
+    dpi::LogicalSize,
     event::{DeviceEvent, DeviceId, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
@@ -300,6 +301,22 @@ struct Args {
     /// Display name sent to multiplayer server on connect.
     #[arg(long)]
     player_name: Option<String>,
+
+    /// Window inner width (overrides OS default)
+    #[arg(long)]
+    window_width: Option<u32>,
+
+    /// Window inner height (overrides OS default)
+    #[arg(long)]
+    window_height: Option<u32>,
+
+    /// Output path for --gpu-screenshot (default: frames/gpu_render.png)
+    #[arg(long, default_value = "frames/gpu_render.png")]
+    screenshot_output: PathBuf,
+
+    /// Suppress all HUD/overlay elements in screenshot
+    #[arg(long)]
+    no_hud: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -2716,17 +2733,6 @@ impl App {
                     }
                     (size, pixels)
                 }
-                egui::ImageData::Font(image) => {
-                    let size = [image.size[0] as u32, image.size[1] as u32];
-                    let mut pixels = Vec::with_capacity(image.pixels.len() * 4);
-                    for &alpha in image.pixels.iter() {
-                        pixels.push(255); // R
-                        pixels.push(255); // G
-                        pixels.push(255); // B
-                        pixels.push(alpha); // A
-                    }
-                    (size, pixels)
-                }
             };
             texture_updates.push(EguiTextureUpdate {
                 size,
@@ -3375,6 +3381,9 @@ impl App {
                 }
             }
         }
+        if self.args.no_hud {
+            custom_overlay_lines.clear();
+        }
 
         let mut vte_highlight_hit_voxel = None;
         let mut vte_highlight_place_voxel = None;
@@ -3401,7 +3410,11 @@ impl App {
             take_screenshot = true;
         }
         if take_screenshot {
-            let _ = std::fs::create_dir_all("frames");
+            if let Some(parent) = self.args.screenshot_output.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
             if auto_screenshot {
                 self.should_exit_after_render = true;
             }
@@ -3420,8 +3433,15 @@ impl App {
         } else {
             "off".to_string()
         };
-        let egui_paint = self.run_egui_frame();
-        let do_navigation_hud = !self.menu_open && self.info_panel_mode != InfoPanelMode::Off;
+        let egui_paint = if self.args.no_hud {
+            None
+        } else {
+            self.run_egui_frame()
+        };
+        let mut do_navigation_hud = !self.menu_open && self.info_panel_mode != InfoPanelMode::Off;
+        if self.args.no_hud {
+            do_navigation_hud = false;
+        }
         let hud_readout_mode = if !self.menu_open
             && matches!(
                 self.info_panel_mode,
@@ -3440,6 +3460,11 @@ impl App {
             hud_target_hit_voxel,
             hud_target_hit_face,
         );
+        let hud_rotation_label = if self.args.no_hud {
+            None
+        } else {
+            hud_rotation_label
+        };
 
         let render_options = RenderOptions {
             do_raster: true,
@@ -3458,8 +3483,8 @@ impl App {
             vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,
             vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
             vte_integral_log_merge_k: self.vte_integral_log_merge_k,
-            vte_highlight_hit_voxel,
-            vte_highlight_place_voxel,
+            vte_highlight_hit_voxel: if self.args.no_hud { None } else { vte_highlight_hit_voxel },
+            vte_highlight_place_voxel: if self.args.no_hud { None } else { vte_highlight_place_voxel },
             do_navigation_hud,
             custom_overlay_lines,
             take_framebuffer_screenshot: take_screenshot,
@@ -3468,7 +3493,7 @@ impl App {
             hud_rotation_label,
             hud_target_hit_voxel,
             hud_target_hit_face,
-            hud_player_tags,
+            hud_player_tags: if self.args.no_hud { Vec::new() } else { hud_player_tags },
             egui_paint,
             ..Default::default()
         };
@@ -3517,29 +3542,35 @@ impl App {
         }
 
         if auto_screenshot {
-            let _ = std::fs::create_dir_all("frames");
+            if let Some(parent) = self.args.screenshot_output.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
             match self.args.gpu_screenshot_source {
                 GpuScreenshotSourceArg::RenderBuffer => {
                     self.rcx
                         .as_mut()
                         .unwrap()
-                        .save_rendered_frame_png("frames/gpu_render.png");
+                        .save_rendered_frame_png(self.args.screenshot_output.to_str().unwrap_or("frames/gpu_render.png"));
                 }
                 GpuScreenshotSourceArg::Framebuffer => {
                     if let Some(src_path) = latest_framebuffer_screenshot_path() {
-                        if let Err(err) = std::fs::copy(&src_path, "frames/gpu_render.webp") {
+                        let webp_path = self.args.screenshot_output.with_extension("webp");
+                        if let Err(err) = std::fs::copy(&src_path, &webp_path) {
                             eprintln!(
-                                "Failed to copy framebuffer screenshot {} -> frames/gpu_render.webp: {}",
+                                "Failed to copy framebuffer screenshot {} -> {}: {}",
                                 src_path.display(),
+                                webp_path.display(),
                                 err
                             );
                         }
                         match image::open(&src_path) {
                             Ok(img) => {
-                                if let Err(err) = img.save("frames/gpu_render.png") {
-                                    eprintln!("Failed to save frames/gpu_render.png: {err}");
+                                if let Err(err) = img.save(&self.args.screenshot_output) {
+                                    eprintln!("Failed to save {}: {err}", self.args.screenshot_output.display());
                                 } else {
-                                    println!("Saved PNG to frames/gpu_render.png");
+                                    println!("Saved PNG to {}", self.args.screenshot_output.display());
                                 }
                             }
                             Err(err) => {
@@ -3557,6 +3588,52 @@ impl App {
                     }
                 }
             }
+            // Write JSON sidecar metadata
+            {
+                let json_path = self.args.screenshot_output.with_extension("json");
+                let window_size = self.rcx.as_ref()
+                    .and_then(|rcx| rcx.window.as_ref())
+                    .map(|w| {
+                        let size = w.inner_size();
+                        [size.width, size.height]
+                    })
+                    .unwrap_or([0, 0]);
+
+                let metadata = serde_json::json!({
+                    "render_width": self.args.width,
+                    "render_height": self.args.height,
+                    "render_layers": self.args.layers,
+                    "window_width": window_size[0],
+                    "window_height": window_size[1],
+                    "camera_position": [
+                        self.camera.position[0],
+                        self.camera.position[1],
+                        self.camera.position[2],
+                        self.camera.position[3],
+                    ],
+                    "camera_angles_rad": [
+                        self.camera.yaw,
+                        self.camera.pitch,
+                        self.camera.xw_angle,
+                        self.camera.zw_angle,
+                    ],
+                    "backend": format!("{:?}", self.args.backend),
+                    "vte_display_mode": format!("{:?}", self.args.vte_display_mode),
+                    "gpu_screenshot_source": format!("{:?}", self.args.gpu_screenshot_source),
+                    "world_file": if self.args.load_world {
+                        Some(self.args.world_file.to_string_lossy().into_owned())
+                    } else {
+                        None
+                    },
+                    "scene": format!("{:?}", self.args.scene),
+                    "no_hud": self.args.no_hud,
+                });
+
+                match std::fs::write(&json_path, serde_json::to_string_pretty(&metadata).unwrap()) {
+                    Ok(()) => println!("Saved metadata to {}", json_path.display()),
+                    Err(err) => eprintln!("Failed to save metadata {}: {}", json_path.display(), err),
+                }
+            }
             self.should_exit_after_render = true;
         }
 
@@ -3567,9 +3644,29 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
+        let window_attrs = {
+            let attrs = Window::default_attributes();
+            // When explicit window size given, use it.
+            // When --gpu-screenshot active but no explicit window size, match render buffer.
+            let (w, h) = if self.args.window_width.is_some() || self.args.window_height.is_some() {
+                (
+                    self.args.window_width.unwrap_or(self.args.width),
+                    self.args.window_height.unwrap_or(self.args.height),
+                )
+            } else if self.args.gpu_screenshot {
+                (self.args.width, self.args.height)
+            } else {
+                (0, 0) // sentinel: use default
+            };
+            if w > 0 && h > 0 {
+                attrs.with_inner_size(LogicalSize::new(w, h))
+            } else {
+                attrs
+            }
+        };
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes())
+                .create_window(window_attrs)
                 .unwrap(),
         );
         self.egui_winit_state = Some(egui_winit::State::new(
