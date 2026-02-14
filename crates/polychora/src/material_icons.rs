@@ -89,7 +89,7 @@ pub fn generate_material_icon_sheet(model_tets: &[ModelTetrahedron]) -> Material
     let params = CpuRenderParams {
         view_matrix,
         focal_length_xy: 1.8,
-        focal_length_zw: 1.0,
+        focal_length_zw: 3.0,  // 3x narrower ZW FOV (30° instead of 90°) to fill frame
         width: ICON_SIZE,
         height: ICON_SIZE,
         ..Default::default()
