@@ -795,6 +795,7 @@ fn main() {
             "0".to_string(),
             "0".to_string(),
         ],
+        controls_dialog_open: false,
         menu_open: false,
         menu_selection: 0,
         egui_ctx: egui::Context::default(),
@@ -1043,6 +1044,7 @@ struct App {
     inventory_open: bool,
     teleport_dialog_open: bool,
     teleport_coords: [String; 4],
+    controls_dialog_open: bool,
     menu_open: bool,
     menu_selection: usize,
     egui_ctx: egui::Context,
@@ -3277,6 +3279,9 @@ impl App {
                     if ui.button("Load World").clicked() {
                         self.load_world();
                     }
+                    if ui.button("Controls").clicked() {
+                        self.controls_dialog_open = !self.controls_dialog_open;
+                    }
                     if ui.button("Main Menu").clicked() {
                         *return_to_main_menu = true;
                     }
@@ -3457,11 +3462,11 @@ impl App {
 
     fn draw_egui_hotbar(&self, ctx: &egui::Context) {
         let screen_rect = ctx.screen_rect();
-        let slot_size = 62.0;
-        let gap = 5.0;
+        let slot_size = 80.0;
+        let gap = 6.5;
         let total_width = 9.0 * slot_size + 8.0 * gap;
         let start_x = (screen_rect.width() - total_width) / 2.0;
-        let start_y = screen_rect.height() - slot_size - 50.0;
+        let start_y = screen_rect.height() - slot_size - 65.0;
 
         egui::Area::new(egui::Id::new("hotbar"))
             .fixed_pos(egui::pos2(start_x, start_y))
@@ -3485,7 +3490,7 @@ impl App {
                         ui.painter().rect_filled(rect, 3.0, bg_color);
 
                         // Material icon (tesseract image or color fallback)
-                        let icon_rect = rect.shrink(4.0);
+                        let icon_rect = rect.shrink(5.0);
                         if let (Some(sheet), Some(tex_id)) =
                             (&self.material_icon_sheet, self.material_icons_texture_id)
                         {
@@ -3513,7 +3518,7 @@ impl App {
                             ui.painter().rect_stroke(
                                 rect,
                                 3.0,
-                                egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 255, 100)),
+                                egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 255, 100)),
                                 egui::epaint::StrokeKind::Outside,
                             );
                         } else {
@@ -3521,7 +3526,7 @@ impl App {
                                 rect,
                                 3.0,
                                 egui::Stroke::new(
-                                    1.0,
+                                    1.3,
                                     egui::Color32::from_rgba_unmultiplied(200, 200, 200, 80),
                                 ),
                                 egui::epaint::StrokeKind::Outside,
@@ -3529,23 +3534,23 @@ impl App {
                         }
 
                         // Slot number label (top-left corner)
-                        let label_pos = rect.left_top() + egui::vec2(3.0, 1.0);
+                        let label_pos = rect.left_top() + egui::vec2(4.0, 1.3);
                         ui.painter().text(
                             label_pos,
                             egui::Align2::LEFT_TOP,
                             format!("{}", i + 1),
-                            egui::FontId::proportional(10.0),
+                            egui::FontId::proportional(13.0),
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
                         );
 
                         // Material name (bottom center, small text)
                         let name = materials::material_name(material_id);
-                        let label_pos = rect.center_bottom() + egui::vec2(0.0, -2.0);
+                        let label_pos = rect.center_bottom() + egui::vec2(0.0, -3.0);
                         ui.painter().text(
                             label_pos,
                             egui::Align2::CENTER_BOTTOM,
                             name,
-                            egui::FontId::proportional(8.0),
+                            egui::FontId::proportional(10.0),
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200),
                         );
                     }
@@ -3643,7 +3648,7 @@ impl App {
             .resizable(false)
             .collapsible(false)
             .open(&mut open)
-            .default_width(520.0)
+            .default_width(676.0)
             .show(ctx, |ui| {
                 // Category tabs
                 ui.horizontal(|ui| {
@@ -3662,11 +3667,11 @@ impl App {
 
                 // Material grid
                 let items_per_row = 10;
-                let cell_size = 57.0;
-                let cell_gap = 4.0;
+                let cell_size = 74.0;
+                let cell_gap = 5.0;
 
                 egui::ScrollArea::vertical()
-                    .max_height(320.0)
+                    .max_height(416.0)
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
@@ -3691,7 +3696,7 @@ impl App {
                                 ui.painter().rect_filled(rect, 3.0, bg);
 
                                 // Material icon (tesseract image or color fallback)
-                                let icon_rect = rect.shrink(3.0);
+                                let icon_rect = rect.shrink(4.0);
                                 if let (Some(sheet), Some(tex_id)) =
                                     (&self.material_icon_sheet, self.material_icons_texture_id)
                                 {
@@ -3718,7 +3723,7 @@ impl App {
                                     text_pos,
                                     egui::Align2::CENTER_BOTTOM,
                                     mat.name,
-                                    egui::FontId::proportional(8.0),
+                                    egui::FontId::proportional(10.0),
                                     egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
                                 );
 
@@ -3726,7 +3731,7 @@ impl App {
                                     ui.painter().rect_stroke(
                                         rect,
                                         3.0,
-                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 255, 100)),
+                                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 100)),
                                         egui::epaint::StrokeKind::Outside,
                                     );
                                 }
@@ -3744,6 +3749,146 @@ impl App {
 
         if !open {
             *close_inventory = true;
+        }
+    }
+
+    fn draw_egui_controls_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Controls")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(400.0)
+            .show(ctx, |ui| {
+                ui.heading("Movement");
+                egui::Grid::new("controls_movement")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("W / A / S / D").strong());
+                        ui.label("Move forward / left / backward / right");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Space").strong());
+                        ui.label("Jump (double-tap to toggle fly mode)");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Shift").strong());
+                        ui.label("Descend / Crouch");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Q / E").strong());
+                        ui.label("Move in 4D (W-axis negative / positive)");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("Camera");
+                egui::Grid::new("controls_camera")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Mouse").strong());
+                        ui.label("Look around");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("R (hold)").strong());
+                        ui.label("Reset orientation");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("F (hold)").strong());
+                        ui.label("Pull to 3D");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("G").strong());
+                        ui.label("Look at nearest block");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Tab").strong());
+                        ui.label("Cycle control scheme");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("Building");
+                egui::Grid::new("controls_building")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Left Click").strong());
+                        ui.label("Break block");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Right Click").strong());
+                        ui.label("Place block");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Middle Click").strong());
+                        ui.label("Pick material");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("[ / ]").strong());
+                        ui.label("Previous / Next material");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Scroll Wheel").strong());
+                        ui.label("Cycle hotbar slot");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("1-9, 0").strong());
+                        ui.label("Select hotbar slot");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("UI");
+                egui::Grid::new("controls_ui")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Escape").strong());
+                        ui.label("Open / close menu");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("I").strong());
+                        ui.label("Toggle inventory");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("T").strong());
+                        ui.label("Toggle teleport dialog");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("World");
+                egui::Grid::new("controls_world")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("F5").strong());
+                        ui.label("Save world");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("F9").strong());
+                        ui.label("Load world");
+                        ui.end_row();
+                    });
+            });
+
+        if !open {
+            self.controls_dialog_open = false;
         }
     }
 
@@ -3776,6 +3921,9 @@ impl App {
                         &mut close_teleport,
                     );
                 }
+                if self.controls_dialog_open {
+                    self.draw_egui_controls_dialog(ctx);
+                }
                 self.draw_egui_hotbar(ctx);
             }
         });
@@ -3799,6 +3947,7 @@ impl App {
         }
         if close_menu {
             self.menu_open = false;
+            self.controls_dialog_open = false;
             self.grab_mouse(&window);
         }
         if close_inventory || inventory_pick.is_some() {
@@ -5565,6 +5714,9 @@ impl ApplicationHandler for App {
                             if !egui_consumed {
                                 self.input.handle_mouse_button(button, state);
                             }
+                        } else if self.teleport_dialog_open && !egui_consumed {
+                            // Click outside teleport dialog — close it and grab mouse
+                            self.toggle_teleport_dialog();
                         } else if !self.menu_open && !self.inventory_open && !self.teleport_dialog_open {
                             if let Some(window) = window.as_ref() {
                                 self.grab_mouse(window);
