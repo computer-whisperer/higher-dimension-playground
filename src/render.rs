@@ -6,7 +6,8 @@ use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_p
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
-    push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine, HUD_VERTEX_CAPACITY,
+    push_text_quads, pixels_to_ndc, HudResources, HudVertex, LineVertex, OverlayLine,
+    HUD_VERTEX_CAPACITY,
 };
 pub use self::vte::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VteDebugCounters, VTE_MAX_CHUNKS,
@@ -53,7 +54,7 @@ use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveT
 use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::{PolygonMode, RasterizationState};
 use vulkano::pipeline::graphics::vertex_input::VertexInputState;
-use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
+use vulkano::pipeline::graphics::viewport::{Scissor, Viewport, ViewportState};
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::layout::{PipelineLayoutCreateInfo, PushConstantRange};
 use vulkano::pipeline::{
@@ -194,6 +195,32 @@ pub enum HudReadoutMode {
     CompactVectors,
 }
 
+#[derive(Clone, Debug)]
+pub struct EguiPaintVertex {
+    pub position_px: [f32; 2],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+}
+
+#[derive(Clone, Debug)]
+pub struct EguiPaintMesh {
+    pub clip_rect_px: [f32; 4],
+    pub vertices: Vec<EguiPaintVertex>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EguiTextureUpdate {
+    pub size: [u32; 2],
+    pub pos: Option<[u32; 2]>,
+    pub pixels_alpha: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EguiPaintData {
+    pub texture_updates: Vec<EguiTextureUpdate>,
+    pub meshes: Vec<EguiPaintMesh>,
+}
+
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
     geometry::generate_tesseract_tetrahedrons()
 }
@@ -234,6 +261,7 @@ pub struct RenderOptions {
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
     pub hud_player_tags: Vec<HudPlayerTag>,
+    pub egui_paint: Option<EguiPaintData>,
 }
 
 impl Default for RenderOptions {
@@ -270,6 +298,7 @@ impl Default for RenderOptions {
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
             hud_player_tags: Vec::new(),
+            egui_paint: None,
         }
     }
 }
@@ -296,6 +325,7 @@ struct FrameInFlight {
     line_vertexes_buffer: Subbuffer<[LineVertex]>,
     hud_vertex_buffer: Option<Subbuffer<[HudVertex]>>,
     hud_descriptor_set: Option<Arc<DescriptorSet>>,
+    egui_descriptor_set: Option<Arc<DescriptorSet>>,
     sized_descriptor_set: Arc<DescriptorSet>,
     cpu_clipped_tet_count_buffer: Subbuffer<[u32]>,
     query_pool: Arc<QueryPool>,
@@ -304,6 +334,21 @@ struct FrameInFlight {
     pending_voxel_payload_slots: Vec<u32>,
     pending_voxel_payload_slot_set: HashSet<u32>,
     last_voxel_metadata_generation: Option<u64>,
+}
+
+struct EguiResources {
+    atlas_view: Arc<ImageView>,
+    atlas_sampler: Arc<Sampler>,
+    texture_size: [u32; 2],
+    texture_pixels: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct HudDrawBatch {
+    first_vertex: u32,
+    vertex_count: u32,
+    scissor: Scissor,
+    uses_egui_texture: bool,
 }
 
 pub struct OneTimeBuffers {
@@ -1278,7 +1323,9 @@ impl PresentPipelineContext {
                             ..Default::default()
                         },
                     )),
-                    dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+                    dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
+                        .into_iter()
+                        .collect(),
                     subpass: Some(subpass.into()),
                     ..GraphicsPipelineCreateInfo::layout(hud_pipeline_layout.clone())
                 },
@@ -1735,6 +1782,86 @@ impl GpuProfiler {
     }
 }
 
+fn create_r8_texture_view(
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    queue: Arc<Queue>,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Arc<ImageView> {
+    let staging_buffer = Buffer::from_iter(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        pixels.iter().copied(),
+    )
+    .unwrap();
+
+    let atlas_image = Image::new(
+        memory_allocator,
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R8_UNORM,
+            extent: [width.max(1), height.max(1), 1],
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let mut upload_builder = AutoCommandBufferBuilder::primary(
+        command_buffer_allocator,
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+    upload_builder
+        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            staging_buffer,
+            atlas_image.clone(),
+        ))
+        .unwrap();
+    let upload_cmd = upload_builder.build().unwrap();
+    let upload_future = sync::now(queue.device().clone())
+        .then_execute(queue.clone(), upload_cmd)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+    upload_future.wait(None).unwrap();
+
+    ImageView::new_default(atlas_image).unwrap()
+}
+
+fn create_hud_descriptor_set(
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    descriptor_set_layout: Arc<DescriptorSetLayout>,
+    hud_vertex_buffer: Subbuffer<[HudVertex]>,
+    atlas_view: Arc<ImageView>,
+    atlas_sampler: Arc<Sampler>,
+) -> Arc<DescriptorSet> {
+    DescriptorSet::new(
+        descriptor_set_allocator,
+        descriptor_set_layout,
+        [
+            WriteDescriptorSet::buffer(0, hud_vertex_buffer),
+            WriteDescriptorSet::image_view_sampler(1, atlas_view, atlas_sampler),
+        ],
+        [],
+    )
+    .unwrap()
+}
+
 pub struct RenderContext {
     pub window: Option<Arc<Window>>,
     swapchain: Option<Arc<Swapchain>>,
@@ -1758,6 +1885,7 @@ pub struct RenderContext {
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
     hud_resources: Option<HudResources>,
+    egui_resources: Option<EguiResources>,
     hud_breadcrumbs: VecDeque<[f32; 4]>,
     hud_previous_camera: Option<[f32; 4]>,
     hud_previous_sample_time: Option<Instant>,
@@ -2148,68 +2276,18 @@ impl RenderContext {
         let profiler = GpuProfiler::new(device.clone());
         let hud_font = load_hud_font();
 
-        // Build HUD resources (font atlas, GPU texture, vertex buffer, descriptor set)
+        // Build HUD resources (font atlas + sampler).
         let hud_resources = match (&hud_font, &present_pipeline) {
             (Some(font), Some(present_ctx)) => {
                 let font_atlas = build_font_atlas(font, 32.0);
-
-                // Create staging buffer with atlas pixel data
-                let staging_buffer = Buffer::from_iter(
+                let atlas_view = create_r8_texture_view(
                     memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::TRANSFER_SRC,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                            | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                    font_atlas.pixels.iter().copied(),
-                )
-                .unwrap();
-
-                // Create GPU image for font atlas
-                let atlas_image = Image::new(
-                    memory_allocator.clone(),
-                    ImageCreateInfo {
-                        image_type: ImageType::Dim2d,
-                        format: Format::R8_UNORM,
-                        extent: [font_atlas.width, font_atlas.height, 1],
-                        usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-
-                // Upload atlas via one-shot command buffer
-                {
-                    let mut upload_builder = AutoCommandBufferBuilder::primary(
-                        command_buffer_allocator.clone(),
-                        queue.queue_family_index(),
-                        CommandBufferUsage::OneTimeSubmit,
-                    )
-                    .unwrap();
-                    upload_builder
-                        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-                            staging_buffer,
-                            atlas_image.clone(),
-                        ))
-                        .unwrap();
-                    let upload_cmd = upload_builder.build().unwrap();
-                    let upload_future = sync::now(device.clone())
-                        .then_execute(queue.clone(), upload_cmd)
-                        .unwrap()
-                        .then_signal_fence_and_flush()
-                        .unwrap();
-                    upload_future.wait(None).unwrap();
-                }
-
-                let atlas_view = ImageView::new_default(atlas_image).unwrap();
+                    command_buffer_allocator.clone(),
+                    queue.clone(),
+                    font_atlas.width,
+                    font_atlas.height,
+                    &font_atlas.pixels,
+                );
                 let atlas_sampler = Sampler::new(
                     device.clone(),
                     SamplerCreateInfo {
@@ -2237,6 +2315,46 @@ impl RenderContext {
             }
             _ => None,
         };
+
+        let egui_resources = match &present_pipeline {
+            Some(_) => {
+                let texture_pixels = vec![255u8];
+                let atlas_view = create_r8_texture_view(
+                    memory_allocator.clone(),
+                    command_buffer_allocator.clone(),
+                    queue.clone(),
+                    1,
+                    1,
+                    &texture_pixels,
+                );
+                let atlas_sampler = Sampler::new(
+                    device.clone(),
+                    SamplerCreateInfo {
+                        mag_filter: Filter::Linear,
+                        min_filter: Filter::Linear,
+                        address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                Some(EguiResources {
+                    atlas_view,
+                    atlas_sampler,
+                    texture_size: [1, 1],
+                    texture_pixels,
+                })
+            }
+            None => None,
+        };
+
+        let hud_descriptor_set_layout = present_pipeline.as_ref().map(|present_ctx| {
+            present_ctx
+                .hud_pipeline_layout
+                .set_layouts()
+                .first()
+                .unwrap()
+                .clone()
+        });
 
         // Create per-frame resources
         let mut frames_in_flight = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -2283,16 +2401,51 @@ impl RenderContext {
             )
             .unwrap();
 
-            let (hud_vertex_buffer, hud_descriptor_set) = match &hud_resources {
-                Some(hud_res) => {
-                    let (buf, ds) = hud_res.create_per_frame_hud(
-                        memory_allocator.clone(),
-                        descriptor_set_allocator.clone(),
-                    );
-                    (Some(buf), Some(ds))
-                }
-                None => (None, None),
-            };
+            let (hud_vertex_buffer, hud_descriptor_set, egui_descriptor_set) =
+                match hud_descriptor_set_layout.as_ref() {
+                    Some(layout) => {
+                        let hud_vertex_buffer = Buffer::from_iter(
+                            memory_allocator.clone(),
+                            BufferCreateInfo {
+                                usage: BufferUsage::STORAGE_BUFFER,
+                                ..Default::default()
+                            },
+                            AllocationCreateInfo {
+                                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                                ..Default::default()
+                            },
+                            vec![HudVertex::zeroed(); HUD_VERTEX_CAPACITY],
+                        )
+                        .unwrap();
+
+                        let hud_descriptor_set = hud_resources.as_ref().map(|hud_res| {
+                            create_hud_descriptor_set(
+                                descriptor_set_allocator.clone(),
+                                layout.clone(),
+                                hud_vertex_buffer.clone(),
+                                hud_res.atlas_view.clone(),
+                                hud_res.atlas_sampler.clone(),
+                            )
+                        });
+                        let egui_descriptor_set = egui_resources.as_ref().map(|egui_res| {
+                            create_hud_descriptor_set(
+                                descriptor_set_allocator.clone(),
+                                layout.clone(),
+                                hud_vertex_buffer.clone(),
+                                egui_res.atlas_view.clone(),
+                                egui_res.atlas_sampler.clone(),
+                            )
+                        });
+
+                        (
+                            Some(hud_vertex_buffer),
+                            hud_descriptor_set,
+                            egui_descriptor_set,
+                        )
+                    }
+                    None => (None, None, None),
+                };
 
             let query_pool = GpuProfiler::create_query_pool(&device);
 
@@ -2301,6 +2454,7 @@ impl RenderContext {
                 line_vertexes_buffer,
                 hud_vertex_buffer,
                 hud_descriptor_set,
+                egui_descriptor_set,
                 sized_descriptor_set,
                 cpu_clipped_tet_count_buffer,
                 query_pool,
@@ -2335,6 +2489,7 @@ impl RenderContext {
             profiler,
             hud_font,
             hud_resources,
+            egui_resources,
             hud_breadcrumbs: VecDeque::new(),
             hud_previous_camera: None,
             hud_previous_sample_time: None,
@@ -2470,6 +2625,206 @@ impl RenderContext {
         } else {
             self.vte_first_mismatch = vte::VteFirstMismatch::default();
         }
+    }
+
+    fn full_hud_scissor(&self) -> Scissor {
+        let (width, height) = match self.window.as_ref() {
+            Some(window) => {
+                let size = window.inner_size();
+                (size.width.max(1), size.height.max(1))
+            }
+            None => (
+                self.sized_buffers.render_dimensions[0].max(1),
+                self.sized_buffers.render_dimensions[1].max(1),
+            ),
+        };
+        Scissor {
+            offset: [0, 0],
+            extent: [width, height],
+        }
+    }
+
+    fn refresh_egui_descriptor_sets(&mut self) {
+        let Some(present_ctx) = self.present_pipeline.as_ref() else {
+            return;
+        };
+        let Some(egui_resources) = self.egui_resources.as_ref() else {
+            return;
+        };
+        let descriptor_set_layout = present_ctx
+            .hud_pipeline_layout
+            .set_layouts()
+            .first()
+            .unwrap()
+            .clone();
+
+        for frame in &mut self.frames_in_flight {
+            frame.egui_descriptor_set = frame.hud_vertex_buffer.as_ref().map(|hud_buffer| {
+                create_hud_descriptor_set(
+                    self.descriptor_set_allocator.clone(),
+                    descriptor_set_layout.clone(),
+                    hud_buffer.clone(),
+                    egui_resources.atlas_view.clone(),
+                    egui_resources.atlas_sampler.clone(),
+                )
+            });
+        }
+    }
+
+    fn apply_egui_texture_updates(&mut self, queue: Arc<Queue>, updates: &[EguiTextureUpdate]) {
+        if updates.is_empty() {
+            return;
+        }
+
+        let (new_size, new_pixels) = {
+            let Some(egui_resources) = self.egui_resources.as_mut() else {
+                return;
+            };
+            let mut did_change = false;
+            for update in updates {
+                let width = update.size[0].max(1);
+                let height = update.size[1].max(1);
+                let expected_len = (width as usize).saturating_mul(height as usize);
+                if update.pixels_alpha.len() != expected_len {
+                    continue;
+                }
+
+                match update.pos {
+                    None => {
+                        egui_resources.texture_size = [width, height];
+                        egui_resources.texture_pixels.clear();
+                        egui_resources
+                            .texture_pixels
+                            .extend_from_slice(&update.pixels_alpha);
+                        did_change = true;
+                    }
+                    Some([x, y]) => {
+                        let atlas_w = egui_resources.texture_size[0].max(1);
+                        let atlas_h = egui_resources.texture_size[1].max(1);
+                        if egui_resources.texture_pixels.len()
+                            != (atlas_w as usize).saturating_mul(atlas_h as usize)
+                        {
+                            continue;
+                        }
+                        if x + width > atlas_w || y + height > atlas_h {
+                            continue;
+                        }
+
+                        for row in 0..height as usize {
+                            let src_start = row * width as usize;
+                            let src_end = src_start + width as usize;
+                            let dst_start = ((y as usize + row) * atlas_w as usize) + x as usize;
+                            let dst_end = dst_start + width as usize;
+                            egui_resources.texture_pixels[dst_start..dst_end]
+                                .copy_from_slice(&update.pixels_alpha[src_start..src_end]);
+                        }
+                        did_change = true;
+                    }
+                }
+            }
+
+            if !did_change {
+                return;
+            }
+            (egui_resources.texture_size, egui_resources.texture_pixels.clone())
+        };
+
+        let new_view = create_r8_texture_view(
+            self.memory_allocator.clone(),
+            self.command_buffer_allocator.clone(),
+            queue,
+            new_size[0],
+            new_size[1],
+            &new_pixels,
+        );
+        if let Some(egui_resources) = self.egui_resources.as_mut() {
+            egui_resources.atlas_view = new_view;
+        }
+        self.refresh_egui_descriptor_sets();
+    }
+
+    fn write_egui_overlay(
+        &mut self,
+        frame_idx: usize,
+        base_hud_vertex: usize,
+        meshes: &[EguiPaintMesh],
+    ) -> (usize, Vec<HudDrawBatch>) {
+        let Some(hud_buf) = self.frames_in_flight[frame_idx].hud_vertex_buffer.as_ref() else {
+            return (0, Vec::new());
+        };
+        if meshes.is_empty() || base_hud_vertex >= HUD_VERTEX_CAPACITY {
+            return (0, Vec::new());
+        }
+
+        let present_size = match self.window.as_ref() {
+            Some(window) => {
+                let size = window.inner_size();
+                [size.width.max(1), size.height.max(1)]
+            }
+            None => [
+                self.sized_buffers.render_dimensions[0].max(1),
+                self.sized_buffers.render_dimensions[1].max(1),
+            ],
+        };
+        let present_w = present_size[0] as f32;
+        let present_h = present_size[1] as f32;
+        let mut writer = hud_buf.write().unwrap();
+        let mut batches = Vec::with_capacity(meshes.len());
+        let mut cursor = base_hud_vertex;
+
+        for mesh in meshes {
+            if cursor >= HUD_VERTEX_CAPACITY || mesh.vertices.is_empty() {
+                break;
+            }
+
+            let clip_min_x = mesh.clip_rect_px[0].clamp(0.0, present_w);
+            let clip_min_y = mesh.clip_rect_px[1].clamp(0.0, present_h);
+            let clip_max_x = mesh.clip_rect_px[2].clamp(0.0, present_w);
+            let clip_max_y = mesh.clip_rect_px[3].clamp(0.0, present_h);
+            if clip_max_x <= clip_min_x || clip_max_y <= clip_min_y {
+                continue;
+            }
+
+            let scissor_x = clip_min_x.floor() as u32;
+            let scissor_y = clip_min_y.floor() as u32;
+            let scissor_w = (clip_max_x.ceil() as u32).saturating_sub(scissor_x);
+            let scissor_h = (clip_max_y.ceil() as u32).saturating_sub(scissor_y);
+            if scissor_w == 0 || scissor_h == 0 {
+                continue;
+            }
+
+            let first_vertex = cursor;
+            for v in &mesh.vertices {
+                if cursor >= HUD_VERTEX_CAPACITY {
+                    break;
+                }
+                let position = pixels_to_ndc(
+                    Vec2::new(v.position_px[0], v.position_px[1]),
+                    present_size,
+                );
+                writer[cursor] = HudVertex::new(
+                    position,
+                    Vec2::new(v.uv[0], v.uv[1]),
+                    Vec4::new(v.color[0], v.color[1], v.color[2], v.color[3]),
+                );
+                cursor += 1;
+            }
+
+            let vertex_count = cursor.saturating_sub(first_vertex);
+            if vertex_count > 0 {
+                batches.push(HudDrawBatch {
+                    first_vertex: first_vertex as u32,
+                    vertex_count: vertex_count as u32,
+                    scissor: Scissor {
+                        offset: [scissor_x, scissor_y],
+                        extent: [scissor_w, scissor_h],
+                    },
+                    uses_egui_texture: true,
+                });
+            }
+        }
+
+        (cursor.saturating_sub(base_hud_vertex), batches)
     }
 
     /// Returns (line_count, hud_vertex_count)
@@ -5177,6 +5532,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
         }
 
         let mut hud_vertex_count = 0usize;
+        let mut hud_batches: Vec<HudDrawBatch> = Vec::new();
         line_render_count += self.write_custom_overlay_lines(
             frame_idx,
             line_render_count,
@@ -5198,6 +5554,24 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             );
             line_render_count += hud_line_count;
             hud_vertex_count = hud_quad_count;
+            if hud_quad_count > 0 {
+                hud_batches.push(HudDrawBatch {
+                    first_vertex: 0,
+                    vertex_count: hud_quad_count as u32,
+                    scissor: self.full_hud_scissor(),
+                    uses_egui_texture: false,
+                });
+            }
+        }
+
+        if let Some(egui_paint) = render_options.egui_paint.as_ref() {
+            if !egui_paint.texture_updates.is_empty() {
+                self.apply_egui_texture_updates(queue.clone(), &egui_paint.texture_updates);
+            }
+            let (egui_vertex_count, mut egui_batches) =
+                self.write_egui_overlay(frame_idx, hud_vertex_count, &egui_paint.meshes);
+            hud_vertex_count += egui_vertex_count;
+            hud_batches.append(&mut egui_batches);
         }
 
         if let Some(image_index) = image_index {
@@ -5268,21 +5642,40 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
 
                     // Render HUD quads (text + panels, alpha-blended on top)
                     if hud_vertex_count > 0 {
-                        if let Some(hud_ds) =
-                            self.frames_in_flight[frame_idx].hud_descriptor_set.as_ref()
-                        {
+                        builder
+                            .bind_pipeline_graphics(present_pipeline.hud_pipeline.clone())
+                            .unwrap();
+
+                        let mut bound_egui_state: Option<bool> = None;
+                        for batch in &hud_batches {
+                            let descriptor_set = if batch.uses_egui_texture {
+                                self.frames_in_flight[frame_idx].egui_descriptor_set.as_ref()
+                            } else {
+                                self.frames_in_flight[frame_idx].hud_descriptor_set.as_ref()
+                            };
+                            let Some(descriptor_set) = descriptor_set else {
+                                continue;
+                            };
+
+                            if bound_egui_state != Some(batch.uses_egui_texture) {
+                                builder
+                                    .bind_descriptor_sets(
+                                        PipelineBindPoint::Graphics,
+                                        present_pipeline.hud_pipeline_layout.clone(),
+                                        0,
+                                        vec![descriptor_set.clone()],
+                                    )
+                                    .unwrap();
+                                bound_egui_state = Some(batch.uses_egui_texture);
+                            }
+
                             builder
-                                .bind_pipeline_graphics(present_pipeline.hud_pipeline.clone())
+                                .set_scissor(0, [batch.scissor].into_iter().collect())
                                 .unwrap();
-                            builder
-                                .bind_descriptor_sets(
-                                    PipelineBindPoint::Graphics,
-                                    present_pipeline.hud_pipeline_layout.clone(),
-                                    0,
-                                    vec![hud_ds.clone()],
-                                )
-                                .unwrap();
-                            unsafe { builder.draw(hud_vertex_count as u32, 1, 0, 0) }.unwrap();
+                            unsafe {
+                                builder.draw(batch.vertex_count, 1, batch.first_vertex, 0)
+                            }
+                            .unwrap();
                         }
                     }
 

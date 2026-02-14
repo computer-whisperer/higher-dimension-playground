@@ -51,6 +51,16 @@ pub(super) struct HudVertex {
     color: Vec4,
 }
 
+impl HudVertex {
+    pub(super) fn new(position: Vec2, texcoord: Vec2, color: Vec4) -> Self {
+        Self {
+            position,
+            texcoord,
+            color,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct GlyphInfo {
     uv_min: Vec2,
@@ -194,10 +204,12 @@ pub(super) struct HudResources {
     pub(super) font_atlas: FontAtlas,
     pub(super) atlas_view: Arc<ImageView>,
     pub(super) atlas_sampler: Arc<Sampler>,
+    #[allow(dead_code)]
     pub(super) hud_descriptor_set_layout: Arc<DescriptorSetLayout>,
 }
 
 impl HudResources {
+    #[allow(dead_code)]
     pub(super) fn create_per_frame_hud(
         &self,
         memory_allocator: Arc<dyn MemoryAllocator>,

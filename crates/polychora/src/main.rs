@@ -7,9 +7,11 @@ mod voxel;
 
 use base64::Engine;
 use clap::{ArgAction, Parser, ValueEnum};
+use egui::RichText;
 use higher_dimension_playground::render::{
-    CustomOverlayLine, FrameParams, HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext,
-    RenderOptions, TetraFrameInput, VteDisplayMode,
+    CustomOverlayLine, EguiPaintData, EguiPaintMesh, EguiPaintVertex, EguiTextureUpdate,
+    FrameParams, HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext, RenderOptions,
+    TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
 };
 
@@ -559,6 +562,8 @@ fn main() {
         vte_sweep_run_id: 0,
         menu_open: false,
         menu_selection: 0,
+        egui_ctx: egui::Context::default(),
+        egui_winit_state: None,
         multiplayer,
         multiplayer_self_id: None,
         next_multiplayer_edit_id: 1,
@@ -730,6 +735,8 @@ struct App {
     vte_sweep_run_id: u32,
     menu_open: bool,
     menu_selection: usize,
+    egui_ctx: egui::Context,
+    egui_winit_state: Option<egui_winit::State>,
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
     next_multiplayer_edit_id: u64,
@@ -866,6 +873,18 @@ fn default_multiplayer_player_name() -> String {
             }
         })
         .unwrap_or_else(|| "player".to_string())
+}
+
+fn is_escape_pressed(event: &winit::event::KeyEvent) -> bool {
+    if event.state.is_pressed() && !event.repeat {
+        if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
+            return true;
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            return true;
+        }
+    }
+    false
 }
 
 fn project_world_point_to_ndc_with_depth(
@@ -1470,6 +1489,12 @@ impl App {
         }
     }
 
+    fn set_control_scheme(&mut self, target: ControlScheme) {
+        while self.control_scheme != target {
+            self.cycle_control_scheme();
+        }
+    }
+
     fn step_f32(value: f32, delta: i32, step: f32, min: f32, max: f32) -> f32 {
         let signed_step = if delta > 0 {
             step
@@ -2040,6 +2065,11 @@ impl App {
     }
 
     fn drain_gameplay_inputs_while_menu_open(&mut self) {
+        self.input.take_menu_left();
+        self.input.take_menu_right();
+        self.input.take_menu_up();
+        self.input.take_menu_down();
+        self.input.take_menu_activate();
         self.input.take_scheme_cycle();
         self.input.take_vte_sweep();
         self.input.take_vte_entities_toggle();
@@ -2494,6 +2524,255 @@ impl App {
         text
     }
 
+    fn draw_egui_pause_menu(&mut self, ctx: &egui::Context, close_menu: &mut bool) {
+        egui::Window::new("Polychora")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(true)
+            .collapsible(false)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.heading(RichText::new("Immediate Menu").strong());
+                ui.label("Adjust runtime settings while paused.");
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.button("Resume").clicked() {
+                        *close_menu = true;
+                    }
+                    if ui.button("Save World").clicked() {
+                        self.save_world();
+                    }
+                    if ui.button("Load World").clicked() {
+                        self.load_world();
+                    }
+                    if ui.button("Quit").clicked() {
+                        self.should_exit_after_render = true;
+                    }
+                });
+
+                ui.separator();
+
+                let mut selected_info_panel = self.info_panel_mode;
+                egui::ComboBox::from_label("Info Panel")
+                    .selected_text(selected_info_panel.label())
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            InfoPanelMode::Full,
+                            InfoPanelMode::VectorTable,
+                            InfoPanelMode::VectorTable2,
+                            InfoPanelMode::Off,
+                        ] {
+                            ui.selectable_value(&mut selected_info_panel, mode, mode.label());
+                        }
+                    });
+                self.info_panel_mode = selected_info_panel;
+
+                let mut selected_control_scheme = self.control_scheme;
+                egui::ComboBox::from_label("Control Scheme")
+                    .selected_text(selected_control_scheme.label())
+                    .show_ui(ui, |ui| {
+                        for scheme in [
+                            ControlScheme::IntuitiveUpright,
+                            ControlScheme::LookTransport,
+                            ControlScheme::RotorFree,
+                            ControlScheme::LegacySideButtonLayers,
+                            ControlScheme::LegacyScrollCycle,
+                        ] {
+                            ui.selectable_value(&mut selected_control_scheme, scheme, scheme.label());
+                        }
+                    });
+                if selected_control_scheme != self.control_scheme {
+                    self.set_control_scheme(selected_control_scheme);
+                }
+
+                ui.add(
+                    egui::Slider::new(&mut self.focal_length_xy, FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX)
+                        .text("Focal Length XY"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.focal_length_zw, FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX)
+                        .text("Focal Length ZW"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_max_trace_steps,
+                        VTE_TRACE_STEPS_MIN..=VTE_TRACE_STEPS_MAX,
+                    )
+                    .logarithmic(true)
+                    .text("VTE Max Trace Steps"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_max_trace_distance,
+                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
+                    )
+                    .text("VTE Max Trace Distance"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.place_material,
+                        BLOCK_EDIT_PLACE_MATERIAL_MIN..=BLOCK_EDIT_PLACE_MATERIAL_MAX,
+                    )
+                    .text("Place Material"),
+                );
+
+                ui.separator();
+
+                let mut entities_enabled = self.vte_entities_enabled;
+                if ui.checkbox(&mut entities_enabled, "VTE Entities").changed() {
+                    self.toggle_vte_entities();
+                }
+                let mut y_cache_enabled = self.vte_y_slice_lookup_cache_enabled;
+                if ui.checkbox(&mut y_cache_enabled, "VTE Y-Slice Lookup Cache").changed() {
+                    self.toggle_vte_y_slice_lookup_cache();
+                }
+                let mut sky_emissive_tweak = self.vte_integral_sky_emissive_enabled;
+                if ui
+                    .checkbox(&mut sky_emissive_tweak, "Integral Sky+Emissive Tweak")
+                    .changed()
+                {
+                    self.toggle_vte_integral_sky_emissive();
+                }
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_integral_sky_scale,
+                        VTE_INTEGRAL_SKY_SCALE_MIN..=VTE_INTEGRAL_SKY_SCALE_MAX,
+                    )
+                    .text("Integral Sky Scale"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_integral_hit_emissive_boost,
+                        VTE_INTEGRAL_HIT_EMISSIVE_MIN..=VTE_INTEGRAL_HIT_EMISSIVE_MAX,
+                    )
+                    .text("Integral Hit Emissive"),
+                );
+                let mut log_merge_tweak = self.vte_integral_log_merge_enabled;
+                if ui
+                    .checkbox(&mut log_merge_tweak, "Integral Log Merge")
+                    .changed()
+                {
+                    self.toggle_vte_integral_log_merge();
+                }
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_integral_log_merge_k,
+                        VTE_INTEGRAL_LOG_MERGE_K_MIN..=VTE_INTEGRAL_LOG_MERGE_K_MAX,
+                    )
+                    .text("Integral Log-Merge K"),
+                );
+
+                ui.separator();
+                ui.label("Press Esc to close this menu.");
+            });
+    }
+
+    fn run_egui_frame(&mut self) -> Option<EguiPaintData> {
+        let window = self
+            .rcx
+            .as_ref()
+            .and_then(|rcx| rcx.window.clone())?;
+        let raw_input = self
+            .egui_winit_state
+            .as_mut()?
+            .take_egui_input(&window);
+
+        let egui_ctx = self.egui_ctx.clone();
+        let mut close_menu = false;
+        let full_output = egui_ctx.run(raw_input, |ctx| {
+            if self.menu_open {
+                self.draw_egui_pause_menu(ctx, &mut close_menu);
+            }
+        });
+
+        let egui::FullOutput {
+            platform_output,
+            textures_delta,
+            shapes,
+            pixels_per_point,
+            ..
+        } = full_output;
+        if let Some(egui_state) = self.egui_winit_state.as_mut() {
+            egui_state.handle_platform_output(&window, platform_output);
+        }
+
+        if close_menu {
+            self.menu_open = false;
+            self.grab_mouse(&window);
+        }
+        if !self.menu_open {
+            return None;
+        }
+
+        let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
+
+        let mut texture_updates = Vec::new();
+        for (texture_id, delta) in textures_delta.set {
+            if !matches!(texture_id, egui::TextureId::Managed(0)) {
+                continue;
+            }
+            let image = match delta.image {
+                egui::ImageData::Color(image) => image,
+            };
+            let size = [image.size[0] as u32, image.size[1] as u32];
+            let mut pixels_alpha = Vec::with_capacity(image.pixels.len());
+            for pixel in image.pixels.iter() {
+                pixels_alpha.push(pixel.a());
+            }
+            texture_updates.push(EguiTextureUpdate {
+                size,
+                pos: delta.pos.map(|[x, y]| [x as u32, y as u32]),
+                pixels_alpha,
+            });
+        }
+
+        let mut meshes = Vec::new();
+        for clipped in clipped_primitives {
+            let egui::epaint::Primitive::Mesh(mesh) = clipped.primitive else {
+                continue;
+            };
+            if !matches!(mesh.texture_id, egui::TextureId::Managed(0)) {
+                continue;
+            }
+
+            let mut vertices = Vec::with_capacity(mesh.indices.len());
+            for &index in &mesh.indices {
+                let Some(vertex) = mesh.vertices.get(index as usize) else {
+                    continue;
+                };
+                let [r, g, b, a] = vertex.color.to_srgba_unmultiplied();
+                vertices.push(EguiPaintVertex {
+                    position_px: [vertex.pos.x * pixels_per_point, vertex.pos.y * pixels_per_point],
+                    uv: [vertex.uv.x, vertex.uv.y],
+                    color: [
+                        r as f32 / 255.0,
+                        g as f32 / 255.0,
+                        b as f32 / 255.0,
+                        a as f32 / 255.0,
+                    ],
+                });
+            }
+            if vertices.is_empty() {
+                continue;
+            }
+
+            meshes.push(EguiPaintMesh {
+                clip_rect_px: [
+                    clipped.clip_rect.min.x * pixels_per_point,
+                    clipped.clip_rect.min.y * pixels_per_point,
+                    clipped.clip_rect.max.x * pixels_per_point,
+                    clipped.clip_rect.max.y * pixels_per_point,
+                ],
+                vertices,
+            });
+        }
+
+        Some(EguiPaintData {
+            texture_updates,
+            meshes,
+        })
+    }
+
     fn active_rotation_pair(&self) -> RotationPair {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => {
@@ -2701,21 +2980,6 @@ impl App {
         self.smooth_remote_players(dt, now);
 
         if self.menu_open {
-            if self.input.take_menu_up() {
-                self.move_menu_selection(-1);
-            }
-            if self.input.take_menu_left() {
-                self.adjust_selected_menu_item(-1);
-            }
-            if self.input.take_menu_right() {
-                self.adjust_selected_menu_item(1);
-            }
-            if self.input.take_menu_down() {
-                self.move_menu_selection(1);
-            }
-            if self.input.take_menu_activate() {
-                self.activate_selected_menu_item();
-            }
             self.drain_gameplay_inputs_while_menu_open();
         } else {
             self.input.take_menu_left();
@@ -3147,7 +3411,8 @@ impl App {
         } else {
             "off".to_string()
         };
-        let do_navigation_hud = self.menu_open || self.info_panel_mode != InfoPanelMode::Off;
+        let egui_paint = self.run_egui_frame();
+        let do_navigation_hud = !self.menu_open && self.info_panel_mode != InfoPanelMode::Off;
         let hud_readout_mode = if !self.menu_open
             && matches!(
                 self.info_panel_mode,
@@ -3157,19 +3422,15 @@ impl App {
         } else {
             HudReadoutMode::Full
         };
-        let hud_rotation_label = if self.menu_open {
-            Some(self.pause_menu_hud_text())
-        } else {
-            self.current_info_hud_text(
-                pair,
-                look_dir,
-                edit_reach,
-                highlight_mode,
-                &vte_sweep_status,
-                hud_target_hit_voxel,
-                hud_target_hit_face,
-            )
-        };
+        let hud_rotation_label = self.current_info_hud_text(
+            pair,
+            look_dir,
+            edit_reach,
+            highlight_mode,
+            &vte_sweep_status,
+            hud_target_hit_voxel,
+            hud_target_hit_face,
+        );
 
         let render_options = RenderOptions {
             do_raster: true,
@@ -3199,6 +3460,7 @@ impl App {
             hud_target_hit_voxel,
             hud_target_hit_face,
             hud_player_tags,
+            egui_paint,
             ..Default::default()
         };
 
@@ -3301,6 +3563,14 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .unwrap(),
         );
+        self.egui_winit_state = Some(egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(window.scale_factor() as f32),
+            window.theme(),
+            None,
+        ));
         self.grab_mouse(&window);
         let backend = self.args.backend.to_render_backend();
         let vte_mode = self.args.vte_display_mode.to_render_mode();
@@ -3314,7 +3584,7 @@ impl ApplicationHandler for App {
             self.device.clone(),
             self.queue.clone(),
             self.instance.clone(),
-            Some(window),
+            Some(window.clone()),
             [self.args.width, self.args.height, self.args.layers],
             pixel_storage_layers,
         ));
@@ -3327,6 +3597,15 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+        let egui_consumed = if let (Some(egui_state), Some(window)) =
+            (self.egui_winit_state.as_mut(), window.as_ref())
+        {
+            self.menu_open && egui_state.on_window_event(window, &event).consumed
+        } else {
+            false
+        };
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -3337,18 +3616,19 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                self.input.handle_key_event(&event);
+                if !egui_consumed {
+                    self.input.handle_key_event(&event);
+                }
 
-                if self.input.take_escape() {
-                    let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+                if is_escape_pressed(&event) {
                     if self.menu_open {
                         self.menu_open = false;
-                        if let Some(window) = window {
-                            self.grab_mouse(&window);
+                        if let Some(window) = window.as_ref() {
+                            self.grab_mouse(window);
                         }
                     } else if self.mouse_grabbed {
-                        if let Some(window) = window {
-                            self.release_mouse(&window);
+                        if let Some(window) = window.as_ref() {
+                            self.release_mouse(window);
                         }
                         self.menu_open = true;
                         self.menu_selection = 0;
@@ -3360,12 +3640,15 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { button, state, .. } => match button {
                 MouseButton::Left => {
                     if state.is_pressed() {
-                        if !self.mouse_grabbed {
-                            let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
-                            self.grab_mouse(&window);
-                            self.menu_open = false;
-                        } else {
-                            self.input.handle_mouse_button(button, state);
+                        if self.mouse_grabbed {
+                            if !egui_consumed {
+                                self.input.handle_mouse_button(button, state);
+                            }
+                        } else if !self.menu_open {
+                            if let Some(window) = window.as_ref() {
+                                self.grab_mouse(window);
+                                self.menu_open = false;
+                            }
                         }
                     }
                 }
@@ -3373,16 +3656,20 @@ impl ApplicationHandler for App {
                 | MouseButton::Right
                 | MouseButton::Back
                 | MouseButton::Forward => {
-                    self.input.handle_mouse_button(button, state);
+                    if !egui_consumed {
+                        self.input.handle_mouse_button(button, state);
+                    }
                 }
                 _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } => {
-                let y = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 40.0,
-                };
-                self.input.handle_scroll(y);
+                if !egui_consumed {
+                    let y = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 40.0,
+                    };
+                    self.input.handle_scroll(y);
+                }
             }
             WindowEvent::Focused(false) => {
                 if self.mouse_grabbed {
