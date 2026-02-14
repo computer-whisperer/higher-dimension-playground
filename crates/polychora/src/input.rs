@@ -133,6 +133,7 @@ pub struct InputState {
     vte_sweep_requested: bool,
     vte_integral_sky_emissive_toggle_requested: bool,
     vte_integral_log_merge_toggle_requested: bool,
+    look_at_requested: bool,
     inventory_toggle_requested: bool,
     teleport_dialog_requested: bool,
     menu_left_requested: bool,
@@ -182,6 +183,7 @@ impl InputState {
             vte_sweep_requested: false,
             vte_integral_sky_emissive_toggle_requested: false,
             vte_integral_log_merge_toggle_requested: false,
+            look_at_requested: false,
             inventory_toggle_requested: false,
             teleport_dialog_requested: false,
             menu_left_requested: false,
@@ -312,6 +314,11 @@ impl InputState {
                 }
                 KeyCode::KeyF => {
                     self.pull_to_3d_held = pressed;
+                }
+                KeyCode::KeyG => {
+                    if pressed && !event.repeat {
+                        self.look_at_requested = true;
+                    }
                 }
                 KeyCode::F6 => {
                     if pressed {
@@ -597,6 +604,12 @@ impl InputState {
     pub fn take_vte_integral_log_merge_toggle(&mut self) -> bool {
         let v = self.vte_integral_log_merge_toggle_requested;
         self.vte_integral_log_merge_toggle_requested = false;
+        v
+    }
+
+    pub fn take_look_at(&mut self) -> bool {
+        let v = self.look_at_requested;
+        self.look_at_requested = false;
         v
     }
 
