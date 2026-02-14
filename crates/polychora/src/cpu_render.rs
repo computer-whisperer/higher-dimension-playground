@@ -1,3 +1,4 @@
+use crate::materials;
 use common::{MatN, ModelInstance, ModelTetrahedron, VecN};
 use std::f32::consts::PI;
 
@@ -834,17 +835,8 @@ fn sample_material(id: u32, tex_pos: [f32; 4]) -> ([f32; 3], f32) {
             )
         }
         _ => {
-            // Look up material color from database
-            if let Some(mat_info) = crate::materials::MATERIALS.iter().find(|m| m.id as u32 == id) {
-                let color = [
-                    mat_info.color[0] as f32 / 255.0,
-                    mat_info.color[1] as f32 / 255.0,
-                    mat_info.color[2] as f32 / 255.0,
-                ];
-                (color, 0.0) // basic_lum = 0.0, standard lit material
-            } else {
-                ([0.0, 0.0, 0.0], 0.0) // truly unknown material
-            }
+            let [r, g, b] = materials::material_color(id.min(u8::MAX as u32) as u8);
+            ([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], 0.0)
         }
     }
 }

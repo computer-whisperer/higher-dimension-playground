@@ -1,5 +1,6 @@
 {
   "name": "hyper_arch",
+  "description": "A small gateway of twin circuit pylons joined by a dirt lintel and reinforced by wood braces.",
   "spawn_weight": 3,
   "fills": [
     { "min": [-2, 0, -1, -1], "size": [1, 4, 3, 3], "material": 24 },

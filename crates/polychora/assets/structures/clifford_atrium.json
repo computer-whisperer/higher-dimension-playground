@@ -1,0 +1,38 @@
+{
+  "name": "clifford_atrium",
+  "description": "Three mutually orthogonal rings (XZ, XW, ZW) interlock around a luminous central shaft to form a truly 4D atrium.",
+  "spawn_weight": 1,
+  "ground_offset_y": 1,
+  "fills": [
+    { "min": [-4, 0, -4, -4], "size": [9, 1, 9, 9], "material": 55 },
+    { "min": [-2, 1, -2, -2], "size": [5, 1, 5, 5], "material": 61 },
+    { "min": [0, 1, 0, 0], "size": [1, 8, 1, 1], "material": 58 },
+
+    { "min": [-8, 4, -8, 0], "size": [17, 1, 1, 1], "material": 56 },
+    { "min": [-8, 4, 8, 0], "size": [17, 1, 1, 1], "material": 56 },
+    { "min": [-8, 4, -7, 0], "size": [1, 1, 15, 1], "material": 56 },
+    { "min": [8, 4, -7, 0], "size": [1, 1, 15, 1], "material": 56 },
+
+    { "min": [-8, 4, 0, -8], "size": [17, 1, 1, 1], "material": 57 },
+    { "min": [-8, 4, 0, 8], "size": [17, 1, 1, 1], "material": 57 },
+    { "min": [-8, 4, 0, -7], "size": [1, 1, 1, 15], "material": 57 },
+    { "min": [8, 4, 0, -7], "size": [1, 1, 1, 15], "material": 57 },
+
+    { "min": [0, 4, -8, -8], "size": [1, 1, 17, 1], "material": 62 },
+    { "min": [0, 4, -8, 8], "size": [1, 1, 17, 1], "material": 62 },
+    { "min": [0, 4, -8, -7], "size": [1, 1, 1, 15], "material": 62 },
+    { "min": [0, 4, 8, -7], "size": [1, 1, 1, 15], "material": 62 },
+
+    { "min": [-3, 3, 0, 0], "size": [7, 1, 1, 1], "material": 60 },
+    { "min": [0, 3, -3, 0], "size": [1, 1, 7, 1], "material": 60 },
+    { "min": [0, 3, 0, -3], "size": [1, 1, 1, 7], "material": 60 }
+  ],
+  "voxels": [
+    { "offset": [-8, 4, 0, 0], "material": 58 },
+    { "offset": [8, 4, 0, 0], "material": 58 },
+    { "offset": [0, 4, -8, 0], "material": 58 },
+    { "offset": [0, 4, 8, 0], "material": 58 },
+    { "offset": [0, 4, 0, -8], "material": 58 },
+    { "offset": [0, 4, 0, 8], "material": 58 }
+  ]
+}

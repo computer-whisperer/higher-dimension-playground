@@ -17,6 +17,8 @@ const JITTER_W_SALT: u64 = 0xf2c6_0c4a_0a8a_d53d;
 #[serde(deny_unknown_fields)]
 struct StructureBlueprintFile {
     name: String,
+    #[serde(default)]
+    description: Option<String>,
     #[serde(default = "default_spawn_weight")]
     spawn_weight: u32,
     #[serde(default)]
@@ -71,6 +73,11 @@ impl StructureBlueprint {
             .unwrap_or_else(|error| panic!("invalid structure blueprint {file_name}: {error}"));
         if parsed.name.trim().is_empty() {
             panic!("structure blueprint {file_name} has an empty name");
+        }
+        if let Some(description) = parsed.description.as_deref() {
+            if description.trim().is_empty() {
+                panic!("structure blueprint {file_name} has an empty description");
+            }
         }
 
         if parsed.spawn_weight == 0 {
@@ -282,6 +289,34 @@ fn structure_set() -> &'static StructureSet {
             (
                 "portal_axis.json",
                 include_str!("../../polychora/assets/structures/portal_axis.json"),
+            ),
+            (
+                "resonance_forge.json",
+                include_str!("../../polychora/assets/structures/resonance_forge.json"),
+            ),
+            (
+                "void_colonnade.json",
+                include_str!("../../polychora/assets/structures/void_colonnade.json"),
+            ),
+            (
+                "lumen_orrery.json",
+                include_str!("../../polychora/assets/structures/lumen_orrery.json"),
+            ),
+            (
+                "clifford_atrium.json",
+                include_str!("../../polychora/assets/structures/clifford_atrium.json"),
+            ),
+            (
+                "braided_transit.json",
+                include_str!("../../polychora/assets/structures/braided_transit.json"),
+            ),
+            (
+                "phase_ladder.json",
+                include_str!("../../polychora/assets/structures/phase_ladder.json"),
+            ),
+            (
+                "orthoplex_nexus.json",
+                include_str!("../../polychora/assets/structures/orthoplex_nexus.json"),
             ),
         ];
 
