@@ -2318,9 +2318,9 @@ impl App {
                     "Multiplayer connected: client_id={} world_rev={} chunks={} server_tick_hz={:.2}",
                     client_id, world.revision, world.non_empty_chunks, tick_hz
                 );
-                if let Some(client) = self.multiplayer.as_ref() {
-                    client.send(MultiplayerClientMessage::RequestWorldSnapshot);
-                }
+                // Note: server already sends WorldSnapshot + streamed chunks
+                // during Hello processing, so no need to request again here.
+                // A redundant RequestWorldSnapshot would wipe procgen chunks.
             }
             multiplayer::ServerMessage::Error { message } => {
                 eprintln!("Multiplayer server error: {message}");
