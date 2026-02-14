@@ -804,6 +804,7 @@ fn main() {
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
         main_menu_connect_error: None,
+        look_at_target: None,
         menu_camera: {
             let mut c = Camera4D::new();
             c.position = [5.0, 3.0, 5.0, 2.0];
@@ -976,6 +977,14 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
+#[derive(Copy, Clone)]
+struct LookAtTarget {
+    yaw: f32,
+    pitch: f32,
+    xw_angle: f32,
+    zw_angle: f32,
+}
+
 struct App {
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -1041,6 +1050,7 @@ struct App {
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
     main_menu_connect_error: Option<String>,
+    look_at_target: Option<LookAtTarget>,
     menu_camera: Camera4D,
     menu_time: f32,
     // Runtime resolution UI state (edited values before Apply)
@@ -4533,6 +4543,10 @@ impl App {
             if self.mouse_grabbed {
                 let pair = self.active_rotation_pair();
                 let (dx, dy) = self.input.take_mouse_delta();
+                // Cancel look-at pull on any mouse movement
+                if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                    self.look_at_target = None;
+                }
                 match self.control_scheme {
                     ControlScheme::LookTransport => {
                         self.camera.apply_mouse_look_transport(
@@ -4569,6 +4583,7 @@ impl App {
 
             if self.input.reset_orientation_held() || self.input.pull_to_3d_held() {
                 let pull_home = self.input.reset_orientation_held();
+                self.look_at_target = None; // Cancel look-at when holding R or F
                 match self.control_scheme {
                     ControlScheme::LookTransport | ControlScheme::RotorFree => {
                         if pull_home {
@@ -4586,6 +4601,58 @@ impl App {
                             self.camera.pull_toward_nearest_3d_angles(dt);
                         }
                     }
+                }
+            }
+
+            // Look-at: on F press, find nearest solid block and set target angles.
+            // Only for upright mode (angle-based) since that's the primary control scheme.
+            if self.input.take_look_at()
+                && self.mouse_grabbed
+                && self.control_scheme == ControlScheme::IntuitiveUpright
+            {
+                let look_dir = self.current_look_direction();
+                let edit_reach = self
+                    .args
+                    .edit_reach
+                    .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
+                let targets =
+                    self.scene
+                        .block_edit_targets(self.camera.position, look_dir, edit_reach);
+                if let Some([x, y, z, w]) = targets.hit_voxel {
+                    let target_pos = [
+                        x as f32 + 0.5,
+                        y as f32 + 0.5,
+                        z as f32 + 0.5,
+                        w as f32 + 0.5,
+                    ];
+                    let dir = [
+                        target_pos[0] - self.camera.position[0],
+                        target_pos[1] - self.camera.position[1],
+                        target_pos[2] - self.camera.position[2],
+                        target_pos[3] - self.camera.position[3],
+                    ];
+                    let (ty, tp, txw, tzw) =
+                        Camera4D::angles_for_direction_upright(dir);
+                    self.look_at_target = Some(LookAtTarget {
+                        yaw: ty,
+                        pitch: tp,
+                        xw_angle: txw,
+                        zw_angle: tzw,
+                    });
+                }
+            }
+
+            // Apply smooth pull toward look-at target
+            if let Some(target) = self.look_at_target {
+                let converged = self.camera.pull_toward_target_angles(
+                    target.yaw,
+                    target.pitch,
+                    target.xw_angle,
+                    target.zw_angle,
+                    dt,
+                );
+                if converged {
+                    self.look_at_target = None;
                 }
             }
 
