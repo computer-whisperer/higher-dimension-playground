@@ -318,6 +318,10 @@ fn structure_set() -> &'static StructureSet {
                 "orthoplex_nexus.json",
                 include_str!("../../assets/structures/orthoplex_nexus.json"),
             ),
+            (
+                "hyper_maze.json",
+                include_str!("../../assets/structures/hyper_maze.json"),
+            ),
         ];
 
         let blueprints: Vec<_> = sources
