@@ -297,7 +297,7 @@ impl InputState {
                 }
                 KeyCode::Tab => {
                     if pressed {
-                        self.scheme_cycle_requested = true;
+                        self.inventory_toggle_requested = true;
                     }
                 }
                 KeyCode::KeyR => {
