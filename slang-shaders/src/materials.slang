@@ -466,6 +466,373 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
             mat.luminance = 0.0;
         }
         break;
+    case 35:
+        // Sand
+        {
+            float4 cell = floor((p4 + 128.0) * 12.0);
+            float n0 = frac(sin(dot(cell, float4(17.91, 43.17, 67.23, 29.71))) * 31731.941);
+            float n1 = frac(sin(dot(cell + 11.0, float4(53.17, 97.11, 13.91, 71.23))) * 47831.173);
+            float grains = 0.5 + 0.5 * sin((p4.x * 25.0 + p4.z * 23.0) * tau);
+            float3 base = float3(0.89, 0.83, 0.64);
+            float3 dark = float3(0.81, 0.74, 0.56);
+            float3 color = lerp(base, dark, n0 * 0.2);
+            color = lerp(color, float3(0.93, 0.88, 0.70), n1 * grains * 0.15);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.94;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 36:
+        // Gravel
+        {
+            float4 cell = floor((p4 + 128.0) * 5.0);
+            float n0 = frac(sin(dot(cell, float4(19.31, 61.17, 47.91, 83.23))) * 21731.531);
+            float n1 = frac(sin(dot(cell + 7.0, float4(71.93, 13.47, 89.11, 37.67))) * 39731.817);
+            float n2 = frac(sin(dot(cell + 23.0, float4(41.71, 97.13, 17.91, 53.29))) * 51731.293);
+            float stones = smoothstep(0.3, 0.7, n0);
+            float3 gray1 = float3(0.52, 0.52, 0.54);
+            float3 gray2 = float3(0.44, 0.43, 0.46);
+            float3 gray3 = float3(0.36, 0.37, 0.39);
+            float3 color = lerp(gray1, gray2, stones);
+            color = lerp(color, gray3, n1 * 0.4);
+            color *= 0.96 + n2 * 0.08;
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.93;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 37:
+        // Clay
+        {
+            float4 cell = floor((p4 + 128.0) * 9.0);
+            float n0 = frac(sin(dot(cell, float4(23.17, 59.91, 37.23, 71.47))) * 27731.391);
+            float n1 = frac(sin(dot(cell + 13.0, float4(83.19, 17.71, 91.13, 41.97))) * 43731.671);
+            float smooth = 0.5 + 0.5 * sin((p4.x * 7.0 + p4.y * 5.0 + p4.w * 6.0) * tau);
+            float3 base = float3(0.63, 0.61, 0.59);
+            float3 warm = float3(0.67, 0.59, 0.52);
+            float3 color = lerp(base, warm, smooth * 0.4);
+            color *= 0.94 + (n0 + n1) * 0.06;
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.88;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 38:
+        // Grass Block (normal-dependent: green top, brown sides/bottom)
+        {
+            // Use normal vector to determine if this is a "top" face
+            // In 4D, we check if any component is strongly positive
+            float4 approxNormal = normalize(frac(p4 * 100.0) - 0.5);
+            float isTop = saturate((approxNormal.y - 0.3) * 5.0);
+
+            float4 cell = floor((p4 + 128.0) * 11.0);
+            float n0 = frac(sin(dot(cell, float4(31.17, 67.91, 19.23, 53.71))) * 29731.471);
+            float n1 = frac(sin(dot(cell + 17.0, float4(47.93, 23.17, 79.11, 61.37))) * 37731.923);
+
+            // Green grass top
+            float3 grassBase = float3(0.35, 0.62, 0.28);
+            float3 grassDark = float3(0.28, 0.52, 0.22);
+            float3 grassColor = lerp(grassBase, grassDark, n0 * 0.4);
+
+            // Brown dirt sides
+            float3 dirtBase = float3(0.43, 0.30, 0.18);
+            float3 dirtDark = float3(0.35, 0.23, 0.13);
+            float3 dirtColor = lerp(dirtBase, dirtDark, n1 * 0.5);
+
+            float3 color = lerp(dirtColor, grassColor, isTop);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.90;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 39:
+        // Snow
+        {
+            float4 cell = floor((p4 + 128.0) * 16.0);
+            float n0 = frac(sin(dot(cell, float4(37.91, 73.17, 11.23, 59.47))) * 33731.591);
+            float n1 = frac(sin(dot(cell + 19.0, float4(61.17, 29.93, 87.11, 43.71))) * 41731.293);
+            float crystals = smoothstep(0.88, 0.98, n0);
+            float3 base = float3(0.94, 0.96, 0.98);
+            float3 shadow = float3(0.88, 0.91, 0.94);
+            float3 sparkle = float3(0.98, 0.99, 1.00);
+            float3 color = lerp(base, shadow, n1 * 0.15);
+            color = lerp(color, sparkle, crystals * 0.3);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.85;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 40:
+        // Ice (translucent)
+        {
+            float4 cell = floor((p4 + 128.0) * 8.0);
+            float n0 = frac(sin(dot(cell, float4(41.17, 79.91, 23.71, 67.13))) * 35731.691);
+            float cracks = 0.5 + 0.5 * sin((p4.x * 13.0 + p4.z * 11.0 + p4.w * 9.0) * tau);
+            float crackMask = smoothstep(0.82, 0.96, cracks);
+            float3 base = float3(0.72, 0.88, 0.96);
+            float3 crackColor = float3(0.85, 0.94, 0.98);
+            float3 color = lerp(base, crackColor, crackMask * 0.3);
+            color *= 0.94 + n0 * 0.12;
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.1;
+            mat.roughness = 0.05;
+            mat.luminance = 0.0;
+            mat.integrationWeight = 0.3;
+        }
+        break;
+    case 41:
+        // Coal Ore
+        {
+            float4 stoneCell = floor((p4 + 128.0) * 8.0);
+            float stoneNoise = frac(sin(dot(stoneCell, float4(43.91, 81.17, 29.23, 73.47))) * 37731.791);
+            float3 stoneBase = float3(0.49, 0.50, 0.52) + (stoneNoise - 0.5) * 0.06;
+
+            float4 oreCell = floor((p4 + 128.0) * 5.0);
+            float oreNoise = frac(sin(dot(oreCell, float4(67.17, 19.91, 97.11, 31.73))) * 43731.391);
+            float oreMask = smoothstep(0.65, 0.82, oreNoise);
+
+            float3 coalColor = float3(0.09, 0.09, 0.10);
+            float3 color = lerp(stoneBase, coalColor, oreMask);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.86;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 42:
+        // Iron Ore
+        {
+            float4 stoneCell = floor((p4 + 128.0) * 8.0);
+            float stoneNoise = frac(sin(dot(stoneCell, float4(47.17, 83.91, 31.71, 79.23))) * 39731.891);
+            float3 stoneBase = float3(0.49, 0.50, 0.52) + (stoneNoise - 0.5) * 0.06;
+
+            float4 oreCell = floor((p4 + 128.0) * 6.0);
+            float oreNoise = frac(sin(dot(oreCell, float4(71.93, 23.17, 89.71, 37.91))) * 45731.491);
+            float oreMask = smoothstep(0.62, 0.80, oreNoise);
+
+            float3 ironColor = float3(0.72, 0.62, 0.53);
+            float3 color = lerp(stoneBase, ironColor, oreMask);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.86;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 43:
+        // Gold Ore
+        {
+            float4 stoneCell = floor((p4 + 128.0) * 8.0);
+            float stoneNoise = frac(sin(dot(stoneCell, float4(51.91, 87.17, 37.23, 83.71))) * 41731.991);
+            float3 stoneBase = float3(0.49, 0.50, 0.52) + (stoneNoise - 0.5) * 0.06;
+
+            float4 oreCell = floor((p4 + 128.0) * 5.5);
+            float oreNoise = frac(sin(dot(oreCell, float4(79.17, 29.93, 93.11, 41.67))) * 47731.591);
+            float oreMask = smoothstep(0.64, 0.84, oreNoise);
+
+            float3 goldColor = float3(0.95, 0.78, 0.18);
+            float3 color = lerp(stoneBase, goldColor, oreMask);
+            mat.metallic = oreMask * 0.7;
+            mat.albedo = float4(color, 1.0);
+            mat.roughness = 0.86;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 44:
+        // Diamond Ore
+        {
+            float4 stoneCell = floor((p4 + 128.0) * 8.0);
+            float stoneNoise = frac(sin(dot(stoneCell, float4(53.17, 89.91, 39.71, 87.23))) * 43731.091);
+            float3 stoneBase = float3(0.49, 0.50, 0.52) + (stoneNoise - 0.5) * 0.06;
+
+            float4 oreCell = floor((p4 + 128.0) * 7.0);
+            float oreNoise = frac(sin(dot(oreCell, float4(83.93, 31.17, 97.71, 47.91))) * 49731.691);
+            float oreMask = smoothstep(0.70, 0.88, oreNoise);
+
+            float sparkle = 0.5 + 0.5 * sin((p4.x * 40.0 + p4.w * 35.0 + t * 3.0) * tau);
+            float3 diamondColor = float3(0.42, 0.78, 0.88);
+            float3 color = lerp(stoneBase, diamondColor, oreMask);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.86;
+            mat.luminance = oreMask * sparkle * 0.08;
+        }
+        break;
+    case 45:
+        // Redstone Ore
+        {
+            float4 stoneCell = floor((p4 + 128.0) * 8.0);
+            float stoneNoise = frac(sin(dot(stoneCell, float4(59.91, 91.17, 41.23, 89.47))) * 45731.191);
+            float3 stoneBase = float3(0.49, 0.50, 0.52) + (stoneNoise - 0.5) * 0.06;
+
+            float4 oreCell = floor((p4 + 128.0) * 6.5);
+            float oreNoise = frac(sin(dot(oreCell, float4(87.17, 37.93, 99.11, 53.71))) * 51731.791);
+            float oreMask = smoothstep(0.63, 0.83, oreNoise);
+
+            float pulse = 0.5 + 0.5 * sin(t * 1.5);
+            float3 redstoneColor = float3(0.82, 0.08, 0.08);
+            float3 color = lerp(stoneBase, redstoneColor, oreMask);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.86;
+            mat.luminance = oreMask * (0.3 + pulse * 0.4);
+        }
+        break;
+    case 46:
+        // Birch Planks
+        {
+            float plankBand = frac(p4.y * 4.5);
+            float seam = 1.0 - smoothstep(0.02, 0.08, min(plankBand, 1.0 - plankBand));
+            float grain = 0.5 + 0.5 * sin((p4.x * 9.0 + p4.z * 6.0 + p4.w * 4.0) * tau);
+            float knotField = 0.5 + 0.5 * sin((p4.x * 16.0 + p4.z * 12.0 + p4.w * 7.0) * tau);
+            float knot = smoothstep(0.85, 0.98, knotField);
+            float3 plankBase = lerp(float3(0.88, 0.84, 0.72), float3(0.82, 0.77, 0.64), grain);
+            plankBase = lerp(plankBase, float3(0.62, 0.55, 0.42), knot * 0.35);
+            plankBase = lerp(plankBase, float3(0.54, 0.48, 0.36), seam * 0.7);
+            mat.albedo = float4(plankBase, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.82;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 47:
+        // Bricks
+        {
+            float4 brickUv = frac(p4 * float4(3.0, 6.0, 3.0, 3.0) + float4(0.0, floor(p4.x * 3.0) * 0.5, 0.0, 0.0));
+            float4 brickDist = min(brickUv, 1.0 - brickUv);
+            float mortarMask = 1.0 - smoothstep(0.04, 0.10, min(min(brickDist.x, brickDist.y), min(brickDist.z, brickDist.w)));
+
+            float4 brickCell = floor(p4 * 3.0);
+            float variation = frac(sin(dot(brickCell, float4(61.17, 93.91, 43.23, 91.47))) * 47731.291);
+            float3 brickBase = float3(0.58, 0.27, 0.17);
+            float3 brickVar = float3(0.52, 0.23, 0.14);
+            float3 mortar = float3(0.64, 0.62, 0.60);
+            float3 color = lerp(brickBase, brickVar, variation);
+            color = lerp(color, mortar, mortarMask);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.87;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 48:
+        // Sandstone (layered)
+        {
+            float layers = frac(p4.y * 8.0);
+            float band = smoothstep(0.45, 0.55, layers);
+            float4 cell = floor((p4 + 128.0) * 10.0);
+            float grain = frac(sin(dot(cell, float4(67.91, 97.17, 47.71, 93.23))) * 49731.391);
+            float3 light = float3(0.87, 0.80, 0.62);
+            float3 dark = float3(0.78, 0.71, 0.54);
+            float3 color = lerp(light, dark, band * 0.3);
+            color *= 0.94 + grain * 0.12;
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.82;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 49:
+        // Glass (transparent)
+        {
+            float4 cell = floor((p4 + 128.0) * 20.0);
+            float imperfections = frac(sin(dot(cell, float4(71.17, 99.93, 51.11, 97.71))) * 51731.891);
+            float specs = smoothstep(0.97, 1.0, imperfections);
+            float3 base = float3(0.88, 0.93, 0.96);
+            float3 color = lerp(base, float3(0.95, 0.98, 1.00), specs);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.02;
+            mat.luminance = 0.0;
+            mat.integrationWeight = 0.05;
+        }
+        break;
+    case 50:
+        // Glowstone
+        {
+            float4 cell = floor((p4 + 128.0) * 6.0);
+            float cracks0 = frac(sin(dot(cell, float4(73.93, 101.17, 53.71, 99.91))) * 53731.991);
+            float cracks1 = frac(sin(dot(cell + 13.0, float4(89.17, 43.93, 107.11, 59.67))) * 57731.491);
+            float crackMask = smoothstep(0.35, 0.65, cracks0 * cracks1);
+            float pulse = 0.5 + 0.5 * sin(t * 1.2);
+            float3 bright = float3(0.98, 0.93, 0.62);
+            float3 dim = float3(0.88, 0.78, 0.45);
+            float3 cracks = float3(0.72, 0.64, 0.38);
+            float3 color = lerp(bright, dim, pulse * 0.15);
+            color = lerp(color, cracks, crackMask);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.65;
+            mat.luminance = 15.0 * (0.85 + pulse * 0.15);
+        }
+        break;
+    case 51:
+        // Obsidian
+        {
+            float4 cell = floor((p4 + 128.0) * 5.0);
+            float flow = frac(sin(dot(cell, float4(79.17, 103.91, 59.23, 101.47))) * 55731.091);
+            float swirl = 0.5 + 0.5 * sin((p4.x * 8.0 + p4.z * 6.0 + p4.w * 7.0) * tau);
+            float3 deep = float3(0.06, 0.04, 0.08);
+            float3 purple = float3(0.14, 0.08, 0.18);
+            float3 color = lerp(deep, purple, flow * swirl * 0.5);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.2;
+            mat.roughness = 0.15;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 52:
+        // Prismarine
+        {
+            float4 q4 = p4 * 0.8 + float4(t * 0.15, -t * 0.10, t * 0.12, t * 0.08);
+            float pattern = 0.5 + 0.5 * sin((q4.x * 7.0 + q4.y * 5.0 + q4.z * 6.0 + q4.w * 8.0) * tau);
+            float pattern2 = 0.5 + 0.5 * sin((q4.x * 11.0 - q4.z * 9.0 + q4.w * 10.0) * tau);
+            float scales = smoothstep(0.35, 0.70, pattern * pattern2);
+            float3 base = float3(0.25, 0.64, 0.62);
+            float3 light = float3(0.38, 0.78, 0.74);
+            float3 color = lerp(base, light, scales);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.1;
+            mat.roughness = 0.6;
+            mat.luminance = 0.02;
+        }
+        break;
+    case 53:
+        // Terracotta
+        {
+            float4 cell = floor((p4 + 128.0) * 8.0);
+            float grain = frac(sin(dot(cell, float4(83.91, 107.17, 61.71, 103.23))) * 59731.191);
+            float bands = 0.5 + 0.5 * sin(p4.y * 12.0 * tau);
+            float3 base = float3(0.68, 0.42, 0.28);
+            float3 light = float3(0.76, 0.48, 0.32);
+            float3 color = lerp(base, light, bands * 0.2);
+            color *= 0.94 + grain * 0.12;
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.85;
+            mat.luminance = 0.0;
+        }
+        break;
+    case 54:
+        // Wool (White)
+        {
+            float4 cell = floor((p4 + 128.0) * 14.0);
+            float fiber0 = frac(sin(dot(cell, float4(87.17, 109.93, 67.11, 107.71))) * 61731.291);
+            float fiber1 = frac(sin(dot(cell + 17.0, float4(91.93, 47.17, 113.71, 71.91))) * 63731.391);
+            float texture = fiber0 * fiber1;
+            float3 base = float3(0.93, 0.93, 0.93);
+            float3 shadow = float3(0.86, 0.86, 0.86);
+            float3 color = lerp(base, shadow, texture * 0.25);
+            mat.albedo = float4(color, 1.0);
+            mat.metallic = 0.0;
+            mat.roughness = 0.96;
+            mat.luminance = 0.0;
+        }
+        break;
     default:
         mat.albedo = float4(0.0, 0.0, 0.0, 1.0);
         mat.luminance = 0.0;
