@@ -1,5 +1,7 @@
 use crate::voxel::{Chunk, ChunkPos, VoxelType, CHUNK_SIZE};
+use flate2::read::GzDecoder;
 use serde::Deserialize;
+use std::io::Read;
 use std::sync::OnceLock;
 
 const STRUCTURE_CELL_SIZE: i32 = 32;
@@ -68,8 +70,8 @@ fn default_spawn_weight() -> u32 {
 }
 
 impl StructureBlueprint {
-    fn from_embedded_json(file_name: &str, json: &str) -> Self {
-        let parsed: StructureBlueprintFile = serde_json::from_str(json)
+    fn from_embedded_json_bytes(file_name: &str, json: &[u8]) -> Self {
+        let parsed: StructureBlueprintFile = serde_json::from_slice(json)
             .unwrap_or_else(|error| panic!("invalid structure blueprint {file_name}: {error}"));
         if parsed.name.trim().is_empty() {
             panic!("structure blueprint {file_name} has an empty name");
@@ -137,6 +139,19 @@ impl StructureBlueprint {
             voxels: parsed.voxels,
             min_offset,
             max_offset,
+        }
+    }
+
+    fn from_embedded_source(file_name: &str, source: &[u8]) -> Self {
+        if let Some(base_name) = file_name.strip_suffix(".gz") {
+            let mut decoder = GzDecoder::new(source);
+            let mut decompressed = Vec::new();
+            decoder.read_to_end(&mut decompressed).unwrap_or_else(|error| {
+                panic!("failed to decompress structure blueprint {file_name}: {error}")
+            });
+            Self::from_embedded_json_bytes(base_name, &decompressed)
+        } else {
+            Self::from_embedded_json_bytes(file_name, source)
         }
     }
 
@@ -249,84 +264,84 @@ static STRUCTURE_SET: OnceLock<StructureSet> = OnceLock::new();
 
 fn structure_set() -> &'static StructureSet {
     STRUCTURE_SET.get_or_init(|| {
-        let sources = [
+        let sources: [(&str, &[u8]); 18] = [
             (
                 "cross_shrine.json",
-                include_str!("../../polychora/assets/structures/cross_shrine.json"),
+                &include_bytes!("../../polychora/assets/structures/cross_shrine.json")[..],
             ),
             (
                 "hyper_arch.json",
-                include_str!("../../polychora/assets/structures/hyper_arch.json"),
+                &include_bytes!("../../polychora/assets/structures/hyper_arch.json")[..],
             ),
             (
                 "tetra_spire.json",
-                include_str!("../../polychora/assets/structures/tetra_spire.json"),
+                &include_bytes!("../../polychora/assets/structures/tetra_spire.json")[..],
             ),
             (
                 "sky_bridge.json",
-                include_str!("../../polychora/assets/structures/sky_bridge.json"),
+                &include_bytes!("../../polychora/assets/structures/sky_bridge.json")[..],
             ),
             (
                 "ring_keep.json",
-                include_str!("../../polychora/assets/structures/ring_keep.json"),
+                &include_bytes!("../../polychora/assets/structures/ring_keep.json")[..],
             ),
             (
                 "terraced_pyramid.json",
-                include_str!("../../polychora/assets/structures/terraced_pyramid.json"),
+                &include_bytes!("../../polychora/assets/structures/terraced_pyramid.json")[..],
             ),
             (
                 "cathedral_spine.json",
-                include_str!("../../polychora/assets/structures/cathedral_spine.json"),
+                &include_bytes!("../../polychora/assets/structures/cathedral_spine.json")[..],
             ),
             (
                 "lattice_hall.json",
-                include_str!("../../polychora/assets/structures/lattice_hall.json"),
+                &include_bytes!("../../polychora/assets/structures/lattice_hall.json")[..],
             ),
             (
                 "shard_garden.json",
-                include_str!("../../polychora/assets/structures/shard_garden.json"),
+                &include_bytes!("../../polychora/assets/structures/shard_garden.json")[..],
             ),
             (
                 "portal_axis.json",
-                include_str!("../../polychora/assets/structures/portal_axis.json"),
+                &include_bytes!("../../polychora/assets/structures/portal_axis.json")[..],
             ),
             (
                 "resonance_forge.json",
-                include_str!("../../polychora/assets/structures/resonance_forge.json"),
+                &include_bytes!("../../polychora/assets/structures/resonance_forge.json")[..],
             ),
             (
                 "void_colonnade.json",
-                include_str!("../../polychora/assets/structures/void_colonnade.json"),
+                &include_bytes!("../../polychora/assets/structures/void_colonnade.json")[..],
             ),
             (
                 "lumen_orrery.json",
-                include_str!("../../polychora/assets/structures/lumen_orrery.json"),
+                &include_bytes!("../../polychora/assets/structures/lumen_orrery.json")[..],
             ),
             (
                 "clifford_atrium.json",
-                include_str!("../../polychora/assets/structures/clifford_atrium.json"),
+                &include_bytes!("../../polychora/assets/structures/clifford_atrium.json")[..],
             ),
             (
                 "braided_transit.json",
-                include_str!("../../polychora/assets/structures/braided_transit.json"),
+                &include_bytes!("../../polychora/assets/structures/braided_transit.json")[..],
             ),
             (
                 "phase_ladder.json",
-                include_str!("../../polychora/assets/structures/phase_ladder.json"),
+                &include_bytes!("../../polychora/assets/structures/phase_ladder.json")[..],
             ),
             (
                 "orthoplex_nexus.json",
-                include_str!("../../polychora/assets/structures/orthoplex_nexus.json"),
+                &include_bytes!("../../polychora/assets/structures/orthoplex_nexus.json")[..],
             ),
             (
-                "hyper_maze.json",
-                include_str!("../../polychora/assets/structures/hyper_maze.json"),
+                "hyper_maze.json.gz",
+                &include_bytes!("../../polychora/assets/structures/hyper_maze.json.gz")[..],
             ),
         ];
 
         let blueprints: Vec<_> = sources
             .iter()
-            .map(|(name, source)| StructureBlueprint::from_embedded_json(name, source))
+            .map(|(name, source)| StructureBlueprint::from_embedded_source(name, source))
             .collect();
 
         let total_weight = blueprints
