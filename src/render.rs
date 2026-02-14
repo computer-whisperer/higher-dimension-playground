@@ -4164,22 +4164,57 @@ impl RenderContext {
             crosshair_outline,
         );
 
-        // WAILA: show targeted block name below crosshair
+        // WAILA: show targeted block name in a styled box at the top center of the screen
         if let Some(name) = waila_text {
             if let Some(hud_res) = self.hud_resources.as_ref() {
                 let waila_size = 16.0 * hud_scale;
                 let waila_color = Vec4::new(0.95, 0.95, 0.95, 0.85);
                 let tw = text_width_px(&hud_res.font_atlas, name, waila_size);
-                // Center horizontally, place 30px (scaled) below screen center
+
+                // Position at top center of screen
                 let center_x = present_w * 0.5;
-                let center_y = present_h * 0.5; // Y-up: center of screen
-                let top_left_px =
-                    Vec2::new(center_x - tw * 0.5, center_y - 30.0 * hud_scale);
+                let padding_h = 8.0 * hud_scale;
+                let padding_v = 4.0 * hud_scale;
+
+                // Y-up coordinate system: Y=0 is bottom, Y=present_h is top
+                // Place box 40px from top edge
+                let box_top_y = present_h - 40.0 * hud_scale;
+
+                // Calculate text height (approximate based on font size)
+                let text_height = waila_size;
+                let box_height = text_height + padding_v * 2.0;
+                let box_width = tw + padding_h * 2.0;
+
+                // Box positioning in pixels (Y-up)
+                let box_min_x = center_x - box_width * 0.5;
+                let box_max_x = center_x + box_width * 0.5;
+                let box_min_y = box_top_y - box_height;
+                let box_max_y = box_top_y;
+
+                // Convert to NDC for background rect
+                let box_min_ndc = pixels_to_ndc(Vec2::new(box_min_x, box_min_y), present_size);
+                let box_max_ndc = pixels_to_ndc(Vec2::new(box_max_x, box_max_y), present_size);
+
+                // Draw dark semi-transparent background
+                let bg_color = Vec4::new(0.1, 0.1, 0.15, 0.7);
+                push_filled_rect_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    box_min_ndc,
+                    box_max_ndc,
+                    bg_color,
+                );
+
+                // Draw text centered in the box
+                let text_top_left_px = Vec2::new(
+                    center_x - tw * 0.5,
+                    box_max_y - padding_v,
+                );
                 push_text_quads(
                     &mut hud_quads,
                     &hud_res.font_atlas,
                     name,
-                    top_left_px,
+                    text_top_left_px,
                     waila_size,
                     waila_color,
                     present_size,
