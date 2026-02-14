@@ -1,5 +1,6 @@
 {
   "name": "portal_axis",
+  "description": "A linear axis gate with hazard-striped footing, tall vertical uprights, and a luminous central core.",
   "spawn_weight": 1,
   "ground_offset_y": 1,
   "fills": [

@@ -1,5 +1,6 @@
 {
   "name": "sky_bridge",
+  "description": "An elevated circuit bridge with narrow side rails, anchored by tall support pylons and endpoint lights.",
   "spawn_weight": 2,
   "ground_offset_y": 3,
   "fills": [

@@ -1,5 +1,6 @@
 {
   "name": "shard_garden",
+  "description": "A marble plaza punctuated by asymmetrical wooden crystal-shard pillars and a central trunk-like spire.",
   "spawn_weight": 2,
   "ground_offset_y": 0,
   "fills": [
