@@ -1959,6 +1959,26 @@ impl App {
         }
     }
 
+    fn toggle_teleport_dialog(&mut self) {
+        self.teleport_dialog_open = !self.teleport_dialog_open;
+        let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+        if let Some(window) = window {
+            if self.teleport_dialog_open {
+                // Pre-fill with current position
+                let pos = self.camera.position;
+                self.teleport_coords = [
+                    format!("{:.1}", pos[0]),
+                    format!("{:.1}", pos[1]),
+                    format!("{:.1}", pos[2]),
+                    format!("{:.1}", pos[3]),
+                ];
+                self.release_mouse(&window);
+            } else {
+                self.grab_mouse(&window);
+            }
+        }
+    }
+
     fn cycle_control_scheme(&mut self) {
         let previous_scheme = self.control_scheme;
         self.control_scheme = self.control_scheme.next();
@@ -2787,6 +2807,7 @@ impl App {
         self.input.take_menu_up();
         self.input.take_menu_down();
         self.input.take_menu_activate();
+        self.input.take_look_at();
         self.input.take_scheme_cycle();
         self.input.take_vte_sweep();
         self.input.take_vte_entities_toggle();
@@ -3791,10 +3812,16 @@ impl App {
         }
         if close_teleport {
             self.teleport_dialog_open = false;
+            if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
+                self.grab_mouse(&window);
+            }
         }
         if let Some(pos) = teleport_target {
             self.camera.position = pos;
             self.teleport_dialog_open = false;
+            if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
+                self.grab_mouse(&window);
+            }
             eprintln!(
                 "Teleported to ({:.1}, {:.1}, {:.1}, {:.1})",
                 pos[0], pos[1], pos[2], pos[3],
@@ -4583,7 +4610,7 @@ impl App {
             self.should_exit_after_render = true;
         }
 
-        if self.menu_open || self.inventory_open {
+        if self.menu_open || self.inventory_open || self.teleport_dialog_open {
             self.drain_gameplay_inputs_while_menu_open();
         } else {
             self.input.take_menu_left();
@@ -4717,12 +4744,9 @@ impl App {
                 }
             }
 
-            // Look-at: on F press, find nearest solid block and set target angles.
-            // Only for upright mode (angle-based) since that's the primary control scheme.
-            if self.input.take_look_at()
-                && self.mouse_grabbed
-                && self.control_scheme == ControlScheme::IntuitiveUpright
-            {
+            // Look-at: on G press, find nearest solid block and set target angles.
+            // Works with any angle-based control scheme.
+            if self.input.take_look_at() && self.mouse_grabbed {
                 let look_dir = self.current_look_direction();
                 let edit_reach = self
                     .args
@@ -4818,17 +4842,7 @@ impl App {
             }
             // T key toggles teleport dialog.
             if self.input.take_teleport_dialog() {
-                self.teleport_dialog_open = !self.teleport_dialog_open;
-                if self.teleport_dialog_open {
-                    // Pre-fill with current position
-                    let pos = self.camera.position;
-                    self.teleport_coords = [
-                        format!("{:.1}", pos[0]),
-                        format!("{:.1}", pos[1]),
-                        format!("{:.1}", pos[2]),
-                        format!("{:.1}", pos[3]),
-                    ];
-                }
+                self.toggle_teleport_dialog();
             }
         }
 
@@ -4840,7 +4854,7 @@ impl App {
             .edit_reach
             .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
 
-        if !self.menu_open && !self.inventory_open {
+        if !self.menu_open && !self.inventory_open && !self.teleport_dialog_open {
             // Jump when in gravity mode, consume jump either way.
             if self.camera.is_flying {
                 self.input.take_jump();
@@ -5493,6 +5507,9 @@ impl ApplicationHandler for App {
                         }
                     } else if self.teleport_dialog_open {
                         self.teleport_dialog_open = false;
+                        if let Some(window) = window.as_ref() {
+                            self.grab_mouse(window);
+                        }
                     } else if self.inventory_open {
                         self.inventory_open = false;
                         if let Some(window) = window.as_ref() {
