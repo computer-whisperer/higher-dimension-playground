@@ -4295,9 +4295,9 @@ impl App {
         self.teleport_dialog_open = false;
         // Reset the menu demo camera
         self.menu_time = 0.0;
-        self.menu_camera.position = [5.0, 3.0, 5.0, 2.0];
-        self.menu_camera.yaw = -0.8;
-        self.menu_camera.pitch = -0.3;
+        self.menu_camera.position = [8.0, 4.0, 1.0, 1.0];
+        self.menu_camera.yaw = -0.15;
+        self.menu_camera.pitch = -0.25;
         self.menu_camera.xw_angle = 0.4;
         self.menu_camera.zw_angle = 0.0;
         self.menu_camera.yw_deviation = 0.0;
@@ -4319,7 +4319,7 @@ impl App {
         self.menu_time += dt;
 
         // Slowly orbit: rotate yaw and xw_angle for a gentle 4D tumble
-        self.menu_camera.yaw = -0.8 + self.menu_time * 0.08;
+        self.menu_camera.yaw = -0.15 + self.menu_time * 0.08;
         self.menu_camera.xw_angle = 0.4 + self.menu_time * 0.05;
 
         let egui_paint = if self.args.no_hud {
@@ -5565,7 +5565,7 @@ impl ApplicationHandler for App {
                             if !egui_consumed {
                                 self.input.handle_mouse_button(button, state);
                             }
-                        } else if !self.menu_open && !self.inventory_open {
+                        } else if !self.menu_open && !self.inventory_open && !self.teleport_dialog_open {
                             if let Some(window) = window.as_ref() {
                                 self.grab_mouse(window);
                                 self.menu_open = false;
