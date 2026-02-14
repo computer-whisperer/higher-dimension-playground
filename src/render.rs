@@ -4,10 +4,9 @@ mod vte;
 
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
-    build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, push_cross,
+    build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
-    push_text_quads, pixels_to_ndc, HudResources, HudVertex, LineVertex, OverlayLine,
-    HUD_VERTEX_CAPACITY,
+    push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine, HUD_VERTEX_CAPACITY,
 };
 pub use self::vte::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VteDebugCounters, VTE_MAX_CHUNKS,
@@ -1819,7 +1818,8 @@ fn create_r8_texture_view(
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
         pixels.iter().copied(),
@@ -1880,7 +1880,8 @@ fn create_rgba8_srgb_texture_view(
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
         pixels.iter().copied(),
@@ -2523,7 +2524,11 @@ impl RenderContext {
                             )
                         });
 
-                        (Some(hud_vertex_buffer), hud_descriptor_set, egui_descriptor_set)
+                        (
+                            Some(hud_vertex_buffer),
+                            hud_descriptor_set,
+                            egui_descriptor_set,
+                        )
                     }
                     None => (None, None, None),
                 };
@@ -2823,7 +2828,9 @@ impl RenderContext {
             for update in updates {
                 let width = update.size[0].max(1);
                 let height = update.size[1].max(1);
-                let expected_len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+                let expected_len = (width as usize)
+                    .saturating_mul(height as usize)
+                    .saturating_mul(4);
                 if update.pixels.len() != expected_len {
                     continue;
                 }
@@ -2841,7 +2848,9 @@ impl RenderContext {
                         let atlas_w = egui_resources.texture_size[0].max(1);
                         let atlas_h = egui_resources.texture_size[1].max(1);
                         if egui_resources.texture_pixels.len()
-                            != (atlas_w as usize).saturating_mul(atlas_h as usize).saturating_mul(4)
+                            != (atlas_w as usize)
+                                .saturating_mul(atlas_h as usize)
+                                .saturating_mul(4)
                         {
                             continue;
                         }
@@ -2852,7 +2861,8 @@ impl RenderContext {
                         for row in 0..height as usize {
                             let src_start = row * width as usize * 4;
                             let src_end = src_start + width as usize * 4;
-                            let dst_start = ((y as usize + row) * atlas_w as usize + x as usize) * 4;
+                            let dst_start =
+                                ((y as usize + row) * atlas_w as usize + x as usize) * 4;
                             let dst_end = dst_start + width as usize * 4;
                             egui_resources.texture_pixels[dst_start..dst_end]
                                 .copy_from_slice(&update.pixels[src_start..src_end]);
@@ -2865,7 +2875,10 @@ impl RenderContext {
             if !did_change {
                 return;
             }
-            (egui_resources.texture_size, egui_resources.texture_pixels.clone())
+            (
+                egui_resources.texture_size,
+                egui_resources.texture_pixels.clone(),
+            )
         };
 
         let new_view = create_rgba8_srgb_texture_view(
@@ -5203,8 +5216,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             }
                         }
 
-                        self.frames_in_flight[frame_idx].last_entity_scene_hash =
-                            entity_scene_hash;
+                        self.frames_in_flight[frame_idx].last_entity_scene_hash = entity_scene_hash;
                     }
                 }
 
@@ -5811,10 +5823,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             let descriptor_set = match batch.texture_slot {
                                 HudTextureSlot::Hud => frame.hud_descriptor_set.as_ref(),
                                 HudTextureSlot::EguiAtlas => frame.egui_descriptor_set.as_ref(),
-                                HudTextureSlot::MaterialIcons => {
-                                    frame.material_icons_descriptor_set.as_ref()
-                                        .or(frame.egui_descriptor_set.as_ref())
-                                }
+                                HudTextureSlot::MaterialIcons => frame
+                                    .material_icons_descriptor_set
+                                    .as_ref()
+                                    .or(frame.egui_descriptor_set.as_ref()),
                             };
                             let Some(descriptor_set) = descriptor_set else {
                                 continue;
@@ -5842,10 +5854,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     [batch.first_vertex],
                                 )
                                 .unwrap();
-                            unsafe {
-                                builder.draw(batch.vertex_count, 1, 0, 0)
-                            }
-                            .unwrap();
+                            unsafe { builder.draw(batch.vertex_count, 1, 0, 0) }.unwrap();
                         }
                     }
 

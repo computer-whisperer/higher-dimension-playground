@@ -58,6 +58,8 @@ struct PlayerState {
     position: [f32; 4],
     look: [f32; 4],
     last_update_ms: u64,
+    streamed_chunks: HashSet<ChunkPos>,
+    last_stream_center_chunk: Option<[i32; 4]>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,7 +91,6 @@ struct ServerState {
     next_entity_id: u64,
     world: VoxelWorld,
     world_revision: u64,
-    generated_procgen_chunks: HashSet<ChunkPos>,
     players: HashMap<u64, PlayerState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
     entities: HashMap<u64, EntityState>,
@@ -136,47 +137,148 @@ fn encode_world_chunk_payload(chunk_pos: ChunkPos, chunk: &voxel::Chunk) -> Worl
     }
 }
 
-fn generate_procgen_chunks_around(
+fn chunks_equal(a: &voxel::Chunk, b: &voxel::Chunk) -> bool {
+    a.solid_count == b.solid_count && a.voxels[..] == b.voxels[..]
+}
+
+fn merge_non_air_voxels(dst: &mut voxel::Chunk, src: &voxel::Chunk) {
+    for (idx, voxel) in src.voxels.iter().enumerate() {
+        if voxel.is_air() {
+            continue;
+        }
+        dst.voxels[idx] = *voxel;
+    }
+    dst.solid_count = dst.voxels.iter().filter(|v| v.is_solid()).count() as u32;
+    dst.dirty = true;
+}
+
+fn build_virgin_chunk_for_edit(
+    world: &VoxelWorld,
+    chunk_pos: ChunkPos,
+    world_seed: u64,
+    procgen_structures: bool,
+) -> Option<voxel::Chunk> {
+    let mut chunk = world.clone_base_chunk_or_empty_at(chunk_pos);
+    if procgen_structures {
+        if let Some(structure_chunk) = procgen::generate_structure_chunk(world_seed, chunk_pos) {
+            merge_non_air_voxels(&mut chunk, &structure_chunk);
+        }
+    }
+    if chunk.is_empty() {
+        None
+    } else {
+        Some(chunk)
+    }
+}
+
+fn build_effective_stream_chunk(
+    state: &ServerState,
+    chunk_pos: ChunkPos,
+    world_seed: u64,
+    procgen_structures: bool,
+) -> Option<voxel::Chunk> {
+    if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
+        return (!override_chunk.is_empty()).then(|| override_chunk.clone());
+    }
+    if procgen_structures {
+        return procgen::generate_structure_chunk(world_seed, chunk_pos);
+    }
+    None
+}
+
+fn plan_stream_window_update(
     state: &mut ServerState,
+    client_id: u64,
     center_chunk: [i32; 4],
     world_seed: u64,
+    procgen_structures: bool,
     chunk_radius: i32,
-) -> Option<(u64, Vec<WorldChunkPayload>)> {
+) -> Option<(u64, Vec<WorldChunkPayload>, Vec<[i32; 4]>)> {
     let radius = chunk_radius.max(0);
-    let (min_structure_chunk_y, max_structure_chunk_y) = procgen::structure_chunk_y_bounds();
-    let mut chunk_payloads = Vec::new();
+    let min_chunk = [
+        center_chunk[0] - radius,
+        center_chunk[1] - radius,
+        center_chunk[2] - radius,
+        center_chunk[3] - radius,
+    ];
+    let max_chunk = [
+        center_chunk[0] + radius,
+        center_chunk[1] + radius,
+        center_chunk[2] + radius,
+        center_chunk[3] + radius,
+    ];
 
-    for chunk_x in (center_chunk[0] - radius)..=(center_chunk[0] + radius) {
-        for chunk_z in (center_chunk[2] - radius)..=(center_chunk[2] + radius) {
-            for chunk_w in (center_chunk[3] - radius)..=(center_chunk[3] + radius) {
-                for chunk_y in min_structure_chunk_y..=max_structure_chunk_y {
-                    let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
-                    if !state.generated_procgen_chunks.insert(chunk_pos) {
-                        continue;
+    let mut desired_set = HashSet::new();
+    if procgen_structures {
+        let (min_structure_chunk_y, max_structure_chunk_y) = procgen::structure_chunk_y_bounds();
+        for chunk_x in min_chunk[0]..=max_chunk[0] {
+            for chunk_z in min_chunk[2]..=max_chunk[2] {
+                for chunk_w in min_chunk[3]..=max_chunk[3] {
+                    for chunk_y in min_structure_chunk_y..=max_structure_chunk_y {
+                        let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
+                        if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
+                            if !override_chunk.is_empty() {
+                                desired_set.insert(chunk_pos);
+                            }
+                            continue;
+                        }
+                        if procgen::structure_chunk_has_content(world_seed, chunk_pos) {
+                            desired_set.insert(chunk_pos);
+                        }
                     }
-                    if state.world.chunks.contains_key(&chunk_pos) {
-                        continue;
-                    }
-
-                    let Some(chunk) = procgen::generate_structure_chunk(world_seed, chunk_pos)
-                    else {
-                        continue;
-                    };
-
-                    let payload = encode_world_chunk_payload(chunk_pos, &chunk);
-                    state.world.insert_chunk(chunk_pos, chunk);
-                    chunk_payloads.push(payload);
                 }
             }
         }
     }
 
-    if chunk_payloads.is_empty() {
-        return None;
+    for (&chunk_pos, chunk) in &state.world.chunks {
+        if chunk_pos.x < min_chunk[0]
+            || chunk_pos.x > max_chunk[0]
+            || chunk_pos.y < min_chunk[1]
+            || chunk_pos.y > max_chunk[1]
+            || chunk_pos.z < min_chunk[2]
+            || chunk_pos.z > max_chunk[2]
+            || chunk_pos.w < min_chunk[3]
+            || chunk_pos.w > max_chunk[3]
+            || chunk.is_empty()
+        {
+            continue;
+        }
+        desired_set.insert(chunk_pos);
     }
 
-    state.world_revision = state.world_revision.wrapping_add(1);
-    Some((state.world_revision, chunk_payloads))
+    let old_streamed = {
+        let player = state.players.get_mut(&client_id)?;
+        std::mem::take(&mut player.streamed_chunks)
+    };
+
+    let mut load_chunk_pos: Vec<ChunkPos> =
+        desired_set.difference(&old_streamed).copied().collect();
+    load_chunk_pos.sort_unstable_by_key(|pos| (pos.w, pos.z, pos.y, pos.x));
+
+    let mut load_payloads = Vec::with_capacity(load_chunk_pos.len());
+    let mut realized_desired = desired_set;
+    for chunk_pos in load_chunk_pos {
+        if let Some(chunk) =
+            build_effective_stream_chunk(state, chunk_pos, world_seed, procgen_structures)
+        {
+            load_payloads.push(encode_world_chunk_payload(chunk_pos, &chunk));
+        } else {
+            realized_desired.remove(&chunk_pos);
+        }
+    }
+
+    let mut unload_chunks: Vec<[i32; 4]> = old_streamed
+        .difference(&realized_desired)
+        .copied()
+        .map(|pos| [pos.x, pos.y, pos.z, pos.w])
+        .collect();
+    unload_chunks.sort_unstable();
+
+    if let Some(player) = state.players.get_mut(&client_id) {
+        player.streamed_chunks = realized_desired;
+    }
+    Some((state.world_revision, load_payloads, unload_chunks))
 }
 
 fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
@@ -213,6 +315,183 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
             guard.players.remove(&client_id);
         }
     }
+}
+
+fn send_world_voxel_set_to_streamed_clients(
+    state: &SharedState,
+    position: [i32; 4],
+    material: u8,
+    source_client_id: Option<u64>,
+    client_edit_id: Option<u64>,
+    revision: u64,
+) {
+    let (chunk_pos, _) = voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
+    let clients: Vec<_> = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard
+            .clients
+            .iter()
+            .filter_map(|(&client_id, tx)| {
+                let is_source = source_client_id == Some(client_id);
+                let is_streaming_chunk = guard
+                    .players
+                    .get(&client_id)
+                    .map(|player| player.streamed_chunks.contains(&chunk_pos))
+                    .unwrap_or(false);
+                if is_source || is_streaming_chunk {
+                    Some((client_id, tx.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    let message = ServerMessage::WorldVoxelSet {
+        position,
+        material,
+        source_client_id,
+        client_edit_id,
+        revision,
+    };
+    let mut stale = Vec::new();
+    for (client_id, tx) in clients {
+        if tx.send(message.clone()).is_err() {
+            stale.push(client_id);
+        }
+    }
+
+    if !stale.is_empty() {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        for client_id in stale {
+            guard.clients.remove(&client_id);
+            guard.players.remove(&client_id);
+        }
+    }
+}
+
+fn sync_streamed_chunks_for_client(
+    state: &SharedState,
+    client_id: u64,
+    center_chunk: [i32; 4],
+    world_seed: u64,
+    procgen_structures: bool,
+    procgen_chunk_radius: i32,
+    force: bool,
+) {
+    let update = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        let should_sync = match guard.players.get_mut(&client_id) {
+            Some(player) => {
+                let changed = player.last_stream_center_chunk != Some(center_chunk);
+                if force || changed {
+                    player.last_stream_center_chunk = Some(center_chunk);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+
+        if should_sync {
+            plan_stream_window_update(
+                &mut guard,
+                client_id,
+                center_chunk,
+                world_seed,
+                procgen_structures,
+                procgen_chunk_radius,
+            )
+        } else {
+            None
+        }
+    };
+
+    let Some((revision, chunk_loads, chunk_unloads)) = update else {
+        return;
+    };
+
+    if !chunk_loads.is_empty() {
+        send_to_client(
+            state,
+            client_id,
+            ServerMessage::WorldChunkBatch {
+                revision,
+                chunks: chunk_loads,
+            },
+        );
+    }
+
+    if !chunk_unloads.is_empty() {
+        send_to_client(
+            state,
+            client_id,
+            ServerMessage::WorldChunkUnloadBatch {
+                revision,
+                chunks: chunk_unloads,
+            },
+        );
+    }
+}
+
+fn ensure_chunk_materialized_for_edit(
+    state: &mut ServerState,
+    chunk_pos: ChunkPos,
+    world_seed: u64,
+    procgen_structures: bool,
+) {
+    if state.world.has_chunk_override(chunk_pos) {
+        return;
+    }
+    if let Some(chunk) =
+        build_virgin_chunk_for_edit(&state.world, chunk_pos, world_seed, procgen_structures)
+    {
+        state.world.insert_chunk(chunk_pos, chunk);
+    }
+}
+
+fn trim_chunk_override_if_virgin(
+    state: &mut ServerState,
+    chunk_pos: ChunkPos,
+    world_seed: u64,
+    procgen_structures: bool,
+) {
+    let Some(override_chunk) = state.world.override_chunk_at(chunk_pos).cloned() else {
+        return;
+    };
+    let virgin_chunk =
+        build_virgin_chunk_for_edit(&state.world, chunk_pos, world_seed, procgen_structures);
+    let matches_virgin = match virgin_chunk {
+        Some(virgin) => chunks_equal(&override_chunk, &virgin),
+        None => override_chunk.is_empty(),
+    };
+    if matches_virgin {
+        let _ = state.world.remove_chunk_override(chunk_pos);
+    }
+}
+
+fn prune_virgin_overrides(
+    world: &mut VoxelWorld,
+    world_seed: u64,
+    procgen_structures: bool,
+) -> usize {
+    let positions: Vec<ChunkPos> = world.chunks.keys().copied().collect();
+    let mut pruned = 0usize;
+    for pos in positions {
+        let Some(override_chunk) = world.override_chunk_at(pos).cloned() else {
+            continue;
+        };
+        let virgin_chunk = build_virgin_chunk_for_edit(world, pos, world_seed, procgen_structures);
+        let matches_virgin = match virgin_chunk {
+            Some(virgin) => chunks_equal(&override_chunk, &virgin),
+            None => override_chunk.is_empty(),
+        };
+        if matches_virgin && world.remove_chunk_override(pos) {
+            pruned += 1;
+        }
+    }
+    pruned
 }
 
 fn load_world_from_path(path: &Path) -> io::Result<VoxelWorld> {
@@ -379,6 +658,8 @@ fn install_or_update_player(
                 std::f32::consts::FRAC_1_SQRT_2,
             ],
             last_update_ms: now,
+            streamed_chunks: HashSet::new(),
+            last_stream_center_chunk: None,
         });
 
     if let Some(n) = name {
@@ -409,21 +690,6 @@ fn handle_message(
         ClientMessage::Hello { name } => {
             let snapshot =
                 install_or_update_player(state, client_id, Some(name), None, None, start);
-            if procgen_structures {
-                let generated = {
-                    let mut guard = state.lock().expect("server state lock poisoned");
-                    let center_chunk = world_chunk_from_position(snapshot.position);
-                    generate_procgen_chunks_around(
-                        &mut guard,
-                        center_chunk,
-                        world_seed,
-                        procgen_chunk_radius,
-                    )
-                };
-                if let Some((revision, chunks)) = generated {
-                    broadcast(state, ServerMessage::WorldChunkBatch { revision, chunks });
-                }
-            }
             send_to_client(
                 state,
                 client_id,
@@ -470,25 +736,30 @@ fn handle_message(
                     });
                 }
             }
+            let center_chunk = world_chunk_from_position(snapshot.position);
+            sync_streamed_chunks_for_client(
+                state,
+                client_id,
+                center_chunk,
+                world_seed,
+                procgen_structures,
+                procgen_chunk_radius,
+                true,
+            );
             broadcast(state, ServerMessage::PlayerJoined { player: snapshot });
         }
         ClientMessage::UpdatePlayer { position, look } => {
             install_or_update_player(state, client_id, None, Some(position), Some(look), start);
-            if procgen_structures {
-                let generated = {
-                    let mut guard = state.lock().expect("server state lock poisoned");
-                    let center_chunk = world_chunk_from_position(position);
-                    generate_procgen_chunks_around(
-                        &mut guard,
-                        center_chunk,
-                        world_seed,
-                        procgen_chunk_radius,
-                    )
-                };
-                if let Some((revision, chunks)) = generated {
-                    broadcast(state, ServerMessage::WorldChunkBatch { revision, chunks });
-                }
-            }
+            let center_chunk = world_chunk_from_position(position);
+            sync_streamed_chunks_for_client(
+                state,
+                client_id,
+                center_chunk,
+                world_seed,
+                procgen_structures,
+                procgen_chunk_radius,
+                false,
+            );
         }
         ClientMessage::SetVoxel {
             position,
@@ -497,6 +768,14 @@ fn handle_message(
         } => {
             let revision = {
                 let mut guard = state.lock().expect("server state lock poisoned");
+                let (chunk_pos, _) =
+                    voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
+                ensure_chunk_materialized_for_edit(
+                    &mut guard,
+                    chunk_pos,
+                    world_seed,
+                    procgen_structures,
+                );
                 guard.world.set_voxel(
                     position[0],
                     position[1],
@@ -504,50 +783,34 @@ fn handle_message(
                     position[3],
                     VoxelType(material),
                 );
-                let (chunk_pos, _) =
-                    voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
-                guard.generated_procgen_chunks.insert(chunk_pos);
+                trim_chunk_override_if_virgin(
+                    &mut guard,
+                    chunk_pos,
+                    world_seed,
+                    procgen_structures,
+                );
                 guard.world_revision = guard.world_revision.wrapping_add(1);
                 guard.world_revision
             };
 
-            broadcast(
+            send_world_voxel_set_to_streamed_clients(
                 state,
-                ServerMessage::WorldVoxelSet {
-                    position,
-                    material,
-                    source_client_id: Some(client_id),
-                    client_edit_id,
-                    revision,
-                },
+                position,
+                material,
+                Some(client_id),
+                client_edit_id,
+                revision,
             );
         }
         ClientMessage::RequestWorldSnapshot => {
-            if procgen_structures {
-                let generated = {
-                    let mut guard = state.lock().expect("server state lock poisoned");
-                    let center_chunk = guard
-                        .players
-                        .get(&client_id)
-                        .map(|player| world_chunk_from_position(player.position))
-                        .unwrap_or([0, 0, 0, 0]);
-                    generate_procgen_chunks_around(
-                        &mut guard,
-                        center_chunk,
-                        world_seed,
-                        procgen_chunk_radius,
-                    )
-                };
-                if let Some((revision, chunks)) = generated {
-                    broadcast(state, ServerMessage::WorldChunkBatch { revision, chunks });
-                }
-            }
             let snapshot_message = {
                 let guard = state.lock().expect("server state lock poisoned");
                 build_world_snapshot_payload(&guard)
             };
             match snapshot_message {
-                Ok(world) => send_to_client(state, client_id, ServerMessage::WorldSnapshot { world }),
+                Ok(world) => {
+                    send_to_client(state, client_id, ServerMessage::WorldSnapshot { world })
+                }
                 Err(error) => send_to_client(
                     state,
                     client_id,
@@ -556,6 +819,23 @@ fn handle_message(
                     },
                 ),
             }
+            let center_chunk = {
+                let guard = state.lock().expect("server state lock poisoned");
+                guard
+                    .players
+                    .get(&client_id)
+                    .map(|player| world_chunk_from_position(player.position))
+                    .unwrap_or([0, 0, 0, 0])
+            };
+            sync_streamed_chunks_for_client(
+                state,
+                client_id,
+                center_chunk,
+                world_seed,
+                procgen_structures,
+                procgen_chunk_radius,
+                true,
+            );
         }
         ClientMessage::Ping { nonce } => {
             send_to_client(state, client_id, ServerMessage::Pong { nonce });
@@ -634,7 +914,10 @@ fn spawn_client_thread(
 
             let len = u32::from_le_bytes(len_buf) as usize;
             if len > 100_000_000 {
-                eprintln!("client {} sent oversized message ({} bytes)", client_id, len);
+                eprintln!(
+                    "client {} sent oversized message ({} bytes)",
+                    client_id, len
+                );
                 break;
             }
 
@@ -730,8 +1013,21 @@ fn initialize_state(
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<(SharedState, Instant)> {
     let start = Instant::now();
-    let initial_world = load_world_from_path(&config.world_file)?;
-    let generated_procgen_chunks: HashSet<_> = initial_world.chunks.keys().copied().collect();
+    let mut initial_world = load_world_from_path(&config.world_file)?;
+    let pruned = prune_virgin_overrides(
+        &mut initial_world,
+        config.world_seed,
+        config.procgen_structures,
+    );
+    if pruned > 0 {
+        eprintln!(
+            "pruned {} virgin chunk overrides from {}",
+            pruned,
+            config.world_file.display()
+        );
+    }
+    initial_world.clear_dirty();
+    let _ = initial_world.drain_pending_chunk_updates();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
         "loaded world {} ({} non-empty chunks)",
@@ -744,7 +1040,6 @@ fn initialize_state(
         next_entity_id: 1,
         world: initial_world,
         world_revision: 0,
-        generated_procgen_chunks,
         players: HashMap::new(),
         clients: HashMap::new(),
         entities: HashMap::new(),

@@ -118,6 +118,18 @@ impl VoxelWorld {
         self.base_kind
     }
 
+    pub fn has_chunk_override(&self, pos: ChunkPos) -> bool {
+        self.chunks.contains_key(&pos)
+    }
+
+    pub fn override_chunk_at(&self, pos: ChunkPos) -> Option<&Chunk> {
+        self.chunks.get(&pos)
+    }
+
+    pub fn clone_base_chunk_or_empty_at(&self, pos: ChunkPos) -> Chunk {
+        self.clone_base_chunk_or_empty(pos)
+    }
+
     pub fn queue_chunk_refresh(&mut self, pos: ChunkPos) {
         self.queue_chunk_update(pos);
     }
@@ -268,6 +280,15 @@ impl VoxelWorld {
         }
         self.world_dirty = true;
         self.queue_chunk_update(pos);
+    }
+
+    pub fn remove_chunk_override(&mut self, pos: ChunkPos) -> bool {
+        let removed = self.chunks.remove(&pos).is_some();
+        if removed {
+            self.world_dirty = true;
+            self.queue_chunk_update(pos);
+        }
+        removed
     }
 
     pub fn non_empty_chunk_count(&self) -> usize {

@@ -1484,16 +1484,24 @@ fn build_place_preview_instance(
     let up_bias = -0.62 * ((16.0 / 9.0) / aspect).clamp(0.72, 1.35);
 
     let anchor = [
-        camera.position[0] + 0.92 * right[0] + up_bias * up[0]
+        camera.position[0]
+            + 0.92 * right[0]
+            + up_bias * up[0]
             + 1.35 * center_forward[0]
             + 0.52 * side_w[0],
-        camera.position[1] + 0.92 * right[1] + up_bias * up[1]
+        camera.position[1]
+            + 0.92 * right[1]
+            + up_bias * up[1]
             + 1.35 * center_forward[1]
             + 0.52 * side_w[1],
-        camera.position[2] + 0.92 * right[2] + up_bias * up[2]
+        camera.position[2]
+            + 0.92 * right[2]
+            + up_bias * up[2]
             + 1.35 * center_forward[2]
             + 0.52 * side_w[2],
-        camera.position[3] + 0.92 * right[3] + up_bias * up[3]
+        camera.position[3]
+            + 0.92 * right[3]
+            + up_bias * up[3]
             + 1.35 * center_forward[3]
             + 0.52 * side_w[3],
     ];
@@ -1655,7 +1663,8 @@ fn build_remote_player_avatar_instances(
 
     for fragment_idx in 0..AVATAR_FORWARD_FRAGMENT_COUNT {
         let fragment_phase = id_phase + fragment_idx as f32 * 0.83;
-        let fragment_distance = (0.54 + fragment_idx as f32 * 0.30) * AVATAR_FORWARD_FRAGMENT_LENGTH_SCALE;
+        let fragment_distance =
+            (0.54 + fragment_idx as f32 * 0.30) * AVATAR_FORWARD_FRAGMENT_LENGTH_SCALE;
         let swirl = time_s * 3.1 + fragment_phase;
         let lateral_offset = [
             0.10 * swirl.cos(),
@@ -1674,7 +1683,12 @@ fn build_remote_player_avatar_instances(
 
         let mut fragment_basis = orthonormal_basis_from_forward(full_forward);
         rotate_basis_plane(&mut fragment_basis, 0, 3, time_s * 1.7 + fragment_phase);
-        rotate_basis_plane(&mut fragment_basis, 1, 2, time_s * 2.3 + fragment_phase * 0.7);
+        rotate_basis_plane(
+            &mut fragment_basis,
+            1,
+            2,
+            time_s * 2.3 + fragment_phase * 0.7,
+        );
 
         let fragment_cells: &[usize] = match fragment_idx % 4 {
             0 => &[0],
@@ -2062,7 +2076,8 @@ impl App {
                 }
             }
 
-            if distance4(previous_position, player.position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE {
+            if distance4(previous_position, player.position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
+            {
                 existing.render_position = existing.position;
                 existing.render_look = existing.look;
                 existing.velocity = [0.0; 4];
@@ -2107,7 +2122,8 @@ impl App {
             {
                 player.render_position = predicted_position;
             } else {
-                player.render_position = lerp4(player.render_position, predicted_position, pos_alpha);
+                player.render_position =
+                    lerp4(player.render_position, predicted_position, pos_alpha);
             }
 
             player.render_look = normalize4_with_fallback(
@@ -2228,6 +2244,22 @@ impl App {
         }
     }
 
+    fn apply_multiplayer_chunk_unload_batch(&mut self, revision: u64, chunks: Vec<[i32; 4]>) {
+        let mut removed_chunks = 0usize;
+        for chunk_pos in chunks {
+            let pos = voxel::ChunkPos::new(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]);
+            if self.scene.world.remove_chunk_override(pos) {
+                removed_chunks += 1;
+            }
+        }
+        if removed_chunks > 0 {
+            eprintln!(
+                "Applied multiplayer chunk unload batch rev={} chunks={}",
+                revision, removed_chunks
+            );
+        }
+    }
+
     fn handle_multiplayer_message(&mut self, message: multiplayer::ServerMessage) {
         let received_at = Instant::now();
         match message {
@@ -2307,6 +2339,9 @@ impl App {
             }
             multiplayer::ServerMessage::WorldChunkBatch { revision, chunks } => {
                 self.apply_multiplayer_chunk_batch(revision, chunks);
+            }
+            multiplayer::ServerMessage::WorldChunkUnloadBatch { revision, chunks } => {
+                self.apply_multiplayer_chunk_unload_batch(revision, chunks);
             }
             multiplayer::ServerMessage::Pong { .. } => {}
             multiplayer::ServerMessage::EntitySpawned { entity } => {
@@ -2758,11 +2793,9 @@ impl App {
             InfoPanelMode::VectorTable => {
                 Some(self.vector_table_hud_text(look_dir, target_hit_voxel, target_hit_face))
             }
-            InfoPanelMode::VectorTable2 => Some(self.vector_table2_hud_text(
-                look_dir,
-                target_hit_voxel,
-                target_hit_face,
-            )),
+            InfoPanelMode::VectorTable2 => {
+                Some(self.vector_table2_hud_text(look_dir, target_hit_voxel, target_hit_face))
+            }
             InfoPanelMode::Full => Some(self.full_info_hud_text(
                 pair,
                 look_dir,
@@ -2808,19 +2841,11 @@ impl App {
         ));
         text.push_str(&format!(
             "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-            "fwd_ctr",
-            center_forward[0],
-            center_forward[1],
-            center_forward[2],
-            center_forward[3],
+            "fwd_ctr", center_forward[0], center_forward[1], center_forward[2], center_forward[3],
         ));
         text.push_str(&format!(
             "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-            "side_w",
-            hidden_side[0],
-            hidden_side[1],
-            hidden_side[2],
-            hidden_side[3],
+            "side_w", hidden_side[0], hidden_side[1], hidden_side[2], hidden_side[3],
         ));
         if let Some(hit) = target_hit_voxel {
             text.push_str(&format!(
@@ -2882,19 +2907,11 @@ impl App {
         ));
         text.push_str(&format!(
             "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-            "fwd_ctr",
-            center_forward[0],
-            center_forward[1],
-            center_forward[2],
-            center_forward[3],
+            "fwd_ctr", center_forward[0], center_forward[1], center_forward[2], center_forward[3],
         ));
         text.push_str(&format!(
             "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-            "side_w",
-            hidden_side[0],
-            hidden_side[1],
-            hidden_side[2],
-            hidden_side[3],
+            "side_w", hidden_side[0], hidden_side[1], hidden_side[2], hidden_side[3],
         ));
         text.push_str(&format!(
             "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
@@ -3057,7 +3074,12 @@ impl App {
         text
     }
 
-    fn draw_egui_pause_menu(&mut self, ctx: &egui::Context, close_menu: &mut bool, return_to_main_menu: &mut bool) {
+    fn draw_egui_pause_menu(
+        &mut self,
+        ctx: &egui::Context,
+        close_menu: &mut bool,
+        return_to_main_menu: &mut bool,
+    ) {
         egui::Window::new("Polychora")
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .resizable(false)
@@ -3114,7 +3136,11 @@ impl App {
                             ControlScheme::LegacySideButtonLayers,
                             ControlScheme::LegacyScrollCycle,
                         ] {
-                            ui.selectable_value(&mut selected_control_scheme, scheme, scheme.label());
+                            ui.selectable_value(
+                                &mut selected_control_scheme,
+                                scheme,
+                                scheme.label(),
+                            );
                         }
                     });
                 if selected_control_scheme != self.control_scheme {
@@ -3122,12 +3148,18 @@ impl App {
                 }
 
                 ui.add(
-                    egui::Slider::new(&mut self.focal_length_xy, FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX)
-                        .text("Focal Length XY"),
+                    egui::Slider::new(
+                        &mut self.focal_length_xy,
+                        FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX,
+                    )
+                    .text("Focal Length XY"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut self.focal_length_zw, FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX)
-                        .text("Focal Length ZW"),
+                    egui::Slider::new(
+                        &mut self.focal_length_zw,
+                        FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX,
+                    )
+                    .text("Focal Length ZW"),
                 );
                 ui.add(
                     egui::Slider::new(
@@ -3159,7 +3191,10 @@ impl App {
                     self.toggle_vte_entities();
                 }
                 let mut y_cache_enabled = self.vte_y_slice_lookup_cache_enabled;
-                if ui.checkbox(&mut y_cache_enabled, "VTE Y-Slice Lookup Cache").changed() {
+                if ui
+                    .checkbox(&mut y_cache_enabled, "VTE Y-Slice Lookup Cache")
+                    .changed()
+                {
                     self.toggle_vte_y_slice_lookup_cache();
                 }
                 let mut sky_emissive_tweak = self.vte_integral_sky_emissive_enabled;
@@ -3223,8 +3258,10 @@ impl App {
                         let [r, g, b] = materials::material_color(material_id);
                         let is_selected = i == self.hotbar_selected_index;
 
-                        let (rect, _response) =
-                            ui.allocate_exact_size(egui::vec2(slot_size, slot_size), egui::Sense::hover());
+                        let (rect, _response) = ui.allocate_exact_size(
+                            egui::vec2(slot_size, slot_size),
+                            egui::Sense::hover(),
+                        );
 
                         // Background
                         let bg_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160);
@@ -3266,7 +3303,10 @@ impl App {
                             ui.painter().rect_stroke(
                                 rect,
                                 3.0,
-                                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(200, 200, 200, 80)),
+                                egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgba_unmultiplied(200, 200, 200, 80),
+                                ),
                                 egui::epaint::StrokeKind::Outside,
                             );
                         }
@@ -3413,14 +3453,8 @@ impl App {
     }
 
     fn run_egui_frame(&mut self) -> Option<EguiPaintData> {
-        let window = self
-            .rcx
-            .as_ref()
-            .and_then(|rcx| rcx.window.clone())?;
-        let raw_input = self
-            .egui_winit_state
-            .as_mut()?
-            .take_egui_input(&window);
+        let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone())?;
+        let raw_input = self.egui_winit_state.as_mut()?.take_egui_input(&window);
 
         let egui_ctx = self.egui_ctx.clone();
         let mut close_menu = false;
@@ -3512,14 +3546,13 @@ impl App {
             let egui::epaint::Primitive::Mesh(mesh) = clipped.primitive else {
                 continue;
             };
-            let texture_slot =
-                if matches!(mesh.texture_id, egui::TextureId::Managed(0)) {
-                    EguiTextureSlot::EguiAtlas
-                } else if Some(mesh.texture_id) == material_icons_tid {
-                    EguiTextureSlot::MaterialIcons
-                } else {
-                    continue;
-                };
+            let texture_slot = if matches!(mesh.texture_id, egui::TextureId::Managed(0)) {
+                EguiTextureSlot::EguiAtlas
+            } else if Some(mesh.texture_id) == material_icons_tid {
+                EguiTextureSlot::MaterialIcons
+            } else {
+                continue;
+            };
 
             let mut vertices = Vec::with_capacity(mesh.indices.len());
             for &index in &mesh.indices {
@@ -3528,7 +3561,10 @@ impl App {
                 };
                 let [r, g, b, a] = vertex.color.to_srgba_unmultiplied();
                 vertices.push(EguiPaintVertex {
-                    position_px: [vertex.pos.x * pixels_per_point, vertex.pos.y * pixels_per_point],
+                    position_px: [
+                        vertex.pos.x * pixels_per_point,
+                        vertex.pos.y * pixels_per_point,
+                    ],
                     uv: [vertex.uv.x, vertex.uv.y],
                     color: [
                         r as f32 / 255.0,
@@ -3880,7 +3916,10 @@ impl App {
                     Ok(()) => {
                         self.world_file = path.clone();
                         self.enter_play_state(window);
-                        eprintln!("Started new integrated singleplayer world {}", path.display());
+                        eprintln!(
+                            "Started new integrated singleplayer world {}",
+                            path.display()
+                        );
                     }
                     Err(msg) => {
                         eprintln!("{msg}");
@@ -4006,7 +4045,11 @@ impl App {
         }
     }
 
-    fn draw_egui_main_menu(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+    fn draw_egui_main_menu(
+        &mut self,
+        ctx: &egui::Context,
+        transition: &mut Option<MainMenuTransition>,
+    ) {
         match self.main_menu_page {
             MainMenuPage::Root => {
                 self.draw_egui_main_menu_root(ctx, transition);
@@ -4020,7 +4063,11 @@ impl App {
         }
     }
 
-    fn draw_egui_main_menu_root(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+    fn draw_egui_main_menu_root(
+        &mut self,
+        ctx: &egui::Context,
+        transition: &mut Option<MainMenuTransition>,
+    ) {
         egui::Window::new("main_menu_root")
             .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -4036,24 +4083,36 @@ impl App {
                     ui.add_space(24.0);
 
                     let button_size = egui::vec2(200.0, 36.0);
-                    if ui.add_sized(button_size, egui::Button::new(
-                        RichText::new("Singleplayer").size(16.0),
-                    )).clicked() {
+                    if ui
+                        .add_sized(
+                            button_size,
+                            egui::Button::new(RichText::new("Singleplayer").size(16.0)),
+                        )
+                        .clicked()
+                    {
                         self.main_menu_page = MainMenuPage::Singleplayer;
                         self.main_menu_connect_error = None;
                         self.scan_world_files();
                     }
                     ui.add_space(8.0);
-                    if ui.add_sized(button_size, egui::Button::new(
-                        RichText::new("Multiplayer").size(16.0),
-                    )).clicked() {
+                    if ui
+                        .add_sized(
+                            button_size,
+                            egui::Button::new(RichText::new("Multiplayer").size(16.0)),
+                        )
+                        .clicked()
+                    {
                         self.main_menu_page = MainMenuPage::Multiplayer;
                         self.main_menu_connect_error = None;
                     }
                     ui.add_space(8.0);
-                    if ui.add_sized(button_size, egui::Button::new(
-                        RichText::new("Quit").size(16.0),
-                    )).clicked() {
+                    if ui
+                        .add_sized(
+                            button_size,
+                            egui::Button::new(RichText::new("Quit").size(16.0)),
+                        )
+                        .clicked()
+                    {
                         self.should_exit_after_render = true;
                     }
                     ui.add_space(16.0);
@@ -4061,7 +4120,11 @@ impl App {
             });
     }
 
-    fn draw_egui_main_menu_singleplayer(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+    fn draw_egui_main_menu_singleplayer(
+        &mut self,
+        ctx: &egui::Context,
+        transition: &mut Option<MainMenuTransition>,
+    ) {
         egui::Window::new("main_menu_singleplayer")
             .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -4090,10 +4153,7 @@ impl App {
                                 let is_selected = selected == Some(i);
                                 let size_label = format_file_size(entry.size_bytes);
                                 let label = format!("{} ({})", entry.display_name, size_label);
-                                if ui
-                                    .selectable_label(is_selected, &label)
-                                    .clicked()
-                                {
+                                if ui.selectable_label(is_selected, &label).clicked() {
                                     self.main_menu_selected_world = Some(i);
                                 }
                             }
@@ -4112,15 +4172,13 @@ impl App {
                 ui.horizontal(|ui| {
                     let has_selection = self.main_menu_selected_world.is_some();
                     if ui
-                        .add_enabled(
-                            has_selection,
-                            egui::Button::new("Load Selected"),
-                        )
+                        .add_enabled(has_selection, egui::Button::new("Load Selected"))
                         .clicked()
                     {
                         if let Some(idx) = self.main_menu_selected_world {
                             if let Some(entry) = self.main_menu_world_files.get(idx) {
-                                *transition = Some(MainMenuTransition::LoadWorld(entry.path.clone()));
+                                *transition =
+                                    Some(MainMenuTransition::LoadWorld(entry.path.clone()));
                             }
                         }
                     }
@@ -4135,7 +4193,11 @@ impl App {
             });
     }
 
-    fn draw_egui_main_menu_multiplayer(&mut self, ctx: &egui::Context, transition: &mut Option<MainMenuTransition>) {
+    fn draw_egui_main_menu_multiplayer(
+        &mut self,
+        ctx: &egui::Context,
+        transition: &mut Option<MainMenuTransition>,
+    ) {
         egui::Window::new("main_menu_multiplayer")
             .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -4427,34 +4489,17 @@ impl App {
             };
             match self.control_scheme {
                 ControlScheme::IntuitiveUpright => {
-                    self.camera.apply_movement_upright(
-                        forward,
-                        strafe,
-                        vertical,
-                        w_axis,
-                        dt,
-                        move_speed,
-                    );
+                    self.camera
+                        .apply_movement_upright(forward, strafe, vertical, w_axis, dt, move_speed);
                 }
                 ControlScheme::LookTransport | ControlScheme::RotorFree => {
                     self.camera.apply_movement_look_frame(
-                        forward,
-                        strafe,
-                        vertical,
-                        w_axis,
-                        dt,
-                        move_speed,
+                        forward, strafe, vertical, w_axis, dt, move_speed,
                     );
                 }
                 ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
-                    self.camera.apply_movement(
-                        forward,
-                        strafe,
-                        vertical,
-                        w_axis,
-                        dt,
-                        move_speed,
-                    );
+                    self.camera
+                        .apply_movement(forward, strafe, vertical, w_axis, dt, move_speed);
                 }
             }
 
@@ -4722,8 +4767,16 @@ impl App {
             vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,
             vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
             vte_integral_log_merge_k: self.vte_integral_log_merge_k,
-            vte_highlight_hit_voxel: if self.args.no_hud { None } else { vte_highlight_hit_voxel },
-            vte_highlight_place_voxel: if self.args.no_hud { None } else { vte_highlight_place_voxel },
+            vte_highlight_hit_voxel: if self.args.no_hud {
+                None
+            } else {
+                vte_highlight_hit_voxel
+            },
+            vte_highlight_place_voxel: if self.args.no_hud {
+                None
+            } else {
+                vte_highlight_place_voxel
+            },
             do_navigation_hud,
             custom_overlay_lines,
             take_framebuffer_screenshot: take_screenshot,
@@ -4732,7 +4785,11 @@ impl App {
             hud_rotation_label,
             hud_target_hit_voxel,
             hud_target_hit_face,
-            hud_player_tags: if self.args.no_hud { Vec::new() } else { hud_player_tags },
+            hud_player_tags: if self.args.no_hud {
+                Vec::new()
+            } else {
+                hud_player_tags
+            },
             egui_paint,
             ..Default::default()
         };
@@ -4767,8 +4824,9 @@ impl App {
             let entity_instances = self.remote_entity_instances(preview_time_s);
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
-            let mut render_instances =
-                Vec::with_capacity(instances.len() + remote_instances.len() + entity_instances.len() + 1);
+            let mut render_instances = Vec::with_capacity(
+                instances.len() + remote_instances.len() + entity_instances.len() + 1,
+            );
             render_instances.extend_from_slice(instances);
             render_instances.extend(remote_instances);
             render_instances.extend(entity_instances);
@@ -4791,10 +4849,12 @@ impl App {
             }
             match self.args.gpu_screenshot_source {
                 GpuScreenshotSourceArg::RenderBuffer => {
-                    self.rcx
-                        .as_mut()
-                        .unwrap()
-                        .save_rendered_frame_png(self.args.screenshot_output.to_str().unwrap_or("frames/gpu_render.png"));
+                    self.rcx.as_mut().unwrap().save_rendered_frame_png(
+                        self.args
+                            .screenshot_output
+                            .to_str()
+                            .unwrap_or("frames/gpu_render.png"),
+                    );
                 }
                 GpuScreenshotSourceArg::Framebuffer => {
                     if let Some(src_path) = latest_framebuffer_screenshot_path() {
@@ -4810,9 +4870,15 @@ impl App {
                         match image::open(&src_path) {
                             Ok(img) => {
                                 if let Err(err) = img.save(&self.args.screenshot_output) {
-                                    eprintln!("Failed to save {}: {err}", self.args.screenshot_output.display());
+                                    eprintln!(
+                                        "Failed to save {}: {err}",
+                                        self.args.screenshot_output.display()
+                                    );
                                 } else {
-                                    println!("Saved PNG to {}", self.args.screenshot_output.display());
+                                    println!(
+                                        "Saved PNG to {}",
+                                        self.args.screenshot_output.display()
+                                    );
                                 }
                             }
                             Err(err) => {
@@ -4833,7 +4899,9 @@ impl App {
             // Write JSON sidecar metadata
             {
                 let json_path = self.args.screenshot_output.with_extension("json");
-                let window_size = self.rcx.as_ref()
+                let window_size = self
+                    .rcx
+                    .as_ref()
                     .and_then(|rcx| rcx.window.as_ref())
                     .map(|w| {
                         let size = w.inner_size();
@@ -4873,7 +4941,9 @@ impl App {
 
                 match std::fs::write(&json_path, serde_json::to_string_pretty(&metadata).unwrap()) {
                     Ok(()) => println!("Saved metadata to {}", json_path.display()),
-                    Err(err) => eprintln!("Failed to save metadata {}: {}", json_path.display(), err),
+                    Err(err) => {
+                        eprintln!("Failed to save metadata {}: {}", json_path.display(), err)
+                    }
                 }
             }
             self.should_exit_after_render = true;
@@ -4906,11 +4976,7 @@ impl ApplicationHandler for App {
                 attrs
             }
         };
-        let window = Arc::new(
-            event_loop
-                .create_window(window_attrs)
-                .unwrap(),
-        );
+        let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
         self.egui_winit_state = Some(egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -4943,8 +5009,7 @@ impl ApplicationHandler for App {
         // Generate material icon sprite sheet and upload to GPU
         if self.material_icon_sheet.is_none() {
             let start = Instant::now();
-            let model_tets =
-                higher_dimension_playground::render::generate_tesseract_tetrahedrons();
+            let model_tets = higher_dimension_playground::render::generate_tesseract_tetrahedrons();
             let sheet = material_icons::generate_material_icon_sheet(&model_tets);
             eprintln!(
                 "Generated material icon sprite sheet ({}x{}) in {:.2}s",
@@ -4975,9 +5040,8 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
-        let show_egui_overlay = self.app_state == AppState::MainMenu
-            || self.menu_open
-            || self.inventory_open;
+        let show_egui_overlay =
+            self.app_state == AppState::MainMenu || self.menu_open || self.inventory_open;
         let egui_consumed = if let (Some(egui_state), Some(window)) =
             (self.egui_winit_state.as_mut(), window.as_ref())
         {

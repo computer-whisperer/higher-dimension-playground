@@ -1,13 +1,11 @@
-pub use polychora::shared::protocol::{ClientMessage, ServerMessage};
 use polychora::server::RuntimeConfig as ServerRuntimeConfig;
+pub use polychora::shared::protocol::{ClientMessage, ServerMessage};
 use std::io::{self, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-pub use polychora::shared::protocol::{
-    EntityKind, PlayerSnapshot, WorldChunkPayload,
-};
+pub use polychora::shared::protocol::{EntityKind, PlayerSnapshot, WorldChunkPayload};
 
 #[derive(Debug)]
 pub enum MultiplayerEvent {
@@ -27,7 +25,10 @@ impl MultiplayerClient {
         let (incoming_tx, incoming_rx) = mpsc::channel::<MultiplayerEvent>();
         thread::spawn(move || {
             while let Ok(message) = endpoint.incoming.recv() {
-                if incoming_tx.send(MultiplayerEvent::Message(message)).is_err() {
+                if incoming_tx
+                    .send(MultiplayerEvent::Message(message))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -135,7 +136,10 @@ impl MultiplayerClient {
 
                     match postcard::from_bytes::<ServerMessage>(&msg_buf) {
                         Ok(message) => {
-                            if incoming_tx.send(MultiplayerEvent::Message(message)).is_err() {
+                            if incoming_tx
+                                .send(MultiplayerEvent::Message(message))
+                                .is_err()
+                            {
                                 break;
                             }
                         }

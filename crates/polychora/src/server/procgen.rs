@@ -9,9 +9,11 @@ const STRUCTURE_SPAWN_DENOMINATOR: u64 = 32;
 const STRUCTURE_ORIGIN_EXCLUSION_RADIUS: i32 = 16;
 const STRUCTURE_HASH_SALT: u64 = 0x9f07_c9ab_33f2_3a11;
 const STRUCTURE_PICK_SALT: u64 = 0x2d99_1f4e_47ba_8c6d;
+const STRUCTURE_ROTATION_SALT: u64 = 0x54c7_9be0_2f61_0d93;
 const JITTER_X_SALT: u64 = 0x1c69_b3f7_4d87_2ba1;
 const JITTER_Z_SALT: u64 = 0x8ab3_d165_52cc_91f3;
 const JITTER_W_SALT: u64 = 0xf2c6_0c4a_0a8a_d53d;
+const ROTATION_VARIANTS: u64 = 48;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,10 +135,128 @@ impl StructureBlueprint {
         }
     }
 
-    fn intersects_chunk(&self, origin: [i32; 4], chunk_min: [i32; 4], chunk_max: [i32; 4]) -> bool {
+    fn oriented_bounds(&self, orientation: u8) -> ([i32; 4], [i32; 4]) {
+        let mut min_offset = [i32::MAX; 4];
+        let mut max_offset = [i32::MIN; 4];
+        let corners = [
+            [
+                self.min_offset[0],
+                self.min_offset[1],
+                self.min_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.min_offset[0],
+                self.min_offset[1],
+                self.min_offset[2],
+                self.max_offset[3],
+            ],
+            [
+                self.min_offset[0],
+                self.min_offset[1],
+                self.max_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.min_offset[0],
+                self.min_offset[1],
+                self.max_offset[2],
+                self.max_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.min_offset[1],
+                self.min_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.min_offset[1],
+                self.min_offset[2],
+                self.max_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.min_offset[1],
+                self.max_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.min_offset[1],
+                self.max_offset[2],
+                self.max_offset[3],
+            ],
+            [
+                self.min_offset[0],
+                self.max_offset[1],
+                self.min_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.min_offset[0],
+                self.max_offset[1],
+                self.min_offset[2],
+                self.max_offset[3],
+            ],
+            [
+                self.min_offset[0],
+                self.max_offset[1],
+                self.max_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.min_offset[0],
+                self.max_offset[1],
+                self.max_offset[2],
+                self.max_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.max_offset[1],
+                self.min_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.max_offset[1],
+                self.min_offset[2],
+                self.max_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.max_offset[1],
+                self.max_offset[2],
+                self.min_offset[3],
+            ],
+            [
+                self.max_offset[0],
+                self.max_offset[1],
+                self.max_offset[2],
+                self.max_offset[3],
+            ],
+        ];
+        for corner in corners {
+            let rotated = rotate_offset_xzw(corner, orientation);
+            for axis in 0..4 {
+                min_offset[axis] = min_offset[axis].min(rotated[axis]);
+                max_offset[axis] = max_offset[axis].max(rotated[axis]);
+            }
+        }
+        (min_offset, max_offset)
+    }
+
+    fn intersects_chunk_oriented(
+        &self,
+        origin: [i32; 4],
+        orientation: u8,
+        chunk_min: [i32; 4],
+        chunk_max: [i32; 4],
+    ) -> bool {
+        let (oriented_min, oriented_max) = self.oriented_bounds(orientation);
         for axis in 0..4 {
-            let min = origin[axis] + self.min_offset[axis];
-            let max = origin[axis] + self.max_offset[axis];
+            let min = origin[axis] + oriented_min[axis];
+            let max = origin[axis] + oriented_max[axis];
             if max < chunk_min[axis] || min > chunk_max[axis] {
                 return false;
             }
@@ -144,23 +264,37 @@ impl StructureBlueprint {
         true
     }
 
-    fn place_into_chunk(&self, origin: [i32; 4], chunk_min: [i32; 4], chunk: &mut Chunk) {
+    fn place_into_chunk_oriented(
+        &self,
+        origin: [i32; 4],
+        orientation: u8,
+        chunk_min: [i32; 4],
+        chunk: &mut Chunk,
+    ) {
         for fill in &self.fills {
             if fill.material == VoxelType::AIR.0 {
                 continue;
             }
 
+            let fill_min_rotated = rotate_offset_xzw(fill.min, orientation);
+            let fill_max_local = [
+                fill.min[0] + fill.size[0] - 1,
+                fill.min[1] + fill.size[1] - 1,
+                fill.min[2] + fill.size[2] - 1,
+                fill.min[3] + fill.size[3] - 1,
+            ];
+            let fill_max_rotated = rotate_offset_xzw(fill_max_local, orientation);
             let fill_world_min = [
-                origin[0] + fill.min[0],
-                origin[1] + fill.min[1],
-                origin[2] + fill.min[2],
-                origin[3] + fill.min[3],
+                origin[0] + fill_min_rotated[0].min(fill_max_rotated[0]),
+                origin[1] + fill_min_rotated[1].min(fill_max_rotated[1]),
+                origin[2] + fill_min_rotated[2].min(fill_max_rotated[2]),
+                origin[3] + fill_min_rotated[3].min(fill_max_rotated[3]),
             ];
             let fill_world_max = [
-                fill_world_min[0] + fill.size[0] - 1,
-                fill_world_min[1] + fill.size[1] - 1,
-                fill_world_min[2] + fill.size[2] - 1,
-                fill_world_min[3] + fill.size[3] - 1,
+                origin[0] + fill_min_rotated[0].max(fill_max_rotated[0]),
+                origin[1] + fill_min_rotated[1].max(fill_max_rotated[1]),
+                origin[2] + fill_min_rotated[2].max(fill_max_rotated[2]),
+                origin[3] + fill_min_rotated[3].max(fill_max_rotated[3]),
             ];
 
             let mut loop_min = [0i32; 4];
@@ -199,10 +333,11 @@ impl StructureBlueprint {
                 continue;
             }
 
-            let wx = origin[0] + voxel.offset[0];
-            let wy = origin[1] + voxel.offset[1];
-            let wz = origin[2] + voxel.offset[2];
-            let ww = origin[3] + voxel.offset[3];
+            let rotated = rotate_offset_xzw(voxel.offset, orientation);
+            let wx = origin[0] + rotated[0];
+            let wy = origin[1] + rotated[1];
+            let wz = origin[2] + rotated[2];
+            let ww = origin[3] + rotated[3];
 
             if wx < chunk_min[0]
                 || wx >= chunk_min[0] + CHUNK_SIZE as i32
@@ -222,6 +357,78 @@ impl StructureBlueprint {
             let lw = (ww - chunk_min[3]) as usize;
             chunk.set(lx, ly, lz, lw, VoxelType(voxel.material));
         }
+    }
+
+    fn writes_any_voxel_in_chunk_oriented(
+        &self,
+        origin: [i32; 4],
+        orientation: u8,
+        chunk_min: [i32; 4],
+        chunk_max: [i32; 4],
+    ) -> bool {
+        for fill in &self.fills {
+            if fill.material == VoxelType::AIR.0 {
+                continue;
+            }
+
+            let fill_min_rotated = rotate_offset_xzw(fill.min, orientation);
+            let fill_max_local = [
+                fill.min[0] + fill.size[0] - 1,
+                fill.min[1] + fill.size[1] - 1,
+                fill.min[2] + fill.size[2] - 1,
+                fill.min[3] + fill.size[3] - 1,
+            ];
+            let fill_max_rotated = rotate_offset_xzw(fill_max_local, orientation);
+            let fill_world_min = [
+                origin[0] + fill_min_rotated[0].min(fill_max_rotated[0]),
+                origin[1] + fill_min_rotated[1].min(fill_max_rotated[1]),
+                origin[2] + fill_min_rotated[2].min(fill_max_rotated[2]),
+                origin[3] + fill_min_rotated[3].min(fill_max_rotated[3]),
+            ];
+            let fill_world_max = [
+                origin[0] + fill_min_rotated[0].max(fill_max_rotated[0]),
+                origin[1] + fill_min_rotated[1].max(fill_max_rotated[1]),
+                origin[2] + fill_min_rotated[2].max(fill_max_rotated[2]),
+                origin[3] + fill_min_rotated[3].max(fill_max_rotated[3]),
+            ];
+
+            let mut intersects = true;
+            for axis in 0..4 {
+                if fill_world_max[axis] < chunk_min[axis] || fill_world_min[axis] > chunk_max[axis]
+                {
+                    intersects = false;
+                    break;
+                }
+            }
+            if intersects {
+                return true;
+            }
+        }
+
+        for voxel in &self.voxels {
+            if voxel.material == VoxelType::AIR.0 {
+                continue;
+            }
+
+            let rotated = rotate_offset_xzw(voxel.offset, orientation);
+            let wx = origin[0] + rotated[0];
+            let wy = origin[1] + rotated[1];
+            let wz = origin[2] + rotated[2];
+            let ww = origin[3] + rotated[3];
+            if wx >= chunk_min[0]
+                && wx <= chunk_max[0]
+                && wy >= chunk_min[1]
+                && wy <= chunk_max[1]
+                && wz >= chunk_min[2]
+                && wz <= chunk_max[2]
+                && ww >= chunk_min[3]
+                && ww <= chunk_max[3]
+            {
+                return true;
+            }
+        }
+
+        false
     }
 }
 
@@ -345,6 +552,7 @@ pub fn structure_chunk_y_bounds() -> (i32, i32) {
 struct StructurePlacement {
     blueprint_idx: usize,
     origin: [i32; 4],
+    orientation: u8,
 }
 
 fn chunk_bounds(chunk_pos: ChunkPos) -> ([i32; 4], [i32; 4]) {
@@ -362,6 +570,31 @@ fn chunk_bounds(chunk_pos: ChunkPos) -> ([i32; 4], [i32; 4]) {
         chunk_min[3] + chunk_size - 1,
     ];
     (chunk_min, chunk_max)
+}
+
+fn rotate_offset_xzw(offset: [i32; 4], orientation: u8) -> [i32; 4] {
+    const PERMUTATIONS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let horizontal = [offset[0], offset[2], offset[3]];
+    let perm = PERMUTATIONS[(orientation as usize) % PERMUTATIONS.len()];
+    let sign_bits = (orientation as usize / PERMUTATIONS.len()) & 0b111;
+
+    let mut out_h = [0i32; 3];
+    for out_axis in 0..3 {
+        let src_axis = perm[out_axis];
+        let mut value = horizontal[src_axis];
+        if (sign_bits & (1 << out_axis)) != 0 {
+            value = -value;
+        }
+        out_h[out_axis] = value;
+    }
+    [out_h[0], offset[1], out_h[1], out_h[2]]
 }
 
 fn collect_structure_placements_for_chunk(
@@ -413,14 +646,17 @@ fn collect_structure_placements_for_chunk(
                 let pick_roll = splitmix64(cell_hash ^ STRUCTURE_PICK_SALT) % set.total_weight;
                 let blueprint_idx = set.pick_blueprint_index(pick_roll);
                 let blueprint = &set.blueprints[blueprint_idx];
+                let orientation =
+                    (splitmix64(cell_hash ^ STRUCTURE_ROTATION_SALT) % ROTATION_VARIANTS) as u8;
                 let origin = [origin_x, blueprint.ground_offset_y, origin_z, origin_w];
-                if !blueprint.intersects_chunk(origin, chunk_min, chunk_max) {
+                if !blueprint.intersects_chunk_oriented(origin, orientation, chunk_min, chunk_max) {
                     continue;
                 }
 
                 placements.push(StructurePlacement {
                     blueprint_idx,
                     origin,
+                    orientation,
                 });
             }
         }
@@ -437,7 +673,12 @@ pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<
     let mut chunk = Chunk::new();
     for placement in placements {
         let blueprint = &set.blueprints[placement.blueprint_idx];
-        blueprint.place_into_chunk(placement.origin, chunk_min, &mut chunk);
+        blueprint.place_into_chunk_oriented(
+            placement.origin,
+            placement.orientation,
+            chunk_min,
+            &mut chunk,
+        );
     }
 
     if chunk.is_empty() {
@@ -445,6 +686,22 @@ pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<
     } else {
         Some(chunk)
     }
+}
+
+pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool {
+    let set = structure_set();
+    let (chunk_min, chunk_max) = chunk_bounds(chunk_pos);
+    collect_structure_placements_for_chunk(world_seed, chunk_pos)
+        .into_iter()
+        .any(|placement| {
+            let blueprint = &set.blueprints[placement.blueprint_idx];
+            blueprint.writes_any_voxel_in_chunk_oriented(
+                placement.origin,
+                placement.orientation,
+                chunk_min,
+                chunk_max,
+            )
+        })
 }
 
 fn jitter_from_hash(hash: u64) -> i32 {
@@ -546,8 +803,13 @@ mod tests {
 
             let mut left_chunk = Chunk::new();
             let mut right_chunk = Chunk::new();
-            blueprint.place_into_chunk(origin, [0, 0, 0, 0], &mut left_chunk);
-            blueprint.place_into_chunk(origin, [CHUNK_SIZE as i32, 0, 0, 0], &mut right_chunk);
+            blueprint.place_into_chunk_oriented(origin, 0, [0, 0, 0, 0], &mut left_chunk);
+            blueprint.place_into_chunk_oriented(
+                origin,
+                0,
+                [CHUNK_SIZE as i32, 0, 0, 0],
+                &mut right_chunk,
+            );
 
             if !left_chunk.is_empty() && !right_chunk.is_empty() {
                 found_spanning = true;
@@ -597,5 +859,26 @@ mod tests {
             found_spanning,
             "expected at least one generated placement to intersect adjacent chunks"
         );
+    }
+
+    #[test]
+    fn chunk_has_content_matches_chunk_generation() {
+        let seed = 777_u64;
+        let (min_y, max_y) = structure_chunk_y_bounds();
+        for x in -8..=8 {
+            for z in -8..=8 {
+                for w in -8..=8 {
+                    for y in min_y..=max_y {
+                        let chunk_pos = ChunkPos::new(x, y, z, w);
+                        let has_content = structure_chunk_has_content(seed, chunk_pos);
+                        let generated = generate_structure_chunk(seed, chunk_pos).is_some();
+                        assert_eq!(
+                            has_content, generated,
+                            "content mismatch for chunk ({x}, {y}, {z}, {w})"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

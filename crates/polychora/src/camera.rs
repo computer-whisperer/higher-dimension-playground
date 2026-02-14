@@ -243,8 +243,7 @@ impl Camera4D {
         for i in 0..4 {
             self.look_right[i] = self.look_right[i] * (1.0 - alpha) + target_right[i] * alpha;
             self.look_up[i] = self.look_up[i] * (1.0 - alpha) + target_up[i] * alpha;
-            self.look_forward[i] =
-                self.look_forward[i] * (1.0 - alpha) + target_forward[i] * alpha;
+            self.look_forward[i] = self.look_forward[i] * (1.0 - alpha) + target_forward[i] * alpha;
             self.look_side[i] = self.look_side[i] * (1.0 - alpha) + target_side[i] * alpha;
         }
         self.reorthonormalize_look_frame();
@@ -274,7 +273,11 @@ impl Camera4D {
 
     fn renormalize_forward_preserve_y(&mut self, target_y: f32) {
         let y = target_y.clamp(-1.0, 1.0);
-        let mut xzw = [self.look_forward[0], self.look_forward[2], self.look_forward[3]];
+        let mut xzw = [
+            self.look_forward[0],
+            self.look_forward[2],
+            self.look_forward[3],
+        ];
         let len_sq = xzw[0] * xzw[0] + xzw[1] * xzw[1] + xzw[2] * xzw[2];
         if len_sq <= 1e-12 {
             return;
@@ -733,10 +736,7 @@ impl Camera4D {
         let mut target_up = Self::project_out_axis(self.look_up, hidden_axis);
         target_up = Self::sub_projection(target_up, target_forward);
         let up_fallback = Self::hyperplane_fallback_axis(hidden_axis, target_forward, None);
-        target_up = Self::normalize_with_fallback(
-            target_up,
-            up_fallback,
-        );
+        target_up = Self::normalize_with_fallback(target_up, up_fallback);
 
         let mut target_right = Self::project_out_axis(self.look_right, hidden_axis);
         target_right = Self::sub_projection(target_right, target_forward);
@@ -745,27 +745,15 @@ impl Camera4D {
             Self::cross_in_hyperplane(target_forward, target_up, hidden_axis),
             Self::hyperplane_fallback_axis(hidden_axis, target_forward, Some(target_up)),
         );
-        target_right = Self::normalize_with_fallback(
-            target_right,
-            right_fallback,
-        );
+        target_right = Self::normalize_with_fallback(target_right, right_fallback);
 
         target_up = Self::sub_projection(target_up, target_forward);
         target_up = Self::sub_projection(target_up, target_right);
         let up_final_fallback =
             Self::hyperplane_fallback_axis(hidden_axis, target_forward, Some(target_right));
-        target_up = Self::normalize_with_fallback(
-            target_up,
-            up_final_fallback,
-        );
+        target_up = Self::normalize_with_fallback(target_up, up_final_fallback);
 
-        self.blend_look_frame_toward(
-            target_right,
-            target_up,
-            target_forward,
-            target_side,
-            alpha,
-        );
+        self.blend_look_frame_toward(target_right, target_up, target_forward, target_side, alpha);
         self.stabilize_look_up_axis(LOOK_TRANSPORT_UPRIGHT_DAMPING);
     }
 
@@ -1481,7 +1469,11 @@ mod tests {
         let mut cam = Camera4D::new();
         cam.apply_mouse_look_transport(0.0, -std::f32::consts::FRAC_PI_2, 1.0, true);
         let look = cam.look_direction_look_frame();
-        assert!(look[0] > 0.9999, "expected look to stay +X, got x={}", look[0]);
+        assert!(
+            look[0] > 0.9999,
+            "expected look to stay +X, got x={}",
+            look[0]
+        );
         assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
         assert!(look[2].abs() < 1e-4, "expected z≈0, got z={}", look[2]);
         assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
@@ -1493,7 +1485,11 @@ mod tests {
             view_w[2] - view_z[2],
             view_w[3] - view_z[3],
         ]);
-        assert!(hidden_side[2] < -0.9999, "expected hidden side near -Z, got z={}", hidden_side[2]);
+        assert!(
+            hidden_side[2] < -0.9999,
+            "expected hidden side near -Z, got z={}",
+            hidden_side[2]
+        );
         assert!(
             hidden_side[0].abs() < 1e-4,
             "expected hidden side x≈0, got x={}",
@@ -1613,9 +1609,17 @@ mod tests {
         cam.xw_angle = 1.2;
         cam.zw_angle = -0.9;
         cam.yw_deviation = 0.8;
-        let before = (cam.xw_angle.abs(), cam.zw_angle.abs(), cam.yw_deviation.abs());
+        let before = (
+            cam.xw_angle.abs(),
+            cam.zw_angle.abs(),
+            cam.yw_deviation.abs(),
+        );
         cam.pull_toward_nearest_3d_angles(0.2);
-        let after = (cam.xw_angle.abs(), cam.zw_angle.abs(), cam.yw_deviation.abs());
+        let after = (
+            cam.xw_angle.abs(),
+            cam.zw_angle.abs(),
+            cam.yw_deviation.abs(),
+        );
         assert!(
             after.0 < before.0 && after.1 < before.1 && after.2 < before.2,
             "3D angle pull should reduce hidden angles: before={before:?} after={after:?}"

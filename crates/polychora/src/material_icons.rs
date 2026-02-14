@@ -70,9 +70,7 @@ impl MaterialIconSheet {
 
 /// Generate a sprite sheet containing all material icons packed into a grid.
 /// Returns the sheet with pixel data and UV lookup.
-pub fn generate_material_icon_sheet(
-    model_tets: &[ModelTetrahedron],
-) -> MaterialIconSheet {
+pub fn generate_material_icon_sheet(model_tets: &[ModelTetrahedron]) -> MaterialIconSheet {
     let num_materials = materials::MATERIALS.len() as u32;
     let rows = (num_materials + SHEET_COLUMNS - 1) / SHEET_COLUMNS;
     let sheet_w = SHEET_COLUMNS * ICON_SIZE;

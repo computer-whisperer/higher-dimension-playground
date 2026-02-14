@@ -5,7 +5,10 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "worldgen-cli", about = "Generate .v4dw world files for polychora")]
+#[command(
+    name = "worldgen-cli",
+    about = "Generate .v4dw world files for polychora"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
