@@ -4176,7 +4176,12 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let voxel_frame = self.scene.build_voxel_frame_data(self.menu_camera.position);
+            let voxel_frame = self.scene.build_voxel_frame_data(
+                self.menu_camera.position,
+                self.vte_lod_near_max_distance,
+                self.vte_lod_mid_max_distance,
+                self.vte_max_trace_distance,
+            );
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
@@ -4962,7 +4967,12 @@ impl App {
             }
             vte_entity_instances.extend(self.remote_player_instances(preview_time_s));
             vte_entity_instances.extend(self.remote_entity_instances(preview_time_s));
-            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
+            let voxel_frame = self.scene.build_voxel_frame_data(
+                self.camera.position,
+                self.vte_lod_near_max_distance,
+                self.vte_lod_mid_max_distance,
+                self.vte_max_trace_distance,
+            );
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),

@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 const STREAM_MID_LOD_SCALE: i32 = 2;
 const STREAM_FAR_LOD_SCALE: i32 = 4;
+const STREAM_RESYNC_INTERVAL_MS: u64 = 500;
+const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -72,6 +74,7 @@ struct PlayerState {
     last_update_ms: u64,
     streamed_chunks: HashSet<StreamChunkKey>,
     last_stream_center_chunk: Option<[i32; 4]>,
+    last_stream_sync_ms: u64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -205,16 +208,22 @@ fn build_effective_stream_chunk_l0(
     procgen_structures: bool,
 ) -> Option<voxel::Chunk> {
     if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
-        return (!override_chunk.is_empty()).then(|| override_chunk.clone());
+        // Preserve explicit empty overrides (carved holes) instead of falling back
+        // to virtual base generation on the client.
+        return Some(override_chunk.clone());
     }
+
+    let mut chunk = state.world.clone_base_chunk_or_empty_at(chunk_pos);
     if procgen_structures {
-        return procgen::generate_structure_chunk_with_keepout(
+        if let Some(structure_chunk) = procgen::generate_structure_chunk_with_keepout(
             world_seed,
             chunk_pos,
             Some(&state.procgen_blocked_cells),
-        );
+        ) {
+            merge_non_air_voxels(&mut chunk, &structure_chunk);
+        }
     }
-    None
+    (!chunk.is_empty()).then_some(chunk)
 }
 
 fn build_effective_l0_chunk_for_sampling(
@@ -238,6 +247,14 @@ fn build_effective_l0_chunk_for_sampling(
         }
     }
     (!chunk.is_empty()).then_some(chunk)
+}
+
+fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
+    let dx = (chunk_pos.x - center_chunk[0]) as i64;
+    let dy = (chunk_pos.y - center_chunk[1]) as i64;
+    let dz = (chunk_pos.z - center_chunk[2]) as i64;
+    let dw = (chunk_pos.w - center_chunk[3]) as i64;
+    dx * dx + dy * dy + dz * dz + dw * dw
 }
 
 fn scaled_lod_child_l0_chunk_pos(parent_chunk_pos: ChunkPos, lod_scale: i32, child: [i32; 4]) -> ChunkPos {
@@ -475,31 +492,29 @@ fn plan_stream_window_update(
     ];
 
     let mut desired_set = HashSet::<StreamChunkKey>::new();
-    if procgen_structures {
-        let (min_structure_chunk_y, max_structure_chunk_y) = procgen::structure_chunk_y_bounds();
-        for chunk_x in min_chunk[0]..=max_chunk[0] {
-            for chunk_z in min_chunk[2]..=max_chunk[2] {
-                for chunk_w in min_chunk[3]..=max_chunk[3] {
-                    for chunk_y in min_structure_chunk_y..=max_structure_chunk_y {
-                        let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
-                        if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
-                            if !override_chunk.is_empty() {
+    if let Some((worldgen_min_near_y, worldgen_max_near_y)) =
+        stream_lod_worldgen_y_bounds(state, WORLD_CHUNK_LOD_NEAR, procgen_structures)
+    {
+        let scan_min_near_y = worldgen_min_near_y.max(min_chunk[1]);
+        let scan_max_near_y = worldgen_max_near_y.min(max_chunk[1]);
+        if scan_min_near_y <= scan_max_near_y {
+            for chunk_x in min_chunk[0]..=max_chunk[0] {
+                for chunk_z in min_chunk[2]..=max_chunk[2] {
+                    for chunk_w in min_chunk[3]..=max_chunk[3] {
+                        for chunk_y in scan_min_near_y..=scan_max_near_y {
+                            let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
+                            if stream_lod_worldgen_has_content(
+                                state,
+                                WORLD_CHUNK_LOD_NEAR,
+                                chunk_pos,
+                                world_seed,
+                                procgen_structures,
+                            ) {
                                 desired_set.insert(StreamChunkKey {
                                     lod_level: WORLD_CHUNK_LOD_NEAR,
                                     chunk_pos,
                                 });
                             }
-                            continue;
-                        }
-                        if procgen::structure_chunk_has_content_with_keepout(
-                            world_seed,
-                            chunk_pos,
-                            Some(&state.procgen_blocked_cells),
-                        ) {
-                            desired_set.insert(StreamChunkKey {
-                                lod_level: WORLD_CHUNK_LOD_NEAR,
-                                chunk_pos,
-                            });
                         }
                     }
                 }
@@ -679,8 +694,15 @@ fn plan_stream_window_update(
     let mut load_chunk_keys: Vec<StreamChunkKey> =
         desired_set.difference(&old_streamed).copied().collect();
     load_chunk_keys.sort_unstable_by_key(|key| {
+        let center = match key.lod_level {
+            WORLD_CHUNK_LOD_NEAR => center_chunk,
+            WORLD_CHUNK_LOD_MID => center_mid_chunk,
+            WORLD_CHUNK_LOD_FAR => center_far_chunk,
+            _ => center_chunk,
+        };
         (
             key.lod_level,
+            stream_chunk_distance2(key.chunk_pos, center),
             key.chunk_pos.w,
             key.chunk_pos.z,
             key.chunk_pos.y,
@@ -688,8 +710,8 @@ fn plan_stream_window_update(
         )
     });
 
-    let mut load_payloads = Vec::with_capacity(load_chunk_keys.len());
     let mut realized_desired = desired_set;
+    let mut load_payloads = Vec::with_capacity(load_chunk_keys.len());
     for key in load_chunk_keys {
         let chunk = match key.lod_level {
             WORLD_CHUNK_LOD_NEAR => build_effective_stream_chunk_l0(
@@ -849,6 +871,7 @@ fn sync_streamed_chunks_for_client(
     state: &SharedState,
     client_id: u64,
     center_chunk: [i32; 4],
+    now_ms: u64,
     world_seed: u64,
     procgen_structures: bool,
     near_chunk_radius: i32,
@@ -861,8 +884,11 @@ fn sync_streamed_chunks_for_client(
         let should_sync = match guard.players.get_mut(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
-                if force || changed {
+                let retry_due = now_ms.saturating_sub(player.last_stream_sync_ms)
+                    >= STREAM_RESYNC_INTERVAL_MS;
+                if force || changed || retry_due {
                     player.last_stream_center_chunk = Some(center_chunk);
+                    player.last_stream_sync_ms = now_ms;
                     true
                 } else {
                     false
@@ -892,25 +918,29 @@ fn sync_streamed_chunks_for_client(
     };
 
     if !chunk_loads.is_empty() {
-        send_to_client(
-            state,
-            client_id,
-            ServerMessage::WorldChunkBatch {
-                revision,
-                chunks: chunk_loads,
-            },
-        );
+        for chunk_batch in chunk_loads.chunks(STREAM_MESSAGE_CHUNK_LIMIT) {
+            send_to_client(
+                state,
+                client_id,
+                ServerMessage::WorldChunkBatch {
+                    revision,
+                    chunks: chunk_batch.to_vec(),
+                },
+            );
+        }
     }
 
     if !chunk_unloads.is_empty() {
-        send_to_client(
-            state,
-            client_id,
-            ServerMessage::WorldChunkUnloadBatch {
-                revision,
-                chunks: chunk_unloads,
-            },
-        );
+        for chunk_batch in chunk_unloads.chunks(STREAM_MESSAGE_CHUNK_LIMIT) {
+            send_to_client(
+                state,
+                client_id,
+                ServerMessage::WorldChunkUnloadBatch {
+                    revision,
+                    chunks: chunk_batch.to_vec(),
+                },
+            );
+        }
     }
 }
 
@@ -1192,6 +1222,7 @@ fn install_or_update_player(
             last_update_ms: now,
             streamed_chunks: HashSet::new(),
             last_stream_center_chunk: None,
+            last_stream_sync_ms: 0,
         });
 
     if let Some(n) = name {
@@ -1275,6 +1306,7 @@ fn handle_message(
                 state,
                 client_id,
                 center_chunk,
+                snapshot.last_update_ms,
                 world_seed,
                 procgen_structures,
                 near_chunk_radius,
@@ -1285,12 +1317,14 @@ fn handle_message(
             broadcast(state, ServerMessage::PlayerJoined { player: snapshot });
         }
         ClientMessage::UpdatePlayer { position, look } => {
-            install_or_update_player(state, client_id, None, Some(position), Some(look), start);
+            let snapshot =
+                install_or_update_player(state, client_id, None, Some(position), Some(look), start);
             let center_chunk = world_chunk_from_position(position);
             sync_streamed_chunks_for_client(
                 state,
                 client_id,
                 center_chunk,
+                snapshot.last_update_ms,
                 world_seed,
                 procgen_structures,
                 near_chunk_radius,
@@ -1369,6 +1403,7 @@ fn handle_message(
                 state,
                 client_id,
                 center_chunk,
+                monotonic_ms(start),
                 world_seed,
                 procgen_structures,
                 near_chunk_radius,
