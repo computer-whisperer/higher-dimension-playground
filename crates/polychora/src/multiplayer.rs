@@ -4,7 +4,7 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-pub use polychora_common::protocol::{PlayerSnapshot, WorldSnapshotPayload, WorldSummary};
+pub use polychora_common::protocol::{EntityKind, EntitySnapshot, PlayerSnapshot, WorldSnapshotPayload, WorldSummary};
 
 #[derive(Debug)]
 pub enum MultiplayerEvent {

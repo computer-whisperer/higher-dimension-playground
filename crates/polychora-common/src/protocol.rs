@@ -1,5 +1,21 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EntityKind {
+    TestCube,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EntitySnapshot {
+    pub entity_id: u64,
+    pub kind: EntityKind,
+    pub position: [f32; 4],
+    pub orientation: [f32; 4],
+    pub scale: f32,
+    pub material: u8,
+    pub last_update_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldSummary {
     pub non_empty_chunks: usize,
@@ -69,5 +85,15 @@ pub enum ServerMessage {
     },
     Pong {
         nonce: u64,
+    },
+    EntitySpawned {
+        entity: EntitySnapshot,
+    },
+    EntityDestroyed {
+        entity_id: u64,
+    },
+    EntityPositions {
+        server_time_ms: u64,
+        entities: Vec<EntitySnapshot>,
     },
 }
