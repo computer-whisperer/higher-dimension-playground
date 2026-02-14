@@ -1,3 +1,4 @@
+mod audio;
 mod camera;
 mod cpu_render;
 mod input;
@@ -30,6 +31,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
+use audio::{AudioEngine, SoundEffect};
 use camera::{Camera4D, PLAYER_HEIGHT};
 use input::{ControlScheme, InputState, RotationPair};
 use multiplayer::{ClientMessage as MultiplayerClientMessage, MultiplayerClient, MultiplayerEvent};
@@ -43,6 +45,14 @@ const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
+const FOOTSTEP_DISTANCE_WALK: f32 = 1.75;
+const FOOTSTEP_DISTANCE_SPRINT: f32 = 1.20;
+const FOOTSTEP_MIN_XZW_SPEED: f32 = 0.55;
+const REMOTE_FOOTSTEP_MAX_DISTANCE: f32 = 36.0;
+const REMOTE_FOOTSTEP_MIN_XZW_SPEED: f32 = 0.40;
+const REMOTE_FOOTSTEP_MAX_VERTICAL_SPEED: f32 = 2.4;
+const REMOTE_FOOTSTEP_MAX_NETWORK_AGE_S: f32 = 0.35;
+const REMOTE_FOOTSTEP_MAX_PER_FRAME: usize = 6;
 const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
 const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
@@ -438,6 +448,14 @@ struct Args {
     /// Commands: press:<key>, wait:<frames>, screenshot
     #[arg(long)]
     commands: Option<String>,
+
+    /// Enable client-side audio output (sound effects).
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    audio: bool,
+
+    /// Master volume for client-side sound effects.
+    #[arg(long, default_value_t = 0.7)]
+    audio_volume: f32,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -700,6 +718,19 @@ fn main() {
     let initial_render_width = args.width;
     let initial_render_height = args.height;
     let initial_render_layers = args.layers;
+    let audio = AudioEngine::new(args.audio, args.audio_volume);
+    if args.audio {
+        if audio.is_active() {
+            eprintln!(
+                "Audio enabled (volume {:.2})",
+                args.audio_volume.clamp(0.0, 2.0)
+            );
+        } else {
+            eprintln!("Audio disabled (no output device)");
+        }
+    } else {
+        eprintln!("Audio disabled via --audio=false");
+    }
 
     let mut app = App {
         instance,
@@ -709,6 +740,9 @@ fn main() {
         scene,
         camera,
         input: InputState::new(),
+        audio,
+        footstep_distance_accum: 0.0,
+        was_grounded_last_frame: false,
         start_time: Instant::now(),
         last_frame: Instant::now(),
         mouse_grabbed: false,
@@ -950,6 +984,9 @@ struct App {
     scene: Scene,
     camera: Camera4D,
     input: InputState,
+    audio: AudioEngine,
+    footstep_distance_accum: f32,
+    was_grounded_last_frame: bool,
     start_time: Instant,
     last_frame: Instant,
     mouse_grabbed: bool,
@@ -1033,6 +1070,7 @@ struct RemotePlayerState {
     render_look: [f32; 4],
     velocity: [f32; 4],
     last_received_at: Instant,
+    footstep_distance_accum: f32,
 }
 
 #[derive(Clone)]
@@ -2113,6 +2151,7 @@ impl App {
                 existing.render_position = existing.position;
                 existing.render_look = existing.look;
                 existing.velocity = [0.0; 4];
+                existing.footstep_distance_accum = 0.0;
             }
             return;
         }
@@ -2128,6 +2167,7 @@ impl App {
                 render_look: normalized_look,
                 velocity: [0.0; 4],
                 last_received_at: received_at,
+                footstep_distance_accum: 0.0,
             },
         );
     }
@@ -2139,7 +2179,10 @@ impl App {
         }
         let pos_alpha = 1.0 - (-REMOTE_PLAYER_POSITION_SMOOTH_HZ * dt).exp();
         let look_alpha = 1.0 - (-REMOTE_PLAYER_LOOK_SMOOTH_HZ * dt).exp();
+        let listener_position = self.camera.position;
+        let mut footstep_scales = Vec::new();
         for player in self.remote_players.values_mut() {
+            let previous_render_position = player.render_position;
             let network_age = now.duration_since(player.last_received_at).as_secs_f32();
             let predict_time = (network_age + REMOTE_PLAYER_PREDICTION_LEAD_S)
                 .clamp(0.0, REMOTE_PLAYER_MAX_PREDICTION_S);
@@ -2149,19 +2192,66 @@ impl App {
                 predicted_position[axis] += player.velocity[axis] * predict_time;
             }
 
-            if distance4(player.render_position, predicted_position)
+            let snapped = if distance4(player.render_position, predicted_position)
                 > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
             {
                 player.render_position = predicted_position;
+                true
             } else {
                 player.render_position =
                     lerp4(player.render_position, predicted_position, pos_alpha);
-            }
+                false
+            };
 
             player.render_look = normalize4_with_fallback(
                 lerp4(player.render_look, player.look, look_alpha),
                 player.look,
             );
+
+            if snapped || network_age > REMOTE_FOOTSTEP_MAX_NETWORK_AGE_S {
+                player.footstep_distance_accum = 0.0;
+                continue;
+            }
+
+            let moved_dx = player.render_position[0] - previous_render_position[0];
+            let moved_dy = player.render_position[1] - previous_render_position[1];
+            let moved_dz = player.render_position[2] - previous_render_position[2];
+            let moved_dw = player.render_position[3] - previous_render_position[3];
+            let moved_xzw =
+                (moved_dx * moved_dx + moved_dz * moved_dz + moved_dw * moved_dw).sqrt();
+            let moved_speed_xzw = moved_xzw / dt;
+            let moved_speed_y = moved_dy.abs() / dt;
+
+            if moved_speed_xzw <= REMOTE_FOOTSTEP_MIN_XZW_SPEED
+                || moved_speed_y > REMOTE_FOOTSTEP_MAX_VERTICAL_SPEED
+            {
+                player.footstep_distance_accum = 0.0;
+                continue;
+            }
+
+            player.footstep_distance_accum += moved_xzw;
+            while player.footstep_distance_accum >= FOOTSTEP_DISTANCE_WALK {
+                if footstep_scales.len() >= REMOTE_FOOTSTEP_MAX_PER_FRAME {
+                    player.footstep_distance_accum = 0.0;
+                    break;
+                }
+
+                let distance_to_listener = distance4(listener_position, player.render_position);
+                if distance_to_listener < REMOTE_FOOTSTEP_MAX_DISTANCE {
+                    let distance_t =
+                        1.0 - (distance_to_listener / REMOTE_FOOTSTEP_MAX_DISTANCE).clamp(0.0, 1.0);
+                    let distance_gain = distance_t * distance_t;
+                    let speed_gain =
+                        (moved_speed_xzw / REMOTE_PLAYER_MAX_PREDICTED_SPEED).clamp(0.30, 1.0);
+                    let gain = (distance_gain * speed_gain).clamp(0.05, 0.65);
+                    footstep_scales.push(gain);
+                }
+                player.footstep_distance_accum -= FOOTSTEP_DISTANCE_WALK;
+            }
+        }
+
+        for scale in footstep_scales {
+            self.audio.play_scaled(SoundEffect::Footstep, scale);
         }
     }
 
@@ -2350,8 +2440,15 @@ impl App {
                     position[3],
                     voxel::VoxelType(material),
                 );
-                if source_client_id == self.multiplayer_self_id {
+                let from_self = source_client_id == self.multiplayer_self_id;
+                if from_self {
                     self.acknowledge_pending_voxel_edit(client_edit_id, position, material);
+                } else if source_client_id.is_some() {
+                    if material == voxel::VoxelType::AIR.0 {
+                        self.audio.play(SoundEffect::Break);
+                    } else {
+                        self.audio.play(SoundEffect::Place);
+                    }
                 }
             }
             multiplayer::ServerMessage::WorldSnapshot { world } => {
@@ -4554,7 +4651,11 @@ impl App {
             if self.camera.is_flying {
                 self.input.take_jump();
             } else if self.input.take_jump() {
+                let was_grounded_for_jump = self.camera.is_grounded;
                 self.camera.jump();
+                if was_grounded_for_jump && !self.camera.is_grounded {
+                    self.audio.play(SoundEffect::Jump);
+                }
             }
 
             // Movement (vertical zeroed in gravity mode internally).
@@ -4599,6 +4700,37 @@ impl App {
             self.camera.position = resolved_pos;
             self.camera.is_grounded = grounded;
 
+            if self.camera.is_grounded && !self.was_grounded_last_frame && !self.camera.is_flying {
+                self.audio.play(SoundEffect::Land);
+            }
+            let moved_dx = self.camera.position[0] - prev_position[0];
+            let moved_dz = self.camera.position[2] - prev_position[2];
+            let moved_dw = self.camera.position[3] - prev_position[3];
+            let moved_xzw =
+                (moved_dx * moved_dx + moved_dz * moved_dz + moved_dw * moved_dw).sqrt();
+            let moved_speed_xzw = if dt > 1e-5 { moved_xzw / dt } else { 0.0 };
+            if self.camera.is_grounded
+                && !self.camera.is_flying
+                && has_movement_input
+                && moved_speed_xzw > FOOTSTEP_MIN_XZW_SPEED
+            {
+                self.footstep_distance_accum += moved_xzw;
+                let stride = if self.sprint_enabled {
+                    FOOTSTEP_DISTANCE_SPRINT
+                } else {
+                    FOOTSTEP_DISTANCE_WALK
+                };
+                while self.footstep_distance_accum >= stride {
+                    let intensity = (moved_speed_xzw / (self.move_speed * SPRINT_SPEED_MULTIPLIER))
+                        .clamp(0.65, 1.25);
+                    self.audio.play_scaled(SoundEffect::Footstep, intensity);
+                    self.footstep_distance_accum -= stride;
+                }
+            } else {
+                self.footstep_distance_accum = 0.0;
+            }
+            self.was_grounded_last_frame = self.camera.is_grounded;
+
             // Block edit actions.
             let look_dir_for_edit = self.current_look_direction();
             if self.mouse_grabbed {
@@ -4631,6 +4763,7 @@ impl App {
                             edit_reach,
                         ) {
                             eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
+                            self.audio.play(SoundEffect::Break);
                             self.send_multiplayer_voxel_update(
                                 now,
                                 [x, y, z, w],
@@ -4648,6 +4781,7 @@ impl App {
                                 "Placed voxel material {} at ({x}, {y}, {z}, {w})",
                                 self.place_material
                             );
+                            self.audio.play(SoundEffect::Place);
                             self.send_multiplayer_voxel_update(
                                 now,
                                 [x, y, z, w],
@@ -4666,6 +4800,8 @@ impl App {
             self.input.take_remove_block();
             self.input.take_place_block();
             self.input.take_pick_material();
+            self.footstep_distance_accum = 0.0;
+            self.was_grounded_last_frame = self.camera.is_grounded;
         }
 
         let look_dir = self.current_look_direction();
