@@ -4036,6 +4036,55 @@ impl RenderContext {
         self.recreate_swapchain = true;
     }
 
+    /// Recreate all resolution-dependent GPU buffers at a new render size.
+    /// Waits for in-flight GPU work to complete, then rebuilds sized buffers
+    /// and all per-frame descriptor sets that reference them.
+    pub fn recreate_sized_buffers(
+        &mut self,
+        new_dimensions: [u32; 3],
+        pixel_storage_layers: Option<u32>,
+    ) {
+        self.wait_for_all_frames();
+
+        let new_sized = SizedBuffers::new(
+            self.memory_allocator.clone(),
+            new_dimensions,
+            pixel_storage_layers,
+        );
+
+        // The sized descriptor set layout is set_layouts[1] in the compute pipeline layout.
+        let sized_ds_layout = self
+            .compute_pipeline
+            .pipeline_layout
+            .set_layouts()[1]
+            .clone();
+
+        for frame in &mut self.frames_in_flight {
+            frame.sized_descriptor_set = new_sized.create_sized_descriptor_set(
+                &frame.line_vertexes_buffer,
+                self.descriptor_set_allocator.clone(),
+                sized_ds_layout.clone(),
+            );
+        }
+
+        self.sized_buffers = new_sized;
+
+        // Reset profiler to avoid stale timing data from the old resolution.
+        self.profiler.next_query = 0;
+        self.profiler.phase_names.clear();
+        self.profiler.accum.clear();
+        self.profiler.total_frames = 0;
+        self.profiler.last_frame_phases.clear();
+        self.profiler.last_gpu_total_ms = 0.0;
+        self.profiler.last_slow_report_frame = None;
+        self.drop_next_profile_sample = true;
+
+        eprintln!(
+            "[render] Resized buffers to {}x{}x{}",
+            new_dimensions[0], new_dimensions[1], new_dimensions[2]
+        );
+    }
+
     pub fn reset_gpu_profile_window(&mut self) {
         self.profiler.next_query = 0;
         self.profiler.phase_names.clear();
