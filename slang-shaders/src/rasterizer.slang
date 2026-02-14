@@ -912,8 +912,24 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
 
     if (numZWLines > 0)
     {
-        // Normal raster output: opaque color where tetrahedra project.
-        pixelBuffer[pixelIndex] = renderZWLines2(currentZWLines, numZWLines, workingData);
+        float4 overlayColor = renderZWLines2(currentZWLines, numZWLines, workingData);
+
+        if (workingData.padding[0] != 0u)
+        {
+            // VTE overlay mode: composite overlay over existing voxel scene.
+            // overlayColor.rgb is premultiplied by alpha (coverage fraction).
+            // Standard premultiplied alpha "over" operation:
+            //   result = overlay + background * (1 - overlay.alpha)
+            float4 background = pixelBuffer[pixelIndex];
+            pixelBuffer[pixelIndex] = float4(
+                overlayColor.rgb + background.rgb * (1.0 - overlayColor.a),
+                overlayColor.a + background.a * (1.0 - overlayColor.a)
+            );
+        }
+        else
+        {
+            pixelBuffer[pixelIndex] = overlayColor;
+        }
     }
     else if (workingData.padding[0] == 0u)
     {
