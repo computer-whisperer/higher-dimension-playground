@@ -306,10 +306,12 @@ impl InputState {
                     self.reset_orientation_held = pressed;
                 }
                 KeyCode::KeyF => {
+                    self.pull_to_3d_held = pressed;
+                }
+                KeyCode::KeyG => {
                     if pressed && !event.repeat {
                         self.look_at_requested = true;
                     }
-                    self.pull_to_3d_held = pressed;
                 }
                 KeyCode::F6 => {
                     if pressed {
