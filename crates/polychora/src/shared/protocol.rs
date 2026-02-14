@@ -47,15 +47,22 @@ pub struct PlayerSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMessage {
-    Hello { name: String },
-    UpdatePlayer { position: [f32; 4], look: [f32; 4] },
+    Hello {
+        name: String,
+    },
+    UpdatePlayer {
+        position: [f32; 4],
+        look: [f32; 4],
+    },
     SetVoxel {
         position: [i32; 4],
         material: u8,
         client_edit_id: Option<u64>,
     },
     RequestWorldSnapshot,
-    Ping { nonce: u64 },
+    Ping {
+        nonce: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,6 +99,10 @@ pub enum ServerMessage {
     WorldChunkBatch {
         revision: u64,
         chunks: Vec<WorldChunkPayload>,
+    },
+    WorldChunkUnloadBatch {
+        revision: u64,
+        chunks: Vec<[i32; 4]>,
     },
     Pong {
         nonce: u64,
