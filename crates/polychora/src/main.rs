@@ -689,6 +689,10 @@ fn main() {
         VecDeque::new()
     };
 
+    let initial_render_width = args.width;
+    let initial_render_height = args.height;
+    let initial_render_layers = args.layers;
+
     let mut app = App {
         instance,
         device,
@@ -758,6 +762,9 @@ fn main() {
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
         main_menu_connect_error: None,
+        pending_render_width: initial_render_width,
+        pending_render_height: initial_render_height,
+        pending_render_layers: initial_render_layers,
     };
 
     if app.vte_reference_compare_enabled {
@@ -980,6 +987,10 @@ struct App {
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
     main_menu_connect_error: Option<String>,
+    // Runtime resolution UI state (edited values before Apply)
+    pending_render_width: u32,
+    pending_render_height: u32,
+    pending_render_layers: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -3151,6 +3162,46 @@ impl App {
                     )
                     .text("Place Material"),
                 );
+
+                ui.separator();
+                ui.label("Render Resolution");
+                ui.horizontal(|ui| {
+                    ui.label("Width:");
+                    ui.add(egui::DragValue::new(&mut self.pending_render_width)
+                        .range(128..=3840)
+                        .speed(16));
+                    ui.label("Height:");
+                    ui.add(egui::DragValue::new(&mut self.pending_render_height)
+                        .range(128..=2160)
+                        .speed(16));
+                    ui.label("Layers:");
+                    ui.add(egui::DragValue::new(&mut self.pending_render_layers)
+                        .range(1..=512)
+                        .speed(1));
+                });
+                let dims_changed = self.pending_render_width != self.args.width
+                    || self.pending_render_height != self.args.height
+                    || self.pending_render_layers != self.args.layers;
+                ui.horizontal(|ui| {
+                    let apply_btn = ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
+                    if apply_btn.clicked() {
+                        self.args.width = self.pending_render_width;
+                        self.args.height = self.pending_render_height;
+                        self.args.layers = self.pending_render_layers;
+                        if let Some(rcx) = self.rcx.as_mut() {
+                            rcx.recreate_sized_buffers(
+                                [self.args.width, self.args.height, self.args.layers],
+                                None,
+                            );
+                        }
+                    }
+                    if dims_changed {
+                        ui.label(format!(
+                            "(current: {}x{}x{})",
+                            self.args.width, self.args.height, self.args.layers
+                        ));
+                    }
+                });
 
                 ui.separator();
 
