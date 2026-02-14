@@ -406,6 +406,14 @@ struct Args {
     #[arg(long, default_value_t = 6)]
     singleplayer_procgen_chunk_radius: i32,
 
+    /// Derive a procgen keepout mask from persisted world chunks in singleplayer.
+    #[arg(long, default_value_t = true)]
+    singleplayer_procgen_keepout_from_existing_world: bool,
+
+    /// Keepout chunk padding around persisted chunks used to block new procgen placements.
+    #[arg(long, default_value_t = 1)]
+    singleplayer_procgen_keepout_padding_chunks: i32,
+
     /// World seed used by integrated singleplayer server procgen.
     #[arg(long, default_value_t = 1337)]
     singleplayer_world_seed: u64,
@@ -1123,6 +1131,8 @@ fn build_singleplayer_runtime_config(
         snapshot_on_join: args.singleplayer_snapshot_on_join,
         procgen_structures: args.singleplayer_procgen_structures,
         procgen_chunk_radius: args.singleplayer_procgen_chunk_radius,
+        procgen_keepout_from_existing_world: args.singleplayer_procgen_keepout_from_existing_world,
+        procgen_keepout_padding_chunks: args.singleplayer_procgen_keepout_padding_chunks,
         world_seed: args.singleplayer_world_seed,
     }
 }

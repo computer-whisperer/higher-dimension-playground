@@ -1,5 +1,6 @@
 use crate::shared::voxel::{Chunk, ChunkPos, VoxelType, CHUNK_SIZE};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 const STRUCTURE_CELL_SIZE: i32 = 32;
@@ -548,11 +549,14 @@ pub fn structure_chunk_y_bounds() -> (i32, i32) {
     )
 }
 
+pub type StructureCell = [i32; 3];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct StructurePlacement {
     blueprint_idx: usize,
     origin: [i32; 4],
     orientation: u8,
+    cell: StructureCell,
 }
 
 fn chunk_bounds(chunk_pos: ChunkPos) -> ([i32; 4], [i32; 4]) {
@@ -657,6 +661,7 @@ fn collect_structure_placements_for_chunk(
                     blueprint_idx,
                     origin,
                     orientation,
+                    cell: [cell_x, cell_z, cell_w],
                 });
             }
         }
@@ -665,13 +670,39 @@ fn collect_structure_placements_for_chunk(
     placements
 }
 
-pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<Chunk> {
+fn placement_allowed(
+    placement: &StructurePlacement,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> bool {
+    blocked_cells
+        .map(|blocked| !blocked.contains(&placement.cell))
+        .unwrap_or(true)
+}
+
+pub fn structure_cells_affecting_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Vec<StructureCell> {
+    let mut unique = HashSet::new();
+    for placement in collect_structure_placements_for_chunk(world_seed, chunk_pos) {
+        unique.insert(placement.cell);
+    }
+    let mut out: Vec<_> = unique.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+pub fn generate_structure_chunk_with_keepout(
+    world_seed: u64,
+    chunk_pos: ChunkPos,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> Option<Chunk> {
     let set = structure_set();
     let (chunk_min, _) = chunk_bounds(chunk_pos);
     let placements = collect_structure_placements_for_chunk(world_seed, chunk_pos);
 
     let mut chunk = Chunk::new();
     for placement in placements {
+        if !placement_allowed(&placement, blocked_cells) {
+            continue;
+        }
         let blueprint = &set.blueprints[placement.blueprint_idx];
         blueprint.place_into_chunk_oriented(
             placement.origin,
@@ -688,12 +719,23 @@ pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<
     }
 }
 
-pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool {
+pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<Chunk> {
+    generate_structure_chunk_with_keepout(world_seed, chunk_pos, None)
+}
+
+pub fn structure_chunk_has_content_with_keepout(
+    world_seed: u64,
+    chunk_pos: ChunkPos,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> bool {
     let set = structure_set();
     let (chunk_min, chunk_max) = chunk_bounds(chunk_pos);
     collect_structure_placements_for_chunk(world_seed, chunk_pos)
         .into_iter()
         .any(|placement| {
+            if !placement_allowed(&placement, blocked_cells) {
+                return false;
+            }
             let blueprint = &set.blueprints[placement.blueprint_idx];
             blueprint.writes_any_voxel_in_chunk_oriented(
                 placement.origin,
@@ -702,6 +744,10 @@ pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool
                 chunk_max,
             )
         })
+}
+
+pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool {
+    structure_chunk_has_content_with_keepout(world_seed, chunk_pos, None)
 }
 
 fn jitter_from_hash(hash: u64) -> i32 {
@@ -730,6 +776,7 @@ fn splitmix64(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn structure_chunk_generation_is_seed_deterministic() {
@@ -880,5 +927,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn keepout_cells_block_generation_for_affected_chunk() {
+        let seed = 4242_u64;
+        let (min_y, max_y) = structure_chunk_y_bounds();
+
+        let mut target_chunk = None;
+        'search: for x in -10..=10 {
+            for z in -10..=10 {
+                for w in -10..=10 {
+                    for y in min_y..=max_y {
+                        let chunk_pos = ChunkPos::new(x, y, z, w);
+                        let cells = structure_cells_affecting_chunk(seed, chunk_pos);
+                        if !cells.is_empty() && generate_structure_chunk(seed, chunk_pos).is_some()
+                        {
+                            target_chunk = Some((chunk_pos, cells));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+
+        let (chunk_pos, cells) = target_chunk.expect("expected at least one structure chunk");
+        let mut blocked = HashSet::new();
+        blocked.insert(cells[0]);
+
+        assert!(
+            !structure_chunk_has_content_with_keepout(seed, chunk_pos, Some(&blocked)),
+            "expected keepout cell to suppress structure content for chunk {:?}",
+            chunk_pos
+        );
+        assert!(
+            generate_structure_chunk_with_keepout(seed, chunk_pos, Some(&blocked)).is_none(),
+            "expected keepout cell to suppress chunk generation for chunk {:?}",
+            chunk_pos
+        );
     }
 }

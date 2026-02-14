@@ -1,13 +1,18 @@
 use clap::{Parser, Subcommand};
-use polychora::shared::voxel::{save_world, BaseWorldKind, VoxelType, VoxelWorld};
+use polychora::shared::voxel::{
+    load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld,
+};
 use std::fs::File;
-use std::io::BufWriter;
-use std::path::PathBuf;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAGIC: &[u8; 4] = b"V4DW";
 
 #[derive(Parser)]
 #[command(
     name = "worldgen-cli",
-    about = "Generate .v4dw world files for polychora"
+    about = "Generate and migrate .v4dw world files for polychora"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -52,6 +57,49 @@ enum Command {
         #[arg(long, short)]
         output: PathBuf,
     },
+    /// Inspect world metadata and chunk bounds
+    Inspect {
+        /// Input .v4dw file path
+        #[arg(long, short)]
+        input: PathBuf,
+    },
+    /// Migrate an existing world by filtering persisted chunk overrides
+    Migrate {
+        /// Input .v4dw file path
+        #[arg(long, short)]
+        input: PathBuf,
+        /// Output .v4dw file path (default: <input>.migrated.v4dw)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Overwrite input file in place
+        #[arg(long, default_value_t = false)]
+        in_place: bool,
+        /// Backup root directory (default: <input_parent>/backups)
+        #[arg(long)]
+        backup_dir: Option<PathBuf>,
+        /// Keep-region minimum chunk coordinate (X Y Z W)
+        #[arg(long, num_args = 4, value_names = ["X", "Y", "Z", "W"], allow_hyphen_values = true)]
+        keep_min_chunk: Option<Vec<i32>>,
+        /// Keep-region maximum chunk coordinate (X Y Z W)
+        #[arg(long, num_args = 4, value_names = ["X", "Y", "Z", "W"], allow_hyphen_values = true)]
+        keep_max_chunk: Option<Vec<i32>>,
+        /// Drop all persisted chunk overrides outside the keep-region chunk bounds
+        #[arg(long, default_value_t = false)]
+        drop_outside_keep_bounds: bool,
+        /// Report migration result without writing output
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct WorldStats {
+    file_version: Option<u32>,
+    base_kind: BaseWorldKind,
+    override_chunks_total: usize,
+    override_chunks_non_empty: usize,
+    bounds_min: Option<[i32; 4]>,
+    bounds_max: Option<[i32; 4]>,
 }
 
 fn fill_hypercube(world: &mut VoxelWorld, min: [i32; 4], size: [i32; 4], material: VoxelType) {
@@ -88,7 +136,7 @@ fn generate_demo_cube_layout_world() -> VoxelWorld {
     world
 }
 
-fn save_world_to_file(world: &VoxelWorld, path: &PathBuf) -> std::io::Result<()> {
+fn save_world_to_file(world: &VoxelWorld, path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -97,7 +145,327 @@ fn save_world_to_file(world: &VoxelWorld, path: &PathBuf) -> std::io::Result<()>
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     save_world(world, &mut writer)?;
-    println!("Saved world to {}", path.display());
+    writer.flush()?;
+    Ok(())
+}
+
+fn save_world_in_place(world: &VoxelWorld, input_path: &Path) -> io::Result<()> {
+    let tmp_path = PathBuf::from(format!("{}.tmp", input_path.to_string_lossy()));
+    save_world_to_file(world, &tmp_path)?;
+    std::fs::rename(&tmp_path, input_path)?;
+    Ok(())
+}
+
+fn load_world_from_file(path: &Path) -> io::Result<VoxelWorld> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    load_world(&mut reader)
+}
+
+fn detect_v4dw_version(path: &Path) -> io::Result<Option<u32>> {
+    let mut file = File::open(path)?;
+    let mut header = [0u8; 8];
+    file.read_exact(&mut header)?;
+    if &header[0..4] != MAGIC {
+        return Ok(None);
+    }
+    Ok(Some(u32::from_le_bytes([
+        header[4], header[5], header[6], header[7],
+    ])))
+}
+
+fn compute_world_stats(world: &VoxelWorld, file_version: Option<u32>) -> WorldStats {
+    let mut bounds_min = [i32::MAX; 4];
+    let mut bounds_max = [i32::MIN; 4];
+    let mut have_bounds = false;
+    let mut non_empty = 0usize;
+
+    for (&pos, chunk) in &world.chunks {
+        if chunk.is_empty() {
+            continue;
+        }
+        non_empty += 1;
+        have_bounds = true;
+        bounds_min[0] = bounds_min[0].min(pos.x);
+        bounds_min[1] = bounds_min[1].min(pos.y);
+        bounds_min[2] = bounds_min[2].min(pos.z);
+        bounds_min[3] = bounds_min[3].min(pos.w);
+        bounds_max[0] = bounds_max[0].max(pos.x);
+        bounds_max[1] = bounds_max[1].max(pos.y);
+        bounds_max[2] = bounds_max[2].max(pos.z);
+        bounds_max[3] = bounds_max[3].max(pos.w);
+    }
+
+    WorldStats {
+        file_version,
+        base_kind: world.base_kind(),
+        override_chunks_total: world.chunks.len(),
+        override_chunks_non_empty: non_empty,
+        bounds_min: have_bounds.then_some(bounds_min),
+        bounds_max: have_bounds.then_some(bounds_max),
+    }
+}
+
+fn print_world_stats(label: &str, stats: &WorldStats) {
+    println!("{label}:");
+    if let Some(version) = stats.file_version {
+        println!("  version: {version}");
+    } else {
+        println!("  version: unknown/non-V4DW");
+    }
+    match stats.base_kind {
+        BaseWorldKind::Empty => println!("  base: empty"),
+        BaseWorldKind::FlatFloor { material } => {
+            println!("  base: flat-floor (material {})", material.0)
+        }
+    }
+    println!(
+        "  overrides: {} total, {} non-empty",
+        stats.override_chunks_total, stats.override_chunks_non_empty
+    );
+    match (stats.bounds_min, stats.bounds_max) {
+        (Some(min), Some(max)) => {
+            println!(
+                "  non-empty override chunk bounds: min=({}, {}, {}, {}) max=({}, {}, {}, {})",
+                min[0], min[1], min[2], min[3], max[0], max[1], max[2], max[3]
+            );
+        }
+        _ => println!("  non-empty override chunk bounds: <none>"),
+    }
+}
+
+fn parse_chunk_bound(arg_name: &str, raw: &[i32]) -> io::Result<[i32; 4]> {
+    if raw.len() != 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{arg_name} requires exactly 4 coordinates"),
+        ));
+    }
+    Ok([raw[0], raw[1], raw[2], raw[3]])
+}
+
+fn validate_bounds(min_chunk: [i32; 4], max_chunk: [i32; 4]) -> io::Result<()> {
+    for axis in 0..4 {
+        if min_chunk[axis] > max_chunk[axis] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid keep chunk bounds: min axis {} ({}) exceeds max ({})",
+                    axis, min_chunk[axis], max_chunk[axis]
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn drop_overrides_outside_chunk_bounds(
+    world: &mut VoxelWorld,
+    min_chunk: [i32; 4],
+    max_chunk: [i32; 4],
+) -> usize {
+    let positions: Vec<ChunkPos> = world.chunks.keys().copied().collect();
+    let mut dropped = 0usize;
+    for pos in positions {
+        let outside = pos.x < min_chunk[0]
+            || pos.x > max_chunk[0]
+            || pos.y < min_chunk[1]
+            || pos.y > max_chunk[1]
+            || pos.z < min_chunk[2]
+            || pos.z > max_chunk[2]
+            || pos.w < min_chunk[3]
+            || pos.w > max_chunk[3];
+        if outside && world.remove_chunk_override(pos) {
+            dropped += 1;
+        }
+    }
+    dropped
+}
+
+fn default_migrate_output_path(input: &Path) -> PathBuf {
+    input.with_extension("migrated.v4dw")
+}
+
+fn default_backup_root(input: &Path) -> PathBuf {
+    input
+        .parent()
+        .map(|p| p.join("backups"))
+        .unwrap_or_else(|| PathBuf::from("backups"))
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
+
+fn utc_date_timestamp_labels() -> (String, String) {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|dur| dur.as_secs() as i64)
+        .unwrap_or(0);
+    let days = now_secs.div_euclid(86_400);
+    let seconds_of_day = now_secs.rem_euclid(86_400) as u32;
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    let (year, month, day) = civil_from_days(days);
+    (
+        format!("{year:04}{month:02}{day:02}"),
+        format!("{hour:02}{minute:02}{second:02}"),
+    )
+}
+
+fn world_version_label(file_version: Option<u32>) -> String {
+    file_version
+        .map(|version| format!("v{}", version))
+        .unwrap_or_else(|| "vunknown".to_string())
+}
+
+fn create_auto_backup(
+    input_path: &Path,
+    file_version: Option<u32>,
+    backup_root_override: Option<&Path>,
+) -> io::Result<PathBuf> {
+    let (date, timestamp) = utc_date_timestamp_labels();
+
+    let version_label = world_version_label(file_version);
+    let backup_root = backup_root_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_backup_root(input_path));
+    let backup_dir = backup_root.join(&date).join(&version_label);
+    std::fs::create_dir_all(&backup_dir)?;
+
+    let stem = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("world");
+    let extension = input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+        .unwrap_or("v4dw");
+
+    for idx in 0..10_000u32 {
+        let suffix = if idx == 0 {
+            String::new()
+        } else {
+            format!("-{}", idx)
+        };
+        let file_name = format!(
+            "{}-{}-{}-{}{}.{}",
+            stem, date, timestamp, version_label, suffix, extension
+        );
+        let backup_path = backup_dir.join(file_name);
+        if backup_path.exists() {
+            continue;
+        }
+        std::fs::copy(input_path, &backup_path)?;
+        return Ok(backup_path);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "failed to allocate backup path in {} after many attempts",
+            backup_dir.display()
+        ),
+    ))
+}
+
+fn run_migrate(
+    input: PathBuf,
+    output: Option<PathBuf>,
+    in_place: bool,
+    backup_dir: Option<PathBuf>,
+    keep_min_chunk: Option<Vec<i32>>,
+    keep_max_chunk: Option<Vec<i32>>,
+    drop_outside_keep_bounds: bool,
+    dry_run: bool,
+) -> io::Result<()> {
+    if in_place && output.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--output cannot be combined with --in-place",
+        ));
+    }
+
+    let keep_bounds = match (keep_min_chunk, keep_max_chunk) {
+        (Some(min_raw), Some(max_raw)) => {
+            let min = parse_chunk_bound("--keep-min-chunk", &min_raw)?;
+            let max = parse_chunk_bound("--keep-max-chunk", &max_raw)?;
+            validate_bounds(min, max)?;
+            Some((min, max))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "both --keep-min-chunk and --keep-max-chunk must be provided together",
+            ));
+        }
+    };
+
+    if drop_outside_keep_bounds && keep_bounds.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--drop-outside-keep-bounds requires --keep-min-chunk and --keep-max-chunk",
+        ));
+    }
+
+    let version = detect_v4dw_version(&input)?;
+    let mut world = load_world_from_file(&input)?;
+    let before = compute_world_stats(&world, version);
+    print_world_stats("Before", &before);
+
+    let mut dropped = 0usize;
+    if drop_outside_keep_bounds {
+        let (min_chunk, max_chunk) = keep_bounds.expect("checked above");
+        dropped = drop_overrides_outside_chunk_bounds(&mut world, min_chunk, max_chunk);
+        println!(
+            "Applied migration: dropped {} override chunks outside keep bounds",
+            dropped
+        );
+    } else if keep_bounds.is_some() {
+        println!(
+            "Keep bounds provided but --drop-outside-keep-bounds is false; no changes applied."
+        );
+    }
+
+    let after = compute_world_stats(&world, before.file_version);
+    print_world_stats("After", &after);
+
+    if dry_run {
+        println!("Dry run enabled; no file was written.");
+        return Ok(());
+    }
+
+    let backup_path = create_auto_backup(&input, before.file_version, backup_dir.as_deref())?;
+    println!("Backup written: {}", backup_path.display());
+
+    if in_place {
+        save_world_in_place(&world, &input)?;
+        println!("Saved migrated world in place: {}", input.display());
+    } else {
+        let output_path = output.unwrap_or_else(|| default_migrate_output_path(&input));
+        save_world_to_file(&world, &output_path)?;
+        println!("Saved migrated world to {}", output_path.display());
+    }
+
+    println!("Migration complete (dropped overrides: {}).", dropped);
     Ok(())
 }
 
@@ -109,11 +477,15 @@ fn main() {
             let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
                 material: VoxelType(material),
             });
-            save_world_to_file(&world, &output)
+            save_world_to_file(&world, &output).map(|_| {
+                println!("Saved world to {}", output.display());
+            })
         }
         Command::DemoCubes { output } => {
             let world = generate_demo_cube_layout_world();
-            save_world_to_file(&world, &output)
+            save_world_to_file(&world, &output).map(|_| {
+                println!("Saved world to {}", output.display());
+            })
         }
         Command::FilledRegion {
             min,
@@ -123,25 +495,60 @@ fn main() {
             base_material,
             output,
         } => {
-            let mut world = match base.as_str() {
-                "flat" => VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            let world_result: io::Result<VoxelWorld> = match base.as_str() {
+                "flat" => Ok(VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
                     material: VoxelType(base_material),
-                }),
-                "empty" => VoxelWorld::new(),
-                other => {
-                    eprintln!("Unknown base type '{}'. Use 'flat' or 'empty'.", other);
-                    std::process::exit(1);
-                }
+                })),
+                "empty" => Ok(VoxelWorld::new()),
+                other => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown base type '{other}'. Use 'flat' or 'empty'."),
+                )),
             };
-            let min_arr = [min[0], min[1], min[2], min[3]];
-            let size_arr = [size[0], size[1], size[2], size[3]];
-            fill_hypercube(&mut world, min_arr, size_arr, VoxelType(material));
-            save_world_to_file(&world, &output)
+            world_result.and_then(|mut world| {
+                parse_chunk_bound("--min", &min).and_then(|min_arr| {
+                    parse_chunk_bound("--size", &size).and_then(|size_arr| {
+                        fill_hypercube(&mut world, min_arr, size_arr, VoxelType(material));
+                        save_world_to_file(&world, &output).map(|_| {
+                            println!("Saved world to {}", output.display());
+                        })
+                    })
+                })
+            })
         }
+        Command::Inspect { input } => detect_v4dw_version(&input).and_then(|version| {
+            load_world_from_file(&input).map(|world| {
+                let stats = compute_world_stats(&world, version);
+                print_world_stats("World", &stats);
+            })
+        }),
+        Command::Migrate {
+            input,
+            output,
+            in_place,
+            backup_dir,
+            keep_min_chunk,
+            keep_max_chunk,
+            drop_outside_keep_bounds,
+            dry_run,
+        } => run_migrate(
+            input,
+            output,
+            in_place,
+            backup_dir,
+            keep_min_chunk,
+            keep_max_chunk,
+            drop_outside_keep_bounds,
+            dry_run,
+        ),
     };
 
     if let Err(err) = result {
-        eprintln!("Error: {}", err);
-        std::process::exit(1);
+        exit_with_error(err);
     }
+}
+
+fn exit_with_error(err: io::Error) -> ! {
+    eprintln!("Error: {}", err);
+    std::process::exit(1);
 }

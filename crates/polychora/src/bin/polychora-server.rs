@@ -22,6 +22,10 @@ struct Args {
     procgen_structures: bool,
     #[arg(long, default_value_t = 6)]
     procgen_chunk_radius: i32,
+    #[arg(long, default_value_t = true)]
+    procgen_keepout_from_existing_world: bool,
+    #[arg(long, default_value_t = 1)]
+    procgen_keepout_padding_chunks: i32,
     #[arg(long, default_value_t = 1337)]
     world_seed: u64,
 }
@@ -36,6 +40,8 @@ fn main() -> std::io::Result<()> {
         snapshot_on_join: args.snapshot_on_join,
         procgen_structures: args.procgen_structures,
         procgen_chunk_radius: args.procgen_chunk_radius,
+        procgen_keepout_from_existing_world: args.procgen_keepout_from_existing_world,
+        procgen_keepout_padding_chunks: args.procgen_keepout_padding_chunks,
         world_seed: args.world_seed,
     };
     run_tcp_server(&config)

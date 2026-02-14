@@ -28,6 +28,8 @@ pub struct RuntimeConfig {
     pub snapshot_on_join: bool,
     pub procgen_structures: bool,
     pub procgen_chunk_radius: i32,
+    pub procgen_keepout_from_existing_world: bool,
+    pub procgen_keepout_padding_chunks: i32,
     pub world_seed: u64,
 }
 
@@ -41,6 +43,8 @@ impl Default for RuntimeConfig {
             snapshot_on_join: true,
             procgen_structures: true,
             procgen_chunk_radius: 6,
+            procgen_keepout_from_existing_world: true,
+            procgen_keepout_padding_chunks: 1,
             world_seed: 1337,
         }
     }
@@ -91,6 +95,7 @@ struct ServerState {
     next_entity_id: u64,
     world: VoxelWorld,
     world_revision: u64,
+    procgen_blocked_cells: HashSet<procgen::StructureCell>,
     players: HashMap<u64, PlayerState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
     entities: HashMap<u64, EntityState>,
@@ -157,10 +162,13 @@ fn build_virgin_chunk_for_edit(
     chunk_pos: ChunkPos,
     world_seed: u64,
     procgen_structures: bool,
+    blocked_cells: Option<&HashSet<procgen::StructureCell>>,
 ) -> Option<voxel::Chunk> {
     let mut chunk = world.clone_base_chunk_or_empty_at(chunk_pos);
     if procgen_structures {
-        if let Some(structure_chunk) = procgen::generate_structure_chunk(world_seed, chunk_pos) {
+        if let Some(structure_chunk) =
+            procgen::generate_structure_chunk_with_keepout(world_seed, chunk_pos, blocked_cells)
+        {
             merge_non_air_voxels(&mut chunk, &structure_chunk);
         }
     }
@@ -181,7 +189,11 @@ fn build_effective_stream_chunk(
         return (!override_chunk.is_empty()).then(|| override_chunk.clone());
     }
     if procgen_structures {
-        return procgen::generate_structure_chunk(world_seed, chunk_pos);
+        return procgen::generate_structure_chunk_with_keepout(
+            world_seed,
+            chunk_pos,
+            Some(&state.procgen_blocked_cells),
+        );
     }
     None
 }
@@ -222,7 +234,11 @@ fn plan_stream_window_update(
                             }
                             continue;
                         }
-                        if procgen::structure_chunk_has_content(world_seed, chunk_pos) {
+                        if procgen::structure_chunk_has_content_with_keepout(
+                            world_seed,
+                            chunk_pos,
+                            Some(&state.procgen_blocked_cells),
+                        ) {
                             desired_set.insert(chunk_pos);
                         }
                     }
@@ -444,9 +460,13 @@ fn ensure_chunk_materialized_for_edit(
     if state.world.has_chunk_override(chunk_pos) {
         return;
     }
-    if let Some(chunk) =
-        build_virgin_chunk_for_edit(&state.world, chunk_pos, world_seed, procgen_structures)
-    {
+    if let Some(chunk) = build_virgin_chunk_for_edit(
+        &state.world,
+        chunk_pos,
+        world_seed,
+        procgen_structures,
+        Some(&state.procgen_blocked_cells),
+    ) {
         state.world.insert_chunk(chunk_pos, chunk);
     }
 }
@@ -460,8 +480,13 @@ fn trim_chunk_override_if_virgin(
     let Some(override_chunk) = state.world.override_chunk_at(chunk_pos).cloned() else {
         return;
     };
-    let virgin_chunk =
-        build_virgin_chunk_for_edit(&state.world, chunk_pos, world_seed, procgen_structures);
+    let virgin_chunk = build_virgin_chunk_for_edit(
+        &state.world,
+        chunk_pos,
+        world_seed,
+        procgen_structures,
+        Some(&state.procgen_blocked_cells),
+    );
     let matches_virgin = match virgin_chunk {
         Some(virgin) => chunks_equal(&override_chunk, &virgin),
         None => override_chunk.is_empty(),
@@ -482,7 +507,8 @@ fn prune_virgin_overrides(
         let Some(override_chunk) = world.override_chunk_at(pos).cloned() else {
             continue;
         };
-        let virgin_chunk = build_virgin_chunk_for_edit(world, pos, world_seed, procgen_structures);
+        let virgin_chunk =
+            build_virgin_chunk_for_edit(world, pos, world_seed, procgen_structures, None);
         let matches_virgin = match virgin_chunk {
             Some(virgin) => chunks_equal(&override_chunk, &virgin),
             None => override_chunk.is_empty(),
@@ -492,6 +518,49 @@ fn prune_virgin_overrides(
         }
     }
     pruned
+}
+
+fn gather_override_chunks_with_padding(
+    world: &VoxelWorld,
+    padding_chunks: i32,
+) -> HashSet<ChunkPos> {
+    let padding = padding_chunks.max(0);
+    let mut out = HashSet::new();
+    for (&pos, chunk) in &world.chunks {
+        if chunk.is_empty() {
+            continue;
+        }
+        for dx in -padding..=padding {
+            for dy in -padding..=padding {
+                for dz in -padding..=padding {
+                    for dw in -padding..=padding {
+                        out.insert(ChunkPos::new(
+                            pos.x + dx,
+                            pos.y + dy,
+                            pos.z + dz,
+                            pos.w + dw,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn build_procgen_keepout_cells(
+    world: &VoxelWorld,
+    world_seed: u64,
+    padding_chunks: i32,
+) -> HashSet<procgen::StructureCell> {
+    let keepout_chunks = gather_override_chunks_with_padding(world, padding_chunks);
+    let mut blocked_cells = HashSet::new();
+    for chunk_pos in keepout_chunks {
+        for cell in procgen::structure_cells_affecting_chunk(world_seed, chunk_pos) {
+            blocked_cells.insert(cell);
+        }
+    }
+    blocked_cells
 }
 
 fn load_world_from_path(path: &Path) -> io::Result<VoxelWorld> {
@@ -1026,6 +1095,24 @@ fn initialize_state(
             config.world_file.display()
         );
     }
+    let procgen_blocked_cells =
+        if config.procgen_structures && config.procgen_keepout_from_existing_world {
+            let blocked = build_procgen_keepout_cells(
+                &initial_world,
+                config.world_seed,
+                config.procgen_keepout_padding_chunks,
+            );
+            if !blocked.is_empty() {
+                eprintln!(
+                    "procgen keepout: {} blocked structure cells (padding={} chunks)",
+                    blocked.len(),
+                    config.procgen_keepout_padding_chunks.max(0)
+                );
+            }
+            blocked
+        } else {
+            HashSet::new()
+        };
     initial_world.clear_dirty();
     let _ = initial_world.drain_pending_chunk_updates();
     let initial_chunks = initial_world.non_empty_chunk_count();
@@ -1040,6 +1127,7 @@ fn initialize_state(
         next_entity_id: 1,
         world: initial_world,
         world_revision: 0,
+        procgen_blocked_cells,
         players: HashMap::new(),
         clients: HashMap::new(),
         entities: HashMap::new(),
@@ -1103,13 +1191,15 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
 
     let listener = TcpListener::bind(&config.bind)?;
     eprintln!(
-        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s, procgen={}, seed={}, radius={} chunks)",
+        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s, procgen={}, seed={}, radius={} chunks, keepout={}, keepout_padding={} chunks)",
         config.bind,
         config.tick_hz.max(0.1),
         config.save_interval_secs,
         config.procgen_structures,
         config.world_seed,
         config.procgen_chunk_radius.max(0),
+        config.procgen_keepout_from_existing_world,
+        config.procgen_keepout_padding_chunks.max(0),
     );
 
     for stream in listener.incoming() {
