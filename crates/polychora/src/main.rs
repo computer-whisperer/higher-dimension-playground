@@ -577,6 +577,9 @@ fn main() {
         vte_sweep_include_no_entities,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
+        hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
+        hotbar_selected_index: 0,
+        inventory_open: false,
         menu_open: false,
         menu_selection: 0,
         egui_ctx: egui::Context::default(),
@@ -750,6 +753,9 @@ struct App {
     vte_sweep_include_no_entities: bool,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
+    hotbar_slots: [u8; 9],
+    hotbar_selected_index: usize,
+    inventory_open: bool,
     menu_open: bool,
     menu_selection: usize,
     egui_ctx: egui::Context,
@@ -1478,6 +1484,50 @@ impl App {
         };
     }
 
+    fn cycle_hotbar_material_prev(&mut self) {
+        let slot = &mut self.hotbar_slots[self.hotbar_selected_index];
+        *slot = if *slot <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
+            BLOCK_EDIT_PLACE_MATERIAL_MAX
+        } else {
+            slot.saturating_sub(1)
+        };
+        self.place_material = *slot;
+        eprintln!(
+            "Hotbar slot {} material: {} ({})",
+            self.hotbar_selected_index + 1,
+            self.place_material,
+            materials::material_name(self.place_material),
+        );
+    }
+
+    fn cycle_hotbar_material_next(&mut self) {
+        let slot = &mut self.hotbar_slots[self.hotbar_selected_index];
+        *slot = if *slot >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
+            BLOCK_EDIT_PLACE_MATERIAL_MIN
+        } else {
+            slot.saturating_add(1)
+        };
+        self.place_material = *slot;
+        eprintln!(
+            "Hotbar slot {} material: {} ({})",
+            self.hotbar_selected_index + 1,
+            self.place_material,
+            materials::material_name(self.place_material),
+        );
+    }
+
+    fn toggle_inventory(&mut self) {
+        self.inventory_open = !self.inventory_open;
+        let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+        if let Some(window) = window {
+            if self.inventory_open {
+                self.release_mouse(&window);
+            } else {
+                self.grab_mouse(&window);
+            }
+        }
+    }
+
     fn cycle_control_scheme(&mut self) {
         let previous_scheme = self.control_scheme;
         self.control_scheme = self.control_scheme.next();
@@ -2099,6 +2149,7 @@ impl App {
         self.input.take_remove_block();
         self.input.take_place_block();
         self.input.take_pick_material();
+        self.input.take_inventory_toggle();
         self.input.take_mouse_delta();
     }
 
@@ -2678,6 +2729,192 @@ impl App {
             });
     }
 
+    fn draw_egui_hotbar(&self, ctx: &egui::Context) {
+        let screen_rect = ctx.screen_rect();
+        let slot_size = 48.0;
+        let gap = 4.0;
+        let total_width = 9.0 * slot_size + 8.0 * gap;
+        let start_x = (screen_rect.width() - total_width) / 2.0;
+        let start_y = screen_rect.height() - slot_size - 50.0;
+
+        egui::Area::new(egui::Id::new("hotbar"))
+            .fixed_pos(egui::pos2(start_x, start_y))
+            .interactable(false)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
+                    for i in 0..9 {
+                        let material_id = self.hotbar_slots[i];
+                        let [r, g, b] = materials::material_color(material_id);
+                        let is_selected = i == self.hotbar_selected_index;
+
+                        let (rect, _response) =
+                            ui.allocate_exact_size(egui::vec2(slot_size, slot_size), egui::Sense::hover());
+
+                        // Background
+                        let bg_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160);
+                        ui.painter().rect_filled(rect, 3.0, bg_color);
+
+                        // Material color swatch (inset)
+                        let swatch_rect = rect.shrink(4.0);
+                        let mat_color = egui::Color32::from_rgb(r, g, b);
+                        ui.painter().rect_filled(swatch_rect, 2.0, mat_color);
+
+                        // Selection border
+                        if is_selected {
+                            ui.painter().rect_stroke(
+                                rect,
+                                3.0,
+                                egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 255, 100)),
+                                egui::epaint::StrokeKind::Outside,
+                            );
+                        } else {
+                            ui.painter().rect_stroke(
+                                rect,
+                                3.0,
+                                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(200, 200, 200, 80)),
+                                egui::epaint::StrokeKind::Outside,
+                            );
+                        }
+
+                        // Slot number label (top-left corner)
+                        let label_pos = rect.left_top() + egui::vec2(3.0, 1.0);
+                        ui.painter().text(
+                            label_pos,
+                            egui::Align2::LEFT_TOP,
+                            format!("{}", i + 1),
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+                        );
+
+                        // Material name (bottom center, small text)
+                        let name = materials::material_name(material_id);
+                        let label_pos = rect.center_bottom() + egui::vec2(0.0, -2.0);
+                        ui.painter().text(
+                            label_pos,
+                            egui::Align2::CENTER_BOTTOM,
+                            name,
+                            egui::FontId::proportional(8.0),
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+                        );
+                    }
+                });
+            });
+    }
+
+    fn draw_egui_inventory(
+        &self,
+        ctx: &egui::Context,
+        close_inventory: &mut bool,
+        inventory_pick: &mut Option<u8>,
+    ) {
+        let mut open = true;
+        egui::Window::new("Creative Inventory")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .collapsible(false)
+            .open(&mut open)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                // Category tabs
+                ui.horizontal(|ui| {
+                    for cat in materials::MaterialCategory::ALL {
+                        if ui
+                            .selectable_label(false, cat.label())
+                            .clicked()
+                        {
+                            // Future: could filter by category. For now just a visual cue.
+                        }
+                    }
+                    ui.label("|");
+                    ui.label("All");
+                });
+                ui.separator();
+
+                // Material grid
+                let items_per_row = 10;
+                let cell_size = 44.0;
+                let cell_gap = 3.0;
+
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
+                            for (idx, mat) in materials::MATERIALS.iter().enumerate() {
+                                if idx > 0 && idx % items_per_row == 0 {
+                                    ui.end_row();
+                                }
+                                let [r, g, b] = mat.color;
+                                let mat_color = egui::Color32::from_rgb(r, g, b);
+
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(cell_size, cell_size),
+                                    egui::Sense::click(),
+                                );
+
+                                // Background
+                                let bg = if response.hovered() {
+                                    egui::Color32::from_rgba_unmultiplied(80, 80, 80, 200)
+                                } else {
+                                    egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200)
+                                };
+                                ui.painter().rect_filled(rect, 3.0, bg);
+
+                                // Color swatch
+                                let swatch = rect.shrink(4.0);
+                                let swatch_top = egui::Rect::from_min_max(
+                                    swatch.left_top(),
+                                    egui::pos2(swatch.right(), swatch.center().y - 2.0),
+                                );
+                                ui.painter().rect_filled(swatch_top, 2.0, mat_color);
+
+                                // Material name
+                                let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
+                                ui.painter().text(
+                                    text_pos,
+                                    egui::Align2::CENTER_BOTTOM,
+                                    mat.name,
+                                    egui::FontId::proportional(8.0),
+                                    egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
+                                );
+
+                                // ID label
+                                let id_pos = rect.left_top() + egui::vec2(3.0, 1.0);
+                                ui.painter().text(
+                                    id_pos,
+                                    egui::Align2::LEFT_TOP,
+                                    format!("{}", mat.id),
+                                    egui::FontId::proportional(9.0),
+                                    egui::Color32::from_rgba_unmultiplied(180, 180, 180, 200),
+                                );
+
+                                if response.hovered() {
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        3.0,
+                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 255, 100)),
+                                        egui::epaint::StrokeKind::Outside,
+                                    );
+                                }
+
+                                if response.clicked() {
+                                    *inventory_pick = Some(mat.id);
+                                }
+                            }
+                        });
+                    });
+
+                ui.separator();
+                ui.label("Click a material to place it in the selected hotbar slot. Press E or Esc to close.");
+            });
+
+        if !open {
+            *close_inventory = true;
+        }
+    }
+
     fn run_egui_frame(&mut self) -> Option<EguiPaintData> {
         let window = self
             .rcx
@@ -2690,10 +2927,16 @@ impl App {
 
         let egui_ctx = self.egui_ctx.clone();
         let mut close_menu = false;
+        let mut close_inventory = false;
+        let mut inventory_pick: Option<u8> = None;
         let full_output = egui_ctx.run(raw_input, |ctx| {
             if self.menu_open {
                 self.draw_egui_pause_menu(ctx, &mut close_menu);
             }
+            if self.inventory_open {
+                self.draw_egui_inventory(ctx, &mut close_inventory, &mut inventory_pick);
+            }
+            self.draw_egui_hotbar(ctx);
         });
 
         let egui::FullOutput {
@@ -2711,8 +2954,19 @@ impl App {
             self.menu_open = false;
             self.grab_mouse(&window);
         }
-        if !self.menu_open {
-            return None;
+        if close_inventory || inventory_pick.is_some() {
+            self.inventory_open = false;
+            self.grab_mouse(&window);
+        }
+        if let Some(material_id) = inventory_pick {
+            self.hotbar_slots[self.hotbar_selected_index] = material_id;
+            self.place_material = material_id;
+            eprintln!(
+                "Inventory: set hotbar slot {} to material {} ({})",
+                self.hotbar_selected_index + 1,
+                material_id,
+                materials::material_name(material_id),
+            );
         }
 
         let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
@@ -2995,7 +3249,7 @@ impl App {
         self.reapply_pending_voxel_edits(now);
         self.smooth_remote_players(dt, now);
 
-        if self.menu_open {
+        if self.menu_open || self.inventory_open {
             self.drain_gameplay_inputs_while_menu_open();
         } else {
             self.input.take_menu_left();
@@ -3049,14 +3303,21 @@ impl App {
                         }
                     }
                 } else {
+                    // Scroll wheel cycles hotbar selection.
                     for _ in 0..scroll_steps.abs() {
                         if scroll_steps > 0 {
-                            self.cycle_place_material_next();
+                            self.hotbar_selected_index = (self.hotbar_selected_index + 1) % 9;
                         } else {
-                            self.cycle_place_material_prev();
+                            self.hotbar_selected_index = (self.hotbar_selected_index + 8) % 9;
                         }
                     }
-                    eprintln!("Selected place material: {}", self.place_material);
+                    self.place_material = self.hotbar_slots[self.hotbar_selected_index];
+                    eprintln!(
+                        "Hotbar slot {} selected: material {} ({})",
+                        self.hotbar_selected_index + 1,
+                        self.place_material,
+                        materials::material_name(self.place_material),
+                    );
                 }
             }
 
@@ -3143,19 +3404,29 @@ impl App {
                 eprintln!("Sprint: on");
             }
 
-            // Block place material selection.
+            // Block place material selection via bracket keys.
             if self.input.take_place_material_prev() {
-                self.cycle_place_material_prev();
-                eprintln!("Selected place material: {}", self.place_material);
+                self.cycle_hotbar_material_prev();
             }
             if self.input.take_place_material_next() {
-                self.cycle_place_material_next();
-                eprintln!("Selected place material: {}", self.place_material);
+                self.cycle_hotbar_material_next();
             }
-            if let Some(material_digit) = self.input.take_place_material_digit() {
-                self.place_material = material_digit
-                    .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
-                eprintln!("Selected place material: {}", self.place_material);
+            // Number keys 1-9 select hotbar slot.
+            if let Some(digit) = self.input.take_place_material_digit() {
+                if digit >= 1 && digit <= 9 {
+                    self.hotbar_selected_index = (digit - 1) as usize;
+                    self.place_material = self.hotbar_slots[self.hotbar_selected_index];
+                    eprintln!(
+                        "Hotbar slot {} selected: material {} ({})",
+                        digit,
+                        self.place_material,
+                        materials::material_name(self.place_material),
+                    );
+                }
+            }
+            // E key toggles inventory.
+            if self.input.take_inventory_toggle() {
+                self.toggle_inventory();
             }
         }
 
@@ -3167,7 +3438,7 @@ impl App {
             .edit_reach
             .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
 
-        if !self.menu_open {
+        if !self.menu_open && !self.inventory_open {
             // Jump when in gravity mode, consume jump either way.
             if self.camera.is_flying {
                 self.input.take_jump();
@@ -3247,11 +3518,14 @@ impl App {
                         .hit_voxel
                     {
                         let material = self.scene.world.get_voxel(x, y, z, w).0;
-                        self.place_material = material
+                        let clamped = material
                             .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
+                        self.place_material = clamped;
+                        self.hotbar_slots[self.hotbar_selected_index] = clamped;
                         eprintln!(
-                            "Picked voxel material {} from ({x}, {y}, {z}, {w})",
-                            self.place_material
+                            "Picked voxel material {} ({}) from ({x}, {y}, {z}, {w})",
+                            clamped,
+                            materials::material_name(clamped),
                         );
                     }
                 }
@@ -3708,7 +3982,7 @@ impl ApplicationHandler for App {
         let egui_consumed = if let (Some(egui_state), Some(window)) =
             (self.egui_winit_state.as_mut(), window.as_ref())
         {
-            self.menu_open && egui_state.on_window_event(window, &event).consumed
+            (self.menu_open || self.inventory_open) && egui_state.on_window_event(window, &event).consumed
         } else {
             false
         };
@@ -3728,7 +4002,12 @@ impl ApplicationHandler for App {
                 }
 
                 if is_escape_pressed(&event) {
-                    if self.menu_open {
+                    if self.inventory_open {
+                        self.inventory_open = false;
+                        if let Some(window) = window.as_ref() {
+                            self.grab_mouse(window);
+                        }
+                    } else if self.menu_open {
                         self.menu_open = false;
                         if let Some(window) = window.as_ref() {
                             self.grab_mouse(window);
@@ -3751,7 +4030,7 @@ impl ApplicationHandler for App {
                             if !egui_consumed {
                                 self.input.handle_mouse_button(button, state);
                             }
-                        } else if !self.menu_open {
+                        } else if !self.menu_open && !self.inventory_open {
                             if let Some(window) = window.as_ref() {
                                 self.grab_mouse(window);
                                 self.menu_open = false;

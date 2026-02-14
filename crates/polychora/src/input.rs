@@ -133,6 +133,7 @@ pub struct InputState {
     vte_sweep_requested: bool,
     vte_integral_sky_emissive_toggle_requested: bool,
     vte_integral_log_merge_toggle_requested: bool,
+    inventory_toggle_requested: bool,
     menu_left_requested: bool,
     menu_right_requested: bool,
     menu_up_requested: bool,
@@ -180,6 +181,7 @@ impl InputState {
             vte_sweep_requested: false,
             vte_integral_sky_emissive_toggle_requested: false,
             vte_integral_log_merge_toggle_requested: false,
+            inventory_toggle_requested: false,
             menu_left_requested: false,
             menu_right_requested: false,
             menu_up_requested: false,
@@ -212,7 +214,12 @@ impl InputState {
                 }
                 KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
                 KeyCode::KeyQ => self.w_neg = pressed,
-                KeyCode::KeyE => self.w_pos = pressed,
+                KeyCode::KeyE => {
+                    self.w_pos = pressed;
+                    if pressed && !event.repeat {
+                        self.inventory_toggle_requested = true;
+                    }
+                }
                 KeyCode::F12 => {
                     if pressed {
                         self.screenshot_requested = true;
@@ -583,6 +590,12 @@ impl InputState {
     pub fn take_vte_integral_log_merge_toggle(&mut self) -> bool {
         let v = self.vte_integral_log_merge_toggle_requested;
         self.vte_integral_log_merge_toggle_requested = false;
+        v
+    }
+
+    pub fn take_inventory_toggle(&mut self) -> bool {
+        let v = self.inventory_toggle_requested;
+        self.inventory_toggle_requested = false;
         v
     }
 
