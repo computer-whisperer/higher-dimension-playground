@@ -576,6 +576,7 @@ float4 renderZWLinesSimple(
     float sinStep = sin(angleStep);
 
     float3 outputAccum = float3(0);
+    float alphaAccum = 0.0;
 
     for (uint i = 0; i < sampleCount; i++)
     {
@@ -628,6 +629,7 @@ float4 renderZWLinesSimple(
                             + mat.luminance * mat.albedo.xyz;
 
             outputAccum += litColor / float(sampleCount);
+            alphaAccum += 1.0 / float(sampleCount);
         }
 
         // Incremental rotation: (cos(θ+Δ), sin(θ+Δ)) = rotate(cos(θ), sin(θ))
@@ -637,7 +639,7 @@ float4 renderZWLinesSimple(
         rayY = newRayY;
     }
 
-    return float4(outputAccum, 1.0);
+    return float4(outputAccum, alphaAccum);
 }
 
 // ZW line rendering with occlusion culling

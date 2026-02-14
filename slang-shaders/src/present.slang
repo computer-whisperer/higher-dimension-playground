@@ -113,26 +113,27 @@ float4 samplePresentedColor(float2 fragCoord)
     }
 
     // Tone map and gamma correct
-    if (csResult.w > 0.0)
+    float alpha = csResult.w;
+    if (alpha > 0.0)
     {
-        float3 color = csResult.xyz / csResult.w;
+        float3 color = csResult.xyz / alpha;
         // Debug mode relies on exact false-color output; skip post-tonemap transforms.
         if (wd.padding[0] != 0u
             && (wd.padding[1] == STAGE_B_MODE_DEBUG_COMPARE
                 || wd.padding[1] == STAGE_B_MODE_DEBUG_INTEGRAL))
         {
-            return float4(saturate(color), 1.0);
+            return float4(saturate(color), alpha);
         }
         color = acesToneMap(color);
         return float4(
             linearToGamma(color.x),
             linearToGamma(color.y),
             linearToGamma(color.z),
-            1.0
+            alpha
         );
     }
 
-    return float4(0.0, 0.0, 0.0, 1.0);
+    return float4(0.0, 0.0, 0.0, 0.0);
 }
 
 float3 adaptiveCrosshairColor(float3 baseColor, float tint)
