@@ -1,7 +1,7 @@
 mod camera;
 mod cpu_render;
 mod input;
-mod material_icons;
+// mod material_icons; // TODO: enable when multi-texture egui rendering is supported
 mod materials;
 mod multiplayer;
 mod scene;
@@ -677,7 +677,6 @@ fn main() {
         menu_selection: 0,
         egui_ctx: egui::Context::default(),
         egui_winit_state: None,
-        material_icon_textures: HashMap::new(),
         multiplayer,
         multiplayer_self_id: None,
         next_multiplayer_edit_id: 1,
@@ -856,7 +855,6 @@ struct App {
     menu_selection: usize,
     egui_ctx: egui::Context,
     egui_winit_state: Option<egui_winit::State>,
-    material_icon_textures: HashMap<u8, egui::TextureHandle>,
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
     next_multiplayer_edit_id: u64,
@@ -1530,15 +1528,6 @@ fn build_remote_player_avatar_instances(
     }
 
     instances
-}
-
-fn srgb_byte_to_linear(s: u8) -> f32 {
-    let s = s as f32 / 255.0;
-    if s <= 0.04045 {
-        s / 12.92
-    } else {
-        ((s + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 impl App {
@@ -2923,15 +2912,10 @@ impl App {
                         let bg_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160);
                         ui.painter().rect_filled(rect, 3.0, bg_color);
 
-                        // Material icon (inset)
+                        // Material color swatch (inset)
                         let swatch_rect = rect.shrink(4.0);
-                        if let Some(tex) = self.material_icon_textures.get(&material_id) {
-                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                            ui.painter().image(tex.id(), swatch_rect, uv, egui::Color32::WHITE);
-                        } else {
-                            let mat_color = egui::Color32::from_rgb(r, g, b);
-                            ui.painter().rect_filled(swatch_rect, 2.0, mat_color);
-                        }
+                        let mat_color = egui::Color32::from_rgb(r, g, b);
+                        ui.painter().rect_filled(swatch_rect, 2.0, mat_color);
 
                         // Selection border
                         if is_selected {
@@ -3040,12 +3024,7 @@ impl App {
                                     swatch.left_top(),
                                     egui::pos2(swatch.right(), swatch.center().y - 2.0),
                                 );
-                                if let Some(tex) = self.material_icon_textures.get(&mat.id) {
-                                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                                    ui.painter().image(tex.id(), swatch_top, uv, egui::Color32::WHITE);
-                                } else {
-                                    ui.painter().rect_filled(swatch_top, 2.0, mat_color);
-                                }
+                                ui.painter().rect_filled(swatch_top, 2.0, mat_color);
 
                                 // Material name
                                 let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
@@ -3193,9 +3172,9 @@ impl App {
                     position_px: [vertex.pos.x * pixels_per_point, vertex.pos.y * pixels_per_point],
                     uv: [vertex.uv.x, vertex.uv.y],
                     color: [
-                        srgb_byte_to_linear(r),
-                        srgb_byte_to_linear(g),
-                        srgb_byte_to_linear(b),
+                        r as f32 / 255.0,
+                        g as f32 / 255.0,
+                        b as f32 / 255.0,
                         a as f32 / 255.0,
                     ],
                 });
@@ -4154,25 +4133,6 @@ impl ApplicationHandler for App {
             window.theme(),
             None,
         ));
-
-        // Generate 3D material icon textures (one-time at startup)
-        if self.material_icon_textures.is_empty() {
-            let model_tets =
-                higher_dimension_playground::render::generate_tesseract_tetrahedrons();
-            let icons = material_icons::generate_material_icons(&model_tets);
-            for (id, color_image) in icons {
-                let handle = self.egui_ctx.load_texture(
-                    format!("mat_icon_{}", id),
-                    color_image,
-                    egui::TextureOptions::LINEAR,
-                );
-                self.material_icon_textures.insert(id, handle);
-            }
-            eprintln!(
-                "Generated {} material icon textures",
-                self.material_icon_textures.len()
-            );
-        }
 
         self.grab_mouse(&window);
         let backend = self.args.backend.to_render_backend();
