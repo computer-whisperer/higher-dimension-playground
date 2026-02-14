@@ -1,5 +1,6 @@
 {
   "name": "resonance_forge",
+  "description": "A broad industrial sanctum with a runic perimeter, stepped forging decks, and a bright core column.",
   "spawn_weight": 1,
   "ground_offset_y": 0,
   "fills": [

@@ -1,5 +1,6 @@
 {
   "name": "lumen_orrery",
+  "description": "A compact observatory-like ring system with nested orbital arms around a vertical star-core spine.",
   "spawn_weight": 1,
   "ground_offset_y": 1,
   "fills": [

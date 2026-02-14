@@ -1,5 +1,6 @@
 {
   "name": "void_colonnade",
+  "description": "A giant cross-axis promenade with smoked-glass rails, tall alloy columns, and luminous beacons at the endpoints.",
   "spawn_weight": 1,
   "ground_offset_y": 2,
   "fills": [
