@@ -253,7 +253,7 @@ impl Scene {
     }
 
     fn sync_active_chunk_window(&mut self, cam_pos: [f32; 4]) {
-        let chunk_radius = (RENDER_DISTANCE / CHUNK_SIZE as f32).ceil() as i32 + 1;
+        let chunk_radius = (VOXEL_NEAR_ACTIVE_DISTANCE / CHUNK_SIZE as f32).ceil() as i32 + 1;
         let cam_chunk = Self::camera_chunk_key(cam_pos);
         let min_chunk = [
             cam_chunk[0] - chunk_radius,
@@ -383,7 +383,10 @@ impl Scene {
         for &key in &self.voxel_active_chunks {
             let chunk_pos = key.chunk_pos;
 
-            if key.lod_level != VOXEL_LOD_LEVEL_NEAR && key.lod_level != VOXEL_LOD_LEVEL_MID {
+            if key.lod_level != VOXEL_LOD_LEVEL_NEAR
+                && key.lod_level != VOXEL_LOD_LEVEL_MID
+                && key.lod_level != VOXEL_LOD_LEVEL_FAR
+            {
                 continue;
             }
 

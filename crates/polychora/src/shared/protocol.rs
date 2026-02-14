@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const WORLD_CHUNK_LOD_NEAR: u8 = 0;
 pub const WORLD_CHUNK_LOD_MID: u8 = 1;
+pub const WORLD_CHUNK_LOD_FAR: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityKind {

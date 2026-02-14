@@ -3,7 +3,7 @@ mod procgen;
 use crate::shared::protocol::{
     ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage,
     WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
-    WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
+    WORLD_CHUNK_LOD_FAR, WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{
     self, load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const STREAM_MID_LOD_SCALE: i32 = 2;
+const STREAM_FAR_LOD_SCALE: i32 = 4;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -30,7 +31,9 @@ pub struct RuntimeConfig {
     pub save_interval_secs: u64,
     pub snapshot_on_join: bool,
     pub procgen_structures: bool,
-    pub procgen_chunk_radius: i32,
+    pub procgen_near_chunk_radius: i32,
+    pub procgen_mid_chunk_radius: i32,
+    pub procgen_far_chunk_radius: i32,
     pub procgen_keepout_from_existing_world: bool,
     pub procgen_keepout_padding_chunks: i32,
     pub world_seed: u64,
@@ -45,7 +48,9 @@ impl Default for RuntimeConfig {
             save_interval_secs: 5,
             snapshot_on_join: true,
             procgen_structures: true,
-            procgen_chunk_radius: 6,
+            procgen_near_chunk_radius: 6,
+            procgen_mid_chunk_radius: 10,
+            procgen_far_chunk_radius: 6,
             procgen_keepout_from_existing_world: true,
             procgen_keepout_padding_chunks: 1,
             world_seed: 1337,
@@ -235,12 +240,21 @@ fn build_effective_l0_chunk_for_sampling(
     (!chunk.is_empty()).then_some(chunk)
 }
 
-fn mid_lod_child_l0_chunk_pos(mid_chunk_pos: ChunkPos, child: [i32; 4]) -> ChunkPos {
+fn scaled_lod_child_l0_chunk_pos(parent_chunk_pos: ChunkPos, lod_scale: i32, child: [i32; 4]) -> ChunkPos {
     ChunkPos::new(
-        mid_chunk_pos.x * STREAM_MID_LOD_SCALE + child[0],
-        mid_chunk_pos.y * STREAM_MID_LOD_SCALE + child[1],
-        mid_chunk_pos.z * STREAM_MID_LOD_SCALE + child[2],
-        mid_chunk_pos.w * STREAM_MID_LOD_SCALE + child[3],
+        parent_chunk_pos.x * lod_scale + child[0],
+        parent_chunk_pos.y * lod_scale + child[1],
+        parent_chunk_pos.z * lod_scale + child[2],
+        parent_chunk_pos.w * lod_scale + child[3],
+    )
+}
+
+fn l0_chunk_to_scaled_chunk(pos: ChunkPos, lod_scale: i32) -> ChunkPos {
+    ChunkPos::new(
+        pos.x.div_euclid(lod_scale),
+        pos.y.div_euclid(lod_scale),
+        pos.z.div_euclid(lod_scale),
+        pos.w.div_euclid(lod_scale),
     )
 }
 
@@ -248,6 +262,7 @@ fn stream_lod_scale(lod_level: u8) -> Option<i32> {
     match lod_level {
         WORLD_CHUNK_LOD_NEAR => Some(1),
         WORLD_CHUNK_LOD_MID => Some(STREAM_MID_LOD_SCALE),
+        WORLD_CHUNK_LOD_FAR => Some(STREAM_FAR_LOD_SCALE),
         _ => None,
     }
 }
@@ -309,26 +324,29 @@ fn stream_lod_worldgen_has_content(
     false
 }
 
-fn build_effective_stream_chunk_l1(
+fn build_effective_stream_chunk_scaled_lod(
     state: &ServerState,
     chunk_pos: ChunkPos,
     world_seed: u64,
     procgen_structures: bool,
+    lod_scale: i32,
 ) -> Option<voxel::Chunk> {
-    let mut child_chunks: Vec<Option<voxel::Chunk>> = vec![
-        None;
-        (STREAM_MID_LOD_SCALE * STREAM_MID_LOD_SCALE * STREAM_MID_LOD_SCALE * STREAM_MID_LOD_SCALE)
-            as usize
-    ];
+    if lod_scale <= 1 {
+        return build_effective_stream_chunk_l0(state, chunk_pos, world_seed, procgen_structures);
+    }
 
-    for cw in 0..STREAM_MID_LOD_SCALE {
-        for cz in 0..STREAM_MID_LOD_SCALE {
-            for cy in 0..STREAM_MID_LOD_SCALE {
-                for cx in 0..STREAM_MID_LOD_SCALE {
-                    let child_idx = (((cw * STREAM_MID_LOD_SCALE + cz) * STREAM_MID_LOD_SCALE + cy)
-                        * STREAM_MID_LOD_SCALE
-                        + cx) as usize;
-                    let child_pos = mid_lod_child_l0_chunk_pos(chunk_pos, [cx, cy, cz, cw]);
+    let scale = lod_scale as usize;
+    let child_count = scale * scale * scale * scale;
+    let mut child_chunks: Vec<Option<voxel::Chunk>> = vec![None; child_count];
+
+    for cw in 0..lod_scale {
+        for cz in 0..lod_scale {
+            for cy in 0..lod_scale {
+                for cx in 0..lod_scale {
+                    let child_idx = (((cw as usize * scale + cz as usize) * scale + cy as usize)
+                        * scale
+                        + cx as usize) as usize;
+                    let child_pos = scaled_lod_child_l0_chunk_pos(chunk_pos, lod_scale, [cx, cy, cz, cw]);
                     child_chunks[child_idx] = build_effective_l0_chunk_for_sampling(
                         state,
                         child_pos,
@@ -341,7 +359,7 @@ fn build_effective_stream_chunk_l1(
     }
 
     let mut out = voxel::Chunk::new();
-    let mut material_counts = [0u8; 256];
+    let mut material_counts = [0u16; 256];
 
     for w in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
@@ -349,16 +367,16 @@ fn build_effective_stream_chunk_l1(
                 for x in 0..CHUNK_SIZE {
                     material_counts.fill(0);
                     let mut best_material = 0u8;
-                    let mut best_count = 0u8;
+                    let mut best_count = 0u16;
 
-                    for dw in 0..STREAM_MID_LOD_SCALE {
-                        for dz in 0..STREAM_MID_LOD_SCALE {
-                            for dy in 0..STREAM_MID_LOD_SCALE {
-                                for dx in 0..STREAM_MID_LOD_SCALE {
-                                    let fx = (x as i32) * STREAM_MID_LOD_SCALE + dx;
-                                    let fy = (y as i32) * STREAM_MID_LOD_SCALE + dy;
-                                    let fz = (z as i32) * STREAM_MID_LOD_SCALE + dz;
-                                    let fw = (w as i32) * STREAM_MID_LOD_SCALE + dw;
+                    for dw in 0..lod_scale {
+                        for dz in 0..lod_scale {
+                            for dy in 0..lod_scale {
+                                for dx in 0..lod_scale {
+                                    let fx = (x as i32) * lod_scale + dx;
+                                    let fy = (y as i32) * lod_scale + dy;
+                                    let fz = (z as i32) * lod_scale + dz;
+                                    let fw = (w as i32) * lod_scale + dw;
                                     let ccx = fx / CHUNK_SIZE as i32;
                                     let ccy = fy / CHUNK_SIZE as i32;
                                     let ccz = fz / CHUNK_SIZE as i32;
@@ -367,11 +385,11 @@ fn build_effective_stream_chunk_l1(
                                     let ly = (fy % CHUNK_SIZE as i32) as usize;
                                     let lz = (fz % CHUNK_SIZE as i32) as usize;
                                     let lw = (fw % CHUNK_SIZE as i32) as usize;
-                                    let child_idx = (((ccw * STREAM_MID_LOD_SCALE + ccz)
-                                        * STREAM_MID_LOD_SCALE
-                                        + ccy)
-                                        * STREAM_MID_LOD_SCALE
-                                        + ccx)
+                                    let child_idx = ((((ccw as usize) * scale + (ccz as usize))
+                                        * scale
+                                        + (ccy as usize))
+                                        * scale
+                                        + (ccx as usize))
                                         as usize;
                                     let Some(child_chunk) = child_chunks[child_idx].as_ref() else {
                                         continue;
@@ -381,8 +399,7 @@ fn build_effective_stream_chunk_l1(
                                         continue;
                                     }
                                     let material = voxel.0 as usize;
-                                    material_counts[material] =
-                                        material_counts[material].saturating_add(1);
+                                    material_counts[material] = material_counts[material].saturating_add(1);
                                     if material_counts[material] > best_count {
                                         best_count = material_counts[material];
                                         best_material = voxel.0;
@@ -403,12 +420,33 @@ fn build_effective_stream_chunk_l1(
     (!out.is_empty()).then_some(out)
 }
 
-fn l0_chunk_to_mid_chunk(pos: ChunkPos) -> ChunkPos {
-    ChunkPos::new(
-        pos.x.div_euclid(STREAM_MID_LOD_SCALE),
-        pos.y.div_euclid(STREAM_MID_LOD_SCALE),
-        pos.z.div_euclid(STREAM_MID_LOD_SCALE),
-        pos.w.div_euclid(STREAM_MID_LOD_SCALE),
+fn build_effective_stream_chunk_l1(
+    state: &ServerState,
+    chunk_pos: ChunkPos,
+    world_seed: u64,
+    procgen_structures: bool,
+) -> Option<voxel::Chunk> {
+    build_effective_stream_chunk_scaled_lod(
+        state,
+        chunk_pos,
+        world_seed,
+        procgen_structures,
+        STREAM_MID_LOD_SCALE,
+    )
+}
+
+fn build_effective_stream_chunk_l2(
+    state: &ServerState,
+    chunk_pos: ChunkPos,
+    world_seed: u64,
+    procgen_structures: bool,
+) -> Option<voxel::Chunk> {
+    build_effective_stream_chunk_scaled_lod(
+        state,
+        chunk_pos,
+        world_seed,
+        procgen_structures,
+        STREAM_FAR_LOD_SCALE,
     )
 }
 
@@ -418,20 +456,22 @@ fn plan_stream_window_update(
     center_chunk: [i32; 4],
     world_seed: u64,
     procgen_structures: bool,
-    chunk_radius: i32,
+    near_chunk_radius: i32,
+    mid_chunk_radius: i32,
+    far_chunk_radius: i32,
 ) -> Option<(u64, Vec<WorldChunkPayload>, Vec<WorldChunkCoordPayload>)> {
-    let radius = chunk_radius.max(0);
+    let near_radius = near_chunk_radius.max(0);
     let min_chunk = [
-        center_chunk[0] - radius,
-        center_chunk[1] - radius,
-        center_chunk[2] - radius,
-        center_chunk[3] - radius,
+        center_chunk[0] - near_radius,
+        center_chunk[1] - near_radius,
+        center_chunk[2] - near_radius,
+        center_chunk[3] - near_radius,
     ];
     let max_chunk = [
-        center_chunk[0] + radius,
-        center_chunk[1] + radius,
-        center_chunk[2] + radius,
-        center_chunk[3] + radius,
+        center_chunk[0] + near_radius,
+        center_chunk[1] + near_radius,
+        center_chunk[2] + near_radius,
+        center_chunk[3] + near_radius,
     ];
 
     let mut desired_set = HashSet::<StreamChunkKey>::new();
@@ -492,7 +532,7 @@ fn plan_stream_window_update(
         center_chunk[2].div_euclid(STREAM_MID_LOD_SCALE),
         center_chunk[3].div_euclid(STREAM_MID_LOD_SCALE),
     ];
-    let mid_radius = radius.max(1);
+    let mid_radius = mid_chunk_radius.max(near_radius).max(1);
     let min_mid_chunk = [
         center_mid_chunk[0] - mid_radius,
         center_mid_chunk[1] - mid_radius,
@@ -540,7 +580,7 @@ fn plan_stream_window_update(
         if chunk.is_empty() {
             continue;
         }
-        let mid_pos = l0_chunk_to_mid_chunk(chunk_pos);
+        let mid_pos = l0_chunk_to_scaled_chunk(chunk_pos, STREAM_MID_LOD_SCALE);
         if mid_pos.x < min_mid_chunk[0]
             || mid_pos.x > max_mid_chunk[0]
             || mid_pos.y < min_mid_chunk[1]
@@ -555,6 +595,79 @@ fn plan_stream_window_update(
         desired_set.insert(StreamChunkKey {
             lod_level: WORLD_CHUNK_LOD_MID,
             chunk_pos: mid_pos,
+        });
+    }
+
+    let center_far_chunk = [
+        center_chunk[0].div_euclid(STREAM_FAR_LOD_SCALE),
+        center_chunk[1].div_euclid(STREAM_FAR_LOD_SCALE),
+        center_chunk[2].div_euclid(STREAM_FAR_LOD_SCALE),
+        center_chunk[3].div_euclid(STREAM_FAR_LOD_SCALE),
+    ];
+    let min_far_radius = (mid_radius + 1).div_euclid(2).max(1);
+    let far_radius = far_chunk_radius.max(min_far_radius).max(1);
+    let min_far_chunk = [
+        center_far_chunk[0] - far_radius,
+        center_far_chunk[1] - far_radius,
+        center_far_chunk[2] - far_radius,
+        center_far_chunk[3] - far_radius,
+    ];
+    let max_far_chunk = [
+        center_far_chunk[0] + far_radius,
+        center_far_chunk[1] + far_radius,
+        center_far_chunk[2] + far_radius,
+        center_far_chunk[3] + far_radius,
+    ];
+
+    if let Some((worldgen_min_far_y, worldgen_max_far_y)) =
+        stream_lod_worldgen_y_bounds(state, WORLD_CHUNK_LOD_FAR, procgen_structures)
+    {
+        let scan_min_far_y = worldgen_min_far_y.max(min_far_chunk[1]);
+        let scan_max_far_y = worldgen_max_far_y.min(max_far_chunk[1]);
+        if scan_min_far_y <= scan_max_far_y {
+            for chunk_x in min_far_chunk[0]..=max_far_chunk[0] {
+                for chunk_z in min_far_chunk[2]..=max_far_chunk[2] {
+                    for chunk_w in min_far_chunk[3]..=max_far_chunk[3] {
+                        for chunk_y in scan_min_far_y..=scan_max_far_y {
+                            let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
+                            if stream_lod_worldgen_has_content(
+                                state,
+                                WORLD_CHUNK_LOD_FAR,
+                                chunk_pos,
+                                world_seed,
+                                procgen_structures,
+                            ) {
+                                desired_set.insert(StreamChunkKey {
+                                    lod_level: WORLD_CHUNK_LOD_FAR,
+                                    chunk_pos,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (&chunk_pos, chunk) in &state.world.chunks {
+        if chunk.is_empty() {
+            continue;
+        }
+        let far_pos = l0_chunk_to_scaled_chunk(chunk_pos, STREAM_FAR_LOD_SCALE);
+        if far_pos.x < min_far_chunk[0]
+            || far_pos.x > max_far_chunk[0]
+            || far_pos.y < min_far_chunk[1]
+            || far_pos.y > max_far_chunk[1]
+            || far_pos.z < min_far_chunk[2]
+            || far_pos.z > max_far_chunk[2]
+            || far_pos.w < min_far_chunk[3]
+            || far_pos.w > max_far_chunk[3]
+        {
+            continue;
+        }
+        desired_set.insert(StreamChunkKey {
+            lod_level: WORLD_CHUNK_LOD_FAR,
+            chunk_pos: far_pos,
         });
     }
 
@@ -586,6 +699,12 @@ fn plan_stream_window_update(
                 procgen_structures,
             ),
             WORLD_CHUNK_LOD_MID => build_effective_stream_chunk_l1(
+                state,
+                key.chunk_pos,
+                world_seed,
+                procgen_structures,
+            ),
+            WORLD_CHUNK_LOD_FAR => build_effective_stream_chunk_l2(
                 state,
                 key.chunk_pos,
                 world_seed,
@@ -732,7 +851,9 @@ fn sync_streamed_chunks_for_client(
     center_chunk: [i32; 4],
     world_seed: u64,
     procgen_structures: bool,
-    procgen_chunk_radius: i32,
+    near_chunk_radius: i32,
+    mid_chunk_radius: i32,
+    far_chunk_radius: i32,
     force: bool,
 ) {
     let update = {
@@ -757,7 +878,9 @@ fn sync_streamed_chunks_for_client(
                 center_chunk,
                 world_seed,
                 procgen_structures,
-                procgen_chunk_radius,
+                near_chunk_radius,
+                mid_chunk_radius,
+                far_chunk_radius,
             )
         } else {
             None
@@ -1091,7 +1214,9 @@ fn handle_message(
     snapshot_on_join: bool,
     tick_hz: f32,
     procgen_structures: bool,
-    procgen_chunk_radius: i32,
+    near_chunk_radius: i32,
+    mid_chunk_radius: i32,
+    far_chunk_radius: i32,
     world_seed: u64,
     start: Instant,
 ) {
@@ -1152,7 +1277,9 @@ fn handle_message(
                 center_chunk,
                 world_seed,
                 procgen_structures,
-                procgen_chunk_radius,
+                near_chunk_radius,
+                mid_chunk_radius,
+                far_chunk_radius,
                 true,
             );
             broadcast(state, ServerMessage::PlayerJoined { player: snapshot });
@@ -1166,7 +1293,9 @@ fn handle_message(
                 center_chunk,
                 world_seed,
                 procgen_structures,
-                procgen_chunk_radius,
+                near_chunk_radius,
+                mid_chunk_radius,
+                far_chunk_radius,
                 false,
             );
         }
@@ -1242,7 +1371,9 @@ fn handle_message(
                 center_chunk,
                 world_seed,
                 procgen_structures,
-                procgen_chunk_radius,
+                near_chunk_radius,
+                mid_chunk_radius,
+                far_chunk_radius,
                 true,
             );
         }
@@ -1258,7 +1389,9 @@ fn spawn_client_thread(
     snapshot_on_join: bool,
     tick_hz: f32,
     procgen_structures: bool,
-    procgen_chunk_radius: i32,
+    near_chunk_radius: i32,
+    mid_chunk_radius: i32,
+    far_chunk_radius: i32,
     world_seed: u64,
     start: Instant,
 ) {
@@ -1349,7 +1482,9 @@ fn spawn_client_thread(
                         snapshot_on_join,
                         tick_hz,
                         procgen_structures,
-                        procgen_chunk_radius,
+                        near_chunk_radius,
+                        mid_chunk_radius,
+                        far_chunk_radius,
                         world_seed,
                         start,
                     );
@@ -1510,7 +1645,9 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
                 cfg.snapshot_on_join,
                 cfg.tick_hz.max(0.1),
                 cfg.procgen_structures,
-                cfg.procgen_chunk_radius,
+                cfg.procgen_near_chunk_radius.max(0),
+                cfg.procgen_mid_chunk_radius.max(1),
+                cfg.procgen_far_chunk_radius.max(1),
                 cfg.world_seed,
                 start,
             );
@@ -1531,13 +1668,15 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
 
     let listener = TcpListener::bind(&config.bind)?;
     eprintln!(
-        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s, procgen={}, seed={}, radius={} chunks, keepout={}, keepout_padding={} chunks)",
+        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s, procgen={}, seed={}, near_radius={} chunks, mid_radius={} chunks, far_radius={} chunks, keepout={}, keepout_padding={} chunks)",
         config.bind,
         config.tick_hz.max(0.1),
         config.save_interval_secs,
         config.procgen_structures,
         config.world_seed,
-        config.procgen_chunk_radius.max(0),
+        config.procgen_near_chunk_radius.max(0),
+        config.procgen_mid_chunk_radius.max(1),
+        config.procgen_far_chunk_radius.max(1),
         config.procgen_keepout_from_existing_world,
         config.procgen_keepout_padding_chunks.max(0),
     );
@@ -1552,7 +1691,9 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
                     config.snapshot_on_join,
                     config.tick_hz.max(0.1),
                     config.procgen_structures,
-                    config.procgen_chunk_radius,
+                    config.procgen_near_chunk_radius.max(0),
+                    config.procgen_mid_chunk_radius.max(1),
+                    config.procgen_far_chunk_radius.max(1),
                     config.world_seed,
                     start,
                 );

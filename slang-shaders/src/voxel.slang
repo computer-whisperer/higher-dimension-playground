@@ -9,8 +9,8 @@ import materials;
 static const uint CHUNK_SIZE = 8;
 static const uint CHUNK_VOLUME = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
 static const uint INVALID_INDEX = 0xFFFFFFFF;
-static const float LOD_RING_NEAR_MAX_DISTANCE = 64.0;
 static const float LOD_MID_SCALE = 2.0;
+static const float LOD_FAR_SCALE = 4.0;
 static const float LOD_TINT_BLEND = 0.35;
 static const uint CHUNK_FLAG_FULL = 1u << 1u;
 static const uint STAGE_B_MODE_INTEGRAL = 0u;
@@ -39,6 +39,7 @@ static const uint META_DEBUG_FLAG_REFERENCE_COMPARE = 1u;
 static const uint META_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY = 1u << 1u;
 static const uint META_DEBUG_FLAG_COMPARE_SLICE_ONLY = 1u << 2u;
 static const uint META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE = 1u << 3u;
+static const uint META_DEBUG_FLAG_LOD_TINT = 1u << 4u;
 static const uint ENABLE_YSLICE_FASTPATH = 0u;
 static const uint DEBUG_FLAG_CHUNK_TIE_STEPPED = 1u << 1u;
 static const uint DEBUG_FLAG_CHUNK_ZERO_INTERVAL = 1u << 2u;
@@ -103,6 +104,8 @@ struct VoxelFrameMeta
     uint macroWordCount;
     uint maxTraceSteps;
     float maxTraceDistance;
+    float lodNearMaxDistance;
+    float lodMidMaxDistance;
     uint chunkLookupCapacity;
     uint ySliceCount;
     uint ySliceLookupEntryCount;
@@ -330,8 +333,17 @@ float3 applyLodTint(float3 baseColor, uint lodLevel)
 {
     float3 tint = lodLevel == 0u
         ? float3(1.0, 0.66, 0.18)
-        : float3(0.18, 0.72, 1.0);
+        : (lodLevel == 1u ? float3(0.18, 0.72, 1.0) : float3(0.64, 0.42, 1.0));
     return lerp(baseColor, tint, LOD_TINT_BLEND);
+}
+
+float3 maybeApplyLodTint(float3 baseColor, uint lodLevel, VoxelFrameMeta meta)
+{
+    if ((meta.debugFlags & META_DEBUG_FLAG_LOD_TINT) == 0u)
+    {
+        return baseColor;
+    }
+    return applyLodTint(baseColor, lodLevel);
 }
 
 struct EntityTetraHit
@@ -2253,8 +2265,9 @@ bool traceVoxelRayDDAWithLodRings(
     outRemainingVoxelSteps = 0u;
     outFinalT = 0.0;
     outLastChunkCoord = int4(0, 0, 0, 0);
-
-    float nearMaxDistance = max(1.0, meta.maxTraceDistance);
+    float traceMaxDistance = max(1.0, meta.maxTraceDistance);
+    float nearMaxDistance = clamp(meta.lodNearMaxDistance, 1.0, traceMaxDistance);
+    float midMaxDistance = clamp(meta.lodMidMaxDistance, nearMaxDistance, traceMaxDistance);
     VoxelFrameMeta nearMeta = meta;
     nearMeta.maxTraceDistance = nearMaxDistance;
 
@@ -2300,69 +2313,136 @@ bool traceVoxelRayDDAWithLodRings(
         return true;
     }
 
-    bool allowMidLod = meta.stageBMode != STAGE_B_MODE_DEBUG_COMPARE
+    bool allowCoarseLod = meta.stageBMode != STAGE_B_MODE_DEBUG_COMPARE
         && meta.stageBMode != STAGE_B_MODE_DEBUG_INTEGRAL
         && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u;
-    if (!allowMidLod || meta.maxTraceDistance <= nearMaxDistance + 1e-6)
+    if (!allowCoarseLod)
     {
         return false;
     }
 
+    const float PASS_EPS = 1e-6;
     float nearTraceEndDistance = clamp(nearFinalT, 0.0, nearMaxDistance);
-    float midBudget = max(0.0, meta.maxTraceDistance - nearTraceEndDistance);
-    if (midBudget <= 1e-6)
+    uint totalChunkStepsTaken = nearChunkStepsTaken;
+    uint remainingVoxelSteps = nearRemainingVoxelSteps;
+    float tracedEndDistance = nearTraceEndDistance;
+    int4 lastChunkCoord = nearLastChunkCoord;
+    uint combinedDebugFlags = nearDebugFlags;
+    uint finalMissReason = nearMissReason;
+
+    if (midMaxDistance > nearTraceEndDistance + PASS_EPS)
+    {
+        float midBudget = max(0.0, midMaxDistance - nearTraceEndDistance);
+        float4 midOrigin = (rayOrigin + rayDir * nearTraceEndDistance) / LOD_MID_SCALE;
+        float4 midDir = rayDir / LOD_MID_SCALE;
+        VoxelFrameMeta midMeta = meta;
+        midMeta.maxTraceDistance = midBudget;
+        midMeta.debugFlags &= ~META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
+
+        uint midHitMaterial = 0u;
+        float4 midHitPosScaled = float4(0.0, 0.0, 0.0, 0.0);
+        int4 midHitChunkCoord = int4(0, 0, 0, 0);
+        uint midHitLodLevel = 1u;
+        uint midMissReason = MISS_REASON_NONE;
+        uint midDebugFlags = 0u;
+        uint midChunkStepsTaken = 0u;
+        uint midRemainingVoxelSteps = 0u;
+        float midFinalT = 0.0;
+        int4 midLastChunkCoord = int4(0, 0, 0, 0);
+        bool midHit = traceVoxelRayDDA(
+            midOrigin,
+            midDir,
+            midMeta,
+            1u,
+            midHitMaterial,
+            midHitPosScaled,
+            midHitChunkCoord,
+            midHitLodLevel,
+            midMissReason,
+            midDebugFlags,
+            midChunkStepsTaken,
+            midRemainingVoxelSteps,
+            midFinalT,
+            midLastChunkCoord);
+
+        totalChunkStepsTaken += midChunkStepsTaken;
+        remainingVoxelSteps = midRemainingVoxelSteps;
+        tracedEndDistance = nearTraceEndDistance + clamp(midFinalT, 0.0, midBudget);
+        lastChunkCoord = midLastChunkCoord;
+        combinedDebugFlags |= midDebugFlags;
+        finalMissReason = midMissReason;
+
+        outChunkStepsTaken = totalChunkStepsTaken;
+        outRemainingVoxelSteps = remainingVoxelSteps;
+        outFinalT = tracedEndDistance;
+        outLastChunkCoord = lastChunkCoord;
+        debugFlags = combinedDebugFlags;
+        missReason = finalMissReason;
+
+        if (midHit)
+        {
+            hitMaterial = midHitMaterial;
+            hitPos = midHitPosScaled * LOD_MID_SCALE;
+            hitChunkCoord = midHitChunkCoord;
+            hitLodLevel = midHitLodLevel;
+            return true;
+        }
+    }
+
+    float farBudget = max(0.0, traceMaxDistance - tracedEndDistance);
+    if (farBudget <= PASS_EPS)
     {
         return false;
     }
 
-    float4 midOrigin = (rayOrigin + rayDir * nearTraceEndDistance) / LOD_MID_SCALE;
-    float4 midDir = rayDir / LOD_MID_SCALE;
-    VoxelFrameMeta midMeta = meta;
-    midMeta.maxTraceDistance = midBudget;
-    midMeta.debugFlags &= ~META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
+    float4 farOrigin = (rayOrigin + rayDir * tracedEndDistance) / LOD_FAR_SCALE;
+    float4 farDir = rayDir / LOD_FAR_SCALE;
+    VoxelFrameMeta farMeta = meta;
+    farMeta.maxTraceDistance = farBudget;
+    farMeta.debugFlags &= ~META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
 
-    uint midHitMaterial = 0u;
-    float4 midHitPosScaled = float4(0.0, 0.0, 0.0, 0.0);
-    int4 midHitChunkCoord = int4(0, 0, 0, 0);
-    uint midHitLodLevel = 1u;
-    uint midMissReason = MISS_REASON_NONE;
-    uint midDebugFlags = 0u;
-    uint midChunkStepsTaken = 0u;
-    uint midRemainingVoxelSteps = 0u;
-    float midFinalT = 0.0;
-    int4 midLastChunkCoord = int4(0, 0, 0, 0);
-    bool midHit = traceVoxelRayDDA(
-        midOrigin,
-        midDir,
-        midMeta,
-        1u,
-        midHitMaterial,
-        midHitPosScaled,
-        midHitChunkCoord,
-        midHitLodLevel,
-        midMissReason,
-        midDebugFlags,
-        midChunkStepsTaken,
-        midRemainingVoxelSteps,
-        midFinalT,
-        midLastChunkCoord);
+    uint farHitMaterial = 0u;
+    float4 farHitPosScaled = float4(0.0, 0.0, 0.0, 0.0);
+    int4 farHitChunkCoord = int4(0, 0, 0, 0);
+    uint farHitLodLevel = 2u;
+    uint farMissReason = MISS_REASON_NONE;
+    uint farDebugFlags = 0u;
+    uint farChunkStepsTaken = 0u;
+    uint farRemainingVoxelSteps = 0u;
+    float farFinalT = 0.0;
+    int4 farLastChunkCoord = int4(0, 0, 0, 0);
+    bool farHit = traceVoxelRayDDA(
+        farOrigin,
+        farDir,
+        farMeta,
+        2u,
+        farHitMaterial,
+        farHitPosScaled,
+        farHitChunkCoord,
+        farHitLodLevel,
+        farMissReason,
+        farDebugFlags,
+        farChunkStepsTaken,
+        farRemainingVoxelSteps,
+        farFinalT,
+        farLastChunkCoord);
 
-    outChunkStepsTaken = nearChunkStepsTaken + midChunkStepsTaken;
-    outRemainingVoxelSteps = midRemainingVoxelSteps;
-    outFinalT = nearTraceEndDistance + midFinalT;
-    outLastChunkCoord = midLastChunkCoord;
-    debugFlags = nearDebugFlags | midDebugFlags;
-    missReason = midMissReason;
+    outChunkStepsTaken = totalChunkStepsTaken + farChunkStepsTaken;
+    outRemainingVoxelSteps = farRemainingVoxelSteps;
+    outFinalT = tracedEndDistance + clamp(farFinalT, 0.0, farBudget);
+    outLastChunkCoord = farLastChunkCoord;
+    debugFlags = combinedDebugFlags | farDebugFlags;
+    missReason = farMissReason;
 
-    if (!midHit)
+    if (!farHit)
     {
         return false;
     }
 
-    hitMaterial = midHitMaterial;
-    hitPos = midHitPosScaled * LOD_MID_SCALE;
-    hitChunkCoord = midHitChunkCoord;
-    hitLodLevel = midHitLodLevel;
+    hitMaterial = farHitMaterial;
+    hitPos = farHitPosScaled * LOD_FAR_SCALE;
+    hitChunkCoord = farHitChunkCoord;
+    hitLodLevel = farHitLodLevel;
     return true;
 }
 
@@ -2542,7 +2622,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                         worldDirection,
                         hitNormal,
                         highlightKind);
-                    highlighted = applyLodTint(highlighted, hitLodLevel);
+                    highlighted = maybeApplyLodTint(highlighted, hitLodLevel, meta);
                     float w = max(1e-4, mat.integrationWeight * INTEGRAL_HIGHLIGHT_WEIGHT_BOOST);
                     float hitBrightnessScale = (hitMaterial == MATERIAL_ID_GROUND)
                         ? integralSkyScale
@@ -2563,7 +2643,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                         : 1.0;
                     float3 hitColor = shadeVoxelMaterial(mat, hitNormal)
                         + mat.albedo.xyz * integralHitEmissiveBoost;
-                    hitColor = applyLodTint(hitColor, hitLodLevel);
+                    hitColor = maybeApplyLodTint(hitColor, hitLodLevel, meta);
                     hitColor *= hitBrightnessScale;
                     hitAccumColor += hitColor * w;
                     hitAccumWeight += w;
@@ -2845,7 +2925,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 outColor = seamDist < 0.04
                     ? lerp(chunkColor, float3(1.0, 1.0, 1.0), 0.65)
                     : chunkColor;
-                outColor = applyLodTint(outColor, hitLodLevel);
+                outColor = maybeApplyLodTint(outColor, hitLodLevel, meta);
                 outAlpha = 1.0;
             }
             else
@@ -2906,7 +2986,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 {
                     outColor = chunkColor;
                 }
-                outColor = applyLodTint(outColor, hitLodLevel);
+                outColor = maybeApplyLodTint(outColor, hitLodLevel, meta);
             }
             outAlpha = 1.0;
         }
@@ -2967,7 +3047,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 worldDirection,
                 hitNormal,
                 highlightKind);
-            outColor = applyLodTint(outColor, hitLodLevel);
+            outColor = maybeApplyLodTint(outColor, hitLodLevel, meta);
         }
         else
         {
@@ -2977,7 +3057,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 wd.timeTicksMs);
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             outColor = shadeVoxelMaterial(mat, hitNormal);
-            outColor = applyLodTint(outColor, hitLodLevel);
+            outColor = maybeApplyLodTint(outColor, hitLodLevel, meta);
         }
     }
     else

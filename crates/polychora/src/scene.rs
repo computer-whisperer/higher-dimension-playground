@@ -14,6 +14,7 @@ use std::path::Path;
 mod voxel_runtime;
 
 const RENDER_DISTANCE: f32 = 64.0;
+const VOXEL_NEAR_ACTIVE_DISTANCE: f32 = 32.0;
 const OCCUPANCY_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 32;
 const MATERIAL_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 4; // packed 4x u8 per u32
 const MACRO_CELLS_PER_AXIS: usize = CHUNK_SIZE / 2; // 2x2x2x2 macro cells
@@ -31,6 +32,7 @@ const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
 pub const VOXEL_LOD_LEVEL_NEAR: u8 = 0;
 pub const VOXEL_LOD_LEVEL_MID: u8 = 1;
+pub const VOXEL_LOD_LEVEL_FAR: u8 = 2;
 
 struct CachedChunkPayload {
     hash: u64,

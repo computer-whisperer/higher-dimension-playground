@@ -61,6 +61,8 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) macro_word_count: u32,
     pub(super) max_trace_steps: u32,
     pub(super) max_trace_distance: f32,
+    pub(super) lod_near_max_distance: f32,
+    pub(super) lod_mid_max_distance: f32,
     pub(super) chunk_lookup_capacity: u32,
     pub(super) y_slice_count: u32,
     pub(super) y_slice_lookup_entry_count: u32,
@@ -162,7 +164,7 @@ pub(super) struct VteFirstMismatch {
     pub(super) last_chunk: [i32; 4],
 }
 
-pub const VTE_MAX_CHUNKS: usize = 8_192;
+pub const VTE_MAX_CHUNKS: usize = 12_288;
 pub(super) const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
 pub(super) const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
 pub(super) const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
@@ -173,6 +175,7 @@ pub(super) const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
 pub(super) const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
 pub(super) const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
 pub(super) const VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE: u32 = 1 << 3;
+pub(super) const VTE_DEBUG_FLAG_LOD_TINT: u32 = 1 << 4;
 pub(super) const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
 pub(super) const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
 pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 16;
