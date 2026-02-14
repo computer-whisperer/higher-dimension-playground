@@ -3,7 +3,8 @@ use crate::materials;
 use common::{MatN, ModelInstance, ModelTetrahedron};
 use std::collections::HashMap;
 
-const ICON_SIZE: u32 = 64;
+pub const ICON_SIZE: u32 = 64;
+const SHEET_COLUMNS: u32 = 10;
 
 /// Build a 5x5 homogeneous rotation matrix in the XZ plane (angle in radians).
 fn rot_xz(a: f32) -> MatN<5> {
@@ -48,25 +49,43 @@ fn translate(dx: f32, dy: f32, dz: f32, dw: f32) -> MatN<5> {
     m
 }
 
-/// Generate 64x64 egui `ColorImage` icons for each material by CPU-rendering a
-/// tesseract with that material applied to all 8 cells.
-pub fn generate_material_icons(
-    model_tets: &[ModelTetrahedron],
-) -> HashMap<u8, egui::ColorImage> {
-    let mut icons = HashMap::new();
+/// A sprite sheet containing all material icons packed into a single texture.
+pub struct MaterialIconSheet {
+    /// RGBA pixel data for the entire sprite sheet
+    pub pixels: Vec<u8>,
+    /// Width of the sprite sheet in pixels
+    pub width: u32,
+    /// Height of the sprite sheet in pixels
+    pub height: u32,
+    /// Map from material ID to its UV rectangle [u_min, v_min, u_max, v_max]
+    uv_rects: HashMap<u8, [f32; 4]>,
+}
 
-    // View matrix: move the tesseract center (0.5,0.5,0.5,0.5) to in front of
-    // the camera, then apply a slight rotation to reveal 4D structure.
-    //
-    // 1. Translate so the tesseract center is at origin.
-    // 2. Apply rotations for a nice viewing angle.
-    // 3. Translate along +Z/+W so the object is in front of the camera.
+impl MaterialIconSheet {
+    /// Get the UV rectangle for a material ID, or None if not found.
+    pub fn uv_rect(&self, material_id: u8) -> Option<[f32; 4]> {
+        self.uv_rects.get(&material_id).copied()
+    }
+}
+
+/// Generate a sprite sheet containing all material icons packed into a grid.
+/// Returns the sheet with pixel data and UV lookup.
+pub fn generate_material_icon_sheet(
+    model_tets: &[ModelTetrahedron],
+) -> MaterialIconSheet {
+    let num_materials = materials::MATERIALS.len() as u32;
+    let rows = (num_materials + SHEET_COLUMNS - 1) / SHEET_COLUMNS;
+    let sheet_w = SHEET_COLUMNS * ICON_SIZE;
+    let sheet_h = rows * ICON_SIZE;
+
+    let mut pixels = vec![0u8; (sheet_w * sheet_h * 4) as usize];
+    let mut uv_rects = HashMap::new();
+
     let center = translate(-0.5, -0.5, -0.5, -0.5);
     let r1 = rot_xz(0.35);
     let r2 = rot_yz(-0.30);
-    let r3 = rot_xw(0.25); // slight 4D rotation
+    let r3 = rot_xw(0.25);
     let push_back = translate(0.0, 0.0, 2.0, 2.0);
-    // View matrix = push_back * rotations * center
     let view_matrix = push_back * r3 * r2 * r1 * center;
 
     let params = CpuRenderParams {
@@ -78,23 +97,40 @@ pub fn generate_material_icons(
         ..Default::default()
     };
 
-    for mat in materials::MATERIALS {
-        let material_id = mat.id as u32;
+    for (idx, mat) in materials::MATERIALS.iter().enumerate() {
+        let col = (idx as u32) % SHEET_COLUMNS;
+        let row = (idx as u32) / SHEET_COLUMNS;
 
         let instance = ModelInstance {
             model_transform: MatN::<5>::identity(),
-            cell_material_ids: [material_id; 8],
+            cell_material_ids: [mat.id as u32; 8],
         };
 
         let img = cpu_render(&[instance], model_tets, &params);
+        let raw = img.into_raw();
 
-        // Convert image::RgbaImage -> egui::ColorImage
-        let size = [img.width() as usize, img.height() as usize];
-        let rgba_flat: Vec<u8> = img.into_raw();
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba_flat);
+        // Copy icon pixels into the sprite sheet
+        let dst_x = col * ICON_SIZE;
+        let dst_y = row * ICON_SIZE;
+        for py in 0..ICON_SIZE {
+            let src_offset = (py * ICON_SIZE * 4) as usize;
+            let dst_offset = ((dst_y + py) * sheet_w + dst_x) as usize * 4;
+            pixels[dst_offset..dst_offset + (ICON_SIZE * 4) as usize]
+                .copy_from_slice(&raw[src_offset..src_offset + (ICON_SIZE * 4) as usize]);
+        }
 
-        icons.insert(mat.id, color_image);
+        // Compute UV coordinates
+        let u_min = dst_x as f32 / sheet_w as f32;
+        let v_min = dst_y as f32 / sheet_h as f32;
+        let u_max = (dst_x + ICON_SIZE) as f32 / sheet_w as f32;
+        let v_max = (dst_y + ICON_SIZE) as f32 / sheet_h as f32;
+        uv_rects.insert(mat.id, [u_min, v_min, u_max, v_max]);
     }
 
-    icons
+    MaterialIconSheet {
+        pixels,
+        width: sheet_w,
+        height: sheet_h,
+        uv_rects,
+    }
 }

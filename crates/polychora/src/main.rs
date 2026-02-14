@@ -1,7 +1,7 @@
 mod camera;
 mod cpu_render;
 mod input;
-// mod material_icons; // TODO: enable when multi-texture egui rendering is supported
+mod material_icons;
 mod materials;
 mod multiplayer;
 mod scene;
@@ -10,9 +10,9 @@ mod voxel;
 use clap::{ArgAction, Parser, ValueEnum};
 use egui::RichText;
 use higher_dimension_playground::render::{
-    CustomOverlayLine, EguiPaintData, EguiPaintMesh, EguiPaintVertex, EguiTextureUpdate,
-    FrameParams, HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext, RenderOptions,
-    TetraFrameInput, VteDisplayMode,
+    CustomOverlayLine, EguiPaintData, EguiPaintMesh, EguiPaintVertex, EguiTextureSlot,
+    EguiTextureUpdate, FrameParams, HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext,
+    RenderOptions, TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::collections::{HashMap, VecDeque};
@@ -677,6 +677,8 @@ fn main() {
         menu_selection: 0,
         egui_ctx: egui::Context::default(),
         egui_winit_state: None,
+        material_icon_sheet: None,
+        material_icons_texture_id: None,
         multiplayer,
         multiplayer_self_id: None,
         next_multiplayer_edit_id: 1,
@@ -855,6 +857,8 @@ struct App {
     menu_selection: usize,
     egui_ctx: egui::Context,
     egui_winit_state: Option<egui_winit::State>,
+    material_icon_sheet: Option<material_icons::MaterialIconSheet>,
+    material_icons_texture_id: Option<egui::TextureId>,
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
     next_multiplayer_edit_id: u64,
@@ -2912,10 +2916,29 @@ impl App {
                         let bg_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160);
                         ui.painter().rect_filled(rect, 3.0, bg_color);
 
-                        // Material color swatch (inset)
-                        let swatch_rect = rect.shrink(4.0);
-                        let mat_color = egui::Color32::from_rgb(r, g, b);
-                        ui.painter().rect_filled(swatch_rect, 2.0, mat_color);
+                        // Material icon (tesseract image or color fallback)
+                        let icon_rect = rect.shrink(4.0);
+                        if let (Some(sheet), Some(tex_id)) =
+                            (&self.material_icon_sheet, self.material_icons_texture_id)
+                        {
+                            if let Some([u0, v0, u1, v1]) = sheet.uv_rect(material_id) {
+                                ui.painter().image(
+                                    tex_id,
+                                    icon_rect,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(u0, v0),
+                                        egui::pos2(u1, v1),
+                                    ),
+                                    egui::Color32::WHITE,
+                                );
+                            } else {
+                                let mat_color = egui::Color32::from_rgb(r, g, b);
+                                ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                            }
+                        } else {
+                            let mat_color = egui::Color32::from_rgb(r, g, b);
+                            ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                        }
 
                         // Selection border
                         if is_selected {
@@ -3018,13 +3041,27 @@ impl App {
                                 };
                                 ui.painter().rect_filled(rect, 3.0, bg);
 
-                                // Material icon
-                                let swatch = rect.shrink(4.0);
-                                let swatch_top = egui::Rect::from_min_max(
-                                    swatch.left_top(),
-                                    egui::pos2(swatch.right(), swatch.center().y - 2.0),
-                                );
-                                ui.painter().rect_filled(swatch_top, 2.0, mat_color);
+                                // Material icon (tesseract image or color fallback)
+                                let icon_rect = rect.shrink(3.0);
+                                if let (Some(sheet), Some(tex_id)) =
+                                    (&self.material_icon_sheet, self.material_icons_texture_id)
+                                {
+                                    if let Some([u0, v0, u1, v1]) = sheet.uv_rect(mat.id) {
+                                        ui.painter().image(
+                                            tex_id,
+                                            icon_rect,
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(u0, v0),
+                                                egui::pos2(u1, v1),
+                                            ),
+                                            egui::Color32::WHITE,
+                                        );
+                                    } else {
+                                        ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                                    }
+                                } else {
+                                    ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                                }
 
                                 // Material name
                                 let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
@@ -3034,16 +3071,6 @@ impl App {
                                     mat.name,
                                     egui::FontId::proportional(8.0),
                                     egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
-                                );
-
-                                // ID label
-                                let id_pos = rect.left_top() + egui::vec2(3.0, 1.0);
-                                ui.painter().text(
-                                    id_pos,
-                                    egui::Align2::LEFT_TOP,
-                                    format!("{}", mat.id),
-                                    egui::FontId::proportional(9.0),
-                                    egui::Color32::from_rgba_unmultiplied(180, 180, 180, 200),
                                 );
 
                                 if response.hovered() {
@@ -3153,14 +3180,20 @@ impl App {
             });
         }
 
+        let material_icons_tid = self.material_icons_texture_id;
         let mut meshes = Vec::new();
         for clipped in clipped_primitives {
             let egui::epaint::Primitive::Mesh(mesh) = clipped.primitive else {
                 continue;
             };
-            if !matches!(mesh.texture_id, egui::TextureId::Managed(0)) {
-                continue;
-            }
+            let texture_slot =
+                if matches!(mesh.texture_id, egui::TextureId::Managed(0)) {
+                    EguiTextureSlot::EguiAtlas
+                } else if Some(mesh.texture_id) == material_icons_tid {
+                    EguiTextureSlot::MaterialIcons
+                } else {
+                    continue;
+                };
 
             let mut vertices = Vec::with_capacity(mesh.indices.len());
             for &index in &mesh.indices {
@@ -3191,6 +3224,7 @@ impl App {
                     clipped.clip_rect.max.y * pixels_per_point,
                 ],
                 vertices,
+                texture_slot,
             });
         }
 
@@ -4151,6 +4185,32 @@ impl ApplicationHandler for App {
             [self.args.width, self.args.height, self.args.layers],
             pixel_storage_layers,
         ));
+
+        // Generate material icon sprite sheet and upload to GPU
+        if self.material_icon_sheet.is_none() {
+            let start = Instant::now();
+            let model_tets =
+                higher_dimension_playground::render::generate_tesseract_tetrahedrons();
+            let sheet = material_icons::generate_material_icon_sheet(&model_tets);
+            eprintln!(
+                "Generated material icon sprite sheet ({}x{}) in {:.2}s",
+                sheet.width,
+                sheet.height,
+                start.elapsed().as_secs_f32()
+            );
+            if let Some(rcx) = self.rcx.as_mut() {
+                rcx.upload_material_icons_texture(
+                    self.queue.clone(),
+                    sheet.width,
+                    sheet.height,
+                    &sheet.pixels,
+                );
+            }
+            // Use User(1) as the egui texture ID for material icons
+            self.material_icons_texture_id = Some(egui::TextureId::User(1));
+            self.material_icon_sheet = Some(sheet);
+        }
+
         self.last_frame = Instant::now();
     }
 
