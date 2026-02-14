@@ -1,7 +1,7 @@
 mod voxel;
 
 use clap::Parser;
-use polychora_common::protocol::{ClientMessage, PlayerSnapshot, ServerMessage, WorldSnapshotPayload, WorldSummary};
+use polychora_common::protocol::{ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage, WorldSnapshotPayload, WorldSummary};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -39,13 +39,38 @@ struct PlayerState {
     last_update_ms: u64,
 }
 
+#[derive(Clone, Debug)]
+struct EntityState {
+    entity_id: u64,
+    kind: EntityKind,
+    position: [f32; 4],
+    orientation: [f32; 4],
+    scale: f32,
+    material: u8,
+    last_update_ms: u64,
+}
+
+fn entity_snapshot(entity: &EntityState) -> EntitySnapshot {
+    EntitySnapshot {
+        entity_id: entity.entity_id,
+        kind: entity.kind,
+        position: entity.position,
+        orientation: entity.orientation,
+        scale: entity.scale,
+        material: entity.material,
+        last_update_ms: entity.last_update_ms,
+    }
+}
+
 #[derive(Debug)]
 struct ServerState {
     next_client_id: u64,
+    next_entity_id: u64,
     world: VoxelWorld,
     world_revision: u64,
     players: HashMap<u64, PlayerState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
+    entities: HashMap<u64, EntityState>,
 }
 
 type SharedState = Arc<Mutex<ServerState>>;
@@ -146,22 +171,40 @@ fn start_broadcast_thread(state: SharedState, tick_hz: f32, start: Instant) {
     let interval = Duration::from_secs_f64(1.0 / tick_hz.max(0.1) as f64);
     thread::spawn(move || loop {
         thread::sleep(interval);
-        let players = {
+        let (players, entities) = {
             let guard = state.lock().expect("server state lock poisoned");
-            if guard.players.is_empty() {
+            let players = if guard.players.is_empty() {
                 None
             } else {
                 let mut all: Vec<_> = guard.players.values().map(player_snapshot).collect();
                 all.sort_by_key(|p| p.client_id);
                 Some(all)
-            }
+            };
+            let entities = if guard.entities.is_empty() {
+                None
+            } else {
+                let mut all: Vec<_> = guard.entities.values().map(entity_snapshot).collect();
+                all.sort_by_key(|e| e.entity_id);
+                Some(all)
+            };
+            (players, entities)
         };
+        let now = monotonic_ms(start);
         if let Some(players) = players {
             broadcast(
                 &state,
                 ServerMessage::PlayerPositions {
-                    server_time_ms: monotonic_ms(start),
+                    server_time_ms: now,
                     players,
+                },
+            );
+        }
+        if let Some(entities) = entities {
+            broadcast(
+                &state,
+                ServerMessage::EntityPositions {
+                    server_time_ms: now,
+                    entities,
                 },
             );
         }
@@ -293,6 +336,17 @@ fn handle_message(
                             },
                         );
                     }
+                }
+            }
+            // Send existing entities to the newly connected client.
+            {
+                let guard = state.lock().expect("server state lock poisoned");
+                for entity in guard.entities.values() {
+                    let _ = guard.clients.get(&client_id).map(|tx| {
+                        let _ = tx.send(ServerMessage::EntitySpawned {
+                            entity: entity_snapshot(entity),
+                        });
+                    });
                 }
             }
             broadcast(state, ServerMessage::PlayerJoined { player: snapshot });
@@ -456,6 +510,31 @@ fn spawn_client_thread(
     });
 }
 
+fn spawn_entity(
+    state: &SharedState,
+    kind: EntityKind,
+    position: [f32; 4],
+    orientation: [f32; 4],
+    scale: f32,
+    material: u8,
+    start: Instant,
+) -> u64 {
+    let mut guard = state.lock().expect("server state lock poisoned");
+    let entity_id = guard.next_entity_id;
+    guard.next_entity_id = guard.next_entity_id.wrapping_add(1).max(1);
+    let entity = EntityState {
+        entity_id,
+        kind,
+        position,
+        orientation,
+        scale,
+        material,
+        last_update_ms: monotonic_ms(start),
+    };
+    guard.entities.insert(entity_id, entity);
+    entity_id
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
     let start = Instant::now();
@@ -469,11 +548,33 @@ fn main() -> io::Result<()> {
 
     let state = Arc::new(Mutex::new(ServerState {
         next_client_id: 1,
+        next_entity_id: 1,
         world: initial_world,
         world_revision: 0,
         players: HashMap::new(),
         clients: HashMap::new(),
+        entities: HashMap::new(),
     }));
+
+    // Spawn a few test entities at server startup.
+    let test_positions: [[f32; 4]; 3] = [
+        [3.0, 2.0, 3.0, 0.0],
+        [-2.0, 1.5, 5.0, 1.0],
+        [0.0, 3.0, -4.0, 2.0],
+    ];
+    let test_materials: [u8; 3] = [12, 8, 15];
+    for (i, (pos, mat)) in test_positions.iter().zip(test_materials.iter()).enumerate() {
+        let id = spawn_entity(
+            &state,
+            EntityKind::TestCube,
+            *pos,
+            [0.0, 0.0, 1.0, 0.0],
+            0.5,
+            *mat,
+            start,
+        );
+        eprintln!("spawned test entity {} (id={}) at {:?}", i, id, pos);
+    }
 
     start_broadcast_thread(state.clone(), args.tick_hz, start);
     start_autosave_thread(

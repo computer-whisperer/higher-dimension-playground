@@ -683,6 +683,7 @@ fn main() {
         next_multiplayer_edit_id: 1,
         pending_voxel_edits: Vec::new(),
         remote_players: HashMap::new(),
+        remote_entities: HashMap::new(),
         last_multiplayer_player_update: Instant::now(),
         command_queue,
         command_wait_frames: 0,
@@ -861,6 +862,7 @@ struct App {
     next_multiplayer_edit_id: u64,
     pending_voxel_edits: Vec<PendingVoxelEdit>,
     remote_players: HashMap<u64, RemotePlayerState>,
+    remote_entities: HashMap<u64, RemoteEntityState>,
     last_multiplayer_player_update: Instant,
     command_queue: VecDeque<AutoCommand>,
     command_wait_frames: u32,
@@ -888,6 +890,20 @@ struct RemotePlayerState {
     velocity: [f32; 4],
     last_received_at: Instant,
 }
+
+#[derive(Clone)]
+struct RemoteEntityState {
+    kind: multiplayer::EntityKind,
+    position: [f32; 4],
+    orientation: [f32; 4],
+    scale: f32,
+    material: u8,
+    render_position: [f32; 4],
+    last_received_at: Instant,
+}
+
+const REMOTE_ENTITY_POSITION_SMOOTH_HZ: f32 = 12.0;
+const REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE: f32 = 20.0;
 
 #[derive(Clone)]
 struct PendingVoxelEdit {
@@ -1852,6 +1868,7 @@ impl App {
                     self.next_multiplayer_edit_id = 1;
                     self.pending_voxel_edits.clear();
                     self.remote_players.clear();
+                    self.remote_entities.clear();
                     break;
                 }
             }
@@ -1949,6 +1966,23 @@ impl App {
                 lerp4(player.render_look, player.look, look_alpha),
                 player.look,
             );
+        }
+    }
+
+    fn smooth_remote_entities(&mut self, dt: f32) {
+        let dt = dt.clamp(0.0, 0.25);
+        if dt <= 0.0 {
+            return;
+        }
+        let pos_alpha = 1.0 - (-REMOTE_ENTITY_POSITION_SMOOTH_HZ * dt).exp();
+        for entity in self.remote_entities.values_mut() {
+            if distance4(entity.render_position, entity.position)
+                > REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE
+            {
+                entity.render_position = entity.position;
+            } else {
+                entity.render_position = lerp4(entity.render_position, entity.position, pos_alpha);
+            }
         }
     }
 
@@ -2070,6 +2104,51 @@ impl App {
                 }
             }
             multiplayer::ServerMessage::Pong { .. } => {}
+            multiplayer::ServerMessage::EntitySpawned { entity } => {
+                self.remote_entities.insert(
+                    entity.entity_id,
+                    RemoteEntityState {
+                        kind: entity.kind,
+                        position: entity.position,
+                        orientation: entity.orientation,
+                        scale: entity.scale,
+                        material: entity.material,
+                        render_position: entity.position,
+                        last_received_at: received_at,
+                    },
+                );
+            }
+            multiplayer::ServerMessage::EntityDestroyed { entity_id } => {
+                self.remote_entities.remove(&entity_id);
+            }
+            multiplayer::ServerMessage::EntityPositions { entities, .. } => {
+                let mut seen = Vec::with_capacity(entities.len());
+                for entity in entities {
+                    seen.push(entity.entity_id);
+                    if let Some(existing) = self.remote_entities.get_mut(&entity.entity_id) {
+                        existing.position = entity.position;
+                        existing.orientation = entity.orientation;
+                        existing.scale = entity.scale;
+                        existing.material = entity.material;
+                        existing.last_received_at = received_at;
+                    } else {
+                        self.remote_entities.insert(
+                            entity.entity_id,
+                            RemoteEntityState {
+                                kind: entity.kind,
+                                position: entity.position,
+                                orientation: entity.orientation,
+                                scale: entity.scale,
+                                material: entity.material,
+                                render_position: entity.position,
+                                last_received_at: received_at,
+                            },
+                        );
+                    }
+                }
+                self.remote_entities
+                    .retain(|entity_id, _| seen.contains(entity_id));
+            }
         }
     }
 
@@ -2129,6 +2208,36 @@ impl App {
                     player.render_look,
                     time_s,
                 ));
+            }
+        }
+        instances
+    }
+
+    fn remote_entity_instances(&self, time_s: f32) -> Vec<common::ModelInstance> {
+        let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
+        ids.sort_unstable();
+        let mut instances = Vec::with_capacity(ids.len());
+        for entity_id in ids {
+            if let Some(entity) = self.remote_entities.get(&entity_id) {
+                match entity.kind {
+                    multiplayer::EntityKind::TestCube => {
+                        let mut basis = [
+                            [1.0, 0.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0, 0.0],
+                            [0.0, 0.0, 1.0, 0.0],
+                            [0.0, 0.0, 0.0, 1.0],
+                        ];
+                        let phase = entity_id as f32 * 0.7;
+                        rotate_basis_plane(&mut basis, 0, 2, time_s * 0.55 + phase);
+                        rotate_basis_plane(&mut basis, 1, 3, time_s * 0.35 + phase * 0.6);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [entity.scale; 4],
+                            [entity.material as u32; 8],
+                        ));
+                    }
+                }
             }
         }
         instances
@@ -3406,6 +3515,7 @@ impl App {
         self.poll_multiplayer_events();
         self.reapply_pending_voxel_edits(now);
         self.smooth_remote_players(dt, now);
+        self.smooth_remote_entities(dt);
 
         // Process command queue
         let mut command_screenshot_requested = false;
@@ -3969,6 +4079,7 @@ impl App {
                 vte_entity_instances.push(build_vte_test_entity_instance(preview_time_s));
             }
             vte_entity_instances.extend(self.remote_player_instances(preview_time_s));
+            vte_entity_instances.extend(self.remote_entity_instances(preview_time_s));
             let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
@@ -3981,12 +4092,14 @@ impl App {
             );
         } else {
             let remote_instances = self.remote_player_instances(preview_time_s);
+            let entity_instances = self.remote_entity_instances(preview_time_s);
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
             let mut render_instances =
-                Vec::with_capacity(instances.len() + remote_instances.len() + 1);
+                Vec::with_capacity(instances.len() + remote_instances.len() + entity_instances.len() + 1);
             render_instances.extend_from_slice(instances);
             render_instances.extend(remote_instances);
+            render_instances.extend(entity_instances);
             render_instances.push(preview_instance);
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),
