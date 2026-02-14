@@ -202,10 +202,17 @@ pub struct EguiPaintVertex {
     pub color: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EguiTextureSlot {
+    EguiAtlas,
+    MaterialIcons,
+}
+
 #[derive(Clone, Debug)]
 pub struct EguiPaintMesh {
     pub clip_rect_px: [f32; 4],
     pub vertices: Vec<EguiPaintVertex>,
+    pub texture_slot: EguiTextureSlot,
 }
 
 #[derive(Clone, Debug)]
@@ -326,6 +333,7 @@ struct FrameInFlight {
     hud_vertex_buffer: Option<Subbuffer<[HudVertex]>>,
     hud_descriptor_set: Option<Arc<DescriptorSet>>,
     egui_descriptor_set: Option<Arc<DescriptorSet>>,
+    material_icons_descriptor_set: Option<Arc<DescriptorSet>>,
     sized_descriptor_set: Arc<DescriptorSet>,
     cpu_clipped_tet_count_buffer: Subbuffer<[u32]>,
     query_pool: Arc<QueryPool>,
@@ -345,12 +353,19 @@ struct EguiResources {
     retired_atlas_views: Vec<(Arc<ImageView>, usize)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HudTextureSlot {
+    Hud,
+    EguiAtlas,
+    MaterialIcons,
+}
+
 #[derive(Clone, Copy)]
 struct HudDrawBatch {
     first_vertex: u32,
     vertex_count: u32,
     scissor: Scissor,
-    uses_egui_texture: bool,
+    texture_slot: HudTextureSlot,
 }
 
 pub struct OneTimeBuffers {
@@ -1953,6 +1968,8 @@ pub struct RenderContext {
     hud_font: Option<FontArc>,
     hud_resources: Option<HudResources>,
     egui_resources: Option<EguiResources>,
+    material_icons_view: Option<Arc<ImageView>>,
+    material_icons_sampler: Option<Arc<Sampler>>,
     hud_breadcrumbs: VecDeque<[f32; 4]>,
     hud_previous_camera: Option<[f32; 4]>,
     hud_previous_sample_time: Option<Instant>,
@@ -2519,6 +2536,7 @@ impl RenderContext {
                 hud_vertex_buffer,
                 hud_descriptor_set,
                 egui_descriptor_set,
+                material_icons_descriptor_set: None,
                 sized_descriptor_set,
                 cpu_clipped_tet_count_buffer,
                 query_pool,
@@ -2554,6 +2572,8 @@ impl RenderContext {
             hud_font,
             hud_resources,
             egui_resources,
+            material_icons_view: None,
+            material_icons_sampler: None,
             hud_breadcrumbs: VecDeque::new(),
             hud_previous_camera: None,
             hud_previous_sample_time: None,
@@ -2735,6 +2755,61 @@ impl RenderContext {
         }
     }
 
+    /// Upload a material icons sprite sheet and create descriptor sets so it can
+    /// be used as a separate texture in the HUD/egui rendering pipeline.
+    pub fn upload_material_icons_texture(
+        &mut self,
+        queue: Arc<Queue>,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) {
+        let view = create_rgba8_srgb_texture_view(
+            self.memory_allocator.clone(),
+            self.command_buffer_allocator.clone(),
+            queue.clone(),
+            width,
+            height,
+            pixels,
+        );
+        let sampler = Sampler::new(
+            queue.device().clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        self.material_icons_view = Some(view.clone());
+        self.material_icons_sampler = Some(sampler.clone());
+
+        // Create descriptor sets for all frames in flight
+        if let Some(present_ctx) = self.present_pipeline.as_ref() {
+            let descriptor_set_layout = present_ctx
+                .hud_pipeline_layout
+                .set_layouts()
+                .first()
+                .unwrap()
+                .clone();
+
+            for frame in &mut self.frames_in_flight {
+                frame.material_icons_descriptor_set =
+                    frame.hud_vertex_buffer.as_ref().map(|hud_buffer| {
+                        create_hud_descriptor_set(
+                            self.descriptor_set_allocator.clone(),
+                            descriptor_set_layout.clone(),
+                            hud_buffer.clone(),
+                            view.clone(),
+                            sampler.clone(),
+                        )
+                    });
+            }
+        }
+    }
+
     fn apply_egui_texture_updates(&mut self, queue: Arc<Queue>, updates: &[EguiTextureUpdate]) {
         if updates.is_empty() {
             return;
@@ -2891,7 +2966,10 @@ impl RenderContext {
                         offset: [scissor_x, scissor_y],
                         extent: [scissor_w, scissor_h],
                     },
-                    uses_egui_texture: true,
+                    texture_slot: match mesh.texture_slot {
+                        EguiTextureSlot::MaterialIcons => HudTextureSlot::MaterialIcons,
+                        EguiTextureSlot::EguiAtlas => HudTextureSlot::EguiAtlas,
+                    },
                 });
             }
         }
@@ -5640,7 +5718,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     first_vertex: 0,
                     vertex_count: hud_quad_count as u32,
                     scissor: self.full_hud_scissor(),
-                    uses_egui_texture: false,
+                    texture_slot: HudTextureSlot::Hud,
                 });
             }
         }
@@ -5727,18 +5805,22 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .bind_pipeline_graphics(present_pipeline.hud_pipeline.clone())
                             .unwrap();
 
-                        let mut bound_egui_state: Option<bool> = None;
+                        let mut bound_texture_slot: Option<HudTextureSlot> = None;
                         for batch in &hud_batches {
-                            let descriptor_set = if batch.uses_egui_texture {
-                                self.frames_in_flight[frame_idx].egui_descriptor_set.as_ref()
-                            } else {
-                                self.frames_in_flight[frame_idx].hud_descriptor_set.as_ref()
+                            let frame = &self.frames_in_flight[frame_idx];
+                            let descriptor_set = match batch.texture_slot {
+                                HudTextureSlot::Hud => frame.hud_descriptor_set.as_ref(),
+                                HudTextureSlot::EguiAtlas => frame.egui_descriptor_set.as_ref(),
+                                HudTextureSlot::MaterialIcons => {
+                                    frame.material_icons_descriptor_set.as_ref()
+                                        .or(frame.egui_descriptor_set.as_ref())
+                                }
                             };
                             let Some(descriptor_set) = descriptor_set else {
                                 continue;
                             };
 
-                            if bound_egui_state != Some(batch.uses_egui_texture) {
+                            if bound_texture_slot != Some(batch.texture_slot) {
                                 builder
                                     .bind_descriptor_sets(
                                         PipelineBindPoint::Graphics,
@@ -5747,7 +5829,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         vec![descriptor_set.clone()],
                                     )
                                     .unwrap();
-                                bound_egui_state = Some(batch.uses_egui_texture);
+                                bound_texture_slot = Some(batch.texture_slot);
                             }
 
                             builder
