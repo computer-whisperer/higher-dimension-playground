@@ -83,7 +83,7 @@ pub(super) struct FontAtlas {
 pub(super) fn build_font_atlas(font: &FontArc, pixel_size: f32) -> FontAtlas {
     let atlas_w: u32 = 512;
     let atlas_h: u32 = 256;
-    let pixels = vec![0u8; (atlas_w * atlas_h) as usize];
+    let pixels = vec![0u8; (atlas_w * atlas_h * 4) as usize];
     let glyphs: [Option<GlyphInfo>; 128] = std::array::from_fn(|_| None);
     let mut atlas = FontAtlas {
         width: atlas_w,
@@ -137,15 +137,18 @@ pub(super) fn build_font_atlas(font: &FontArc, pixel_size: f32) -> FontAtlas {
                 break;
             }
 
-            // Rasterize glyph into atlas
+            // Rasterize glyph into atlas (RGBA: white with varying alpha)
             outline.draw(|x, y, c| {
                 let px = cursor_x + x;
                 let py = cursor_y + y;
                 if px < atlas_w && py < atlas_h {
-                    let idx = (py * atlas_w + px) as usize;
+                    let idx = ((py * atlas_w + px) * 4) as usize;
                     let val = (c * 255.0).clamp(0.0, 255.0) as u8;
-                    if val > atlas.pixels[idx] {
-                        atlas.pixels[idx] = val;
+                    if val > atlas.pixels[idx + 3] {
+                        atlas.pixels[idx] = 255;
+                        atlas.pixels[idx + 1] = 255;
+                        atlas.pixels[idx + 2] = 255;
+                        atlas.pixels[idx + 3] = val;
                     }
                 }
             });
@@ -178,7 +181,7 @@ pub(super) fn build_font_atlas(font: &FontArc, pixel_size: f32) -> FontAtlas {
         }
     }
 
-    // Reserve a 4x4 white block for solid rectangles
+    // Reserve a 4x4 white block for solid rectangles (RGBA: fully opaque white)
     if cursor_x + 4 + pad > atlas_w {
         cursor_x = 0;
         cursor_y += row_height + pad;
@@ -188,7 +191,11 @@ pub(super) fn build_font_atlas(font: &FontArc, pixel_size: f32) -> FontAtlas {
             let px = cursor_x + dx;
             let py = cursor_y + dy;
             if px < atlas_w && py < atlas_h {
-                atlas.pixels[(py * atlas_w + px) as usize] = 255;
+                let idx = ((py * atlas_w + px) * 4) as usize;
+                atlas.pixels[idx] = 255;
+                atlas.pixels[idx + 1] = 255;
+                atlas.pixels[idx + 2] = 255;
+                atlas.pixels[idx + 3] = 255;
             }
         }
     }

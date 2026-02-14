@@ -2341,7 +2341,7 @@ impl RenderContext {
         let hud_resources = match (&hud_font, &present_pipeline) {
             (Some(font), Some(present_ctx)) => {
                 let font_atlas = build_font_atlas(font, 32.0);
-                let atlas_view = create_r8_texture_view(
+                let atlas_view = create_rgba8_srgb_texture_view(
                     memory_allocator.clone(),
                     command_buffer_allocator.clone(),
                     queue.clone(),
@@ -2379,8 +2379,8 @@ impl RenderContext {
 
         let egui_resources = match &present_pipeline {
             Some(_) => {
-                let texture_pixels = vec![255u8];
-                let atlas_view = create_r8_texture_view(
+                let texture_pixels = vec![255u8, 255, 255, 255];
+                let atlas_view = create_rgba8_srgb_texture_view(
                     memory_allocator.clone(),
                     command_buffer_allocator.clone(),
                     queue.clone(),
