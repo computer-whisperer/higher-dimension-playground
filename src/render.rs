@@ -4303,6 +4303,10 @@ impl RenderContext {
         self.drop_next_profile_sample = true;
     }
 
+    pub fn last_gpu_frame_ms(&self) -> f32 {
+        self.profiler.last_gpu_total_ms
+    }
+
     fn wait_for_all_frames(&mut self) {
         for frame in &mut self.frames_in_flight {
             if let Some(future) = frame.fence.take() {
