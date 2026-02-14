@@ -1892,13 +1892,15 @@ bool traceVoxelRayDDA(
     float4 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
     bool chunkStateValid = false;
     bool ySliceLookupEnabled =
-        (meta.debugFlags & META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE) != 0u
+        targetLodLevel == 0u
+        && (meta.debugFlags & META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE) != 0u
         && meta.ySliceCount > 0u;
     int cachedSliceY = 0;
     int cachedSliceIndex = -1;
     const float CHUNK_EPS = 1e-6;
     float chunkSizeF = float(CHUNK_SIZE);
-    bool useSliceIntervalCull = !collectDebugFlags
+    bool useSliceIntervalCull = targetLodLevel == 0u
+        && !collectDebugFlags
         && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u
         && meta.ySliceCount > 0u
         && meta.ySliceCount <= FAST_Y_SLICE_LIMIT;
@@ -2252,7 +2254,7 @@ bool traceVoxelRayDDAWithLodRings(
     outFinalT = 0.0;
     outLastChunkCoord = int4(0, 0, 0, 0);
 
-    float nearMaxDistance = min(max(1.0, meta.maxTraceDistance), LOD_RING_NEAR_MAX_DISTANCE);
+    float nearMaxDistance = max(1.0, meta.maxTraceDistance);
     VoxelFrameMeta nearMeta = meta;
     nearMeta.maxTraceDistance = nearMaxDistance;
 
