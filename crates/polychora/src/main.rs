@@ -1,6 +1,7 @@
 mod camera;
 mod cpu_render;
 mod input;
+mod materials;
 mod multiplayer;
 mod scene;
 mod voxel;
@@ -39,7 +40,7 @@ const BLOCK_EDIT_REACH_MIN: f32 = 1.0;
 const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
 const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
-const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 34;
+const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = 54;
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
 const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
