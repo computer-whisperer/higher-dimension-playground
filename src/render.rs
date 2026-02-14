@@ -3010,26 +3010,30 @@ impl RenderContext {
             return (0, 0);
         }
 
+        // -- Cohesive HUD color palette --
         let axis_colors = [
-            Vec4::new(1.00, 0.32, 0.32, 1.0), // +X
-            Vec4::new(0.34, 1.00, 0.52, 1.0), // +Y
-            Vec4::new(0.36, 0.70, 1.00, 1.0), // +Z
-            Vec4::new(1.00, 0.78, 0.28, 1.0), // +W
+            Vec4::new(0.95, 0.35, 0.35, 1.0), // +X  red
+            Vec4::new(0.35, 0.90, 0.45, 1.0), // +Y  green
+            Vec4::new(0.40, 0.65, 1.00, 1.0), // +Z  blue
+            Vec4::new(1.00, 0.75, 0.25, 1.0), // +W  amber
         ];
-        let rose_frame_color = Vec4::new(0.85, 0.85, 0.90, 1.0);
-        let xy_frame_color = Vec4::new(0.25, 0.92, 0.92, 1.0);
-        let zw_frame_color = Vec4::new(0.95, 0.55, 0.95, 1.0);
-        let map_axis_color = Vec4::new(0.65, 0.65, 0.70, 1.0);
-        let marker_xy_color = Vec4::new(0.70, 1.00, 1.00, 1.0);
-        let marker_zw_color = Vec4::new(1.00, 0.85, 1.00, 1.0);
-        let breadcrumb_xy_start = Vec4::new(0.18, 0.42, 0.50, 1.0);
-        let breadcrumb_xy_end = Vec4::new(0.30, 0.95, 0.95, 1.0);
-        let breadcrumb_zw_start = Vec4::new(0.35, 0.22, 0.42, 1.0);
-        let breadcrumb_zw_end = Vec4::new(1.00, 0.50, 0.95, 1.0);
+        let rose_frame_color = Vec4::new(0.70, 0.72, 0.78, 0.85);
+        let xy_frame_color = Vec4::new(0.35, 0.80, 0.85, 0.90);
+        let zw_frame_color = Vec4::new(0.80, 0.50, 0.85, 0.90);
+        let map_axis_color = Vec4::new(0.50, 0.52, 0.58, 0.50);
+        let map_grid_color = Vec4::new(0.45, 0.47, 0.52, 0.18);
+        let marker_xy_color = Vec4::new(0.55, 0.90, 0.92, 1.0);
+        let marker_zw_color = Vec4::new(0.92, 0.72, 0.92, 1.0);
+        let breadcrumb_xy_start = Vec4::new(0.18, 0.38, 0.45, 0.5);
+        let breadcrumb_xy_end = Vec4::new(0.30, 0.85, 0.88, 1.0);
+        let breadcrumb_zw_start = Vec4::new(0.32, 0.20, 0.38, 0.5);
+        let breadcrumb_zw_end = Vec4::new(0.90, 0.48, 0.85, 1.0);
         let altimeter_color = Vec4::new(1.00, 0.75, 0.25, 1.0);
-        let drift_color = Vec4::new(0.95, 0.95, 0.35, 1.0);
+        let drift_color = Vec4::new(0.92, 0.90, 0.35, 1.0);
         let crosshair_color = Vec4::new(0.95, 0.95, 0.95, 1.0);
         let crosshair_outline = Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let text_color = Vec4::new(0.82, 0.84, 0.88, 1.0);
+        let text_dim_color = Vec4::new(0.58, 0.60, 0.65, 1.0);
 
         let (present_size, dpi_scale) = match self.window.as_ref() {
             Some(window) => {
@@ -3146,17 +3150,29 @@ impl RenderContext {
         ));
         let rose_radius = px_delta_to_ndc(Vec2::splat(rose_radius_px));
 
-        // Circle boundary (~32 segments)
-        let circle_segments = 32;
-        for i in 0..circle_segments {
-            let a0 = (i as f32 / circle_segments as f32) * std::f32::consts::TAU;
-            let a1 = ((i + 1) as f32 / circle_segments as f32) * std::f32::consts::TAU;
-            push_line(
-                &mut lines,
-                rose_origin + Vec2::new(a0.cos() * rose_radius.x, a0.sin() * rose_radius.y),
-                rose_origin + Vec2::new(a1.cos() * rose_radius.x, a1.sin() * rose_radius.y),
-                rose_frame_color,
+        // Circle boundary -- double ring for thickness
+        let circle_segments = 48;
+        let outer_offset = px_delta_to_ndc(Vec2::splat(1.5 * hud_scale));
+        for ring in 0..2 {
+            let ring_radius = Vec2::new(
+                rose_radius.x + outer_offset.x * ring as f32,
+                rose_radius.y + outer_offset.y * ring as f32,
             );
+            let ring_color = if ring == 0 {
+                rose_frame_color
+            } else {
+                rose_frame_color * Vec4::new(1.0, 1.0, 1.0, 0.4)
+            };
+            for i in 0..circle_segments {
+                let a0 = (i as f32 / circle_segments as f32) * std::f32::consts::TAU;
+                let a1 = ((i + 1) as f32 / circle_segments as f32) * std::f32::consts::TAU;
+                push_line(
+                    &mut lines,
+                    rose_origin + Vec2::new(a0.cos() * ring_radius.x, a0.sin() * ring_radius.y),
+                    rose_origin + Vec2::new(a1.cos() * ring_radius.x, a1.sin() * ring_radius.y),
+                    ring_color,
+                );
+            }
         }
 
         let axis_directions = [
@@ -3178,7 +3194,6 @@ impl RenderContext {
 
         // Compute arrow data for all axes, then draw lines and labels
         struct ArrowData {
-            ray_dir: Vec2,
             color: Vec4,
             label_pos: Vec2,
         }
@@ -3202,11 +3217,16 @@ impl RenderContext {
                 ray_dir = fallback_dirs[axis_id];
             }
 
-            // Depth dimming: arrows pointing away from camera are dimmed
-            // Positive Z or W in view space means pointing away
+            // Depth shading: smooth fade based on how much axis points away
+            // Positive Z or W in view space means pointing away from camera
             let depth_component = view_dir[2] + view_dir[3];
-            let brightness = if depth_component > 0.0 { 0.45 } else { 1.0 };
-            let axis_color = axis_colors[axis_id] * brightness;
+            let depth_norm = (depth_component / 1.5).clamp(-1.0, 1.0);
+            let brightness = 1.0 - depth_norm.max(0.0) * 0.6; // 1.0 at front, 0.4 at back
+            let mut axis_color = axis_colors[axis_id];
+            axis_color.x *= brightness;
+            axis_color.y *= brightness;
+            axis_color.z *= brightness;
+            axis_color.w = axis_colors[axis_id].w * (0.5 + brightness * 0.5);
 
             let tip = rose_origin + px_delta_to_ndc(ray_dir * arrow_len_px);
             push_line(&mut lines, rose_origin, tip, axis_color);
@@ -3228,11 +3248,10 @@ impl RenderContext {
                 axis_color,
             );
 
-            // Label position: just beyond arrowhead
+            // Label position: pushed outside the circle boundary for clean separation
             let label_pos =
-                rose_origin + px_delta_to_ndc(ray_dir * (arrow_len_px + rose_radius_px * 0.28));
+                rose_origin + px_delta_to_ndc(ray_dir * (rose_radius_px * 1.08));
             arrows.push(ArrowData {
-                ray_dir,
                 color: axis_color,
                 label_pos,
             });
@@ -3243,10 +3262,10 @@ impl RenderContext {
         let rose_label_text_size = 13.0 * text_scale;
         let readout_text_size = 12.0 * text_scale;
 
-        // Rose background
+        // Rose background -- slightly larger than circle, with rounded feel via filled rect
         if let Some(hud_res) = self.hud_resources.as_ref() {
-            let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
-            let rose_bg_half = px_delta_to_ndc(Vec2::splat(rose_radius_px * 1.15));
+            let panel_bg = Vec4::new(0.05, 0.06, 0.08, 0.55);
+            let rose_bg_half = px_delta_to_ndc(Vec2::splat(rose_radius_px * 1.22));
             push_filled_rect_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
@@ -3258,11 +3277,11 @@ impl RenderContext {
 
         // Render axis labels at arrow tips
         for (axis_id, arrow) in arrows.iter().enumerate() {
-            // Offset label position so text is centered on the label point
-            let label_offset = px_delta_to_ndc(Vec2::new(
-                -arrow.ray_dir.x.abs() * 7.0 * hud_scale,
-                arrow.ray_dir.y * 7.0 * hud_scale,
-            ));
+            // Center the label on the label point: offset left by half-char width,
+            // and up by half the cap height
+            let char_half_w = rose_label_text_size * 0.28;
+            let char_half_h = rose_label_text_size * 0.35;
+            let label_offset = px_delta_to_ndc(Vec2::new(-char_half_w, char_half_h));
             let label_ndc = arrow.label_pos + label_offset;
             let label_px = ndc_to_pixels(label_ndc, present_size);
             if let Some(hud_res) = self.hud_resources.as_ref() {
@@ -3335,7 +3354,38 @@ impl RenderContext {
         push_rect(&mut lines, xz_min, xz_max, xz_frame_color);
         push_rect(&mut lines, yw_min, yw_max, yw_frame_color);
 
-        // Crosshair axes
+        // Grid lines -- subtle background grid every 4 world units
+        let grid_interval = 4.0;
+        let grid_max = (map_range / grid_interval) as i32;
+        for &(center, pmin, pmax) in &[(xz_center, xz_min, xz_max), (yw_center, yw_min, yw_max)] {
+            for i in 1..=grid_max {
+                let frac = (i as f32 * grid_interval) / map_range;
+                for sign in [-1.0f32, 1.0] {
+                    // Vertical grid lines
+                    let gx = center.x + sign * frac * panel_half.x * 0.9;
+                    if gx > pmin.x && gx < pmax.x {
+                        push_line(
+                            &mut lines,
+                            Vec2::new(gx, pmin.y),
+                            Vec2::new(gx, pmax.y),
+                            map_grid_color,
+                        );
+                    }
+                    // Horizontal grid lines
+                    let gy = center.y + sign * frac * panel_half.y * 0.9;
+                    if gy > pmin.y && gy < pmax.y {
+                        push_line(
+                            &mut lines,
+                            Vec2::new(pmin.x, gy),
+                            Vec2::new(pmax.x, gy),
+                            map_grid_color,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Crosshair axes (drawn on top of grid)
         push_line(
             &mut lines,
             Vec2::new(xz_min.x, xz_center.y),
@@ -3361,15 +3411,13 @@ impl RenderContext {
             map_axis_color,
         );
 
-        // Scale tick marks every 4 world units along crosshairs (skip origin)
+        // Scale tick marks on crosshair axes
         let tick_size = px_delta_to_ndc(Vec2::splat(4.0 * hud_scale));
         let tick_interval = 4.0;
         let max_ticks = (map_range / tick_interval) as i32;
-        for panel_data in [(xz_center, xz_min, xz_max), (yw_center, yw_min, yw_max)] {
-            let (center, pmin, pmax) = panel_data;
+        for &(center, pmin, pmax) in &[(xz_center, xz_min, xz_max), (yw_center, yw_min, yw_max)] {
             for i in 1..=max_ticks {
                 let frac = (i as f32 * tick_interval) / map_range;
-                // Horizontal axis ticks (vertical dashes)
                 for sign in [-1.0f32, 1.0] {
                     let tx = center.x + sign * frac * panel_half.x * 0.9;
                     if tx > pmin.x && tx < pmax.x {
@@ -3377,38 +3425,35 @@ impl RenderContext {
                             &mut lines,
                             Vec2::new(tx, center.y - tick_size.y),
                             Vec2::new(tx, center.y + tick_size.y),
-                            map_axis_color * 0.6,
+                            map_axis_color * 0.8,
                         );
                     }
-                    // Vertical axis ticks (horizontal dashes)
                     let ty = center.y + sign * frac * panel_half.y * 0.9;
                     if ty > pmin.y && ty < pmax.y {
                         push_line(
                             &mut lines,
                             Vec2::new(center.x - tick_size.x, ty),
                             Vec2::new(center.x + tick_size.x, ty),
-                            map_axis_color * 0.6,
+                            map_axis_color * 0.8,
                         );
                     }
                 }
             }
         }
 
-        // Direction wedge on XZ panel: small triangle showing camera yaw
+        // Direction indicator on XZ panel: filled arrow + FOV cone
         {
-            let yaw_x = look_world[0]; // X component of look direction
-            let yaw_z = look_world[2]; // Z component of look direction
+            let yaw_x = look_world[0];
+            let yaw_z = look_world[2];
             let yaw_len = (yaw_x * yaw_x + yaw_z * yaw_z).sqrt();
             if yaw_len > 1e-4 {
                 let dx = yaw_x / yaw_len;
                 let dz = yaw_z / yaw_len;
-                // Map to panel space: X horizontal, Z vertical (up on screen)
-                // Negate dz because Vulkan +Y=down but +Z should point up on minimap
                 let panel_aspect = panel_half.x / panel_half.y;
                 let wedge_dir = Vec2::new(dx, -dz * panel_aspect).normalize();
                 let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
-                let wedge_len = px_delta_to_ndc(Vec2::splat(12.0 * hud_scale));
-                let wedge_width = px_delta_to_ndc(Vec2::splat(6.0 * hud_scale));
+                let wedge_len = px_delta_to_ndc(Vec2::splat(14.0 * hud_scale));
+                let wedge_width = px_delta_to_ndc(Vec2::splat(7.0 * hud_scale));
                 let wedge_tip =
                     xz_center + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
                 let wedge_left = xz_center
@@ -3417,28 +3462,69 @@ impl RenderContext {
                 let wedge_right = xz_center
                     - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
                     - Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
-                let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
+                let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.95);
+                // Fill the triangle with horizontal scan lines
+                let fill_steps = 6i32;
+                for s in 0..=fill_steps {
+                    let t = s as f32 / fill_steps as f32;
+                    let l = wedge_tip.lerp(wedge_left, t);
+                    let r = wedge_tip.lerp(wedge_right, t);
+                    push_line(
+                        &mut lines,
+                        l,
+                        r,
+                        Vec4::new(1.0, 1.0, 1.0, 0.65 * (1.0 - t * 0.5)),
+                    );
+                }
+                // Outline
                 push_line(&mut lines, wedge_tip, wedge_left, wedge_color);
                 push_line(&mut lines, wedge_tip, wedge_right, wedge_color);
                 push_line(&mut lines, wedge_left, wedge_right, wedge_color);
+
+                // FOV cone: two lines extending from center showing approximate field of view
+                let fov_half_angle = 0.45_f32; // ~26 degrees half-angle
+                let fov_len = px_delta_to_ndc(Vec2::splat(panel_width_px * 0.28));
+                let cos_a = fov_half_angle.cos();
+                let sin_a = fov_half_angle.sin();
+                let fov_left_dir = Vec2::new(
+                    wedge_dir.x * cos_a - wedge_dir.y * sin_a,
+                    wedge_dir.x * sin_a + wedge_dir.y * cos_a,
+                );
+                let fov_right_dir = Vec2::new(
+                    wedge_dir.x * cos_a + wedge_dir.y * sin_a,
+                    -wedge_dir.x * sin_a + wedge_dir.y * cos_a,
+                );
+                let fov_color = Vec4::new(1.0, 1.0, 1.0, 0.12);
+                push_line(
+                    &mut lines,
+                    xz_center,
+                    xz_center
+                        + Vec2::new(fov_left_dir.x * fov_len.x, fov_left_dir.y * fov_len.y),
+                    fov_color,
+                );
+                push_line(
+                    &mut lines,
+                    xz_center,
+                    xz_center
+                        + Vec2::new(fov_right_dir.x * fov_len.x, fov_right_dir.y * fov_len.y),
+                    fov_color,
+                );
             }
         }
 
-        // Direction wedge on YW panel: small triangle showing camera look in Y/W plane
+        // Direction indicator on YW panel: filled arrow
         {
-            let look_y = look_world[1]; // Y component of look direction
-            let look_w = look_world[3]; // W component of look direction
+            let look_y = look_world[1];
+            let look_w = look_world[3];
             let yw_len = (look_y * look_y + look_w * look_w).sqrt();
             if yw_len > 1e-4 {
                 let dy = look_y / yw_len;
                 let dw = look_w / yw_len;
-                // Map to panel space: Y horizontal, W vertical (up on screen)
-                // Negate dw because Vulkan +Y=down but +W should point up on minimap
                 let panel_aspect = panel_half.x / panel_half.y;
                 let wedge_dir = Vec2::new(dy, -dw * panel_aspect).normalize();
                 let wedge_side = Vec2::new(-wedge_dir.y, wedge_dir.x);
-                let wedge_len = px_delta_to_ndc(Vec2::splat(12.0 * hud_scale));
-                let wedge_width = px_delta_to_ndc(Vec2::splat(6.0 * hud_scale));
+                let wedge_len = px_delta_to_ndc(Vec2::splat(14.0 * hud_scale));
+                let wedge_width = px_delta_to_ndc(Vec2::splat(7.0 * hud_scale));
                 let wedge_tip =
                     yw_center + Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y);
                 let wedge_left = yw_center
@@ -3447,19 +3533,34 @@ impl RenderContext {
                 let wedge_right = yw_center
                     - Vec2::new(wedge_dir.x * wedge_len.x, wedge_dir.y * wedge_len.y) * 0.3
                     - Vec2::new(wedge_side.x * wedge_width.x, wedge_side.y * wedge_width.y);
-                let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.9);
+                let wedge_color = Vec4::new(1.0, 1.0, 1.0, 0.95);
+                // Fill the triangle
+                let fill_steps = 6i32;
+                for s in 0..=fill_steps {
+                    let t = s as f32 / fill_steps as f32;
+                    let l = wedge_tip.lerp(wedge_left, t);
+                    let r = wedge_tip.lerp(wedge_right, t);
+                    push_line(
+                        &mut lines,
+                        l,
+                        r,
+                        Vec4::new(1.0, 1.0, 1.0, 0.65 * (1.0 - t * 0.5)),
+                    );
+                }
+                // Outline
                 push_line(&mut lines, wedge_tip, wedge_left, wedge_color);
                 push_line(&mut lines, wedge_tip, wedge_right, wedge_color);
                 push_line(&mut lines, wedge_left, wedge_right, wedge_color);
             }
         }
 
-        // Panel title labels and axis labels
+        // Panel labels: title, cardinal directions, and scale bar
         let minimap_label_size = 11.0 * text_scale;
+        let cardinal_label_size = 9.0 * text_scale;
         let label_inset = px_delta_to_ndc(Vec2::new(10.0 * hud_scale, 8.0 * hud_scale));
-        let axis_inset = px_delta_to_ndc(Vec2::new(14.0 * hud_scale, 14.0 * hud_scale));
+        let edge_inset = px_delta_to_ndc(Vec2::new(6.0 * hud_scale, 5.0 * hud_scale));
         if let Some(hud_res) = self.hud_resources.as_ref() {
-            // Panel titles inside top-left corner (Vulkan: lower clip Y = higher on screen)
+            // Panel titles inside top-left corner
             let xz_title_px = ndc_to_pixels(
                 Vec2::new(xz_min.x + label_inset.x, xz_min.y + label_inset.y),
                 present_size,
@@ -3487,59 +3588,111 @@ impl RenderContext {
                 present_size,
             );
 
-            // XZ panel axis labels: X at right edge, Z at top edge (lower clip Y)
-            let xz_x_label_px = ndc_to_pixels(
-                Vec2::new(xz_max.x - axis_inset.x, xz_center.y + axis_inset.y),
-                present_size,
-            );
-            push_text_quads(
-                &mut hud_quads,
-                &hud_res.font_atlas,
-                "X",
-                xz_x_label_px,
-                minimap_label_size,
-                axis_colors[0],
-                present_size,
-            );
-            let xz_z_label_px = ndc_to_pixels(
-                Vec2::new(xz_center.x + label_inset.x, xz_min.y + label_inset.y),
-                present_size,
-            );
-            push_text_quads(
-                &mut hud_quads,
-                &hud_res.font_atlas,
-                "Z",
-                xz_z_label_px,
-                minimap_label_size,
-                axis_colors[2],
-                present_size,
-            );
+            // Cardinal labels on XZ panel edges: +X right, -X left, +Z top, -Z bottom
+            // In Vulkan NDC: xz_min.y = top of screen (lower NDC), xz_max.y = bottom
+            let xz_cardinals: &[(&str, Vec2)] = &[
+                (
+                    "+X",
+                    Vec2::new(xz_max.x - edge_inset.x * 3.0, xz_center.y),
+                ),
+                ("-X", Vec2::new(xz_min.x + edge_inset.x, xz_center.y)),
+                (
+                    "+Z",
+                    Vec2::new(xz_center.x - edge_inset.x, xz_min.y + edge_inset.y),
+                ),
+                (
+                    "-Z",
+                    Vec2::new(
+                        xz_center.x - edge_inset.x,
+                        xz_max.y - edge_inset.y * 3.0,
+                    ),
+                ),
+            ];
+            for (label, ndc_pos) in xz_cardinals {
+                let px = ndc_to_pixels(*ndc_pos, present_size);
+                push_text_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    label,
+                    px,
+                    cardinal_label_size,
+                    text_dim_color,
+                    present_size,
+                );
+            }
 
-            // YW panel axis labels: Y at right edge, W at top edge (lower clip Y)
-            let yw_y_label_px = ndc_to_pixels(
-                Vec2::new(yw_max.x - axis_inset.x, yw_center.y + axis_inset.y),
-                present_size,
+            // Cardinal labels on YW panel edges: +Y right, -Y left, +W top, -W bottom
+            let yw_cardinals: &[(&str, Vec2)] = &[
+                (
+                    "+Y",
+                    Vec2::new(yw_max.x - edge_inset.x * 3.0, yw_center.y),
+                ),
+                ("-Y", Vec2::new(yw_min.x + edge_inset.x, yw_center.y)),
+                (
+                    "+W",
+                    Vec2::new(yw_center.x - edge_inset.x, yw_min.y + edge_inset.y),
+                ),
+                (
+                    "-W",
+                    Vec2::new(
+                        yw_center.x - edge_inset.x,
+                        yw_max.y - edge_inset.y * 3.0,
+                    ),
+                ),
+            ];
+            for (label, ndc_pos) in yw_cardinals {
+                let px = ndc_to_pixels(*ndc_pos, present_size);
+                push_text_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    label,
+                    px,
+                    cardinal_label_size,
+                    text_dim_color,
+                    present_size,
+                );
+            }
+
+            // Scale bar at bottom-right of XZ panel
+            let scale_bar_world = 4.0_f32; // 4 world units
+            let scale_bar_frac = scale_bar_world / map_range;
+            let scale_bar_ndc_w = scale_bar_frac * panel_half.x * 0.9 * 2.0;
+            let bar_right = xz_max.x - edge_inset.x;
+            let bar_left = bar_right - scale_bar_ndc_w;
+            let bar_y = xz_max.y - edge_inset.y * 2.0;
+            let bar_tick_h = px_delta_to_ndc(Vec2::new(0.0, 3.0 * hud_scale)).y;
+            let scale_bar_color = Vec4::new(0.70, 0.72, 0.78, 0.7);
+            push_line(
+                &mut lines,
+                Vec2::new(bar_left, bar_y),
+                Vec2::new(bar_right, bar_y),
+                scale_bar_color,
             );
+            push_line(
+                &mut lines,
+                Vec2::new(bar_left, bar_y - bar_tick_h),
+                Vec2::new(bar_left, bar_y + bar_tick_h),
+                scale_bar_color,
+            );
+            push_line(
+                &mut lines,
+                Vec2::new(bar_right, bar_y - bar_tick_h),
+                Vec2::new(bar_right, bar_y + bar_tick_h),
+                scale_bar_color,
+            );
+            // Scale bar label
+            let bar_label_ndc = Vec2::new(
+                bar_left,
+                bar_y + bar_tick_h + px_delta_to_ndc(Vec2::new(0.0, 2.0 * hud_scale)).y,
+            );
+            let bar_label_px = ndc_to_pixels(bar_label_ndc, present_size);
             push_text_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
-                "Y",
-                yw_y_label_px,
-                minimap_label_size,
-                axis_colors[1],
-                present_size,
-            );
-            let yw_w_label_px = ndc_to_pixels(
-                Vec2::new(yw_center.x + label_inset.x, yw_min.y + label_inset.y),
-                present_size,
-            );
-            push_text_quads(
-                &mut hud_quads,
-                &hud_res.font_atlas,
-                "W",
-                yw_w_label_px,
-                minimap_label_size,
-                axis_colors[3],
+                "4u",
+                bar_label_px,
+                cardinal_label_size,
+                scale_bar_color,
                 present_size,
             );
         } else if let Some(font) = self.hud_font.as_ref() {
@@ -3723,50 +3876,36 @@ impl RenderContext {
             if !readout_text.is_empty() {
                 readout_text.push('\n');
             }
+            // Performance line -- compact
             readout_text.push_str(&format!(
-                "frame {:>5.1} ms ({:>3.0} fps)\n\
-                 gpu   {:>5.1} ms [{}]",
-                self.frame_time_ms,
-                fps,
-                self.profiler.last_gpu_total_ms,
-                self.last_backend.label()
+                "{:.0} fps  {:.1}/{:.1} ms  [{}]",
+                fps, self.frame_time_ms, self.profiler.last_gpu_total_ms, self.last_backend.label()
             ));
+            // Position and orientation table -- clean aligned columns
             readout_text.push_str(
-                "\nvec       |        X |        Y |        Z |        W\n\
-                 ----------+----------+----------+----------+----------",
+                "\n          X        Y        Z        W",
             );
             readout_text.push_str(&format!(
-                "\n{:<9} | {:+8.2} | {:+8.2} | {:+8.2} | {:+8.2}",
-                "cam_pos",
+                "\npos  {:+7.1}  {:+7.1}  {:+7.1}  {:+7.1}",
                 camera_position[0],
                 camera_position[1],
                 camera_position[2],
                 camera_position[3],
             ));
             readout_text.push_str(&format!(
-                "\n{:<9} | {:+8.3} | {:+8.3} | {:+8.3} | {:+8.3}",
-                "look_dir", look_world[0], look_world[1], look_world[2], look_world[3],
+                "\ndir  {:+7.3}  {:+7.3}  {:+7.3}  {:+7.3}",
+                look_world[0], look_world[1], look_world[2], look_world[3],
             ));
             if let Some(hit) = target_hit_voxel {
                 readout_text.push_str(&format!(
-                    "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
-                    "block_hit", hit[0], hit[1], hit[2], hit[3]
-                ));
-            } else {
-                readout_text.push_str(&format!(
-                    "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
-                    "block_hit", "--", "--", "--", "--"
+                    "\nhit  {:+7}  {:+7}  {:+7}  {:+7}",
+                    hit[0], hit[1], hit[2], hit[3]
                 ));
             }
             if let Some(face) = target_hit_face {
                 readout_text.push_str(&format!(
-                    "\n{:<9} | {:+8} | {:+8} | {:+8} | {:+8}",
-                    "face_n", face[0], face[1], face[2], face[3]
-                ));
-            } else {
-                readout_text.push_str(&format!(
-                    "\n{:<9} | {:>8} | {:>8} | {:>8} | {:>8}",
-                    "face_n", "--", "--", "--", "--"
+                    "\nface {:+7}  {:+7}  {:+7}  {:+7}",
+                    face[0], face[1], face[2], face[3]
                 ));
             }
             if self.last_backend == RenderBackend::VoxelTraversal {
@@ -3837,8 +3976,8 @@ impl RenderContext {
         );
 
         if let Some(hud_res) = self.hud_resources.as_ref() {
-            let panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.45);
-            let text_panel_bg = Vec4::new(0.0, 0.0, 0.0, 0.78);
+            let panel_bg = Vec4::new(0.05, 0.06, 0.08, 0.50);
+            let text_panel_bg = Vec4::new(0.04, 0.05, 0.07, 0.82);
 
             // Semi-transparent backgrounds behind minimap panels
             push_filled_rect_quads(
@@ -3865,6 +4004,40 @@ impl RenderContext {
                 text_panel_bg,
             );
 
+            // Accent border on panels (top edge highlight)
+            let border_h = px_delta_to_ndc(Vec2::new(0.0, 1.0 * hud_scale)).y;
+            push_filled_rect_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                Vec2::new(xz_min.x, xz_min.y),
+                Vec2::new(xz_max.x, xz_min.y + border_h),
+                Vec4::new(
+                    xz_frame_color.x,
+                    xz_frame_color.y,
+                    xz_frame_color.z,
+                    0.35,
+                ),
+            );
+            push_filled_rect_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                Vec2::new(yw_min.x, yw_min.y),
+                Vec2::new(yw_max.x, yw_min.y + border_h),
+                Vec4::new(
+                    yw_frame_color.x,
+                    yw_frame_color.y,
+                    yw_frame_color.z,
+                    0.35,
+                ),
+            );
+            push_filled_rect_quads(
+                &mut hud_quads,
+                &hud_res.font_atlas,
+                Vec2::new(readout_bg_min.x, readout_bg_min.y),
+                Vec2::new(readout_bg_max.x, readout_bg_min.y + border_h),
+                Vec4::new(0.45, 0.50, 0.60, 0.40),
+            );
+
             let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
             push_text_quads(
                 &mut hud_quads,
@@ -3872,7 +4045,7 @@ impl RenderContext {
                 &readout_text,
                 readout_anchor_px,
                 readout_text_size,
-                map_axis_color,
+                text_color,
                 present_size,
             );
         } else if let Some(font) = self.hud_font.as_ref() {
@@ -3883,7 +4056,7 @@ impl RenderContext {
                 &readout_text,
                 readout_anchor_px,
                 readout_text_size,
-                map_axis_color,
+                text_color,
                 present_size,
             );
         }
