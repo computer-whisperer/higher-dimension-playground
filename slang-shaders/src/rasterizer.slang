@@ -266,9 +266,9 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
     // Clip conditions are linear in view-space Z,W:
     //   lower boundary: -sin(theta_min)*Z + cos(theta_min)*W >= 0
     //   upper boundary:  sin(theta_max)*Z - cos(theta_max)*W >= 0
-    // In VTE overlay mode (material preview), use 3x narrower ZW FOV (30° instead of 90°).
+    // In VTE overlay mode (material preview), use 2x narrower ZW FOV (45° instead of 90°).
     float effectiveFocalLengthZW = workingData.padding[0] != 0u
-        ? workingData.focalLengthZW * 3.0
+        ? workingData.focalLengthZW * 2.0
         : workingData.focalLengthZW;
     float zwViewAngle = (3.14159265 / 2.0) / effectiveFocalLengthZW;
     float thetaMin = 3.14159265 / 4.0 - zwViewAngle / 2.0;
@@ -505,9 +505,9 @@ float2 getIntersection(float2 lineA[2], float2 lineB[2])
 float2 getZWAngleRange(WorkingData workingData)
 {
     const float PI = 3.14159;
-    // In VTE overlay mode (material preview), use 3x narrower ZW FOV (30° instead of 90°).
+    // In VTE overlay mode (material preview), use 2x narrower ZW FOV (45° instead of 90°).
     float effectiveFocalLengthZW = workingData.padding[0] != 0u
-        ? workingData.focalLengthZW * 3.0
+        ? workingData.focalLengthZW * 2.0
         : workingData.focalLengthZW;
     float viewAngle = (PI / 2.0) / effectiveFocalLengthZW;
     return float2(PI / 4.0 - viewAngle / 2.0, PI / 4.0 + viewAngle / 2.0);
