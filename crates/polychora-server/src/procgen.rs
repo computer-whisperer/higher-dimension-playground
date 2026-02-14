@@ -302,6 +302,22 @@ fn structure_set() -> &'static StructureSet {
                 "lumen_orrery.json",
                 include_str!("../../polychora/assets/structures/lumen_orrery.json"),
             ),
+            (
+                "clifford_atrium.json",
+                include_str!("../../polychora/assets/structures/clifford_atrium.json"),
+            ),
+            (
+                "braided_transit.json",
+                include_str!("../../polychora/assets/structures/braided_transit.json"),
+            ),
+            (
+                "phase_ladder.json",
+                include_str!("../../polychora/assets/structures/phase_ladder.json"),
+            ),
+            (
+                "orthoplex_nexus.json",
+                include_str!("../../polychora/assets/structures/orthoplex_nexus.json"),
+            ),
         ];
 
         let blueprints: Vec<_> = sources
