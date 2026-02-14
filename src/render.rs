@@ -20,7 +20,7 @@ use glam::{Vec2, Vec4, Vec4Swizzles};
 use image::{ImageBuffer, Rgba};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -72,6 +72,23 @@ use vulkano::sync::PipelineStage;
 use vulkano::{sync, Validated, VulkanError};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
+
+const VTE_LOD_TINT_ENV: &str = "R4D_VTE_LOD_TINT";
+
+fn env_flag_enabled(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
+        }
+        Err(_) => false,
+    }
+}
+
+fn vte_lod_tint_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(VTE_LOD_TINT_ENV))
+}
 
 /// Collection of all shader modules loaded from Slang-compiled SPIR-V
 struct ShaderModules {
@@ -243,6 +260,8 @@ pub struct RenderOptions {
     pub render_backend: RenderBackend,
     pub vte_max_trace_steps: u32,
     pub vte_max_trace_distance: f32,
+    pub vte_lod_near_max_distance: f32,
+    pub vte_lod_mid_max_distance: f32,
     pub vte_display_mode: VteDisplayMode,
     pub vte_slice_layer: Option<u32>,
     pub vte_thick_half_width: u32,
@@ -281,6 +300,8 @@ impl Default for RenderOptions {
             render_backend: RenderBackend::Auto,
             vte_max_trace_steps: 320,
             vte_max_trace_distance: 160.0,
+            vte_lod_near_max_distance: 48.0,
+            vte_lod_mid_max_distance: 112.0,
             vte_display_mode: VteDisplayMode::Integral,
             vte_slice_layer: None,
             vte_thick_half_width: 2,
@@ -4902,8 +4923,10 @@ impl RenderContext {
                             let chunk_index = input.visible_chunk_indices[i]
                                 .min(vte_chunk_count.saturating_sub(1) as u32);
                             let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                            let lod_level = input.chunk_headers[chunk_index as usize].lod_level;
                             let mut slot =
-                                (vte::vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
+                                (vte::vte_hash_chunk_coord_with_lod(chunk_coord, lod_level)
+                                    & hash_mask) as usize;
 
                             for _ in 0..vte_chunk_lookup_capacity {
                                 let entry = &mut writer[slot];
@@ -4913,7 +4936,8 @@ impl RenderContext {
                                     *entry = vte::GpuVoxelChunkLookupEntry {
                                         chunk_coord,
                                         chunk_index,
-                                        _padding: [0; 3],
+                                        lod_level,
+                                        _padding: [0; 2],
                                     };
                                     break;
                                 }
@@ -4987,6 +5011,15 @@ impl RenderContext {
             } else {
                 0.0
             };
+            let max_trace_distance = render_options.vte_max_trace_distance.max(1.0);
+            let lod_near_max_distance = render_options
+                .vte_lod_near_max_distance
+                .max(1.0)
+                .min(max_trace_distance);
+            let lod_mid_max_distance = render_options
+                .vte_lod_mid_max_distance
+                .max(lod_near_max_distance)
+                .min(max_trace_distance);
             *writer = vte::GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 visible_chunk_count: vte_visible_chunk_count as u32,
@@ -4994,7 +5027,9 @@ impl RenderContext {
                 material_word_count: vte_material_word_count as u32,
                 macro_word_count: vte_macro_word_count as u32,
                 max_trace_steps: render_options.vte_max_trace_steps.max(1),
-                max_trace_distance: render_options.vte_max_trace_distance.max(1.0),
+                max_trace_distance,
+                lod_near_max_distance,
+                lod_mid_max_distance,
                 chunk_lookup_capacity: vte_chunk_lookup_capacity as u32,
                 y_slice_count: vte_y_slice_count as u32,
                 y_slice_lookup_entry_count: vte_y_slice_lookup_entry_count as u32,
@@ -5014,6 +5049,9 @@ impl RenderContext {
                     }
                     if render_options.vte_y_slice_lookup_cache {
                         flags |= vte::VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
+                    }
+                    if vte_lod_tint_enabled() {
+                        flags |= vte::VTE_DEBUG_FLAG_LOD_TINT;
                     }
                     flags
                 },
@@ -5164,7 +5202,10 @@ impl RenderContext {
                         let Some(header) = input.chunk_headers.get(chunk_index as usize) else {
                             continue;
                         };
-                        let h = vte::vte_hash_chunk_coord(header.chunk_coord);
+                        let h = vte::vte_hash_chunk_coord_with_lod(
+                            header.chunk_coord,
+                            header.lod_level,
+                        );
                         hash ^= h;
                         hash = hash.wrapping_mul(0x0100_0193);
                     }
@@ -5202,7 +5243,7 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, lod_near={:.1}, lod_mid={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, lod_tint={}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
@@ -5210,6 +5251,8 @@ impl RenderContext {
                     payload_updates_applied,
                     render_options.vte_max_trace_steps.max(1),
                     render_options.vte_max_trace_distance.max(1.0),
+                    render_options.vte_lod_near_max_distance,
+                    render_options.vte_lod_mid_max_distance,
                     render_options.vte_display_mode.label(),
                     render_options.vte_slice_layer,
                     render_options.vte_thick_half_width,
@@ -5217,6 +5260,7 @@ impl RenderContext {
                     render_options.vte_reference_mismatch_only,
                     render_options.vte_compare_slice_only,
                     render_options.vte_y_slice_lookup_cache,
+                    vte_lod_tint_enabled(),
                     storage_layers,
                     logical_layers,
                 );
@@ -6422,16 +6466,19 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 );
                                 if self.last_backend == RenderBackend::VoxelTraversal {
                                     println!(
-                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} reference_compare={} mismatch_only={} compare_slice_only={} yslice_fastpath=true chunk_solid_clip=true yslice_lookup_cache={}",
+                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} lod_near={:.1} lod_mid={:.1} reference_compare={} mismatch_only={} compare_slice_only={} yslice_fastpath=true chunk_solid_clip=true yslice_lookup_cache={} lod_tint={}",
                                         render_options.vte_display_mode.label(),
                                         render_options.vte_slice_layer,
                                         render_options.vte_thick_half_width,
                                         render_options.vte_max_trace_steps,
                                         render_options.vte_max_trace_distance,
+                                        render_options.vte_lod_near_max_distance,
+                                        render_options.vte_lod_mid_max_distance,
                                         render_options.vte_reference_compare,
                                         render_options.vte_reference_mismatch_only,
                                         render_options.vte_compare_slice_only,
                                         render_options.vte_y_slice_lookup_cache,
+                                        vte_lod_tint_enabled(),
                                     );
                                     if self.vte_compare_stats.compared > 0
                                         || self.vte_compare_stats.mismatches > 0

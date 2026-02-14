@@ -654,6 +654,12 @@ pub fn structure_chunk_y_bounds() -> (i32, i32) {
     )
 }
 
+pub fn structure_chunk_y_bounds_for_scale(chunk_scale: i32) -> (i32, i32) {
+    let (min_chunk_y, max_chunk_y) = structure_chunk_y_bounds();
+    let scale = chunk_scale.max(1);
+    (min_chunk_y.div_euclid(scale), max_chunk_y.div_euclid(scale))
+}
+
 pub type StructureCell = [i32; 3];
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -1219,6 +1225,45 @@ pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool
     structure_chunk_has_content_with_keepout(world_seed, chunk_pos, None)
 }
 
+pub fn structure_chunk_has_content_for_scale_with_keepout(
+    world_seed: u64,
+    chunk_pos: ChunkPos,
+    chunk_scale: i32,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> bool {
+    let scale = chunk_scale.max(1);
+    if scale == 1 {
+        return structure_chunk_has_content_with_keepout(world_seed, chunk_pos, blocked_cells);
+    }
+
+    for dw in 0..scale {
+        for dz in 0..scale {
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let child = ChunkPos::new(
+                        chunk_pos.x * scale + dx,
+                        chunk_pos.y * scale + dy,
+                        chunk_pos.z * scale + dz,
+                        chunk_pos.w * scale + dw,
+                    );
+                    if structure_chunk_has_content_with_keepout(world_seed, child, blocked_cells) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn structure_chunk_has_content_for_scale(
+    world_seed: u64,
+    chunk_pos: ChunkPos,
+    chunk_scale: i32,
+) -> bool {
+    structure_chunk_has_content_for_scale_with_keepout(world_seed, chunk_pos, chunk_scale, None)
+}
+
 fn jitter_from_hash(hash: u64) -> i32 {
     jitter_from_hash_with_radius(hash, STRUCTURE_CELL_JITTER)
 }
@@ -1478,6 +1523,57 @@ mod tests {
                         assert_eq!(
                             has_content, generated,
                             "content mismatch for chunk ({x}, {y}, {z}, {w})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_has_content_for_scale_matches_child_chunks() {
+        let seed = 1717_u64;
+        let scale = 2;
+        let (min_y, max_y) = structure_chunk_y_bounds_for_scale(scale);
+
+        for x in -6..=6 {
+            for z in -6..=6 {
+                for w in -6..=6 {
+                    for y in min_y..=max_y {
+                        let coarse = ChunkPos::new(x, y, z, w);
+                        let mut expected = false;
+                        for dw in 0..scale {
+                            for dz in 0..scale {
+                                for dy in 0..scale {
+                                    for dx in 0..scale {
+                                        let child = ChunkPos::new(
+                                            coarse.x * scale + dx,
+                                            coarse.y * scale + dy,
+                                            coarse.z * scale + dz,
+                                            coarse.w * scale + dw,
+                                        );
+                                        if structure_chunk_has_content(seed, child) {
+                                            expected = true;
+                                            break;
+                                        }
+                                    }
+                                    if expected {
+                                        break;
+                                    }
+                                }
+                                if expected {
+                                    break;
+                                }
+                            }
+                            if expected {
+                                break;
+                            }
+                        }
+
+                        assert_eq!(
+                            structure_chunk_has_content_for_scale(seed, coarse, scale),
+                            expected,
+                            "scaled content mismatch for chunk ({x}, {y}, {z}, {w})"
                         );
                     }
                 }

@@ -6,6 +6,8 @@ use vulkano::buffer::Subbuffer;
 #[repr(C)]
 pub struct GpuVoxelChunkHeader {
     pub chunk_coord: [i32; 4],
+    pub lod_level: u32,
+    pub _lod_padding: [u32; 3],
     pub occupancy_word_offset: u32,
     pub material_word_offset: u32,
     pub flags: u32,
@@ -59,6 +61,8 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) macro_word_count: u32,
     pub(super) max_trace_steps: u32,
     pub(super) max_trace_distance: f32,
+    pub(super) lod_near_max_distance: f32,
+    pub(super) lod_mid_max_distance: f32,
     pub(super) chunk_lookup_capacity: u32,
     pub(super) y_slice_count: u32,
     pub(super) y_slice_lookup_entry_count: u32,
@@ -85,7 +89,8 @@ pub(super) struct GpuVoxelFrameMeta {
 pub(super) struct GpuVoxelChunkLookupEntry {
     pub(super) chunk_coord: [i32; 4],
     pub(super) chunk_index: u32,
-    pub(super) _padding: [u32; 3],
+    pub(super) lod_level: u32,
+    pub(super) _padding: [u32; 2],
 }
 
 impl GpuVoxelChunkLookupEntry {
@@ -95,7 +100,8 @@ impl GpuVoxelChunkLookupEntry {
         Self {
             chunk_coord: [0; 4],
             chunk_index: Self::INVALID_INDEX,
-            _padding: [0; 3],
+            lod_level: 0,
+            _padding: [0; 2],
         }
     }
 }
@@ -158,7 +164,7 @@ pub(super) struct VteFirstMismatch {
     pub(super) last_chunk: [i32; 4],
 }
 
-pub const VTE_MAX_CHUNKS: usize = 8_192;
+pub const VTE_MAX_CHUNKS: usize = 12_288;
 pub(super) const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
 pub(super) const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
 pub(super) const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
@@ -169,6 +175,7 @@ pub(super) const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
 pub(super) const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
 pub(super) const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
 pub(super) const VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE: u32 = 1 << 3;
+pub(super) const VTE_DEBUG_FLAG_LOD_TINT: u32 = 1 << 4;
 pub(super) const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
 pub(super) const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
 pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 16;
@@ -230,6 +237,11 @@ pub(super) fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
         ^ y.wrapping_mul(0xD816_3841)
         ^ z.wrapping_mul(0xCB1A_B31F)
         ^ w.wrapping_mul(0x1656_67B1)
+}
+
+#[inline]
+pub(super) fn vte_hash_chunk_coord_with_lod(chunk_coord: [i32; 4], lod_level: u32) -> u32 {
+    vte_hash_chunk_coord(chunk_coord) ^ lod_level.wrapping_mul(0x9E37_79B9)
 }
 
 pub(super) fn stage_voxel_payload_updates(

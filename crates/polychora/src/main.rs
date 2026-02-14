@@ -320,6 +320,14 @@ struct Args {
     #[arg(long, default_value_t = 160.0)]
     vte_max_trace_distance: f32,
 
+    /// World-space distance where L0 tracing hands off to coarser LODs.
+    #[arg(long, default_value_t = 48.0)]
+    vte_lod_near_max_distance: f32,
+
+    /// World-space distance where L1 tracing hands off to L2 tracing.
+    #[arg(long, default_value_t = 112.0)]
+    vte_lod_mid_max_distance: f32,
+
     /// VTE Stage-B display operator (integral, slice, thick-slice, debug-compare, debug-integral)
     #[arg(long, value_enum, default_value_t = VteDisplayModeArg::Integral)]
     vte_display_mode: VteDisplayModeArg,
@@ -412,9 +420,17 @@ struct Args {
     #[arg(long, default_value_t = true)]
     singleplayer_procgen_structures: bool,
 
-    /// Chunk radius around player to evaluate server-side procgen in singleplayer.
+    /// Chunk radius around player for streamed near (L0) chunk updates in singleplayer.
     #[arg(long, default_value_t = 6)]
     singleplayer_procgen_chunk_radius: i32,
+
+    /// Chunk radius around player for streamed mid (L1) chunk updates in singleplayer.
+    #[arg(long, default_value_t = 10)]
+    singleplayer_procgen_mid_chunk_radius: i32,
+
+    /// Chunk radius around player for streamed far (L2) chunk updates in singleplayer.
+    #[arg(long, default_value_t = 6)]
+    singleplayer_procgen_far_chunk_radius: i32,
 
     /// Derive a procgen keepout mask from persisted world chunks in singleplayer.
     #[arg(long, default_value_t = true)]
@@ -629,6 +645,14 @@ fn main() {
     let initial_vte_integral_log_merge_k = args.vte_integral_log_merge_k.max(0.0);
     let initial_vte_max_trace_steps = args.vte_max_trace_steps.max(1);
     let initial_vte_max_trace_distance = args.vte_max_trace_distance.max(1.0);
+    let initial_vte_lod_near_max_distance = args
+        .vte_lod_near_max_distance
+        .max(1.0)
+        .min(initial_vte_max_trace_distance);
+    let initial_vte_lod_mid_max_distance = args
+        .vte_lod_mid_max_distance
+        .max(initial_vte_lod_near_max_distance)
+        .min(initial_vte_max_trace_distance);
 
     let world_file = args.world_file.clone();
     // Determine whether to skip the main menu and go straight to playing.
@@ -782,6 +806,8 @@ fn main() {
         vte_integral_log_merge_k: initial_vte_integral_log_merge_k,
         vte_max_trace_steps: initial_vte_max_trace_steps,
         vte_max_trace_distance: initial_vte_max_trace_distance,
+        vte_lod_near_max_distance: initial_vte_lod_near_max_distance,
+        vte_lod_mid_max_distance: initial_vte_lod_mid_max_distance,
         vte_sweep_include_no_entities,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
@@ -1036,6 +1062,8 @@ struct App {
     vte_integral_log_merge_k: f32,
     vte_max_trace_steps: u32,
     vte_max_trace_distance: f32,
+    vte_lod_near_max_distance: f32,
+    vte_lod_mid_max_distance: f32,
     vte_sweep_include_no_entities: bool,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
@@ -1216,7 +1244,9 @@ fn build_singleplayer_runtime_config(
         save_interval_secs: args.singleplayer_save_interval_secs,
         snapshot_on_join: args.singleplayer_snapshot_on_join,
         procgen_structures: args.singleplayer_procgen_structures,
-        procgen_chunk_radius: args.singleplayer_procgen_chunk_radius,
+        procgen_near_chunk_radius: args.singleplayer_procgen_chunk_radius,
+        procgen_mid_chunk_radius: args.singleplayer_procgen_mid_chunk_radius,
+        procgen_far_chunk_radius: args.singleplayer_procgen_far_chunk_radius,
         procgen_keepout_from_existing_world: args.singleplayer_procgen_keepout_from_existing_world,
         procgen_keepout_padding_chunks: args.singleplayer_procgen_keepout_padding_chunks,
         world_seed: args.singleplayer_world_seed,
@@ -2402,7 +2432,8 @@ impl App {
                 payload.chunk_pos[2],
                 payload.chunk_pos[3],
             );
-            self.scene.world.insert_chunk(chunk_pos, chunk);
+            self.scene
+                .insert_lod_chunk(payload.lod_level, chunk_pos, chunk);
             applied_chunks += 1;
         }
 
@@ -2414,11 +2445,20 @@ impl App {
         }
     }
 
-    fn apply_multiplayer_chunk_unload_batch(&mut self, revision: u64, chunks: Vec<[i32; 4]>) {
+    fn apply_multiplayer_chunk_unload_batch(
+        &mut self,
+        revision: u64,
+        chunks: Vec<multiplayer::WorldChunkCoordPayload>,
+    ) {
         let mut removed_chunks = 0usize;
-        for chunk_pos in chunks {
-            let pos = voxel::ChunkPos::new(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]);
-            if self.scene.world.remove_chunk_override(pos) {
+        for payload in chunks {
+            let pos = voxel::ChunkPos::new(
+                payload.chunk_pos[0],
+                payload.chunk_pos[1],
+                payload.chunk_pos[2],
+                payload.chunk_pos[3],
+            );
+            if self.scene.remove_lod_chunk(payload.lod_level, pos) {
                 removed_chunks += 1;
             }
         }
@@ -3358,6 +3398,29 @@ impl App {
                     )
                     .text("VTE Max Trace Distance"),
                 );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_lod_near_max_distance,
+                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
+                    )
+                    .text("VTE L0->L1 Distance"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_lod_mid_max_distance,
+                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
+                    )
+                    .text("VTE L1->L2 Distance"),
+                );
+                self.vte_max_trace_distance = self
+                    .vte_max_trace_distance
+                    .clamp(VTE_TRACE_DISTANCE_MIN, VTE_TRACE_DISTANCE_MAX);
+                self.vte_lod_near_max_distance = self
+                    .vte_lod_near_max_distance
+                    .clamp(1.0, self.vte_max_trace_distance);
+                self.vte_lod_mid_max_distance = self
+                    .vte_lod_mid_max_distance
+                    .clamp(self.vte_lod_near_max_distance, self.vte_max_trace_distance);
                 ui.add(
                     egui::Slider::new(
                         &mut self.place_material,
@@ -4484,6 +4547,8 @@ impl App {
             render_backend: backend,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
+            vte_lod_near_max_distance: self.vte_lod_near_max_distance,
+            vte_lod_mid_max_distance: self.vte_lod_mid_max_distance,
             vte_display_mode: self.args.vte_display_mode.to_render_mode(),
             vte_slice_layer: self.args.vte_slice_layer,
             vte_thick_half_width: self.args.vte_thick_half_width,
@@ -5358,6 +5423,8 @@ impl App {
             render_backend: backend,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
+            vte_lod_near_max_distance: self.vte_lod_near_max_distance,
+            vte_lod_mid_max_distance: self.vte_lod_mid_max_distance,
             vte_display_mode: self.args.vte_display_mode.to_render_mode(),
             vte_slice_layer: self.args.vte_slice_layer,
             vte_thick_half_width: self.args.vte_thick_half_width,
