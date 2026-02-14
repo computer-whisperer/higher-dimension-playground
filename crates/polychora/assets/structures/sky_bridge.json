@@ -1,0 +1,18 @@
+{
+  "name": "sky_bridge",
+  "spawn_weight": 2,
+  "ground_offset_y": 3,
+  "fills": [
+    { "min": [-8, 0, -1, -1], "size": [17, 1, 3, 3], "material": 24 },
+    { "min": [-8, 1, -1, -1], "size": [17, 1, 1, 1], "material": 29 },
+    { "min": [-8, 1, 1, -1], "size": [17, 1, 1, 1], "material": 29 },
+    { "min": [-8, 1, -1, 1], "size": [17, 1, 1, 1], "material": 29 },
+    { "min": [-8, 1, 1, 1], "size": [17, 1, 1, 1], "material": 29 },
+    { "min": [-8, -4, -1, -1], "size": [1, 4, 3, 3], "material": 12 },
+    { "min": [8, -4, -1, -1], "size": [1, 4, 3, 3], "material": 12 }
+  ],
+  "voxels": [
+    { "offset": [-8, 2, 0, 0], "material": 13 },
+    { "offset": [8, 2, 0, 0], "material": 13 }
+  ]
+}

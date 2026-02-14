@@ -4,7 +4,7 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-pub use polychora_common::protocol::{PlayerSnapshot, WorldSnapshotPayload, WorldSummary};
+pub use polychora_common::protocol::{PlayerSnapshot, WorldChunkPayload};
 
 #[derive(Debug)]
 pub enum MultiplayerEvent {
@@ -90,7 +90,8 @@ impl MultiplayerClient {
                     let len = u32::from_le_bytes(len_buf) as usize;
                     if len > 100_000_000 {
                         let _ = incoming_tx.send(MultiplayerEvent::Disconnected(format!(
-                            "oversized message: {} bytes", len
+                            "oversized message: {} bytes",
+                            len
                         )));
                         break;
                     }

@@ -1,8 +1,12 @@
+mod procgen;
 mod voxel;
 
 use clap::Parser;
-use polychora_common::protocol::{ClientMessage, PlayerSnapshot, ServerMessage, WorldSnapshotPayload, WorldSummary};
-use std::collections::HashMap;
+use polychora_common::protocol::{
+    ClientMessage, PlayerSnapshot, ServerMessage, WorldChunkPayload, WorldSnapshotPayload,
+    WorldSummary,
+};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -10,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use voxel::{load_world, save_world, VoxelType, VoxelWorld};
+use voxel::{load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -28,6 +32,12 @@ struct Args {
     save_interval_secs: u64,
     #[arg(long, default_value_t = true)]
     snapshot_on_join: bool,
+    #[arg(long, default_value_t = true)]
+    procgen_structures: bool,
+    #[arg(long, default_value_t = 6)]
+    procgen_chunk_radius: i32,
+    #[arg(long, default_value_t = 1337)]
+    world_seed: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +54,7 @@ struct ServerState {
     next_client_id: u64,
     world: VoxelWorld,
     world_revision: u64,
+    generated_procgen_chunks: HashSet<ChunkPos>,
     players: HashMap<u64, PlayerState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
 }
@@ -70,6 +81,66 @@ fn player_snapshot(player: &PlayerState) -> PlayerSnapshot {
         look: player.look,
         last_update_ms: player.last_update_ms,
     }
+}
+
+fn world_chunk_from_position(position: [f32; 4]) -> [i32; 4] {
+    let cs = CHUNK_SIZE as i32;
+    [
+        (position[0].floor() as i32).div_euclid(cs),
+        (position[1].floor() as i32).div_euclid(cs),
+        (position[2].floor() as i32).div_euclid(cs),
+        (position[3].floor() as i32).div_euclid(cs),
+    ]
+}
+
+fn encode_world_chunk_payload(chunk_pos: ChunkPos, chunk: &voxel::Chunk) -> WorldChunkPayload {
+    WorldChunkPayload {
+        chunk_pos: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+        voxels: chunk.voxels.iter().map(|v| v.0).collect(),
+    }
+}
+
+fn generate_procgen_chunks_around(
+    state: &mut ServerState,
+    center_chunk: [i32; 4],
+    world_seed: u64,
+    chunk_radius: i32,
+) -> Option<(u64, Vec<WorldChunkPayload>)> {
+    let radius = chunk_radius.max(0);
+    let (min_structure_chunk_y, max_structure_chunk_y) = procgen::structure_chunk_y_bounds();
+    let mut chunk_payloads = Vec::new();
+
+    for chunk_x in (center_chunk[0] - radius)..=(center_chunk[0] + radius) {
+        for chunk_z in (center_chunk[2] - radius)..=(center_chunk[2] + radius) {
+            for chunk_w in (center_chunk[3] - radius)..=(center_chunk[3] + radius) {
+                for chunk_y in min_structure_chunk_y..=max_structure_chunk_y {
+                    let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
+                    if !state.generated_procgen_chunks.insert(chunk_pos) {
+                        continue;
+                    }
+                    if state.world.chunks.contains_key(&chunk_pos) {
+                        continue;
+                    }
+
+                    let Some(chunk) = procgen::generate_structure_chunk(world_seed, chunk_pos)
+                    else {
+                        continue;
+                    };
+
+                    let payload = encode_world_chunk_payload(chunk_pos, &chunk);
+                    state.world.insert_chunk(chunk_pos, chunk);
+                    chunk_payloads.push(payload);
+                }
+            }
+        }
+    }
+
+    if chunk_payloads.is_empty() {
+        return None;
+    }
+
+    state.world_revision = state.world_revision.wrapping_add(1);
+    Some((state.world_revision, chunk_payloads))
 }
 
 fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
@@ -110,7 +181,9 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
 
 fn load_world_from_path(path: &Path) -> io::Result<VoxelWorld> {
     if !path.exists() {
-        return Ok(VoxelWorld::new());
+        return Ok(VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            material: VoxelType(11),
+        }));
     }
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -253,12 +326,30 @@ fn handle_message(
     message: ClientMessage,
     snapshot_on_join: bool,
     tick_hz: f32,
+    procgen_structures: bool,
+    procgen_chunk_radius: i32,
+    world_seed: u64,
     start: Instant,
 ) {
     match message {
         ClientMessage::Hello { name } => {
             let snapshot =
                 install_or_update_player(state, client_id, Some(name), None, None, start);
+            if procgen_structures {
+                let generated = {
+                    let mut guard = state.lock().expect("server state lock poisoned");
+                    let center_chunk = world_chunk_from_position(snapshot.position);
+                    generate_procgen_chunks_around(
+                        &mut guard,
+                        center_chunk,
+                        world_seed,
+                        procgen_chunk_radius,
+                    )
+                };
+                if let Some((revision, chunks)) = generated {
+                    broadcast(state, ServerMessage::WorldChunkBatch { revision, chunks });
+                }
+            }
             send_to_client(
                 state,
                 client_id,
@@ -299,6 +390,21 @@ fn handle_message(
         }
         ClientMessage::UpdatePlayer { position, look } => {
             install_or_update_player(state, client_id, None, Some(position), Some(look), start);
+            if procgen_structures {
+                let generated = {
+                    let mut guard = state.lock().expect("server state lock poisoned");
+                    let center_chunk = world_chunk_from_position(position);
+                    generate_procgen_chunks_around(
+                        &mut guard,
+                        center_chunk,
+                        world_seed,
+                        procgen_chunk_radius,
+                    )
+                };
+                if let Some((revision, chunks)) = generated {
+                    broadcast(state, ServerMessage::WorldChunkBatch { revision, chunks });
+                }
+            }
         }
         ClientMessage::SetVoxel {
             position,
@@ -314,6 +420,9 @@ fn handle_message(
                     position[3],
                     VoxelType(material),
                 );
+                let (chunk_pos, _) =
+                    voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
+                guard.generated_procgen_chunks.insert(chunk_pos);
                 guard.world_revision = guard.world_revision.wrapping_add(1);
                 guard.world_revision
             };
@@ -330,6 +439,25 @@ fn handle_message(
             );
         }
         ClientMessage::RequestWorldSnapshot => {
+            if procgen_structures {
+                let generated = {
+                    let mut guard = state.lock().expect("server state lock poisoned");
+                    let center_chunk = guard
+                        .players
+                        .get(&client_id)
+                        .map(|player| world_chunk_from_position(player.position))
+                        .unwrap_or([0, 0, 0, 0]);
+                    generate_procgen_chunks_around(
+                        &mut guard,
+                        center_chunk,
+                        world_seed,
+                        procgen_chunk_radius,
+                    )
+                };
+                if let Some((revision, chunks)) = generated {
+                    broadcast(state, ServerMessage::WorldChunkBatch { revision, chunks });
+                }
+            }
             let snapshot_message = {
                 let guard = state.lock().expect("server state lock poisoned");
                 build_world_snapshot_payload(&guard)
@@ -358,6 +486,9 @@ fn spawn_client_thread(
     state: SharedState,
     snapshot_on_join: bool,
     tick_hz: f32,
+    procgen_structures: bool,
+    procgen_chunk_radius: i32,
+    world_seed: u64,
     start: Instant,
 ) {
     let peer_label = stream
@@ -421,7 +552,10 @@ fn spawn_client_thread(
 
             let len = u32::from_le_bytes(len_buf) as usize;
             if len > 100_000_000 {
-                eprintln!("client {} sent oversized message ({} bytes)", client_id, len);
+                eprintln!(
+                    "client {} sent oversized message ({} bytes)",
+                    client_id, len
+                );
                 break;
             }
 
@@ -437,7 +571,17 @@ fn spawn_client_thread(
             let parsed = postcard::from_bytes::<ClientMessage>(&msg_buf);
             match parsed {
                 Ok(message) => {
-                    handle_message(&state, client_id, message, snapshot_on_join, tick_hz, start);
+                    handle_message(
+                        &state,
+                        client_id,
+                        message,
+                        snapshot_on_join,
+                        tick_hz,
+                        procgen_structures,
+                        procgen_chunk_radius,
+                        world_seed,
+                        start,
+                    );
                 }
                 Err(error) => {
                     send_to_client(
@@ -460,6 +604,7 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
     let start = Instant::now();
     let initial_world = load_world_from_path(&args.world_file)?;
+    let generated_procgen_chunks: HashSet<_> = initial_world.chunks.keys().copied().collect();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
         "loaded world {} ({} non-empty chunks)",
@@ -471,6 +616,7 @@ fn main() -> io::Result<()> {
         next_client_id: 1,
         world: initial_world,
         world_revision: 0,
+        generated_procgen_chunks,
         players: HashMap::new(),
         clients: HashMap::new(),
     }));
@@ -484,10 +630,13 @@ fn main() -> io::Result<()> {
 
     let listener = TcpListener::bind(&args.bind)?;
     eprintln!(
-        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s)",
+        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s, procgen={}, seed={}, radius={} chunks)",
         args.bind,
         args.tick_hz.max(0.1),
-        args.save_interval_secs
+        args.save_interval_secs,
+        args.procgen_structures,
+        args.world_seed,
+        args.procgen_chunk_radius.max(0),
     );
 
     for stream in listener.incoming() {
@@ -499,6 +648,9 @@ fn main() -> io::Result<()> {
                     state.clone(),
                     args.snapshot_on_join,
                     args.tick_hz.max(0.1),
+                    args.procgen_structures,
+                    args.procgen_chunk_radius,
+                    args.world_seed,
                     start,
                 );
             }

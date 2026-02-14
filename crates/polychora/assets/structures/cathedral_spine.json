@@ -1,0 +1,13 @@
+{
+  "name": "cathedral_spine",
+  "spawn_weight": 2,
+  "ground_offset_y": 0,
+  "fills": [
+    { "min": [-7, 0, -2, -2], "size": [15, 1, 5, 5], "material": 11 },
+    { "min": [-7, 1, -2, -2], "size": [1, 8, 5, 5], "material": 19 },
+    { "min": [7, 1, -2, -2], "size": [1, 8, 5, 5], "material": 19 },
+    { "min": [-3, 1, -1, -1], "size": [7, 7, 3, 3], "material": 25 },
+    { "min": [-5, 4, -2, -2], "size": [11, 1, 5, 5], "material": 28 },
+    { "min": [0, 8, 0, 0], "size": [1, 4, 1, 1], "material": 31 }
+  ]
+}

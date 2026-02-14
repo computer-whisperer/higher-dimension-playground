@@ -15,6 +15,12 @@ pub struct WorldSnapshotPayload {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorldChunkPayload {
+    pub chunk_pos: [i32; 4],
+    pub voxels: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlayerSnapshot {
     pub client_id: u64,
     pub name: String,
@@ -66,6 +72,10 @@ pub enum ServerMessage {
     },
     WorldSnapshot {
         world: WorldSnapshotPayload,
+    },
+    WorldChunkBatch {
+        revision: u64,
+        chunks: Vec<WorldChunkPayload>,
     },
     Pong {
         nonce: u64,
