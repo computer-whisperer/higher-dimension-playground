@@ -1,12 +1,10 @@
-mod protocol;
 mod voxel;
 
-use base64::Engine;
 use clap::Parser;
-use protocol::{ClientMessage, PlayerSnapshot, ServerMessage, WorldSnapshotPayload, WorldSummary};
+use polychora_common::protocol::{ClientMessage, PlayerSnapshot, ServerMessage, WorldSnapshotPayload, WorldSummary};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
@@ -140,7 +138,7 @@ fn build_world_snapshot_payload(state: &ServerState) -> io::Result<WorldSnapshot
         format: "v4dw".to_string(),
         non_empty_chunks: state.world.non_empty_chunk_count(),
         revision: state.world_revision,
-        bytes_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        bytes,
     })
 }
 
@@ -388,10 +386,14 @@ fn spawn_client_thread(
     thread::spawn(move || {
         let mut writer = BufWriter::new(writer_stream);
         while let Ok(message) = rx.recv() {
-            let Ok(serialized) = serde_json::to_string(&message) else {
+            let Ok(encoded) = postcard::to_stdvec(&message) else {
                 continue;
             };
-            if writeln!(writer, "{serialized}").is_err() {
+            let len = (encoded.len() as u32).to_le_bytes();
+            if writer.write_all(&len).is_err() {
+                break;
+            }
+            if writer.write_all(&encoded).is_err() {
                 break;
             }
             if writer.flush().is_err() {
@@ -402,28 +404,37 @@ fn spawn_client_thread(
 
     thread::spawn(move || {
         eprintln!("client {} connected from {}", client_id, peer_label);
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
+        let mut reader = stream;
+        let mut len_buf = [0u8; 4];
 
         loop {
-            line.clear();
-            let count = match reader.read_line(&mut line) {
-                Ok(n) => n,
+            match reader.read_exact(&mut len_buf) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    break;
+                }
                 Err(error) => {
                     eprintln!("read error for client {}: {}", client_id, error);
                     break;
                 }
             };
-            if count == 0 {
+
+            let len = u32::from_le_bytes(len_buf) as usize;
+            if len > 100_000_000 {
+                eprintln!("client {} sent oversized message ({} bytes)", client_id, len);
                 break;
             }
 
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
+            let mut msg_buf = vec![0u8; len];
+            match reader.read_exact(&mut msg_buf) {
+                Ok(()) => {}
+                Err(error) => {
+                    eprintln!("read error for client {}: {}", client_id, error);
+                    break;
+                }
+            };
 
-            let parsed = serde_json::from_str::<ClientMessage>(trimmed);
+            let parsed = postcard::from_bytes::<ClientMessage>(&msg_buf);
             match parsed {
                 Ok(message) => {
                     handle_message(&state, client_id, message, snapshot_on_join, tick_hz, start);
