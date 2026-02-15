@@ -184,6 +184,10 @@ impl EntityStore {
         self.entities.get(&entity_id).map(EntityState::snapshot)
     }
 
+    pub fn despawn(&mut self, entity_id: EntityId) -> bool {
+        self.entities.remove(&entity_id).is_some()
+    }
+
     pub fn simulate(&mut self, now_ms: u64) {
         for entity in self.entities.values_mut() {
             entity.simulate(now_ms);
