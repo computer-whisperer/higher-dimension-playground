@@ -595,6 +595,62 @@ impl Scene {
         }
     }
 
+    /// Fan-cast across the ZW viewing wedge and return the nearest solid
+    /// voxel hit.  `view_z` and `view_w` are the camera's world-space Z and W
+    /// basis vectors (obtained from the view basis).  The sweep mirrors the VTE
+    /// shader: theta ranges from `PI/4 - viewAngle/2` to `PI/4 + viewAngle/2`
+    /// where `viewAngle = (PI/2) / focal_length_zw`.
+    pub fn fan_cast_nearest_block(
+        &self,
+        ray_origin: [f32; 4],
+        view_z: [f32; 4],
+        view_w: [f32; 4],
+        focal_length_zw: f32,
+        max_distance: f32,
+        num_samples: usize,
+    ) -> Option<[i32; 4]> {
+        let pi = std::f32::consts::PI;
+        let view_angle = (pi / 2.0) / focal_length_zw.max(0.01);
+        let theta_min = pi / 4.0 - view_angle / 2.0;
+        let theta_max = pi / 4.0 + view_angle / 2.0;
+
+        let samples = num_samples.max(1);
+        let mut best_voxel: Option<[i32; 4]> = None;
+        let mut best_dist_sq = f32::INFINITY;
+
+        for i in 0..samples {
+            let t = if samples == 1 {
+                0.5
+            } else {
+                i as f32 / (samples - 1) as f32
+            };
+            let theta = theta_min + t * (theta_max - theta_min);
+            let cz = theta.cos();
+            let sw = theta.sin();
+
+            let dir = [
+                cz * view_z[0] + sw * view_w[0],
+                cz * view_z[1] + sw * view_w[1],
+                cz * view_z[2] + sw * view_w[2],
+                cz * view_z[3] + sw * view_w[3],
+            ];
+
+            if let Some(hit) = self.trace_first_solid_voxel(ray_origin, dir, max_distance) {
+                let dx = hit.solid_voxel[0] as f32 + 0.5 - ray_origin[0];
+                let dy = hit.solid_voxel[1] as f32 + 0.5 - ray_origin[1];
+                let dz = hit.solid_voxel[2] as f32 + 0.5 - ray_origin[2];
+                let dw = hit.solid_voxel[3] as f32 + 0.5 - ray_origin[3];
+                let dist_sq = dx * dx + dy * dy + dz * dz + dw * dw;
+                if dist_sq < best_dist_sq {
+                    best_dist_sq = dist_sq;
+                    best_voxel = Some(hit.solid_voxel);
+                }
+            }
+        }
+
+        best_voxel
+    }
+
     /// Place a voxel in the last empty cell before the first solid hit.
     pub fn place_block_along_ray(
         &mut self,
