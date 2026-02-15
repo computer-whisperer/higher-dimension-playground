@@ -97,6 +97,9 @@ const REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE: f32 = 8.0;
 const REMOTE_PLAYER_MAX_PREDICTED_SPEED: f32 = 24.0;
 const REMOTE_PLAYER_TAG_FOV_DOT_MIN: f32 = 0.16;
 const REMOTE_PLAYER_TAG_MAX_COUNT: usize = 32;
+const PERF_SUITE_WARMUP_FRAMES_DEFAULT: u32 = 180;
+const PERF_SUITE_SAMPLE_FRAMES_DEFAULT: u32 = 600;
+const PERF_SUITE_REPORT_DIR_DEFAULT: &str = "profiles";
 const MENU_ORBIT_CENTER: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
 const MENU_ORBIT_RADIUS_XZ: f32 = 16.0;
 const MENU_ORBIT_RADIUS_W: f32 = 7.0;
@@ -113,6 +116,127 @@ struct VteRuntimeProfile {
     entities: bool,
     y_slice_lookup_cache: bool,
 }
+
+#[derive(Copy, Clone)]
+struct PerfSuiteScenario {
+    label: &'static str,
+    position: [f32; 4],
+    yaw: f32,
+    pitch: f32,
+    xw_angle: f32,
+    zw_angle: f32,
+    yw_deviation: f32,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum PerfSuitePhase {
+    Warmup,
+    Sample,
+}
+
+struct PerfSuiteState {
+    run_started_at: Instant,
+    scenario_index: usize,
+    phase: PerfSuitePhase,
+    frames_remaining: u32,
+    warmup_frames: u32,
+    sample_frames: u32,
+    sample_frame_samples: u32,
+    sample_client_cpu_ms_sum: f64,
+    sample_client_cpu_ms_max: f64,
+    sample_gpu_ms_sum: f64,
+    sample_gpu_ms_max: f64,
+    sample_gpu_samples: u32,
+    results: Vec<PerfSuiteScenarioResult>,
+}
+
+struct PerfSuiteScenarioResult {
+    scenario_index: usize,
+    scenario_label: &'static str,
+    client_cpu_avg_ms: f64,
+    client_cpu_max_ms: f64,
+    client_cpu_frames: u32,
+    render_gpu_avg_ms: Option<f64>,
+    render_gpu_max_ms: Option<f64>,
+    render_gpu_samples: u32,
+}
+
+impl PerfSuiteState {
+    fn new(warmup_frames: u32, sample_frames: u32, started_at: Instant) -> Self {
+        Self {
+            run_started_at: started_at,
+            scenario_index: 0,
+            phase: PerfSuitePhase::Warmup,
+            frames_remaining: warmup_frames,
+            warmup_frames,
+            sample_frames,
+            sample_frame_samples: 0,
+            sample_client_cpu_ms_sum: 0.0,
+            sample_client_cpu_ms_max: 0.0,
+            sample_gpu_ms_sum: 0.0,
+            sample_gpu_ms_max: 0.0,
+            sample_gpu_samples: 0,
+            results: Vec::new(),
+        }
+    }
+
+    fn reset_sample_accumulators(&mut self) {
+        self.sample_frame_samples = 0;
+        self.sample_client_cpu_ms_sum = 0.0;
+        self.sample_client_cpu_ms_max = 0.0;
+        self.sample_gpu_ms_sum = 0.0;
+        self.sample_gpu_ms_max = 0.0;
+        self.sample_gpu_samples = 0;
+    }
+}
+
+const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 5] = [
+    PerfSuiteScenario {
+        label: "ground-3d",
+        position: [0.0, 8.0, -24.0, -4.0],
+        yaw: 1.25,
+        pitch: -0.15,
+        xw_angle: 0.0,
+        zw_angle: 0.0,
+        yw_deviation: 0.0,
+    },
+    PerfSuiteScenario {
+        label: "ground-4d",
+        position: [0.0, 8.0, -24.0, -4.0],
+        yaw: 1.25,
+        pitch: -0.15,
+        xw_angle: 0.70,
+        zw_angle: 0.95,
+        yw_deviation: 0.0,
+    },
+    PerfSuiteScenario {
+        label: "sky-4d",
+        position: [0.0, 64.0, 0.0, -4.0],
+        yaw: 0.35,
+        pitch: -0.70,
+        xw_angle: 0.90,
+        zw_angle: 0.78,
+        yw_deviation: 0.0,
+    },
+    PerfSuiteScenario {
+        label: "oblique-far",
+        position: [96.0, 20.0, 96.0, -4.0],
+        yaw: -2.35,
+        pitch: -0.22,
+        xw_angle: -0.45,
+        zw_angle: 0.42,
+        yw_deviation: 0.0,
+    },
+    PerfSuiteScenario {
+        label: "ridge-4d",
+        position: [-64.0, 14.0, 32.0, -4.0],
+        yaw: 0.95,
+        pitch: -0.08,
+        xw_angle: 0.46,
+        zw_angle: 0.52,
+        yw_deviation: 0.0,
+    },
+];
 
 const VTE_SWEEP_PROFILES_ENTITIES: [VteRuntimeProfile; 2] = [
     VteRuntimeProfile {
@@ -479,6 +603,28 @@ struct Args {
     #[arg(long)]
     commands: Option<String>,
 
+    /// Run deterministic built-in performance scenario suite.
+    /// Input is ignored while active.
+    #[arg(long, action = ArgAction::Set, default_value_t = false)]
+    perf_suite: bool,
+
+    /// Warmup frames before collecting samples for each perf-suite scenario.
+    #[arg(long, default_value_t = PERF_SUITE_WARMUP_FRAMES_DEFAULT)]
+    perf_suite_warmup_frames: u32,
+
+    /// Sample frames collected per perf-suite scenario.
+    #[arg(long, default_value_t = PERF_SUITE_SAMPLE_FRAMES_DEFAULT)]
+    perf_suite_sample_frames: u32,
+
+    /// Exit automatically when the perf-suite finishes all scenarios.
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    perf_suite_exit_on_complete: bool,
+
+    /// Output path for perf-suite machine-readable report (JSON).
+    /// Defaults to profiles/perf-suite-<unix-seconds>.json when omitted.
+    #[arg(long)]
+    perf_suite_report: Option<PathBuf>,
+
     /// Enable client-side audio output (sound effects).
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
     audio: bool,
@@ -676,6 +822,7 @@ fn main() {
         || args.gpu_screenshot
         || args.cpu_render
         || args.commands.is_some()
+        || args.perf_suite
         || !matches!(args.scene, SceneArg::Flat);
     let start_with_integrated_singleplayer = args.server.is_none() && skip_main_menu;
     let initial_app_state = if skip_main_menu {
@@ -756,16 +903,33 @@ fn main() {
         None
     };
 
-    let command_queue: VecDeque<AutoCommand> = if let Some(cmd_str) = &args.commands {
+    let mut command_queue: VecDeque<AutoCommand> = if let Some(cmd_str) = &args.commands {
         parse_commands(cmd_str).into()
     } else {
         VecDeque::new()
+    };
+    if args.perf_suite && !command_queue.is_empty() {
+        eprintln!("Perf suite active: ignoring --commands automation.");
+        command_queue.clear();
+    }
+
+    let perf_suite_state = if args.perf_suite {
+        Some(PerfSuiteState::new(
+            args.perf_suite_warmup_frames.max(1),
+            args.perf_suite_sample_frames.max(1),
+            Instant::now(),
+        ))
+    } else {
+        None
     };
 
     let initial_render_width = args.width;
     let initial_render_height = args.height;
     let initial_render_layers = args.layers;
-    let initial_player_name = args.player_name.clone().unwrap_or_else(default_multiplayer_player_name);
+    let initial_player_name = args
+        .player_name
+        .clone()
+        .unwrap_or_else(default_multiplayer_player_name);
     let audio = AudioEngine::new(args.audio, args.audio_volume);
     if args.audio {
         if audio.is_active() {
@@ -876,6 +1040,7 @@ fn main() {
         profile_gpu_ms_sum: 0.0,
         profile_gpu_ms_max: 0.0,
         profile_gpu_samples: 0,
+        perf_suite_state,
         world_ready: initial_app_state == AppState::MainMenu,
         vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
     };
@@ -936,6 +1101,17 @@ fn main() {
             "VTE held-block preview uses VTE entity path (default). Set {}=1 to use legacy overlay raster path.",
             VTE_OVERLAY_RASTER_ENV
         );
+    }
+    if app.perf_suite_active() {
+        let report_path = app.perf_suite_report_path();
+        eprintln!(
+            "[perf-suite] enabled: {} scenarios, warmup={}f, sample={}f, exit_on_complete={}",
+            PERF_SUITE_SCENARIOS.len(),
+            app.args.perf_suite_warmup_frames.max(1),
+            app.args.perf_suite_sample_frames.max(1),
+            app.args.perf_suite_exit_on_complete
+        );
+        eprintln!("[perf-suite] report path: {}", report_path.display());
     }
 
     event_loop.run_app(&mut app).unwrap();
@@ -1145,6 +1321,7 @@ struct App {
     profile_gpu_ms_sum: f64,
     profile_gpu_ms_max: f64,
     profile_gpu_samples: u32,
+    perf_suite_state: Option<PerfSuiteState>,
     world_ready: bool,
     vte_overlay_raster_enabled: bool,
 }
@@ -1733,7 +1910,12 @@ fn build_place_preview_instance(
     rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
     rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
 
-    build_centered_model_instance(anchor, &basis, [0.35, 0.35, 0.38, 0.38], [preview_material; 8])
+    build_centered_model_instance(
+        anchor,
+        &basis,
+        [0.35, 0.35, 0.38, 0.38],
+        [preview_material; 8],
+    )
 }
 
 fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
@@ -2018,6 +2200,309 @@ impl App {
         }
     }
 
+    fn perf_suite_active(&self) -> bool {
+        self.perf_suite_state.is_some()
+    }
+
+    fn perf_suite_scenario(&self, scenario_index: usize) -> PerfSuiteScenario {
+        PERF_SUITE_SCENARIOS[scenario_index % PERF_SUITE_SCENARIOS.len()]
+    }
+
+    fn set_perf_suite_camera_pose(&mut self, scenario_index: usize) {
+        let scenario = self.perf_suite_scenario(scenario_index);
+        self.camera.position = scenario.position;
+        self.camera.yaw = scenario.yaw;
+        self.camera.pitch = scenario.pitch;
+        self.camera.xw_angle = scenario.xw_angle;
+        self.camera.zw_angle = scenario.zw_angle;
+        self.camera.yw_deviation = scenario.yw_deviation;
+        self.camera.is_flying = true;
+        self.camera.is_grounded = false;
+        self.camera.velocity_y = 0.0;
+        self.look_at_target = None;
+        self.menu_open = false;
+        self.inventory_open = false;
+        self.teleport_dialog_open = false;
+        self.controls_dialog_open = false;
+        self.sprint_enabled = false;
+    }
+
+    fn reset_runtime_profile_window(&mut self) {
+        self.profile_window_start = Instant::now();
+        self.profile_frame_samples = 0;
+        self.profile_client_cpu_ms_sum = 0.0;
+        self.profile_client_cpu_ms_max = 0.0;
+        self.profile_gpu_ms_sum = 0.0;
+        self.profile_gpu_ms_max = 0.0;
+        self.profile_gpu_samples = 0;
+    }
+
+    fn begin_perf_suite_phase(&mut self, announce: bool) {
+        let (scenario_index, phase, frames_remaining, warmup_frames, sample_frames) = {
+            let Some(state) = self.perf_suite_state.as_ref() else {
+                return;
+            };
+            (
+                state.scenario_index,
+                state.phase,
+                state.frames_remaining,
+                state.warmup_frames,
+                state.sample_frames,
+            )
+        };
+        self.set_perf_suite_camera_pose(scenario_index);
+        self.drain_gameplay_inputs_while_menu_open();
+        self.input.take_escape();
+        self.input.take_screenshot();
+        self.reset_runtime_profile_window();
+        if let Some(rcx) = self.rcx.as_mut() {
+            rcx.reset_gpu_profile_window();
+        }
+
+        if announce {
+            let scenario = self.perf_suite_scenario(scenario_index);
+            let scenario_num = scenario_index + 1;
+            let scenario_total = PERF_SUITE_SCENARIOS.len();
+            let phase_label = match phase {
+                PerfSuitePhase::Warmup => "warmup",
+                PerfSuitePhase::Sample => "sample",
+            };
+            eprintln!(
+                "[perf-suite] scenario {}/{} '{}': {} {} frames (warmup={} sample={})",
+                scenario_num,
+                scenario_total,
+                scenario.label,
+                phase_label,
+                frames_remaining,
+                warmup_frames,
+                sample_frames
+            );
+        }
+    }
+
+    fn perf_suite_report_path(&self) -> PathBuf {
+        if let Some(path) = self.args.perf_suite_report.clone() {
+            return path;
+        }
+        let unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        PathBuf::from(format!(
+            "{}/perf-suite-{}.json",
+            PERF_SUITE_REPORT_DIR_DEFAULT, unix_secs
+        ))
+    }
+
+    fn write_perf_suite_report(&self, state: &PerfSuiteState, elapsed_s: f32) {
+        let mut scenarios = Vec::with_capacity(state.results.len());
+        for result in &state.results {
+            let scenario = self.perf_suite_scenario(result.scenario_index);
+            let render_gpu = if let (Some(avg_ms), Some(max_ms)) =
+                (result.render_gpu_avg_ms, result.render_gpu_max_ms)
+            {
+                serde_json::json!({
+                    "avg_ms": avg_ms,
+                    "max_ms": max_ms,
+                    "samples": result.render_gpu_samples,
+                })
+            } else {
+                serde_json::json!(null)
+            };
+            scenarios.push(serde_json::json!({
+                "index": result.scenario_index,
+                "label": result.scenario_label,
+                "pose": {
+                    "position": scenario.position,
+                    "yaw": scenario.yaw,
+                    "pitch": scenario.pitch,
+                    "xw_angle": scenario.xw_angle,
+                    "zw_angle": scenario.zw_angle,
+                    "yw_deviation": scenario.yw_deviation,
+                },
+                "client_cpu": {
+                    "avg_ms": result.client_cpu_avg_ms,
+                    "max_ms": result.client_cpu_max_ms,
+                    "frames": result.client_cpu_frames,
+                },
+                "render_gpu": render_gpu,
+            }));
+        }
+
+        let report = serde_json::json!({
+            "schema": "polychora.perf_suite.v1",
+            "generated_unix_seconds": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            "elapsed_seconds": elapsed_s,
+            "world_file": self.world_file.to_string_lossy(),
+            "render_backend": format!("{:?}", self.args.backend),
+            "vte_display_mode": format!("{:?}", self.args.vte_display_mode),
+            "vte_max_trace_steps": self.vte_max_trace_steps,
+            "vte_max_trace_distance": self.vte_max_trace_distance,
+            "vte_lod_near_max_distance": self.vte_lod_near_max_distance,
+            "vte_lod_mid_max_distance": self.vte_lod_mid_max_distance,
+            "warmup_frames": state.warmup_frames,
+            "sample_frames": state.sample_frames,
+            "scenario_count": scenarios.len(),
+            "scenarios": scenarios,
+        });
+
+        let report_path = self.perf_suite_report_path();
+        if let Some(parent) = report_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "[perf-suite] failed to create report directory {}: {}",
+                        parent.display(),
+                        error
+                    );
+                    return;
+                }
+            }
+        }
+        let bytes = match serde_json::to_vec_pretty(&report) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("[perf-suite] failed to serialize JSON report: {error}");
+                return;
+            }
+        };
+        if let Err(error) = std::fs::write(&report_path, bytes) {
+            eprintln!(
+                "[perf-suite] failed to write report {}: {}",
+                report_path.display(),
+                error
+            );
+            return;
+        }
+        eprintln!("[perf-suite] wrote report {}", report_path.display());
+        println!("perf-suite-report path={}", report_path.display());
+    }
+
+    fn advance_perf_suite_after_frame(&mut self, frame_start: Instant) {
+        let Some(mut state) = self.perf_suite_state.take() else {
+            return;
+        };
+
+        if !self.world_ready {
+            self.perf_suite_state = Some(state);
+            return;
+        }
+
+        let client_cpu_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        if state.phase == PerfSuitePhase::Sample {
+            state.sample_frame_samples = state.sample_frame_samples.saturating_add(1);
+            state.sample_client_cpu_ms_sum += client_cpu_ms;
+            state.sample_client_cpu_ms_max = state.sample_client_cpu_ms_max.max(client_cpu_ms);
+
+            if let Some(rcx) = self.rcx.as_ref() {
+                let gpu_ms = rcx.last_gpu_frame_ms().max(0.0) as f64;
+                state.sample_gpu_samples = state.sample_gpu_samples.saturating_add(1);
+                state.sample_gpu_ms_sum += gpu_ms;
+                state.sample_gpu_ms_max = state.sample_gpu_ms_max.max(gpu_ms);
+            }
+        }
+
+        if state.frames_remaining > 0 {
+            state.frames_remaining -= 1;
+        }
+        if state.frames_remaining > 0 {
+            self.perf_suite_state = Some(state);
+            return;
+        }
+
+        let scenario = self.perf_suite_scenario(state.scenario_index);
+        let scenario_num = state.scenario_index + 1;
+        let scenario_total = PERF_SUITE_SCENARIOS.len();
+
+        match state.phase {
+            PerfSuitePhase::Warmup => {
+                state.phase = PerfSuitePhase::Sample;
+                state.frames_remaining = state.sample_frames;
+                state.reset_sample_accumulators();
+                self.perf_suite_state = Some(state);
+                self.begin_perf_suite_phase(true);
+            }
+            PerfSuitePhase::Sample => {
+                if state.sample_frame_samples > 0 {
+                    let frame_samples = state.sample_frame_samples as f64;
+                    let client_avg_ms = state.sample_client_cpu_ms_sum / frame_samples;
+                    let client_max_ms = state.sample_client_cpu_ms_max;
+                    let (render_gpu_avg_ms, render_gpu_max_ms) = if state.sample_gpu_samples > 0 {
+                        (
+                            Some(state.sample_gpu_ms_sum / state.sample_gpu_samples as f64),
+                            Some(state.sample_gpu_ms_max),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                    if state.sample_gpu_samples > 0 {
+                        let gpu_avg_ms = render_gpu_avg_ms.unwrap_or(0.0);
+                        let gpu_max_ms = render_gpu_max_ms.unwrap_or(0.0);
+                        eprintln!(
+                            "[perf-suite] result {}/{} '{}': client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu avg={:.3}ms max={:.3}ms samples={}",
+                            scenario_num,
+                            scenario_total,
+                            scenario.label,
+                            client_avg_ms,
+                            client_max_ms,
+                            state.sample_frame_samples,
+                            gpu_avg_ms,
+                            gpu_max_ms,
+                            state.sample_gpu_samples
+                        );
+                    } else {
+                        eprintln!(
+                            "[perf-suite] result {}/{} '{}': client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu unavailable",
+                            scenario_num,
+                            scenario_total,
+                            scenario.label,
+                            client_avg_ms,
+                            client_max_ms,
+                            state.sample_frame_samples
+                        );
+                    }
+                    state.results.push(PerfSuiteScenarioResult {
+                        scenario_index: state.scenario_index,
+                        scenario_label: scenario.label,
+                        client_cpu_avg_ms: client_avg_ms,
+                        client_cpu_max_ms: client_max_ms,
+                        client_cpu_frames: state.sample_frame_samples,
+                        render_gpu_avg_ms,
+                        render_gpu_max_ms,
+                        render_gpu_samples: state.sample_gpu_samples,
+                    });
+                }
+
+                if let Some(rcx) = self.rcx.as_mut() {
+                    rcx.flush_gpu_profile_report_now();
+                }
+
+                if state.scenario_index + 1 < scenario_total {
+                    state.scenario_index += 1;
+                    state.phase = PerfSuitePhase::Warmup;
+                    state.frames_remaining = state.warmup_frames;
+                    state.reset_sample_accumulators();
+                    self.perf_suite_state = Some(state);
+                    self.begin_perf_suite_phase(true);
+                } else {
+                    let elapsed_s = state.run_started_at.elapsed().as_secs_f32();
+                    self.write_perf_suite_report(&state, elapsed_s);
+                    eprintln!(
+                        "[perf-suite] completed {} scenarios in {:.2}s.",
+                        scenario_total, elapsed_s
+                    );
+                    self.perf_suite_state = None;
+                    if self.args.perf_suite_exit_on_complete {
+                        self.should_exit_after_render = true;
+                    }
+                }
+            }
+        }
+    }
+
     fn record_runtime_profile_sample(&mut self, frame_start: Instant) {
         let client_cpu_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         self.profile_frame_samples = self.profile_frame_samples.saturating_add(1);
@@ -2061,20 +2546,12 @@ impl App {
             } else {
                 eprintln!(
                     "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu unavailable",
-                    client_avg_ms,
-                    client_max_ms,
-                    self.profile_frame_samples,
+                    client_avg_ms, client_max_ms, self.profile_frame_samples,
                 );
             }
         }
 
-        self.profile_window_start = Instant::now();
-        self.profile_frame_samples = 0;
-        self.profile_client_cpu_ms_sum = 0.0;
-        self.profile_client_cpu_ms_max = 0.0;
-        self.profile_gpu_ms_sum = 0.0;
-        self.profile_gpu_ms_max = 0.0;
-        self.profile_gpu_samples = 0;
+        self.reset_runtime_profile_window();
     }
 
     fn grab_mouse(&mut self, window: &Window) {
@@ -2248,9 +2725,9 @@ impl App {
         self.audio.master_volume = Self::step_f32(
             self.audio.master_volume,
             delta,
-            0.05,  // 5% steps
-            0.0,   // minimum
-            2.0,   // maximum (200% - allows boosting quiet audio)
+            0.05, // 5% steps
+            0.0,  // minimum
+            2.0,  // maximum (200% - allows boosting quiet audio)
         );
     }
 
@@ -3096,7 +3573,10 @@ impl App {
         // Play UI tick sound for any adjustment (except when it's an action item that does nothing)
         if !matches!(
             self.selected_menu_item(),
-            PauseMenuItem::Resume | PauseMenuItem::SaveWorld | PauseMenuItem::LoadWorld | PauseMenuItem::Quit
+            PauseMenuItem::Resume
+                | PauseMenuItem::SaveWorld
+                | PauseMenuItem::LoadWorld
+                | PauseMenuItem::Quit
         ) {
             self.audio.play(SoundEffect::UiTick);
         }
@@ -3632,23 +4112,30 @@ impl App {
                 ui.label("Render Resolution");
                 ui.horizontal(|ui| {
                     ui.label("Width:");
-                    ui.add(egui::DragValue::new(&mut self.pending_render_width)
-                        .range(128..=3840)
-                        .speed(16));
+                    ui.add(
+                        egui::DragValue::new(&mut self.pending_render_width)
+                            .range(128..=3840)
+                            .speed(16),
+                    );
                     ui.label("Height:");
-                    ui.add(egui::DragValue::new(&mut self.pending_render_height)
-                        .range(128..=2160)
-                        .speed(16));
+                    ui.add(
+                        egui::DragValue::new(&mut self.pending_render_height)
+                            .range(128..=2160)
+                            .speed(16),
+                    );
                     ui.label("Layers:");
-                    ui.add(egui::DragValue::new(&mut self.pending_render_layers)
-                        .range(1..=512)
-                        .speed(1));
+                    ui.add(
+                        egui::DragValue::new(&mut self.pending_render_layers)
+                            .range(1..=512)
+                            .speed(1),
+                    );
                 });
                 let dims_changed = self.pending_render_width != self.args.width
                     || self.pending_render_height != self.args.height
                     || self.pending_render_layers != self.args.layers;
                 ui.horizontal(|ui| {
-                    let apply_btn = ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
+                    let apply_btn =
+                        ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
                     if apply_btn.clicked() {
                         self.args.width = self.pending_render_width;
                         self.args.height = self.pending_render_height;
@@ -3871,8 +4358,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.label("Players:");
-                    let mut sorted_ids: Vec<u64> =
-                        self.remote_players.keys().copied().collect();
+                    let mut sorted_ids: Vec<u64> = self.remote_players.keys().copied().collect();
                     sorted_ids.sort();
                     for id in sorted_ids {
                         if let Some(player) = self.remote_players.get(&id) {
@@ -4175,11 +4661,7 @@ impl App {
                     self.draw_egui_inventory(ctx, &mut close_inventory, &mut inventory_pick);
                 }
                 if self.teleport_dialog_open {
-                    self.draw_egui_teleport_dialog(
-                        ctx,
-                        &mut teleport_target,
-                        &mut close_teleport,
-                    );
+                    self.draw_egui_teleport_dialog(ctx, &mut teleport_target, &mut close_teleport);
                 }
                 if self.controls_dialog_open {
                     self.draw_egui_controls_dialog(ctx);
@@ -4639,12 +5121,12 @@ impl App {
         self.world_ready = false;
 
         // Pre-load chunks around spawn position
-        self.scene.preload_spawn_chunks(
-            self.camera.position,
-            self.vte_lod_near_max_distance,
-        );
+        self.scene
+            .preload_spawn_chunks(self.camera.position, self.vte_lod_near_max_distance);
 
-        self.grab_mouse(window);
+        if !self.perf_suite_active() {
+            self.grab_mouse(window);
+        }
     }
 
     fn handle_main_menu_transition(&mut self, transition: MainMenuTransition, window: &Window) {
@@ -5015,7 +5497,11 @@ impl App {
 
         if self.app_state == AppState::MainMenu {
             self.update_and_render_main_menu(dt);
-            self.record_runtime_profile_sample(frame_start);
+            if self.perf_suite_active() {
+                self.advance_perf_suite_after_frame(frame_start);
+            } else {
+                self.record_runtime_profile_sample(frame_start);
+            }
             return;
         }
 
@@ -5023,28 +5509,37 @@ impl App {
         self.reapply_pending_voxel_edits(now);
         self.smooth_remote_players(dt, now);
         self.smooth_remote_entities(dt);
+        if let Some(scenario_index) = self
+            .perf_suite_state
+            .as_ref()
+            .map(|state| state.scenario_index)
+        {
+            self.set_perf_suite_camera_pose(scenario_index);
+        }
 
         // Process command queue
         let mut command_screenshot_requested = false;
-        if self.command_wait_frames > 0 {
-            self.command_wait_frames -= 1;
-        } else if let Some(cmd) = self.command_queue.pop_front() {
-            match cmd {
-                AutoCommand::Press(keycode) => {
-                    self.inject_key_press(keycode);
+        if !self.perf_suite_active() {
+            if self.command_wait_frames > 0 {
+                self.command_wait_frames -= 1;
+            } else if let Some(cmd) = self.command_queue.pop_front() {
+                match cmd {
+                    AutoCommand::Press(keycode) => {
+                        self.inject_key_press(keycode);
+                    }
+                    AutoCommand::Wait(n) => {
+                        self.command_wait_frames = n;
+                    }
+                    AutoCommand::Screenshot => {
+                        command_screenshot_requested = true;
+                    }
                 }
-                AutoCommand::Wait(n) => {
-                    self.command_wait_frames = n;
-                }
-                AutoCommand::Screenshot => {
-                    command_screenshot_requested = true;
-                }
+            } else if !self.command_queue.is_empty() || self.command_wait_frames > 0 {
+                // Still processing commands
+            } else if self.args.commands.is_some() && self.args.gpu_screenshot {
+                // Commands finished and we're in screenshot mode, exit
+                self.should_exit_after_render = true;
             }
-        } else if !self.command_queue.is_empty() || self.command_wait_frames > 0 {
-            // Still processing commands
-        } else if self.args.commands.is_some() && self.args.gpu_screenshot {
-            // Commands finished and we're in screenshot mode, exit
-            self.should_exit_after_render = true;
         }
 
         if self.menu_open || self.inventory_open || self.teleport_dialog_open {
@@ -5215,8 +5710,7 @@ impl App {
                             self.look_at_target = Some(LookAtTarget::Direction(dir));
                         }
                         _ => {
-                            let (ty, tp, txw, tzw) =
-                                Camera4D::angles_for_direction_upright(dir);
+                            let (ty, tp, txw, tzw) = Camera4D::angles_for_direction_upright(dir);
                             self.look_at_target = Some(LookAtTarget::Angles {
                                 yaw: ty,
                                 pitch: tp,
@@ -5231,11 +5725,14 @@ impl App {
             // Apply smooth pull toward look-at target
             if let Some(target) = self.look_at_target {
                 let converged = match target {
-                    LookAtTarget::Angles { yaw, pitch, xw_angle, zw_angle } => {
-                        self.camera.pull_toward_target_angles(
-                            yaw, pitch, xw_angle, zw_angle, dt,
-                        )
-                    }
+                    LookAtTarget::Angles {
+                        yaw,
+                        pitch,
+                        xw_angle,
+                        zw_angle,
+                    } => self
+                        .camera
+                        .pull_toward_target_angles(yaw, pitch, xw_angle, zw_angle, dt),
                     LookAtTarget::Direction(dir) => {
                         self.camera.pull_toward_target_direction_look_frame(dir, dt)
                     }
@@ -5462,6 +5959,13 @@ impl App {
             self.input.take_pick_material();
             self.footstep_distance_accum = 0.0;
             self.was_grounded_last_frame = self.camera.is_grounded;
+        }
+        if let Some(scenario_index) = self
+            .perf_suite_state
+            .as_ref()
+            .map(|state| state.scenario_index)
+        {
+            self.set_perf_suite_camera_pose(scenario_index);
         }
 
         let look_dir = self.current_look_direction();
@@ -5876,7 +6380,11 @@ impl App {
         }
 
         self.advance_vte_runtime_sweep_after_frame();
-        self.record_runtime_profile_sample(frame_start);
+        if self.perf_suite_active() {
+            self.advance_perf_suite_after_frame(frame_start);
+        } else {
+            self.record_runtime_profile_sample(frame_start);
+        }
     }
 }
 
@@ -5913,7 +6421,7 @@ impl ApplicationHandler for App {
             None,
         ));
 
-        if self.app_state == AppState::Playing {
+        if self.app_state == AppState::Playing && !self.perf_suite_active() {
             self.grab_mouse(&window);
         }
         let backend = self.args.backend.to_render_backend();
@@ -5958,6 +6466,9 @@ impl ApplicationHandler for App {
         }
 
         self.last_frame = Instant::now();
+        if self.perf_suite_active() {
+            self.begin_perf_suite_phase(true);
+        }
     }
 
     fn window_event(
@@ -5978,6 +6489,7 @@ impl ApplicationHandler for App {
         } else {
             false
         };
+        let perf_suite_input_locked = self.perf_suite_active();
 
         match event {
             WindowEvent::CloseRequested => {
@@ -5989,6 +6501,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if perf_suite_input_locked {
+                    return;
+                }
                 if !egui_consumed {
                     self.input.handle_key_event(&event);
                 }
@@ -6030,6 +6545,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { button, state, .. } => match button {
                 MouseButton::Left => {
+                    if perf_suite_input_locked {
+                        return;
+                    }
                     if state.is_pressed() {
                         if self.app_state == AppState::MainMenu {
                             // Don't grab mouse in main menu -- egui handles clicks
@@ -6040,7 +6558,10 @@ impl ApplicationHandler for App {
                         } else if self.teleport_dialog_open && !egui_consumed {
                             // Click outside teleport dialog — close it and grab mouse
                             self.toggle_teleport_dialog();
-                        } else if !self.menu_open && !self.inventory_open && !self.teleport_dialog_open {
+                        } else if !self.menu_open
+                            && !self.inventory_open
+                            && !self.teleport_dialog_open
+                        {
                             if let Some(window) = window.as_ref() {
                                 self.grab_mouse(window);
                                 self.menu_open = false;
@@ -6052,6 +6573,9 @@ impl ApplicationHandler for App {
                 | MouseButton::Right
                 | MouseButton::Back
                 | MouseButton::Forward => {
+                    if perf_suite_input_locked {
+                        return;
+                    }
                     if !egui_consumed {
                         self.input.handle_mouse_button(button, state);
                     }
@@ -6059,6 +6583,9 @@ impl ApplicationHandler for App {
                 _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } => {
+                if perf_suite_input_locked {
+                    return;
+                }
                 if !egui_consumed {
                     let y = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => y,
@@ -6068,6 +6595,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                if perf_suite_input_locked {
+                    return;
+                }
                 if self.mouse_grabbed {
                     let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
                     self.release_mouse(&window);
@@ -6091,6 +6621,9 @@ impl ApplicationHandler for App {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
+        if self.perf_suite_active() {
+            return;
+        }
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.mouse_grabbed {
                 self.input.handle_mouse_motion(delta);

@@ -4500,6 +4500,14 @@ impl RenderContext {
         self.drop_next_profile_sample = true;
     }
 
+    pub fn flush_gpu_profile_report_now(&mut self) {
+        if self.profiler.total_frames == 0 && self.profiler.accum.is_empty() {
+            return;
+        }
+        self.profiler.print_report();
+        self.drop_next_profile_sample = true;
+    }
+
     pub fn last_gpu_frame_ms(&self) -> f32 {
         self.profiler.last_gpu_total_ms
     }

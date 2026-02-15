@@ -435,6 +435,7 @@ impl Scene {
         max_trace_distance: f32,
     ) {
         struct YSliceBuildData {
+            lod_level: u8,
             min_chunk_x: i32,
             max_chunk_x: i32,
             min_chunk_z: i32,
@@ -453,7 +454,7 @@ impl Scene {
 
         let mut chunk_headers = Vec::new();
         let mut visible_chunk_indices = Vec::new();
-        let mut y_slice_build: BTreeMap<i32, YSliceBuildData> = BTreeMap::new();
+        let mut y_slice_build: BTreeMap<(u8, i32), YSliceBuildData> = BTreeMap::new();
         let mut y_slice_lookup_entries = Vec::new();
 
         let trace_max_distance = max_trace_distance.max(1.0);
@@ -511,6 +512,11 @@ impl Scene {
             else {
                 continue;
             };
+            // Skip all-air chunks in VTE visibility metadata. They cannot produce
+            // hits, but they still cost Stage A lookup/traversal work.
+            if chunk_payload.solid_count == 0 {
+                continue;
+            }
 
             let slot = chunk_payload.gpu_slot as usize;
             if slot >= GPU_PAYLOAD_SLOT_CAPACITY {
@@ -518,15 +524,9 @@ impl Scene {
             }
             let (min_dist_sq, max_dist_sq) = Self::chunk_distance_bounds_sq(cam_pos, key);
             let in_ring = match key.lod_level {
-                VOXEL_LOD_LEVEL_NEAR => {
-                    min_dist_sq <= near_max_sq
-                }
-                VOXEL_LOD_LEVEL_MID => {
-                    min_dist_sq <= mid_max_sq && max_dist_sq >= near_max_sq
-                }
-                VOXEL_LOD_LEVEL_FAR => {
-                    min_dist_sq <= trace_max_sq && max_dist_sq >= mid_max_sq
-                }
+                VOXEL_LOD_LEVEL_NEAR => min_dist_sq <= near_max_sq,
+                VOXEL_LOD_LEVEL_MID => min_dist_sq <= mid_max_sq && max_dist_sq >= near_max_sq,
+                VOXEL_LOD_LEVEL_FAR => min_dist_sq <= trace_max_sq && max_dist_sq >= mid_max_sq,
                 _ => false,
             };
             if !in_ring {
@@ -591,37 +591,34 @@ impl Scene {
             });
             visible_chunk_indices.push(chunk_index);
 
-            if key.lod_level == VOXEL_LOD_LEVEL_NEAR {
-                y_slice_build
-                    .entry(chunk_pos.y)
-                    .and_modify(|slice| {
-                        slice.min_chunk_x = slice.min_chunk_x.min(chunk_pos.x);
-                        slice.max_chunk_x = slice.max_chunk_x.max(chunk_pos.x);
-                        slice.min_chunk_z = slice.min_chunk_z.min(chunk_pos.z);
-                        slice.max_chunk_z = slice.max_chunk_z.max(chunk_pos.z);
-                        slice.min_chunk_w = slice.min_chunk_w.min(chunk_pos.w);
-                        slice.max_chunk_w = slice.max_chunk_w.max(chunk_pos.w);
-                        slice
-                            .chunk_coords_xzw
-                            .push(([chunk_pos.x, chunk_pos.z, chunk_pos.w], chunk_index));
-                    })
-                    .or_insert_with(|| YSliceBuildData {
-                        min_chunk_x: chunk_pos.x,
-                        max_chunk_x: chunk_pos.x,
-                        min_chunk_z: chunk_pos.z,
-                        max_chunk_z: chunk_pos.z,
-                        min_chunk_w: chunk_pos.w,
-                        max_chunk_w: chunk_pos.w,
-                        chunk_coords_xzw: vec![(
-                            [chunk_pos.x, chunk_pos.z, chunk_pos.w],
-                            chunk_index,
-                        )],
-                    });
-            }
+            let slice_key = (key.lod_level, chunk_pos.y);
+            y_slice_build
+                .entry(slice_key)
+                .and_modify(|slice| {
+                    slice.min_chunk_x = slice.min_chunk_x.min(chunk_pos.x);
+                    slice.max_chunk_x = slice.max_chunk_x.max(chunk_pos.x);
+                    slice.min_chunk_z = slice.min_chunk_z.min(chunk_pos.z);
+                    slice.max_chunk_z = slice.max_chunk_z.max(chunk_pos.z);
+                    slice.min_chunk_w = slice.min_chunk_w.min(chunk_pos.w);
+                    slice.max_chunk_w = slice.max_chunk_w.max(chunk_pos.w);
+                    slice
+                        .chunk_coords_xzw
+                        .push(([chunk_pos.x, chunk_pos.z, chunk_pos.w], chunk_index));
+                })
+                .or_insert_with(|| YSliceBuildData {
+                    lod_level: key.lod_level,
+                    min_chunk_x: chunk_pos.x,
+                    max_chunk_x: chunk_pos.x,
+                    min_chunk_z: chunk_pos.z,
+                    max_chunk_z: chunk_pos.z,
+                    min_chunk_w: chunk_pos.w,
+                    max_chunk_w: chunk_pos.w,
+                    chunk_coords_xzw: vec![([chunk_pos.x, chunk_pos.z, chunk_pos.w], chunk_index)],
+                });
         }
 
         let mut y_slice_bounds = Vec::with_capacity(y_slice_build.len());
-        for (chunk_y, slice) in y_slice_build {
+        for ((_lod_level, chunk_y), slice) in y_slice_build {
             let dim_x = (slice.max_chunk_x - slice.min_chunk_x + 1).max(0) as usize;
             let dim_z = (slice.max_chunk_z - slice.min_chunk_z + 1).max(0) as usize;
             let dim_w = (slice.max_chunk_w - slice.min_chunk_w + 1).max(0) as usize;
@@ -652,6 +649,7 @@ impl Scene {
 
             y_slice_bounds.push(GpuVoxelYSliceBounds {
                 chunk_y,
+                lod_level: slice.lod_level as u32,
                 min_chunk_x: slice.min_chunk_x,
                 max_chunk_x: slice.max_chunk_x,
                 min_chunk_z: slice.min_chunk_z,
@@ -783,7 +781,8 @@ impl Scene {
 
             // Check if there are still pending chunk updates
             if self.world.drain_pending_chunk_updates().is_empty()
-                && self.voxel_pending_lod_chunk_updates.is_empty() {
+                && self.voxel_pending_lod_chunk_updates.is_empty()
+            {
                 break;
             }
 
