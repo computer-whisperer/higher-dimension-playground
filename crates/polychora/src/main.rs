@@ -16,7 +16,7 @@ use higher_dimension_playground::render::{
     RenderOptions, TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2688,12 +2688,12 @@ impl App {
                 self.remote_players.remove(&client_id);
             }
             multiplayer::ServerMessage::PlayerPositions { players, .. } => {
-                let mut seen = Vec::with_capacity(players.len());
+                let mut seen = HashSet::with_capacity(players.len());
                 for player in players {
                     if Some(player.client_id) == self.multiplayer_self_id {
                         continue;
                     }
-                    seen.push(player.client_id);
+                    seen.insert(player.client_id);
                     self.upsert_remote_player_snapshot(player, received_at);
                 }
                 self.remote_players
@@ -2775,9 +2775,9 @@ impl App {
                 self.remote_entities.remove(&entity_id);
             }
             multiplayer::ServerMessage::EntityPositions { entities, .. } => {
-                let mut seen = Vec::with_capacity(entities.len());
+                let mut seen = HashSet::with_capacity(entities.len());
                 for entity in entities {
-                    seen.push(entity.entity_id);
+                    seen.insert(entity.entity_id);
                     if let Some(existing) = self.remote_entities.get_mut(&entity.entity_id) {
                         existing.position = entity.position;
                         existing.orientation = entity.orientation;

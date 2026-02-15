@@ -1,7 +1,9 @@
+mod entities;
 mod procgen;
 
+use self::entities::EntityStore;
 use crate::shared::protocol::{
-    ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage,
+    ClientMessage, EntityKind, PlayerSnapshot, ServerMessage,
     WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
     WORLD_CHUNK_LOD_FAR, WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
 };
@@ -84,17 +86,6 @@ struct StreamChunkKey {
 }
 
 #[derive(Clone, Debug)]
-struct EntityState {
-    entity_id: u64,
-    kind: EntityKind,
-    position: [f32; 4],
-    orientation: [f32; 4],
-    scale: f32,
-    material: u8,
-    last_update_ms: u64,
-}
-
-#[derive(Clone, Debug)]
 struct ServerCpuProfile {
     window_start: Instant,
     message_samples: u64,
@@ -172,29 +163,16 @@ impl ServerCpuProfile {
     }
 }
 
-fn entity_snapshot(entity: &EntityState) -> EntitySnapshot {
-    EntitySnapshot {
-        entity_id: entity.entity_id,
-        kind: entity.kind,
-        position: entity.position,
-        orientation: entity.orientation,
-        scale: entity.scale,
-        material: entity.material,
-        last_update_ms: entity.last_update_ms,
-    }
-}
-
 #[derive(Debug)]
 struct ServerState {
     next_client_id: u64,
-    next_entity_id: u64,
+    entity_store: EntityStore,
     world: VoxelWorld,
     world_revision: u64,
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
     stream_worldgen_has_content_cache: HashMap<StreamChunkKey, bool>,
     players: HashMap<u64, PlayerState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
-    entities: HashMap<u64, EntityState>,
     cpu_profile: ServerCpuProfile,
 }
 
@@ -220,7 +198,7 @@ fn record_server_cpu_sample(
         guard
             .cpu_profile
             .take_report_if_due(Instant::now())
-            .map(|report| (report, guard.players.len(), guard.entities.len()))
+            .map(|report| (report, guard.players.len(), guard.entity_store.len()))
     };
 
     let Some((report, player_count, entity_count)) = maybe_report else {
@@ -1316,12 +1294,10 @@ fn start_broadcast_thread(
                     all.sort_by_key(|p| p.client_id);
                     Some(all)
                 };
-                let entities = if guard.entities.is_empty() {
+                let entities = if guard.entity_store.is_empty() {
                     None
                 } else {
-                    let mut all: Vec<_> = guard.entities.values().map(entity_snapshot).collect();
-                    all.sort_by_key(|e| e.entity_id);
-                    Some(all)
+                    Some(guard.entity_store.sorted_snapshots())
                 };
                 (players, entities)
             };
@@ -1500,12 +1476,11 @@ fn handle_message(
             }
             {
                 let guard = state.lock().expect("server state lock poisoned");
-                for entity in guard.entities.values() {
-                    let _ = guard.clients.get(&client_id).map(|tx| {
-                        let _ = tx.send(ServerMessage::EntitySpawned {
-                            entity: entity_snapshot(entity),
-                        });
-                    });
+                let entities = guard.entity_store.snapshots();
+                if let Some(tx) = guard.clients.get(&client_id) {
+                    for entity in entities {
+                        let _ = tx.send(ServerMessage::EntitySpawned { entity });
+                    }
                 }
             }
             let center_chunk = world_chunk_from_position(snapshot.position);
@@ -1756,19 +1731,14 @@ fn spawn_entity(
     start: Instant,
 ) -> u64 {
     let mut guard = state.lock().expect("server state lock poisoned");
-    let entity_id = guard.next_entity_id;
-    guard.next_entity_id = guard.next_entity_id.wrapping_add(1).max(1);
-    let entity = EntityState {
-        entity_id,
+    guard.entity_store.spawn(
         kind,
         position,
         orientation,
         scale,
         material,
-        last_update_ms: monotonic_ms(start),
-    };
-    guard.entities.insert(entity_id, entity);
-    entity_id
+        monotonic_ms(start),
+    )
 }
 
 fn spawn_default_test_entities(state: &SharedState, start: Instant) {
@@ -1839,14 +1809,13 @@ fn initialize_state(
 
     let state = Arc::new(Mutex::new(ServerState {
         next_client_id: 1,
-        next_entity_id: 1,
+        entity_store: EntityStore::new(),
         world: initial_world,
         world_revision: 0,
         procgen_blocked_cells,
         stream_worldgen_has_content_cache: HashMap::new(),
         players: HashMap::new(),
         clients: HashMap::new(),
-        entities: HashMap::new(),
         cpu_profile: ServerCpuProfile::new(start),
     }));
 
