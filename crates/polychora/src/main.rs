@@ -5072,18 +5072,23 @@ impl App {
                 }
             }
 
-            // Look-at: on G press, find nearest solid block and smoothly
-            // rotate the camera toward it.
+            // Look-at: on G press, fan-cast across the ZW viewing wedge to
+            // find the nearest solid block and smoothly rotate toward it.
             if self.input.take_look_at() && self.mouse_grabbed {
-                let look_dir = self.current_look_direction();
                 let edit_reach = self
                     .args
                     .edit_reach
                     .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
-                let targets =
-                    self.scene
-                        .block_edit_targets(self.camera.position, look_dir, edit_reach);
-                if let Some([x, y, z, w]) = targets.hit_voxel {
+                let (_right, _up, view_z, view_w) = self.current_view_basis();
+                let hit = self.scene.fan_cast_nearest_block(
+                    self.camera.position,
+                    view_z,
+                    view_w,
+                    self.focal_length_zw,
+                    edit_reach,
+                    32,
+                );
+                if let Some([x, y, z, w]) = hit {
                     let target_pos = [
                         x as f32 + 0.5,
                         y as f32 + 0.5,
