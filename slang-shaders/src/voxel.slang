@@ -156,6 +156,7 @@ struct VoxelChunkLookupEntry
 struct VoxelYSliceBounds
 {
     int chunkY;
+    uint lodLevel;
     int minChunkX;
     int maxChunkX;
     int minChunkZ;
@@ -884,10 +885,6 @@ uint findChunkIndexFromYSliceLookup(
     VoxelYSliceBounds slice,
     VoxelFrameMeta meta)
 {
-    if (lodLevel != 0u)
-    {
-        return INVALID_INDEX;
-    }
     if (slice.lookupEntryCount == 0u)
     {
         return INVALID_INDEX;
@@ -1606,6 +1603,10 @@ bool traceVoxelRayDDAByYSlicesFast(
         }
 
         VoxelYSliceBounds slice = voxelYSliceBounds[sliceIdx];
+        if (slice.lodLevel != 0u)
+        {
+            continue;
+        }
         float4 sliceMin = float4(
             float(slice.minChunkX) * chunkSizeF,
             float(slice.chunkY) * chunkSizeF,
@@ -1904,18 +1905,19 @@ bool traceVoxelRayDDA(
     float4 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
     bool chunkStateValid = false;
     bool ySliceLookupEnabled =
-        targetLodLevel == 0u
-        && (meta.debugFlags & META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE) != 0u
+        (meta.debugFlags & META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE) != 0u
         && meta.ySliceCount > 0u;
     int cachedSliceY = 0;
+    uint cachedSliceLod = 0xFFFFFFFFu;
     int cachedSliceIndex = -1;
     const float CHUNK_EPS = 1e-6;
     float chunkSizeF = float(CHUNK_SIZE);
-    bool useSliceIntervalCull = targetLodLevel == 0u
-        && !collectDebugFlags
+    bool useSliceIntervalCull = !collectDebugFlags
         && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u
         && meta.ySliceCount > 0u
-        && meta.ySliceCount <= FAST_Y_SLICE_LIMIT;
+        // Y-slice tables now include up to three LOD bands per Y; keep the
+        // previous per-LOD budget while accounting for those bands.
+        && meta.ySliceCount <= FAST_Y_SLICE_LIMIT * 3u;
     if (useSliceIntervalCull)
     {
         bool sliceAnyHit = false;
@@ -1924,6 +1926,10 @@ bool traceVoxelRayDDA(
         for (uint sliceIdx = 0u; sliceIdx < meta.ySliceCount; sliceIdx++)
         {
             VoxelYSliceBounds slice = voxelYSliceBounds[sliceIdx];
+            if (slice.lodLevel != targetLodLevel)
+            {
+                continue;
+            }
             float4 sliceBMin = float4(
                 float(slice.minChunkX) * chunkSizeF,
                 float(slice.chunkY) * chunkSizeF,
@@ -2101,15 +2107,20 @@ bool traceVoxelRayDDA(
         bool lookupDecidesMiss = false;
         if (inVisibleChunkBounds && ySliceLookupEnabled)
         {
-            if (cachedSliceIndex < 0 || chunkCoord.y != cachedSliceY)
+            if (cachedSliceIndex < 0
+                || chunkCoord.y != cachedSliceY
+                || targetLodLevel != cachedSliceLod)
             {
                 cachedSliceIndex = -1;
                 for (uint sliceIdx = 0u; sliceIdx < meta.ySliceCount; sliceIdx++)
                 {
-                    if (voxelYSliceBounds[sliceIdx].chunkY == chunkCoord.y)
+                    VoxelYSliceBounds candidateSlice = voxelYSliceBounds[sliceIdx];
+                    if (candidateSlice.chunkY == chunkCoord.y
+                        && candidateSlice.lodLevel == targetLodLevel)
                     {
                         cachedSliceIndex = int(sliceIdx);
                         cachedSliceY = chunkCoord.y;
+                        cachedSliceLod = targetLodLevel;
                         break;
                     }
                 }

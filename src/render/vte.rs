@@ -25,6 +25,7 @@ impl GpuVoxelChunkHeader {
 #[repr(C)]
 pub struct GpuVoxelYSliceBounds {
     pub chunk_y: i32,
+    pub lod_level: u32,
     pub min_chunk_x: i32,
     pub max_chunk_x: i32,
     pub min_chunk_z: i32,
