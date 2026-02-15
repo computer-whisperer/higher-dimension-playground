@@ -1,9 +1,8 @@
 use clap::{Parser, Subcommand};
+use polychora::legacy_migration;
 use polychora::save_v3;
 use polychora::shared::protocol::{EntityClass, EntityKind};
-use polychora::shared::voxel::{
-    load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld,
-};
+use polychora::shared::voxel::{load_world, save_world, BaseWorldKind, VoxelType, VoxelWorld};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -271,44 +270,6 @@ fn parse_chunk_bound(arg_name: &str, raw: &[i32]) -> io::Result<[i32; 4]> {
     Ok([raw[0], raw[1], raw[2], raw[3]])
 }
 
-fn validate_bounds(min_chunk: [i32; 4], max_chunk: [i32; 4]) -> io::Result<()> {
-    for axis in 0..4 {
-        if min_chunk[axis] > max_chunk[axis] {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "invalid keep chunk bounds: min axis {} ({}) exceeds max ({})",
-                    axis, min_chunk[axis], max_chunk[axis]
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn drop_overrides_outside_chunk_bounds(
-    world: &mut VoxelWorld,
-    min_chunk: [i32; 4],
-    max_chunk: [i32; 4],
-) -> usize {
-    let positions: Vec<ChunkPos> = world.chunks.keys().copied().collect();
-    let mut dropped = 0usize;
-    for pos in positions {
-        let outside = pos.x < min_chunk[0]
-            || pos.x > max_chunk[0]
-            || pos.y < min_chunk[1]
-            || pos.y > max_chunk[1]
-            || pos.z < min_chunk[2]
-            || pos.z > max_chunk[2]
-            || pos.w < min_chunk[3]
-            || pos.w > max_chunk[3];
-        if outside && world.remove_chunk_override(pos) {
-            dropped += 1;
-        }
-    }
-    dropped
-}
-
 fn default_migrate_output_path(input: &Path) -> PathBuf {
     input.with_extension("migrated.v4dw")
 }
@@ -434,7 +395,8 @@ fn run_migrate(
         (Some(min_raw), Some(max_raw)) => {
             let min = parse_chunk_bound("--keep-min-chunk", &min_raw)?;
             let max = parse_chunk_bound("--keep-max-chunk", &max_raw)?;
-            validate_bounds(min, max)?;
+            legacy_migration::validate_chunk_bounds(min, max)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             Some((min, max))
         }
         (None, None) => None,
@@ -461,7 +423,8 @@ fn run_migrate(
     let mut dropped = 0usize;
     if drop_outside_keep_bounds {
         let (min_chunk, max_chunk) = keep_bounds.expect("checked above");
-        dropped = drop_overrides_outside_chunk_bounds(&mut world, min_chunk, max_chunk);
+        dropped =
+            legacy_migration::drop_overrides_outside_chunk_bounds(&mut world, min_chunk, max_chunk);
         println!(
             "Applied migration: dropped {} override chunks outside keep bounds",
             dropped

@@ -40,75 +40,17 @@ fn parse_chunk_coord4(raw: &str, label: &str) -> Result<[i32; 4], String> {
     Ok(out)
 }
 
-fn validate_chunk_bounds(min_chunk: [i32; 4], max_chunk: [i32; 4]) -> Result<(), String> {
-    for axis in 0..4 {
-        if min_chunk[axis] > max_chunk[axis] {
-            return Err(format!(
-                "invalid bounds on axis {}: min {} > max {}",
-                axis, min_chunk[axis], max_chunk[axis]
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn drop_overrides_outside_chunk_bounds(
-    world: &mut polychora::shared::voxel::VoxelWorld,
-    min_chunk: [i32; 4],
-    max_chunk: [i32; 4],
-) -> usize {
-    let positions: Vec<polychora::shared::voxel::ChunkPos> = world.chunks.keys().copied().collect();
-    let mut dropped = 0usize;
-    for pos in positions {
-        let outside = pos.x < min_chunk[0]
-            || pos.x > max_chunk[0]
-            || pos.y < min_chunk[1]
-            || pos.y > max_chunk[1]
-            || pos.z < min_chunk[2]
-            || pos.z > max_chunk[2]
-            || pos.w < min_chunk[3]
-            || pos.w > max_chunk[3];
-        if outside && world.remove_chunk_override(pos) {
-            dropped = dropped.saturating_add(1);
-        }
-    }
-    dropped
-}
-
 fn run_legacy_trim_migration(
     input: &Path,
     output: &Path,
     min_chunk: [i32; 4],
     max_chunk: [i32; 4],
 ) -> Result<(usize, usize), String> {
-    let file = std::fs::File::open(input)
-        .map_err(|error| format!("failed to open input {}: {error}", input.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut world = polychora::shared::voxel::load_world(&mut reader)
-        .map_err(|error| format!("failed to parse {}: {error}", input.display()))?;
-    let dropped = drop_overrides_outside_chunk_bounds(&mut world, min_chunk, max_chunk);
-
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "failed to create output directory {}: {error}",
-                    parent.display()
-                )
-            })?;
-        }
-    }
-    let file = std::fs::File::create(output)
-        .map_err(|error| format!("failed to create output {}: {error}", output.display()))?;
-    let mut writer = std::io::BufWriter::new(file);
-    polychora::shared::voxel::save_world(&world, &mut writer)
-        .map_err(|error| format!("failed to write output {}: {error}", output.display()))?;
-    use std::io::Write;
-    writer
-        .flush()
-        .map_err(|error| format!("failed to flush output {}: {error}", output.display()))?;
-
-    Ok((dropped, world.non_empty_chunk_count()))
+    let result = polychora::legacy_migration::trim_legacy_world_keep_bounds(
+        input, output, min_chunk, max_chunk,
+    )
+    .map_err(|error| format!("legacy trim migration failed: {error}"))?;
+    Ok((result.dropped_overrides, result.non_empty_chunks))
 }
 
 fn run_legacy_to_v3_migration(
@@ -273,7 +215,8 @@ impl App {
                 return;
             }
         };
-        if let Err(error) = validate_chunk_bounds(min_chunk, max_chunk) {
+        if let Err(error) = polychora::legacy_migration::validate_chunk_bounds(min_chunk, max_chunk)
+        {
             self.main_menu_migration_status = Some(format!("Error: {error}"));
             return;
         }

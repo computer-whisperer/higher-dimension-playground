@@ -260,17 +260,40 @@ impl Scene {
             ));
         }
 
-        let empty_entities = Vec::new();
-        let empty_players = Vec::new();
+        if path.exists() && path.is_dir() && !save_v3::is_v3_save_root(path) {
+            let mut entries = std::fs::read_dir(path)?;
+            if entries.next().is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "directory '{}' is not a v3 save root (missing manifest.json)",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+
+        let mut persisted_entities = Vec::new();
+        let mut persisted_players = Vec::new();
+        let mut world_seed = 1337u64;
+        let mut next_entity_id = 1u64;
+        if save_v3::is_v3_save_root(path) {
+            let loaded = save_v3::load_state(path)?;
+            world_seed = loaded.global.world_seed;
+            next_entity_id = loaded.global.next_entity_id;
+            persisted_entities = loaded.entities;
+            persisted_players = loaded.players.players;
+        }
+
         let empty_regions = HashSet::new();
         let _ = save_v3::save_state(
             path,
             save_v3::SaveRequest {
                 world: &self.world,
-                entities: &empty_entities,
-                players: &empty_players,
-                world_seed: 1337,
-                next_entity_id: 1,
+                entities: &persisted_entities,
+                players: &persisted_players,
+                world_seed,
+                next_entity_id,
                 dirty_block_regions: &empty_regions,
                 dirty_entity_regions: &empty_regions,
                 force_full_blocks: true,

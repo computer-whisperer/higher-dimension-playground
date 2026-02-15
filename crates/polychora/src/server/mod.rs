@@ -29,6 +29,7 @@ const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
 const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
 const ENTITY_SIM_STEP_MAX_PER_BROADCAST: usize = 16;
+const PLAYER_PERSIST_INTERVAL_MS: u64 = 60_000;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -274,6 +275,7 @@ struct ServerState {
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
     stream_worldgen_has_content_cache: HashMap<StreamChunkKey, bool>,
     players: HashMap<u64, PlayerState>,
+    last_players_persisted_ms: u64,
     mobs: HashMap<u64, MobState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
     cpu_profile: ServerCpuProfile,
@@ -1983,8 +1985,11 @@ fn start_autosave_thread(
                 let mut guard = state.lock().expect("server state lock poisoned");
                 let now_ms = save_v3::now_unix_ms();
                 let players = collect_player_records(&guard, now_ms);
+                let should_persist_players = !players.is_empty()
+                    && now_ms.saturating_sub(guard.last_players_persisted_ms)
+                        >= PLAYER_PERSIST_INTERVAL_MS;
                 let should_save =
-                    guard.world.any_dirty() || guard.entities_dirty || !players.is_empty();
+                    guard.world.any_dirty() || guard.entities_dirty || should_persist_players;
                 if !should_save {
                     None
                 } else {
@@ -2015,6 +2020,9 @@ fn start_autosave_thread(
                             guard.entities_dirty = false;
                             guard.dirty_block_regions.clear();
                             guard.world.clear_dirty();
+                            if !players.is_empty() {
+                                guard.last_players_persisted_ms = now_ms;
+                            }
                             (
                                 save_result,
                                 chunk_count,
@@ -2854,6 +2862,7 @@ fn initialize_state(
     let start = Instant::now();
     let loaded = load_or_init_world_state(&config.world_file, config.world_seed)?;
     let save_generation = loaded.manifest.current_generation;
+    let last_persisted_ms = loaded.manifest.last_modified_ms;
     let region_chunk_edge = loaded.manifest.limits.region_chunk_edge.max(1);
     let persisted_entities = loaded.entities;
     let persisted_players = loaded.players.players;
@@ -2916,6 +2925,7 @@ fn initialize_state(
         procgen_blocked_cells,
         stream_worldgen_has_content_cache: HashMap::new(),
         players: HashMap::new(),
+        last_players_persisted_ms: last_persisted_ms,
         mobs: HashMap::new(),
         clients: HashMap::new(),
         cpu_profile: ServerCpuProfile::new(start),

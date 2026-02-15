@@ -1088,3 +1088,115 @@ fn fsync_directory(path: &Path) {
         let _ = dir.sync_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_UNIQUIFIER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_root(name: &str) -> PathBuf {
+        let serial = TEST_UNIQUIFIER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "polychora-save-v3-{name}-{}-{}",
+            std::process::id(),
+            serial
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create test save root");
+        path
+    }
+
+    #[test]
+    fn save_and_load_roundtrip_preserves_world_entities_players() {
+        let root = test_root("roundtrip");
+        let now_ms = now_unix_ms();
+
+        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            material: VoxelType(11),
+        });
+        world.set_voxel(1, 1, 1, 1, VoxelType(3));
+        world.set_voxel(40, 2, -5, 17, VoxelType(7));
+
+        let entities = vec![PersistedEntityRecord {
+            entity_id: 42,
+            class: EntityClass::Accent,
+            kind: EntityKind::TestRotor,
+            position: [2.0, 3.0, 4.0, 5.0],
+            orientation: [0.0, 0.0, 1.0, 0.0],
+            velocity: [0.1, 0.2, 0.3, 0.4],
+            scale: 0.75,
+            material: 9,
+            display_name: Some("spin".to_string()),
+            tags: vec!["demo".to_string()],
+            payload: vec![1, 2, 3, 4],
+            last_saved_ms: now_ms,
+        }];
+        let players = vec![PlayerRecord {
+            player_id: 7,
+            position: [8.0, 9.0, 10.0, 11.0],
+            orientation: [0.0, 0.0, 1.0, 0.0],
+            tags: vec!["tester".to_string()],
+            inventory_payload: vec![99],
+            last_saved_ms: now_ms,
+        }];
+        let empty_regions = HashSet::new();
+
+        let save_result = save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &entities,
+                players: &players,
+                world_seed: 4242,
+                next_entity_id: 1000,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                now_ms,
+            },
+        )
+        .expect("save state");
+        assert_eq!(save_result.generation, 1);
+
+        let loaded = load_state(&root).expect("load state");
+        assert_eq!(loaded.manifest.version, SAVE_FORMAT_VERSION);
+        assert_eq!(loaded.global.world_seed, 4242);
+        assert_eq!(loaded.global.next_entity_id, 1000);
+        assert_eq!(loaded.players.players.len(), 1);
+        assert_eq!(loaded.entities.len(), 1);
+        assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), VoxelType(3));
+        assert_eq!(loaded.world.get_voxel(40, 2, -5, 17), VoxelType(7));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrate_legacy_world_to_v3_roundtrip() {
+        let root = test_root("migrate");
+        let legacy_world = root.join("legacy.v4dw");
+        let output_root = root.join("migrated-v3");
+
+        let mut world = VoxelWorld::new();
+        world.set_voxel(2, 2, 2, 2, VoxelType(9));
+        {
+            let mut writer = BufWriter::new(File::create(&legacy_world).expect("create legacy"));
+            crate::shared::voxel::save_world(&world, &mut writer).expect("save legacy");
+            writer.flush().expect("flush legacy");
+        }
+
+        let save_result =
+            migrate_legacy_world_to_v3(&legacy_world, None, &output_root, 777, now_unix_ms())
+                .expect("migrate legacy to v3");
+        assert_eq!(save_result.generation, 1);
+
+        let loaded = load_state(&output_root).expect("load migrated");
+        assert_eq!(loaded.global.world_seed, 777);
+        assert_eq!(loaded.world.get_voxel(2, 2, 2, 2), VoxelType(9));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
