@@ -1285,8 +1285,10 @@ fn start_broadcast_thread(
                 break;
             }
             let tick_cpu_start = Instant::now();
+            let now = monotonic_ms(start);
             let (players, entities) = {
-                let guard = state.lock().expect("server state lock poisoned");
+                let mut guard = state.lock().expect("server state lock poisoned");
+                guard.entity_store.simulate(now);
                 let players = if guard.players.is_empty() {
                     None
                 } else {
@@ -1302,7 +1304,6 @@ fn start_broadcast_thread(
                 (players, entities)
             };
             let did_broadcast = players.is_some() || entities.is_some();
-            let now = monotonic_ms(start);
             if let Some(players) = players {
                 broadcast(
                     &state,
@@ -1476,7 +1477,7 @@ fn handle_message(
             }
             {
                 let guard = state.lock().expect("server state lock poisoned");
-                let entities = guard.entity_store.snapshots();
+                let entities = guard.entity_store.sorted_snapshots();
                 if let Some(tx) = guard.clients.get(&client_id) {
                     for entity in entities {
                         let _ = tx.send(ServerMessage::EntitySpawned { entity });
