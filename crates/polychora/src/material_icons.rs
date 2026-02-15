@@ -1,10 +1,17 @@
-use crate::cpu_render::{cpu_render, CpuRenderParams};
 use crate::materials;
-use common::{MatN, ModelInstance, ModelTetrahedron};
+use common::{MatN, ModelInstance};
+use higher_dimension_playground::render::{
+    FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
+};
 use std::collections::HashMap;
+use std::sync::Arc;
+use vulkano::device::{Device, Queue};
+use vulkano::instance::Instance;
 
 pub const ICON_SIZE: u32 = 64;
 const SHEET_COLUMNS: u32 = 10;
+const ICON_FOCAL_LENGTH_XY: f32 = 4.0;
+const ICON_FOCAL_LENGTH_ZW: f32 = 6.0;
 
 /// Build a 5x5 homogeneous rotation matrix in the XZ plane (angle in radians).
 fn rot_xz(a: f32) -> MatN<5> {
@@ -49,6 +56,33 @@ fn translate(dx: f32, dy: f32, dz: f32, dw: f32) -> MatN<5> {
     m
 }
 
+fn icon_view_matrix() -> MatN<5> {
+    let center = translate(-0.5, -0.5, -0.5, -0.5);
+    let r1 = rot_xz(0.50);
+    let r2 = rot_yz(-0.40);
+    // Keep a subtle hidden-dimension tilt, but reduce it so icons stay crisp.
+    let r3 = rot_xw(0.22);
+    let push_back = translate(0.0, 0.15, 2.8, 2.8);
+    push_back * r3 * r2 * r1 * center
+}
+
+fn icon_render_options() -> RenderOptions {
+    RenderOptions {
+        do_frame_clear: true,
+        do_raster: true,
+        do_raytrace: false,
+        render_backend: RenderBackend::TetraRaster,
+        do_edges: false,
+        do_tetrahedron_edges: false,
+        do_navigation_hud: false,
+        zw_angle_color_shift_enabled: false,
+        // Keep padding flags clear so rasterizer stays in non-overlay mode.
+        zw_angle_color_shift_strength: 0.0,
+        prepare_render_screenshot: true,
+        ..Default::default()
+    }
+}
+
 /// A sprite sheet containing all material icons packed into a single texture.
 pub struct MaterialIconSheet {
     /// RGBA pixel data for the entire sprite sheet
@@ -68,9 +102,13 @@ impl MaterialIconSheet {
     }
 }
 
-/// Generate a sprite sheet containing all material icons packed into a grid.
-/// Returns the sheet with pixel data and UV lookup.
-pub fn generate_material_icon_sheet(model_tets: &[ModelTetrahedron]) -> MaterialIconSheet {
+/// Generate a sprite sheet containing all material icons packed into a grid
+/// by rendering the tetrahedron pipeline offscreen on GPU.
+pub fn generate_material_icon_sheet_gpu(
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    instance: Arc<Instance>,
+) -> Option<MaterialIconSheet> {
     let num_materials = materials::MATERIALS.len() as u32;
     let rows = (num_materials + SHEET_COLUMNS - 1) / SHEET_COLUMNS;
     let sheet_w = SHEET_COLUMNS * ICON_SIZE;
@@ -78,36 +116,54 @@ pub fn generate_material_icon_sheet(model_tets: &[ModelTetrahedron]) -> Material
 
     let mut pixels = vec![0u8; (sheet_w * sheet_h * 4) as usize];
     let mut uv_rects = HashMap::new();
+    let icon_pixel_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
 
-    let center = translate(-0.5, -0.5, -0.5, -0.5);
-    let r1 = rot_xz(0.50);
-    let r2 = rot_yz(-0.40);
-    // Keep a subtle hidden-dimension tilt, but reduce it so icons stay crisp.
-    let r3 = rot_xw(0.22);
-    let push_back = translate(0.0, 0.15, 2.8, 2.8);
-    let view_matrix = push_back * r3 * r2 * r1 * center;
-
-    let params = CpuRenderParams {
-        view_matrix,
-        focal_length_xy: 4.0,
-        // Narrower ZW cone for less integrated blur in tiny icon renders.
-        focal_length_zw: 6.0,
-        width: ICON_SIZE,
-        height: ICON_SIZE,
-        ..Default::default()
-    };
+    let mut offscreen = RenderContext::new(
+        device.clone(),
+        queue.clone(),
+        instance,
+        None,
+        [ICON_SIZE, ICON_SIZE, 1],
+    );
+    let view_matrix: ndarray::Array2<f32> = icon_view_matrix().into();
 
     for (idx, mat) in materials::MATERIALS.iter().enumerate() {
         let col = (idx as u32) % SHEET_COLUMNS;
         let row = (idx as u32) / SHEET_COLUMNS;
 
-        let instance = ModelInstance {
+        let model_instance = [ModelInstance {
             model_transform: MatN::<5>::identity(),
             cell_material_ids: [mat.id as u32; 8],
-        };
+        }];
 
-        let img = cpu_render(&[instance], model_tets, &params);
-        let raw = img.into_raw();
+        offscreen.render_tetra_frame(
+            device.clone(),
+            queue.clone(),
+            FrameParams {
+                view_matrix: view_matrix.clone(),
+                time_ticks_ms: 0,
+                focal_length_xy: ICON_FOCAL_LENGTH_XY,
+                focal_length_zw: ICON_FOCAL_LENGTH_ZW,
+                render_options: icon_render_options(),
+            },
+            TetraFrameInput {
+                model_instances: &model_instance,
+            },
+        );
+        let Some((icon_w, icon_h, raw)) = offscreen.capture_rendered_frame_rgba8(true) else {
+            eprintln!("Failed to capture offscreen material icon render for material {}", mat.id);
+            return None;
+        };
+        if icon_w != ICON_SIZE || icon_h != ICON_SIZE || raw.len() != icon_pixel_len {
+            eprintln!(
+                "Unexpected offscreen icon size for material {}: {}x{} ({} bytes)",
+                mat.id,
+                icon_w,
+                icon_h,
+                raw.len()
+            );
+            return None;
+        }
 
         // Copy icon pixels into the sprite sheet
         let dst_x = col * ICON_SIZE;
@@ -127,10 +183,10 @@ pub fn generate_material_icon_sheet(model_tets: &[ModelTetrahedron]) -> Material
         uv_rects.insert(mat.id, [u_min, v_min, u_max, v_max]);
     }
 
-    MaterialIconSheet {
+    Some(MaterialIconSheet {
         pixels,
         width: sheet_w,
         height: sheet_h,
         uv_rects,
-    }
+    })
 }

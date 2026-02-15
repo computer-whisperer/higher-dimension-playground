@@ -19,6 +19,12 @@ import materials;
 [[vk::binding(8, 1)]] RWStructuredBuffer<uint> tileTetIndices;
 
 static const uint MAX_TETS_PER_TILE = 8192;
+static const uint WORKING_FLAG_VTE_COLLAPSED = 1u << 0u;
+
+bool isVteCollapsed(WorkingData workingData)
+{
+    return (workingData.padding[0] & WORKING_FLAG_VTE_COLLAPSED) != 0u;
+}
 
 // Set 2: LiveBuffers
 [[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;
@@ -267,7 +273,7 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
     //   lower boundary: -sin(theta_min)*Z + cos(theta_min)*W >= 0
     //   upper boundary:  sin(theta_max)*Z - cos(theta_max)*W >= 0
     // In VTE overlay mode (material preview), use 2x narrower ZW FOV (45° instead of 90°).
-    float effectiveFocalLengthZW = workingData.padding[0] != 0u
+    float effectiveFocalLengthZW = isVteCollapsed(workingData)
         ? workingData.focalLengthZW * 2.0
         : workingData.focalLengthZW;
     float zwViewAngle = (3.14159265 / 2.0) / effectiveFocalLengthZW;
@@ -506,7 +512,7 @@ float2 getZWAngleRange(WorkingData workingData)
 {
     const float PI = 3.14159;
     // In VTE overlay mode (material preview), use 2x narrower ZW FOV (45° instead of 90°).
-    float effectiveFocalLengthZW = workingData.padding[0] != 0u
+    float effectiveFocalLengthZW = isVteCollapsed(workingData)
         ? workingData.focalLengthZW * 2.0
         : workingData.focalLengthZW;
     float viewAngle = (PI / 2.0) / effectiveFocalLengthZW;
@@ -660,7 +666,7 @@ float4 renderZWLines2(inout ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDa
 {
     // VTE overlay mode only draws small post-raster previews. Use a cheaper path:
     // skip O(n^2) occlusion prepass and reduce hidden-dimension sampling.
-    if (workingData.padding[0] != 0u)
+    if (isVteCollapsed(workingData))
     {
         return renderZWLinesSimple(
             lines,
@@ -773,7 +779,7 @@ groupshared uint sharedTetIndices[MAX_TETS_PER_TILE];
 void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex)
 {
     WorkingData workingData = workingDataBuffer[0];
-    bool overlayMode = workingData.padding[0] != 0u;
+    bool overlayMode = isVteCollapsed(workingData);
     uint2 overlayOrigin = overlayMode
         ? uint2(dispatchParams.instanceBase, dispatchParams.tetrahedronCount)
         : uint2(0, 0);
@@ -1015,14 +1021,14 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
     {
         // Legacy raster/ray paths expect uncovered pixels to be cleared each frame.
         uint pixelIndex = uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x;
-        pixelBuffer[pixelIndex] = float4(0, 0, 0, 1.0);
+        pixelBuffer[pixelIndex] = float4(0, 0, 0, 0.0);
     }
-    // In VTE mode (padding[0] != 0), leave uncovered pixels untouched so
+    // In VTE mode (WORKING_FLAG_VTE_COLLAPSED set), leave uncovered pixels untouched so
     // voxel Stage A/B output remains visible behind the overlay raster.
 
     // Only clear other Z slices for non-VTE paths. VTE uses layer 0 as the
     // collapsed display target, and clearing here can clobber Stage A data.
-    if (workingData.padding[0] == 0u)
+    if (!isVteCollapsed(workingData))
     {
         for (uint z = 1; z < workingData.renderDimensions.z; z++)
         {

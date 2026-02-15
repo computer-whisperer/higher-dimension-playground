@@ -56,25 +56,33 @@ impl ApplicationHandler for App {
         // Generate material icon sprite sheet and upload to GPU
         if self.material_icon_sheet.is_none() {
             let start = Instant::now();
-            let model_tets = higher_dimension_playground::render::generate_tesseract_tetrahedrons();
-            let sheet = material_icons::generate_material_icon_sheet(&model_tets);
-            eprintln!(
-                "Generated material icon sprite sheet ({}x{}) in {:.2}s",
-                sheet.width,
-                sheet.height,
-                start.elapsed().as_secs_f32()
-            );
-            if let Some(rcx) = self.rcx.as_mut() {
-                rcx.upload_material_icons_texture(
-                    self.queue.clone(),
+            if let Some(sheet) = material_icons::generate_material_icon_sheet_gpu(
+                self.device.clone(),
+                self.queue.clone(),
+                self.instance.clone(),
+            ) {
+                eprintln!(
+                    "Generated material icon sprite sheet ({}x{}) in {:.2}s",
                     sheet.width,
                     sheet.height,
-                    &sheet.pixels,
+                    start.elapsed().as_secs_f32()
+                );
+                self.material_icon_sheet = Some(sheet);
+            } else {
+                eprintln!(
+                    "Failed to generate GPU material icon sprite sheet; using color fallback icons."
                 );
             }
+        }
+        if let (Some(rcx), Some(sheet)) = (self.rcx.as_mut(), self.material_icon_sheet.as_ref()) {
+            rcx.upload_material_icons_texture(
+                self.queue.clone(),
+                sheet.width,
+                sheet.height,
+                &sheet.pixels,
+            );
             // Use User(1) as the egui texture ID for material icons
             self.material_icons_texture_id = Some(egui::TextureId::User(1));
-            self.material_icon_sheet = Some(sheet);
         }
 
         self.last_frame = Instant::now();

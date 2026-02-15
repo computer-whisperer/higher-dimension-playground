@@ -116,7 +116,10 @@ impl RenderContext {
         };
     }
 
-    pub fn save_rendered_frame_png(&mut self, path: &str) {
+    pub fn capture_rendered_frame_rgba8(
+        &mut self,
+        preserve_alpha: bool,
+    ) -> Option<(u32, u32, Vec<u8>)> {
         self.wait_for_all_frames();
 
         let result = self.sized_buffers.output_cpu_pixel_buffer.read();
@@ -131,8 +134,8 @@ impl RenderContext {
                     ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
                 }
 
-                let w = self.sized_buffers.render_dimensions[0] as u32;
-                let h = self.sized_buffers.render_dimensions[1] as u32;
+                let w = self.sized_buffers.render_dimensions[0];
+                let h = self.sized_buffers.render_dimensions[1];
                 let vte_collapsed = self.last_backend == RenderBackend::VoxelTraversal;
                 let depth = if vte_collapsed {
                     1
@@ -142,7 +145,7 @@ impl RenderContext {
                         .min(self.sized_buffers.pixel_storage_layers.max(1))
                 };
 
-                let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+                let mut pixels = Vec::with_capacity((w as usize) * (h as usize) * 4);
                 for y in 0..h {
                     for x in 0..w {
                         // Match present shader behavior:
@@ -178,17 +181,29 @@ impl RenderContext {
                         pixels.push((r.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);
                         pixels.push((g.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);
                         pixels.push((b.clamp(0.0, 1.0).powf(gamma) * 255.0) as u8);
-                        pixels.push(255u8);
+                        let alpha = if preserve_alpha {
+                            (accum_pixel.w.clamp(0.0, 1.0) * 255.0) as u8
+                        } else {
+                            255u8
+                        };
+                        pixels.push(alpha);
                     }
                 }
 
-                let image = ImageBuffer::<Rgba<u8>, _>::from_raw(w, h, pixels).unwrap();
-                image.save(path).unwrap();
-                println!("Saved PNG to {}", path);
+                Some((w, h, pixels))
             }
             Err(error) => {
-                eprintln!("Error saving PNG: {:?}", error);
+                eprintln!("Error capturing rendered frame: {:?}", error);
+                None
             }
-        };
+        }
+    }
+
+    pub fn save_rendered_frame_png(&mut self, path: &str) {
+        if let Some((w, h, pixels)) = self.capture_rendered_frame_rgba8(false) {
+            let image = ImageBuffer::<Rgba<u8>, _>::from_raw(w, h, pixels).unwrap();
+            image.save(path).unwrap();
+            println!("Saved PNG to {}", path);
+        }
     }
 }
