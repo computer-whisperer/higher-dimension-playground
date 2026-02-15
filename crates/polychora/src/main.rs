@@ -865,6 +865,7 @@ fn main() {
         profile_gpu_ms_sum: 0.0,
         profile_gpu_ms_max: 0.0,
         profile_gpu_samples: 0,
+        world_ready: initial_app_state == AppState::MainMenu,
     };
 
     if app.vte_reference_compare_enabled {
@@ -990,7 +991,7 @@ fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
     eprintln!("Saved frames/cpu_render.png");
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum AppState {
     MainMenu,
     Playing,
@@ -1120,6 +1121,7 @@ struct App {
     profile_gpu_ms_sum: f64,
     profile_gpu_ms_max: f64,
     profile_gpu_samples: u32,
+    world_ready: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -4047,6 +4049,8 @@ impl App {
         let full_output = egui_ctx.run(raw_input, |ctx| {
             if self.app_state == AppState::MainMenu {
                 self.draw_egui_main_menu(ctx, &mut transition_to_playing);
+            } else if !self.world_ready {
+                self.draw_egui_loading_screen(ctx);
             } else {
                 if self.menu_open {
                     self.draw_egui_pause_menu(ctx, &mut close_menu, &mut return_to_main_menu);
@@ -4515,6 +4519,14 @@ impl App {
         self.app_state = AppState::Playing;
         self.menu_open = false;
         self.main_menu_connect_error = None;
+        self.world_ready = false;
+
+        // Pre-load chunks around spawn position
+        self.scene.preload_spawn_chunks(
+            self.camera.position,
+            self.vte_lod_near_max_distance,
+        );
+
         self.grab_mouse(window);
     }
 
@@ -4582,6 +4594,7 @@ impl App {
         self.menu_open = false;
         self.inventory_open = false;
         self.teleport_dialog_open = false;
+        self.world_ready = true;
         // Reset the menu demo camera
         // DemoCubes geometry: 2x2x2x2 lattice centered at [1,1,1,1], cubes from [-2,-2,-2,-2] to [4,4,4,4]
         // Position camera at [6,3,6,1] looking toward the cluster center [1,1,1,1]
@@ -4683,6 +4696,15 @@ impl App {
                 },
             );
         }
+    }
+
+    fn draw_egui_loading_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.4);
+                ui.heading("Loading world...");
+            });
+        });
     }
 
     fn draw_egui_main_menu(
@@ -5583,6 +5605,16 @@ impl App {
                 self.vte_lod_mid_max_distance,
                 self.vte_max_trace_distance,
             );
+
+            // Check if enough chunks are loaded to mark the world as ready
+            if !self.world_ready && self.app_state == AppState::Playing {
+                // Require at least 10 chunks to be visible before marking ready
+                if voxel_frame.chunk_headers.len() >= 10 {
+                    self.world_ready = true;
+                    eprintln!("World ready: {} chunks loaded", voxel_frame.chunk_headers.len());
+                }
+            }
+
             let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),

@@ -724,4 +724,29 @@ impl Scene {
         self.rebuild_pending_payload_upload_words();
         &self.voxel_frame_data
     }
+
+    /// Pre-load chunks around the spawn position.
+    /// This should be called once after scene creation to avoid showing an empty world.
+    pub fn preload_spawn_chunks(&mut self, spawn_pos: [f32; 4], near_lod_max_distance: f32) {
+        // Queue all chunks in the active window
+        self.sync_active_chunk_window(spawn_pos, near_lod_max_distance);
+
+        // Process all queued chunks immediately (not just a batch)
+        // Keep processing until there are no more pending updates
+        let max_iterations = 100; // Safety limit to avoid infinite loop
+        for _ in 0..max_iterations {
+            self.process_queued_voxel_payload_updates();
+
+            // Check if there are still pending chunk updates
+            if self.world.drain_pending_chunk_updates().is_empty()
+                && self.voxel_pending_lod_chunk_updates.is_empty() {
+                break;
+            }
+
+            // Re-queue them since we just drained them
+            self.sync_active_chunk_window(spawn_pos, near_lod_max_distance);
+        }
+
+        eprintln!("Preloaded chunks around spawn position");
+    }
 }
