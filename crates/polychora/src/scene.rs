@@ -60,6 +60,7 @@ struct RuntimeChunkKey {
 
 #[derive(Copy, Clone, Debug)]
 pub enum ScenePreset {
+    Empty,
     Flat,
     DemoCubes,
 }
@@ -67,6 +68,7 @@ pub enum ScenePreset {
 impl ScenePreset {
     fn label(self) -> &'static str {
         match self {
+            Self::Empty => "empty",
             Self::Flat => "flat",
             Self::DemoCubes => "demo_cubes",
         }
@@ -162,6 +164,7 @@ impl Scene {
 
     pub fn new(preset: ScenePreset) -> Self {
         let world = match preset {
+            ScenePreset::Empty => crate::voxel::world::VoxelWorld::new(),
             ScenePreset::Flat => worldgen::generate_flat_world(
                 5,             // 5×5×5 chunks in X, Z, W
                 VoxelType(11), // neutral grid floor

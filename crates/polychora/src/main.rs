@@ -94,6 +94,15 @@ const REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE: f32 = 8.0;
 const REMOTE_PLAYER_MAX_PREDICTED_SPEED: f32 = 24.0;
 const REMOTE_PLAYER_TAG_FOV_DOT_MIN: f32 = 0.16;
 const REMOTE_PLAYER_TAG_MAX_COUNT: usize = 32;
+const MENU_CAMERA_BASE_POSITION: [f32; 4] = [0.0, PLAYER_HEIGHT, -8.0, -4.0];
+const MENU_CAMERA_BASE_YAW: f32 = 0.0;
+const MENU_CAMERA_BASE_PITCH: f32 = 0.0;
+const MENU_CAMERA_BASE_XW_ANGLE: f32 = 0.0;
+const MENU_CAMERA_BASE_ZW_ANGLE: f32 = 0.0;
+const MENU_CAMERA_YAW_SWAY_SPEED: f32 = 0.35;
+const MENU_CAMERA_YAW_SWAY_AMPLITUDE: f32 = 0.08;
+const MENU_CAMERA_XW_SWAY_SPEED: f32 = 0.21;
+const MENU_CAMERA_XW_SWAY_AMPLITUDE: f32 = 0.06;
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -672,8 +681,12 @@ fn main() {
         AppState::MainMenu
     };
 
+    let start_with_network_world = args.server.is_some() || start_with_integrated_singleplayer;
     let scene_preset = if initial_app_state == AppState::MainMenu {
         ScenePreset::DemoCubes
+    } else if start_with_network_world {
+        // Networked play should render server-authoritative world data only.
+        ScenePreset::Empty
     } else {
         args.scene.to_scene_preset()
     };
@@ -846,14 +859,7 @@ fn main() {
         main_menu_selected_world: None,
         main_menu_connect_error: None,
         look_at_target: None,
-        menu_camera: {
-            let mut c = Camera4D::new();
-            c.position = [5.0, 3.0, 5.0, 2.0];
-            c.yaw = -0.8;
-            c.pitch = -0.3;
-            c.xw_angle = 0.4;
-            c
-        },
+        menu_camera: make_menu_camera(),
         menu_time: 0.0,
         pending_render_width: initial_render_width,
         pending_render_height: initial_render_height,
@@ -1254,6 +1260,17 @@ fn normalize_server_addr(raw: &str) -> String {
     } else {
         format!("{trimmed}:{MULTIPLAYER_DEFAULT_PORT}")
     }
+}
+
+fn make_menu_camera() -> Camera4D {
+    let mut camera = Camera4D::new();
+    camera.position = MENU_CAMERA_BASE_POSITION;
+    camera.yaw = MENU_CAMERA_BASE_YAW;
+    camera.pitch = MENU_CAMERA_BASE_PITCH;
+    camera.xw_angle = MENU_CAMERA_BASE_XW_ANGLE;
+    camera.zw_angle = MENU_CAMERA_BASE_ZW_ANGLE;
+    camera.yw_deviation = 0.0;
+    camera
 }
 
 fn build_singleplayer_runtime_config(
@@ -2489,7 +2506,7 @@ impl App {
         &mut self,
         revision: u64,
         chunks: Vec<multiplayer::WorldChunkPayload>,
-    ) {
+    ) -> usize {
         let mut applied_chunks = 0usize;
 
         for payload in chunks {
@@ -2538,6 +2555,7 @@ impl App {
                 revision, applied_chunks
             );
         }
+        applied_chunks
     }
 
     fn apply_multiplayer_chunk_unload_batch(
@@ -2643,13 +2661,13 @@ impl App {
                             "Applied multiplayer world snapshot rev={} chunks={}",
                             world.revision, world.non_empty_chunks
                         );
-                        // Reset world_ready flag to show loading screen while chunks materialize
-                        self.world_ready = false;
-                        // Preload chunks around player position
+                        // Warm near chunks so the first drawn frame has local payloads ready.
                         self.scene.preload_spawn_chunks(
                             self.camera.position,
                             self.vte_lod_near_max_distance,
                         );
+                        self.world_ready = true;
+                        eprintln!("World ready: snapshot applied");
                     }
                     Err(error) => {
                         eprintln!("Failed to load multiplayer world snapshot: {error}");
@@ -2657,7 +2675,11 @@ impl App {
                 }
             }
             multiplayer::ServerMessage::WorldChunkBatch { revision, chunks } => {
-                self.apply_multiplayer_chunk_batch(revision, chunks);
+                let applied_chunks = self.apply_multiplayer_chunk_batch(revision, chunks);
+                if applied_chunks > 0 && !self.world_ready {
+                    self.world_ready = true;
+                    eprintln!("World ready: streamed chunk data applied");
+                }
             }
             multiplayer::ServerMessage::WorldChunkUnloadBatch { revision, chunks } => {
                 self.apply_multiplayer_chunk_unload_batch(revision, chunks);
@@ -4551,7 +4573,8 @@ impl App {
     }
 
     fn enter_play_state(&mut self, window: &Window) {
-        self.scene = Scene::new(ScenePreset::Flat);
+        // Start from an empty client scene; multiplayer snapshot/chunks are authoritative.
+        self.scene = Scene::new(ScenePreset::Empty);
         self.camera = Camera4D::new();
         self.app_state = AppState::Playing;
         self.menu_open = false;
@@ -4632,17 +4655,8 @@ impl App {
         self.inventory_open = false;
         self.teleport_dialog_open = false;
         self.world_ready = true;
-        // Reset the menu demo camera
-        // DemoCubes geometry: 2x2x2x2 lattice centered at [1,1,1,1], cubes from [-2,-2,-2,-2] to [4,4,4,4]
-        // Position camera at [6,3,6,1] looking toward the cluster center [1,1,1,1]
-        // Direction [-5,-2,-5,0]: yaw=-0.75 (rotate toward -X), pitch=-0.38 (tilt down)
         self.menu_time = 0.0;
-        self.menu_camera.position = [6.0, 3.0, 6.0, 1.0];
-        self.menu_camera.yaw = -0.75;
-        self.menu_camera.pitch = -0.38;
-        self.menu_camera.xw_angle = 0.2;
-        self.menu_camera.zw_angle = 0.0;
-        self.menu_camera.yw_deviation = 0.0;
+        self.menu_camera = make_menu_camera();
         self.release_mouse(window);
     }
 
@@ -4660,9 +4674,10 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.menu_time += dt;
 
-        // Slowly orbit: rotate yaw and xw_angle for a gentle 4D tumble around the main cube cluster
-        self.menu_camera.yaw = -0.75 + self.menu_time * 0.08;
-        self.menu_camera.xw_angle = 0.2 + self.menu_time * 0.05;
+        self.menu_camera.yaw = MENU_CAMERA_BASE_YAW
+            + (self.menu_time * MENU_CAMERA_YAW_SWAY_SPEED).sin() * MENU_CAMERA_YAW_SWAY_AMPLITUDE;
+        self.menu_camera.xw_angle = MENU_CAMERA_BASE_XW_ANGLE
+            + (self.menu_time * MENU_CAMERA_XW_SWAY_SPEED).sin() * MENU_CAMERA_XW_SWAY_AMPLITUDE;
 
         let egui_paint = if self.args.no_hud {
             None
@@ -5648,13 +5663,13 @@ impl App {
                 self.vte_max_trace_distance,
             );
 
-            // Check if enough chunks are loaded to mark the world as ready
-            if !self.world_ready && self.app_state == AppState::Playing {
-                // Require at least 10 chunks to be visible before marking ready
-                if voxel_frame.chunk_headers.len() >= 10 {
-                    self.world_ready = true;
-                    eprintln!("World ready: {} chunks loaded", voxel_frame.chunk_headers.len());
-                }
+            // If we are playing without a live server connection, do not keep the loading gate up.
+            if !self.world_ready
+                && self.app_state == AppState::Playing
+                && self.multiplayer.is_none()
+            {
+                self.world_ready = true;
+                eprintln!("World ready: no multiplayer connection");
             }
 
             let preview_overlay_instances = [preview_instance];
