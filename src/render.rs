@@ -2939,8 +2939,8 @@ impl RenderContext {
         let sampler = Sampler::new(
             queue.device().clone(),
             SamplerCreateInfo {
-                mag_filter: Filter::Linear,
-                min_filter: Filter::Linear,
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
                 address_mode: [SamplerAddressMode::ClampToEdge; 3],
                 ..Default::default()
             },

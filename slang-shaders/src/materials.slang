@@ -1165,11 +1165,10 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
 
     if (isPreviewMaterial)
     {
-        // Held-block preview should stand out in integral mode and remain readable
-        // without reintroducing the expensive legacy overlay raster path.
-        mat.integrationWeight *= 2.8;
-        mat.luminance += 0.14;
-        mat.albedo.xyz = lerp(mat.albedo.xyz, float3(1.0, 1.0, 1.0), 0.14);
+        // Held-block preview should over-contribute enough to read clearly in
+        // integral mode, while preserving material hue (avoid whitening).
+        mat.integrationWeight *= 5.0;
+        mat.luminance += 0.02;
     }
 
     return mat;

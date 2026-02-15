@@ -1706,7 +1706,7 @@ fn build_place_preview_instance(
     rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
     rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
 
-    build_centered_model_instance(anchor, &basis, [0.35, 0.35, 0.42, 0.42], [preview_material; 8])
+    build_centered_model_instance(anchor, &basis, [0.35, 0.35, 0.38, 0.38], [preview_material; 8])
 }
 
 fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
