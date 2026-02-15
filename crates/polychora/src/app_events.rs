@@ -114,6 +114,7 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.persist_settings_if_needed(true);
                 event_loop.exit();
             }
             WindowEvent::Resized(_) => {
@@ -146,6 +147,7 @@ impl ApplicationHandler for App {
                             self.main_menu_page = MainMenuPage::Root;
                             self.main_menu_connect_error = None;
                         } else {
+                            self.persist_settings_if_needed(true);
                             event_loop.exit();
                         }
                     } else if self.dev_console_open {
@@ -172,6 +174,7 @@ impl ApplicationHandler for App {
                         self.menu_open = true;
                         self.menu_selection = 0;
                     } else {
+                        self.persist_settings_if_needed(true);
                         event_loop.exit();
                     }
                 }
@@ -242,6 +245,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.update_and_render();
                 if self.should_exit_after_render {
+                    self.persist_settings_if_needed(true);
                     event_loop.exit();
                 }
             }

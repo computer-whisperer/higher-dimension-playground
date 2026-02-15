@@ -14,6 +14,7 @@ impl App {
             } else {
                 self.record_runtime_profile_sample(frame_start);
             }
+            self.persist_settings_if_needed(false);
             return;
         }
 
@@ -905,5 +906,6 @@ impl App {
         } else {
             self.record_runtime_profile_sample(frame_start);
         }
+        self.persist_settings_if_needed(false);
     }
 }

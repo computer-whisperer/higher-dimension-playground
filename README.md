@@ -77,7 +77,8 @@ yay -S shader-slang-bin spirv-tools
 cargo build --release
 
 # Interactive FPS-style explorer (WASD + mouse look, Q/E for W-axis)
-cargo run -p polychora --release
+# (workspace default points to crates/polychora)
+cargo run --release
 
 # Basic multiplayer state server
 cargo run -p polychora --bin polychora-server --release -- --bind 0.0.0.0:4000
@@ -183,7 +184,7 @@ The default scene includes:
 ### Game Options
 
 ```bash
-cargo run -p polychora --release -- [OPTIONS]
+cargo run --release -- [OPTIONS]
 ```
 
 Core runtime options:
@@ -225,6 +226,16 @@ Screenshot/capture options:
 The runtime `F12` screenshot path writes both `.webp` and `.png` to `frames/`,
 and prints screenshot metadata (frame, camera pose, look vector, backend, and
 active VTE mode details) to stdout.
+
+### Settings Persistence
+
+Polychora persists menu/runtime settings to a per-user config file:
+
+- Linux: `$XDG_CONFIG_HOME/polychora/settings.json` (fallback: `~/.config/polychora/settings.json`)
+- macOS: `~/Library/Application Support/polychora/settings.json`
+- Windows: `%APPDATA%\polychora\settings.json`
+
+Command-line flags still take priority for that launch.
 
 ### VTE Debug Environment Flags
 

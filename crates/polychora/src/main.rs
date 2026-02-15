@@ -9,6 +9,7 @@ mod app_main_menu;
 mod app_multiplayer;
 mod app_perf;
 mod app_runtime;
+mod app_settings;
 mod app_ui;
 mod audio;
 mod camera;
@@ -668,7 +669,13 @@ impl InfoPanelMode {
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    let settings_file_path = app_settings::settings_file_path();
+    let cli_overrides = app_settings::CliOverrides::from_process_args();
+    let loaded_settings = app_settings::load_settings(&settings_file_path);
+    if let Some(settings) = loaded_settings.as_ref() {
+        app_settings::apply_settings_to_args(&mut args, settings, cli_overrides);
+    }
 
     if args.cpu_render {
         run_cpu_render(args.scene.to_scene_preset(), &args);
@@ -993,7 +1000,20 @@ fn main() {
         perf_suite_state,
         world_ready: initial_app_state == AppState::MainMenu,
         vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
+        settings_file_path: settings_file_path.clone(),
+        settings_last_saved: app_settings::PersistedSettings::default(),
+        settings_last_save_attempt: Instant::now(),
     };
+
+    if let Some(settings) = loaded_settings.as_ref() {
+        app.apply_runtime_settings(settings);
+        eprintln!(
+            "Loaded persisted settings from {}",
+            settings_file_path.display()
+        );
+    }
+    app.settings_last_saved = app.capture_persisted_settings();
+    app.settings_last_save_attempt = Instant::now();
 
     if app.vte_reference_compare_enabled {
         eprintln!("VTE reference compare enabled via R4D_VTE_REFERENCE_COMPARE");
@@ -1215,6 +1235,9 @@ struct App {
     perf_suite_state: Option<PerfSuiteState>,
     world_ready: bool,
     vte_overlay_raster_enabled: bool,
+    settings_file_path: PathBuf,
+    settings_last_saved: app_settings::PersistedSettings,
+    settings_last_save_attempt: Instant,
 }
 
 #[derive(Copy, Clone)]
