@@ -1,6 +1,5 @@
 [workspace]
 members = ["common", "crates/*"]
-exclude = ["crates/polychora-common", "crates/polychora-server"]
 
 [package]
 name = "higher-dimension-playground"

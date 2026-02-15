@@ -79,8 +79,8 @@ cargo build --release
 # Interactive FPS-style explorer (WASD + mouse look, Q/E for W-axis)
 cargo run -p polychora --release
 
-# Basic multiplayer state server (TCP JSON protocol)
-cargo run -p polychora-server --release -- --bind 0.0.0.0:4000
+# Basic multiplayer state server
+cargo run -p polychora --bin polychora-server --release -- --bind 0.0.0.0:4000
 
 # Demo with pre-set camera (supports --headless, --raytrace, --edges, etc.)
 cargo run -p demo --release
@@ -106,11 +106,10 @@ higher-dimension-playground/
 │   │       ├── camera.rs    # Camera4D: 5-angle orientation, auto-leveling
 │   │       ├── input.rs     # InputState: keys, mouse buttons, scroll, rotation modes
 │   │       ├── scene.rs     # Demo scene builder
-│   │       └── multiplayer.rs # Multiplayer client protocol + socket threads
+│   │       ├── multiplayer.rs # Multiplayer client protocol + socket threads
+│   │       └── bin/polychora-server.rs # Dedicated server binary entrypoint
 │   ├── demo/                # CLI demo with pre-set camera angles
 │   │   └── src/main.rs      # Headless/windowed demo, CLI options
-│   ├── polychora-server/    # Basic multiplayer state server
-│   │   └── src/main.rs      # TCP listener, world state, player replication
 │   └── exr-converter/       # Standalone EXR recompression tool
 ├── common/                  # Shared math library (CPU + GPU compatible)
 │   └── src/
@@ -259,7 +258,7 @@ cargo run -p demo --release -- [OPTIONS]
 ### Multiplayer Server (Early)
 
 ```bash
-cargo run -p polychora-server --release -- --bind 0.0.0.0:4000
+cargo run -p polychora --bin polychora-server --release -- --bind 0.0.0.0:4000
 ```
 
 Server CLI options:

@@ -64,19 +64,14 @@ const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
 const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
 const FOCAL_LENGTH_MAX: f32 = 4.00;
-const FOCAL_LENGTH_STEP: f32 = 0.05;
 const VTE_TRACE_DISTANCE_MIN: f32 = 10.0;
 const VTE_TRACE_DISTANCE_MAX: f32 = 4096.0;
-const VTE_TRACE_DISTANCE_STEP: f32 = 10.0;
 const VTE_INTEGRAL_SKY_SCALE_MIN: f32 = 0.0;
 const VTE_INTEGRAL_SKY_SCALE_MAX: f32 = 2.0;
-const VTE_INTEGRAL_SKY_SCALE_STEP: f32 = 0.05;
 const VTE_INTEGRAL_HIT_EMISSIVE_MIN: f32 = 0.0;
 const VTE_INTEGRAL_HIT_EMISSIVE_MAX: f32 = 0.20;
-const VTE_INTEGRAL_HIT_EMISSIVE_STEP: f32 = 0.005;
 const VTE_INTEGRAL_LOG_MERGE_K_MIN: f32 = 0.0;
 const VTE_INTEGRAL_LOG_MERGE_K_MAX: f32 = 64.0;
-const VTE_INTEGRAL_LOG_MERGE_K_STEP: f32 = 0.5;
 const VTE_TRACE_STEPS_MIN: u32 = 16;
 const VTE_TRACE_STEPS_MAX: u32 = 4096;
 const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
@@ -719,21 +714,6 @@ impl InfoPanelMode {
             Self::VectorTable => "vectors",
             Self::VectorTable2 => "vectors2",
             Self::Off => "off",
-        }
-    }
-
-    fn step(self, delta: i32) -> Self {
-        let index = match self {
-            Self::Full => 0,
-            Self::VectorTable => 1,
-            Self::VectorTable2 => 2,
-            Self::Off => 3,
-        };
-        match (index + delta).rem_euclid(4) {
-            0 => Self::Full,
-            1 => Self::VectorTable,
-            2 => Self::VectorTable2,
-            _ => Self::Off,
         }
     }
 }
@@ -1385,49 +1365,6 @@ struct PendingVoxelEdit {
     material: u8,
     created_at: Instant,
 }
-
-#[derive(Copy, Clone)]
-enum PauseMenuItem {
-    Resume,
-    InfoPanel,
-    ControlScheme,
-    MasterVolume,
-    FocalLengthXy,
-    FocalLengthZw,
-    VteMaxTraceSteps,
-    VteMaxTraceDistance,
-    VteNonVoxelInstances,
-    VteYSliceLookupCache,
-    IntegralSkyEmissive,
-    IntegralSkyScale,
-    IntegralHitEmissiveBoost,
-    IntegralLogMerge,
-    IntegralLogMergeK,
-    SaveWorld,
-    LoadWorld,
-    Quit,
-}
-
-const PAUSE_MENU_ITEMS: [PauseMenuItem; 18] = [
-    PauseMenuItem::Resume,
-    PauseMenuItem::InfoPanel,
-    PauseMenuItem::ControlScheme,
-    PauseMenuItem::MasterVolume,
-    PauseMenuItem::FocalLengthXy,
-    PauseMenuItem::FocalLengthZw,
-    PauseMenuItem::VteMaxTraceSteps,
-    PauseMenuItem::VteMaxTraceDistance,
-    PauseMenuItem::VteNonVoxelInstances,
-    PauseMenuItem::VteYSliceLookupCache,
-    PauseMenuItem::IntegralSkyEmissive,
-    PauseMenuItem::IntegralSkyScale,
-    PauseMenuItem::IntegralHitEmissiveBoost,
-    PauseMenuItem::IntegralLogMerge,
-    PauseMenuItem::IntegralLogMergeK,
-    PauseMenuItem::SaveWorld,
-    PauseMenuItem::LoadWorld,
-    PauseMenuItem::Quit,
-];
 
 fn latest_framebuffer_screenshot_path() -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -2554,22 +2491,6 @@ impl App {
         self.input.clear_mouse_delta();
     }
 
-    fn cycle_place_material_prev(&mut self) {
-        self.place_material = if self.place_material <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
-            BLOCK_EDIT_PLACE_MATERIAL_MAX
-        } else {
-            self.place_material.saturating_sub(1)
-        };
-    }
-
-    fn cycle_place_material_next(&mut self) {
-        self.place_material = if self.place_material >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
-            BLOCK_EDIT_PLACE_MATERIAL_MIN
-        } else {
-            self.place_material.saturating_add(1)
-        };
-    }
-
     fn cycle_hotbar_material_prev(&mut self) {
         let slot = &mut self.hotbar_slots[self.hotbar_selected_index];
         *slot = if *slot <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
@@ -2651,116 +2572,10 @@ impl App {
         }
     }
 
-    fn cycle_control_scheme_by(&mut self, delta: i32) {
-        if delta >= 0 {
-            self.cycle_control_scheme();
-            return;
-        }
-        // ControlScheme currently has 5 variants, so 4 forward steps == one backward step.
-        for _ in 0..4 {
-            self.cycle_control_scheme();
-        }
-    }
-
     fn set_control_scheme(&mut self, target: ControlScheme) {
         while self.control_scheme != target {
             self.cycle_control_scheme();
         }
-    }
-
-    fn step_f32(value: f32, delta: i32, step: f32, min: f32, max: f32) -> f32 {
-        let signed_step = if delta > 0 {
-            step
-        } else if delta < 0 {
-            -step
-        } else {
-            0.0
-        };
-        (value + signed_step).clamp(min, max)
-    }
-
-    fn adjust_info_panel_mode(&mut self, delta: i32) {
-        self.info_panel_mode = self.info_panel_mode.step(delta);
-    }
-
-    fn adjust_focal_length_xy(&mut self, delta: i32) {
-        self.focal_length_xy = Self::step_f32(
-            self.focal_length_xy,
-            delta,
-            FOCAL_LENGTH_STEP,
-            FOCAL_LENGTH_MIN,
-            FOCAL_LENGTH_MAX,
-        );
-    }
-
-    fn adjust_focal_length_zw(&mut self, delta: i32) {
-        self.focal_length_zw = Self::step_f32(
-            self.focal_length_zw,
-            delta,
-            FOCAL_LENGTH_STEP,
-            FOCAL_LENGTH_MIN,
-            FOCAL_LENGTH_MAX,
-        );
-    }
-
-    fn adjust_master_volume(&mut self, delta: i32) {
-        self.audio.master_volume = Self::step_f32(
-            self.audio.master_volume,
-            delta,
-            0.05, // 5% steps
-            0.0,  // minimum
-            2.0,  // maximum (200% - allows boosting quiet audio)
-        );
-    }
-
-    fn adjust_vte_max_trace_steps(&mut self, delta: i32) {
-        if delta > 0 {
-            self.vte_max_trace_steps = (self.vte_max_trace_steps.saturating_mul(2))
-                .clamp(VTE_TRACE_STEPS_MIN, VTE_TRACE_STEPS_MAX);
-        } else if delta < 0 {
-            self.vte_max_trace_steps =
-                (self.vte_max_trace_steps / 2).clamp(VTE_TRACE_STEPS_MIN, VTE_TRACE_STEPS_MAX);
-        }
-    }
-
-    fn adjust_vte_max_trace_distance(&mut self, delta: i32) {
-        self.vte_max_trace_distance = Self::step_f32(
-            self.vte_max_trace_distance,
-            delta,
-            VTE_TRACE_DISTANCE_STEP,
-            VTE_TRACE_DISTANCE_MIN,
-            VTE_TRACE_DISTANCE_MAX,
-        );
-    }
-
-    fn adjust_vte_integral_sky_scale(&mut self, delta: i32) {
-        self.vte_integral_sky_scale = Self::step_f32(
-            self.vte_integral_sky_scale,
-            delta,
-            VTE_INTEGRAL_SKY_SCALE_STEP,
-            VTE_INTEGRAL_SKY_SCALE_MIN,
-            VTE_INTEGRAL_SKY_SCALE_MAX,
-        );
-    }
-
-    fn adjust_vte_integral_hit_emissive_boost(&mut self, delta: i32) {
-        self.vte_integral_hit_emissive_boost = Self::step_f32(
-            self.vte_integral_hit_emissive_boost,
-            delta,
-            VTE_INTEGRAL_HIT_EMISSIVE_STEP,
-            VTE_INTEGRAL_HIT_EMISSIVE_MIN,
-            VTE_INTEGRAL_HIT_EMISSIVE_MAX,
-        );
-    }
-
-    fn adjust_vte_integral_log_merge_k(&mut self, delta: i32) {
-        self.vte_integral_log_merge_k = Self::step_f32(
-            self.vte_integral_log_merge_k,
-            delta,
-            VTE_INTEGRAL_LOG_MERGE_K_STEP,
-            VTE_INTEGRAL_LOG_MERGE_K_MIN,
-            VTE_INTEGRAL_LOG_MERGE_K_MAX,
-        );
     }
 
     fn save_world(&mut self) {
@@ -3568,141 +3383,6 @@ impl App {
         self.input.take_mouse_delta();
     }
 
-    fn move_menu_selection(&mut self, delta: i32) {
-        let len = PAUSE_MENU_ITEMS.len() as i32;
-        let index = self.menu_selection as i32;
-        self.menu_selection = (index + delta).rem_euclid(len) as usize;
-        self.audio.play(SoundEffect::UiTick);
-    }
-
-    fn selected_menu_item(&self) -> PauseMenuItem {
-        PAUSE_MENU_ITEMS[self.menu_selection]
-    }
-
-    fn adjust_selected_menu_item(&mut self, delta: i32) {
-        match self.selected_menu_item() {
-            PauseMenuItem::InfoPanel => self.adjust_info_panel_mode(delta),
-            PauseMenuItem::ControlScheme => self.cycle_control_scheme_by(delta),
-            PauseMenuItem::MasterVolume => self.adjust_master_volume(delta),
-            PauseMenuItem::FocalLengthXy => self.adjust_focal_length_xy(delta),
-            PauseMenuItem::FocalLengthZw => self.adjust_focal_length_zw(delta),
-            PauseMenuItem::VteMaxTraceSteps => self.adjust_vte_max_trace_steps(delta),
-            PauseMenuItem::VteMaxTraceDistance => self.adjust_vte_max_trace_distance(delta),
-            PauseMenuItem::VteNonVoxelInstances => self.toggle_vte_non_voxel_instances(),
-            PauseMenuItem::VteYSliceLookupCache => self.toggle_vte_y_slice_lookup_cache(),
-            PauseMenuItem::IntegralSkyEmissive => self.toggle_vte_integral_sky_emissive(),
-            PauseMenuItem::IntegralSkyScale => self.adjust_vte_integral_sky_scale(delta),
-            PauseMenuItem::IntegralHitEmissiveBoost => {
-                self.adjust_vte_integral_hit_emissive_boost(delta)
-            }
-            PauseMenuItem::IntegralLogMerge => self.toggle_vte_integral_log_merge(),
-            PauseMenuItem::IntegralLogMergeK => self.adjust_vte_integral_log_merge_k(delta),
-            PauseMenuItem::Resume
-            | PauseMenuItem::SaveWorld
-            | PauseMenuItem::LoadWorld
-            | PauseMenuItem::Quit => {}
-        }
-        // Play UI tick sound for any adjustment (except when it's an action item that does nothing)
-        if !matches!(
-            self.selected_menu_item(),
-            PauseMenuItem::Resume
-                | PauseMenuItem::SaveWorld
-                | PauseMenuItem::LoadWorld
-                | PauseMenuItem::Quit
-        ) {
-            self.audio.play(SoundEffect::UiTick);
-        }
-    }
-
-    fn activate_selected_menu_item(&mut self) {
-        self.audio.play(SoundEffect::UiTick);
-        match self.selected_menu_item() {
-            PauseMenuItem::Resume => {
-                self.menu_open = false;
-                let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
-                if let Some(window) = window {
-                    self.grab_mouse(&window);
-                }
-            }
-            PauseMenuItem::SaveWorld => self.save_world(),
-            PauseMenuItem::LoadWorld => self.load_world(),
-            PauseMenuItem::Quit => self.should_exit_after_render = true,
-            _ => self.adjust_selected_menu_item(1),
-        }
-    }
-
-    fn pause_menu_item_text(&self, item: PauseMenuItem) -> String {
-        match item {
-            PauseMenuItem::Resume => "Resume".to_string(),
-            PauseMenuItem::InfoPanel => {
-                format!("Info panel: {}", self.info_panel_mode.label())
-            }
-            PauseMenuItem::ControlScheme => {
-                format!("Control scheme: {}", self.control_scheme.label())
-            }
-            PauseMenuItem::MasterVolume => {
-                format!("Volume: {:.0}%", self.audio.master_volume * 100.0)
-            }
-            PauseMenuItem::FocalLengthXy => {
-                format!("Focal XY: {:.2}", self.focal_length_xy)
-            }
-            PauseMenuItem::FocalLengthZw => {
-                format!("Focal ZW: {:.2}", self.focal_length_zw)
-            }
-            PauseMenuItem::VteMaxTraceSteps => {
-                format!("VTE max steps: {}", self.vte_max_trace_steps)
-            }
-            PauseMenuItem::VteMaxTraceDistance => {
-                format!("VTE max dist: {:.0}", self.vte_max_trace_distance)
-            }
-            PauseMenuItem::VteNonVoxelInstances => format!(
-                "VTE non-voxel: {}",
-                if self.vte_non_voxel_instances_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-            PauseMenuItem::VteYSliceLookupCache => format!(
-                "VTE y-cache: {}",
-                if self.vte_y_slice_lookup_cache_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-            PauseMenuItem::IntegralSkyEmissive => format!(
-                "Integral sky+emi: {}",
-                if self.vte_integral_sky_emissive_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-            PauseMenuItem::IntegralSkyScale => {
-                format!("Integral sky scale: {:.3}", self.vte_integral_sky_scale)
-            }
-            PauseMenuItem::IntegralHitEmissiveBoost => format!(
-                "Integral hit emissive: {:.3}",
-                self.vte_integral_hit_emissive_boost
-            ),
-            PauseMenuItem::IntegralLogMerge => format!(
-                "Integral log merge: {}",
-                if self.vte_integral_log_merge_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-            PauseMenuItem::IntegralLogMergeK => {
-                format!("Integral log K: {:.3}", self.vte_integral_log_merge_k)
-            }
-            PauseMenuItem::SaveWorld => "Save world".to_string(),
-            PauseMenuItem::LoadWorld => "Load world".to_string(),
-            PauseMenuItem::Quit => "Quit".to_string(),
-        }
-    }
-
     fn current_info_hud_text(
         &self,
         pair: RotationPair,
@@ -3984,19 +3664,6 @@ impl App {
                 },
             )
         }
-    }
-
-    fn pause_menu_hud_text(&self) -> String {
-        let mut text = String::from("MENU  (Up/Down select, Left/Right tune, Enter action)\n");
-        for (i, item) in PAUSE_MENU_ITEMS.iter().enumerate() {
-            let prefix = if i == self.menu_selection { ">" } else { " " };
-            text.push_str(prefix);
-            text.push(' ');
-            text.push_str(&self.pause_menu_item_text(*item));
-            text.push('\n');
-        }
-        text.push_str("Click window or Resume to return to capture.");
-        text
     }
 
     fn draw_egui_pause_menu(
@@ -5358,7 +5025,7 @@ impl App {
     fn draw_egui_main_menu_root(
         &mut self,
         ctx: &egui::Context,
-        transition: &mut Option<MainMenuTransition>,
+        _transition: &mut Option<MainMenuTransition>,
     ) {
         egui::Window::new("main_menu_root")
             .title_bar(false)
