@@ -97,15 +97,15 @@ const REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE: f32 = 8.0;
 const REMOTE_PLAYER_MAX_PREDICTED_SPEED: f32 = 24.0;
 const REMOTE_PLAYER_TAG_FOV_DOT_MIN: f32 = 0.16;
 const REMOTE_PLAYER_TAG_MAX_COUNT: usize = 32;
-const MENU_CAMERA_BASE_POSITION: [f32; 4] = [0.0, PLAYER_HEIGHT, -8.0, -4.0];
-const MENU_CAMERA_BASE_YAW: f32 = 0.0;
-const MENU_CAMERA_BASE_PITCH: f32 = 0.0;
-const MENU_CAMERA_BASE_XW_ANGLE: f32 = 0.0;
-const MENU_CAMERA_BASE_ZW_ANGLE: f32 = 0.0;
-const MENU_CAMERA_YAW_SWAY_SPEED: f32 = 0.35;
-const MENU_CAMERA_YAW_SWAY_AMPLITUDE: f32 = 0.08;
-const MENU_CAMERA_XW_SWAY_SPEED: f32 = 0.21;
-const MENU_CAMERA_XW_SWAY_AMPLITUDE: f32 = 0.06;
+const MENU_ORBIT_CENTER: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+const MENU_ORBIT_RADIUS_XZ: f32 = 16.0;
+const MENU_ORBIT_RADIUS_W: f32 = 7.0;
+const MENU_ORBIT_HEIGHT_BASE: f32 = PLAYER_HEIGHT + 1.2;
+const MENU_ORBIT_HEIGHT_BOB: f32 = 0.8;
+const MENU_ORBIT_RATE_XZ: f32 = 0.23;
+const MENU_ORBIT_RATE_W: f32 = 0.17;
+const MENU_ORBIT_RATE_Y: f32 = 0.11;
+const MENU_ORBIT_TARGET_Y_OFFSET: f32 = 0.6;
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -1293,13 +1293,40 @@ fn normalize_server_addr(raw: &str) -> String {
 
 fn make_menu_camera() -> Camera4D {
     let mut camera = Camera4D::new();
-    camera.position = MENU_CAMERA_BASE_POSITION;
-    camera.yaw = MENU_CAMERA_BASE_YAW;
-    camera.pitch = MENU_CAMERA_BASE_PITCH;
-    camera.xw_angle = MENU_CAMERA_BASE_XW_ANGLE;
-    camera.zw_angle = MENU_CAMERA_BASE_ZW_ANGLE;
-    camera.yw_deviation = 0.0;
+    apply_menu_camera_orbit_pose(&mut camera, 0.0);
     camera
+}
+
+fn apply_menu_camera_orbit_pose(camera: &mut Camera4D, time_s: f32) {
+    let orbit_phase_xz = time_s * MENU_ORBIT_RATE_XZ;
+    let orbit_phase_w = time_s * MENU_ORBIT_RATE_W;
+    let orbit_phase_y = time_s * MENU_ORBIT_RATE_Y;
+
+    camera.position = [
+        MENU_ORBIT_CENTER[0] + MENU_ORBIT_RADIUS_XZ * orbit_phase_xz.cos(),
+        MENU_ORBIT_HEIGHT_BASE + MENU_ORBIT_HEIGHT_BOB * orbit_phase_y.sin(),
+        MENU_ORBIT_CENTER[2] + MENU_ORBIT_RADIUS_XZ * orbit_phase_xz.sin(),
+        MENU_ORBIT_CENTER[3] + MENU_ORBIT_RADIUS_W * orbit_phase_w.sin(),
+    ];
+
+    let orbit_target = [
+        MENU_ORBIT_CENTER[0],
+        MENU_ORBIT_CENTER[1] + MENU_ORBIT_TARGET_Y_OFFSET,
+        MENU_ORBIT_CENTER[2],
+        MENU_ORBIT_CENTER[3],
+    ];
+    let target_dir = [
+        orbit_target[0] - camera.position[0],
+        orbit_target[1] - camera.position[1],
+        orbit_target[2] - camera.position[2],
+        orbit_target[3] - camera.position[3],
+    ];
+    let (yaw, pitch, xw_angle, zw_angle) = Camera4D::angles_for_direction_upright(target_dir);
+    camera.yaw = yaw;
+    camera.pitch = pitch;
+    camera.xw_angle = xw_angle;
+    camera.zw_angle = zw_angle;
+    camera.yw_deviation = 0.0;
 }
 
 fn build_singleplayer_runtime_config(
@@ -4690,7 +4717,7 @@ impl App {
         self.release_mouse(window);
     }
 
-    fn update_and_render_main_menu(&mut self) {
+    fn update_and_render_main_menu(&mut self, dt: f32) {
         // Drain any inputs that accumulated
         self.input.take_mouse_delta();
         self.input.take_jump();
@@ -4700,14 +4727,8 @@ impl App {
         let _ = self.input.take_scroll_steps();
 
         // Advance menu camera animation
-        let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
-        self.menu_time += dt;
-
-        self.menu_camera.yaw = MENU_CAMERA_BASE_YAW
-            + (self.menu_time * MENU_CAMERA_YAW_SWAY_SPEED).sin() * MENU_CAMERA_YAW_SWAY_AMPLITUDE;
-        self.menu_camera.xw_angle = MENU_CAMERA_BASE_XW_ANGLE
-            + (self.menu_time * MENU_CAMERA_XW_SWAY_SPEED).sin() * MENU_CAMERA_XW_SWAY_AMPLITUDE;
+        self.menu_time += dt.min(0.1);
+        apply_menu_camera_orbit_pose(&mut self.menu_camera, self.menu_time);
 
         let egui_paint = if self.args.no_hud {
             None
@@ -4715,7 +4736,7 @@ impl App {
             self.run_egui_frame()
         };
 
-        let view_matrix = self.menu_camera.view_matrix();
+        let view_matrix = self.menu_camera.view_matrix_upright();
         let backend = self.args.backend.to_render_backend();
         let render_options = RenderOptions {
             do_raster: true,
@@ -4993,7 +5014,7 @@ impl App {
         self.last_frame = now;
 
         if self.app_state == AppState::MainMenu {
-            self.update_and_render_main_menu();
+            self.update_and_render_main_menu(dt);
             self.record_runtime_profile_sample(frame_start);
             return;
         }
