@@ -273,7 +273,12 @@ pub(super) fn normalize4(v: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-pub(super) fn rotate_basis_plane(basis: &mut [[f32; 4]; 4], axis_a: usize, axis_b: usize, angle: f32) {
+pub(super) fn rotate_basis_plane(
+    basis: &mut [[f32; 4]; 4],
+    axis_a: usize,
+    axis_b: usize,
+    angle: f32,
+) {
     let c = angle.cos();
     let s = angle.sin();
     let old_a = basis[axis_a];
@@ -671,4 +676,3 @@ pub(super) fn build_remote_player_avatar_instances(
 
     instances
 }
-

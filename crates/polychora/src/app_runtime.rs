@@ -73,7 +73,11 @@ impl App {
         }
     }
 
-    pub(super) fn set_vte_runtime_flags(&mut self, non_voxel_instances: bool, y_slice_lookup_cache: bool) {
+    pub(super) fn set_vte_runtime_flags(
+        &mut self,
+        non_voxel_instances: bool,
+        y_slice_lookup_cache: bool,
+    ) {
         self.vte_non_voxel_instances_enabled = non_voxel_instances;
         self.vte_y_slice_lookup_cache_enabled = y_slice_lookup_cache;
     }

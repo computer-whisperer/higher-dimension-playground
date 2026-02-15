@@ -1,28 +1,28 @@
-mod geometry;
-mod hud;
-mod vte;
 mod buffers;
-mod pipelines;
-mod profiler;
-mod overlay;
 mod capture;
 mod context_init;
+mod geometry;
+mod hud;
+mod overlay;
+mod pipelines;
+mod profiler;
 mod types;
+mod vte;
 
-use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers};
-use self::profiler::{GpuProfiler, PROFILER_MAX_TIMESTAMPS};
-use self::pipelines::{ComputePipelineContext, PresentPipelineContext};
+use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
     push_text_quads, text_width_px, HudResources, HudVertex, LineVertex, OverlayLine,
     HUD_VERTEX_CAPACITY,
 };
+use self::pipelines::{ComputePipelineContext, PresentPipelineContext};
+use self::profiler::{GpuProfiler, PROFILER_MAX_TIMESTAMPS};
+pub use self::types::*;
 pub use self::vte::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VteDebugCounters, VTE_MAX_CHUNKS,
 };
-pub use self::types::*;
 use ab_glyph::FontArc;
 use bytemuck::Zeroable;
 use common::ModelTetrahedron;
@@ -137,7 +137,6 @@ struct ShaderModules {
     bvh_propagate_aabbs: Arc<ShaderModule>,
 }
 
-
 const LINE_VERTEX_CAPACITY: usize = 100_000;
 const HUD_BREADCRUMB_CAPACITY: usize = 128;
 const HUD_BREADCRUMB_MIN_STEP: f32 = 0.2;
@@ -182,7 +181,6 @@ struct HudDrawBatch {
     scissor: Scissor,
     texture_slot: HudTextureSlot,
 }
-
 
 fn create_rgba8_srgb_texture_view(
     memory_allocator: Arc<StandardMemoryAllocator>,
@@ -310,7 +308,6 @@ pub struct RenderContext {
 }
 
 impl RenderContext {
-
     fn reset_vte_compare_buffers(&mut self, frame_idx: usize) {
         {
             let mut writer = self.frames_in_flight[frame_idx]
@@ -3024,7 +3021,6 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
 
         self.frames_rendered += 1;
     }
-
 }
 
 fn window_size_dependent_setup(

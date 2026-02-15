@@ -370,5 +370,4 @@ impl App {
 
         self.reset_runtime_profile_window();
     }
-
 }

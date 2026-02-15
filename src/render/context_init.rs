@@ -620,6 +620,5 @@ impl RenderContext {
                     * vte::VTE_MACRO_WORDS_PER_CHUNK
             ],
         }
-}
-
+    }
 }

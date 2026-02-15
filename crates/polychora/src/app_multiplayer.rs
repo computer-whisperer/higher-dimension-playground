@@ -486,7 +486,12 @@ impl App {
         }
     }
 
-    pub(super) fn send_multiplayer_voxel_update(&mut self, now: Instant, position: [i32; 4], material: u8) {
+    pub(super) fn send_multiplayer_voxel_update(
+        &mut self,
+        now: Instant,
+        position: [i32; 4],
+        material: u8,
+    ) {
         if self.multiplayer.is_none() {
             return;
         }
@@ -676,5 +681,4 @@ impl App {
 
         tags
     }
-
 }

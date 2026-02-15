@@ -81,7 +81,11 @@ impl GpuProfiler {
         idx
     }
 
-    pub(super) fn read_results_and_accumulate(&mut self, query_pool: &Arc<QueryPool>, clipped_tet_count: u32) {
+    pub(super) fn read_results_and_accumulate(
+        &mut self,
+        query_pool: &Arc<QueryPool>,
+        clipped_tet_count: u32,
+    ) {
         let n = self.next_query;
         if n < 2 {
             return;

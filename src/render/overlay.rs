@@ -119,7 +119,11 @@ impl RenderContext {
         }
     }
 
-    pub(super) fn apply_egui_texture_updates(&mut self, queue: Arc<Queue>, updates: &[EguiTextureUpdate]) {
+    pub(super) fn apply_egui_texture_updates(
+        &mut self,
+        queue: Arc<Queue>,
+        updates: &[EguiTextureUpdate],
+    ) {
         if updates.is_empty() {
             return;
         }
@@ -1550,5 +1554,4 @@ impl RenderContext {
 
         lines_to_write
     }
-
 }

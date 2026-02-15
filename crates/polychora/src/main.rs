@@ -1,15 +1,15 @@
-mod audio;
-mod app_hud;
-mod app_helpers;
 mod app_bootstrap;
-mod app_multiplayer;
-mod app_perf;
 mod app_controls;
 mod app_events;
 mod app_gameplay_loop;
+mod app_helpers;
+mod app_hud;
 mod app_main_menu;
+mod app_multiplayer;
+mod app_perf;
 mod app_runtime;
 mod app_ui;
+mod audio;
 mod camera;
 mod cpu_render;
 mod input;
@@ -42,9 +42,9 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use audio::{AudioEngine, SoundEffect};
-use app_helpers::*;
 use app_bootstrap::{parse_commands, run_cpu_render};
+use app_helpers::*;
+use audio::{AudioEngine, SoundEffect};
 use camera::{Camera4D, PLAYER_HEIGHT};
 use input::{ControlScheme, InputState, RotationPair};
 use multiplayer::{ClientMessage as MultiplayerClientMessage, MultiplayerClient, MultiplayerEvent};
@@ -315,7 +315,6 @@ enum AutoCommand {
     Wait(u32),
     Screenshot,
 }
-
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about = "4D polychora explorer")]
@@ -1046,7 +1045,6 @@ fn main() {
 
     event_loop.run_app(&mut app).unwrap();
 }
-
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum AppState {

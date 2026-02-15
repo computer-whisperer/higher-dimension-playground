@@ -124,7 +124,11 @@ impl App {
         }
     }
 
-    pub(super) fn handle_main_menu_transition(&mut self, transition: MainMenuTransition, window: &Window) {
+    pub(super) fn handle_main_menu_transition(
+        &mut self,
+        transition: MainMenuTransition,
+        window: &Window,
+    ) {
         match transition {
             MainMenuTransition::NewWorld => {
                 let path = generate_new_singleplayer_world_path();

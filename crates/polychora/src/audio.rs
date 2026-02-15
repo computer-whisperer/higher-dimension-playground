@@ -140,15 +140,21 @@ fn build_effect_table(sample_rate: u32) -> Vec<EffectVariations> {
     // Order must match SoundEffect::index()
     vec![
         // Place
-        EffectVariations::single(load(include_bytes!("../../../sfx5/place_block_01_medium.wav"))),
+        EffectVariations::single(load(include_bytes!(
+            "../../../sfx5/place_block_01_medium.wav"
+        ))),
         // Break
-        EffectVariations::single(load(include_bytes!("../../../sfx5/break_block_01_medium.wav"))),
+        EffectVariations::single(load(include_bytes!(
+            "../../../sfx5/break_block_01_medium.wav"
+        ))),
         // Footstep (3 variations)
-        EffectVariations { samples: vec![
-            load(include_bytes!("../../../sfx5/footstep_01_medium.wav")),
-            load(include_bytes!("../../../sfx5/footstep_02_medium.wav")),
-            load(include_bytes!("../../../sfx5/footstep_03_medium.wav")),
-        ]},
+        EffectVariations {
+            samples: vec![
+                load(include_bytes!("../../../sfx5/footstep_01_medium.wav")),
+                load(include_bytes!("../../../sfx5/footstep_02_medium.wav")),
+                load(include_bytes!("../../../sfx5/footstep_03_medium.wav")),
+            ],
+        },
         // Jump
         EffectVariations::single(load(include_bytes!("../../../sfx5/jump_01_medium.wav"))),
         // Land
