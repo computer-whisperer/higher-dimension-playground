@@ -45,8 +45,8 @@ const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
-const FOOTSTEP_DISTANCE_WALK: f32 = 1.75;
-const FOOTSTEP_DISTANCE_SPRINT: f32 = 1.20;
+const FOOTSTEP_DISTANCE_WALK: f32 = 3.50;
+const FOOTSTEP_DISTANCE_SPRINT: f32 = 2.40;
 const FOOTSTEP_MIN_XZW_SPEED: f32 = 0.55;
 const REMOTE_FOOTSTEP_MAX_DISTANCE: f32 = 36.0;
 const REMOTE_FOOTSTEP_MIN_XZW_SPEED: f32 = 0.40;
@@ -264,11 +264,11 @@ fn parse_commands(input: &str) -> Vec<AutoCommand> {
 #[command(version, about = "4D polychora explorer")]
 struct Args {
     /// Render buffer width in pixels
-    #[arg(long, short = 'W', default_value_t = 1920)]
+    #[arg(long, short = 'W', default_value_t = 960)]
     width: u32,
 
     /// Render buffer height in pixels
-    #[arg(long, short = 'H', default_value_t = 1080)]
+    #[arg(long, short = 'H', default_value_t = 540)]
     height: u32,
 
     /// Number of depth layers (supersampling)
@@ -765,6 +765,7 @@ fn main() {
     let initial_render_width = args.width;
     let initial_render_height = args.height;
     let initial_render_layers = args.layers;
+    let initial_player_name = args.player_name.clone().unwrap_or_else(default_multiplayer_player_name);
     let audio = AudioEngine::new(args.audio, args.audio_volume);
     if args.audio {
         if audio.is_active() {
@@ -858,6 +859,7 @@ fn main() {
         app_state: initial_app_state,
         main_menu_page: MainMenuPage::Root,
         main_menu_server_address: "localhost:4000".to_string(),
+        main_menu_player_name: initial_player_name,
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
         main_menu_connect_error: None,
@@ -1125,6 +1127,7 @@ struct App {
     app_state: AppState,
     main_menu_page: MainMenuPage,
     main_menu_server_address: String,
+    main_menu_player_name: String,
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
     main_menu_connect_error: Option<String>,
@@ -4553,11 +4556,11 @@ impl App {
     }
 
     fn connect_multiplayer_remote(&mut self, server_addr: String) -> Result<(), String> {
-        let player_name = self
-            .args
-            .player_name
-            .clone()
-            .unwrap_or_else(default_multiplayer_player_name);
+        let player_name = if self.main_menu_player_name.trim().is_empty() {
+            default_multiplayer_player_name()
+        } else {
+            self.main_menu_player_name.trim().to_string()
+        };
         match MultiplayerClient::connect(server_addr.clone(), player_name.clone()) {
             Ok(client) => {
                 eprintln!(
@@ -4574,11 +4577,11 @@ impl App {
     }
 
     fn connect_singleplayer_local(&mut self, world_file: PathBuf) -> Result<(), String> {
-        let player_name = self
-            .args
-            .player_name
-            .clone()
-            .unwrap_or_else(default_multiplayer_player_name);
+        let player_name = if self.main_menu_player_name.trim().is_empty() {
+            default_multiplayer_player_name()
+        } else {
+            self.main_menu_player_name.trim().to_string()
+        };
         let config = build_singleplayer_runtime_config(&self.args, world_file.clone());
         match MultiplayerClient::connect_local(config, player_name.clone()) {
             Ok(client) => {
@@ -4954,6 +4957,11 @@ impl App {
                 ui.separator();
                 ui.add_space(8.0);
 
+                ui.horizontal(|ui| {
+                    ui.label("Player name:");
+                    ui.text_edit_singleline(&mut self.main_menu_player_name);
+                });
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("Server address:");
                     ui.text_edit_singleline(&mut self.main_menu_server_address);

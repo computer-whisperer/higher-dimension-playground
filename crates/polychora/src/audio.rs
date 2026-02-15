@@ -3,8 +3,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
-const DEFAULT_MASTER_VOLUME: f32 = 0.7;
-const EFFECT_BASE_GAINS: [f32; SoundEffect::COUNT] = [0.75, 0.90, 0.55, 0.70, 0.95, 0.65, 0.60, 0.50];
+const DEFAULT_MASTER_VOLUME: f32 = 1.0;
+const EFFECT_BASE_GAINS: [f32; SoundEffect::COUNT] = [0.15, 0.18, 0.11, 0.14, 0.19, 0.13, 0.12, 0.10];
 const FOOTSTEP_VARIATION_COUNT: usize = 3;
 
 #[derive(Copy, Clone, Debug)]
