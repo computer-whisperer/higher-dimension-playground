@@ -343,6 +343,7 @@ RayHit raycast(
     {
         return raycastLinear(start, direction, numTetrahedrons);
     }
+    uint totalNodes = 2u * numTetrahedrons - 1u;
 
     // Precompute inverse direction for AABB tests (preserve sign for near-zero values)
     float4 invDir = float4(
@@ -357,6 +358,7 @@ RayHit raycast(
     // so popped nodes are known to intersect the ray.
     uint stack[BVH_STACK_SIZE];
     int stackPtr = 0;
+    bool stackOverflowed = false;
 
     // Test root AABB before entering the loop
     BVHNode root = bvhNodes[0];
@@ -369,6 +371,11 @@ RayHit raycast(
     while (stackPtr > 0)
     {
         uint nodeIdx = stack[--stackPtr];
+        if (nodeIdx >= totalNodes)
+        {
+            stackOverflowed = true;
+            break;
+        }
         BVHNode node = bvhNodes[nodeIdx];
 
         if (node.isLeaf != 0)
@@ -381,6 +388,11 @@ RayHit raycast(
             // Internal node - test children and push those that intersect
             uint left = node.leftChild;
             uint right = node.rightChild;
+            if (left >= totalNodes || right >= totalNodes)
+            {
+                stackOverflowed = true;
+                break;
+            }
 
             float2 leftT = rayAABBIntersect4D(start, invDir, bvhNodes[left].minBounds, bvhNodes[left].maxBounds);
             float2 rightT = rayAABBIntersect4D(start, invDir, bvhNodes[right].minBounds, bvhNodes[right].maxBounds);
@@ -392,6 +404,11 @@ RayHit raycast(
             // Push farther child first so closer child is popped first
             if (leftHit && rightHit)
             {
+                if (stackPtr + 2 > int(BVH_STACK_SIZE))
+                {
+                    stackOverflowed = true;
+                    break;
+                }
                 if (leftT.x > rightT.x)
                 {
                     stack[stackPtr++] = left;
@@ -405,12 +422,32 @@ RayHit raycast(
             }
             else if (leftHit)
             {
+                if (stackPtr + 1 > int(BVH_STACK_SIZE))
+                {
+                    stackOverflowed = true;
+                    break;
+                }
                 stack[stackPtr++] = left;
             }
             else if (rightHit)
             {
+                if (stackPtr + 1 > int(BVH_STACK_SIZE))
+                {
+                    stackOverflowed = true;
+                    break;
+                }
                 stack[stackPtr++] = right;
             }
+        }
+    }
+
+    // Maintain correctness if BVH traversal stack overflows by finishing with
+    // a linear pass instead of risking undefined behavior.
+    if (stackOverflowed)
+    {
+        for (uint i = 0; i < numTetrahedrons; i++)
+        {
+            testTetrahedronHit(start, direction, i, closestHit);
         }
     }
 

@@ -367,7 +367,6 @@ struct FrameInFlight {
     pending_voxel_payload_slots: Vec<u32>,
     pending_voxel_payload_slot_set: HashSet<u32>,
     last_voxel_metadata_generation: Option<u64>,
-    last_entity_scene_hash: u64,
 }
 
 struct EguiResources {
@@ -2104,6 +2103,7 @@ pub struct RenderContext {
     memory_allocator: Arc<StandardMemoryAllocator>,
     frames_rendered: usize,
     bvh_scene_hash: u64,
+    vte_entity_scene_hash: u64,
     last_clipped_tet_count: u32,
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
@@ -2690,7 +2690,6 @@ impl RenderContext {
                 pending_voxel_payload_slots: Vec::new(),
                 pending_voxel_payload_slot_set: HashSet::new(),
                 last_voxel_metadata_generation: None,
-                last_entity_scene_hash: 0,
             });
         }
 
@@ -2712,6 +2711,7 @@ impl RenderContext {
             cpu_screen_capture_buffer,
             frames_rendered: 0,
             bvh_scene_hash: 0,
+            vte_entity_scene_hash: 0,
             last_clipped_tet_count: 0,
             profiler,
             hud_font,
@@ -5443,9 +5443,7 @@ impl RenderContext {
         } else {
             // Non-VTE passes reuse the same tetra/BVH buffers for other pipelines.
             // Force entity reprovisioning when VTE is re-enabled.
-            for fif in &mut self.frames_in_flight {
-                fif.last_entity_scene_hash = 0;
-            }
+            self.vte_entity_scene_hash = 0;
             self.clear_vte_compare_diagnostics();
         }
 
@@ -5562,10 +5560,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             if do_voxel_vte {
                 let entity_tetrahedron_count = total_tetrahedron_count;
                 if entity_tetrahedron_count == 0 {
-                    self.frames_in_flight[frame_idx].last_entity_scene_hash = 0;
+                    self.vte_entity_scene_hash = 0;
                 } else {
-                    let entity_rebuild_needed = entity_scene_hash
-                        != self.frames_in_flight[frame_idx].last_entity_scene_hash;
+                    let entity_rebuild_needed = entity_scene_hash != self.vte_entity_scene_hash;
                     if entity_rebuild_needed {
                         // Preprocess tetra entity instances into world-space tetrahedra.
                         let vte_preprocess_push_data: [u32; 4] =
@@ -5728,7 +5725,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             }
                         }
 
-                        self.frames_in_flight[frame_idx].last_entity_scene_hash = entity_scene_hash;
+                        self.vte_entity_scene_hash = entity_scene_hash;
                     }
                 }
 
