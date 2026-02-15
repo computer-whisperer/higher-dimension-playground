@@ -2643,6 +2643,13 @@ impl App {
                             "Applied multiplayer world snapshot rev={} chunks={}",
                             world.revision, world.non_empty_chunks
                         );
+                        // Reset world_ready flag to show loading screen while chunks materialize
+                        self.world_ready = false;
+                        // Preload chunks around player position
+                        self.scene.preload_spawn_chunks(
+                            self.camera.position,
+                            self.vte_lod_near_max_distance,
+                        );
                     }
                     Err(error) => {
                         eprintln!("Failed to load multiplayer world snapshot: {error}");
@@ -3535,6 +3542,11 @@ impl App {
                         BLOCK_EDIT_PLACE_MATERIAL_MIN..=BLOCK_EDIT_PLACE_MATERIAL_MAX,
                     )
                     .text("Place Material"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.audio.master_volume, 0.0..=2.0)
+                        .text("Master Volume")
+                        .step_by(0.05),
                 );
 
                 ui.separator();
