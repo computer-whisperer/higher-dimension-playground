@@ -1,7 +1,7 @@
 mod entities;
 mod procgen;
 
-use self::entities::EntityStore;
+use self::entities::{EntityId, EntityStore};
 use crate::shared::protocol::{
     ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage,
     WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
@@ -74,6 +74,7 @@ pub struct LocalConnection {
 #[derive(Clone, Debug)]
 struct PlayerState {
     client_id: u64,
+    entity_id: EntityId,
     name: String,
     position: [f32; 4],
     look: [f32; 4],
@@ -204,7 +205,7 @@ impl ServerCpuProfile {
 
 #[derive(Debug)]
 struct ServerState {
-    next_client_id: u64,
+    next_object_id: u64,
     entity_store: EntityStore,
     world: VoxelWorld,
     world_revision: u64,
@@ -219,6 +220,12 @@ type SharedState = Arc<Mutex<ServerState>>;
 
 fn monotonic_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn allocate_server_object_id(state: &mut ServerState) -> u64 {
+    let id = state.next_object_id;
+    state.next_object_id = state.next_object_id.wrapping_add(1).max(1);
+    id
 }
 
 fn record_server_cpu_sample(
@@ -293,6 +300,7 @@ fn sanitize_player_name(name: &str, client_id: u64) -> String {
 }
 
 fn player_snapshot(player: &PlayerState) -> PlayerSnapshot {
+    debug_assert_eq!(player.entity_id, player.client_id);
     PlayerSnapshot {
         client_id: player.client_id,
         name: player.name.clone(),
@@ -1518,6 +1526,7 @@ fn install_or_update_player(
         .entry(client_id)
         .or_insert_with(|| PlayerState {
             client_id,
+            entity_id: client_id,
             name: format!("player-{client_id}"),
             position: [0.0, 0.0, 0.0, 0.0],
             look: [
@@ -1805,8 +1814,7 @@ fn spawn_client_thread(
 
     let client_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
-        let id = guard.next_client_id;
-        guard.next_client_id = guard.next_client_id.wrapping_add(1).max(1);
+        let id = allocate_server_object_id(&mut guard);
         guard.clients.insert(id, tx.clone());
         id
     };
@@ -1918,7 +1926,9 @@ fn spawn_entity(
     start: Instant,
 ) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
+    let allocated_id = allocate_server_object_id(&mut guard);
     let entity_id = guard.entity_store.spawn(
+        allocated_id,
         kind,
         position,
         orientation,
@@ -2025,7 +2035,7 @@ fn initialize_state(
     );
 
     let state = Arc::new(Mutex::new(ServerState {
-        next_client_id: 1,
+        next_object_id: 1,
         entity_store: EntityStore::new(),
         world: initial_world,
         world_revision: 0,
@@ -2066,8 +2076,7 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
 
     let client_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
-        let id = guard.next_client_id;
-        guard.next_client_id = guard.next_client_id.wrapping_add(1).max(1);
+        let id = allocate_server_object_id(&mut guard);
         guard.clients.insert(id, server_to_client_tx);
         id
     };
