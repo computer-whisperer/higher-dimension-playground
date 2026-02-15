@@ -6,20 +6,31 @@ pub const WORLD_CHUNK_LOD_FAR: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityKind {
+    PlayerAvatar,
     TestCube,
     TestRotor,
     TestDrifter,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EntityClass {
+    Player,
+    Accent,
+    Mob,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EntitySnapshot {
     pub entity_id: u64,
+    pub class: EntityClass,
     pub kind: EntityKind,
     pub position: [f32; 4],
     pub orientation: [f32; 4],
     pub velocity: [f32; 4],
     pub scale: f32,
     pub material: u8,
+    pub owner_client_id: Option<u64>,
+    pub display_name: Option<String>,
     pub last_update_ms: u64,
 }
 
@@ -48,16 +59,6 @@ pub struct WorldChunkPayload {
 pub struct WorldChunkCoordPayload {
     pub lod_level: u8,
     pub chunk_pos: [i32; 4],
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PlayerSnapshot {
-    pub client_id: u64,
-    pub name: String,
-    pub position: [f32; 4],
-    pub look: [f32; 4],
-    pub velocity: [f32; 4],
-    pub last_update_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,16 +98,6 @@ pub enum ServerMessage {
     },
     Error {
         message: String,
-    },
-    PlayerJoined {
-        player: PlayerSnapshot,
-    },
-    PlayerLeft {
-        client_id: u64,
-    },
-    PlayerPositions {
-        server_time_ms: u64,
-        players: Vec<PlayerSnapshot>,
     },
     WorldVoxelSet {
         position: [i32; 4],

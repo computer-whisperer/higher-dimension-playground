@@ -1,14 +1,7 @@
-use crate::shared::protocol::{EntityKind, EntitySnapshot};
+use crate::shared::protocol::{EntityClass, EntityKind, EntitySnapshot};
 use std::collections::HashMap;
 
 pub type EntityId = u64;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntityClass {
-    Player,
-    Accent,
-    Mob,
-}
 
 const ENTITY_CLASSES: [EntityClass; 3] =
     [EntityClass::Player, EntityClass::Accent, EntityClass::Mob];
@@ -73,6 +66,11 @@ impl EntityState {
         debug_assert!(ENTITY_CLASSES.contains(&self.core.class));
         let t = now_ms as f32 * 0.001;
         let (next_position, next_orientation, next_scale) = match self.kind {
+            EntityKind::PlayerAvatar => (
+                self.core.position,
+                self.core.orientation,
+                self.base_scale.max(0.01),
+            ),
             EntityKind::TestCube => {
                 // Keep test entities moving in 4D using two coupled phase loops.
                 let phase_a = t * 0.65 + self.core.entity_id as f32 * 0.61;
@@ -149,12 +147,15 @@ impl EntityState {
     fn snapshot(&self) -> EntitySnapshot {
         EntitySnapshot {
             entity_id: self.core.entity_id,
+            class: self.core.class,
             kind: self.kind,
             position: self.core.position,
             orientation: self.core.orientation,
             velocity: self.core.velocity,
             scale: self.scale,
             material: self.material,
+            owner_client_id: None,
+            display_name: None,
             last_update_ms: self.core.last_update_ms,
         }
     }
@@ -174,10 +175,6 @@ impl EntityStore {
 
     pub fn len(&self) -> usize {
         self.entities.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entities.is_empty()
     }
 
     pub fn snapshot(&self, entity_id: EntityId) -> Option<EntitySnapshot> {

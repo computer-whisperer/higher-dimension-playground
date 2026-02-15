@@ -412,10 +412,13 @@ impl App {
                     ui.label("Players:");
                     let mut sorted_ids: Vec<u64> = self.remote_players.keys().copied().collect();
                     sorted_ids.sort();
-                    for id in sorted_ids {
-                        if let Some(player) = self.remote_players.get(&id) {
+                    for entity_id in sorted_ids {
+                        if let Some(player) = self.remote_players.get(&entity_id) {
                             let name = if player.name.is_empty() {
-                                format!("Player {}", id)
+                                player
+                                    .owner_client_id
+                                    .map(|id| format!("Player {}", id))
+                                    .unwrap_or_else(|| format!("Entity {}", entity_id))
                             } else {
                                 player.name.clone()
                             };

@@ -294,6 +294,7 @@ impl App {
 
     fn default_spawn_entity_scale(kind: multiplayer::EntityKind) -> f32 {
         match kind {
+            multiplayer::EntityKind::PlayerAvatar => 0.70,
             multiplayer::EntityKind::TestCube => 0.50,
             multiplayer::EntityKind::TestRotor => 0.54,
             multiplayer::EntityKind::TestDrifter => 0.48,
@@ -312,6 +313,7 @@ impl App {
 
     fn console_entity_kind_name(kind: multiplayer::EntityKind) -> &'static str {
         match kind {
+            multiplayer::EntityKind::PlayerAvatar => "player",
             multiplayer::EntityKind::TestCube => "cube",
             multiplayer::EntityKind::TestRotor => "rotor",
             multiplayer::EntityKind::TestDrifter => "drifter",

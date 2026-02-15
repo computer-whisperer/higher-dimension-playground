@@ -37,24 +37,31 @@ impl App {
         }
     }
 
-    pub(super) fn upsert_remote_player_snapshot(
+    pub(super) fn upsert_remote_player_entity(
         &mut self,
-        player: multiplayer::PlayerSnapshot,
+        entity: multiplayer::EntitySnapshot,
         received_at: Instant,
     ) {
-        let normalized_look = normalize4_with_fallback(player.look, [0.0, 0.0, 1.0, 0.0]);
-        if let Some(existing) = self.remote_players.get_mut(&player.client_id) {
+        let normalized_look = normalize4_with_fallback(entity.orientation, [0.0, 0.0, 1.0, 0.0]);
+        let player_name = entity.display_name.clone().unwrap_or_else(|| {
+            entity
+                .owner_client_id
+                .map(|id| format!("player-{id}"))
+                .unwrap_or_else(|| format!("entity-{}", entity.entity_id))
+        });
+        if let Some(existing) = self.remote_players.get_mut(&entity.entity_id) {
             let previous_position = existing.position;
 
-            existing.name = player.name;
-            existing.position = player.position;
+            existing.owner_client_id = entity.owner_client_id;
+            existing.name = player_name;
+            existing.position = entity.position;
             existing.look = normalized_look;
-            existing.last_update_ms = player.last_update_ms;
+            existing.last_update_ms = entity.last_update_ms;
             existing.last_received_at = received_at;
             existing.velocity =
-                sanitize_remote_velocity(player.velocity, REMOTE_PLAYER_MAX_PREDICTED_SPEED);
+                sanitize_remote_velocity(entity.velocity, REMOTE_PLAYER_MAX_PREDICTED_SPEED);
 
-            if distance4(previous_position, player.position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
+            if distance4(previous_position, entity.position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
             {
                 existing.render_position = existing.position;
                 existing.render_look = existing.look;
@@ -65,16 +72,17 @@ impl App {
         }
 
         self.remote_players.insert(
-            player.client_id,
+            entity.entity_id,
             RemotePlayerState {
-                name: player.name,
-                position: player.position,
+                owner_client_id: entity.owner_client_id,
+                name: player_name,
+                position: entity.position,
                 look: normalized_look,
-                last_update_ms: player.last_update_ms,
-                render_position: player.position,
+                last_update_ms: entity.last_update_ms,
+                render_position: entity.position,
                 render_look: normalized_look,
                 velocity: sanitize_remote_velocity(
-                    player.velocity,
+                    entity.velocity,
                     REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                 ),
                 last_received_at: received_at,
@@ -342,27 +350,6 @@ impl App {
             multiplayer::ServerMessage::Error { message } => {
                 eprintln!("Multiplayer server error: {message}");
             }
-            multiplayer::ServerMessage::PlayerJoined { player } => {
-                if Some(player.client_id) == self.multiplayer_self_id {
-                    return;
-                }
-                self.upsert_remote_player_snapshot(player, received_at);
-            }
-            multiplayer::ServerMessage::PlayerLeft { client_id } => {
-                self.remote_players.remove(&client_id);
-            }
-            multiplayer::ServerMessage::PlayerPositions { players, .. } => {
-                let mut seen = HashSet::with_capacity(players.len());
-                for player in players {
-                    if Some(player.client_id) == self.multiplayer_self_id {
-                        continue;
-                    }
-                    seen.insert(player.client_id);
-                    self.upsert_remote_player_snapshot(player, received_at);
-                }
-                self.remote_players
-                    .retain(|client_id, _| seen.contains(client_id));
-            }
             multiplayer::ServerMessage::WorldVoxelSet {
                 position,
                 material,
@@ -421,64 +408,92 @@ impl App {
                 self.apply_multiplayer_chunk_unload_batch(revision, chunks);
             }
             multiplayer::ServerMessage::Pong { .. } => {}
-            multiplayer::ServerMessage::EntitySpawned { entity } => {
-                self.remote_entities.insert(
-                    entity.entity_id,
-                    RemoteEntityState {
-                        kind: entity.kind,
-                        position: entity.position,
-                        orientation: entity.orientation,
-                        velocity: sanitize_remote_velocity(
-                            entity.velocity,
-                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
-                        ),
-                        scale: entity.scale,
-                        material: entity.material,
-                        render_position: entity.position,
-                        render_orientation: entity.orientation,
-                        last_received_at: received_at,
-                    },
-                );
-            }
+            multiplayer::ServerMessage::EntitySpawned { entity } => match entity.class {
+                multiplayer::EntityClass::Player => {
+                    self.remote_entities.remove(&entity.entity_id);
+                    if entity.owner_client_id == self.multiplayer_self_id {
+                        self.remote_players.remove(&entity.entity_id);
+                    } else {
+                        self.upsert_remote_player_entity(entity, received_at);
+                    }
+                }
+                multiplayer::EntityClass::Accent | multiplayer::EntityClass::Mob => {
+                    self.remote_entities.insert(
+                        entity.entity_id,
+                        RemoteEntityState {
+                            kind: entity.kind,
+                            position: entity.position,
+                            orientation: entity.orientation,
+                            velocity: sanitize_remote_velocity(
+                                entity.velocity,
+                                REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                            ),
+                            scale: entity.scale,
+                            material: entity.material,
+                            render_position: entity.position,
+                            render_orientation: entity.orientation,
+                            last_received_at: received_at,
+                        },
+                    );
+                }
+            },
             multiplayer::ServerMessage::EntityDestroyed { entity_id } => {
+                self.remote_players.remove(&entity_id);
                 self.remote_entities.remove(&entity_id);
             }
             multiplayer::ServerMessage::EntityPositions { entities, .. } => {
-                let mut seen = HashSet::with_capacity(entities.len());
+                let mut seen_players = HashSet::new();
+                let mut seen_entities = HashSet::new();
                 for entity in entities {
-                    seen.insert(entity.entity_id);
-                    if let Some(existing) = self.remote_entities.get_mut(&entity.entity_id) {
-                        existing.position = entity.position;
-                        existing.orientation = entity.orientation;
-                        existing.velocity = sanitize_remote_velocity(
-                            entity.velocity,
-                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
-                        );
-                        existing.scale = entity.scale;
-                        existing.material = entity.material;
-                        existing.last_received_at = received_at;
-                    } else {
-                        self.remote_entities.insert(
-                            entity.entity_id,
-                            RemoteEntityState {
-                                kind: entity.kind,
-                                position: entity.position,
-                                orientation: entity.orientation,
-                                velocity: sanitize_remote_velocity(
+                    match entity.class {
+                        multiplayer::EntityClass::Player => {
+                            self.remote_entities.remove(&entity.entity_id);
+                            if entity.owner_client_id == self.multiplayer_self_id {
+                                self.remote_players.remove(&entity.entity_id);
+                                continue;
+                            }
+                            seen_players.insert(entity.entity_id);
+                            self.upsert_remote_player_entity(entity, received_at);
+                        }
+                        multiplayer::EntityClass::Accent | multiplayer::EntityClass::Mob => {
+                            seen_entities.insert(entity.entity_id);
+                            if let Some(existing) = self.remote_entities.get_mut(&entity.entity_id)
+                            {
+                                existing.position = entity.position;
+                                existing.orientation = entity.orientation;
+                                existing.velocity = sanitize_remote_velocity(
                                     entity.velocity,
                                     REMOTE_PLAYER_MAX_PREDICTED_SPEED,
-                                ),
-                                scale: entity.scale,
-                                material: entity.material,
-                                render_position: entity.position,
-                                render_orientation: entity.orientation,
-                                last_received_at: received_at,
-                            },
-                        );
+                                );
+                                existing.scale = entity.scale;
+                                existing.material = entity.material;
+                                existing.last_received_at = received_at;
+                            } else {
+                                self.remote_entities.insert(
+                                    entity.entity_id,
+                                    RemoteEntityState {
+                                        kind: entity.kind,
+                                        position: entity.position,
+                                        orientation: entity.orientation,
+                                        velocity: sanitize_remote_velocity(
+                                            entity.velocity,
+                                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                                        ),
+                                        scale: entity.scale,
+                                        material: entity.material,
+                                        render_position: entity.position,
+                                        render_orientation: entity.orientation,
+                                        last_received_at: received_at,
+                                    },
+                                );
+                            }
+                        }
                     }
                 }
                 self.remote_entities
-                    .retain(|entity_id, _| seen.contains(entity_id));
+                    .retain(|entity_id, _| seen_entities.contains(entity_id));
+                self.remote_players
+                    .retain(|entity_id, _| seen_players.contains(entity_id));
             }
         }
     }
@@ -557,10 +572,11 @@ impl App {
         let mut ids: Vec<u64> = self.remote_players.keys().copied().collect();
         ids.sort_unstable();
         let mut instances = Vec::with_capacity(ids.len() * REMOTE_AVATAR_PART_COUNT_ESTIMATE);
-        for client_id in ids {
-            if let Some(player) = self.remote_players.get(&client_id) {
+        for entity_id in ids {
+            if let Some(player) = self.remote_players.get(&entity_id) {
+                let avatar_seed_id = player.owner_client_id.unwrap_or(entity_id);
                 instances.extend(build_remote_player_avatar_instances(
-                    client_id,
+                    avatar_seed_id,
                     stable_name_hash(&player.name),
                     player.render_position,
                     player.render_look,
@@ -578,6 +594,7 @@ impl App {
         for entity_id in ids {
             if let Some(entity) = self.remote_entities.get(&entity_id) {
                 match entity.kind {
+                    multiplayer::EntityKind::PlayerAvatar => {}
                     multiplayer::EntityKind::TestCube => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         instances.push(build_centered_model_instance(
@@ -651,11 +668,11 @@ impl App {
         ids.sort_unstable();
 
         let mut tags = Vec::with_capacity(ids.len().min(REMOTE_PLAYER_TAG_MAX_COUNT));
-        for client_id in ids {
+        for entity_id in ids {
             if tags.len() >= REMOTE_PLAYER_TAG_MAX_COUNT {
                 break;
             }
-            let Some(player) = self.remote_players.get(&client_id) else {
+            let Some(player) = self.remote_players.get(&entity_id) else {
                 continue;
             };
 
@@ -700,7 +717,10 @@ impl App {
             let scale = (3.2 / (distance + 1.0)).clamp(0.55, 1.45);
             let bg_alpha = (0.82 - distance * 0.05).clamp(0.35, 0.82);
             let text = if player.name.trim().is_empty() {
-                format!("player-{client_id}")
+                player
+                    .owner_client_id
+                    .map(|id| format!("player-{id}"))
+                    .unwrap_or_else(|| format!("entity-{entity_id}"))
             } else {
                 player.name.clone()
             };

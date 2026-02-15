@@ -1251,6 +1251,7 @@ struct VteSweepState {
 
 #[derive(Clone)]
 struct RemotePlayerState {
+    owner_client_id: Option<u64>,
     name: String,
     // Latest network-authoritative state from the server.
     position: [f32; 4],
