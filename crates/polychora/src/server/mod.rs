@@ -1,7 +1,7 @@
 mod entities;
 mod procgen;
 
-use self::entities::{EntityClass, EntityCore, EntityStore};
+use self::entities::{update_core_motion, EntityClass, EntityCore, EntityStore};
 use crate::shared::protocol::{
     ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage,
     WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
@@ -10,7 +10,7 @@ use crate::shared::protocol::{
 use crate::shared::voxel::{
     self, load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -411,6 +411,14 @@ fn player_snapshot(player: &PlayerState) -> PlayerSnapshot {
         look: player.core.orientation,
         last_update_ms: player.core.last_update_ms,
     }
+}
+
+fn broadcast_player_spawn_compat(state: &SharedState, player: PlayerSnapshot) {
+    broadcast(state, ServerMessage::PlayerJoined { player });
+}
+
+fn broadcast_player_despawn_compat(state: &SharedState, client_id: u64) {
+    broadcast(state, ServerMessage::PlayerLeft { client_id });
 }
 
 fn world_chunk_from_position(position: [f32; 4]) -> [i32; 4] {
@@ -1121,6 +1129,28 @@ fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
     }
 }
 
+fn prune_stale_clients(state: &SharedState, stale: Vec<u64>, notify_player_left: bool) {
+    if stale.is_empty() {
+        return;
+    }
+    let mut disconnected_players = Vec::new();
+    {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        for client_id in stale {
+            guard.clients.remove(&client_id);
+            if let Some(player) = guard.players.remove(&client_id) {
+                mark_entity_record_despawned(&mut guard, player.core.entity_id, None);
+                disconnected_players.push(client_id);
+            }
+        }
+    }
+    if notify_player_left {
+        for client_id in disconnected_players {
+            broadcast_player_despawn_compat(state, client_id);
+        }
+    }
+}
+
 fn broadcast(state: &SharedState, message: ServerMessage) {
     let clients: Vec<_> = {
         let guard = state.lock().expect("server state lock poisoned");
@@ -1138,15 +1168,7 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
         }
     }
 
-    if !stale.is_empty() {
-        let mut guard = state.lock().expect("server state lock poisoned");
-        for client_id in stale {
-            guard.clients.remove(&client_id);
-            if let Some(player) = guard.players.remove(&client_id) {
-                mark_entity_record_despawned(&mut guard, player.core.entity_id, None);
-            }
-        }
-    }
+    prune_stale_clients(state, stale, true);
 }
 
 fn send_world_voxel_set_to_streamed_clients(
@@ -1197,15 +1219,7 @@ fn send_world_voxel_set_to_streamed_clients(
         }
     }
 
-    if !stale.is_empty() {
-        let mut guard = state.lock().expect("server state lock poisoned");
-        for client_id in stale {
-            guard.clients.remove(&client_id);
-            if let Some(player) = guard.players.remove(&client_id) {
-                mark_entity_record_despawned(&mut guard, player.core.entity_id, None);
-            }
-        }
-    }
+    prune_stale_clients(state, stale, true);
 }
 
 fn sync_streamed_chunks_for_client(
@@ -1620,7 +1634,7 @@ fn remove_client(state: &SharedState, client_id: u64) {
         }
     };
     if had_player {
-        broadcast(state, ServerMessage::PlayerLeft { client_id });
+        broadcast_player_despawn_compat(state, client_id);
     }
 }
 
@@ -1631,42 +1645,51 @@ fn install_or_update_player(
     position: Option<[f32; 4]>,
     look: Option<[f32; 4]>,
     start: Instant,
-) -> PlayerSnapshot {
+) -> (PlayerSnapshot, bool) {
     let now = monotonic_ms(start);
     let mut guard = state.lock().expect("server state lock poisoned");
-    let player = guard
-        .players
-        .entry(client_id)
-        .or_insert_with(|| PlayerState {
-            client_id,
-            core: EntityCore {
-                entity_id: client_id,
-                class: EntityClass::Player,
-                position: [0.0, 0.0, 0.0, 0.0],
-                orientation: [
-                    0.0,
-                    0.0,
-                    std::f32::consts::FRAC_1_SQRT_2,
-                    std::f32::consts::FRAC_1_SQRT_2,
-                ],
-                last_update_ms: now,
-            },
-            name: format!("player-{client_id}"),
-            streamed_chunks: HashSet::new(),
-            last_stream_center_chunk: None,
-            last_stream_world_revision: 0,
-        });
+    let (player, spawned_now) = match guard.players.entry(client_id) {
+        Entry::Occupied(entry) => (entry.into_mut(), false),
+        Entry::Vacant(entry) => (
+            entry.insert(PlayerState {
+                client_id,
+                core: EntityCore {
+                    entity_id: client_id,
+                    class: EntityClass::Player,
+                    position: [0.0, 0.0, 0.0, 0.0],
+                    orientation: [
+                        0.0,
+                        0.0,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                    ],
+                    velocity: [0.0, 0.0, 0.0, 0.0],
+                    last_update_ms: now,
+                },
+                name: format!("player-{client_id}"),
+                streamed_chunks: HashSet::new(),
+                last_stream_center_chunk: None,
+                last_stream_world_revision: 0,
+            }),
+            true,
+        ),
+    };
 
     if let Some(n) = name {
         player.name = sanitize_player_name(&n, client_id);
     }
-    if let Some(pos) = position {
-        player.core.position = pos;
+    if position.is_some() || look.is_some() {
+        let prior_position = player.core.position;
+        let prior_orientation = player.core.orientation;
+        update_core_motion(
+            &mut player.core,
+            position.unwrap_or(prior_position),
+            look.unwrap_or(prior_orientation),
+            now,
+        );
+    } else {
+        player.core.last_update_ms = now;
     }
-    if let Some(dir) = look {
-        player.core.orientation = dir;
-    }
-    player.core.last_update_ms = now;
     let entity_id = player.core.entity_id;
     let snapshot = player_snapshot(player);
     upsert_entity_record(
@@ -1676,7 +1699,7 @@ fn install_or_update_player(
         Some(client_id),
         now,
     );
-    snapshot
+    (snapshot, spawned_now)
 }
 
 fn handle_message(
@@ -1695,7 +1718,7 @@ fn handle_message(
     let message_cpu_start = Instant::now();
     match message {
         ClientMessage::Hello { name } => {
-            let snapshot =
+            let (snapshot, spawned_now) =
                 install_or_update_player(state, client_id, Some(name), None, None, start);
             send_to_client(
                 state,
@@ -1754,10 +1777,12 @@ fn handle_message(
                 far_chunk_radius,
                 true,
             );
-            broadcast(state, ServerMessage::PlayerJoined { player: snapshot });
+            if spawned_now {
+                broadcast_player_spawn_compat(state, snapshot);
+            }
         }
         ClientMessage::UpdatePlayer { position, look } => {
-            let _snapshot =
+            let (snapshot, spawned_now) =
                 install_or_update_player(state, client_id, None, Some(position), Some(look), start);
             let center_chunk = world_chunk_from_position(position);
             sync_streamed_chunks_for_client(
@@ -1771,6 +1796,9 @@ fn handle_message(
                 far_chunk_radius,
                 false,
             );
+            if spawned_now {
+                broadcast_player_spawn_compat(state, snapshot);
+            }
         }
         ClientMessage::SetVoxel {
             position,
