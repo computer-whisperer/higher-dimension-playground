@@ -62,11 +62,14 @@ pub struct EntityState {
 }
 
 impl EntityState {
-    fn simulate(&mut self, now_ms: u64) {
+    fn simulate(&mut self, now_ms: u64) -> bool {
         debug_assert!(ENTITY_CLASSES.contains(&self.core.class));
         if self.core.class != EntityClass::Accent {
-            return;
+            return false;
         }
+        let previous_position = self.core.position;
+        let previous_orientation = self.core.orientation;
+        let previous_scale = self.scale;
         let t = now_ms as f32 * 0.001;
         let (next_position, next_orientation, next_scale) = match self.kind {
             EntityKind::PlayerAvatar => (
@@ -150,6 +153,9 @@ impl EntityState {
         };
         self.scale = next_scale;
         update_core_motion(&mut self.core, next_position, next_orientation, now_ms);
+        previous_position != next_position
+            || previous_orientation != next_orientation
+            || previous_scale != next_scale
     }
 
     fn snapshot(&self) -> EntitySnapshot {
@@ -193,10 +199,14 @@ impl EntityStore {
         self.entities.remove(&entity_id).is_some()
     }
 
-    pub fn simulate(&mut self, now_ms: u64) {
+    pub fn simulate(&mut self, now_ms: u64) -> Vec<EntityId> {
+        let mut moved = Vec::new();
         for entity in self.entities.values_mut() {
-            entity.simulate(now_ms);
+            if entity.simulate(now_ms) {
+                moved.push(entity.core.entity_id);
+            }
         }
+        moved
     }
 
     pub fn set_motion_state(

@@ -1,7 +1,7 @@
 mod entities;
 mod procgen;
 
-use self::entities::EntityStore;
+use self::entities::{EntityId, EntityStore};
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
@@ -300,6 +300,19 @@ fn allocate_server_object_id(state: &mut ServerState) -> u64 {
     let id = state.next_object_id;
     state.next_object_id = state.next_object_id.wrapping_add(1).max(1);
     id
+}
+
+fn allocate_or_reserve_server_object_id(
+    state: &mut ServerState,
+    persisted_id: Option<EntityId>,
+) -> EntityId {
+    match persisted_id {
+        Some(entity_id) if entity_id > 0 => {
+            state.next_object_id = state.next_object_id.max(entity_id.saturating_add(1).max(1));
+            entity_id
+        }
+        _ => allocate_server_object_id(state),
+    }
 }
 
 fn mark_entities_dirty(state: &mut ServerState) {
@@ -841,7 +854,21 @@ fn tick_entity_simulation_window(
 ) {
     let mut sim_steps = 0usize;
     while *next_sim_ms <= now_ms && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
-        state.entity_store.simulate(*next_sim_ms);
+        let moved_entities = state.entity_store.simulate(*next_sim_ms);
+        let persistent_accent_motion = moved_entities.iter().any(|entity_id| {
+            state
+                .entity_records
+                .get(entity_id)
+                .map(|record| {
+                    record.lifecycle == EntityLifecycle::Live
+                        && record.persistent
+                        && record.class == EntityClass::Accent
+                })
+                .unwrap_or(false)
+        });
+        if persistent_accent_motion {
+            mark_entities_dirty(state);
+        }
         simulate_mobs(state, *next_sim_ms);
         *next_sim_ms = (*next_sim_ms).saturating_add(sim_step_ms);
         sim_steps += 1;
@@ -2506,6 +2533,7 @@ fn handle_message(
                     None,
                     true,
                     None,
+                    None,
                     start,
                 ),
                 EntityKind::TestCube | EntityKind::TestRotor | EntityKind::TestDrifter => {
@@ -2518,6 +2546,7 @@ fn handle_message(
                         spawn_material,
                         None,
                         true,
+                        None,
                         start,
                     )
                 }
@@ -2700,10 +2729,11 @@ fn spawn_entity(
     material: u8,
     display_name: Option<String>,
     persistent: bool,
+    persisted_entity_id: Option<EntityId>,
     start: Instant,
 ) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
-    let allocated_id = allocate_server_object_id(&mut guard);
+    let allocated_id = allocate_or_reserve_server_object_id(&mut guard, persisted_entity_id);
     let now_ms = monotonic_ms(start);
     let entity_id = guard.entity_store.spawn(
         allocated_id,
@@ -2744,10 +2774,11 @@ fn spawn_mob_entity(
     display_name: Option<String>,
     persistent: bool,
     persisted_mob: Option<PersistedMobEntry>,
+    persisted_entity_id: Option<EntityId>,
     start: Instant,
 ) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
-    let allocated_id = allocate_server_object_id(&mut guard);
+    let allocated_id = allocate_or_reserve_server_object_id(&mut guard, persisted_entity_id);
     let now_ms = monotonic_ms(start);
     let entity_id = guard.entity_store.spawn(
         allocated_id,
@@ -2856,6 +2887,7 @@ fn spawn_default_test_entities(state: &SharedState, start: Instant) {
             *material,
             None,
             false,
+            None,
             start,
         );
         eprintln!(
@@ -2883,6 +2915,7 @@ fn spawn_default_test_mobs(state: &SharedState, start: Instant) {
             *material,
             None,
             false,
+            None,
             None,
             start,
         );
@@ -2916,6 +2949,7 @@ fn restore_persisted_entities(
                         entry.material,
                         entry.display_name,
                         true,
+                        Some(entry.entity_id),
                         start,
                     );
                     restored = restored.saturating_add(1);
@@ -2946,6 +2980,7 @@ fn restore_persisted_entities(
                     entry.display_name,
                     true,
                     persisted_mob,
+                    Some(entry.entity_id),
                     start,
                 );
                 restored = restored.saturating_add(1);
