@@ -94,6 +94,10 @@ struct ServerCpuProfile {
     tick_samples: u64,
     tick_cpu_ms_sum: f64,
     tick_cpu_ms_max: f64,
+    tick_player_snapshots_sum: u64,
+    tick_player_snapshots_max: u64,
+    tick_entity_snapshots_sum: u64,
+    tick_entity_snapshots_max: u64,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -104,6 +108,10 @@ struct ServerCpuProfileReport {
     tick_samples: u64,
     tick_cpu_ms_sum: f64,
     tick_cpu_ms_max: f64,
+    tick_player_snapshots_sum: u64,
+    tick_player_snapshots_max: u64,
+    tick_entity_snapshots_sum: u64,
+    tick_entity_snapshots_max: u64,
 }
 
 impl ServerCpuProfile {
@@ -116,6 +124,10 @@ impl ServerCpuProfile {
             tick_samples: 0,
             tick_cpu_ms_sum: 0.0,
             tick_cpu_ms_max: 0.0,
+            tick_player_snapshots_sum: 0,
+            tick_player_snapshots_max: 0,
+            tick_entity_snapshots_sum: 0,
+            tick_entity_snapshots_max: 0,
         }
     }
 
@@ -126,11 +138,26 @@ impl ServerCpuProfile {
         self.message_cpu_ms_max = self.message_cpu_ms_max.max(elapsed_ms);
     }
 
-    fn record_tick_sample(&mut self, elapsed: Duration) {
+    fn record_tick_sample(
+        &mut self,
+        elapsed: Duration,
+        player_snapshots: usize,
+        entity_snapshots: usize,
+    ) {
         let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
         self.tick_samples = self.tick_samples.saturating_add(1);
         self.tick_cpu_ms_sum += elapsed_ms;
         self.tick_cpu_ms_max = self.tick_cpu_ms_max.max(elapsed_ms);
+        let player_snapshots = player_snapshots as u64;
+        let entity_snapshots = entity_snapshots as u64;
+        self.tick_player_snapshots_sum = self
+            .tick_player_snapshots_sum
+            .saturating_add(player_snapshots);
+        self.tick_player_snapshots_max = self.tick_player_snapshots_max.max(player_snapshots);
+        self.tick_entity_snapshots_sum = self
+            .tick_entity_snapshots_sum
+            .saturating_add(entity_snapshots);
+        self.tick_entity_snapshots_max = self.tick_entity_snapshots_max.max(entity_snapshots);
     }
 
     fn take_report_if_due(&mut self, now: Instant) -> Option<ServerCpuProfileReport> {
@@ -145,6 +172,10 @@ impl ServerCpuProfile {
             tick_samples: self.tick_samples,
             tick_cpu_ms_sum: self.tick_cpu_ms_sum,
             tick_cpu_ms_max: self.tick_cpu_ms_max,
+            tick_player_snapshots_sum: self.tick_player_snapshots_sum,
+            tick_player_snapshots_max: self.tick_player_snapshots_max,
+            tick_entity_snapshots_sum: self.tick_entity_snapshots_sum,
+            tick_entity_snapshots_max: self.tick_entity_snapshots_max,
         };
 
         self.window_start = now;
@@ -154,6 +185,10 @@ impl ServerCpuProfile {
         self.tick_samples = 0;
         self.tick_cpu_ms_sum = 0.0;
         self.tick_cpu_ms_max = 0.0;
+        self.tick_player_snapshots_sum = 0;
+        self.tick_player_snapshots_max = 0;
+        self.tick_entity_snapshots_sum = 0;
+        self.tick_entity_snapshots_max = 0;
 
         if report.message_samples == 0 && report.tick_samples == 0 {
             None
@@ -185,15 +220,17 @@ fn monotonic_ms(start: Instant) -> u64 {
 fn record_server_cpu_sample(
     state: &SharedState,
     message_elapsed: Option<Duration>,
-    tick_elapsed: Option<Duration>,
+    tick_sample: Option<(Duration, usize, usize)>,
 ) {
     let maybe_report = {
         let mut guard = state.lock().expect("server state lock poisoned");
         if let Some(elapsed) = message_elapsed {
             guard.cpu_profile.record_message_sample(elapsed);
         }
-        if let Some(elapsed) = tick_elapsed {
-            guard.cpu_profile.record_tick_sample(elapsed);
+        if let Some((elapsed, player_snapshots, entity_snapshots)) = tick_sample {
+            guard
+                .cpu_profile
+                .record_tick_sample(elapsed, player_snapshots, entity_snapshots);
         }
         guard
             .cpu_profile
@@ -215,15 +252,29 @@ fn record_server_cpu_sample(
     } else {
         0.0
     };
+    let tick_players_avg = if report.tick_samples > 0 {
+        report.tick_player_snapshots_sum as f64 / report.tick_samples as f64
+    } else {
+        0.0
+    };
+    let tick_entities_avg = if report.tick_samples > 0 {
+        report.tick_entity_snapshots_sum as f64 / report.tick_samples as f64
+    } else {
+        0.0
+    };
 
     eprintln!(
-        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} players={} entities={}",
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={}",
         msg_avg_ms,
         report.message_cpu_ms_max,
         report.message_samples,
         tick_avg_ms,
         report.tick_cpu_ms_max,
         report.tick_samples,
+        tick_players_avg,
+        report.tick_player_snapshots_max,
+        tick_entities_avg,
+        report.tick_entity_snapshots_max,
         player_count,
         entity_count,
     );
@@ -1303,7 +1354,9 @@ fn start_broadcast_thread(
                 };
                 (players, entities)
             };
-            let did_broadcast = players.is_some() || entities.is_some();
+            let player_snapshot_count = players.as_ref().map_or(0, Vec::len);
+            let entity_snapshot_count = entities.as_ref().map_or(0, Vec::len);
+            let did_broadcast = player_snapshot_count > 0 || entity_snapshot_count > 0;
             if let Some(players) = players {
                 broadcast(
                     &state,
@@ -1323,7 +1376,15 @@ fn start_broadcast_thread(
                 );
             }
             if did_broadcast {
-                record_server_cpu_sample(&state, None, Some(tick_cpu_start.elapsed()));
+                record_server_cpu_sample(
+                    &state,
+                    None,
+                    Some((
+                        tick_cpu_start.elapsed(),
+                        player_snapshot_count,
+                        entity_snapshot_count,
+                    )),
+                );
             }
         }
     });
