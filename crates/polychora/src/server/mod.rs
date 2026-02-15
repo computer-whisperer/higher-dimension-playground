@@ -26,6 +26,7 @@ const STREAM_MID_LOD_SCALE: i32 = 2;
 const STREAM_FAR_LOD_SCALE: i32 = 4;
 const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
+const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -306,6 +307,14 @@ fn world_chunk_from_position(position: [f32; 4]) -> [i32; 4] {
         (position[2].floor() as i32).div_euclid(cs),
         (position[3].floor() as i32).div_euclid(cs),
     ]
+}
+
+fn chunk_distance2(a: [i32; 4], b: [i32; 4]) -> i64 {
+    let dx = (a[0] - b[0]) as i64;
+    let dy = (a[1] - b[1]) as i64;
+    let dz = (a[2] - b[2]) as i64;
+    let dw = (a[3] - b[3]) as i64;
+    dx * dx + dy * dy + dz * dz + dw * dw
 }
 
 fn encode_world_chunk_payload(
@@ -1325,10 +1334,15 @@ fn build_world_snapshot_payload(state: &ServerState) -> io::Result<WorldSnapshot
 fn start_broadcast_thread(
     state: SharedState,
     tick_hz: f32,
+    entity_interest_radius_chunks: i32,
     start: Instant,
     shutdown: Arc<AtomicBool>,
 ) {
     let interval = Duration::from_secs_f64(1.0 / tick_hz.max(0.1) as f64);
+    let entity_interest_radius_sq = {
+        let radius = entity_interest_radius_chunks.max(0) as i64;
+        radius * radius
+    };
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             thread::sleep(interval);
@@ -1337,7 +1351,7 @@ fn start_broadcast_thread(
             }
             let tick_cpu_start = Instant::now();
             let now = monotonic_ms(start);
-            let (players, entities) = {
+            let (players, entity_batches) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 guard.entity_store.simulate(now);
                 let players = if guard.players.is_empty() {
@@ -1347,16 +1361,31 @@ fn start_broadcast_thread(
                     all.sort_by_key(|p| p.client_id);
                     Some(all)
                 };
-                let entities = if guard.entity_store.is_empty() {
-                    None
+                let entity_batches = if guard.entity_store.is_empty() || guard.players.is_empty() {
+                    Vec::new()
                 } else {
-                    Some(guard.entity_store.sorted_snapshots())
+                    let all_entities = guard.entity_store.sorted_snapshots();
+                    let mut batches = Vec::with_capacity(guard.players.len());
+                    for player in guard.players.values() {
+                        let player_chunk = world_chunk_from_position(player.position);
+                        let mut visible = Vec::new();
+                        for entity in &all_entities {
+                            let entity_chunk = world_chunk_from_position(entity.position);
+                            if chunk_distance2(entity_chunk, player_chunk) <= entity_interest_radius_sq
+                            {
+                                visible.push(entity.clone());
+                            }
+                        }
+                        batches.push((player.client_id, visible));
+                    }
+                    batches
                 };
-                (players, entities)
+                (players, entity_batches)
             };
             let player_snapshot_count = players.as_ref().map_or(0, Vec::len);
-            let entity_snapshot_count = entities.as_ref().map_or(0, Vec::len);
-            let did_broadcast = player_snapshot_count > 0 || entity_snapshot_count > 0;
+            let entity_snapshot_count: usize =
+                entity_batches.iter().map(|(_, entities)| entities.len()).sum();
+            let did_broadcast = player_snapshot_count > 0 || !entity_batches.is_empty();
             if let Some(players) = players {
                 broadcast(
                     &state,
@@ -1366,9 +1395,10 @@ fn start_broadcast_thread(
                     },
                 );
             }
-            if let Some(entities) = entities {
-                broadcast(
+            for (client_id, entities) in entity_batches {
+                send_to_client(
                     &state,
+                    client_id,
                     ServerMessage::EntityPositions {
                         server_time_ms: now,
                         entities,
@@ -1881,8 +1911,17 @@ fn initialize_state(
         cpu_profile: ServerCpuProfile::new(start),
     }));
 
+    let entity_interest_radius_chunks =
+        config.procgen_far_chunk_radius.max(1) * STREAM_FAR_LOD_SCALE
+            + ENTITY_INTEREST_RADIUS_PADDING_CHUNKS;
     spawn_default_test_entities(&state, start);
-    start_broadcast_thread(state.clone(), config.tick_hz, start, shutdown.clone());
+    start_broadcast_thread(
+        state.clone(),
+        config.tick_hz,
+        entity_interest_radius_chunks,
+        start,
+        shutdown.clone(),
+    );
     start_autosave_thread(
         state.clone(),
         config.world_file.clone(),
