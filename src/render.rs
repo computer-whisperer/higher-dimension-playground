@@ -63,7 +63,7 @@ use vulkano::pipeline::{
 };
 use vulkano::query::{QueryPool, QueryPoolCreateInfo, QueryResultFlags, QueryType};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::shader::{ShaderModule, ShaderStages};
+use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo, ShaderStages};
 use vulkano::swapchain::{
     acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
 };
@@ -2172,8 +2172,11 @@ impl RenderContext {
         // Load shaders from SPIR-V bytes embedded at compile time
         // (vulkano_shaders macro can't parse Slang's SPIR-V 1.4 output).
         fn load_shader(device: Arc<Device>, spirv: &[u8]) -> Arc<ShaderModule> {
+            let words = vulkano::shader::spirv::bytes_to_words(spirv)
+                .expect("SPIR-V bytes length must be a multiple of 4");
             unsafe {
-                ShaderModule::from_bytes(device, spirv).expect("Failed to load shader module")
+                ShaderModule::new(device, ShaderModuleCreateInfo::new(words.as_ref()))
+                    .expect("Failed to load shader module")
             }
         }
 
