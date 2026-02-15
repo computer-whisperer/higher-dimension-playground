@@ -427,6 +427,10 @@ struct Args {
     #[arg(long, default_value_t = 10.0)]
     singleplayer_tick_hz: f32,
 
+    /// Integrated singleplayer entity simulation rate in Hz.
+    #[arg(long, default_value_t = 30.0)]
+    singleplayer_entity_sim_hz: f32,
+
     /// Autosave interval for integrated singleplayer server (seconds).
     #[arg(long, default_value_t = 5)]
     singleplayer_save_interval_secs: u64,
@@ -1350,6 +1354,7 @@ fn build_singleplayer_runtime_config(
         bind: "127.0.0.1:0".to_string(),
         world_file,
         tick_hz: args.singleplayer_tick_hz.max(0.1),
+        entity_sim_hz: args.singleplayer_entity_sim_hz.max(0.1),
         save_interval_secs: args.singleplayer_save_interval_secs,
         snapshot_on_join: args.singleplayer_snapshot_on_join,
         procgen_structures: args.singleplayer_procgen_structures,

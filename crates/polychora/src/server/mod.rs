@@ -27,12 +27,14 @@ const STREAM_FAR_LOD_SCALE: i32 = 4;
 const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
 const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
+const ENTITY_SIM_STEP_MAX_PER_BROADCAST: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub bind: String,
     pub world_file: PathBuf,
     pub tick_hz: f32,
+    pub entity_sim_hz: f32,
     pub save_interval_secs: u64,
     pub snapshot_on_join: bool,
     pub procgen_structures: bool,
@@ -50,6 +52,7 @@ impl Default for RuntimeConfig {
             bind: "0.0.0.0:4000".to_string(),
             world_file: PathBuf::from("saves/world.v4dw"),
             tick_hz: 10.0,
+            entity_sim_hz: 30.0,
             save_interval_secs: 5,
             snapshot_on_join: true,
             procgen_structures: true,
@@ -1334,15 +1337,20 @@ fn build_world_snapshot_payload(state: &ServerState) -> io::Result<WorldSnapshot
 fn start_broadcast_thread(
     state: SharedState,
     tick_hz: f32,
+    entity_sim_hz: f32,
     entity_interest_radius_chunks: i32,
     start: Instant,
     shutdown: Arc<AtomicBool>,
 ) {
     let interval = Duration::from_secs_f64(1.0 / tick_hz.max(0.1) as f64);
+    let entity_sim_step_ms = (1000.0 / entity_sim_hz.max(0.1) as f64)
+        .round()
+        .max(1.0) as u64;
     let entity_interest_radius_sq = {
         let radius = entity_interest_radius_chunks.max(0) as i64;
         radius * radius
     };
+    let mut next_entity_sim_ms = 0u64;
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             thread::sleep(interval);
@@ -1353,7 +1361,15 @@ fn start_broadcast_thread(
             let now = monotonic_ms(start);
             let (players, entity_batches) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                guard.entity_store.simulate(now);
+                let mut sim_steps = 0usize;
+                while next_entity_sim_ms <= now && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
+                    guard.entity_store.simulate(next_entity_sim_ms);
+                    next_entity_sim_ms = next_entity_sim_ms.saturating_add(entity_sim_step_ms);
+                    sim_steps += 1;
+                }
+                if sim_steps == ENTITY_SIM_STEP_MAX_PER_BROADCAST && next_entity_sim_ms <= now {
+                    next_entity_sim_ms = now.saturating_add(entity_sim_step_ms);
+                }
                 let players = if guard.players.is_empty() {
                     None
                 } else {
@@ -1918,6 +1934,7 @@ fn initialize_state(
     start_broadcast_thread(
         state.clone(),
         config.tick_hz,
+        config.entity_sim_hz,
         entity_interest_radius_chunks,
         start,
         shutdown.clone(),
@@ -1980,9 +1997,10 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
 
     let listener = TcpListener::bind(&config.bind)?;
     eprintln!(
-        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s, procgen={}, seed={}, near_radius={} chunks, mid_radius={} chunks, far_radius={} chunks, keepout={}, keepout_padding={} chunks)",
+        "polychora-server listening on {} (tick {:.2} Hz, entity_sim {:.2} Hz, autosave {}s, procgen={}, seed={}, near_radius={} chunks, mid_radius={} chunks, far_radius={} chunks, keepout={}, keepout_padding={} chunks)",
         config.bind,
         config.tick_hz.max(0.1),
+        config.entity_sim_hz.max(0.1),
         config.save_interval_secs,
         config.procgen_structures,
         config.world_seed,
