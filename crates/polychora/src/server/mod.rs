@@ -1461,14 +1461,21 @@ fn start_autosave_thread(
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
+            let world_file_exists = world_file.exists();
             let save_result = {
-                let guard = state.lock().expect("server state lock poisoned");
-                save_world_to_path(&world_file, &guard.world)
-                    .map(|chunks| (chunks, guard.world_revision))
+                let mut guard = state.lock().expect("server state lock poisoned");
+                if !guard.world.any_dirty() && world_file_exists {
+                    None
+                } else {
+                    Some(save_world_to_path(&world_file, &guard.world).map(|chunks| {
+                        guard.world.clear_dirty();
+                        (chunks, guard.world_revision)
+                    }))
+                }
             };
 
             match save_result {
-                Ok((chunk_count, revision)) => {
+                Some(Ok((chunk_count, revision))) => {
                     eprintln!(
                         "autosave: world revision {} ({} non-empty chunks) -> {}",
                         revision,
@@ -1476,9 +1483,10 @@ fn start_autosave_thread(
                         world_file.display()
                     );
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     eprintln!("autosave failed ({}): {}", world_file.display(), error);
                 }
+                None => {}
             }
         }
     });
@@ -1635,41 +1643,52 @@ fn handle_message(
             material,
             client_edit_id,
         } => {
-            let revision = {
+            let requested_voxel = VoxelType(material);
+            let maybe_revision = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                let (chunk_pos, _) =
-                    voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
-                ensure_chunk_materialized_for_edit(
-                    &mut guard,
-                    chunk_pos,
-                    world_seed,
-                    procgen_structures,
-                );
-                guard.world.set_voxel(
-                    position[0],
-                    position[1],
-                    position[2],
-                    position[3],
-                    VoxelType(material),
-                );
-                trim_chunk_override_if_virgin(
-                    &mut guard,
-                    chunk_pos,
-                    world_seed,
-                    procgen_structures,
-                );
-                guard.world_revision = guard.world_revision.wrapping_add(1);
-                guard.world_revision
+                if guard
+                    .world
+                    .get_voxel(position[0], position[1], position[2], position[3])
+                    == requested_voxel
+                {
+                    None
+                } else {
+                    let (chunk_pos, _) =
+                        voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
+                    ensure_chunk_materialized_for_edit(
+                        &mut guard,
+                        chunk_pos,
+                        world_seed,
+                        procgen_structures,
+                    );
+                    guard.world.set_voxel(
+                        position[0],
+                        position[1],
+                        position[2],
+                        position[3],
+                        requested_voxel,
+                    );
+                    trim_chunk_override_if_virgin(
+                        &mut guard,
+                        chunk_pos,
+                        world_seed,
+                        procgen_structures,
+                    );
+                    guard.world_revision = guard.world_revision.wrapping_add(1);
+                    Some(guard.world_revision)
+                }
             };
 
-            send_world_voxel_set_to_streamed_clients(
-                state,
-                position,
-                material,
-                Some(client_id),
-                client_edit_id,
-                revision,
-            );
+            if let Some(revision) = maybe_revision {
+                send_world_voxel_set_to_streamed_clients(
+                    state,
+                    position,
+                    material,
+                    Some(client_id),
+                    client_edit_id,
+                    revision,
+                );
+            }
         }
         ClientMessage::RequestWorldSnapshot => {
             let snapshot_message = {
