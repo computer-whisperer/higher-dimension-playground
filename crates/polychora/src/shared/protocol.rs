@@ -17,6 +17,7 @@ pub struct EntitySnapshot {
     pub kind: EntityKind,
     pub position: [f32; 4],
     pub orientation: [f32; 4],
+    pub velocity: [f32; 4],
     pub scale: f32,
     pub material: u8,
     pub last_update_ms: u64,
@@ -55,6 +56,7 @@ pub struct PlayerSnapshot {
     pub name: String,
     pub position: [f32; 4],
     pub look: [f32; 4],
+    pub velocity: [f32; 4],
     pub last_update_ms: u64,
 }
 

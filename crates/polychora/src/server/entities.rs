@@ -152,6 +152,7 @@ impl EntityState {
             kind: self.kind,
             position: self.core.position,
             orientation: self.core.orientation,
+            velocity: self.core.velocity,
             scale: self.scale,
             material: self.material,
             last_update_ms: self.core.last_update_ms,
@@ -177,16 +178,6 @@ impl EntityStore {
 
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
-    }
-
-    pub fn snapshots(&self) -> Vec<EntitySnapshot> {
-        self.entities.values().map(EntityState::snapshot).collect()
-    }
-
-    pub fn sorted_snapshots(&self) -> Vec<EntitySnapshot> {
-        let mut all = self.snapshots();
-        all.sort_by_key(|e| e.entity_id);
-        all
     }
 
     pub fn snapshot(&self, entity_id: EntityId) -> Option<EntitySnapshot> {

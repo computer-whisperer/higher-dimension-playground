@@ -1,5 +1,19 @@
 use super::*;
 
+fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
+    if velocity.iter().any(|v| !v.is_finite()) {
+        return [0.0; 4];
+    }
+    let speed = dot4(velocity, velocity).sqrt();
+    if speed.is_finite() && speed > max_speed && max_speed > 0.0 {
+        let clamp = max_speed / speed;
+        for axis in &mut velocity {
+            *axis *= clamp;
+        }
+    }
+    velocity
+}
+
 impl App {
     pub(super) fn poll_multiplayer_events(&mut self) {
         loop {
@@ -31,36 +45,14 @@ impl App {
         let normalized_look = normalize4_with_fallback(player.look, [0.0, 0.0, 1.0, 0.0]);
         if let Some(existing) = self.remote_players.get_mut(&player.client_id) {
             let previous_position = existing.position;
-            let previous_update_ms = existing.last_update_ms;
 
             existing.name = player.name;
             existing.position = player.position;
             existing.look = normalized_look;
             existing.last_update_ms = player.last_update_ms;
             existing.last_received_at = received_at;
-
-            let update_delta_ms = player.last_update_ms.saturating_sub(previous_update_ms);
-            if update_delta_ms > 0 {
-                let dt_s = (update_delta_ms as f32) * 0.001;
-                if dt_s > 1e-4 {
-                    let mut velocity = [0.0f32; 4];
-                    for axis in 0..4 {
-                        velocity[axis] = (player.position[axis] - previous_position[axis]) / dt_s;
-                    }
-                    let speed = dot4(velocity, velocity).sqrt();
-                    if speed.is_finite() && speed > REMOTE_PLAYER_MAX_PREDICTED_SPEED {
-                        let clamp = REMOTE_PLAYER_MAX_PREDICTED_SPEED / speed;
-                        for v in &mut velocity {
-                            *v *= clamp;
-                        }
-                    }
-                    existing.velocity = velocity;
-                }
-            } else {
-                for v in &mut existing.velocity {
-                    *v *= 0.85;
-                }
-            }
+            existing.velocity =
+                sanitize_remote_velocity(player.velocity, REMOTE_PLAYER_MAX_PREDICTED_SPEED);
 
             if distance4(previous_position, player.position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
             {
@@ -81,7 +73,10 @@ impl App {
                 last_update_ms: player.last_update_ms,
                 render_position: player.position,
                 render_look: normalized_look,
-                velocity: [0.0; 4],
+                velocity: sanitize_remote_velocity(
+                    player.velocity,
+                    REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                ),
                 last_received_at: received_at,
                 footstep_distance_accum: 0.0,
             },
@@ -179,13 +174,18 @@ impl App {
         let pos_alpha = 1.0 - (-REMOTE_ENTITY_POSITION_SMOOTH_HZ * dt).exp();
         let orientation_alpha = 1.0 - (-REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ * dt).exp();
         for entity in self.remote_entities.values_mut() {
-            if distance4(entity.render_position, entity.position)
+            let mut predicted_position = entity.position;
+            for axis in 0..4 {
+                predicted_position[axis] += entity.velocity[axis] * dt;
+            }
+            if distance4(entity.render_position, predicted_position)
                 > REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE
             {
-                entity.render_position = entity.position;
+                entity.render_position = predicted_position;
                 entity.render_orientation = entity.orientation;
             } else {
-                entity.render_position = lerp4(entity.render_position, entity.position, pos_alpha);
+                entity.render_position =
+                    lerp4(entity.render_position, predicted_position, pos_alpha);
                 entity.render_orientation = normalize4_with_fallback(
                     lerp4(
                         entity.render_orientation,
@@ -428,6 +428,10 @@ impl App {
                         kind: entity.kind,
                         position: entity.position,
                         orientation: entity.orientation,
+                        velocity: sanitize_remote_velocity(
+                            entity.velocity,
+                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                        ),
                         scale: entity.scale,
                         material: entity.material,
                         render_position: entity.position,
@@ -446,6 +450,10 @@ impl App {
                     if let Some(existing) = self.remote_entities.get_mut(&entity.entity_id) {
                         existing.position = entity.position;
                         existing.orientation = entity.orientation;
+                        existing.velocity = sanitize_remote_velocity(
+                            entity.velocity,
+                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                        );
                         existing.scale = entity.scale;
                         existing.material = entity.material;
                         existing.last_received_at = received_at;
@@ -456,6 +464,10 @@ impl App {
                                 kind: entity.kind,
                                 position: entity.position,
                                 orientation: entity.orientation,
+                                velocity: sanitize_remote_velocity(
+                                    entity.velocity,
+                                    REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                                ),
                                 scale: entity.scale,
                                 material: entity.material,
                                 render_position: entity.position,

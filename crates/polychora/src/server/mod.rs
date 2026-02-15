@@ -107,6 +107,13 @@ struct EntityRecordSummary {
     tombstones: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct LiveReplicationFrame {
+    players: Vec<PlayerSnapshot>,
+    player_chunks: Vec<(u64, [i32; 4])>,
+    non_player_entities: Vec<EntitySnapshot>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct StreamChunkKey {
     lod_level: u8,
@@ -409,8 +416,52 @@ fn player_snapshot(player: &PlayerState) -> PlayerSnapshot {
         name: player.name.clone(),
         position: player.core.position,
         look: player.core.orientation,
+        velocity: player.core.velocity,
         last_update_ms: player.core.last_update_ms,
     }
+}
+
+fn collect_live_replication_frame(state: &ServerState) -> LiveReplicationFrame {
+    let mut live_records: Vec<&EntityRecord> = state
+        .entity_records
+        .values()
+        .filter(|record| record.lifecycle == EntityLifecycle::Live)
+        .collect();
+    live_records.sort_unstable_by_key(|record| record.entity_id);
+
+    let mut frame = LiveReplicationFrame::default();
+    for record in live_records {
+        match record.class {
+            EntityClass::Player => {
+                let Some(client_id) = record.owner_client_id else {
+                    continue;
+                };
+                let Some(player) = state.players.get(&client_id) else {
+                    continue;
+                };
+                if player.core.entity_id != record.entity_id {
+                    continue;
+                }
+                frame.players.push(player_snapshot(player));
+                frame
+                    .player_chunks
+                    .push((client_id, world_chunk_from_position(player.core.position)));
+            }
+            EntityClass::Accent | EntityClass::Mob => {
+                if let Some(snapshot) = state.entity_store.snapshot(record.entity_id) {
+                    frame.non_player_entities.push(snapshot);
+                }
+            }
+        }
+    }
+
+    frame
+        .players
+        .sort_unstable_by_key(|snapshot| snapshot.client_id);
+    frame
+        .player_chunks
+        .sort_unstable_by_key(|(client_id, _)| *client_id);
+    frame
 }
 
 fn broadcast_player_spawn_compat(state: &SharedState, player: PlayerSnapshot) {
@@ -1505,20 +1556,15 @@ fn start_broadcast_thread(
                 if sim_steps == ENTITY_SIM_STEP_MAX_PER_BROADCAST && next_entity_sim_ms <= now {
                     next_entity_sim_ms = now.saturating_add(entity_sim_step_ms);
                 }
-                let players = if guard.players.is_empty() {
-                    None
-                } else {
-                    let mut all: Vec<_> = guard.players.values().map(player_snapshot).collect();
-                    all.sort_by_key(|p| p.client_id);
-                    Some(all)
-                };
-                let entity_batches = if guard.entity_store.is_empty() || guard.players.is_empty() {
+                let frame = collect_live_replication_frame(&guard);
+                let players = (!frame.players.is_empty()).then_some(frame.players);
+                let player_chunks = frame.player_chunks;
+                let entity_batches = if guard.entity_store.is_empty() || player_chunks.is_empty() {
                     Vec::new()
                 } else {
-                    let all_entities = guard.entity_store.sorted_snapshots();
-                    let mut batches = Vec::with_capacity(guard.players.len());
-                    for player in guard.players.values() {
-                        let player_chunk = world_chunk_from_position(player.core.position);
+                    let all_entities = frame.non_player_entities;
+                    let mut batches = Vec::with_capacity(player_chunks.len());
+                    for (client_id, player_chunk) in player_chunks {
                         let mut visible = Vec::new();
                         for entity in &all_entities {
                             let entity_chunk = world_chunk_from_position(entity.position);
@@ -1528,7 +1574,7 @@ fn start_broadcast_thread(
                                 visible.push(entity.clone());
                             }
                         }
-                        batches.push((player.client_id, visible));
+                        batches.push((client_id, visible));
                     }
                     batches
                 };
@@ -1758,7 +1804,7 @@ fn handle_message(
             }
             {
                 let guard = state.lock().expect("server state lock poisoned");
-                let entities = guard.entity_store.sorted_snapshots();
+                let entities = collect_live_replication_frame(&guard).non_player_entities;
                 if let Some(tx) = guard.clients.get(&client_id) {
                     for entity in entities {
                         let _ = tx.send(ServerMessage::EntitySpawned { entity });

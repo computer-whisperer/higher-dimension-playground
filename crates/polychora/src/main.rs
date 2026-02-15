@@ -1269,6 +1269,7 @@ struct RemoteEntityState {
     kind: multiplayer::EntityKind,
     position: [f32; 4],
     orientation: [f32; 4],
+    velocity: [f32; 4],
     scale: f32,
     material: u8,
     render_position: [f32; 4],
