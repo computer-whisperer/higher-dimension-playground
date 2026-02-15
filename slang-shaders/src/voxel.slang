@@ -514,6 +514,7 @@ EntityTetraHit traceEntityTetraBVH(
     {
         return closestHit;
     }
+    uint totalNodes = 2u * numTetrahedrons - 1u;
 
     float4 invDir = float4(
         abs(direction.x) > 1e-8 ? 1.0 / direction.x : (direction.x >= 0.0 ? 1e8 : -1e8),
@@ -534,11 +535,17 @@ EntityTetraHit traceEntityTetraBVH(
 
     uint stack[BVH_STACK_SIZE];
     int stackPtr = 0;
+    bool stackOverflowed = false;
     stack[stackPtr++] = 0u;
 
     while (stackPtr > 0)
     {
         uint nodeIdx = stack[--stackPtr];
+        if (nodeIdx >= totalNodes)
+        {
+            stackOverflowed = true;
+            break;
+        }
         BVHNode node = bvhNodes[nodeIdx];
 
         if (node.isLeaf != 0u)
@@ -557,6 +564,11 @@ EntityTetraHit traceEntityTetraBVH(
         {
             uint left = node.leftChild;
             uint right = node.rightChild;
+            if (left >= totalNodes || right >= totalNodes)
+            {
+                stackOverflowed = true;
+                break;
+            }
             float bestBound = closestHit.didHit ? min(maxDistance, closestHit.hitDistance) : maxDistance;
 
             float2 leftT = rayAABBIntersect4DEntity(
@@ -575,6 +587,11 @@ EntityTetraHit traceEntityTetraBVH(
 
             if (leftHit && rightHit)
             {
+                if (stackPtr + 2 > int(BVH_STACK_SIZE))
+                {
+                    stackOverflowed = true;
+                    break;
+                }
                 if (leftT.x > rightT.x)
                 {
                     stack[stackPtr++] = left;
@@ -588,12 +605,32 @@ EntityTetraHit traceEntityTetraBVH(
             }
             else if (leftHit)
             {
+                if (stackPtr + 1 > int(BVH_STACK_SIZE))
+                {
+                    stackOverflowed = true;
+                    break;
+                }
                 stack[stackPtr++] = left;
             }
             else if (rightHit)
             {
+                if (stackPtr + 1 > int(BVH_STACK_SIZE))
+                {
+                    stackOverflowed = true;
+                    break;
+                }
                 stack[stackPtr++] = right;
             }
+        }
+    }
+
+    // Preserve correctness under deep/degenerate BVHs by falling back to linear traversal
+    // instead of writing past the fixed traversal stack.
+    if (stackOverflowed)
+    {
+        for (uint i = 0u; i < numTetrahedrons; i++)
+        {
+            testEntityTetrahedronHit(start, direction, i, maxDistance, closestHit);
         }
     }
 
