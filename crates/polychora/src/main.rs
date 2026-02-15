@@ -59,6 +59,9 @@ const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
 const VTE_TEST_ENTITY_CENTER: [f32; 4] = [0.0, 3.0, 0.0, 0.0];
 const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
 const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
+const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
+// Tags held-block preview instances so shaders can apply preview-only shading boosts.
+const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
 const FOCAL_LENGTH_MAX: f32 = 4.00;
 const FOCAL_LENGTH_STEP: f32 = 0.05;
@@ -865,6 +868,7 @@ fn main() {
         profile_gpu_ms_sum: 0.0,
         profile_gpu_ms_max: 0.0,
         profile_gpu_samples: 0,
+        vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
     };
 
     if app.vte_reference_compare_enabled {
@@ -912,6 +916,17 @@ fn main() {
         );
     } else {
         eprintln!("VTE sweep: entities mode (default, entities stay enabled).");
+    }
+    if app.vte_overlay_raster_enabled {
+        eprintln!(
+            "VTE overlay raster enabled via {} (legacy held-block raster pass; higher GPU cost).",
+            VTE_OVERLAY_RASTER_ENV
+        );
+    } else {
+        eprintln!(
+            "VTE held-block preview uses VTE entity path (default). Set {}=1 to use legacy overlay raster path.",
+            VTE_OVERLAY_RASTER_ENV
+        );
     }
 
     event_loop.run_app(&mut app).unwrap();
@@ -1120,6 +1135,7 @@ struct App {
     profile_gpu_ms_sum: f64,
     profile_gpu_ms_max: f64,
     profile_gpu_samples: u32,
+    vte_overlay_raster_enabled: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -1237,6 +1253,16 @@ fn env_flag_enabled(name: &str) -> bool {
             !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
         }
         Err(_) => false,
+    }
+}
+
+fn env_flag_enabled_or(name: &str, default_enabled: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
+        }
+        Err(_) => default_enabled,
     }
 }
 
@@ -1602,9 +1628,10 @@ fn build_place_preview_instance(
     control_scheme: ControlScheme,
     aspect: f32,
 ) -> common::ModelInstance {
-    let material = selected_material
+    let preview_material = selected_material
         .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
-        as u32;
+        as u32
+        | PREVIEW_MATERIAL_FLAG;
     let (right, up, view_z, view_w) = match control_scheme {
         ControlScheme::IntuitiveUpright => camera.view_basis_upright(),
         ControlScheme::LookTransport | ControlScheme::RotorFree => camera.view_basis_look_frame(),
@@ -1626,36 +1653,36 @@ fn build_place_preview_instance(
         view_w[3] - view_z[3],
     ]);
     let aspect = aspect.max(0.25);
-    let up_bias = -0.62 * ((16.0 / 9.0) / aspect).clamp(0.72, 1.35);
+    let up_bias = -0.56 * ((16.0 / 9.0) / aspect).clamp(0.72, 1.35);
 
     let anchor = [
         camera.position[0]
-            + 0.92 * right[0]
+            + 0.88 * right[0]
             + up_bias * up[0]
-            + 1.35 * center_forward[0]
-            + 0.52 * side_w[0],
+            + 1.20 * center_forward[0]
+            + 0.46 * side_w[0],
         camera.position[1]
-            + 0.92 * right[1]
+            + 0.88 * right[1]
             + up_bias * up[1]
-            + 1.35 * center_forward[1]
-            + 0.52 * side_w[1],
+            + 1.20 * center_forward[1]
+            + 0.46 * side_w[1],
         camera.position[2]
-            + 0.92 * right[2]
+            + 0.88 * right[2]
             + up_bias * up[2]
-            + 1.35 * center_forward[2]
-            + 0.52 * side_w[2],
+            + 1.20 * center_forward[2]
+            + 0.46 * side_w[2],
         camera.position[3]
-            + 0.92 * right[3]
+            + 0.88 * right[3]
             + up_bias * up[3]
-            + 1.35 * center_forward[3]
-            + 0.52 * side_w[3],
+            + 1.20 * center_forward[3]
+            + 0.46 * side_w[3],
     ];
 
     let mut basis = [right, up, center_forward, side_w];
     rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
     rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
 
-    build_centered_model_instance(anchor, &basis, [0.35; 4], [material; 8])
+    build_centered_model_instance(anchor, &basis, [0.35, 0.35, 0.42, 0.42], [preview_material; 8])
 }
 
 fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
@@ -4659,6 +4686,7 @@ impl App {
         if backend == RenderBackend::VoxelTraversal {
             let voxel_frame = self.scene.build_voxel_frame_data(
                 self.menu_camera.position,
+                self.menu_camera.look_direction(),
                 self.vte_lod_near_max_distance,
                 self.vte_lod_mid_max_distance,
                 self.vte_max_trace_distance,
@@ -5577,13 +5605,20 @@ impl App {
             }
             vte_entity_instances.extend(self.remote_player_instances(preview_time_s));
             vte_entity_instances.extend(self.remote_entity_instances(preview_time_s));
+            let mut preview_overlay_instances: &[common::ModelInstance] = &[];
+            if self.vte_overlay_raster_enabled {
+                preview_overlay_instances = std::slice::from_ref(&preview_instance);
+            } else {
+                // Default: render held-block preview through Stage A entity path for full quality.
+                vte_entity_instances.push(preview_instance);
+            }
             let voxel_frame = self.scene.build_voxel_frame_data(
                 self.camera.position,
+                look_dir,
                 self.vte_lod_near_max_distance,
                 self.vte_lod_mid_max_distance,
                 self.vte_max_trace_distance,
             );
-            let preview_overlay_instances = [preview_instance];
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),

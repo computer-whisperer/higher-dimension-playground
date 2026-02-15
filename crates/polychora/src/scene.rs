@@ -121,7 +121,7 @@ pub struct Scene {
     voxel_active_chunk_indices: HashMap<RuntimeChunkKey, usize>,
     voxel_world_revision: u64,
     voxel_visibility_generation: u64,
-    voxel_cached_visibility_camera_chunk: Option<[i32; 12]>,
+    voxel_cached_visibility_camera_chunk: Option<[i32; 16]>,
     voxel_cached_visibility_world_revision: u64,
     voxel_payload_slot_overflow_logged: bool,
     voxel_frame_data: VoxelFrameData,
