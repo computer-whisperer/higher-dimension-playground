@@ -64,6 +64,9 @@ pub struct EntityState {
 impl EntityState {
     fn simulate(&mut self, now_ms: u64) {
         debug_assert!(ENTITY_CLASSES.contains(&self.core.class));
+        if self.core.class != EntityClass::Accent {
+            return;
+        }
         let t = now_ms as f32 * 0.001;
         let (next_position, next_orientation, next_scale) = match self.kind {
             EntityKind::PlayerAvatar => (
@@ -187,9 +190,29 @@ impl EntityStore {
         }
     }
 
+    pub fn set_motion_state(
+        &mut self,
+        entity_id: EntityId,
+        position: [f32; 4],
+        orientation: [f32; 4],
+        now_ms: u64,
+    ) -> bool {
+        let Some(entity) = self.entities.get_mut(&entity_id) else {
+            return false;
+        };
+        update_core_motion(
+            &mut entity.core,
+            position,
+            normalize4_with_fallback(orientation, [0.0, 0.0, 1.0, 0.0]),
+            now_ms,
+        );
+        true
+    }
+
     pub fn spawn(
         &mut self,
         entity_id: EntityId,
+        class: EntityClass,
         kind: EntityKind,
         position: [f32; 4],
         orientation: [f32; 4],
@@ -200,7 +223,7 @@ impl EntityStore {
         let entity = EntityState {
             core: EntityCore {
                 entity_id,
-                class: EntityClass::Accent,
+                class,
                 position,
                 orientation: normalize4_with_fallback(orientation, [0.0, 0.0, 1.0, 0.0]),
                 velocity: [0.0, 0.0, 0.0, 0.0],

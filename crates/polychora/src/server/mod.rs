@@ -81,6 +81,14 @@ struct PlayerState {
     last_stream_world_revision: u64,
 }
 
+#[derive(Clone, Debug)]
+struct MobState {
+    entity_id: u64,
+    home_position: [f32; 4],
+    phase_offset: f32,
+    speed_scale: f32,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum EntityLifecycle {
     Live,
@@ -243,6 +251,7 @@ struct ServerState {
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
     stream_worldgen_has_content_cache: HashMap<StreamChunkKey, bool>,
     players: HashMap<u64, PlayerState>,
+    mobs: HashMap<u64, MobState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
     cpu_profile: ServerCpuProfile,
 }
@@ -491,6 +500,55 @@ fn chunk_distance2(a: [i32; 4], b: [i32; 4]) -> i64 {
     let dz = (a[2] - b[2]) as i64;
     let dw = (a[3] - b[3]) as i64;
     dx * dx + dy * dy + dz * dz + dw * dw
+}
+
+fn normalize4_or_default(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
+    let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
+    if len_sq <= 1e-8 || !len_sq.is_finite() {
+        return fallback;
+    }
+    let inv_len = len_sq.sqrt().recip();
+    [
+        v[0] * inv_len,
+        v[1] * inv_len,
+        v[2] * inv_len,
+        v[3] * inv_len,
+    ]
+}
+
+fn simulate_mobs(state: &mut ServerState, now_ms: u64) {
+    let t_s = now_ms as f32 * 0.001;
+    let mut stale = Vec::new();
+    for mob in state.mobs.values() {
+        let phase = t_s * mob.speed_scale + mob.phase_offset;
+        let phase_b = phase * 0.71 + mob.phase_offset * 0.31;
+        let next_position = [
+            mob.home_position[0] + 0.42 * phase.cos(),
+            mob.home_position[1] + 0.22 * phase_b.sin(),
+            mob.home_position[2] + 0.38 * phase.sin(),
+            mob.home_position[3] + 0.30 * phase_b.cos(),
+        ];
+        let next_forward = normalize4_or_default(
+            [
+                -0.42 * phase.sin(),
+                0.22 * 0.71 * phase_b.cos(),
+                0.38 * phase.cos(),
+                -0.30 * 0.71 * phase_b.sin(),
+            ],
+            [0.0, 0.0, 1.0, 0.0],
+        );
+        if !state
+            .entity_store
+            .set_motion_state(mob.entity_id, next_position, next_forward, now_ms)
+        {
+            stale.push(mob.entity_id);
+        }
+    }
+
+    for entity_id in stale {
+        state.mobs.remove(&entity_id);
+        mark_entity_record_despawned(state, entity_id, Some(now_ms));
+    }
 }
 
 fn encode_world_chunk_payload(
@@ -1553,6 +1611,7 @@ fn start_broadcast_thread(
                 let mut sim_steps = 0usize;
                 while next_entity_sim_ms <= now && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
                     guard.entity_store.simulate(next_entity_sim_ms);
+                    simulate_mobs(&mut guard, next_entity_sim_ms);
                     next_entity_sim_ms = next_entity_sim_ms.saturating_add(entity_sim_step_ms);
                     sim_steps += 1;
                 }
@@ -2136,6 +2195,7 @@ fn spawn_entity(
     let now_ms = monotonic_ms(start);
     let entity_id = guard.entity_store.spawn(
         allocated_id,
+        EntityClass::Accent,
         kind,
         position,
         orientation,
@@ -2148,6 +2208,46 @@ fn spawn_entity(
         .entity_store
         .snapshot(entity_id)
         .expect("spawned entity should exist in store")
+}
+
+fn spawn_mob_entity(
+    state: &SharedState,
+    kind: EntityKind,
+    position: [f32; 4],
+    orientation: [f32; 4],
+    scale: f32,
+    material: u8,
+    phase_offset: f32,
+    speed_scale: f32,
+    start: Instant,
+) -> EntitySnapshot {
+    let mut guard = state.lock().expect("server state lock poisoned");
+    let allocated_id = allocate_server_object_id(&mut guard);
+    let now_ms = monotonic_ms(start);
+    let entity_id = guard.entity_store.spawn(
+        allocated_id,
+        EntityClass::Mob,
+        kind,
+        position,
+        orientation,
+        scale,
+        material,
+        now_ms,
+    );
+    guard.mobs.insert(
+        entity_id,
+        MobState {
+            entity_id,
+            home_position: position,
+            phase_offset,
+            speed_scale,
+        },
+    );
+    upsert_entity_record(&mut guard, entity_id, EntityClass::Mob, None, now_ms);
+    guard
+        .entity_store
+        .snapshot(entity_id)
+        .expect("spawned mob entity should exist in store")
 }
 
 fn spawn_default_test_entities(state: &SharedState, start: Instant) {
@@ -2192,6 +2292,58 @@ fn spawn_default_test_entities(state: &SharedState, start: Instant) {
         let entity = spawn_entity(state, *kind, *pos, *orientation, *scale, *material, start);
         eprintln!(
             "spawned test entity {} {:?} (id={}) at {:?}",
+            i, kind, entity.entity_id, pos
+        );
+    }
+}
+
+fn spawn_default_test_mobs(state: &SharedState, start: Instant) {
+    let test_mobs: [(EntityKind, [f32; 4], [f32; 4], f32, u8, f32, f32); 3] = [
+        (
+            EntityKind::TestDrifter,
+            [8.0, 2.0, 2.0, -2.0],
+            [0.0, 0.0, 1.0, 0.0],
+            0.62,
+            24,
+            0.0,
+            0.63,
+        ),
+        (
+            EntityKind::TestRotor,
+            [-8.0, 2.4, -3.0, 2.5],
+            [1.0, 0.0, 0.0, 0.0],
+            0.58,
+            18,
+            1.3,
+            0.57,
+        ),
+        (
+            EntityKind::TestCube,
+            [0.0, 3.2, 8.0, 3.0],
+            [0.0, 0.0, 1.0, 0.0],
+            0.56,
+            20,
+            2.1,
+            0.69,
+        ),
+    ];
+
+    for (i, (kind, pos, orientation, scale, material, phase_offset, speed_scale)) in
+        test_mobs.iter().enumerate()
+    {
+        let entity = spawn_mob_entity(
+            state,
+            *kind,
+            *pos,
+            *orientation,
+            *scale,
+            *material,
+            *phase_offset,
+            *speed_scale,
+            start,
+        );
+        eprintln!(
+            "spawned test mob {} {:?} (id={}) at {:?}",
             i, kind, entity.entity_id, pos
         );
     }
@@ -2251,6 +2403,7 @@ fn initialize_state(
         procgen_blocked_cells,
         stream_worldgen_has_content_cache: HashMap::new(),
         players: HashMap::new(),
+        mobs: HashMap::new(),
         clients: HashMap::new(),
         cpu_profile: ServerCpuProfile::new(start),
     }));
@@ -2259,6 +2412,7 @@ fn initialize_state(
         * STREAM_FAR_LOD_SCALE
         + ENTITY_INTEREST_RADIUS_PADDING_CHUNKS;
     spawn_default_test_entities(&state, start);
+    spawn_default_test_mobs(&state, start);
     start_broadcast_thread(
         state.clone(),
         config.tick_hz,
