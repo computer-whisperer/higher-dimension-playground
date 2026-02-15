@@ -3,9 +3,9 @@ mod procgen;
 
 use self::entities::EntityStore;
 use crate::shared::protocol::{
-    ClientMessage, EntityKind, PlayerSnapshot, ServerMessage,
-    WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
-    WORLD_CHUNK_LOD_FAR, WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
+    ClientMessage, EntityKind, PlayerSnapshot, ServerMessage, WorldChunkCoordPayload,
+    WorldChunkPayload, WorldSnapshotPayload, WorldSummary, WORLD_CHUNK_LOD_FAR,
+    WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{
     self, load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
@@ -441,7 +441,11 @@ fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
     dx * dx + dy * dy + dz * dz + dw * dw
 }
 
-fn scaled_lod_child_l0_chunk_pos(parent_chunk_pos: ChunkPos, lod_scale: i32, child: [i32; 4]) -> ChunkPos {
+fn scaled_lod_child_l0_chunk_pos(
+    parent_chunk_pos: ChunkPos,
+    lod_scale: i32,
+    child: [i32; 4],
+) -> ChunkPos {
     ChunkPos::new(
         parent_chunk_pos.x * lod_scale + child[0],
         parent_chunk_pos.y * lod_scale + child[1],
@@ -552,9 +556,11 @@ fn build_effective_stream_chunk_scaled_lod(
             .world
             .base_chunk_has_content_for_scale(chunk_pos, lod_scale);
         if base_has_content {
-            let has_override_child = state.world.chunks.keys().any(|&child_pos| {
-                l0_chunk_to_scaled_chunk(child_pos, lod_scale) == chunk_pos
-            });
+            let has_override_child = state
+                .world
+                .chunks
+                .keys()
+                .any(|&child_pos| l0_chunk_to_scaled_chunk(child_pos, lod_scale) == chunk_pos);
             if !has_override_child {
                 let has_structure_child = procgen_structures
                     && procgen::structure_chunk_has_content_for_scale_with_keepout(
@@ -581,7 +587,8 @@ fn build_effective_stream_chunk_scaled_lod(
                     let child_idx = (((cw as usize * scale + cz as usize) * scale + cy as usize)
                         * scale
                         + cx as usize) as usize;
-                    let child_pos = scaled_lod_child_l0_chunk_pos(chunk_pos, lod_scale, [cx, cy, cz, cw]);
+                    let child_pos =
+                        scaled_lod_child_l0_chunk_pos(chunk_pos, lod_scale, [cx, cy, cz, cw]);
                     child_chunks[child_idx] = build_effective_l0_chunk_for_sampling(
                         state,
                         child_pos,
@@ -634,7 +641,8 @@ fn build_effective_stream_chunk_scaled_lod(
                                         continue;
                                     }
                                     let material = voxel.0 as usize;
-                                    material_counts[material] = material_counts[material].saturating_add(1);
+                                    material_counts[material] =
+                                        material_counts[material].saturating_add(1);
                                     if material_counts[material] > best_count {
                                         best_count = material_counts[material];
                                         best_material = voxel.0;
@@ -1343,9 +1351,7 @@ fn start_broadcast_thread(
     shutdown: Arc<AtomicBool>,
 ) {
     let interval = Duration::from_secs_f64(1.0 / tick_hz.max(0.1) as f64);
-    let entity_sim_step_ms = (1000.0 / entity_sim_hz.max(0.1) as f64)
-        .round()
-        .max(1.0) as u64;
+    let entity_sim_step_ms = (1000.0 / entity_sim_hz.max(0.1) as f64).round().max(1.0) as u64;
     let entity_interest_radius_sq = {
         let radius = entity_interest_radius_chunks.max(0) as i64;
         radius * radius
@@ -1387,7 +1393,8 @@ fn start_broadcast_thread(
                         let mut visible = Vec::new();
                         for entity in &all_entities {
                             let entity_chunk = world_chunk_from_position(entity.position);
-                            if chunk_distance2(entity_chunk, player_chunk) <= entity_interest_radius_sq
+                            if chunk_distance2(entity_chunk, player_chunk)
+                                <= entity_interest_radius_sq
                             {
                                 visible.push(entity.clone());
                             }
@@ -1399,8 +1406,10 @@ fn start_broadcast_thread(
                 (players, entity_batches)
             };
             let player_snapshot_count = players.as_ref().map_or(0, Vec::len);
-            let entity_snapshot_count: usize =
-                entity_batches.iter().map(|(_, entities)| entities.len()).sum();
+            let entity_snapshot_count: usize = entity_batches
+                .iter()
+                .map(|(_, entities)| entities.len())
+                .sum();
             let did_broadcast = player_snapshot_count > 0 || !entity_batches.is_empty();
             if let Some(players) = players {
                 broadcast(
@@ -1888,16 +1897,11 @@ fn spawn_default_test_entities(state: &SharedState, start: Instant) {
         ),
     ];
     for (i, (kind, pos, orientation, scale, material)) in test_entities.iter().enumerate() {
-        let id = spawn_entity(
-            state,
-            *kind,
-            *pos,
-            *orientation,
-            *scale,
-            *material,
-            start,
+        let id = spawn_entity(state, *kind, *pos, *orientation, *scale, *material, start);
+        eprintln!(
+            "spawned test entity {} {:?} (id={}) at {:?}",
+            i, kind, id, pos
         );
-        eprintln!("spawned test entity {} {:?} (id={}) at {:?}", i, kind, id, pos);
     }
 }
 
@@ -1958,9 +1962,9 @@ fn initialize_state(
         cpu_profile: ServerCpuProfile::new(start),
     }));
 
-    let entity_interest_radius_chunks =
-        config.procgen_far_chunk_radius.max(1) * STREAM_FAR_LOD_SCALE
-            + ENTITY_INTEREST_RADIUS_PADDING_CHUNKS;
+    let entity_interest_radius_chunks = config.procgen_far_chunk_radius.max(1)
+        * STREAM_FAR_LOD_SCALE
+        + ENTITY_INTEREST_RADIUS_PADDING_CHUNKS;
     spawn_default_test_entities(&state, start);
     start_broadcast_thread(
         state.clone(),

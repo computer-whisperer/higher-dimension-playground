@@ -1,6 +1,5 @@
 [workspace]
 members = ["common", "crates/*"]
-exclude = ["crates/polychora-common", "crates/polychora-server"]
 
 [package]
 name = "higher-dimension-playground"
@@ -15,9 +14,6 @@ path = "src/lib.rs"
 
 # The `vulkano` crate is the main crate that you must use to use Vulkan.
 vulkano = "0.35"
-
-# Provides the `shader!` macro that is used to generate code for using shaders.
-vulkano-shaders = "0.35"
 
 common = {path="common", features=["ndarray", "nalgebra"]}
 
@@ -34,7 +30,3 @@ image = { version="0.25", features=["rayon"] }
 winit = "0.30"
 glam = {version = "0.24", features=["bytemuck"]}
 ab_glyph = "0.2"
-
-# Build dependencies removed - using slangc CLI instead
-# [build-dependencies]
-# spirv-builder = {git = "https://github.com/Firestar99/rust-gpu-new.git", branch="linker-speedup"}

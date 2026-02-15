@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
 const DEFAULT_MASTER_VOLUME: f32 = 1.0;
-const EFFECT_BASE_GAINS: [f32; SoundEffect::COUNT] = [0.15, 0.18, 0.11, 0.14, 0.19, 0.13, 0.12, 0.10];
+const EFFECT_BASE_GAINS: [f32; SoundEffect::COUNT] = [0.15, 0.18, 0.11, 0.14, 0.19];
 
 #[derive(Copy, Clone, Debug)]
 pub enum SoundEffect {
@@ -13,13 +13,10 @@ pub enum SoundEffect {
     Footstep,
     Jump,
     Land,
-    Hurt,
-    Pickup,
-    UiTick,
 }
 
 impl SoundEffect {
-    const COUNT: usize = 8;
+    const COUNT: usize = 5;
 
     fn index(self) -> usize {
         match self {
@@ -28,9 +25,6 @@ impl SoundEffect {
             Self::Footstep => 2,
             Self::Jump => 3,
             Self::Land => 4,
-            Self::Hurt => 5,
-            Self::Pickup => 6,
-            Self::UiTick => 7,
         }
     }
 }
@@ -146,25 +140,25 @@ fn build_effect_table(sample_rate: u32) -> Vec<EffectVariations> {
     // Order must match SoundEffect::index()
     vec![
         // Place
-        EffectVariations::single(load(include_bytes!("../../../sfx5/place_block_01_medium.wav"))),
+        EffectVariations::single(load(include_bytes!(
+            "../../../sfx5/place_block_01_medium.wav"
+        ))),
         // Break
-        EffectVariations::single(load(include_bytes!("../../../sfx5/break_block_01_medium.wav"))),
+        EffectVariations::single(load(include_bytes!(
+            "../../../sfx5/break_block_01_medium.wav"
+        ))),
         // Footstep (3 variations)
-        EffectVariations { samples: vec![
-            load(include_bytes!("../../../sfx5/footstep_01_medium.wav")),
-            load(include_bytes!("../../../sfx5/footstep_02_medium.wav")),
-            load(include_bytes!("../../../sfx5/footstep_03_medium.wav")),
-        ]},
+        EffectVariations {
+            samples: vec![
+                load(include_bytes!("../../../sfx5/footstep_01_medium.wav")),
+                load(include_bytes!("../../../sfx5/footstep_02_medium.wav")),
+                load(include_bytes!("../../../sfx5/footstep_03_medium.wav")),
+            ],
+        },
         // Jump
         EffectVariations::single(load(include_bytes!("../../../sfx5/jump_01_medium.wav"))),
         // Land
         EffectVariations::single(load(include_bytes!("../../../sfx5/land_01_medium.wav"))),
-        // Hurt
-        EffectVariations::single(load(include_bytes!("../../../sfx5/hurt_01_medium.wav"))),
-        // Pickup
-        EffectVariations::single(load(include_bytes!("../../../sfx5/pickup_01_medium.wav"))),
-        // UiTick
-        EffectVariations::single(load(include_bytes!("../../../sfx5/ui_tick_01_medium.wav"))),
     ]
 }
 

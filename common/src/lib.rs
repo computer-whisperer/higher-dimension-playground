@@ -1,5 +1,3 @@
-#![cfg_attr(target_arch = "spirv", no_std)]
-
 mod layout_verify;
 mod linalg_n;
 mod mat_n;

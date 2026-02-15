@@ -471,11 +471,6 @@ pub const MATERIALS: &[MaterialInfo] = &[
     },
 ];
 
-/// Get material info by ID
-pub fn material_info(id: u8) -> Option<&'static MaterialInfo> {
-    MATERIALS.iter().find(|m| m.id == id)
-}
-
 /// Get the name of a material by ID
 pub fn material_name(id: u8) -> &'static str {
     MATERIALS
@@ -485,15 +480,6 @@ pub fn material_name(id: u8) -> &'static str {
         .unwrap_or("Unknown")
 }
 
-/// Get the category of a material by ID
-pub fn material_category(id: u8) -> MaterialCategory {
-    MATERIALS
-        .iter()
-        .find(|m| m.id == id)
-        .map(|m| m.category)
-        .unwrap_or(MaterialCategory::Basic)
-}
-
 /// Get the color of a material by ID (RGB)
 pub fn material_color(id: u8) -> [u8; 3] {
     MATERIALS
@@ -501,21 +487,6 @@ pub fn material_color(id: u8) -> [u8; 3] {
         .find(|m| m.id == id)
         .map(|m| m.color)
         .unwrap_or([128, 128, 128])
-}
-
-/// Get all materials in a specific category
-pub fn materials_in_category(cat: MaterialCategory) -> Vec<&'static MaterialInfo> {
-    MATERIALS.iter().filter(|m| m.category == cat).collect()
-}
-
-/// Get all material info
-pub fn all_materials() -> &'static [MaterialInfo] {
-    MATERIALS
-}
-
-/// Get the maximum material ID
-pub fn max_material_id() -> u8 {
-    MAX_MATERIAL_ID
 }
 
 #[cfg(test)]
@@ -532,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_max_material_id() {
-        assert_eq!(max_material_id(), 68);
+        assert_eq!(MAX_MATERIAL_ID, 68);
         assert_eq!(
             MATERIALS.iter().map(|m| m.id).max().unwrap_or(0),
             MAX_MATERIAL_ID
@@ -541,10 +512,16 @@ mod tests {
 
     #[test]
     fn test_categories() {
-        let natural = materials_in_category(MaterialCategory::Natural);
+        let natural: Vec<_> = MATERIALS
+            .iter()
+            .filter(|m| m.category == MaterialCategory::Natural)
+            .collect();
         assert!(natural.len() > 0);
 
-        let ores = materials_in_category(MaterialCategory::Ore);
+        let ores: Vec<_> = MATERIALS
+            .iter()
+            .filter(|m| m.category == MaterialCategory::Ore)
+            .collect();
         assert_eq!(ores.len(), 5);
     }
 

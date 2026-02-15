@@ -306,17 +306,6 @@ impl StructureBlueprint {
         (min_offset, max_offset)
     }
 
-    fn intersects_chunk(&self, origin: [i32; 4], chunk_min: [i32; 4], chunk_max: [i32; 4]) -> bool {
-        for axis in 0..4 {
-            let min = origin[axis] + self.min_offset[axis];
-            let max = origin[axis] + self.max_offset[axis];
-            if max < chunk_min[axis] || min > chunk_max[axis] {
-                return false;
-            }
-        }
-        true
-    }
-
     fn intersects_chunk_oriented(
         &self,
         origin: [i32; 4],
@@ -1201,6 +1190,7 @@ pub fn generate_structure_chunk_with_keepout(
     }
 }
 
+#[cfg(test)]
 pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<Chunk> {
     generate_structure_chunk_with_keepout(world_seed, chunk_pos, None)
 }
@@ -1233,6 +1223,7 @@ pub fn structure_chunk_has_content_with_keepout(
     !collect_maze_placements_for_chunk(world_seed, chunk_pos).is_empty()
 }
 
+#[cfg(test)]
 pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool {
     structure_chunk_has_content_with_keepout(world_seed, chunk_pos, None)
 }
@@ -1268,6 +1259,7 @@ pub fn structure_chunk_has_content_for_scale_with_keepout(
     false
 }
 
+#[cfg(test)]
 pub fn structure_chunk_has_content_for_scale(
     world_seed: u64,
     chunk_pos: ChunkPos,
