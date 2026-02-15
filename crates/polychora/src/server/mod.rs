@@ -1,7 +1,7 @@
 mod entities;
 mod procgen;
 
-use self::entities::{EntityId, EntityStore};
+use self::entities::{EntityClass, EntityCore, EntityStore};
 use crate::shared::protocol::{
     ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage,
     WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
@@ -74,11 +74,8 @@ pub struct LocalConnection {
 #[derive(Clone, Debug)]
 struct PlayerState {
     client_id: u64,
-    entity_id: EntityId,
+    core: EntityCore,
     name: String,
-    position: [f32; 4],
-    look: [f32; 4],
-    last_update_ms: u64,
     streamed_chunks: HashSet<StreamChunkKey>,
     last_stream_center_chunk: Option<[i32; 4]>,
     last_stream_world_revision: u64,
@@ -300,13 +297,14 @@ fn sanitize_player_name(name: &str, client_id: u64) -> String {
 }
 
 fn player_snapshot(player: &PlayerState) -> PlayerSnapshot {
-    debug_assert_eq!(player.entity_id, player.client_id);
+    debug_assert_eq!(player.core.entity_id, player.client_id);
+    debug_assert_eq!(player.core.class, EntityClass::Player);
     PlayerSnapshot {
         client_id: player.client_id,
         name: player.name.clone(),
-        position: player.position,
-        look: player.look,
-        last_update_ms: player.last_update_ms,
+        position: player.core.position,
+        look: player.core.orientation,
+        last_update_ms: player.core.last_update_ms,
     }
 }
 
@@ -1397,7 +1395,7 @@ fn start_broadcast_thread(
                     let all_entities = guard.entity_store.sorted_snapshots();
                     let mut batches = Vec::with_capacity(guard.players.len());
                     for player in guard.players.values() {
-                        let player_chunk = world_chunk_from_position(player.position);
+                        let player_chunk = world_chunk_from_position(player.core.position);
                         let mut visible = Vec::new();
                         for entity in &all_entities {
                             let entity_chunk = world_chunk_from_position(entity.position);
@@ -1526,16 +1524,19 @@ fn install_or_update_player(
         .entry(client_id)
         .or_insert_with(|| PlayerState {
             client_id,
-            entity_id: client_id,
+            core: EntityCore {
+                entity_id: client_id,
+                class: EntityClass::Player,
+                position: [0.0, 0.0, 0.0, 0.0],
+                orientation: [
+                    0.0,
+                    0.0,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                ],
+                last_update_ms: now,
+            },
             name: format!("player-{client_id}"),
-            position: [0.0, 0.0, 0.0, 0.0],
-            look: [
-                0.0,
-                0.0,
-                std::f32::consts::FRAC_1_SQRT_2,
-                std::f32::consts::FRAC_1_SQRT_2,
-            ],
-            last_update_ms: now,
             streamed_chunks: HashSet::new(),
             last_stream_center_chunk: None,
             last_stream_world_revision: 0,
@@ -1545,12 +1546,12 @@ fn install_or_update_player(
         player.name = sanitize_player_name(&n, client_id);
     }
     if let Some(pos) = position {
-        player.position = pos;
+        player.core.position = pos;
     }
     if let Some(dir) = look {
-        player.look = dir;
+        player.core.orientation = dir;
     }
-    player.last_update_ms = now;
+    player.core.last_update_ms = now;
     player_snapshot(player)
 }
 
@@ -1772,7 +1773,7 @@ fn handle_message(
                 guard
                     .players
                     .get(&client_id)
-                    .map(|player| world_chunk_from_position(player.position))
+                    .map(|player| world_chunk_from_position(player.core.position))
                     .unwrap_or([0, 0, 0, 0])
             };
             sync_streamed_chunks_for_client(
