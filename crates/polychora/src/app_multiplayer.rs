@@ -650,6 +650,29 @@ impl App {
                             ],
                         ));
                     }
+                    multiplayer::EntityKind::MobSeeker => {
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [
+                                entity.scale * 0.48,
+                                entity.scale * 1.25,
+                                entity.scale * 0.58,
+                                entity.scale * 1.12,
+                            ],
+                            [
+                                (entity.material.saturating_add(1)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(3)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                                entity.material as u32,
+                            ],
+                        ));
+                    }
                 }
             }
         }

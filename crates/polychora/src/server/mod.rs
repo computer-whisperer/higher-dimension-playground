@@ -79,12 +79,19 @@ struct PlayerState {
     last_stream_world_revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MobArchetype {
+    Seeker,
+}
+
 #[derive(Clone, Debug)]
 struct MobState {
     entity_id: u64,
-    home_position: [f32; 4],
+    archetype: MobArchetype,
     phase_offset: f32,
-    speed_scale: f32,
+    move_speed: f32,
+    preferred_distance: f32,
+    tangent_weight: f32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -513,38 +520,138 @@ fn normalize4_or_default(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-fn simulate_mobs(state: &mut ServerState, now_ms: u64) {
+fn distance4_sq(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    let dw = a[3] - b[3];
+    dx * dx + dy * dy + dz * dz + dw * dw
+}
+
+fn simulate_seeker_step(
+    mob: &MobState,
+    position: [f32; 4],
+    player_positions: &[[f32; 4]],
+    now_ms: u64,
+    previous_update_ms: u64,
+) -> ([f32; 4], [f32; 4]) {
+    let dt_s = (now_ms.saturating_sub(previous_update_ms)).max(1) as f32 * 0.001;
     let t_s = now_ms as f32 * 0.001;
-    let mut stale = Vec::new();
-    for mob in state.mobs.values() {
-        let phase = t_s * mob.speed_scale + mob.phase_offset;
-        let phase_b = phase * 0.71 + mob.phase_offset * 0.31;
-        let next_position = [
-            mob.home_position[0] + 0.42 * phase.cos(),
-            mob.home_position[1] + 0.22 * phase_b.sin(),
-            mob.home_position[2] + 0.38 * phase.sin(),
-            mob.home_position[3] + 0.30 * phase_b.cos(),
+    let nearest_target = player_positions.iter().copied().min_by(|a, b| {
+        distance4_sq(*a, position)
+            .partial_cmp(&distance4_sq(*b, position))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let (desired_dir, slow_factor) = if let Some(target) = nearest_target {
+        let to_target = [
+            target[0] - position[0],
+            target[1] - position[1],
+            target[2] - position[2],
+            target[3] - position[3],
         ];
-        let next_forward = normalize4_or_default(
-            [
-                -0.42 * phase.sin(),
-                0.22 * 0.71 * phase_b.cos(),
-                0.38 * phase.cos(),
-                -0.30 * 0.71 * phase_b.sin(),
-            ],
-            [0.0, 0.0, 1.0, 0.0],
+        let distance = distance4_sq(target, position).sqrt();
+        let direct = normalize4_or_default(to_target, [0.0, 0.0, 1.0, 0.0]);
+        // A 4D tangent that rotates [x,z] and [y,w] planes together.
+        let tangent = normalize4_or_default(
+            [-direct[2], -direct[3], direct[0], direct[1]],
+            [direct[3], 0.0, -direct[0], direct[1]],
         );
+        let pursuit = if distance > mob.preferred_distance {
+            1.0
+        } else {
+            -0.45
+        };
+        let weave_phase = t_s * 1.7 + mob.phase_offset;
+        let weave = [
+            0.10 * weave_phase.sin(),
+            0.08 * (weave_phase * 0.7).cos(),
+            -0.10 * weave_phase.sin(),
+            0.08 * (weave_phase * 1.3).sin(),
+        ];
+        let desired = normalize4_or_default(
+            [
+                direct[0] * pursuit + tangent[0] * mob.tangent_weight + weave[0],
+                direct[1] * pursuit + tangent[1] * mob.tangent_weight + weave[1],
+                direct[2] * pursuit + tangent[2] * mob.tangent_weight + weave[2],
+                direct[3] * pursuit + tangent[3] * mob.tangent_weight + weave[3],
+            ],
+            direct,
+        );
+        let slow = if distance < mob.preferred_distance * 0.6 {
+            0.42
+        } else {
+            1.0
+        };
+        (desired, slow)
+    } else {
+        let phase = t_s * 0.65 + mob.phase_offset;
+        (
+            normalize4_or_default(
+                [
+                    phase.cos(),
+                    0.45 * (phase * 0.7).sin(),
+                    phase.sin(),
+                    (phase * 1.1).cos(),
+                ],
+                [0.0, 0.0, 1.0, 0.0],
+            ),
+            0.35,
+        )
+    };
+
+    let step = mob.move_speed.max(0.1) * slow_factor * dt_s;
+    let next_position = [
+        position[0] + desired_dir[0] * step,
+        position[1] + desired_dir[1] * step,
+        position[2] + desired_dir[2] * step,
+        position[3] + desired_dir[3] * step,
+    ];
+    (next_position, desired_dir)
+}
+
+fn simulate_mobs(state: &mut ServerState, now_ms: u64) {
+    let player_positions: Vec<[f32; 4]> = state
+        .players
+        .values()
+        .filter_map(|player| state.entity_store.snapshot(player.entity_id))
+        .map(|snapshot| snapshot.position)
+        .collect();
+
+    let mut stale = Vec::new();
+    let mut updates = Vec::with_capacity(state.mobs.len());
+    for mob in state.mobs.values() {
+        let Some(snapshot) = state.entity_store.snapshot(mob.entity_id) else {
+            stale.push(mob.entity_id);
+            continue;
+        };
+        let (next_position, next_forward) = match mob.archetype {
+            MobArchetype::Seeker => simulate_seeker_step(
+                mob,
+                snapshot.position,
+                &player_positions,
+                now_ms,
+                snapshot.last_update_ms,
+            ),
+        };
+        updates.push((mob.entity_id, next_position, next_forward));
+    }
+
+    for (entity_id, next_position, next_forward) in updates {
         if !state
             .entity_store
-            .set_motion_state(mob.entity_id, next_position, next_forward, now_ms)
+            .set_motion_state(entity_id, next_position, next_forward, now_ms)
         {
-            stale.push(mob.entity_id);
+            stale.push(entity_id);
         }
     }
 
+    stale.sort_unstable();
+    stale.dedup();
     for entity_id in stale {
         state.mobs.remove(&entity_id);
         mark_entity_record_despawned(state, entity_id, Some(now_ms));
+        let _ = state.entity_store.despawn(entity_id);
     }
 }
 
@@ -2055,15 +2162,30 @@ fn handle_message(
                 0.5
             };
             let spawn_material = material.max(1);
-            let entity = spawn_entity(
-                state,
-                spawn_kind,
-                spawn_position,
-                spawn_orientation,
-                spawn_scale,
-                spawn_material,
-                start,
-            );
+            let entity = match spawn_kind {
+                EntityKind::MobSeeker => spawn_mob_entity(
+                    state,
+                    spawn_kind,
+                    MobArchetype::Seeker,
+                    spawn_position,
+                    spawn_orientation,
+                    spawn_scale,
+                    spawn_material,
+                    start,
+                ),
+                EntityKind::TestCube | EntityKind::TestRotor | EntityKind::TestDrifter => {
+                    spawn_entity(
+                        state,
+                        spawn_kind,
+                        spawn_position,
+                        spawn_orientation,
+                        spawn_scale,
+                        spawn_material,
+                        start,
+                    )
+                }
+                EntityKind::PlayerAvatar => unreachable!("already handled above"),
+            };
             broadcast(state, ServerMessage::EntitySpawned { entity });
         }
         ClientMessage::RequestWorldSnapshot => {
@@ -2272,12 +2394,11 @@ fn spawn_entity(
 fn spawn_mob_entity(
     state: &SharedState,
     kind: EntityKind,
+    archetype: MobArchetype,
     position: [f32; 4],
     orientation: [f32; 4],
     scale: f32,
     material: u8,
-    phase_offset: f32,
-    speed_scale: f32,
     start: Instant,
 ) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
@@ -2293,13 +2414,19 @@ fn spawn_mob_entity(
         material,
         now_ms,
     );
+    let phase_offset = ((entity_id as f32) * 0.73).rem_euclid(std::f32::consts::TAU);
+    let (move_speed, preferred_distance, tangent_weight) = match archetype {
+        MobArchetype::Seeker => (2.9, 2.6, 0.64),
+    };
     guard.mobs.insert(
         entity_id,
         MobState {
             entity_id,
-            home_position: position,
+            archetype,
             phase_offset,
-            speed_scale,
+            move_speed,
+            preferred_distance,
+            tangent_weight,
         },
     );
     upsert_entity_record(&mut guard, entity_id, EntityClass::Mob, None, None, now_ms);
@@ -2357,53 +2484,29 @@ fn spawn_default_test_entities(state: &SharedState, start: Instant) {
 }
 
 fn spawn_default_test_mobs(state: &SharedState, start: Instant) {
-    let test_mobs: [(EntityKind, [f32; 4], [f32; 4], f32, u8, f32, f32); 3] = [
-        (
-            EntityKind::TestDrifter,
-            [8.0, 2.0, 2.0, -2.0],
-            [0.0, 0.0, 1.0, 0.0],
-            0.62,
-            24,
-            0.0,
-            0.63,
-        ),
-        (
-            EntityKind::TestRotor,
-            [-8.0, 2.4, -3.0, 2.5],
-            [1.0, 0.0, 0.0, 0.0],
-            0.58,
-            18,
-            1.3,
-            0.57,
-        ),
-        (
-            EntityKind::TestCube,
-            [0.0, 3.2, 8.0, 3.0],
-            [0.0, 0.0, 1.0, 0.0],
-            0.56,
-            20,
-            2.1,
-            0.69,
-        ),
+    let test_mobs: [([f32; 4], [f32; 4], f32, u8); 3] = [
+        ([8.0, 2.0, 2.0, -2.0], [0.0, 0.0, 1.0, 0.0], 0.62, 24),
+        ([-8.0, 2.4, -3.0, 2.5], [1.0, 0.0, 0.0, 0.0], 0.58, 18),
+        ([0.0, 3.2, 8.0, 3.0], [0.0, 0.0, 1.0, 0.0], 0.56, 20),
     ];
 
-    for (i, (kind, pos, orientation, scale, material, phase_offset, speed_scale)) in
-        test_mobs.iter().enumerate()
-    {
+    for (i, (pos, orientation, scale, material)) in test_mobs.iter().enumerate() {
         let entity = spawn_mob_entity(
             state,
-            *kind,
+            EntityKind::MobSeeker,
+            MobArchetype::Seeker,
             *pos,
             *orientation,
             *scale,
             *material,
-            *phase_offset,
-            *speed_scale,
             start,
         );
         eprintln!(
             "spawned test mob {} {:?} (id={}) at {:?}",
-            i, kind, entity.entity_id, pos
+            i,
+            EntityKind::MobSeeker,
+            entity.entity_id,
+            pos
         );
     }
 }

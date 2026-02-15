@@ -142,6 +142,11 @@ impl EntityState {
                     self.base_scale * (1.0 + 0.08 * (phase_a + phase_b).sin()),
                 )
             }
+            EntityKind::MobSeeker => (
+                self.core.position,
+                self.core.orientation,
+                self.base_scale.max(0.01),
+            ),
         };
         self.scale = next_scale;
         update_core_motion(&mut self.core, next_position, next_orientation, now_ms);

@@ -123,7 +123,7 @@ impl App {
             self.append_dev_console_log_line("  /tp <x> <y> <z> <w>");
             self.append_dev_console_log_line("  /tp origin");
             self.append_dev_console_log_line(
-                "  /spawn <cube|rotor|drifter> [x y z w] [material-id|material-name]",
+                "  /spawn <cube|rotor|drifter|seeker> [x y z w] [material-id|material-name]",
             );
             return;
         }
@@ -152,7 +152,7 @@ impl App {
         if command_name.eq_ignore_ascii_case("spawn") {
             if args.is_empty() {
                 self.append_dev_console_log_line(
-                    "Usage: /spawn <cube|rotor|drifter> [x y z w] [material-id|material-name]",
+                    "Usage: /spawn <cube|rotor|drifter|seeker> [x y z w] [material-id|material-name]",
                 );
                 return;
             }
@@ -162,8 +162,9 @@ impl App {
                 return;
             };
 
-            let parse_spawn_usage =
-                || "Usage: /spawn <cube|rotor|drifter> [x y z w] [material-id|material-name]";
+            let parse_spawn_usage = || {
+                "Usage: /spawn <cube|rotor|drifter|seeker> [x y z w] [material-id|material-name]"
+            };
 
             let (position, material_id) = match args.len() {
                 1 => (
@@ -298,6 +299,7 @@ impl App {
             multiplayer::EntityKind::TestCube => 0.50,
             multiplayer::EntityKind::TestRotor => 0.54,
             multiplayer::EntityKind::TestDrifter => 0.48,
+            multiplayer::EntityKind::MobSeeker => 0.62,
         }
     }
 
@@ -307,6 +309,7 @@ impl App {
             "cube" | "testcube" => Some(multiplayer::EntityKind::TestCube),
             "rotor" | "testrotor" => Some(multiplayer::EntityKind::TestRotor),
             "drifter" | "testdrifter" => Some(multiplayer::EntityKind::TestDrifter),
+            "seeker" | "mobseeker" => Some(multiplayer::EntityKind::MobSeeker),
             _ => None,
         }
     }
@@ -317,6 +320,7 @@ impl App {
             multiplayer::EntityKind::TestCube => "cube",
             multiplayer::EntityKind::TestRotor => "rotor",
             multiplayer::EntityKind::TestDrifter => "drifter",
+            multiplayer::EntityKind::MobSeeker => "seeker",
         }
     }
 

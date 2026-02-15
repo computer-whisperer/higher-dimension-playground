@@ -10,6 +10,7 @@ pub enum EntityKind {
     TestCube,
     TestRotor,
     TestDrifter,
+    MobSeeker,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
