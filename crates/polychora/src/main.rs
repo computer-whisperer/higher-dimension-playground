@@ -858,7 +858,7 @@ fn main() {
         command_wait_frames: 0,
         app_state: initial_app_state,
         main_menu_page: MainMenuPage::Root,
-        main_menu_server_address: "localhost:4000".to_string(),
+        main_menu_server_address: "c-gateway.computer-whisperer.network:4000".to_string(),
         main_menu_player_name: initial_player_name,
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
