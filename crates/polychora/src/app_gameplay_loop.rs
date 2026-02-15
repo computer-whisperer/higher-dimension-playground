@@ -380,6 +380,25 @@ impl App {
 
             // Apply gravity physics (no-op while flying), then always resolve voxel collisions.
             self.camera.update_physics(dt);
+            if dt > 0.0 {
+                let external_velocity = self.player_modifier_external_velocity;
+                self.camera.position[0] += external_velocity[0] * dt;
+                self.camera.position[2] += external_velocity[2] * dt;
+                self.camera.position[3] += external_velocity[3] * dt;
+                let decay = (-MULTIPLAYER_PLAYER_MODIFIER_DECAY_HZ * dt.clamp(0.0, 0.25)).exp();
+                self.player_modifier_external_velocity[0] *= decay;
+                self.player_modifier_external_velocity[2] *= decay;
+                self.player_modifier_external_velocity[3] *= decay;
+                if self.player_modifier_external_velocity[0].abs() < 1e-3 {
+                    self.player_modifier_external_velocity[0] = 0.0;
+                }
+                if self.player_modifier_external_velocity[2].abs() < 1e-3 {
+                    self.player_modifier_external_velocity[2] = 0.0;
+                }
+                if self.player_modifier_external_velocity[3].abs() < 1e-3 {
+                    self.player_modifier_external_velocity[3] = 0.0;
+                }
+            }
             let (resolved_pos, grounded) = self.scene.resolve_player_collision(
                 prev_position,
                 self.camera.position,
@@ -498,6 +517,7 @@ impl App {
         {
             self.set_perf_suite_camera_pose(scenario_index);
         }
+        self.apply_pending_player_movement_modifiers();
 
         let look_dir = self.current_look_direction();
         self.send_multiplayer_player_update(now, look_dir);

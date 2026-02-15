@@ -2,6 +2,7 @@ mod entities;
 mod procgen;
 
 use self::entities::{EntityId, EntityStore};
+use crate::materials;
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
@@ -30,6 +31,11 @@ const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
 const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
 const ENTITY_SIM_STEP_MAX_PER_BROADCAST: usize = 16;
 const PLAYER_PERSIST_INTERVAL_MS: u64 = 60_000;
+const CREEPER_EXPLOSION_TRIGGER_DISTANCE: f32 = 1.55;
+const CREEPER_EXPLOSION_RADIUS_VOXELS: i32 = 3;
+const CREEPER_EXPLOSION_IMPULSE_RADIUS: f32 = 7.0;
+const CREEPER_EXPLOSION_MAX_IMPULSE_DISTANCE: f32 = 5.0;
+const CREEPER_POUNCE_TARGET_BELOW_PLAYER_Y: f32 = 1.05;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -84,6 +90,7 @@ struct PlayerState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum MobArchetype {
     Seeker,
+    Creeper4d,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +155,89 @@ struct ClientEntityReplicationBatch {
     despawned: Vec<u64>,
     transforms: Vec<EntityTransform>,
 }
+
+#[derive(Clone, Debug)]
+struct QueuedWorldVoxelSet {
+    position: [i32; 4],
+    material: u8,
+    source_client_id: Option<u64>,
+    client_edit_id: Option<u64>,
+    revision: u64,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedExplosionEvent {
+    position: [f32; 4],
+    radius: f32,
+    source_entity_id: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedPlayerMovementModifier {
+    client_id: u64,
+    delta_position: [f32; 4],
+    delta_velocity_y: f32,
+    source_entity_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SpawnableEntitySpec {
+    kind: EntityKind,
+    class: EntityClass,
+    mob_archetype: Option<MobArchetype>,
+    canonical_name: &'static str,
+    aliases: &'static [&'static str],
+    default_scale: f32,
+    default_material: u8,
+}
+
+const SPAWNABLE_ENTITY_SPECS: &[SpawnableEntitySpec] = &[
+    SpawnableEntitySpec {
+        kind: EntityKind::TestCube,
+        class: EntityClass::Accent,
+        mob_archetype: None,
+        canonical_name: "cube",
+        aliases: &["cube", "testcube"],
+        default_scale: 0.50,
+        default_material: 12,
+    },
+    SpawnableEntitySpec {
+        kind: EntityKind::TestRotor,
+        class: EntityClass::Accent,
+        mob_archetype: None,
+        canonical_name: "rotor",
+        aliases: &["rotor", "testrotor"],
+        default_scale: 0.54,
+        default_material: 8,
+    },
+    SpawnableEntitySpec {
+        kind: EntityKind::TestDrifter,
+        class: EntityClass::Accent,
+        mob_archetype: None,
+        canonical_name: "drifter",
+        aliases: &["drifter", "testdrifter"],
+        default_scale: 0.48,
+        default_material: 15,
+    },
+    SpawnableEntitySpec {
+        kind: EntityKind::MobSeeker,
+        class: EntityClass::Mob,
+        mob_archetype: Some(MobArchetype::Seeker),
+        canonical_name: "seeker",
+        aliases: &["seeker", "mobseeker"],
+        default_scale: 0.62,
+        default_material: 24,
+    },
+    SpawnableEntitySpec {
+        kind: EntityKind::MobCreeper4d,
+        class: EntityClass::Mob,
+        mob_archetype: Some(MobArchetype::Creeper4d),
+        canonical_name: "creeper",
+        aliases: &["creeper", "4dcreeper", "mobcreeper4d"],
+        default_scale: 0.78,
+        default_material: 19,
+    },
+];
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct StreamChunkKey {
@@ -278,6 +368,7 @@ struct ServerState {
     dirty_block_regions: HashSet<[i32; 4]>,
     region_chunk_edge: i32,
     world_seed: u64,
+    procgen_structures: bool,
     world: VoxelWorld,
     world_revision: u64,
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
@@ -495,15 +586,90 @@ fn sanitize_player_name(name: &str, client_id: u64) -> String {
     trimmed.chars().take(32).collect()
 }
 
+fn normalize_spawn_token(token: &str) -> String {
+    token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+fn parse_spawn_material_id(token: &str) -> Option<u8> {
+    if let Ok(id) = token.parse::<u8>() {
+        if (1..=materials::MAX_MATERIAL_ID).contains(&id) {
+            return Some(id);
+        }
+    }
+    let normalized = normalize_spawn_token(token);
+    materials::MATERIALS.iter().find_map(|material| {
+        (normalize_spawn_token(material.name) == normalized).then_some(material.id)
+    })
+}
+
+fn parse_spawn_vec4(args: &[&str]) -> Option<[f32; 4]> {
+    if args.len() != 4 {
+        return None;
+    }
+    let x = args[0].parse::<f32>().ok()?;
+    let y = args[1].parse::<f32>().ok()?;
+    let z = args[2].parse::<f32>().ok()?;
+    let w = args[3].parse::<f32>().ok()?;
+    Some([x, y, z, w])
+}
+
+fn spawn_usage_string() -> String {
+    let names = SPAWNABLE_ENTITY_SPECS
+        .iter()
+        .map(|spec| spec.canonical_name)
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("Usage: /spawn <{names}> [x y z w] [material-id|material-name]")
+}
+
+fn spawnable_entity_spec_for_token(token: &str) -> Option<SpawnableEntitySpec> {
+    let normalized = normalize_spawn_token(token);
+    SPAWNABLE_ENTITY_SPECS.iter().copied().find(|spec| {
+        spec.aliases
+            .iter()
+            .any(|alias| normalize_spawn_token(alias) == normalized)
+    })
+}
+
+fn spawnable_entity_spec_for_kind(kind: EntityKind) -> Option<SpawnableEntitySpec> {
+    SPAWNABLE_ENTITY_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.kind == kind)
+}
+
+fn default_spawn_pose_for_client(state: &ServerState, client_id: u64) -> ([f32; 4], [f32; 4]) {
+    let Some(player) = state.players.get(&client_id) else {
+        return ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]);
+    };
+    let Some(snapshot) = state.entity_store.snapshot(player.entity_id) else {
+        return ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]);
+    };
+    let look = normalize4_or_default(snapshot.orientation, [0.0, 0.0, 1.0, 0.0]);
+    let position = [
+        snapshot.position[0] + look[0] * 3.0,
+        snapshot.position[1] + look[1] * 3.0,
+        snapshot.position[2] + look[2] * 3.0,
+        snapshot.position[3] + look[3] * 3.0,
+    ];
+    (position, look)
+}
+
 fn mob_archetype_defaults(archetype: MobArchetype) -> (f32, f32, f32) {
     match archetype {
         MobArchetype::Seeker => (2.9, 2.6, 0.64),
+        MobArchetype::Creeper4d => (2.4, 3.8, 1.15),
     }
 }
 
 fn mob_archetype_for_kind(kind: EntityKind) -> Option<MobArchetype> {
     match kind {
         EntityKind::MobSeeker => Some(MobArchetype::Seeker),
+        EntityKind::MobCreeper4d => Some(MobArchetype::Creeper4d),
         EntityKind::PlayerAvatar
         | EntityKind::TestCube
         | EntityKind::TestRotor
@@ -788,7 +954,116 @@ fn simulate_seeker_step(
     (next_position, desired_dir)
 }
 
-fn simulate_mobs(state: &mut ServerState, now_ms: u64) {
+fn simulate_creeper_step(
+    mob: &MobState,
+    position: [f32; 4],
+    player_positions: &[[f32; 4]],
+    now_ms: u64,
+    previous_update_ms: u64,
+) -> ([f32; 4], [f32; 4]) {
+    let dt_s = (now_ms.saturating_sub(previous_update_ms)).max(1) as f32 * 0.001;
+    let t_s = now_ms as f32 * 0.001;
+    let nearest_target = player_positions.iter().copied().min_by(|a, b| {
+        distance4_sq(*a, position)
+            .partial_cmp(&distance4_sq(*b, position))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let (desired_dir, speed_factor) = if let Some(target) = nearest_target {
+        let pounce_target = [
+            target[0],
+            target[1] - CREEPER_POUNCE_TARGET_BELOW_PLAYER_Y,
+            target[2],
+            target[3],
+        ];
+        let to_target = [
+            pounce_target[0] - position[0],
+            pounce_target[1] - position[1],
+            pounce_target[2] - position[2],
+            pounce_target[3] - position[3],
+        ];
+        let distance = distance4_sq(pounce_target, position).sqrt();
+        let direct = normalize4_or_default(to_target, [0.0, 0.0, 1.0, 0.0]);
+        // Creeper keeps pressure by orbiting in two coupled 4D planes, then lunges.
+        let orbit_a = normalize4_or_default(
+            [-direct[2], direct[3], direct[0], -direct[1]],
+            [direct[3], 0.0, -direct[0], direct[1]],
+        );
+        let orbit_b = normalize4_or_default(
+            [direct[1], -direct[0], direct[3], -direct[2]],
+            [0.0, direct[2], -direct[1], direct[0]],
+        );
+        let phase = t_s * 2.35 + mob.phase_offset;
+        let orbit_mix = [
+            orbit_a[0] * phase.sin() + orbit_b[0] * phase.cos(),
+            orbit_a[1] * phase.sin() + orbit_b[1] * phase.cos(),
+            orbit_a[2] * phase.sin() + orbit_b[2] * phase.cos(),
+            orbit_a[3] * phase.sin() + orbit_b[3] * phase.cos(),
+        ];
+
+        let too_close = distance < mob.preferred_distance * 0.55;
+        let in_lunge_band =
+            distance > mob.preferred_distance * 0.80 && distance < mob.preferred_distance * 1.95;
+        let lunge = in_lunge_band && phase.sin() > 0.58;
+        let pressure = if too_close {
+            -0.72
+        } else if lunge {
+            1.85
+        } else {
+            0.68
+        };
+
+        let desired = normalize4_or_default(
+            [
+                direct[0] * pressure + orbit_mix[0] * mob.tangent_weight,
+                direct[1] * pressure + orbit_mix[1] * mob.tangent_weight,
+                direct[2] * pressure + orbit_mix[2] * mob.tangent_weight,
+                direct[3] * pressure + orbit_mix[3] * mob.tangent_weight,
+            ],
+            direct,
+        );
+        let speed = if lunge {
+            1.65
+        } else if too_close {
+            0.48
+        } else {
+            0.95
+        };
+        (desired, speed)
+    } else {
+        let phase = t_s * 0.72 + mob.phase_offset;
+        (
+            normalize4_or_default(
+                [
+                    0.7 * phase.sin(),
+                    (phase * 0.9).cos(),
+                    0.7 * phase.cos(),
+                    (phase * 1.4).sin(),
+                ],
+                [0.0, 0.0, 1.0, 0.0],
+            ),
+            0.38,
+        )
+    };
+
+    let step = mob.move_speed.max(0.1) * speed_factor * dt_s;
+    let next_position = [
+        position[0] + desired_dir[0] * step,
+        position[1] + desired_dir[1] * step,
+        position[2] + desired_dir[2] * step,
+        position[3] + desired_dir[3] * step,
+    ];
+    (next_position, desired_dir)
+}
+
+fn simulate_mobs(
+    state: &mut ServerState,
+    now_ms: u64,
+) -> (
+    Vec<QueuedWorldVoxelSet>,
+    Vec<QueuedExplosionEvent>,
+    Vec<QueuedPlayerMovementModifier>,
+) {
     let player_positions: Vec<[f32; 4]> = state
         .players
         .values()
@@ -797,14 +1072,32 @@ fn simulate_mobs(state: &mut ServerState, now_ms: u64) {
         .collect();
 
     let mut stale = Vec::new();
+    let mut detonations = Vec::new();
     let mut updates = Vec::with_capacity(state.mobs.len());
     for mob in state.mobs.values() {
         let Some(snapshot) = state.entity_store.snapshot(mob.entity_id) else {
             stale.push(mob.entity_id);
             continue;
         };
+        if mob.archetype == MobArchetype::Creeper4d {
+            let should_detonate = player_positions.iter().any(|player_position| {
+                distance4_sq(snapshot.position, *player_position).sqrt()
+                    <= CREEPER_EXPLOSION_TRIGGER_DISTANCE
+            });
+            if should_detonate {
+                detonations.push((mob.entity_id, snapshot.position));
+                continue;
+            }
+        }
         let (next_position, next_forward) = match mob.archetype {
             MobArchetype::Seeker => simulate_seeker_step(
+                mob,
+                snapshot.position,
+                &player_positions,
+                now_ms,
+                snapshot.last_update_ms,
+            ),
+            MobArchetype::Creeper4d => simulate_creeper_step(
                 mob,
                 snapshot.position,
                 &player_positions,
@@ -844,6 +1137,65 @@ fn simulate_mobs(state: &mut ServerState, now_ms: u64) {
         mark_entity_record_despawned(state, entity_id, Some(now_ms));
         let _ = state.entity_store.despawn(entity_id);
     }
+
+    let mut queued_voxel_sets = Vec::new();
+    let mut queued_explosions = Vec::new();
+    let mut queued_player_modifiers = Vec::new();
+    for (entity_id, center) in detonations {
+        if !state.mobs.contains_key(&entity_id) {
+            continue;
+        }
+        let (mut voxel_sets, explosion) =
+            apply_creeper_explosion(state, entity_id, center, CREEPER_EXPLOSION_RADIUS_VOXELS);
+        let voxel_update_count = voxel_sets.len();
+        queued_voxel_sets.append(&mut voxel_sets);
+        queued_explosions.push(explosion);
+        let (persistent_motion, mut player_modifiers) = apply_explosion_impulse(
+            state,
+            entity_id,
+            center,
+            CREEPER_EXPLOSION_IMPULSE_RADIUS,
+            CREEPER_EXPLOSION_MAX_IMPULSE_DISTANCE,
+            now_ms,
+        );
+        eprintln!(
+            "[impulse-debug][server] creeper_explosion source_entity={} center={:?} voxel_updates={} player_modifiers={} persistent_motion={}",
+            entity_id,
+            center,
+            voxel_update_count,
+            player_modifiers.len(),
+            persistent_motion
+        );
+        for modifier in &player_modifiers {
+            let delta = modifier.delta_position;
+            let delta_len = (delta[0] * delta[0]
+                + delta[1] * delta[1]
+                + delta[2] * delta[2]
+                + delta[3] * delta[3])
+                .sqrt();
+            eprintln!(
+                "[impulse-debug][server] queued_modifier client_id={} source_entity={:?} delta={:?} delta_len={:.3} delta_velocity_y={:.3}",
+                modifier.client_id,
+                modifier.source_entity_id,
+                modifier.delta_position,
+                delta_len,
+                modifier.delta_velocity_y
+            );
+        }
+        queued_player_modifiers.append(&mut player_modifiers);
+        if persistent_motion {
+            mark_entities_dirty(state);
+        }
+        state.mobs.remove(&entity_id);
+        mark_entity_record_despawned(state, entity_id, Some(now_ms));
+        let _ = state.entity_store.despawn(entity_id);
+    }
+
+    (
+        queued_voxel_sets,
+        queued_explosions,
+        queued_player_modifiers,
+    )
 }
 
 fn tick_entity_simulation_window(
@@ -851,7 +1203,14 @@ fn tick_entity_simulation_window(
     now_ms: u64,
     next_sim_ms: &mut u64,
     sim_step_ms: u64,
+) -> (
+    Vec<QueuedWorldVoxelSet>,
+    Vec<QueuedExplosionEvent>,
+    Vec<QueuedPlayerMovementModifier>,
 ) {
+    let mut queued_voxel_sets = Vec::new();
+    let mut queued_explosions = Vec::new();
+    let mut queued_player_modifiers = Vec::new();
     let mut sim_steps = 0usize;
     while *next_sim_ms <= now_ms && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
         let moved_entities = state.entity_store.simulate(*next_sim_ms);
@@ -869,13 +1228,22 @@ fn tick_entity_simulation_window(
         if persistent_accent_motion {
             mark_entities_dirty(state);
         }
-        simulate_mobs(state, *next_sim_ms);
+        let (mut step_voxel_sets, mut step_explosions, mut step_player_modifiers) =
+            simulate_mobs(state, *next_sim_ms);
+        queued_voxel_sets.append(&mut step_voxel_sets);
+        queued_explosions.append(&mut step_explosions);
+        queued_player_modifiers.append(&mut step_player_modifiers);
         *next_sim_ms = (*next_sim_ms).saturating_add(sim_step_ms);
         sim_steps += 1;
     }
     if sim_steps == ENTITY_SIM_STEP_MAX_PER_BROADCAST && *next_sim_ms <= now_ms {
         *next_sim_ms = now_ms.saturating_add(sim_step_ms);
     }
+    (
+        queued_voxel_sets,
+        queued_explosions,
+        queued_player_modifiers,
+    )
 }
 
 fn build_entity_replication_batches(
@@ -1864,27 +2232,6 @@ fn sync_streamed_chunks_for_client(
     }
 }
 
-fn ensure_chunk_materialized_for_edit(
-    state: &mut ServerState,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-) {
-    if state.world.has_chunk_override(chunk_pos) {
-        return;
-    }
-    if let Some(chunk) = build_virgin_chunk_for_edit(
-        &state.world,
-        chunk_pos,
-        world_seed,
-        procgen_structures,
-        Some(&state.procgen_blocked_cells),
-    ) {
-        state.world.insert_chunk(chunk_pos, chunk);
-        mark_block_region_dirty(state, chunk_pos);
-    }
-}
-
 fn trim_chunk_override_if_virgin(
     state: &mut ServerState,
     chunk_pos: ChunkPos,
@@ -1910,6 +2257,271 @@ fn trim_chunk_override_if_virgin(
             mark_block_region_dirty(state, chunk_pos);
         }
     }
+}
+
+fn apply_authoritative_voxel_edit(
+    state: &mut ServerState,
+    position: [i32; 4],
+    material: VoxelType,
+) -> bool {
+    let (chunk_pos, voxel_index) =
+        voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
+    let mut virgin_chunk_for_materialize = None;
+    let current_voxel = if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
+        override_chunk.voxels[voxel_index]
+    } else {
+        virgin_chunk_for_materialize = build_virgin_chunk_for_edit(
+            &state.world,
+            chunk_pos,
+            state.world_seed,
+            state.procgen_structures,
+            Some(&state.procgen_blocked_cells),
+        );
+        virgin_chunk_for_materialize
+            .as_ref()
+            .map(|chunk| chunk.voxels[voxel_index])
+            .unwrap_or(VoxelType::AIR)
+    };
+    if current_voxel == material {
+        return false;
+    }
+    if !state.world.has_chunk_override(chunk_pos) {
+        if let Some(chunk) = virgin_chunk_for_materialize {
+            state.world.insert_chunk(chunk_pos, chunk);
+            mark_block_region_dirty(state, chunk_pos);
+        }
+    }
+    state
+        .world
+        .set_voxel(position[0], position[1], position[2], position[3], material);
+    mark_block_region_dirty(state, chunk_pos);
+    trim_chunk_override_if_virgin(state, chunk_pos, state.world_seed, state.procgen_structures);
+    true
+}
+
+fn apply_creeper_explosion(
+    state: &mut ServerState,
+    source_entity_id: u64,
+    center: [f32; 4],
+    radius_voxels: i32,
+) -> (Vec<QueuedWorldVoxelSet>, QueuedExplosionEvent) {
+    let radius = radius_voxels.max(1);
+    let radius_sq = radius * radius;
+    let center_voxel = [
+        center[0].floor() as i32,
+        center[1].floor() as i32,
+        center[2].floor() as i32,
+        center[3].floor() as i32,
+    ];
+    let blast_centers = [
+        center_voxel,
+        [
+            center_voxel[0],
+            center_voxel[1] - 1,
+            center_voxel[2],
+            center_voxel[3],
+        ],
+    ];
+
+    let mut changed_positions = HashSet::new();
+    for blast_center in blast_centers {
+        for dx in -radius..=radius {
+            for dy in -radius..=radius {
+                for dz in -radius..=radius {
+                    for dw in -radius..=radius {
+                        let dist_sq = dx * dx + dy * dy + dz * dz + dw * dw;
+                        if dist_sq > radius_sq {
+                            continue;
+                        }
+                        let pos = [
+                            blast_center[0] + dx,
+                            blast_center[1] + dy,
+                            blast_center[2] + dz,
+                            blast_center[3] + dw,
+                        ];
+                        if apply_authoritative_voxel_edit(state, pos, VoxelType::AIR) {
+                            changed_positions.insert(pos);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut voxel_sets = Vec::new();
+    if !changed_positions.is_empty() {
+        state.world_revision = state.world_revision.wrapping_add(1);
+        let revision = state.world_revision;
+        let mut sorted_positions: Vec<[i32; 4]> = changed_positions.into_iter().collect();
+        sorted_positions.sort_unstable_by_key(|pos| (pos[3], pos[2], pos[1], pos[0]));
+        voxel_sets.reserve(sorted_positions.len());
+        for pos in sorted_positions {
+            voxel_sets.push(QueuedWorldVoxelSet {
+                position: pos,
+                material: VoxelType::AIR.0,
+                source_client_id: None,
+                client_edit_id: None,
+                revision,
+            });
+        }
+    }
+
+    (
+        voxel_sets,
+        QueuedExplosionEvent {
+            position: center,
+            radius: radius as f32,
+            source_entity_id: Some(source_entity_id),
+        },
+    )
+}
+
+fn apply_explosion_impulse(
+    state: &mut ServerState,
+    source_entity_id: u64,
+    center: [f32; 4],
+    impulse_radius: f32,
+    max_push_distance: f32,
+    now_ms: u64,
+) -> (bool, Vec<QueuedPlayerMovementModifier>) {
+    if !impulse_radius.is_finite()
+        || !max_push_distance.is_finite()
+        || impulse_radius <= 0.0
+        || max_push_distance <= 0.0
+    {
+        return (false, Vec::new());
+    }
+    let impulse_radius_sq = impulse_radius * impulse_radius;
+    let mut pending_impulses = Vec::new();
+    let mut queued_player_modifiers = Vec::new();
+    for record in state.entity_records.values() {
+        if record.lifecycle != EntityLifecycle::Live || record.entity_id == source_entity_id {
+            continue;
+        }
+        let Some(snapshot) = state.entity_store.snapshot(record.entity_id) else {
+            continue;
+        };
+        let offset = [
+            snapshot.position[0] - center[0],
+            snapshot.position[1] - center[1],
+            snapshot.position[2] - center[2],
+            snapshot.position[3] - center[3],
+        ];
+        let distance_sq = offset[0] * offset[0]
+            + offset[1] * offset[1]
+            + offset[2] * offset[2]
+            + offset[3] * offset[3];
+        if !distance_sq.is_finite() || distance_sq > impulse_radius_sq {
+            continue;
+        }
+        let distance = distance_sq.sqrt();
+        let falloff = (1.0 - distance / impulse_radius).clamp(0.0, 1.0);
+        if falloff <= 0.0 {
+            continue;
+        }
+        let push_distance = max_push_distance * falloff * falloff;
+        if push_distance <= 1e-3 {
+            continue;
+        }
+        let outward = if distance > 1e-4 {
+            [
+                offset[0] / distance,
+                offset[1] / distance,
+                offset[2] / distance,
+                offset[3] / distance,
+            ]
+        } else {
+            normalize4_or_default(snapshot.orientation, [1.0, 0.0, 0.0, 0.0])
+        };
+        let next_position = [
+            snapshot.position[0] + outward[0] * push_distance,
+            snapshot.position[1] + outward[1] * push_distance,
+            snapshot.position[2] + outward[2] * push_distance,
+            snapshot.position[3] + outward[3] * push_distance,
+        ];
+        let next_orientation = normalize4_or_default(outward, snapshot.orientation);
+        pending_impulses.push((
+            record.entity_id,
+            next_position,
+            next_orientation,
+            record.persistent,
+        ));
+    }
+    for (&client_id, player) in &state.players {
+        if player.entity_id == source_entity_id {
+            continue;
+        }
+        let Some(snapshot) = state.entity_store.snapshot(player.entity_id) else {
+            continue;
+        };
+        let offset = [
+            snapshot.position[0] - center[0],
+            snapshot.position[1] - center[1],
+            snapshot.position[2] - center[2],
+            snapshot.position[3] - center[3],
+        ];
+        let distance_sq = offset[0] * offset[0]
+            + offset[1] * offset[1]
+            + offset[2] * offset[2]
+            + offset[3] * offset[3];
+        if !distance_sq.is_finite() || distance_sq > impulse_radius_sq {
+            continue;
+        }
+        let distance = distance_sq.sqrt();
+        let falloff = (1.0 - distance / impulse_radius).clamp(0.0, 1.0);
+        if falloff <= 0.0 {
+            continue;
+        }
+        let push_distance = max_push_distance * falloff * falloff;
+        if push_distance <= 1e-3 {
+            continue;
+        }
+        let outward = if distance > 1e-4 {
+            [
+                offset[0] / distance,
+                offset[1] / distance,
+                offset[2] / distance,
+                offset[3] / distance,
+            ]
+        } else {
+            normalize4_or_default(snapshot.orientation, [1.0, 0.0, 0.0, 0.0])
+        };
+        let delta_position = [
+            outward[0] * push_distance,
+            outward[1] * push_distance,
+            outward[2] * push_distance,
+            outward[3] * push_distance,
+        ];
+        let delta_velocity_y = (outward[1] * push_distance * 6.0).clamp(-18.0, 18.0);
+        queued_player_modifiers.push(QueuedPlayerMovementModifier {
+            client_id,
+            delta_position,
+            delta_velocity_y,
+            source_entity_id: Some(source_entity_id),
+        });
+    }
+    if queued_player_modifiers.is_empty() && !state.players.is_empty() {
+        eprintln!(
+            "[impulse-debug][server] explosion produced no player modifiers source_entity={} center={:?} players_connected={}",
+            source_entity_id,
+            center,
+            state.players.len()
+        );
+    }
+
+    let mut persistent_motion = false;
+    for (entity_id, next_position, next_orientation, persistent) in pending_impulses {
+        if !state
+            .entity_store
+            .set_motion_state(entity_id, next_position, next_orientation, now_ms)
+        {
+            continue;
+        }
+        if persistent {
+            persistent_motion = true;
+        }
+    }
+    (persistent_motion, queued_player_modifiers)
 }
 
 fn prune_virgin_overrides(
@@ -2052,26 +2664,85 @@ fn start_broadcast_thread(
             }
             let tick_cpu_start = Instant::now();
             let now = monotonic_ms(start);
-            let entity_batches = {
+            let (entity_batches, world_voxel_updates, explosion_events, player_movement_modifiers) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                tick_entity_simulation_window(
-                    &mut guard,
-                    now,
-                    &mut next_entity_sim_ms,
-                    entity_sim_step_ms,
-                );
-                build_entity_replication_batches(&mut guard, entity_interest_radius_sq)
+                let (world_voxel_updates, explosion_events, player_movement_modifiers) =
+                    tick_entity_simulation_window(
+                        &mut guard,
+                        now,
+                        &mut next_entity_sim_ms,
+                        entity_sim_step_ms,
+                    );
+                let entity_batches =
+                    build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
+                (
+                    entity_batches,
+                    world_voxel_updates,
+                    explosion_events,
+                    player_movement_modifiers,
+                )
             };
             let spawned_count: usize = entity_batches.iter().map(|batch| batch.spawned.len()).sum();
             let transform_count: usize = entity_batches
                 .iter()
                 .map(|batch| batch.transforms.len())
                 .sum();
+            let world_voxel_update_count = world_voxel_updates.len();
+            let explosion_count = explosion_events.len();
+            let player_modifier_count = player_movement_modifiers.len();
             let did_broadcast = entity_batches.iter().any(|batch| {
                 !batch.spawned.is_empty()
                     || !batch.despawned.is_empty()
                     || !batch.transforms.is_empty()
-            });
+            }) || world_voxel_update_count > 0
+                || explosion_count > 0
+                || player_modifier_count > 0;
+
+            for update in world_voxel_updates {
+                send_world_voxel_set_to_streamed_clients(
+                    &state,
+                    update.position,
+                    update.material,
+                    update.source_client_id,
+                    update.client_edit_id,
+                    update.revision,
+                );
+            }
+            for explosion in explosion_events {
+                broadcast(
+                    &state,
+                    ServerMessage::Explosion {
+                        position: explosion.position,
+                        radius: explosion.radius,
+                        source_entity_id: explosion.source_entity_id,
+                    },
+                );
+            }
+            for modifier in player_movement_modifiers {
+                let delta = modifier.delta_position;
+                let delta_len = (delta[0] * delta[0]
+                    + delta[1] * delta[1]
+                    + delta[2] * delta[2]
+                    + delta[3] * delta[3])
+                    .sqrt();
+                eprintln!(
+                    "[impulse-debug][server] send_modifier client_id={} source_entity={:?} delta={:?} delta_len={:.3} delta_velocity_y={:.3}",
+                    modifier.client_id,
+                    modifier.source_entity_id,
+                    modifier.delta_position,
+                    delta_len,
+                    modifier.delta_velocity_y
+                );
+                send_to_client(
+                    &state,
+                    modifier.client_id,
+                    ServerMessage::PlayerMovementModifier {
+                        delta_position: modifier.delta_position,
+                        delta_velocity_y: modifier.delta_velocity_y,
+                        source_entity_id: modifier.source_entity_id,
+                    },
+                );
+            }
 
             for batch in entity_batches {
                 for entity_id in batch.despawned {
@@ -2103,7 +2774,13 @@ fn start_broadcast_thread(
                 record_server_cpu_sample(
                     &state,
                     None,
-                    Some((tick_cpu_start.elapsed(), spawned_count, transform_count)),
+                    Some((
+                        tick_cpu_start.elapsed(),
+                        spawned_count.saturating_add(explosion_count),
+                        transform_count
+                            .saturating_add(world_voxel_update_count)
+                            .saturating_add(player_modifier_count),
+                    )),
                 );
             }
         }
@@ -2330,6 +3007,185 @@ fn install_or_update_player(
     (snapshot, spawned_now)
 }
 
+fn spawn_entity_from_request(
+    state: &SharedState,
+    kind: EntityKind,
+    position: [f32; 4],
+    orientation: [f32; 4],
+    scale: f32,
+    material: u8,
+    start: Instant,
+) -> Result<EntitySnapshot, String> {
+    if kind == EntityKind::PlayerAvatar {
+        return Err("player entities are server-managed and cannot be spawned".to_string());
+    }
+    let Some(spec) = spawnable_entity_spec_for_kind(kind) else {
+        return Err(format!("entity kind {:?} is not spawnable", kind));
+    };
+
+    let spawn_position = [
+        if position[0].is_finite() {
+            position[0]
+        } else {
+            0.0
+        },
+        if position[1].is_finite() {
+            position[1]
+        } else {
+            0.0
+        },
+        if position[2].is_finite() {
+            position[2]
+        } else {
+            0.0
+        },
+        if position[3].is_finite() {
+            position[3]
+        } else {
+            0.0
+        },
+    ];
+    let spawn_orientation = if orientation.iter().all(|axis| axis.is_finite()) {
+        normalize4_or_default(orientation, [0.0, 0.0, 1.0, 0.0])
+    } else {
+        [0.0, 0.0, 1.0, 0.0]
+    };
+    let spawn_scale = if scale.is_finite() {
+        scale.clamp(0.10, 8.0)
+    } else {
+        0.5
+    };
+    let spawn_material = material.clamp(1, materials::MAX_MATERIAL_ID);
+
+    let entity = match (spec.class, spec.mob_archetype) {
+        (EntityClass::Mob, Some(archetype)) => spawn_mob_entity(
+            state,
+            kind,
+            archetype,
+            spawn_position,
+            spawn_orientation,
+            spawn_scale,
+            spawn_material,
+            None,
+            true,
+            None,
+            None,
+            start,
+        ),
+        (EntityClass::Accent, None) => spawn_entity(
+            state,
+            kind,
+            spawn_position,
+            spawn_orientation,
+            spawn_scale,
+            spawn_material,
+            None,
+            true,
+            None,
+            start,
+        ),
+        (class, archetype) => {
+            return Err(format!(
+                "spawn spec for {:?} is invalid (class={:?}, archetype={:?})",
+                kind, class, archetype
+            ));
+        }
+    };
+    Ok(entity)
+}
+
+fn handle_console_spawn_command(
+    state: &SharedState,
+    client_id: u64,
+    args: &[&str],
+    start: Instant,
+) -> Result<(), String> {
+    if args.is_empty() {
+        return Err(spawn_usage_string());
+    }
+    let Some(spec) = spawnable_entity_spec_for_token(args[0]) else {
+        let available = SPAWNABLE_ENTITY_SPECS
+            .iter()
+            .map(|spec| spec.canonical_name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "unknown spawn kind '{}'; available kinds: {available}",
+            args[0]
+        ));
+    };
+
+    let (default_position, default_orientation) = {
+        let guard = state.lock().expect("server state lock poisoned");
+        default_spawn_pose_for_client(&guard, client_id)
+    };
+    let parse_usage = || spawn_usage_string();
+    let (position, material_id) = match args.len() {
+        1 => (default_position, spec.default_material),
+        2 => {
+            let Some(material_id) = parse_spawn_material_id(args[1]) else {
+                return Err(format!("unknown material '{}'", args[1]));
+            };
+            (default_position, material_id)
+        }
+        5 => {
+            let Some(position) = parse_spawn_vec4(&args[1..5]) else {
+                return Err(parse_usage());
+            };
+            (position, spec.default_material)
+        }
+        6 => {
+            let Some(position) = parse_spawn_vec4(&args[1..5]) else {
+                return Err(parse_usage());
+            };
+            let Some(material_id) = parse_spawn_material_id(args[5]) else {
+                return Err(format!("unknown material '{}'", args[5]));
+            };
+            (position, material_id)
+        }
+        _ => return Err(parse_usage()),
+    };
+
+    let _ = spawn_entity_from_request(
+        state,
+        spec.kind,
+        position,
+        default_orientation,
+        spec.default_scale,
+        material_id,
+        start,
+    )?;
+    Ok(())
+}
+
+fn run_server_console_command(
+    state: &SharedState,
+    client_id: u64,
+    command: &str,
+    start: Instant,
+) -> Result<(), String> {
+    let mut command = command.trim();
+    if command.is_empty() {
+        return Ok(());
+    }
+    if let Some(stripped) = command.strip_prefix('/') {
+        command = stripped;
+    }
+    let mut parts = command.split_whitespace();
+    let Some(command_name) = parts.next() else {
+        return Ok(());
+    };
+    let args: Vec<&str> = parts.collect();
+
+    if command_name.eq_ignore_ascii_case("spawn") {
+        return handle_console_spawn_command(state, client_id, &args, start);
+    }
+    Err(format!(
+        "unknown server command '{}'; supported: /spawn",
+        command_name
+    ))
+}
+
 fn handle_message(
     state: &SharedState,
     client_id: u64,
@@ -2421,37 +3277,11 @@ fn handle_message(
             let requested_voxel = VoxelType(material);
             let maybe_revision = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                if guard
-                    .world
-                    .get_voxel(position[0], position[1], position[2], position[3])
-                    == requested_voxel
-                {
-                    None
-                } else {
-                    let (chunk_pos, _) =
-                        voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
-                    ensure_chunk_materialized_for_edit(
-                        &mut guard,
-                        chunk_pos,
-                        world_seed,
-                        procgen_structures,
-                    );
-                    guard.world.set_voxel(
-                        position[0],
-                        position[1],
-                        position[2],
-                        position[3],
-                        requested_voxel,
-                    );
-                    mark_block_region_dirty(&mut guard, chunk_pos);
-                    trim_chunk_override_if_virgin(
-                        &mut guard,
-                        chunk_pos,
-                        world_seed,
-                        procgen_structures,
-                    );
+                if apply_authoritative_voxel_edit(&mut guard, position, requested_voxel) {
                     guard.world_revision = guard.world_revision.wrapping_add(1);
                     Some(guard.world_revision)
+                } else {
+                    None
                 }
             };
 
@@ -2473,85 +3303,22 @@ fn handle_message(
             scale,
             material,
         } => {
-            let spawn_kind = match kind {
-                EntityKind::PlayerAvatar => {
-                    send_to_client(
-                        state,
-                        client_id,
-                        ServerMessage::Error {
-                            message: "player entities are server-managed and cannot be spawned"
-                                .to_string(),
-                        },
-                    );
-                    record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None);
-                    return;
-                }
-                _ => kind,
-            };
-            let spawn_position = [
-                if position[0].is_finite() {
-                    position[0]
-                } else {
-                    0.0
-                },
-                if position[1].is_finite() {
-                    position[1]
-                } else {
-                    0.0
-                },
-                if position[2].is_finite() {
-                    position[2]
-                } else {
-                    0.0
-                },
-                if position[3].is_finite() {
-                    position[3]
-                } else {
-                    0.0
-                },
-            ];
-            let spawn_orientation = if orientation.iter().all(|axis| axis.is_finite()) {
-                orientation
-            } else {
-                [0.0, 0.0, 1.0, 0.0]
-            };
-            let spawn_scale = if scale.is_finite() {
-                scale.clamp(0.10, 8.0)
-            } else {
-                0.5
-            };
-            let spawn_material = material.max(1);
-            let _entity = match spawn_kind {
-                EntityKind::MobSeeker => spawn_mob_entity(
-                    state,
-                    spawn_kind,
-                    MobArchetype::Seeker,
-                    spawn_position,
-                    spawn_orientation,
-                    spawn_scale,
-                    spawn_material,
-                    None,
-                    true,
-                    None,
-                    None,
-                    start,
-                ),
-                EntityKind::TestCube | EntityKind::TestRotor | EntityKind::TestDrifter => {
-                    spawn_entity(
-                        state,
-                        spawn_kind,
-                        spawn_position,
-                        spawn_orientation,
-                        spawn_scale,
-                        spawn_material,
-                        None,
-                        true,
-                        None,
-                        start,
-                    )
-                }
-                EntityKind::PlayerAvatar => unreachable!("already handled above"),
-            };
+            if let Err(message) = spawn_entity_from_request(
+                state,
+                kind,
+                position,
+                orientation,
+                scale,
+                material,
+                start,
+            ) {
+                send_to_client(state, client_id, ServerMessage::Error { message });
+            }
+        }
+        ClientMessage::ConsoleCommand { command } => {
+            if let Err(message) = run_server_console_command(state, client_id, &command, start) {
+                send_to_client(state, client_id, ServerMessage::Error { message });
+            }
         }
         ClientMessage::RequestWorldSnapshot => {
             let snapshot_message = {
@@ -2864,7 +3631,7 @@ fn restore_persisted_entities(
                     );
                     restored = restored.saturating_add(1);
                 }
-                EntityKind::PlayerAvatar | EntityKind::MobSeeker => {}
+                EntityKind::PlayerAvatar | EntityKind::MobSeeker | EntityKind::MobCreeper4d => {}
             },
             EntityClass::Mob => {
                 let Some(default_archetype) = mob_archetype_for_kind(entry.kind) else {
@@ -2965,6 +3732,7 @@ fn initialize_state(
         dirty_block_regions: HashSet::new(),
         region_chunk_edge,
         world_seed: runtime_world_seed,
+        procgen_structures: config.procgen_structures,
         world: initial_world,
         world_revision: 0,
         procgen_blocked_cells,

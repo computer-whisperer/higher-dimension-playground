@@ -11,6 +11,7 @@ pub enum EntityKind {
     TestRotor,
     TestDrifter,
     MobSeeker,
+    MobCreeper4d,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -94,6 +95,9 @@ pub enum ClientMessage {
         scale: f32,
         material: u8,
     },
+    ConsoleCommand {
+        command: String,
+    },
     RequestWorldSnapshot,
     Ping {
         nonce: u64,
@@ -141,5 +145,15 @@ pub enum ServerMessage {
     EntityTransforms {
         server_time_ms: u64,
         entities: Vec<EntityTransform>,
+    },
+    Explosion {
+        position: [f32; 4],
+        radius: f32,
+        source_entity_id: Option<u64>,
+    },
+    PlayerMovementModifier {
+        delta_position: [f32; 4],
+        delta_velocity_y: f32,
+        source_entity_id: Option<u64>,
     },
 }

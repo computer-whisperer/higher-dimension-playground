@@ -151,7 +151,10 @@ pub fn generate_material_icon_sheet_gpu(
             },
         );
         let Some((icon_w, icon_h, raw)) = offscreen.capture_rendered_frame_rgba8(true) else {
-            eprintln!("Failed to capture offscreen material icon render for material {}", mat.id);
+            eprintln!(
+                "Failed to capture offscreen material icon render for material {}",
+                mat.id
+            );
             return None;
         };
         if icon_w != ICON_SIZE || icon_h != ICON_SIZE || raw.len() != icon_pixel_len {

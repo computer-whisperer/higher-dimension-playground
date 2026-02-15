@@ -246,6 +246,102 @@ impl App {
         }
     }
 
+    pub(super) fn queue_pending_player_movement_modifier(
+        &mut self,
+        delta_position: [f32; 4],
+        delta_velocity_y: f32,
+        source_entity_id: Option<u64>,
+    ) {
+        if delta_position.iter().any(|axis| !axis.is_finite()) || !delta_velocity_y.is_finite() {
+            eprintln!(
+                "[impulse-debug][client] drop invalid modifier source_entity={:?} delta={:?} delta_velocity_y={}",
+                source_entity_id, delta_position, delta_velocity_y
+            );
+            return;
+        }
+        let mut clamped_delta = delta_position;
+        let delta_len_sq = dot4(clamped_delta, clamped_delta);
+        if delta_len_sq.is_finite() && delta_len_sq > 1e-6 {
+            let delta_len = delta_len_sq.sqrt();
+            if delta_len > MULTIPLAYER_PLAYER_MODIFIER_MAX_TRANSLATION {
+                let clamp = MULTIPLAYER_PLAYER_MODIFIER_MAX_TRANSLATION / delta_len;
+                for axis in &mut clamped_delta {
+                    *axis *= clamp;
+                }
+            }
+        }
+        let raw_len = dot4(delta_position, delta_position).sqrt();
+        let clamped_len = dot4(clamped_delta, clamped_delta).sqrt();
+        self.pending_player_movement_modifiers
+            .push_back(PendingPlayerMovementModifier {
+                delta_position: clamped_delta,
+                delta_velocity_y: delta_velocity_y.clamp(
+                    -MULTIPLAYER_PLAYER_MODIFIER_MAX_VELOCITY_Y_DELTA,
+                    MULTIPLAYER_PLAYER_MODIFIER_MAX_VELOCITY_Y_DELTA,
+                ),
+                source_entity_id,
+            });
+        eprintln!(
+            "[impulse-debug][client] queue modifier source_entity={:?} raw_delta={:?} raw_len={:.3} clamped_delta={:?} clamped_len={:.3} raw_dvy={:.3} clamped_dvy={:.3} queue_len={}",
+            source_entity_id,
+            delta_position,
+            raw_len,
+            clamped_delta,
+            clamped_len,
+            delta_velocity_y,
+            self.pending_player_movement_modifiers
+                .back()
+                .map(|m| m.delta_velocity_y)
+                .unwrap_or(0.0),
+            self.pending_player_movement_modifiers.len()
+        );
+        if self.pending_player_movement_modifiers.len() > MULTIPLAYER_PENDING_PLAYER_MODIFIER_MAX {
+            let overflow = self.pending_player_movement_modifiers.len()
+                - MULTIPLAYER_PENDING_PLAYER_MODIFIER_MAX;
+            self.pending_player_movement_modifiers.drain(0..overflow);
+        }
+    }
+
+    pub(super) fn apply_pending_player_movement_modifiers(&mut self) {
+        while let Some(modifier) = self.pending_player_movement_modifiers.pop_front() {
+            let mut added_velocity = [0.0f32; 4];
+            for axis in [0usize, 2, 3] {
+                added_velocity[axis] =
+                    modifier.delta_position[axis] * MULTIPLAYER_PLAYER_MODIFIER_IMPULSE_GAIN_XZW;
+                self.player_modifier_external_velocity[axis] += added_velocity[axis];
+            }
+            let xzw_speed = (self.player_modifier_external_velocity[0]
+                * self.player_modifier_external_velocity[0]
+                + self.player_modifier_external_velocity[2]
+                    * self.player_modifier_external_velocity[2]
+                + self.player_modifier_external_velocity[3]
+                    * self.player_modifier_external_velocity[3])
+                .sqrt();
+            if xzw_speed > MULTIPLAYER_PLAYER_MODIFIER_MAX_EXTERNAL_SPEED_XZW {
+                let clamp = MULTIPLAYER_PLAYER_MODIFIER_MAX_EXTERNAL_SPEED_XZW / xzw_speed;
+                self.player_modifier_external_velocity[0] *= clamp;
+                self.player_modifier_external_velocity[2] *= clamp;
+                self.player_modifier_external_velocity[3] *= clamp;
+            }
+            let previous_velocity_y = self.camera.velocity_y;
+            if !self.camera.is_flying && modifier.delta_velocity_y.abs() > 1e-5 {
+                self.camera.velocity_y += modifier.delta_velocity_y;
+                if modifier.delta_velocity_y > 0.0 {
+                    self.camera.is_grounded = false;
+                }
+            }
+            eprintln!(
+                "[impulse-debug][client] apply modifier source_entity={:?} delta={:?} added_external_velocity={:?} external_velocity_now={:?} prev_vy={:.3} next_vy={:.3}",
+                modifier.source_entity_id,
+                modifier.delta_position,
+                added_velocity,
+                self.player_modifier_external_velocity,
+                previous_velocity_y,
+                self.camera.velocity_y
+            );
+        }
+    }
+
     pub(super) fn apply_multiplayer_chunk_batch(
         &mut self,
         revision: u64,
@@ -339,6 +435,8 @@ impl App {
                 self.multiplayer_self_id = Some(client_id);
                 self.next_multiplayer_edit_id = 1;
                 self.pending_voxel_edits.clear();
+                self.pending_player_movement_modifiers.clear();
+                self.player_modifier_external_velocity = [0.0; 4];
                 eprintln!(
                     "Multiplayer connected: client_id={} world_rev={} chunks={} server_tick_hz={:.2}",
                     client_id, world.revision, world.non_empty_chunks, tick_hz
@@ -349,6 +447,7 @@ impl App {
             }
             multiplayer::ServerMessage::Error { message } => {
                 eprintln!("Multiplayer server error: {message}");
+                self.append_dev_console_log_line(format!("[server] {message}"));
             }
             multiplayer::ServerMessage::WorldVoxelSet {
                 position,
@@ -478,6 +577,36 @@ impl App {
                     }
                 }
             }
+            multiplayer::ServerMessage::Explosion {
+                position, radius, ..
+            } => {
+                let max_distance = 40.0f32;
+                let distance = distance4(self.camera.position, position);
+                if distance <= max_distance {
+                    let distance_t = 1.0 - (distance / max_distance).clamp(0.0, 1.0);
+                    let distance_gain = distance_t * distance_t;
+                    let radius_gain = (radius / 2.5).clamp(0.6, 1.6);
+                    self.audio
+                        .play_scaled(SoundEffect::Break, distance_gain * radius_gain * 1.4);
+                }
+            }
+            multiplayer::ServerMessage::PlayerMovementModifier {
+                delta_position,
+                delta_velocity_y,
+                source_entity_id,
+            } => {
+                eprintln!(
+                    "[impulse-debug][client] recv modifier source_entity={:?} delta={:?} delta_velocity_y={:.3}",
+                    source_entity_id,
+                    delta_position,
+                    delta_velocity_y
+                );
+                self.queue_pending_player_movement_modifier(
+                    delta_position,
+                    delta_velocity_y,
+                    source_entity_id,
+                );
+            }
         }
     }
 
@@ -529,24 +658,13 @@ impl App {
         }
     }
 
-    pub(super) fn send_multiplayer_spawn_entity(
-        &self,
-        kind: multiplayer::EntityKind,
-        position: [f32; 4],
-        orientation: [f32; 4],
-        scale: f32,
-        material: u8,
-    ) -> bool {
+    pub(super) fn send_multiplayer_console_command(&self, command: &str) -> bool {
         let Some(client) = self.multiplayer.as_ref() else {
             return false;
         };
 
-        client.send(MultiplayerClientMessage::SpawnEntity {
-            kind,
-            position,
-            orientation,
-            scale,
-            material,
+        client.send(MultiplayerClientMessage::ConsoleCommand {
+            command: command.trim().to_string(),
         });
         true
     }
@@ -652,6 +770,29 @@ impl App {
                                 (entity.material.saturating_add(3)) as u32,
                                 entity.material as u32,
                                 (entity.material.saturating_add(1)) as u32,
+                                entity.material as u32,
+                            ],
+                        ));
+                    }
+                    multiplayer::EntityKind::MobCreeper4d => {
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [
+                                entity.scale * 0.92,
+                                entity.scale * 1.18,
+                                entity.scale * 0.92,
+                                entity.scale * 1.18,
+                            ],
+                            [
+                                (entity.material.saturating_add(5)) as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                                (entity.material.saturating_add(3)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(6)) as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(4)) as u32,
                                 entity.material as u32,
                             ],
                         ));

@@ -144,6 +144,8 @@ impl App {
         self.multiplayer_self_id = None;
         self.next_multiplayer_edit_id = 1;
         self.pending_voxel_edits.clear();
+        self.pending_player_movement_modifiers.clear();
+        self.player_modifier_external_velocity = [0.0; 4];
         self.remote_players.clear();
         self.remote_entities.clear();
         self.last_multiplayer_player_update = Instant::now();

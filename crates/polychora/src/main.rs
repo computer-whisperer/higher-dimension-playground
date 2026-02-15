@@ -96,6 +96,12 @@ const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 const MULTIPLAYER_PENDING_EDIT_TIMEOUT: Duration = Duration::from_secs(5);
 const MULTIPLAYER_PENDING_EDIT_MAX: usize = 512;
+const MULTIPLAYER_PENDING_PLAYER_MODIFIER_MAX: usize = 128;
+const MULTIPLAYER_PLAYER_MODIFIER_MAX_TRANSLATION: f32 = 12.0;
+const MULTIPLAYER_PLAYER_MODIFIER_MAX_VELOCITY_Y_DELTA: f32 = 16.0;
+const MULTIPLAYER_PLAYER_MODIFIER_IMPULSE_GAIN_XZW: f32 = 18.0;
+const MULTIPLAYER_PLAYER_MODIFIER_DECAY_HZ: f32 = 2.5;
+const MULTIPLAYER_PLAYER_MODIFIER_MAX_EXTERNAL_SPEED_XZW: f32 = 60.0;
 const CLIENT_PROFILE_REPORT_INTERVAL: Duration = Duration::from_secs(2);
 const AVATAR_MATERIAL_ID: u32 = 21;
 const AVATAR_FORWARD_FRAGMENT_COUNT: usize = 4;
@@ -973,6 +979,8 @@ fn main() {
         multiplayer_self_id: None,
         next_multiplayer_edit_id: 1,
         pending_voxel_edits: Vec::new(),
+        pending_player_movement_modifiers: VecDeque::new(),
+        player_modifier_external_velocity: [0.0; 4],
         remote_players: HashMap::new(),
         remote_entities: HashMap::new(),
         last_multiplayer_player_update: Instant::now(),
@@ -1220,6 +1228,8 @@ struct App {
     multiplayer_self_id: Option<u64>,
     next_multiplayer_edit_id: u64,
     pending_voxel_edits: Vec<PendingVoxelEdit>,
+    pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,
+    player_modifier_external_velocity: [f32; 4],
     remote_players: HashMap<u64, RemotePlayerState>,
     remote_entities: HashMap<u64, RemoteEntityState>,
     last_multiplayer_player_update: Instant,
@@ -1312,4 +1322,11 @@ struct PendingVoxelEdit {
     position: [i32; 4],
     material: u8,
     created_at: Instant,
+}
+
+#[derive(Clone)]
+struct PendingPlayerMovementModifier {
+    delta_position: [f32; 4],
+    delta_velocity_y: f32,
+    source_entity_id: Option<u64>,
 }
