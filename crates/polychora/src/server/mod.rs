@@ -1850,23 +1850,54 @@ fn spawn_entity(
 }
 
 fn spawn_default_test_entities(state: &SharedState, start: Instant) {
-    let test_positions: [[f32; 4]; 3] = [
-        [3.0, 2.0, 3.0, 0.0],
-        [-2.0, 1.5, 5.0, 1.0],
-        [0.0, 3.0, -4.0, 2.0],
+    let test_entities: [(EntityKind, [f32; 4], [f32; 4], f32, u8); 5] = [
+        (
+            EntityKind::TestCube,
+            [3.0, 2.0, 3.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            0.50,
+            12,
+        ),
+        (
+            EntityKind::TestRotor,
+            [-2.0, 1.5, 5.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            0.54,
+            8,
+        ),
+        (
+            EntityKind::TestDrifter,
+            [0.0, 3.0, -4.0, 2.0],
+            [0.4, 0.2, 1.0, 0.3],
+            0.48,
+            15,
+        ),
+        (
+            EntityKind::TestRotor,
+            [5.5, 2.4, -1.0, -2.5],
+            [0.8, 0.0, 1.0, -0.4],
+            0.46,
+            17,
+        ),
+        (
+            EntityKind::TestDrifter,
+            [-5.0, 2.8, 1.5, 3.5],
+            [0.3, -0.2, 1.0, 0.7],
+            0.58,
+            21,
+        ),
     ];
-    let test_materials: [u8; 3] = [12, 8, 15];
-    for (i, (pos, mat)) in test_positions.iter().zip(test_materials.iter()).enumerate() {
+    for (i, (kind, pos, orientation, scale, material)) in test_entities.iter().enumerate() {
         let id = spawn_entity(
             state,
-            EntityKind::TestCube,
+            *kind,
             *pos,
-            [0.0, 0.0, 1.0, 0.0],
-            0.5,
-            *mat,
+            *orientation,
+            *scale,
+            *material,
             start,
         );
-        eprintln!("spawned test entity {} (id={}) at {:?}", i, id, pos);
+        eprintln!("spawned test entity {} {:?} (id={}) at {:?}", i, kind, id, pos);
     }
 }
 

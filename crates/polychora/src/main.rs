@@ -2867,6 +2867,52 @@ impl App {
                             [entity.material as u32; 8],
                         ));
                     }
+                    multiplayer::EntityKind::TestRotor => {
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [
+                                entity.scale * 0.56,
+                                entity.scale * 0.56,
+                                entity.scale * 1.35,
+                                entity.scale * 0.82,
+                            ],
+                            [
+                                entity.material as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                            ],
+                        ));
+                    }
+                    multiplayer::EntityKind::TestDrifter => {
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [
+                                entity.scale * 1.15,
+                                entity.scale * 0.44,
+                                entity.scale * 0.72,
+                                entity.scale * 1.05,
+                            ],
+                            [
+                                (entity.material.saturating_add(2)) as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                            ],
+                        ));
+                    }
                 }
             }
         }
