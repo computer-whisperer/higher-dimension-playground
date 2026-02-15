@@ -13,6 +13,49 @@ import types;
 
 static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
 static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
+static const uint WORKING_FLAG_VTE_COLLAPSED = 1u << 0u;
+static const uint WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT = 1u << 1u;
+static const uint WORKING_ZW_SHIFT_STRENGTH_SHIFT = 8u;
+
+bool isVteCollapsed(WorkingData wd)
+{
+    return (wd.padding[0] & WORKING_FLAG_VTE_COLLAPSED) != 0u;
+}
+
+bool zwAngleColorShiftEnabled(WorkingData wd)
+{
+    return (wd.padding[0] & WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT) != 0u;
+}
+
+float zwAngleColorShiftStrength(WorkingData wd)
+{
+    uint q = (wd.padding[0] >> WORKING_ZW_SHIFT_STRENGTH_SHIFT) & 0xFFu;
+    return float(q) / 255.0;
+}
+
+float zwLayerCoord(uint layer, uint layerCount)
+{
+    if (layerCount <= 1u)
+    {
+        return 0.0;
+    }
+    float t = float(layer) / float(layerCount - 1u);
+    return t * 2.0 - 1.0;
+}
+
+float3 applyZwAngleColorShift(float3 color, uint layer, uint layerCount, float strength)
+{
+    float coord = zwLayerCoord(layer, layerCount);
+    float redBoost = saturate(-coord) * strength;
+    float blueBoost = saturate(coord) * strength;
+    float neutralFade = 1.0 - 0.12 * abs(coord) * strength;
+
+    return float3(
+        color.x * (1.0 + redBoost),
+        color.y * neutralFade,
+        color.z * (1.0 + blueBoost)
+    );
+}
 
 // Vertex shader for line rendering
 struct LineVSOutput
@@ -78,6 +121,13 @@ float linearToGamma(float value)
 float4 samplePresentedColor(float2 fragCoord)
 {
     WorkingData wd = workingDataBuffer[0];
+    bool vteCollapsed = isVteCollapsed(wd);
+    uint stageBMode = wd.padding[1];
+    bool debugStageBMode = vteCollapsed
+        && (stageBMode == STAGE_B_MODE_DEBUG_COMPARE
+            || stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL);
+    bool applyZwShift = zwAngleColorShiftEnabled(wd) && !debugStageBMode;
+    float zwShiftStrength = zwAngleColorShiftStrength(wd);
 
     // Map fragment coordinate to buffer coordinate
     float2 normalPos = float2(
@@ -96,7 +146,7 @@ float4 samplePresentedColor(float2 fragCoord)
     float4 csResult = float4(0.0, 0.0, 0.0, 0.0);
     // For VTE, Stage B collapses to layer 0 in compute.
     // Legacy raster/raytrace paths still accumulate all Z slices here.
-    if (wd.padding[0] != 0u)
+    if (vteCollapsed)
     {
         uint index = py * wd.renderDimensions.x + px;
         csResult = pixelBuffer[index];
@@ -108,7 +158,16 @@ float4 samplePresentedColor(float2 fragCoord)
             uint index = z * wd.renderDimensions.x * wd.renderDimensions.y
                        + py * wd.renderDimensions.x
                        + px;
-            csResult += pixelBuffer[index];
+            float4 sample = pixelBuffer[index];
+            if (applyZwShift && zwShiftStrength > 0.0)
+            {
+                sample.xyz = applyZwAngleColorShift(
+                    sample.xyz,
+                    z,
+                    wd.renderDimensions.z,
+                    zwShiftStrength);
+            }
+            csResult += sample;
         }
     }
 
@@ -118,9 +177,7 @@ float4 samplePresentedColor(float2 fragCoord)
     {
         float3 color = csResult.xyz / alpha;
         // Debug mode relies on exact false-color output; skip post-tonemap transforms.
-        if (wd.padding[0] != 0u
-            && (wd.padding[1] == STAGE_B_MODE_DEBUG_COMPARE
-                || wd.padding[1] == STAGE_B_MODE_DEBUG_INTEGRAL))
+        if (debugStageBMode)
         {
             return float4(saturate(color), alpha);
         }

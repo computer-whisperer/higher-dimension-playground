@@ -18,6 +18,8 @@ static const uint STAGE_B_MODE_SLICE = 1u;
 static const uint STAGE_B_MODE_THICK_SLICE = 2u;
 static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
 static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
+static const uint WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT = 1u << 1u;
+static const uint WORKING_ZW_SHIFT_STRENGTH_SHIFT = 8u;
 static const uint HIGHLIGHT_FLAG_HIT_VOXEL = 1u << 0u;
 static const uint HIGHLIGHT_FLAG_PLACE_VOXEL = 1u << 1u;
 static const uint MATERIAL_ID_GROUND = 11u;
@@ -2643,6 +2645,12 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 float3 hitColor = shadeVoxelMaterial(mat, entityHit.hitNormal)
                     + mat.albedo.xyz * integralHitEmissiveBoost;
                 hitColor *= hitBrightnessScale;
+                hitColor = maybeApplyZwAngleColorShift(
+                    hitColor,
+                    sampleLayer,
+                    layerCount,
+                    wd,
+                    meta);
                 hitAccumColor += hitColor * w;
                 hitAccumWeight += w;
             }
@@ -2671,7 +2679,16 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                     float hitBrightnessScale = (hitMaterial == MATERIAL_ID_GROUND)
                         ? integralSkyScale
                         : 1.0;
-                    hitAccumColor += (highlighted + mat.albedo.xyz * integralHitEmissiveBoost) * hitBrightnessScale * w;
+                    float3 sampleColor =
+                        (highlighted + mat.albedo.xyz * integralHitEmissiveBoost)
+                        * hitBrightnessScale;
+                    sampleColor = maybeApplyZwAngleColorShift(
+                        sampleColor,
+                        sampleLayer,
+                        layerCount,
+                        wd,
+                        meta);
+                    hitAccumColor += sampleColor * w;
                     hitAccumWeight += w;
                 }
                 else
@@ -2689,6 +2706,12 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                         + mat.albedo.xyz * integralHitEmissiveBoost;
                     hitColor = maybeApplyLodTint(hitColor, hitLodLevel, meta);
                     hitColor *= hitBrightnessScale;
+                    hitColor = maybeApplyZwAngleColorShift(
+                        hitColor,
+                        sampleLayer,
+                        layerCount,
+                        wd,
+                        meta);
                     hitAccumColor += hitColor * w;
                     hitAccumWeight += w;
                 }
@@ -2697,7 +2720,14 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             {
                 float a = 0.5 + 0.5 * worldDirection.y;
                 float3 sky = lerp(float3(0.02, 0.03, 0.06), float3(0.16, 0.22, 0.40), saturate(a));
-                skyAccumColor += sky * integralSkyScale;
+                sky *= integralSkyScale;
+                sky = maybeApplyZwAngleColorShift(
+                    sky,
+                    sampleLayer,
+                    layerCount,
+                    wd,
+                    meta);
+                skyAccumColor += sky;
                 skyAccumWeight += 1.0;
             }
 
@@ -3107,6 +3137,55 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     pixelBuffer[index] = float4(outColor, outAlpha);
 }
 
+float decodeZwAngleColorShiftStrength(WorkingData wd)
+{
+    uint q = (wd.padding[0] >> WORKING_ZW_SHIFT_STRENGTH_SHIFT) & 0xFFu;
+    return float(q) / 255.0;
+}
+
+float zwLayerCoord(uint layer, uint layerCount)
+{
+    if (layerCount <= 1u)
+    {
+        return 0.0;
+    }
+    float t = float(layer) / float(layerCount - 1u);
+    return t * 2.0 - 1.0;
+}
+
+float3 maybeApplyZwAngleColorShift(
+    float3 color,
+    uint layer,
+    uint layerCount,
+    WorkingData wd,
+    VoxelFrameMeta meta)
+{
+    if ((wd.padding[0] & WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT) == 0u)
+    {
+        return color;
+    }
+    if (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL)
+    {
+        return color;
+    }
+
+    float strength = decodeZwAngleColorShiftStrength(wd);
+    if (strength <= 0.0)
+    {
+        return color;
+    }
+
+    float coord = zwLayerCoord(layer, layerCount);
+    float redBoost = saturate(-coord) * strength;
+    float blueBoost = saturate(coord) * strength;
+    float neutralFade = 1.0 - 0.12 * abs(coord) * strength;
+    return float3(
+        color.x * (1.0 + redBoost),
+        color.y * neutralFade,
+        color.z * (1.0 + blueBoost)
+    );
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void mainVoxelDisplayStageB(uint3 globalId : SV_DispatchThreadID)
@@ -3129,6 +3208,7 @@ void mainVoxelDisplayStageB(uint3 globalId : SV_DispatchThreadID)
     if (meta.stageBMode == STAGE_B_MODE_SLICE || meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE)
     {
         color = pixelBuffer[pixelBase + centerLayer * layerStride].xyz;
+        color = maybeApplyZwAngleColorShift(color, centerLayer, layers, wd, meta);
     }
     else if (meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL)
     {
@@ -3168,7 +3248,9 @@ void mainVoxelDisplayStageB(uint3 globalId : SV_DispatchThreadID)
         uint sampleCount = 0;
         for (uint z = lo; z <= hi; z++)
         {
-            accum += pixelBuffer[pixelBase + z * layerStride].xyz;
+            float3 sample = pixelBuffer[pixelBase + z * layerStride].xyz;
+            sample = maybeApplyZwAngleColorShift(sample, z, layers, wd, meta);
+            accum += sample;
             sampleCount++;
         }
 

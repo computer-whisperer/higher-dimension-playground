@@ -91,6 +91,17 @@ impl App {
                     )
                     .text("Focal Length ZW"),
                 );
+                ui.checkbox(
+                    &mut self.zw_angle_color_shift_enabled,
+                    "ZW Angle Red/Blue Shift",
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.zw_angle_color_shift_strength,
+                        ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN..=ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
+                    )
+                    .text("ZW Shift Strength"),
+                );
                 ui.add(
                     egui::Slider::new(
                         &mut self.vte_max_trace_steps,
@@ -129,6 +140,10 @@ impl App {
                 self.vte_lod_mid_max_distance = self
                     .vte_lod_mid_max_distance
                     .clamp(self.vte_lod_near_max_distance, self.vte_max_trace_distance);
+                self.zw_angle_color_shift_strength = self.zw_angle_color_shift_strength.clamp(
+                    ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
+                    ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
+                );
                 ui.add(
                     egui::Slider::new(
                         &mut self.place_material,

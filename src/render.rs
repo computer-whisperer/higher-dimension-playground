@@ -87,6 +87,9 @@ use winit::window::Window;
 const VTE_LOD_TINT_ENV: &str = "R4D_VTE_LOD_TINT";
 // Keep in sync with OVERLAY_RASTER_SCALE in `slang-shaders/src/rasterizer.slang`.
 const VTE_OVERLAY_RASTER_SCALE: u32 = 3;
+const WORKING_FLAG_VTE_COLLAPSED: u32 = 1u32 << 0u32;
+const WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT: u32 = 1u32 << 1u32;
+const WORKING_ZW_SHIFT_STRENGTH_SHIFT: u32 = 8u32;
 
 fn env_flag_enabled(name: &str) -> bool {
     match std::env::var(name) {
@@ -888,14 +891,24 @@ impl RenderContext {
             writer.time_ticks_ms = time_ticks_ms;
             writer.focal_length_xy = focal_length_xy;
             writer.focal_length_zw = focal_length_zw;
+            let mut working_flags = 0u32;
+            if voxel_input.is_some() {
+                working_flags |= WORKING_FLAG_VTE_COLLAPSED;
+            }
+            if render_options.zw_angle_color_shift_enabled {
+                working_flags |= WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT;
+            }
+            let zw_shift_strength_q = (render_options.zw_angle_color_shift_strength.clamp(0.0, 1.0)
+                * 255.0)
+                .round() as u32;
+            working_flags |= zw_shift_strength_q << WORKING_ZW_SHIFT_STRENGTH_SHIFT;
             // Flag used by present shader:
-            // 0 = legacy per-layer accumulation, 1 = VTE Stage-B-collapsed output in layer 0.
+            // - padding[0] bit0: 0 = legacy per-layer accumulation, 1 = VTE Stage-B-collapsed output in layer 0.
+            // - padding[0] bit1: ZW angle color shift enabled.
+            // - padding[0] bits8..15: quantized ZW angle color shift strength [0, 255].
             // padding[1] carries VTE stage_b_mode so present shader can conditionally
             // bypass tone mapping for debug compare output.
-            writer.padding = [
-                u32::from(voxel_input.is_some()),
-                render_options.vte_display_mode.as_u32(),
-            ];
+            writer.padding = [working_flags, render_options.vte_display_mode.as_u32()];
             writer.world_origin = world_origin;
             writer.world_dir_x = glam::Vec4::new(
                 world_dir_x_h[0],

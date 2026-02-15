@@ -696,6 +696,8 @@ impl App {
             vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,
             vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
             vte_integral_log_merge_k: self.vte_integral_log_merge_k,
+            zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
+            zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
             vte_highlight_hit_voxel: if self.args.no_hud {
                 None
             } else {

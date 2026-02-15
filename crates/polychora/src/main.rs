@@ -78,6 +78,9 @@ const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
 const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
 const FOCAL_LENGTH_MAX: f32 = 4.00;
+const ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN: f32 = 0.0;
+const ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX: f32 = 1.0;
+const ZW_ANGLE_COLOR_SHIFT_STRENGTH_DEFAULT: f32 = 0.35;
 const VTE_TRACE_DISTANCE_MIN: f32 = 10.0;
 const VTE_TRACE_DISTANCE_MAX: f32 = 4096.0;
 const VTE_INTEGRAL_SKY_SCALE_MIN: f32 = 0.0;
@@ -452,6 +455,14 @@ struct Args {
     /// Curve strength k for log merge: blend = log(1+k*p) / log(1+k).
     #[arg(long, default_value_t = 8.0)]
     vte_integral_log_merge_k: f32,
+
+    /// Apply an optional red/blue tint across Z/W layers to make hidden-angle sampling visible.
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    zw_angle_color_shift: bool,
+
+    /// Strength of the optional Z/W angle red/blue color shift.
+    #[arg(long, default_value_t = ZW_ANGLE_COLOR_SHIFT_STRENGTH_DEFAULT)]
+    zw_angle_color_shift_strength: f32,
 
     /// Edit highlight mode for pointed/placement voxel guides.
     /// `faces` uses in-VTE occlusion-correct face highlighting.
@@ -854,6 +865,11 @@ fn main() {
     let initial_render_width = args.width;
     let initial_render_height = args.height;
     let initial_render_layers = args.layers;
+    let initial_zw_angle_color_shift_enabled = args.zw_angle_color_shift;
+    let initial_zw_angle_color_shift_strength = args.zw_angle_color_shift_strength.clamp(
+        ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
+        ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
+    );
     let initial_player_name = args
         .player_name
         .clone()
@@ -903,6 +919,8 @@ fn main() {
         info_panel_mode: InfoPanelMode::VectorTable,
         focal_length_xy: 1.0,
         focal_length_zw: 1.0,
+        zw_angle_color_shift_enabled: initial_zw_angle_color_shift_enabled,
+        zw_angle_color_shift_strength: initial_zw_angle_color_shift_strength,
         place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
         world_file,
         vte_reference_compare_enabled,
@@ -1017,6 +1035,12 @@ fn main() {
             app.vte_integral_log_merge_k
         );
     }
+    if app.zw_angle_color_shift_enabled {
+        eprintln!(
+            "ZW angle color shift enabled via --zw-angle-color-shift=true (strength={:.2})",
+            app.zw_angle_color_shift_strength
+        );
+    }
     if app.vte_sweep_include_no_non_voxel {
         eprintln!(
             "VTE sweep: extended mode enabled via {} or {} (includes no-nonvoxel profiles).",
@@ -1121,6 +1145,8 @@ struct App {
     info_panel_mode: InfoPanelMode,
     focal_length_xy: f32,
     focal_length_zw: f32,
+    zw_angle_color_shift_enabled: bool,
+    zw_angle_color_shift_strength: f32,
     place_material: u8,
     world_file: PathBuf,
     vte_reference_compare_enabled: bool,
