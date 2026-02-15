@@ -1,14 +1,13 @@
 use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::cull::{self, SurfaceData};
-use crate::voxel::io as voxel_io;
 use crate::voxel::worldgen;
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VTE_MAX_CHUNKS,
 };
+use polychora::save_v3;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io;
 use std::path::Path;
 
 mod voxel_runtime;
@@ -251,15 +250,34 @@ impl Scene {
     }
 
     pub fn save_world_to_path(&self, path: &Path) -> io::Result<usize> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if path.exists() && path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "legacy .v4dw world file '{}' is unsupported; migrate to a v3 save root directory",
+                    path.display()
+                ),
+            ));
         }
 
-        let mut writer = BufWriter::new(File::create(path)?);
-        voxel_io::save_world(&self.world, &mut writer)?;
-        writer.flush()?;
+        let empty_entities = Vec::new();
+        let empty_players = Vec::new();
+        let empty_regions = HashSet::new();
+        let _ = save_v3::save_state(
+            path,
+            save_v3::SaveRequest {
+                world: &self.world,
+                entities: &empty_entities,
+                players: &empty_players,
+                world_seed: 1337,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                now_ms: save_v3::now_unix_ms(),
+            },
+        )?;
 
         Ok(self
             .world
@@ -270,8 +288,18 @@ impl Scene {
     }
 
     pub fn load_world_from_path(&mut self, path: &Path) -> io::Result<usize> {
-        let mut reader = BufReader::new(File::open(path)?);
-        let world = voxel_io::load_world(&mut reader)?;
+        if path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "legacy .v4dw world file '{}' is unsupported; migrate to a v3 save root directory",
+                    path.display()
+                ),
+            ));
+        }
+
+        let loaded = save_v3::load_state(path)?;
+        let world = loaded.world;
         let non_empty_chunks = world
             .chunks
             .values()

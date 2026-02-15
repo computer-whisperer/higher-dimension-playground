@@ -10,7 +10,7 @@ use std::path::PathBuf;
 struct Args {
     #[arg(long, default_value = "0.0.0.0:4000")]
     bind: String,
-    #[arg(long, default_value = "saves/world.v4dw")]
+    #[arg(long, default_value = "saves/world")]
     world_file: PathBuf,
     #[arg(long, default_value_t = 10.0)]
     tick_hz: f32,

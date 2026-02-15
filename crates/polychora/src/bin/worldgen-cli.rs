@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
+use polychora::save_v3;
+use polychora::shared::protocol::{EntityClass, EntityKind};
 use polychora::shared::voxel::{
     load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld,
 };
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +15,7 @@ const MAGIC: &[u8; 4] = b"V4DW";
 #[derive(Parser)]
 #[command(
     name = "worldgen-cli",
-    about = "Generate and migrate .v4dw world files for polychora"
+    about = "Generate legacy .v4dw worlds and migrate save formats for polychora"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -89,6 +92,30 @@ enum Command {
         /// Report migration result without writing output
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+    /// Migrate legacy .v4dw (+ optional entity sidecar) into a v3 save root directory
+    MigrateV3 {
+        /// Input legacy .v4dw file path
+        #[arg(long, short)]
+        input: PathBuf,
+        /// Optional legacy JSON sidecar path (<input>.entities.json)
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+        /// Output v3 save root directory path
+        #[arg(long, short)]
+        output: PathBuf,
+        /// World seed written to v3 global metadata
+        #[arg(long, default_value_t = 1337)]
+        world_seed: u64,
+        /// Overwrite output directory if it already exists
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    /// Inspect v3 save root metadata and summary counts
+    InspectV3 {
+        /// Input v3 save root directory path
+        #[arg(long, short)]
+        input: PathBuf,
     },
 }
 
@@ -469,6 +496,239 @@ fn run_migrate(
     Ok(())
 }
 
+fn run_migrate_v3(
+    input: PathBuf,
+    sidecar: Option<PathBuf>,
+    output: PathBuf,
+    world_seed: u64,
+    overwrite: bool,
+) -> io::Result<()> {
+    if output.exists() {
+        if !overwrite {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "output path '{}' already exists (use --overwrite to replace)",
+                    output.display()
+                ),
+            ));
+        }
+        if output.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("output path '{}' is a file", output.display()),
+            ));
+        }
+        std::fs::remove_dir_all(&output)?;
+    }
+
+    let save_result = save_v3::migrate_legacy_world_to_v3(
+        &input,
+        sidecar.as_deref(),
+        &output,
+        world_seed,
+        save_v3::now_unix_ms(),
+    )?;
+    println!(
+        "Migrated legacy world -> v3: generation={} saved_block_regions={} saved_entity_regions={} output={}",
+        save_result.generation,
+        save_result.saved_block_regions,
+        save_result.saved_entity_regions,
+        output.display()
+    );
+    Ok(())
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn file_size_or_zero(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn count_named_files(root: &Path, prefix: &str, suffix: &str) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| name.starts_with(prefix) && name.ends_with(suffix))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+fn run_inspect_v3(input: PathBuf) -> io::Result<()> {
+    let loaded = save_v3::load_state(&input)?;
+    let manifest = loaded.manifest;
+    let global = loaded.global;
+    let players = loaded.players.players;
+    let entities = loaded.entities;
+    let index = loaded.index;
+    let world = loaded.world;
+
+    let index_path = input.join(&manifest.index_file);
+    let global_path = input.join(&manifest.global_file);
+    let players_path = input.join(&manifest.players_file);
+    let data_dir = input.join("data");
+    let index_dir = input.join("index");
+
+    let mut block_leaf_count = 0usize;
+    let mut entity_leaf_count = 0usize;
+    let mut leaf_min = [i32::MAX; 4];
+    let mut leaf_max = [i32::MIN; 4];
+    let mut have_leaf_bounds = false;
+    for leaf in &index.leaves {
+        if leaf.block_blob.is_some() {
+            block_leaf_count += 1;
+        }
+        if leaf.entity_blob.is_some() {
+            entity_leaf_count += 1;
+        }
+        have_leaf_bounds = true;
+        for axis in 0..4 {
+            leaf_min[axis] = leaf_min[axis].min(leaf.region[axis]);
+            leaf_max[axis] = leaf_max[axis].max(leaf.region[axis]);
+        }
+    }
+
+    let mut entity_class_counts = [0usize; 3];
+    let mut entity_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut entity_payload_bytes = 0usize;
+    let mut entity_tag_count = 0usize;
+    for entity in &entities {
+        match entity.class {
+            EntityClass::Player => entity_class_counts[0] += 1,
+            EntityClass::Accent => entity_class_counts[1] += 1,
+            EntityClass::Mob => entity_class_counts[2] += 1,
+        }
+        let kind_label = match entity.kind {
+            EntityKind::PlayerAvatar => "player_avatar",
+            EntityKind::TestCube => "test_cube",
+            EntityKind::TestRotor => "test_rotor",
+            EntityKind::TestDrifter => "test_drifter",
+            EntityKind::MobSeeker => "mob_seeker",
+        };
+        *entity_kind_counts
+            .entry(kind_label.to_string())
+            .or_insert(0) += 1;
+        entity_payload_bytes += entity.payload.len();
+        entity_tag_count += entity.tags.len();
+    }
+
+    let mut player_ids: Vec<u64> = players.iter().map(|p| p.player_id).collect();
+    player_ids.sort_unstable();
+
+    println!("v3 save root: {}", input.display());
+    println!(
+        "manifest: format={} version={} generation={}",
+        manifest.format, manifest.version, manifest.current_generation
+    );
+    println!(
+        "timestamps_ms: created={} last_modified={}",
+        manifest.created_ms, manifest.last_modified_ms
+    );
+    println!(
+        "files: index='{}' ({}) global='{}' ({}) players='{}' ({})",
+        manifest.index_file,
+        format_size(file_size_or_zero(&index_path)),
+        manifest.global_file,
+        format_size(file_size_or_zero(&global_path)),
+        manifest.players_file,
+        format_size(file_size_or_zero(&players_path)),
+    );
+    println!(
+        "data_files: active={} declared_count={} observed_count={}",
+        manifest.active_data_file_id,
+        manifest.data_file_count,
+        count_named_files(&data_dir, "dt-", ".v4dt"),
+    );
+    println!(
+        "generations: index_files={} global_files={} players_files={}",
+        count_named_files(&index_dir, "ix-main.g", ".v4ix"),
+        count_named_files(&input, "global.g", ".v4g"),
+        count_named_files(&input, "players.g", ".v4p"),
+    );
+    println!(
+        "limits: region_chunk_edge={} data_file_max_bytes={} index_soft_max_bytes={} block_blob_target={} block_blob_hard={} entity_blob_target={} entity_blob_hard={}",
+        manifest.limits.region_chunk_edge,
+        manifest.limits.data_file_max_bytes,
+        manifest.limits.index_soft_max_bytes,
+        manifest.limits.block_blob_target_bytes,
+        manifest.limits.block_blob_hard_max_bytes,
+        manifest.limits.entity_blob_target_bytes,
+        manifest.limits.entity_blob_hard_max_bytes,
+    );
+    println!(
+        "global: base_world={:?} world_seed={} next_entity_id={} next_data_file_id={} player_hints={} custom_payload_bytes={}",
+        global.base_world_kind,
+        global.world_seed,
+        global.next_entity_id,
+        global.next_data_file_id,
+        global.player_entity_hints.len(),
+        global.custom_global_payload.len(),
+    );
+    println!(
+        "index: leaves={} block_leaves={} entity_leaves={} region_chunk_edge={}",
+        index.leaves.len(),
+        block_leaf_count,
+        entity_leaf_count,
+        index.region_chunk_edge,
+    );
+    if have_leaf_bounds {
+        println!(
+            "index_leaf_bounds: min=({}, {}, {}, {}) max=({}, {}, {}, {})",
+            leaf_min[0],
+            leaf_min[1],
+            leaf_min[2],
+            leaf_min[3],
+            leaf_max[0],
+            leaf_max[1],
+            leaf_max[2],
+            leaf_max[3]
+        );
+    } else {
+        println!("index_leaf_bounds: <none>");
+    }
+    println!(
+        "world: override_chunks={} non_empty_override_chunks={}",
+        world.chunks.len(),
+        world.non_empty_chunk_count(),
+    );
+    println!(
+        "entities: total={} class_counts(player={}, accent={}, mob={}) payload_bytes={} tag_count={}",
+        entities.len(),
+        entity_class_counts[0],
+        entity_class_counts[1],
+        entity_class_counts[2],
+        entity_payload_bytes,
+        entity_tag_count,
+    );
+    if entity_kind_counts.is_empty() {
+        println!("entity_kinds: <none>");
+    } else {
+        println!("entity_kinds:");
+        for (kind, count) in entity_kind_counts {
+            println!("  {kind}: {count}");
+        }
+    }
+    println!("players: total={} ids={:?}", players.len(), player_ids);
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -541,6 +801,14 @@ fn main() {
             drop_outside_keep_bounds,
             dry_run,
         ),
+        Command::MigrateV3 {
+            input,
+            sidecar,
+            output,
+            world_seed,
+            overwrite,
+        } => run_migrate_v3(input, sidecar, output, world_seed, overwrite),
+        Command::InspectV3 { input } => run_inspect_v3(input),
     };
 
     if let Err(err) = result {

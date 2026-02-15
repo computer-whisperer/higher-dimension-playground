@@ -1,5 +1,27 @@
 use super::*;
 
+fn estimate_directory_size_bytes(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    total
+}
+
 impl App {
     pub(super) fn scan_world_files(&mut self) {
         self.main_menu_world_files.clear();
@@ -10,7 +32,7 @@ impl App {
         } else {
             vec![]
         };
-        // Also scan current directory for .v4dw files
+        // Also scan current directory for v3 save roots.
         let cwd = Path::new(".");
         let all_dirs: Vec<&Path> = {
             let mut v = vec![cwd];
@@ -25,7 +47,7 @@ impl App {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("v4dw") {
+                if !path.is_dir() || !polychora::save_v3::is_v3_save_root(&path) {
                     continue;
                 }
                 let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -33,11 +55,11 @@ impl App {
                     continue;
                 }
                 let display_name = path
-                    .file_stem()
+                    .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let size_bytes = estimate_directory_size_bytes(&path);
                 self.main_menu_world_files.push(WorldFileEntry {
                     path,
                     display_name,
@@ -398,7 +420,7 @@ impl App {
                 ui.add_space(4.0);
 
                 if self.main_menu_world_files.is_empty() {
-                    ui.label("No .v4dw world files found in saves/ or current directory.");
+                    ui.label("No v3 world save directories found in saves/ or current directory.");
                 } else {
                     let selected = self.main_menu_selected_world;
                     egui::ScrollArea::vertical()

@@ -1,5 +1,10 @@
 [workspace]
-members = ["common", "crates/*"]
+members = [
+    "common",
+    "crates/demo",
+    "crates/exr-converter",
+    "crates/polychora",
+]
 default-members = ["crates/polychora"]
 
 [package]

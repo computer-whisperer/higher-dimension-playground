@@ -23,3 +23,4 @@ postcard = { version = "1", features = ["use-std"] }
 egui = "0.33.3"
 egui-winit = { version = "0.33.3", default-features = false, features = ["links", "wayland", "x11"] }
 rodio = "0.20"
+crc32fast = "1.4"

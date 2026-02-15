@@ -122,9 +122,9 @@ pub(super) fn generate_new_singleplayer_world_path() -> PathBuf {
 
     for suffix in 0u32..1000 {
         let file_name = if suffix == 0 {
-            format!("world-{timestamp}.v4dw")
+            format!("world-{timestamp}")
         } else {
-            format!("world-{timestamp}-{suffix}.v4dw")
+            format!("world-{timestamp}-{suffix}")
         };
         let candidate = saves_dir.join(file_name);
         if !candidate.exists() {
@@ -132,7 +132,7 @@ pub(super) fn generate_new_singleplayer_world_path() -> PathBuf {
         }
     }
 
-    saves_dir.join("world-new.v4dw")
+    saves_dir.join("world-new")
 }
 
 pub(super) fn default_multiplayer_player_name() -> String {

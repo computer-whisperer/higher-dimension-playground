@@ -2,19 +2,20 @@ mod entities;
 mod procgen;
 
 use self::entities::EntityStore;
+use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, ServerMessage, WorldChunkCoordPayload,
     WorldChunkPayload, WorldSnapshotPayload, WorldSummary, WORLD_CHUNK_LOD_FAR,
     WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{
-    self, load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
+    self, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -50,7 +51,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0:4000".to_string(),
-            world_file: PathBuf::from("saves/world.v4dw"),
+            world_file: PathBuf::from("saves/world"),
             tick_hz: 10.0,
             entity_sim_hz: 30.0,
             save_interval_secs: 5,
@@ -79,7 +80,7 @@ struct PlayerState {
     last_stream_world_revision: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum MobArchetype {
     Seeker,
 }
@@ -87,6 +88,15 @@ enum MobArchetype {
 #[derive(Clone, Debug)]
 struct MobState {
     entity_id: u64,
+    archetype: MobArchetype,
+    phase_offset: f32,
+    move_speed: f32,
+    preferred_distance: f32,
+    tangent_weight: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedMobEntry {
     archetype: MobArchetype,
     phase_offset: f32,
     move_speed: f32,
@@ -106,6 +116,7 @@ struct EntityRecord {
     class: EntityClass,
     owner_client_id: Option<u64>,
     display_name: Option<String>,
+    persistent: bool,
     spawned_at_ms: u64,
     lifecycle: EntityLifecycle,
     despawned_at_ms: Option<u64>,
@@ -117,6 +128,7 @@ struct EntityRecordSummary {
     live_players: usize,
     live_accents: usize,
     live_mobs: usize,
+    live_persistent: usize,
     live_owned: usize,
     tombstones: usize,
 }
@@ -252,6 +264,11 @@ struct ServerState {
     next_object_id: u64,
     entity_store: EntityStore,
     entity_records: HashMap<u64, EntityRecord>,
+    entities_dirty: bool,
+    entity_revision: u64,
+    dirty_block_regions: HashSet<[i32; 4]>,
+    region_chunk_edge: i32,
+    world_seed: u64,
     world: VoxelWorld,
     world_revision: u64,
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
@@ -274,12 +291,23 @@ fn allocate_server_object_id(state: &mut ServerState) -> u64 {
     id
 }
 
+fn mark_entities_dirty(state: &mut ServerState) {
+    state.entities_dirty = true;
+    state.entity_revision = state.entity_revision.wrapping_add(1);
+}
+
+fn mark_block_region_dirty(state: &mut ServerState, chunk_pos: ChunkPos) {
+    let region = save_v3::region_from_chunk_pos(chunk_pos, state.region_chunk_edge.max(1));
+    state.dirty_block_regions.insert(region);
+}
+
 fn upsert_entity_record(
     state: &mut ServerState,
     entity_id: u64,
     class: EntityClass,
     owner_client_id: Option<u64>,
     display_name: Option<String>,
+    persistent: bool,
     now_ms: u64,
 ) {
     let display_name_for_insert = display_name.clone();
@@ -291,12 +319,14 @@ fn upsert_entity_record(
             class,
             owner_client_id,
             display_name: display_name_for_insert,
+            persistent,
             spawned_at_ms: now_ms,
             lifecycle: EntityLifecycle::Live,
             despawned_at_ms: None,
         });
     record.class = class;
     record.owner_client_id = owner_client_id;
+    record.persistent = persistent;
     if display_name.is_some() || class != EntityClass::Player {
         record.display_name = display_name;
     }
@@ -308,12 +338,20 @@ fn upsert_entity_record(
 }
 
 fn mark_entity_record_despawned(state: &mut ServerState, entity_id: u64, now_ms: Option<u64>) {
-    let Some(record) = state.entity_records.get_mut(&entity_id) else {
-        return;
+    let (was_live, was_persistent) = {
+        let Some(record) = state.entity_records.get_mut(&entity_id) else {
+            return;
+        };
+        let was_live = record.lifecycle == EntityLifecycle::Live;
+        let was_persistent = record.persistent;
+        record.lifecycle = EntityLifecycle::Despawned;
+        if record.despawned_at_ms.is_none() {
+            record.despawned_at_ms = now_ms;
+        }
+        (was_live, was_persistent)
     };
-    record.lifecycle = EntityLifecycle::Despawned;
-    if record.despawned_at_ms.is_none() {
-        record.despawned_at_ms = now_ms;
+    if was_live && was_persistent {
+        mark_entities_dirty(state);
     }
 }
 
@@ -324,6 +362,9 @@ fn summarize_entity_records(state: &ServerState) -> EntityRecordSummary {
         match record.lifecycle {
             EntityLifecycle::Live => {
                 summary.live_total = summary.live_total.saturating_add(1);
+                if record.persistent {
+                    summary.live_persistent = summary.live_persistent.saturating_add(1);
+                }
                 if record.owner_client_id.is_some() {
                     summary.live_owned = summary.live_owned.saturating_add(1);
                 }
@@ -399,7 +440,7 @@ fn record_server_cpu_sample(
     };
 
     eprintln!(
-        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_owned={} rec_tombstones={}",
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_persistent={} rec_owned={} rec_tombstones={}",
         msg_avg_ms,
         report.message_cpu_ms_max,
         report.message_samples,
@@ -416,6 +457,7 @@ fn record_server_cpu_sample(
         entity_records.live_players,
         entity_records.live_accents,
         entity_records.live_mobs,
+        entity_records.live_persistent,
         entity_records.live_owned,
         entity_records.tombstones,
     );
@@ -427,6 +469,106 @@ fn sanitize_player_name(name: &str, client_id: u64) -> String {
         return format!("player-{client_id}");
     }
     trimmed.chars().take(32).collect()
+}
+
+fn mob_archetype_defaults(archetype: MobArchetype) -> (f32, f32, f32) {
+    match archetype {
+        MobArchetype::Seeker => (2.9, 2.6, 0.64),
+    }
+}
+
+fn mob_archetype_for_kind(kind: EntityKind) -> Option<MobArchetype> {
+    match kind {
+        EntityKind::MobSeeker => Some(MobArchetype::Seeker),
+        EntityKind::PlayerAvatar
+        | EntityKind::TestCube
+        | EntityKind::TestRotor
+        | EntityKind::TestDrifter => None,
+    }
+}
+
+fn encode_persisted_mob_payload(state: &ServerState, entity_id: u64) -> Vec<u8> {
+    let Some(mob) = state.mobs.get(&entity_id) else {
+        return Vec::new();
+    };
+    let payload = PersistedMobEntry {
+        archetype: mob.archetype,
+        phase_offset: mob.phase_offset,
+        move_speed: mob.move_speed,
+        preferred_distance: mob.preferred_distance,
+        tangent_weight: mob.tangent_weight,
+    };
+    postcard::to_stdvec(&payload).unwrap_or_default()
+}
+
+fn decode_persisted_mob_payload(bytes: &[u8]) -> Option<PersistedMobEntry> {
+    if bytes.is_empty() {
+        return None;
+    }
+    postcard::from_bytes(bytes).ok()
+}
+
+fn collect_persisted_entities(state: &ServerState, now_ms: u64) -> Vec<PersistedEntityRecord> {
+    let mut records: Vec<&EntityRecord> = state
+        .entity_records
+        .values()
+        .filter(|record| {
+            record.lifecycle == EntityLifecycle::Live
+                && record.persistent
+                && record.class != EntityClass::Player
+        })
+        .collect();
+    records.sort_unstable_by_key(|record| record.entity_id);
+
+    let mut out = Vec::with_capacity(records.len());
+    for record in records {
+        let Some(snapshot) = state.entity_store.snapshot(record.entity_id) else {
+            continue;
+        };
+        let payload = if record.class == EntityClass::Mob {
+            encode_persisted_mob_payload(state, record.entity_id)
+        } else {
+            Vec::new()
+        };
+        out.push(PersistedEntityRecord {
+            entity_id: record.entity_id,
+            class: record.class,
+            kind: snapshot.kind,
+            position: snapshot.position,
+            orientation: snapshot.orientation,
+            velocity: snapshot.velocity,
+            scale: snapshot.scale,
+            material: snapshot.material,
+            display_name: record.display_name.clone(),
+            tags: Vec::new(),
+            payload,
+            last_saved_ms: now_ms,
+        });
+    }
+    out
+}
+
+fn collect_player_records(state: &ServerState, now_ms: u64) -> Vec<PlayerRecord> {
+    let mut player_ids: Vec<u64> = state.players.keys().copied().collect();
+    player_ids.sort_unstable();
+    let mut out = Vec::with_capacity(player_ids.len());
+    for player_id in player_ids {
+        let Some(player) = state.players.get(&player_id) else {
+            continue;
+        };
+        let Some(snapshot) = state.entity_store.snapshot(player.entity_id) else {
+            continue;
+        };
+        out.push(PlayerRecord {
+            player_id,
+            position: snapshot.position,
+            orientation: snapshot.orientation,
+            tags: Vec::new(),
+            inventory_payload: Vec::new(),
+            last_saved_ms: now_ms,
+        });
+    }
+    out
 }
 
 fn entity_snapshot_from_record(
@@ -637,13 +779,26 @@ fn simulate_mobs(state: &mut ServerState, now_ms: u64) {
         updates.push((mob.entity_id, next_position, next_forward));
     }
 
+    let mut persistent_motion = false;
     for (entity_id, next_position, next_forward) in updates {
         if !state
             .entity_store
             .set_motion_state(entity_id, next_position, next_forward, now_ms)
         {
             stale.push(entity_id);
+            continue;
         }
+        if state
+            .entity_records
+            .get(&entity_id)
+            .map(|record| record.persistent)
+            .unwrap_or(false)
+        {
+            persistent_motion = true;
+        }
+    }
+    if persistent_motion {
+        mark_entities_dirty(state);
     }
 
     stale.sort_unstable();
@@ -1601,6 +1756,7 @@ fn ensure_chunk_materialized_for_edit(
         Some(&state.procgen_blocked_cells),
     ) {
         state.world.insert_chunk(chunk_pos, chunk);
+        mark_block_region_dirty(state, chunk_pos);
     }
 }
 
@@ -1625,7 +1781,9 @@ fn trim_chunk_override_if_virgin(
         None => override_chunk.is_empty(),
     };
     if matches_virgin {
-        let _ = state.world.remove_chunk_override(chunk_pos);
+        if state.world.remove_chunk_override(chunk_pos) {
+            mark_block_region_dirty(state, chunk_pos);
+        }
     }
 }
 
@@ -1696,29 +1854,43 @@ fn build_procgen_keepout_cells(
     blocked_cells
 }
 
-fn load_world_from_path(path: &Path) -> io::Result<VoxelWorld> {
-    if !path.exists() {
-        return Ok(VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
-            material: VoxelType(11),
-        }));
-    }
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    load_world(&mut reader)
+fn directory_is_empty(path: &std::path::Path) -> io::Result<bool> {
+    Ok(std::fs::read_dir(path)?.next().is_none())
 }
 
-fn save_world_to_path(path: &Path, world: &VoxelWorld) -> io::Result<usize> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+fn load_or_init_world_state(
+    root: &std::path::Path,
+    world_seed: u64,
+) -> io::Result<save_v3::LoadedState> {
+    if root.exists() {
+        if root.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "legacy .v4dw world file '{}' is unsupported; use worldgen-cli migration to v3",
+                    root.display()
+                ),
+            ));
+        }
+        if !save_v3::is_v3_save_root(root) && !directory_is_empty(root)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "save root '{}' is not a v3 world directory (missing manifest.json)",
+                    root.display()
+                ),
+            ));
         }
     }
 
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    save_world(world, &mut writer)?;
-    writer.flush()?;
-    Ok(world.non_empty_chunk_count())
+    save_v3::load_or_init_state(
+        root,
+        BaseWorldKind::FlatFloor {
+            material: VoxelType(11),
+        },
+        world_seed,
+        save_v3::now_unix_ms(),
+    )
 }
 
 fn build_world_snapshot_payload(state: &ServerState) -> io::Result<WorldSnapshotPayload> {
@@ -1807,25 +1979,74 @@ fn start_autosave_thread(
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            let world_file_exists = world_file.exists();
             let save_result = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                if !guard.world.any_dirty() && world_file_exists {
+                let now_ms = save_v3::now_unix_ms();
+                let players = collect_player_records(&guard, now_ms);
+                let should_save =
+                    guard.world.any_dirty() || guard.entities_dirty || !players.is_empty();
+                if !should_save {
                     None
                 } else {
-                    Some(save_world_to_path(&world_file, &guard.world).map(|chunks| {
-                        guard.world.clear_dirty();
-                        (chunks, guard.world_revision)
-                    }))
+                    let persisted_entities = collect_persisted_entities(&guard, now_ms);
+                    let dirty_block_regions = guard.dirty_block_regions.clone();
+                    let dirty_entity_regions = HashSet::new();
+                    let force_full_blocks =
+                        guard.world.any_dirty() && dirty_block_regions.is_empty();
+                    let force_full_entities = guard.entities_dirty;
+                    Some(
+                        save_v3::save_state(
+                            &world_file,
+                            SaveRequest {
+                                world: &guard.world,
+                                entities: &persisted_entities,
+                                players: &players,
+                                world_seed: guard.world_seed,
+                                next_entity_id: guard.next_object_id,
+                                dirty_block_regions: &dirty_block_regions,
+                                dirty_entity_regions: &dirty_entity_regions,
+                                force_full_blocks,
+                                force_full_entities,
+                                now_ms,
+                            },
+                        )
+                        .map(|save_result| {
+                            let chunk_count = guard.world.non_empty_chunk_count();
+                            guard.entities_dirty = false;
+                            guard.dirty_block_regions.clear();
+                            guard.world.clear_dirty();
+                            (
+                                save_result,
+                                chunk_count,
+                                persisted_entities.len(),
+                                players.len(),
+                                guard.world_revision,
+                                guard.entity_revision,
+                            )
+                        }),
+                    )
                 }
             };
 
             match save_result {
-                Some(Ok((chunk_count, revision))) => {
+                Some(Ok((
+                    save_result,
+                    chunk_count,
+                    entity_count,
+                    player_count,
+                    world_revision,
+                    entity_revision,
+                ))) => {
                     eprintln!(
-                        "autosave: world revision {} ({} non-empty chunks) -> {}",
-                        revision,
+                        "autosave: generation {} world_rev={} entity_rev={} regions(block={}, entity={}) world_chunks={} entities={} players={} -> {}",
+                        save_result.generation,
+                        world_revision,
+                        entity_revision,
+                        save_result.saved_block_regions,
+                        save_result.saved_entity_regions,
                         chunk_count,
+                        entity_count,
+                        player_count,
                         world_file.display()
                     );
                 }
@@ -1949,6 +2170,7 @@ fn install_or_update_player(
         EntityClass::Player,
         Some(client_id),
         Some(player_name),
+        false,
         now,
     );
     (snapshot, spawned_now)
@@ -2085,6 +2307,7 @@ fn handle_message(
                         position[3],
                         requested_voxel,
                     );
+                    mark_block_region_dirty(&mut guard, chunk_pos);
                     trim_chunk_override_if_virgin(
                         &mut guard,
                         chunk_pos,
@@ -2171,6 +2394,9 @@ fn handle_message(
                     spawn_orientation,
                     spawn_scale,
                     spawn_material,
+                    None,
+                    true,
+                    None,
                     start,
                 ),
                 EntityKind::TestCube | EntityKind::TestRotor | EntityKind::TestDrifter => {
@@ -2181,6 +2407,8 @@ fn handle_message(
                         spawn_orientation,
                         spawn_scale,
                         spawn_material,
+                        None,
+                        true,
                         start,
                     )
                 }
@@ -2362,6 +2590,8 @@ fn spawn_entity(
     orientation: [f32; 4],
     scale: f32,
     material: u8,
+    display_name: Option<String>,
+    persistent: bool,
     start: Instant,
 ) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
@@ -2382,9 +2612,13 @@ fn spawn_entity(
         entity_id,
         EntityClass::Accent,
         None,
-        None,
+        display_name,
+        persistent,
         now_ms,
     );
+    if persistent {
+        mark_entities_dirty(&mut guard);
+    }
     guard
         .entity_store
         .snapshot(entity_id)
@@ -2399,6 +2633,9 @@ fn spawn_mob_entity(
     orientation: [f32; 4],
     scale: f32,
     material: u8,
+    display_name: Option<String>,
+    persistent: bool,
+    persisted_mob: Option<PersistedMobEntry>,
     start: Instant,
 ) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
@@ -2414,10 +2651,26 @@ fn spawn_mob_entity(
         material,
         now_ms,
     );
-    let phase_offset = ((entity_id as f32) * 0.73).rem_euclid(std::f32::consts::TAU);
-    let (move_speed, preferred_distance, tangent_weight) = match archetype {
-        MobArchetype::Seeker => (2.9, 2.6, 0.64),
-    };
+    let (default_speed, default_distance, default_tangent) = mob_archetype_defaults(archetype);
+    let phase_offset = persisted_mob
+        .as_ref()
+        .map(|mob| mob.phase_offset)
+        .unwrap_or_else(|| ((entity_id as f32) * 0.73).rem_euclid(std::f32::consts::TAU));
+    let move_speed = persisted_mob
+        .as_ref()
+        .map(|mob| mob.move_speed)
+        .unwrap_or(default_speed)
+        .max(0.1);
+    let preferred_distance = persisted_mob
+        .as_ref()
+        .map(|mob| mob.preferred_distance)
+        .unwrap_or(default_distance)
+        .max(0.1);
+    let tangent_weight = persisted_mob
+        .as_ref()
+        .map(|mob| mob.tangent_weight)
+        .unwrap_or(default_tangent)
+        .clamp(0.0, 2.0);
     guard.mobs.insert(
         entity_id,
         MobState {
@@ -2429,7 +2682,18 @@ fn spawn_mob_entity(
             tangent_weight,
         },
     );
-    upsert_entity_record(&mut guard, entity_id, EntityClass::Mob, None, None, now_ms);
+    upsert_entity_record(
+        &mut guard,
+        entity_id,
+        EntityClass::Mob,
+        None,
+        display_name,
+        persistent,
+        now_ms,
+    );
+    if persistent {
+        mark_entities_dirty(&mut guard);
+    }
     guard
         .entity_store
         .snapshot(entity_id)
@@ -2475,7 +2739,17 @@ fn spawn_default_test_entities(state: &SharedState, start: Instant) {
         ),
     ];
     for (i, (kind, pos, orientation, scale, material)) in test_entities.iter().enumerate() {
-        let entity = spawn_entity(state, *kind, *pos, *orientation, *scale, *material, start);
+        let entity = spawn_entity(
+            state,
+            *kind,
+            *pos,
+            *orientation,
+            *scale,
+            *material,
+            None,
+            false,
+            start,
+        );
         eprintln!(
             "spawned test entity {} {:?} (id={}) at {:?}",
             i, kind, entity.entity_id, pos
@@ -2499,6 +2773,9 @@ fn spawn_default_test_mobs(state: &SharedState, start: Instant) {
             *orientation,
             *scale,
             *material,
+            None,
+            false,
+            None,
             start,
         );
         eprintln!(
@@ -2511,15 +2788,81 @@ fn spawn_default_test_mobs(state: &SharedState, start: Instant) {
     }
 }
 
+fn restore_persisted_entities(
+    state: &SharedState,
+    entries: Vec<PersistedEntityRecord>,
+    start: Instant,
+) -> usize {
+    let mut restored = 0usize;
+    for entry in entries {
+        match entry.class {
+            EntityClass::Player => {}
+            EntityClass::Accent => match entry.kind {
+                EntityKind::TestCube | EntityKind::TestRotor | EntityKind::TestDrifter => {
+                    let _ = spawn_entity(
+                        state,
+                        entry.kind,
+                        entry.position,
+                        entry.orientation,
+                        entry.scale,
+                        entry.material,
+                        entry.display_name,
+                        true,
+                        start,
+                    );
+                    restored = restored.saturating_add(1);
+                }
+                EntityKind::PlayerAvatar | EntityKind::MobSeeker => {}
+            },
+            EntityClass::Mob => {
+                let Some(default_archetype) = mob_archetype_for_kind(entry.kind) else {
+                    continue;
+                };
+                let persisted_mob = decode_persisted_mob_payload(&entry.payload);
+                let archetype = persisted_mob
+                    .as_ref()
+                    .map(|mob| mob.archetype)
+                    .unwrap_or(default_archetype);
+                let persisted_mob = persisted_mob.map(|mut mob| {
+                    mob.archetype = archetype;
+                    mob
+                });
+                let _ = spawn_mob_entity(
+                    state,
+                    entry.kind,
+                    archetype,
+                    entry.position,
+                    entry.orientation,
+                    entry.scale,
+                    entry.material,
+                    entry.display_name,
+                    true,
+                    persisted_mob,
+                    start,
+                );
+                restored = restored.saturating_add(1);
+            }
+        }
+    }
+    restored
+}
+
 fn initialize_state(
     config: &RuntimeConfig,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<(SharedState, Instant)> {
     let start = Instant::now();
-    let mut initial_world = load_world_from_path(&config.world_file)?;
+    let loaded = load_or_init_world_state(&config.world_file, config.world_seed)?;
+    let save_generation = loaded.manifest.current_generation;
+    let region_chunk_edge = loaded.manifest.limits.region_chunk_edge.max(1);
+    let persisted_entities = loaded.entities;
+    let persisted_players = loaded.players.players;
+    let mut initial_world = loaded.world;
+    let runtime_world_seed = loaded.global.world_seed;
+    let next_object_id = loaded.global.next_entity_id.max(1);
     let pruned = prune_virgin_overrides(
         &mut initial_world,
-        config.world_seed,
+        runtime_world_seed,
         config.procgen_structures,
     );
     if pruned > 0 {
@@ -2533,7 +2876,7 @@ fn initialize_state(
         if config.procgen_structures && config.procgen_keepout_from_existing_world {
             let blocked = build_procgen_keepout_cells(
                 &initial_world,
-                config.world_seed,
+                runtime_world_seed,
                 config.procgen_keepout_padding_chunks,
             );
             if !blocked.is_empty() {
@@ -2551,15 +2894,23 @@ fn initialize_state(
     let _ = initial_world.drain_pending_chunk_updates();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
-        "loaded world {} ({} non-empty chunks)",
+        "loaded v3 world {} (generation {}, {} non-empty chunks, {} persisted entities, {} player records)",
         config.world_file.display(),
-        initial_chunks
+        save_generation,
+        initial_chunks,
+        persisted_entities.len(),
+        persisted_players.len(),
     );
 
     let state = Arc::new(Mutex::new(ServerState {
-        next_object_id: 1,
+        next_object_id,
         entity_store: EntityStore::new(),
         entity_records: HashMap::new(),
+        entities_dirty: false,
+        entity_revision: 0,
+        dirty_block_regions: HashSet::new(),
+        region_chunk_edge,
+        world_seed: runtime_world_seed,
         world: initial_world,
         world_revision: 0,
         procgen_blocked_cells,
@@ -2573,8 +2924,22 @@ fn initialize_state(
     let entity_interest_radius_chunks = config.procgen_far_chunk_radius.max(1)
         * STREAM_FAR_LOD_SCALE
         + ENTITY_INTEREST_RADIUS_PADDING_CHUNKS;
-    spawn_default_test_entities(&state, start);
-    spawn_default_test_mobs(&state, start);
+    let restored = restore_persisted_entities(&state, persisted_entities, start);
+    if restored == 0 {
+        spawn_default_test_entities(&state, start);
+        spawn_default_test_mobs(&state, start);
+    } else {
+        eprintln!(
+            "loaded {} persisted entities from {}",
+            restored,
+            config.world_file.display()
+        );
+    }
+    {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        guard.entities_dirty = false;
+        guard.dirty_block_regions.clear();
+    }
     start_broadcast_thread(
         state.clone(),
         config.tick_hz,
@@ -2598,6 +2963,10 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
     let (state, start) = initialize_state(config, shutdown.clone())?;
     let (client_to_server_tx, client_to_server_rx) = mpsc::channel::<ClientMessage>();
     let (server_to_client_tx, server_to_client_rx) = mpsc::channel::<ServerMessage>();
+    let runtime_world_seed = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard.world_seed
+    };
 
     let client_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
@@ -2607,7 +2976,8 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
     };
 
     let state_for_client = state.clone();
-    let cfg = config.clone();
+    let mut cfg = config.clone();
+    cfg.world_seed = runtime_world_seed;
     thread::spawn(move || {
         while let Ok(message) = client_to_server_rx.recv() {
             handle_message(
@@ -2637,6 +3007,10 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
 pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let (state, start) = initialize_state(config, shutdown)?;
+    let runtime_world_seed = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard.world_seed
+    };
 
     let listener = TcpListener::bind(&config.bind)?;
     eprintln!(
@@ -2646,7 +3020,7 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
         config.entity_sim_hz.max(0.1),
         config.save_interval_secs,
         config.procgen_structures,
-        config.world_seed,
+        runtime_world_seed,
         config.procgen_near_chunk_radius.max(0),
         config.procgen_mid_chunk_radius.max(1),
         config.procgen_far_chunk_radius.max(1),
@@ -2667,7 +3041,7 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
                     config.procgen_near_chunk_radius.max(0),
                     config.procgen_mid_chunk_radius.max(1),
                     config.procgen_far_chunk_radius.max(1),
-                    config.world_seed,
+                    runtime_world_seed,
                     start,
                 );
             }
