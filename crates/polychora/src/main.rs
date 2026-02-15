@@ -1173,6 +1173,7 @@ enum PauseMenuItem {
     Resume,
     InfoPanel,
     ControlScheme,
+    MasterVolume,
     FocalLengthXy,
     FocalLengthZw,
     VteMaxTraceSteps,
@@ -1189,10 +1190,11 @@ enum PauseMenuItem {
     Quit,
 }
 
-const PAUSE_MENU_ITEMS: [PauseMenuItem; 17] = [
+const PAUSE_MENU_ITEMS: [PauseMenuItem; 18] = [
     PauseMenuItem::Resume,
     PauseMenuItem::InfoPanel,
     PauseMenuItem::ControlScheme,
+    PauseMenuItem::MasterVolume,
     PauseMenuItem::FocalLengthXy,
     PauseMenuItem::FocalLengthZw,
     PauseMenuItem::VteMaxTraceSteps,
@@ -2166,6 +2168,16 @@ impl App {
         );
     }
 
+    fn adjust_master_volume(&mut self, delta: i32) {
+        self.audio.master_volume = Self::step_f32(
+            self.audio.master_volume,
+            delta,
+            0.05,  // 5% steps
+            0.0,   // minimum
+            2.0,   // maximum (200% - allows boosting quiet audio)
+        );
+    }
+
     fn adjust_vte_max_trace_steps(&mut self, delta: i32) {
         if delta > 0 {
             self.vte_max_trace_steps = (self.vte_max_trace_steps.saturating_mul(2))
@@ -2963,6 +2975,7 @@ impl App {
         let len = PAUSE_MENU_ITEMS.len() as i32;
         let index = self.menu_selection as i32;
         self.menu_selection = (index + delta).rem_euclid(len) as usize;
+        self.audio.play(SoundEffect::UiTick);
     }
 
     fn selected_menu_item(&self) -> PauseMenuItem {
@@ -2973,6 +2986,7 @@ impl App {
         match self.selected_menu_item() {
             PauseMenuItem::InfoPanel => self.adjust_info_panel_mode(delta),
             PauseMenuItem::ControlScheme => self.cycle_control_scheme_by(delta),
+            PauseMenuItem::MasterVolume => self.adjust_master_volume(delta),
             PauseMenuItem::FocalLengthXy => self.adjust_focal_length_xy(delta),
             PauseMenuItem::FocalLengthZw => self.adjust_focal_length_zw(delta),
             PauseMenuItem::VteMaxTraceSteps => self.adjust_vte_max_trace_steps(delta),
@@ -2991,9 +3005,17 @@ impl App {
             | PauseMenuItem::LoadWorld
             | PauseMenuItem::Quit => {}
         }
+        // Play UI tick sound for any adjustment (except when it's an action item that does nothing)
+        if !matches!(
+            self.selected_menu_item(),
+            PauseMenuItem::Resume | PauseMenuItem::SaveWorld | PauseMenuItem::LoadWorld | PauseMenuItem::Quit
+        ) {
+            self.audio.play(SoundEffect::UiTick);
+        }
     }
 
     fn activate_selected_menu_item(&mut self) {
+        self.audio.play(SoundEffect::UiTick);
         match self.selected_menu_item() {
             PauseMenuItem::Resume => {
                 self.menu_open = false;
@@ -3017,6 +3039,9 @@ impl App {
             }
             PauseMenuItem::ControlScheme => {
                 format!("Control scheme: {}", self.control_scheme.label())
+            }
+            PauseMenuItem::MasterVolume => {
+                format!("Volume: {:.0}%", self.audio.master_volume * 100.0)
             }
             PauseMenuItem::FocalLengthXy => {
                 format!("Focal XY: {:.2}", self.focal_length_xy)
