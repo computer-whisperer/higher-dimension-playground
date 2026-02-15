@@ -2866,7 +2866,7 @@ impl App {
         instances
     }
 
-    fn remote_entity_instances(&self, time_s: f32) -> Vec<common::ModelInstance> {
+    fn remote_entity_instances(&self) -> Vec<common::ModelInstance> {
         let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
         ids.sort_unstable();
         let mut instances = Vec::with_capacity(ids.len());
@@ -2874,15 +2874,7 @@ impl App {
             if let Some(entity) = self.remote_entities.get(&entity_id) {
                 match entity.kind {
                     multiplayer::EntityKind::TestCube => {
-                        let mut basis = [
-                            [1.0, 0.0, 0.0, 0.0],
-                            [0.0, 1.0, 0.0, 0.0],
-                            [0.0, 0.0, 1.0, 0.0],
-                            [0.0, 0.0, 0.0, 1.0],
-                        ];
-                        let phase = entity_id as f32 * 0.7;
-                        rotate_basis_plane(&mut basis, 0, 2, time_s * 0.55 + phase);
-                        rotate_basis_plane(&mut basis, 1, 3, time_s * 0.35 + phase * 0.6);
+                        let basis = orthonormal_basis_from_forward(entity.orientation);
                         instances.push(build_centered_model_instance(
                             entity.render_position,
                             &basis,
@@ -5744,7 +5736,7 @@ impl App {
                 vte_non_voxel_instances.push(build_vte_test_non_voxel_instance(preview_time_s));
             }
             vte_non_voxel_instances.extend(self.remote_player_instances(preview_time_s));
-            vte_non_voxel_instances.extend(self.remote_entity_instances(preview_time_s));
+            vte_non_voxel_instances.extend(self.remote_entity_instances());
             let mut preview_overlay_instances: &[common::ModelInstance] = &[];
             if self.vte_overlay_raster_enabled {
                 preview_overlay_instances = std::slice::from_ref(&preview_instance);
@@ -5778,7 +5770,7 @@ impl App {
             );
         } else {
             let remote_instances = self.remote_player_instances(preview_time_s);
-            let entity_instances = self.remote_entity_instances(preview_time_s);
+            let entity_instances = self.remote_entity_instances();
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
             let mut render_instances = Vec::with_capacity(
