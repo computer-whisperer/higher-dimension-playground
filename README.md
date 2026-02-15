@@ -125,7 +125,6 @@ higher-dimension-playground/
 │       ├── raytracer.slang  # 4D path tracing
 │       ├── rasterizer.slang # 4D rasterization + near-plane clipping
 │       └── present.slang    # Screen presentation
-├── shaders/                 # Legacy rust-gpu shaders (deprecated)
 └── build.rs                 # Slang shader compilation
 ```
 
@@ -281,4 +280,3 @@ Message protocol is line-delimited JSON:
 
 - [Slang](https://shader-slang.com/) - Modern shading language with generics
 - [vulkano](https://vulkano.rs/) - Safe Rust bindings for Vulkan
-- rust-gpu (previous shader system, replaced due to ICE issues)
