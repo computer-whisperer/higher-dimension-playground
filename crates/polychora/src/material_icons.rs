@@ -82,14 +82,16 @@ pub fn generate_material_icon_sheet(model_tets: &[ModelTetrahedron]) -> Material
     let center = translate(-0.5, -0.5, -0.5, -0.5);
     let r1 = rot_xz(0.50);
     let r2 = rot_yz(-0.40);
-    let r3 = rot_xw(0.40);
+    // Keep a subtle hidden-dimension tilt, but reduce it so icons stay crisp.
+    let r3 = rot_xw(0.22);
     let push_back = translate(0.0, 0.15, 2.8, 2.8);
     let view_matrix = push_back * r3 * r2 * r1 * center;
 
     let params = CpuRenderParams {
         view_matrix,
         focal_length_xy: 4.0,
-        focal_length_zw: 3.5,
+        // Narrower ZW cone for less integrated blur in tiny icon renders.
+        focal_length_zw: 6.0,
         width: ICON_SIZE,
         height: ICON_SIZE,
         ..Default::default()
