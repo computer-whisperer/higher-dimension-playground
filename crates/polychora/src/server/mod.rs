@@ -2839,96 +2839,6 @@ fn spawn_mob_entity(
         .expect("spawned mob entity should exist in store")
 }
 
-fn spawn_default_test_entities(state: &SharedState, start: Instant) {
-    let test_entities: [(EntityKind, [f32; 4], [f32; 4], f32, u8); 5] = [
-        (
-            EntityKind::TestCube,
-            [3.0, 2.0, 3.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            0.50,
-            12,
-        ),
-        (
-            EntityKind::TestRotor,
-            [-2.0, 1.5, 5.0, 1.0],
-            [1.0, 0.0, 0.0, 1.0],
-            0.54,
-            8,
-        ),
-        (
-            EntityKind::TestDrifter,
-            [0.0, 3.0, -4.0, 2.0],
-            [0.4, 0.2, 1.0, 0.3],
-            0.48,
-            15,
-        ),
-        (
-            EntityKind::TestRotor,
-            [5.5, 2.4, -1.0, -2.5],
-            [0.8, 0.0, 1.0, -0.4],
-            0.46,
-            17,
-        ),
-        (
-            EntityKind::TestDrifter,
-            [-5.0, 2.8, 1.5, 3.5],
-            [0.3, -0.2, 1.0, 0.7],
-            0.58,
-            21,
-        ),
-    ];
-    for (i, (kind, pos, orientation, scale, material)) in test_entities.iter().enumerate() {
-        let entity = spawn_entity(
-            state,
-            *kind,
-            *pos,
-            *orientation,
-            *scale,
-            *material,
-            None,
-            false,
-            None,
-            start,
-        );
-        eprintln!(
-            "spawned test entity {} {:?} (id={}) at {:?}",
-            i, kind, entity.entity_id, pos
-        );
-    }
-}
-
-fn spawn_default_test_mobs(state: &SharedState, start: Instant) {
-    let test_mobs: [([f32; 4], [f32; 4], f32, u8); 3] = [
-        ([8.0, 2.0, 2.0, -2.0], [0.0, 0.0, 1.0, 0.0], 0.62, 24),
-        ([-8.0, 2.4, -3.0, 2.5], [1.0, 0.0, 0.0, 0.0], 0.58, 18),
-        ([0.0, 3.2, 8.0, 3.0], [0.0, 0.0, 1.0, 0.0], 0.56, 20),
-    ];
-
-    for (i, (pos, orientation, scale, material)) in test_mobs.iter().enumerate() {
-        let entity = spawn_mob_entity(
-            state,
-            EntityKind::MobSeeker,
-            MobArchetype::Seeker,
-            *pos,
-            *orientation,
-            *scale,
-            *material,
-            None,
-            false,
-            None,
-            None,
-            start,
-        );
-        eprintln!(
-            "spawned test mob {} {:?} (id={}) at {:?}",
-            i,
-            EntityKind::MobSeeker,
-            entity.entity_id,
-            pos
-        );
-    }
-}
-
 fn restore_persisted_entities(
     state: &SharedState,
     entries: Vec<PersistedEntityRecord>,
@@ -3071,16 +2981,11 @@ fn initialize_state(
         * STREAM_FAR_LOD_SCALE
         + ENTITY_INTEREST_RADIUS_PADDING_CHUNKS;
     let restored = restore_persisted_entities(&state, persisted_entities, start);
-    if restored == 0 {
-        spawn_default_test_entities(&state, start);
-        spawn_default_test_mobs(&state, start);
-    } else {
-        eprintln!(
-            "loaded {} persisted entities from {}",
-            restored,
-            config.world_file.display()
-        );
-    }
+    eprintln!(
+        "loaded {} persisted entities from {}",
+        restored,
+        config.world_file.display()
+    );
     {
         let mut guard = state.lock().expect("server state lock poisoned");
         guard.entities_dirty = false;
