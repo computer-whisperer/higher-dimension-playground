@@ -48,10 +48,10 @@ const MAZE_HALF_SPAN: i32 = MAZE_SPAN / 2;
 const MAZE_HEIGHT: i32 = 7;
 const MAZE_WORLD_Y_MIN: i32 = 0;
 const MAZE_FLOOR_MATERIAL: u8 = 55;
-const MAZE_CEILING_MATERIAL: u8 = 63;
-const MAZE_WALL_MATERIAL: u8 = 66;
-const MAZE_GATE_FRAME_MATERIAL: u8 = 68;
-const MAZE_BEACON_MATERIAL: u8 = 64;
+const MAZE_CEILING_MATERIAL: u8 = 60;
+const MAZE_WALL_MATERIAL: u8 = 62;
+const MAZE_GATE_FRAME_MATERIAL: u8 = 51;
+const MAZE_BEACON_MATERIAL: u8 = 67;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
