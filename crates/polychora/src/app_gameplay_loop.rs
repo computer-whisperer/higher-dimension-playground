@@ -138,12 +138,22 @@ impl App {
                 }
                 match self.control_scheme {
                     ControlScheme::LookTransport => {
-                        self.camera.apply_mouse_look_transport(
-                            dx,
-                            dy,
-                            MOUSE_SENSITIVITY,
-                            self.input.mouse_back_held(),
-                        );
+                        if self.input.mouse_forward_held() {
+                            self.camera.apply_mouse_look_transport_with_modifiers(
+                                dx,
+                                dy,
+                                MOUSE_SENSITIVITY,
+                                self.input.mouse_back_held(),
+                                true,
+                            );
+                        } else {
+                            self.camera.apply_mouse_look_transport(
+                                dx,
+                                dy,
+                                MOUSE_SENSITIVITY,
+                                self.input.mouse_back_held(),
+                            );
+                        }
                     }
                     ControlScheme::RotorFree => {
                         self.camera.apply_mouse_look_rotor(

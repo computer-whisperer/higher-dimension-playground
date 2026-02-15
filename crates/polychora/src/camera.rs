@@ -430,10 +430,30 @@ impl Camera4D {
         sensitivity: f32,
         hidden_mode: bool,
     ) {
+        self.apply_mouse_look_transport_with_modifiers(dx, dy, sensitivity, hidden_mode, false);
+    }
+
+    pub fn apply_mouse_look_transport_with_modifiers(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        hidden_mode: bool,
+        forward_mode: bool,
+    ) {
         let yaw_delta = dx * sensitivity;
         let vertical_delta = -dy * sensitivity;
-        let forward_y_before_yaw = self.look_forward[1];
+        if forward_mode {
+            // Mouse-forward LOOK-TR mode drives the two remaining look-frame planes:
+            // right/up (roll-like) and up/side (hidden-elevation-like).
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_up, yaw_delta);
+            Self::rotate_axis_pair(&mut self.look_up, &mut self.look_side, vertical_delta);
+            self.reorthonormalize_look_frame();
+            // Intentionally skip upright stabilization while forward-modifying.
+            return;
+        }
 
+        let forward_y_before_yaw = self.look_forward[1];
         if hidden_mode {
             // Keep yaw strictly on the world XZW hyperplane: do not mix Y into yaw turns.
             Self::rotate_axis_pair_xzw(&mut self.look_forward, &mut self.look_side, yaw_delta);
@@ -1702,6 +1722,58 @@ mod tests {
             hidden_side[3].abs() < 1e-4,
             "expected hidden side w≈0, got w={}",
             hidden_side[3]
+        );
+    }
+
+    #[test]
+    fn look_transport_forward_mode_uses_remaining_rotation_planes() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport_with_modifiers(
+            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_2,
+            1.0,
+            false,
+            true,
+        );
+
+        let look = cam.look_direction_look_frame();
+        assert!(
+            look[0] > 0.9999,
+            "forward-mode remaining-plane turns should keep look near +X, got x={}",
+            look[0]
+        );
+        assert!(look[1].abs() < 1e-4, "expected y≈0, got y={}", look[1]);
+        assert!(look[2].abs() < 1e-4, "expected z≈0, got z={}", look[2]);
+        assert!(look[3].abs() < 1e-4, "expected w≈0, got w={}", look[3]);
+
+        let up = cam.look_up;
+        assert!(
+            up[3].abs() > 0.999,
+            "forward-mode vertical should rotate up toward side axis, got up.w={}",
+            up[3]
+        );
+    }
+
+    #[test]
+    fn look_transport_forward_mode_disables_upright_stabilization() {
+        let mut cam = Camera4D::new();
+        cam.apply_mouse_look_transport_with_modifiers(
+            0.0,
+            -std::f32::consts::FRAC_PI_2,
+            1.0,
+            false,
+            true,
+        );
+        let up_before = cam.look_up;
+
+        for _ in 0..60 {
+            cam.apply_mouse_look_transport_with_modifiers(0.0, 0.0, 1.0, false, true);
+        }
+        let up_after = cam.look_up;
+        let alignment = dot4(up_before, up_after);
+        assert!(
+            alignment > 0.999,
+            "forward-mode should not be pulled by upright stabilization, alignment={alignment}"
         );
     }
 
