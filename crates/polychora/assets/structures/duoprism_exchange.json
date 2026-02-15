@@ -1,0 +1,52 @@
+{
+  "name": "duoprism_exchange",
+  "description": "Twin portal courts in Z and W are fused by a long X-axis transfer spine, creating a layered duoprism interchange that only reads clearly in 4D.",
+  "spawn_weight": 2,
+  "ground_offset_y": 1,
+  "fills": [
+    { "min": [-2, 0, -2, -2], "size": [5, 3, 5, 5], "material": 61 },
+    { "min": [0, 3, 0, 0], "size": [1, 8, 1, 1], "material": 58 },
+
+    { "min": [-18, 3, 0, 0], "size": [17, 1, 1, 1], "material": 62 },
+    { "min": [2, 3, 0, 0], "size": [17, 1, 1, 1], "material": 62 },
+    { "min": [0, 3, -18, 0], "size": [1, 1, 17, 1], "material": 56 },
+    { "min": [0, 3, 2, 0], "size": [1, 1, 17, 1], "material": 56 },
+    { "min": [0, 3, 0, -18], "size": [1, 1, 1, 17], "material": 57 },
+    { "min": [0, 3, 0, 2], "size": [1, 1, 1, 17], "material": 57 },
+
+    { "min": [-9, 1, -18, -9], "size": [19, 1, 1, 19], "material": 55 },
+    { "min": [-9, 6, -18, -9], "size": [19, 1, 1, 19], "material": 60 },
+    { "min": [-9, 2, -18, -9], "size": [1, 4, 1, 19], "material": 62 },
+    { "min": [9, 2, -18, -9], "size": [1, 4, 1, 19], "material": 62 },
+    { "min": [-9, 2, -18, -9], "size": [19, 4, 1, 1], "material": 62 },
+    { "min": [-9, 2, -18, 9], "size": [19, 4, 1, 1], "material": 62 },
+
+    { "min": [-9, 1, 18, -9], "size": [19, 1, 1, 19], "material": 55 },
+    { "min": [-9, 6, 18, -9], "size": [19, 1, 1, 19], "material": 60 },
+    { "min": [-9, 2, 18, -9], "size": [1, 4, 1, 19], "material": 62 },
+    { "min": [9, 2, 18, -9], "size": [1, 4, 1, 19], "material": 62 },
+    { "min": [-9, 2, 18, -9], "size": [19, 4, 1, 1], "material": 62 },
+    { "min": [-9, 2, 18, 9], "size": [19, 4, 1, 1], "material": 62 },
+
+    { "min": [-9, 1, -9, -18], "size": [19, 1, 19, 1], "material": 56 },
+    { "min": [-9, 6, -9, -18], "size": [19, 1, 19, 1], "material": 60 },
+    { "min": [-9, 2, -9, -18], "size": [1, 4, 19, 1], "material": 57 },
+    { "min": [9, 2, -9, -18], "size": [1, 4, 19, 1], "material": 57 },
+    { "min": [-9, 2, -9, -18], "size": [19, 4, 1, 1], "material": 57 },
+    { "min": [-9, 2, 9, -18], "size": [19, 4, 1, 1], "material": 57 },
+
+    { "min": [-9, 1, -9, 18], "size": [19, 1, 19, 1], "material": 56 },
+    { "min": [-9, 6, -9, 18], "size": [19, 1, 19, 1], "material": 60 },
+    { "min": [-9, 2, -9, 18], "size": [1, 4, 19, 1], "material": 57 },
+    { "min": [9, 2, -9, 18], "size": [1, 4, 19, 1], "material": 57 },
+    { "min": [-9, 2, -9, 18], "size": [19, 4, 1, 1], "material": 57 },
+    { "min": [-9, 2, 9, 18], "size": [19, 4, 1, 1], "material": 57 }
+  ],
+  "voxels": [
+    { "offset": [0, 11, 0, 0], "material": 58 },
+    { "offset": [0, 4, -18, 0], "material": 58 },
+    { "offset": [0, 4, 18, 0], "material": 58 },
+    { "offset": [0, 4, 0, -18], "material": 58 },
+    { "offset": [0, 4, 0, 18], "material": 58 }
+  ]
+}

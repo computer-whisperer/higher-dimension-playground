@@ -1,7 +1,7 @@
 {
   "name": "ring_keep",
   "description": "A square ring fortress with aurora-stone walls surrounding a central wooden keep spine.",
-  "spawn_weight": 2,
+  "spawn_weight": 1,
   "ground_offset_y": 0,
   "fills": [
     { "min": [-6, 0, -6, -6], "size": [13, 1, 13, 13], "material": 18 },
