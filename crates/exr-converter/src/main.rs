@@ -13,9 +13,7 @@ fn main() {
             dest_path.push_str(file_name.file_name().to_str().unwrap());
 
             if !fs::metadata(&dest_path).is_ok() {
-                let mut image = exr::prelude::read_all_data_from_file(file_name.path());
-
-                match image {
+                match exr::prelude::read_all_data_from_file(file_name.path()) {
                     Ok(mut image) => {
                         for layer in image.layer_data.as_mut() {
                             layer.encoding = exr::prelude::Encoding::FAST_LOSSLESS;

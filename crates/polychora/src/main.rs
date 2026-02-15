@@ -3912,7 +3912,7 @@ impl App {
     }
 
     fn draw_egui_hotbar(&self, ctx: &egui::Context) {
-        let screen_rect = ctx.screen_rect();
+        let screen_rect = ctx.content_rect();
         let slot_size = 80.0;
         let gap = 6.5;
         let total_width = 9.0 * slot_size + 8.0 * gap;
@@ -4175,6 +4175,14 @@ impl App {
                                     mat.name,
                                     egui::FontId::proportional(10.0),
                                     egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
+                                );
+                                let category_pos = egui::pos2(rect.center().x, rect.top() + 4.0);
+                                ui.painter().text(
+                                    category_pos,
+                                    egui::Align2::CENTER_TOP,
+                                    mat.category.label(),
+                                    egui::FontId::proportional(8.0),
+                                    egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220),
                                 );
 
                                 if response.hovered() {

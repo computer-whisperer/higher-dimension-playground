@@ -110,7 +110,6 @@ struct ShaderModules {
     raytrace_pixel: Arc<ShaderModule>,
     raytrace_clear: Arc<ShaderModule>,
     // Voxel traversal engine (VTE) compute shaders
-    voxel_clear: Arc<ShaderModule>,
     voxel_trace_stage_a: Arc<ShaderModule>,
     voxel_display_stage_b: Arc<ShaderModule>,
     // Tile binning
@@ -394,9 +393,7 @@ struct HudDrawBatch {
 
 pub struct OneTimeBuffers {
     model_tetrahedron_count: usize,
-    model_tetrahedron_buffer: Subbuffer<[common::ModelTetrahedron]>,
     model_edge_count: usize,
-    model_edge_buffer: Subbuffer<[common::ModelEdge]>,
     descriptor_set: Arc<DescriptorSet>,
 }
 
@@ -451,9 +448,7 @@ impl OneTimeBuffers {
         )
         .unwrap();
         Self {
-            model_tetrahedron_buffer,
             model_tetrahedron_count,
-            model_edge_buffer,
             model_edge_count,
             descriptor_set,
         }
@@ -498,12 +493,10 @@ pub struct SizedBuffers {
     bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
     scene_bounds_buffer: Subbuffer<[common::SceneBounds]>,
     atomic_counter_buffer: Subbuffer<[u32]>,
-    cpu_atomic_counter_buffer: Subbuffer<[u32]>,
     output_cpu_pixel_buffer: Subbuffer<[Vec4]>,
     // Tile binning buffers
     tile_tet_counts_buffer: Subbuffer<[u32]>,
     tile_tet_indices_buffer: Subbuffer<[u32]>,
-    tile_count: u32,
     // Debug readback buffers
     cpu_bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
     cpu_morton_codes_buffer: Subbuffer<[common::MortonCode]>,
@@ -646,21 +639,6 @@ impl SizedBuffers {
         )
         .unwrap();
 
-        let cpu_atomic_counter_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::TRANSFER_DST,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
-                ..Default::default()
-            },
-            vec![0u32; 1],
-        )
-        .unwrap();
-
         // Tile binning buffers
         let tiles_x = (render_dimensions[0] + 7) / 8;
         let tiles_y = (render_dimensions[1] + 7) / 8;
@@ -737,11 +715,9 @@ impl SizedBuffers {
             bvh_nodes_buffer,
             scene_bounds_buffer,
             atomic_counter_buffer,
-            cpu_atomic_counter_buffer,
             output_cpu_pixel_buffer,
             tile_tet_counts_buffer,
             tile_tet_indices_buffer,
-            tile_count,
             cpu_bvh_nodes_buffer,
             cpu_morton_codes_buffer,
         }
@@ -1398,7 +1374,6 @@ struct ComputePipelineContext {
     raytrace_pixel_pipeline: Arc<ComputePipeline>,
     raytrace_clear_pipeline: Arc<ComputePipeline>,
     // Voxel traversal engine (VTE) pipelines
-    voxel_clear_pipeline: Arc<ComputePipeline>,
     voxel_trace_stage_a_pipeline: Arc<ComputePipeline>,
     voxel_display_stage_b_pipeline: Arc<ComputePipeline>,
     // BVH pipelines
@@ -1508,17 +1483,6 @@ impl ComputePipelineContext {
                             .raytrace_clear
                             .entry_point("mainRaytracerClear")
                             .unwrap(),
-                    ),
-                    pipeline_layout.clone(),
-                ),
-            )
-            .unwrap(),
-            voxel_clear_pipeline: ComputePipeline::new(
-                device.clone(),
-                None,
-                ComputePipelineCreateInfo::stage_layout(
-                    PipelineShaderStageCreateInfo::new(
-                        shaders.voxel_clear.entry_point("mainVoxelClear").unwrap(),
                     ),
                     pipeline_layout.clone(),
                 ),
@@ -1942,68 +1906,6 @@ impl GpuProfiler {
     }
 }
 
-fn create_r8_texture_view(
-    memory_allocator: Arc<StandardMemoryAllocator>,
-    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-    queue: Arc<Queue>,
-    width: u32,
-    height: u32,
-    pixels: &[u8],
-) -> Arc<ImageView> {
-    let staging_buffer = Buffer::from_iter(
-        memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_SRC,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        },
-        pixels.iter().copied(),
-    )
-    .unwrap();
-
-    let atlas_image = Image::new(
-        memory_allocator,
-        ImageCreateInfo {
-            image_type: ImageType::Dim2d,
-            format: Format::R8_UNORM,
-            extent: [width.max(1), height.max(1), 1],
-            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    let mut upload_builder = AutoCommandBufferBuilder::primary(
-        command_buffer_allocator,
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )
-    .unwrap();
-    upload_builder
-        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-            staging_buffer,
-            atlas_image.clone(),
-        ))
-        .unwrap();
-    let upload_cmd = upload_builder.build().unwrap();
-    let upload_future = sync::now(queue.device().clone())
-        .then_execute(queue.clone(), upload_cmd)
-        .unwrap()
-        .then_signal_fence_and_flush()
-        .unwrap();
-    upload_future.wait(None).unwrap();
-
-    ImageView::new_default(atlas_image).unwrap()
-}
-
 fn create_rgba8_srgb_texture_view(
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
@@ -2287,7 +2189,6 @@ impl RenderContext {
             shader_spirv!("mainRaytracerTetrahedronPreprocessor"),
         );
         let raytrace_clear = load_shader(device.clone(), shader_spirv!("mainRaytracerClear"));
-        let voxel_clear = load_shader(device.clone(), shader_spirv!("mainVoxelClear"));
         let voxel_trace_stage_a =
             load_shader(device.clone(), shader_spirv!("mainVoxelTraceStageA"));
         let voxel_display_stage_b =
@@ -2435,7 +2336,6 @@ impl RenderContext {
             raytrace_preprocess: raytrace_preprocess,
             raytrace_pixel: raytrace_pixel,
             raytrace_clear: raytrace_clear,
-            voxel_clear,
             voxel_trace_stage_a,
             voxel_display_stage_b,
             bvh_scene_bounds,
@@ -7022,7 +6922,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             Ok(buffer_content) => {
                 let mut buffer_stored = Vec::new();
                 buffer_stored.extend_from_slice(&buffer_content[..]);
-                let mut buffer_arc = Arc::new(buffer_stored);
+                let buffer_arc = Arc::new(buffer_stored);
                 let mut buffer_dimensions = self.sized_buffers.render_dimensions;
                 let logical_depth = buffer_dimensions[2].max(1);
                 let storage_depth = self.sized_buffers.pixel_storage_layers.max(1);

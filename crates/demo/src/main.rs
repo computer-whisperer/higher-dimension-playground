@@ -8,7 +8,6 @@ use higher_dimension_playground::render::{
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::f32::consts::PI;
-use std::time::Instant;
 use std::{error::Error, sync::Arc};
 use vulkano::device::{Device, Queue};
 use vulkano::instance::debug::DebugUtilsMessenger;
@@ -142,7 +141,6 @@ fn run_headless(args: &Args) {
 
 struct DemoScene {
     args: Args,
-    start_time: Instant,
     frame_num: u32,
     sub_frame_num: u32,
 }
@@ -151,7 +149,6 @@ impl DemoScene {
     fn new(args: Args) -> DemoScene {
         DemoScene {
             args,
-            start_time: Instant::now(),
             frame_num: 0,
             sub_frame_num: 0,
         }

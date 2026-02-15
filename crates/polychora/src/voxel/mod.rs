@@ -1,7 +1,6 @@
 pub mod chunk;
 pub mod cull;
 pub mod io;
-pub mod mesh;
 pub mod world;
 pub mod worldgen;
 

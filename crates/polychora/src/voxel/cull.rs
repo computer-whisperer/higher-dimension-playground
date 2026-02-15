@@ -13,7 +13,6 @@ pub struct SurfaceVoxel {
 
 /// Per-chunk metadata for fast culling.
 pub struct ChunkSurface {
-    pub chunk_pos: super::ChunkPos,
     pub aabb_min: [i32; 4],
     pub aabb_max: [i32; 4],
     /// Range [start..end) into SurfaceData::voxels.
@@ -99,7 +98,6 @@ pub fn extract_surfaces(world: &VoxelWorld) -> SurfaceData {
         }
 
         chunks.push(ChunkSurface {
-            chunk_pos,
             aabb_min,
             aabb_max,
             voxel_start,
