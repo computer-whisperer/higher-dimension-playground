@@ -441,59 +441,42 @@ impl App {
                 self.remote_players.remove(&entity_id);
                 self.remote_entities.remove(&entity_id);
             }
-            multiplayer::ServerMessage::EntityPositions { entities, .. } => {
-                let mut seen_players = HashSet::new();
-                let mut seen_entities = HashSet::new();
-                for entity in entities {
-                    match entity.class {
-                        multiplayer::EntityClass::Player => {
-                            self.remote_entities.remove(&entity.entity_id);
-                            if entity.owner_client_id == self.multiplayer_self_id {
-                                self.remote_players.remove(&entity.entity_id);
-                                continue;
-                            }
-                            seen_players.insert(entity.entity_id);
-                            self.upsert_remote_player_entity(entity, received_at);
+            multiplayer::ServerMessage::EntityTransforms { entities, .. } => {
+                for transform in entities {
+                    if let Some(player) = self.remote_players.get_mut(&transform.entity_id) {
+                        let previous_position = player.position;
+                        let normalized_look =
+                            normalize4_with_fallback(transform.orientation, [0.0, 0.0, 1.0, 0.0]);
+                        player.position = transform.position;
+                        player.look = normalized_look;
+                        player.last_update_ms = transform.last_update_ms;
+                        player.last_received_at = received_at;
+                        player.velocity = sanitize_remote_velocity(
+                            transform.velocity,
+                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                        );
+                        if distance4(previous_position, transform.position)
+                            > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
+                        {
+                            player.render_position = player.position;
+                            player.render_look = player.look;
+                            player.velocity = [0.0; 4];
+                            player.footstep_distance_accum = 0.0;
                         }
-                        multiplayer::EntityClass::Accent | multiplayer::EntityClass::Mob => {
-                            seen_entities.insert(entity.entity_id);
-                            if let Some(existing) = self.remote_entities.get_mut(&entity.entity_id)
-                            {
-                                existing.position = entity.position;
-                                existing.orientation = entity.orientation;
-                                existing.velocity = sanitize_remote_velocity(
-                                    entity.velocity,
-                                    REMOTE_PLAYER_MAX_PREDICTED_SPEED,
-                                );
-                                existing.scale = entity.scale;
-                                existing.material = entity.material;
-                                existing.last_received_at = received_at;
-                            } else {
-                                self.remote_entities.insert(
-                                    entity.entity_id,
-                                    RemoteEntityState {
-                                        kind: entity.kind,
-                                        position: entity.position,
-                                        orientation: entity.orientation,
-                                        velocity: sanitize_remote_velocity(
-                                            entity.velocity,
-                                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
-                                        ),
-                                        scale: entity.scale,
-                                        material: entity.material,
-                                        render_position: entity.position,
-                                        render_orientation: entity.orientation,
-                                        last_received_at: received_at,
-                                    },
-                                );
-                            }
-                        }
+                        continue;
+                    }
+                    if let Some(existing) = self.remote_entities.get_mut(&transform.entity_id) {
+                        existing.position = transform.position;
+                        existing.orientation = transform.orientation;
+                        existing.velocity = sanitize_remote_velocity(
+                            transform.velocity,
+                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                        );
+                        existing.scale = transform.scale;
+                        existing.material = transform.material;
+                        existing.last_received_at = received_at;
                     }
                 }
-                self.remote_entities
-                    .retain(|entity_id, _| seen_entities.contains(entity_id));
-                self.remote_players
-                    .retain(|entity_id, _| seen_players.contains(entity_id));
             }
         }
     }

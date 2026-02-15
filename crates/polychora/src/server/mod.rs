@@ -4,9 +4,9 @@ mod procgen;
 use self::entities::EntityStore;
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
-    ClientMessage, EntityClass, EntityKind, EntitySnapshot, ServerMessage, WorldChunkCoordPayload,
-    WorldChunkPayload, WorldSnapshotPayload, WorldSummary, WORLD_CHUNK_LOD_FAR,
-    WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
+    ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
+    WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
+    WORLD_CHUNK_LOD_FAR, WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{
     self, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
@@ -139,6 +139,14 @@ struct LiveReplicationFrame {
     player_entities: Vec<EntitySnapshot>,
     player_chunks: Vec<(u64, [i32; 4])>,
     non_player_entities: Vec<(EntitySnapshot, [i32; 4])>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ClientEntityReplicationBatch {
+    client_id: u64,
+    spawned: Vec<EntitySnapshot>,
+    despawned: Vec<u64>,
+    transforms: Vec<EntityTransform>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -278,6 +286,7 @@ struct ServerState {
     last_players_persisted_ms: u64,
     mobs: HashMap<u64, MobState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
+    client_visible_entities: HashMap<u64, HashSet<u64>>,
     cpu_profile: ServerCpuProfile,
 }
 
@@ -585,6 +594,18 @@ fn entity_snapshot_from_record(
     Some((snapshot, chunk))
 }
 
+fn entity_transform_from_snapshot(snapshot: &EntitySnapshot) -> EntityTransform {
+    EntityTransform {
+        entity_id: snapshot.entity_id,
+        position: snapshot.position,
+        orientation: snapshot.orientation,
+        velocity: snapshot.velocity,
+        scale: snapshot.scale,
+        material: snapshot.material,
+        last_update_ms: snapshot.last_update_ms,
+    }
+}
+
 fn collect_live_replication_frame(state: &ServerState) -> LiveReplicationFrame {
     let mut live_records: Vec<&EntityRecord> = state
         .entity_records
@@ -831,27 +852,101 @@ fn tick_entity_simulation_window(
 }
 
 fn build_entity_replication_batches(
-    state: &ServerState,
+    state: &mut ServerState,
     entity_interest_radius_sq: i64,
-) -> Vec<(u64, Vec<EntitySnapshot>)> {
+) -> Vec<ClientEntityReplicationBatch> {
     let frame = collect_live_replication_frame(state);
-    let player_entities = frame.player_entities;
-    let player_chunks = frame.player_chunks;
-    if player_chunks.is_empty() {
-        return Vec::new();
+    let mut player_chunk_by_client =
+        HashMap::<u64, [i32; 4]>::with_capacity(frame.player_chunks.len());
+    for (client_id, chunk) in frame.player_chunks {
+        player_chunk_by_client.insert(client_id, chunk);
     }
 
-    let mut batches = Vec::with_capacity(player_chunks.len());
-    for (client_id, player_chunk) in player_chunks {
-        let mut visible =
-            Vec::with_capacity(player_entities.len() + frame.non_player_entities.len());
-        visible.extend(player_entities.iter().cloned());
-        for (entity, entity_chunk) in &frame.non_player_entities {
-            if chunk_distance2(*entity_chunk, player_chunk) <= entity_interest_radius_sq {
-                visible.push(entity.clone());
+    let mut player_entities_with_chunks = Vec::with_capacity(frame.player_entities.len());
+    for entity in frame.player_entities {
+        let Some(owner_client_id) = entity.owner_client_id else {
+            continue;
+        };
+        let Some(owner_chunk) = player_chunk_by_client.get(&owner_client_id).copied() else {
+            continue;
+        };
+        player_entities_with_chunks.push((entity, owner_chunk));
+    }
+
+    let connected_client_ids: HashSet<u64> = state.clients.keys().copied().collect();
+    state
+        .client_visible_entities
+        .retain(|client_id, _| connected_client_ids.contains(client_id));
+    let mut client_ids: Vec<u64> = state.clients.keys().copied().collect();
+    client_ids.sort_unstable();
+
+    let mut batches = Vec::with_capacity(client_ids.len());
+    for client_id in client_ids {
+        let Some(player_chunk) = player_chunk_by_client.get(&client_id).copied() else {
+            state.client_visible_entities.remove(&client_id);
+            continue;
+        };
+
+        let mut visible_entities =
+            Vec::with_capacity(player_entities_with_chunks.len() + frame.non_player_entities.len());
+        for (entity, owner_chunk) in &player_entities_with_chunks {
+            if entity.owner_client_id == Some(client_id) {
+                continue;
+            }
+            if chunk_distance2(*owner_chunk, player_chunk) <= entity_interest_radius_sq {
+                visible_entities.push(entity.clone());
             }
         }
-        batches.push((client_id, visible));
+        for (entity, entity_chunk) in &frame.non_player_entities {
+            if chunk_distance2(*entity_chunk, player_chunk) <= entity_interest_radius_sq {
+                visible_entities.push(entity.clone());
+            }
+        }
+        visible_entities.sort_unstable_by_key(|entity| entity.entity_id);
+        let current_visible_ids: HashSet<u64> = visible_entities
+            .iter()
+            .map(|entity| entity.entity_id)
+            .collect();
+        let previous_visible_ids = state.client_visible_entities.entry(client_id).or_default();
+
+        let mut despawned: Vec<u64> = previous_visible_ids
+            .difference(&current_visible_ids)
+            .copied()
+            .collect();
+        despawned.sort_unstable();
+
+        let mut spawned_ids: Vec<u64> = current_visible_ids
+            .difference(previous_visible_ids)
+            .copied()
+            .collect();
+        spawned_ids.sort_unstable();
+
+        *previous_visible_ids = current_visible_ids;
+
+        let transforms: Vec<EntityTransform> = visible_entities
+            .iter()
+            .map(entity_transform_from_snapshot)
+            .collect();
+        let snapshot_by_id: HashMap<u64, EntitySnapshot> = visible_entities
+            .into_iter()
+            .map(|entity| (entity.entity_id, entity))
+            .collect();
+        let mut spawned = Vec::with_capacity(spawned_ids.len());
+        for entity_id in spawned_ids {
+            if let Some(entity) = snapshot_by_id.get(&entity_id) {
+                spawned.push(entity.clone());
+            }
+        }
+
+        if spawned.is_empty() && despawned.is_empty() && transforms.is_empty() {
+            continue;
+        }
+        batches.push(ClientEntityReplicationBatch {
+            client_id,
+            spawned,
+            despawned,
+            transforms,
+        });
     }
     batches
 }
@@ -1555,6 +1650,7 @@ fn prune_stale_clients(state: &SharedState, stale: Vec<u64>, notify_entity_destr
         let mut guard = state.lock().expect("server state lock poisoned");
         for client_id in stale {
             guard.clients.remove(&client_id);
+            guard.client_visible_entities.remove(&client_id);
             if let Some(player) = guard.players.remove(&client_id) {
                 mark_entity_record_despawned(&mut guard, player.entity_id, None);
                 let _ = guard.entity_store.despawn(player.entity_id);
@@ -1937,28 +2033,50 @@ fn start_broadcast_thread(
                     &mut next_entity_sim_ms,
                     entity_sim_step_ms,
                 );
-                build_entity_replication_batches(&guard, entity_interest_radius_sq)
+                build_entity_replication_batches(&mut guard, entity_interest_radius_sq)
             };
-            let entity_snapshot_count: usize = entity_batches
+            let spawned_count: usize = entity_batches.iter().map(|batch| batch.spawned.len()).sum();
+            let transform_count: usize = entity_batches
                 .iter()
-                .map(|(_, entities)| entities.len())
+                .map(|batch| batch.transforms.len())
                 .sum();
-            let did_broadcast = !entity_batches.is_empty();
-            for (client_id, entities) in entity_batches {
-                send_to_client(
-                    &state,
-                    client_id,
-                    ServerMessage::EntityPositions {
-                        server_time_ms: now,
-                        entities,
-                    },
-                );
+            let did_broadcast = entity_batches.iter().any(|batch| {
+                !batch.spawned.is_empty()
+                    || !batch.despawned.is_empty()
+                    || !batch.transforms.is_empty()
+            });
+
+            for batch in entity_batches {
+                for entity_id in batch.despawned {
+                    send_to_client(
+                        &state,
+                        batch.client_id,
+                        ServerMessage::EntityDestroyed { entity_id },
+                    );
+                }
+                for entity in batch.spawned {
+                    send_to_client(
+                        &state,
+                        batch.client_id,
+                        ServerMessage::EntitySpawned { entity },
+                    );
+                }
+                if !batch.transforms.is_empty() {
+                    send_to_client(
+                        &state,
+                        batch.client_id,
+                        ServerMessage::EntityTransforms {
+                            server_time_ms: now,
+                            entities: batch.transforms,
+                        },
+                    );
+                }
             }
             if did_broadcast {
                 record_server_cpu_sample(
                     &state,
                     None,
-                    Some((tick_cpu_start.elapsed(), 0, entity_snapshot_count)),
+                    Some((tick_cpu_start.elapsed(), spawned_count, transform_count)),
                 );
             }
         }
@@ -2071,6 +2189,7 @@ fn remove_client(state: &SharedState, client_id: u64) {
     let removed_entity_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let _ = guard.clients.remove(&client_id);
+        guard.client_visible_entities.remove(&client_id);
         match guard.players.remove(&client_id) {
             Some(player) => {
                 mark_entity_record_despawned(&mut guard, player.entity_id, None);
@@ -2200,7 +2319,7 @@ fn handle_message(
     let message_cpu_start = Instant::now();
     match message {
         ClientMessage::Hello { name } => {
-            let (snapshot, spawned_now) =
+            let (snapshot, _spawned_now) =
                 install_or_update_player(state, client_id, Some(name), None, None, start);
             send_to_client(
                 state,
@@ -2238,18 +2357,6 @@ fn handle_message(
                     }
                 }
             }
-            {
-                let guard = state.lock().expect("server state lock poisoned");
-                let frame = collect_live_replication_frame(&guard);
-                if let Some(tx) = guard.clients.get(&client_id) {
-                    for entity in frame.player_entities {
-                        let _ = tx.send(ServerMessage::EntitySpawned { entity });
-                    }
-                    for (entity, _) in frame.non_player_entities {
-                        let _ = tx.send(ServerMessage::EntitySpawned { entity });
-                    }
-                }
-            }
             let center_chunk = world_chunk_from_position(snapshot.position);
             sync_streamed_chunks_for_client(
                 state,
@@ -2262,12 +2369,9 @@ fn handle_message(
                 far_chunk_radius,
                 true,
             );
-            if spawned_now {
-                broadcast(state, ServerMessage::EntitySpawned { entity: snapshot });
-            }
         }
         ClientMessage::UpdatePlayer { position, look } => {
-            let (snapshot, spawned_now) =
+            let (_snapshot, _spawned_now) =
                 install_or_update_player(state, client_id, None, Some(position), Some(look), start);
             let center_chunk = world_chunk_from_position(position);
             sync_streamed_chunks_for_client(
@@ -2281,9 +2385,6 @@ fn handle_message(
                 far_chunk_radius,
                 false,
             );
-            if spawned_now {
-                broadcast(state, ServerMessage::EntitySpawned { entity: snapshot });
-            }
         }
         ClientMessage::SetVoxel {
             position,
@@ -2393,7 +2494,7 @@ fn handle_message(
                 0.5
             };
             let spawn_material = material.max(1);
-            let entity = match spawn_kind {
+            let _entity = match spawn_kind {
                 EntityKind::MobSeeker => spawn_mob_entity(
                     state,
                     spawn_kind,
@@ -2422,7 +2523,6 @@ fn handle_message(
                 }
                 EntityKind::PlayerAvatar => unreachable!("already handled above"),
             };
-            broadcast(state, ServerMessage::EntitySpawned { entity });
         }
         ClientMessage::RequestWorldSnapshot => {
             let snapshot_message = {
@@ -2928,6 +3028,7 @@ fn initialize_state(
         last_players_persisted_ms: last_persisted_ms,
         mobs: HashMap::new(),
         clients: HashMap::new(),
+        client_visible_entities: HashMap::new(),
         cpu_profile: ServerCpuProfile::new(start),
     }));
 

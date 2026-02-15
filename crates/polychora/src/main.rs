@@ -29,7 +29,7 @@ use higher_dimension_playground::render::{
     RenderOptions, TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

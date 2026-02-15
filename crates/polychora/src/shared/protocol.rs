@@ -36,6 +36,17 @@ pub struct EntitySnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EntityTransform {
+    pub entity_id: u64,
+    pub position: [f32; 4],
+    pub orientation: [f32; 4],
+    pub velocity: [f32; 4],
+    pub scale: f32,
+    pub material: u8,
+    pub last_update_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldSummary {
     pub non_empty_chunks: usize,
     pub revision: u64,
@@ -127,8 +138,8 @@ pub enum ServerMessage {
     EntityDestroyed {
         entity_id: u64,
     },
-    EntityPositions {
+    EntityTransforms {
         server_time_ms: u64,
-        entities: Vec<EntitySnapshot>,
+        entities: Vec<EntityTransform>,
     },
 }
