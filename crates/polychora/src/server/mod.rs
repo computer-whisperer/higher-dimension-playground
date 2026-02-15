@@ -81,6 +81,32 @@ struct PlayerState {
     last_stream_world_revision: u64,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum EntityLifecycle {
+    Live,
+    Despawned,
+}
+
+#[derive(Clone, Debug)]
+struct EntityRecord {
+    entity_id: u64,
+    class: EntityClass,
+    owner_client_id: Option<u64>,
+    spawned_at_ms: u64,
+    lifecycle: EntityLifecycle,
+    despawned_at_ms: Option<u64>,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct EntityRecordSummary {
+    live_total: usize,
+    live_players: usize,
+    live_accents: usize,
+    live_mobs: usize,
+    live_owned: usize,
+    tombstones: usize,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct StreamChunkKey {
     lod_level: u8,
@@ -204,6 +230,7 @@ impl ServerCpuProfile {
 struct ServerState {
     next_object_id: u64,
     entity_store: EntityStore,
+    entity_records: HashMap<u64, EntityRecord>,
     world: VoxelWorld,
     world_revision: u64,
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
@@ -225,6 +252,71 @@ fn allocate_server_object_id(state: &mut ServerState) -> u64 {
     id
 }
 
+fn upsert_entity_record(
+    state: &mut ServerState,
+    entity_id: u64,
+    class: EntityClass,
+    owner_client_id: Option<u64>,
+    now_ms: u64,
+) {
+    let record = state
+        .entity_records
+        .entry(entity_id)
+        .or_insert(EntityRecord {
+            entity_id,
+            class,
+            owner_client_id,
+            spawned_at_ms: now_ms,
+            lifecycle: EntityLifecycle::Live,
+            despawned_at_ms: None,
+        });
+    record.class = class;
+    record.owner_client_id = owner_client_id;
+    if record.lifecycle == EntityLifecycle::Despawned {
+        record.spawned_at_ms = now_ms;
+        record.lifecycle = EntityLifecycle::Live;
+        record.despawned_at_ms = None;
+    }
+}
+
+fn mark_entity_record_despawned(state: &mut ServerState, entity_id: u64, now_ms: Option<u64>) {
+    let Some(record) = state.entity_records.get_mut(&entity_id) else {
+        return;
+    };
+    record.lifecycle = EntityLifecycle::Despawned;
+    if record.despawned_at_ms.is_none() {
+        record.despawned_at_ms = now_ms;
+    }
+}
+
+fn summarize_entity_records(state: &ServerState) -> EntityRecordSummary {
+    let mut summary = EntityRecordSummary::default();
+    for (&record_id, record) in &state.entity_records {
+        debug_assert_eq!(record.entity_id, record_id);
+        match record.lifecycle {
+            EntityLifecycle::Live => {
+                summary.live_total = summary.live_total.saturating_add(1);
+                if record.owner_client_id.is_some() {
+                    summary.live_owned = summary.live_owned.saturating_add(1);
+                }
+                match record.class {
+                    EntityClass::Player => {
+                        summary.live_players = summary.live_players.saturating_add(1)
+                    }
+                    EntityClass::Accent => {
+                        summary.live_accents = summary.live_accents.saturating_add(1)
+                    }
+                    EntityClass::Mob => summary.live_mobs = summary.live_mobs.saturating_add(1),
+                }
+            }
+            EntityLifecycle::Despawned => {
+                summary.tombstones = summary.tombstones.saturating_add(1);
+            }
+        }
+    }
+    summary
+}
+
 fn record_server_cpu_sample(
     state: &SharedState,
     message_elapsed: Option<Duration>,
@@ -243,10 +335,17 @@ fn record_server_cpu_sample(
         guard
             .cpu_profile
             .take_report_if_due(Instant::now())
-            .map(|report| (report, guard.players.len(), guard.entity_store.len()))
+            .map(|report| {
+                (
+                    report,
+                    guard.players.len(),
+                    guard.entity_store.len(),
+                    summarize_entity_records(&guard),
+                )
+            })
     };
 
-    let Some((report, player_count, entity_count)) = maybe_report else {
+    let Some((report, player_count, entity_count, entity_records)) = maybe_report else {
         return;
     };
 
@@ -272,7 +371,7 @@ fn record_server_cpu_sample(
     };
 
     eprintln!(
-        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={}",
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_owned={} rec_tombstones={}",
         msg_avg_ms,
         report.message_cpu_ms_max,
         report.message_samples,
@@ -285,6 +384,12 @@ fn record_server_cpu_sample(
         report.tick_entity_snapshots_max,
         player_count,
         entity_count,
+        entity_records.live_total,
+        entity_records.live_players,
+        entity_records.live_accents,
+        entity_records.live_mobs,
+        entity_records.live_owned,
+        entity_records.tombstones,
     );
 }
 
@@ -1037,7 +1142,9 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
         let mut guard = state.lock().expect("server state lock poisoned");
         for client_id in stale {
             guard.clients.remove(&client_id);
-            guard.players.remove(&client_id);
+            if let Some(player) = guard.players.remove(&client_id) {
+                mark_entity_record_despawned(&mut guard, player.core.entity_id, None);
+            }
         }
     }
 }
@@ -1094,7 +1201,9 @@ fn send_world_voxel_set_to_streamed_clients(
         let mut guard = state.lock().expect("server state lock poisoned");
         for client_id in stale {
             guard.clients.remove(&client_id);
-            guard.players.remove(&client_id);
+            if let Some(player) = guard.players.remove(&client_id) {
+                mark_entity_record_despawned(&mut guard, player.core.entity_id, None);
+            }
         }
     }
 }
@@ -1502,7 +1611,13 @@ fn remove_client(state: &SharedState, client_id: u64) {
     let had_player = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let _ = guard.clients.remove(&client_id);
-        guard.players.remove(&client_id).is_some()
+        match guard.players.remove(&client_id) {
+            Some(player) => {
+                mark_entity_record_despawned(&mut guard, player.core.entity_id, None);
+                true
+            }
+            None => false,
+        }
     };
     if had_player {
         broadcast(state, ServerMessage::PlayerLeft { client_id });
@@ -1552,7 +1667,16 @@ fn install_or_update_player(
         player.core.orientation = dir;
     }
     player.core.last_update_ms = now;
-    player_snapshot(player)
+    let entity_id = player.core.entity_id;
+    let snapshot = player_snapshot(player);
+    upsert_entity_record(
+        &mut guard,
+        entity_id,
+        EntityClass::Player,
+        Some(client_id),
+        now,
+    );
+    snapshot
 }
 
 fn handle_message(
@@ -1928,6 +2052,7 @@ fn spawn_entity(
 ) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
     let allocated_id = allocate_server_object_id(&mut guard);
+    let now_ms = monotonic_ms(start);
     let entity_id = guard.entity_store.spawn(
         allocated_id,
         kind,
@@ -1935,8 +2060,9 @@ fn spawn_entity(
         orientation,
         scale,
         material,
-        monotonic_ms(start),
+        now_ms,
     );
+    upsert_entity_record(&mut guard, entity_id, EntityClass::Accent, None, now_ms);
     guard
         .entity_store
         .snapshot(entity_id)
@@ -2038,6 +2164,7 @@ fn initialize_state(
     let state = Arc::new(Mutex::new(ServerState {
         next_object_id: 1,
         entity_store: EntityStore::new(),
+        entity_records: HashMap::new(),
         world: initial_world,
         world_revision: 0,
         procgen_blocked_cells,
