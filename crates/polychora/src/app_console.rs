@@ -122,7 +122,9 @@ impl App {
             self.append_dev_console_log_line("Usage:");
             self.append_dev_console_log_line("  /tp <x> <y> <z> <w>");
             self.append_dev_console_log_line("  /tp origin");
-            self.append_dev_console_log_line("  /spawn <material-id|material-name> [x y z w]");
+            self.append_dev_console_log_line(
+                "  /spawn <cube|rotor|drifter> [x y z w] [material-id|material-name]",
+            );
             return;
         }
 
@@ -150,46 +152,79 @@ impl App {
         if command_name.eq_ignore_ascii_case("spawn") {
             if args.is_empty() {
                 self.append_dev_console_log_line(
-                    "Usage: /spawn <material-id|material-name> [x y z w]",
+                    "Usage: /spawn <cube|rotor|drifter> [x y z w] [material-id|material-name]",
                 );
                 return;
             }
 
-            let Some(material_id) = Self::parse_console_material_id(args[0]) else {
-                self.append_dev_console_log_line(format!("Unknown material '{}'.", args[0]));
+            let Some(kind) = Self::parse_console_entity_kind(args[0]) else {
+                self.append_dev_console_log_line(format!("Unknown entity kind '{}'.", args[0]));
                 return;
             };
 
-            let voxel_pos = if args.len() == 1 {
-                self.default_spawn_voxel_position()
-            } else {
-                match Self::parse_console_voxel4(&args[1..]) {
-                    Ok(pos) => pos,
-                    Err(_) => {
-                        self.append_dev_console_log_line(
-                            "Usage: /spawn <material-id|material-name> [x y z w]",
-                        );
+            let parse_spawn_usage =
+                || "Usage: /spawn <cube|rotor|drifter> [x y z w] [material-id|material-name]";
+
+            let (position, material_id) = match args.len() {
+                1 => (
+                    self.default_spawn_entity_position(),
+                    self.default_spawn_entity_material(),
+                ),
+                2 => {
+                    let Some(material_id) = Self::parse_console_material_id(args[1]) else {
+                        self.append_dev_console_log_line(format!(
+                            "Unknown material '{}'.",
+                            args[1]
+                        ));
                         return;
-                    }
+                    };
+                    (self.default_spawn_entity_position(), material_id)
+                }
+                5 => {
+                    let Ok(pos) = Self::parse_console_vec4(&args[1..5]) else {
+                        self.append_dev_console_log_line(parse_spawn_usage());
+                        return;
+                    };
+                    (pos, self.default_spawn_entity_material())
+                }
+                6 => {
+                    let Ok(pos) = Self::parse_console_vec4(&args[1..5]) else {
+                        self.append_dev_console_log_line(parse_spawn_usage());
+                        return;
+                    };
+                    let Some(material_id) = Self::parse_console_material_id(args[5]) else {
+                        self.append_dev_console_log_line(format!(
+                            "Unknown material '{}'.",
+                            args[5]
+                        ));
+                        return;
+                    };
+                    (pos, material_id)
+                }
+                _ => {
+                    self.append_dev_console_log_line(parse_spawn_usage());
+                    return;
                 }
             };
 
-            self.scene.world.set_voxel(
-                voxel_pos[0],
-                voxel_pos[1],
-                voxel_pos[2],
-                voxel_pos[3],
-                voxel::VoxelType(material_id),
-            );
-            self.send_multiplayer_voxel_update(Instant::now(), voxel_pos, material_id);
+            let orientation =
+                normalize4_with_fallback(self.current_look_direction(), [0.0, 0.0, 1.0, 0.0]);
+            let scale = Self::default_spawn_entity_scale(kind);
+            if !self.send_multiplayer_spawn_entity(kind, position, orientation, scale, material_id)
+            {
+                self.append_dev_console_log_line("Cannot spawn entity without an active server.");
+                return;
+            }
+
             self.append_dev_console_log_line(format!(
-                "Spawned material {} ({}) at ({}, {}, {}, {}).",
+                "Spawned {} with material {} ({}) at ({:.2}, {:.2}, {:.2}, {:.2}).",
+                Self::console_entity_kind_name(kind),
                 material_id,
                 materials::material_name(material_id),
-                voxel_pos[0],
-                voxel_pos[1],
-                voxel_pos[2],
-                voxel_pos[3]
+                position[0],
+                position[1],
+                position[2],
+                position[3]
             ));
             return;
         }
@@ -218,18 +253,7 @@ impl App {
         Ok([x, y, z, w])
     }
 
-    fn parse_console_voxel4(args: &[&str]) -> Result<[i32; 4], ()> {
-        if args.len() != 4 {
-            return Err(());
-        }
-        let x = args[0].parse::<i32>().map_err(|_| ())?;
-        let y = args[1].parse::<i32>().map_err(|_| ())?;
-        let z = args[2].parse::<i32>().map_err(|_| ())?;
-        let w = args[3].parse::<i32>().map_err(|_| ())?;
-        Ok([x, y, z, w])
-    }
-
-    fn default_spawn_voxel_position(&self) -> [i32; 4] {
+    fn default_spawn_entity_position(&self) -> [f32; 4] {
         let edit_reach = self
             .args
             .edit_reach
@@ -239,18 +263,59 @@ impl App {
             .scene
             .block_edit_targets(self.camera.position, look_dir, edit_reach);
         if let Some(place_voxel) = targets.place_voxel {
-            return place_voxel;
+            return [
+                place_voxel[0] as f32 + 0.5,
+                place_voxel[1] as f32 + 0.5,
+                place_voxel[2] as f32 + 0.5,
+                place_voxel[3] as f32 + 0.5,
+            ];
         }
         if let Some(hit_voxel) = targets.hit_voxel {
-            return hit_voxel;
+            return [
+                hit_voxel[0] as f32 + 0.5,
+                hit_voxel[1] as f32 + 0.5,
+                hit_voxel[2] as f32 + 0.5,
+                hit_voxel[3] as f32 + 0.5,
+            ];
         }
 
         [
-            (self.camera.position[0] + look_dir[0] * 3.0).floor() as i32,
-            (self.camera.position[1] + look_dir[1] * 3.0).floor() as i32,
-            (self.camera.position[2] + look_dir[2] * 3.0).floor() as i32,
-            (self.camera.position[3] + look_dir[3] * 3.0).floor() as i32,
+            self.camera.position[0] + look_dir[0] * 3.0,
+            self.camera.position[1] + look_dir[1] * 3.0,
+            self.camera.position[2] + look_dir[2] * 3.0,
+            self.camera.position[3] + look_dir[3] * 3.0,
         ]
+    }
+
+    fn default_spawn_entity_material(&self) -> u8 {
+        self.place_material
+            .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
+    }
+
+    fn default_spawn_entity_scale(kind: multiplayer::EntityKind) -> f32 {
+        match kind {
+            multiplayer::EntityKind::TestCube => 0.50,
+            multiplayer::EntityKind::TestRotor => 0.54,
+            multiplayer::EntityKind::TestDrifter => 0.48,
+        }
+    }
+
+    fn parse_console_entity_kind(token: &str) -> Option<multiplayer::EntityKind> {
+        let normalized = Self::normalize_material_token(token);
+        match normalized.as_str() {
+            "cube" | "testcube" => Some(multiplayer::EntityKind::TestCube),
+            "rotor" | "testrotor" => Some(multiplayer::EntityKind::TestRotor),
+            "drifter" | "testdrifter" => Some(multiplayer::EntityKind::TestDrifter),
+            _ => None,
+        }
+    }
+
+    fn console_entity_kind_name(kind: multiplayer::EntityKind) -> &'static str {
+        match kind {
+            multiplayer::EntityKind::TestCube => "cube",
+            multiplayer::EntityKind::TestRotor => "rotor",
+            multiplayer::EntityKind::TestDrifter => "drifter",
+        }
     }
 
     fn parse_console_material_id(token: &str) -> Option<u8> {

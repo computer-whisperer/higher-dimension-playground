@@ -3,9 +3,9 @@ mod procgen;
 
 use self::entities::EntityStore;
 use crate::shared::protocol::{
-    ClientMessage, EntityKind, PlayerSnapshot, ServerMessage, WorldChunkCoordPayload,
-    WorldChunkPayload, WorldSnapshotPayload, WorldSummary, WORLD_CHUNK_LOD_FAR,
-    WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
+    ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage,
+    WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
+    WORLD_CHUNK_LOD_FAR, WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{
     self, load_world, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
@@ -1690,6 +1690,57 @@ fn handle_message(
                 );
             }
         }
+        ClientMessage::SpawnEntity {
+            kind,
+            position,
+            orientation,
+            scale,
+            material,
+        } => {
+            let spawn_position = [
+                if position[0].is_finite() {
+                    position[0]
+                } else {
+                    0.0
+                },
+                if position[1].is_finite() {
+                    position[1]
+                } else {
+                    0.0
+                },
+                if position[2].is_finite() {
+                    position[2]
+                } else {
+                    0.0
+                },
+                if position[3].is_finite() {
+                    position[3]
+                } else {
+                    0.0
+                },
+            ];
+            let spawn_orientation = if orientation.iter().all(|axis| axis.is_finite()) {
+                orientation
+            } else {
+                [0.0, 0.0, 1.0, 0.0]
+            };
+            let spawn_scale = if scale.is_finite() {
+                scale.clamp(0.10, 8.0)
+            } else {
+                0.5
+            };
+            let spawn_material = material.max(1);
+            let entity = spawn_entity(
+                state,
+                kind,
+                spawn_position,
+                spawn_orientation,
+                spawn_scale,
+                spawn_material,
+                start,
+            );
+            broadcast(state, ServerMessage::EntitySpawned { entity });
+        }
         ClientMessage::RequestWorldSnapshot => {
             let snapshot_message = {
                 let guard = state.lock().expect("server state lock poisoned");
@@ -1865,16 +1916,20 @@ fn spawn_entity(
     scale: f32,
     material: u8,
     start: Instant,
-) -> u64 {
+) -> EntitySnapshot {
     let mut guard = state.lock().expect("server state lock poisoned");
-    guard.entity_store.spawn(
+    let entity_id = guard.entity_store.spawn(
         kind,
         position,
         orientation,
         scale,
         material,
         monotonic_ms(start),
-    )
+    );
+    guard
+        .entity_store
+        .snapshot(entity_id)
+        .expect("spawned entity should exist in store")
 }
 
 fn spawn_default_test_entities(state: &SharedState, start: Instant) {
@@ -1916,10 +1971,10 @@ fn spawn_default_test_entities(state: &SharedState, start: Instant) {
         ),
     ];
     for (i, (kind, pos, orientation, scale, material)) in test_entities.iter().enumerate() {
-        let id = spawn_entity(state, *kind, *pos, *orientation, *scale, *material, start);
+        let entity = spawn_entity(state, *kind, *pos, *orientation, *scale, *material, start);
         eprintln!(
             "spawned test entity {} {:?} (id={}) at {:?}",
-            i, kind, id, pos
+            i, kind, entity.entity_id, pos
         );
     }
 }

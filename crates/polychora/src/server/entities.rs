@@ -143,6 +143,10 @@ impl EntityStore {
         all
     }
 
+    pub fn snapshot(&self, entity_id: u64) -> Option<EntitySnapshot> {
+        self.entities.get(&entity_id).map(EntityState::snapshot)
+    }
+
     pub fn simulate(&mut self, now_ms: u64) {
         for entity in self.entities.values_mut() {
             entity.simulate(now_ms);

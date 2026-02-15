@@ -519,6 +519,28 @@ impl App {
         }
     }
 
+    pub(super) fn send_multiplayer_spawn_entity(
+        &self,
+        kind: multiplayer::EntityKind,
+        position: [f32; 4],
+        orientation: [f32; 4],
+        scale: f32,
+        material: u8,
+    ) -> bool {
+        let Some(client) = self.multiplayer.as_ref() else {
+            return false;
+        };
+
+        client.send(MultiplayerClientMessage::SpawnEntity {
+            kind,
+            position,
+            orientation,
+            scale,
+            material,
+        });
+        true
+    }
+
     pub(super) fn remote_player_instances(&self, time_s: f32) -> Vec<common::ModelInstance> {
         let mut ids: Vec<u64> = self.remote_players.keys().copied().collect();
         ids.sort_unstable();

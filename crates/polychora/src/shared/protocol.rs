@@ -72,6 +72,13 @@ pub enum ClientMessage {
         material: u8,
         client_edit_id: Option<u64>,
     },
+    SpawnEntity {
+        kind: EntityKind,
+        position: [f32; 4],
+        orientation: [f32; 4],
+        scale: f32,
+        material: u8,
+    },
     RequestWorldSnapshot,
     Ping {
         nonce: u64,
