@@ -52,7 +52,7 @@ jobs:
 
       - name: Verify shader toolchain
         run: |
-          slangc --version
+          slangc -v
           spirv-link --version
           spirv-val --version
 

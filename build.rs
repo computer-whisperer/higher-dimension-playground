@@ -172,10 +172,12 @@ fn main() {
     // Check if required tools are available
     check_tool(
         "slangc",
+        "-v",
         "Slang compiler not found. Install: yay -S shader-slang-bin",
     );
     check_tool(
         "spirv-link",
+        "--version",
         "spirv-link not found. Install: yay -S spirv-tools",
     );
 
@@ -267,8 +269,8 @@ fn main() {
     );
 }
 
-fn check_tool(name: &str, error_msg: &str) {
-    let result = Command::new(name).arg("--version").output();
+fn check_tool(name: &str, flag: &str, error_msg: &str) {
+    let result = Command::new(name).arg(flag).output();
     if result.is_err() {
         panic!("{}", error_msg);
     }
