@@ -655,6 +655,10 @@ impl App {
                         ui.label(egui::RichText::new("T").strong());
                         ui.label("Toggle teleport dialog");
                         ui.end_row();
+
+                        ui.label(egui::RichText::new("`").strong());
+                        ui.label("Toggle developer console");
+                        ui.end_row();
                     });
 
                 ui.add_space(8.0);
@@ -691,6 +695,8 @@ impl App {
         let mut inventory_pick: Option<u8> = None;
         let mut teleport_target: Option<[f32; 4]> = None;
         let mut close_teleport = false;
+        let mut close_console = false;
+        let mut console_command: Option<String> = None;
         let mut transition_to_playing: Option<MainMenuTransition> = None;
         let mut return_to_main_menu = false;
         let full_output = egui_ctx.run(raw_input, |ctx| {
@@ -710,6 +716,9 @@ impl App {
                 }
                 if self.controls_dialog_open {
                     self.draw_egui_controls_dialog(ctx);
+                }
+                if self.dev_console_open {
+                    self.draw_egui_dev_console(ctx, &mut console_command, &mut close_console);
                 }
                 self.draw_egui_hotbar(ctx);
             }
@@ -767,6 +776,12 @@ impl App {
                 "Teleported to ({:.1}, {:.1}, {:.1}, {:.1})",
                 pos[0], pos[1], pos[2], pos[3],
             );
+        }
+        if close_console {
+            self.close_dev_console();
+        }
+        if let Some(command) = console_command {
+            self.execute_dev_console_command(&command);
         }
 
         let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);

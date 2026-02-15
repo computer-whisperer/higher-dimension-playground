@@ -112,6 +112,9 @@ impl App {
         self.camera = Camera4D::new();
         self.app_state = AppState::Playing;
         self.menu_open = false;
+        self.dev_console_open = false;
+        self.dev_console_focus_input = false;
+        self.dev_console_input.clear();
         self.main_menu_connect_error = None;
         self.world_ready = false;
 
@@ -192,6 +195,9 @@ impl App {
         self.menu_open = false;
         self.inventory_open = false;
         self.teleport_dialog_open = false;
+        self.dev_console_open = false;
+        self.dev_console_focus_input = false;
+        self.dev_console_input.clear();
         self.world_ready = true;
         self.menu_time = 0.0;
         self.menu_camera = make_menu_camera();

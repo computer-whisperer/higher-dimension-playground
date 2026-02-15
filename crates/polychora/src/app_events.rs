@@ -93,7 +93,8 @@ impl ApplicationHandler for App {
         let show_egui_overlay = self.app_state == AppState::MainMenu
             || self.menu_open
             || self.inventory_open
-            || self.teleport_dialog_open;
+            || self.teleport_dialog_open
+            || self.dev_console_open;
         let egui_consumed = if let (Some(egui_state), Some(window)) =
             (self.egui_winit_state.as_mut(), window.as_ref())
         {
@@ -116,6 +117,16 @@ impl ApplicationHandler for App {
                 if perf_suite_input_locked {
                     return;
                 }
+
+                if self.app_state == AppState::Playing
+                    && event.state.is_pressed()
+                    && !event.repeat
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Backquote))
+                {
+                    self.toggle_dev_console();
+                    return;
+                }
+
                 if !egui_consumed {
                     self.input.handle_key_event(&event);
                 }
@@ -129,6 +140,8 @@ impl ApplicationHandler for App {
                         } else {
                             event_loop.exit();
                         }
+                    } else if self.dev_console_open {
+                        self.close_dev_console();
                     } else if self.teleport_dialog_open {
                         self.teleport_dialog_open = false;
                         if let Some(window) = window.as_ref() {
@@ -173,6 +186,7 @@ impl ApplicationHandler for App {
                         } else if !self.menu_open
                             && !self.inventory_open
                             && !self.teleport_dialog_open
+                            && !self.dev_console_open
                         {
                             if let Some(window) = window.as_ref() {
                                 self.grab_mouse(window);

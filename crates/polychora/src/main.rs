@@ -1,4 +1,5 @@
 mod app_bootstrap;
+mod app_console;
 mod app_controls;
 mod app_events;
 mod app_gameplay_loop;
@@ -931,6 +932,10 @@ fn main() {
             "0".to_string(),
             "0".to_string(),
         ],
+        dev_console_open: false,
+        dev_console_input: String::new(),
+        dev_console_log: VecDeque::new(),
+        dev_console_focus_input: false,
         controls_dialog_open: false,
         menu_open: false,
         menu_selection: 0,
@@ -1140,6 +1145,10 @@ struct App {
     inventory_open: bool,
     teleport_dialog_open: bool,
     teleport_coords: [String; 4],
+    dev_console_open: bool,
+    dev_console_input: String,
+    dev_console_log: VecDeque<String>,
+    dev_console_focus_input: bool,
     controls_dialog_open: bool,
     menu_open: bool,
     menu_selection: usize,

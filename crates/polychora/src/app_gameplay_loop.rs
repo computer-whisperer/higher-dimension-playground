@@ -54,7 +54,11 @@ impl App {
             }
         }
 
-        if self.menu_open || self.inventory_open || self.teleport_dialog_open {
+        if self.menu_open
+            || self.inventory_open
+            || self.teleport_dialog_open
+            || self.dev_console_open
+        {
             self.drain_gameplay_inputs_while_menu_open();
         } else {
             self.input.take_menu_left();
@@ -315,7 +319,11 @@ impl App {
             .edit_reach
             .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
 
-        if !self.menu_open && !self.inventory_open && !self.teleport_dialog_open {
+        if !self.menu_open
+            && !self.inventory_open
+            && !self.teleport_dialog_open
+            && !self.dev_console_open
+        {
             // Jump when in gravity mode, consume jump either way.
             if self.camera.is_flying {
                 self.input.take_jump();
@@ -634,16 +642,18 @@ impl App {
         } else {
             "off".to_string()
         };
-        let egui_paint = if self.args.no_hud {
+        let egui_paint = if self.args.no_hud && !self.dev_console_open {
             None
         } else {
             self.run_egui_frame()
         };
-        let mut do_navigation_hud = !self.menu_open && self.info_panel_mode != InfoPanelMode::Off;
+        let mut do_navigation_hud =
+            !self.menu_open && !self.dev_console_open && self.info_panel_mode != InfoPanelMode::Off;
         if self.args.no_hud {
             do_navigation_hud = false;
         }
         let hud_readout_mode = if !self.menu_open
+            && !self.dev_console_open
             && matches!(
                 self.info_panel_mode,
                 InfoPanelMode::VectorTable | InfoPanelMode::VectorTable2
