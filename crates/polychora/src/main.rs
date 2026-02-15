@@ -881,6 +881,7 @@ fn main() {
         .player_name
         .clone()
         .unwrap_or_else(default_multiplayer_player_name);
+    let initial_migrate_world_seed = args.singleplayer_world_seed.to_string();
     let audio = AudioEngine::new(args.audio, args.audio_volume);
     if args.audio {
         if audio.is_active() {
@@ -984,6 +985,16 @@ fn main() {
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
         main_menu_connect_error: None,
+        main_menu_migration_status: None,
+        main_menu_migrate_trim_input: "saves/world.v4dw".to_string(),
+        main_menu_migrate_trim_output: "saves/world.migrated.v4dw".to_string(),
+        main_menu_migrate_trim_keep_min: "0 -2 -2 -2".to_string(),
+        main_menu_migrate_trim_keep_max: "0 0 2 2".to_string(),
+        main_menu_migrate_v3_input: "saves/world.v4dw".to_string(),
+        main_menu_migrate_v3_output: "saves/world-migrated-v3".to_string(),
+        main_menu_migrate_v3_sidecar: String::new(),
+        main_menu_migrate_v3_world_seed: initial_migrate_world_seed,
+        main_menu_migrate_v3_overwrite: false,
         look_at_target: None,
         menu_camera: make_menu_camera(),
         menu_time: 0.0,
@@ -1105,6 +1116,9 @@ enum AppState {
 enum MainMenuPage {
     Root,
     Singleplayer,
+    SingleplayerMigrations,
+    SingleplayerMigrationLegacyTrim,
+    SingleplayerMigrationLegacyToV3,
     Multiplayer,
 }
 
@@ -1218,6 +1232,16 @@ struct App {
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
     main_menu_connect_error: Option<String>,
+    main_menu_migration_status: Option<String>,
+    main_menu_migrate_trim_input: String,
+    main_menu_migrate_trim_output: String,
+    main_menu_migrate_trim_keep_min: String,
+    main_menu_migrate_trim_keep_max: String,
+    main_menu_migrate_v3_input: String,
+    main_menu_migrate_v3_output: String,
+    main_menu_migrate_v3_sidecar: String,
+    main_menu_migrate_v3_world_seed: String,
+    main_menu_migrate_v3_overwrite: bool,
     look_at_target: Option<LookAtTarget>,
     menu_camera: Camera4D,
     menu_time: f32,
