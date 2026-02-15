@@ -74,6 +74,8 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 const VTE_LOD_TINT_ENV: &str = "R4D_VTE_LOD_TINT";
+// Keep in sync with OVERLAY_RASTER_SCALE in `slang-shaders/src/rasterizer.slang`.
+const VTE_OVERLAY_RASTER_SCALE: u32 = 3;
 
 fn env_flag_enabled(name: &str) -> bool {
     match std::env::var(name) {
@@ -1683,7 +1685,7 @@ impl ComputePipelineContext {
     }
 }
 
-const PROFILER_MAX_TIMESTAMPS: u32 = 16;
+const PROFILER_MAX_TIMESTAMPS: u32 = 64;
 const PROFILER_REPORT_INTERVAL: usize = 100;
 const PROFILER_SLOW_FRAME_THRESHOLD_MS: f64 = 100.0;
 const PROFILER_SLOW_FRAME_REPORT_INTERVAL: usize = 60;
@@ -1701,6 +1703,17 @@ struct GpuProfiler {
     last_gpu_total_ms: f32,
     /// Last frame's per-phase breakdown (for HUD display)
     last_frame_phases: Vec<(&'static str, f32)>,
+    vte_frame_samples: usize,
+    vte_chunk_headers_sum: u64,
+    vte_visible_chunks_sum: u64,
+    vte_visible_lod0_sum: u64,
+    vte_visible_lod1_sum: u64,
+    vte_visible_lod2_sum: u64,
+    vte_y_slices_sum: u64,
+    vte_y_slice_lookup_entries_sum: u64,
+    raster_frame_samples: usize,
+    raster_tetrahedrons_sum: u64,
+    entity_tetrahedrons_sum: u64,
 }
 
 impl GpuProfiler {
@@ -1716,6 +1729,17 @@ impl GpuProfiler {
             last_slow_report_frame: None,
             last_gpu_total_ms: 0.0,
             last_frame_phases: Vec::new(),
+            vte_frame_samples: 0,
+            vte_chunk_headers_sum: 0,
+            vte_visible_chunks_sum: 0,
+            vte_visible_lod0_sum: 0,
+            vte_visible_lod1_sum: 0,
+            vte_visible_lod2_sum: 0,
+            vte_y_slices_sum: 0,
+            vte_y_slice_lookup_entries_sum: 0,
+            raster_frame_samples: 0,
+            raster_tetrahedrons_sum: 0,
+            entity_tetrahedrons_sum: 0,
         }
     }
 
@@ -1803,27 +1827,119 @@ impl GpuProfiler {
         }
     }
 
+    fn record_scene_stats(
+        &mut self,
+        is_vte: bool,
+        vte_chunk_headers: usize,
+        vte_visible_chunks: usize,
+        vte_visible_lod_counts: [u32; 3],
+        vte_y_slices: usize,
+        vte_y_slice_lookup_entries: usize,
+        raster_tetrahedrons: usize,
+        entity_tetrahedrons: usize,
+    ) {
+        if is_vte {
+            self.vte_frame_samples = self.vte_frame_samples.saturating_add(1);
+            self.vte_chunk_headers_sum = self
+                .vte_chunk_headers_sum
+                .saturating_add(vte_chunk_headers as u64);
+            self.vte_visible_chunks_sum = self
+                .vte_visible_chunks_sum
+                .saturating_add(vte_visible_chunks as u64);
+            self.vte_visible_lod0_sum = self
+                .vte_visible_lod0_sum
+                .saturating_add(vte_visible_lod_counts[0] as u64);
+            self.vte_visible_lod1_sum = self
+                .vte_visible_lod1_sum
+                .saturating_add(vte_visible_lod_counts[1] as u64);
+            self.vte_visible_lod2_sum = self
+                .vte_visible_lod2_sum
+                .saturating_add(vte_visible_lod_counts[2] as u64);
+            self.vte_y_slices_sum = self.vte_y_slices_sum.saturating_add(vte_y_slices as u64);
+            self.vte_y_slice_lookup_entries_sum = self
+                .vte_y_slice_lookup_entries_sum
+                .saturating_add(vte_y_slice_lookup_entries as u64);
+        }
+
+        self.raster_frame_samples = self.raster_frame_samples.saturating_add(1);
+        self.raster_tetrahedrons_sum = self
+            .raster_tetrahedrons_sum
+            .saturating_add(raster_tetrahedrons as u64);
+        self.entity_tetrahedrons_sum = self
+            .entity_tetrahedrons_sum
+            .saturating_add(entity_tetrahedrons as u64);
+    }
+
     fn print_report(&mut self) {
         println!("=== GPU Profile ({} frames) ===", self.total_frames);
 
-        let mut total_avg = 0.0f64;
-        for (name, total_ms, count) in &self.accum {
-            if *count > 0 {
-                let avg = total_ms / *count as f64;
-                total_avg += avg;
-                println!("  {}: {:.3} ms (avg over {} samples)", name, avg, count);
-            }
+        let mut rows: Vec<(&'static str, f64, usize)> = self
+            .accum
+            .iter()
+            .filter_map(|(name, total_ms, count)| {
+                if *count == 0 {
+                    None
+                } else {
+                    Some((*name, total_ms / *count as f64, *count))
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let total_avg: f64 = rows.iter().map(|(_, avg, _)| *avg).sum();
+        for (name, avg, count) in rows {
+            let pct = if total_avg > 0.0 {
+                (avg / total_avg) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "  {}: {:.3} ms ({:.1}%) (avg over {} samples)",
+                name, avg, pct, count
+            );
         }
         println!(
             "  Total avg: {:.3} ms ({:.0} FPS)",
             total_avg,
             1000.0 / total_avg.max(0.001)
         );
+        if self.vte_frame_samples > 0 {
+            let s = self.vte_frame_samples as f64;
+            println!(
+                "  VTE avg chunks: headers {:.1} visible {:.1} (L0 {:.1} / L1 {:.1} / L2 {:.1}) y_slices {:.1} y_lookup {:.1}",
+                self.vte_chunk_headers_sum as f64 / s,
+                self.vte_visible_chunks_sum as f64 / s,
+                self.vte_visible_lod0_sum as f64 / s,
+                self.vte_visible_lod1_sum as f64 / s,
+                self.vte_visible_lod2_sum as f64 / s,
+                self.vte_y_slices_sum as f64 / s,
+                self.vte_y_slice_lookup_entries_sum as f64 / s,
+            );
+        }
+        if self.raster_frame_samples > 0 {
+            let s = self.raster_frame_samples as f64;
+            println!(
+                "  Tetra avg: raster_tets {:.1} entity_tets {:.1}",
+                self.raster_tetrahedrons_sum as f64 / s,
+                self.entity_tetrahedrons_sum as f64 / s,
+            );
+        }
 
         println!("================================");
 
         // Reset accumulators
         self.accum.clear();
+        self.vte_frame_samples = 0;
+        self.vte_chunk_headers_sum = 0;
+        self.vte_visible_chunks_sum = 0;
+        self.vte_visible_lod0_sum = 0;
+        self.vte_visible_lod1_sum = 0;
+        self.vte_visible_lod2_sum = 0;
+        self.vte_y_slices_sum = 0;
+        self.vte_y_slice_lookup_entries_sum = 0;
+        self.raster_frame_samples = 0;
+        self.raster_tetrahedrons_sum = 0;
+        self.entity_tetrahedrons_sum = 0;
     }
 }
 
@@ -2755,6 +2871,25 @@ impl RenderContext {
             offset: [0, 0],
             extent: [width, height],
         }
+    }
+
+    /// Screen-space raster region for VTE overlay tetra pass (held block preview).
+    /// Keeping this bounded avoids full-frame tet pixel traversal for a tiny HUD element.
+    fn vte_overlay_raster_region(&self) -> [u32; 4] {
+        let render_w = self.sized_buffers.render_dimensions[0].max(1);
+        let render_h = self.sized_buffers.render_dimensions[1].max(1);
+
+        let side = ((render_w.min(render_h) as f32) * 0.28).round() as u32;
+        let side = side.clamp(208, 360).min(render_w).min(render_h);
+        let width = side;
+        let height = side;
+        let margin_x = (render_w / 64).clamp(8, 24);
+        let margin_y = (render_h / 64).clamp(8, 24);
+
+        let origin_x = render_w.saturating_sub(width + margin_x);
+        let origin_y = render_h.saturating_sub(height + margin_y);
+
+        [origin_x, origin_y, width.max(1), height.max(1)]
     }
 
     fn refresh_egui_descriptor_sets(&mut self) {
@@ -4727,6 +4862,22 @@ impl RenderContext {
             }
         }
         {
+            let world_origin_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
+            let world_origin_inv_w = if world_origin_h[4].abs() > 1e-6 {
+                1.0 / world_origin_h[4]
+            } else {
+                1.0
+            };
+            let world_origin = glam::Vec4::new(
+                world_origin_h[0] * world_origin_inv_w,
+                world_origin_h[1] * world_origin_inv_w,
+                world_origin_h[2] * world_origin_inv_w,
+                world_origin_h[3] * world_origin_inv_w,
+            );
+            let world_dir_x_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [1.0, 0.0, 0.0, 0.0, 0.0]);
+            let world_dir_y_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 1.0, 0.0, 0.0, 0.0]);
+            let world_dir_z_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 1.0, 0.0, 0.0]);
+            let world_dir_w_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 1.0, 0.0]);
             let mut writer = self.frames_in_flight[frame_idx]
                 .live_buffers
                 .working_data_buffer
@@ -4762,6 +4913,15 @@ impl RenderContext {
                 u32::from(voxel_input.is_some()),
                 render_options.vte_display_mode.as_u32(),
             ];
+            writer.world_origin = world_origin;
+            writer.world_dir_x =
+                glam::Vec4::new(world_dir_x_h[0], world_dir_x_h[1], world_dir_x_h[2], world_dir_x_h[3]);
+            writer.world_dir_y =
+                glam::Vec4::new(world_dir_y_h[0], world_dir_y_h[1], world_dir_y_h[2], world_dir_y_h[3]);
+            writer.world_dir_z =
+                glam::Vec4::new(world_dir_z_h[0], world_dir_z_h[1], world_dir_z_h[2], world_dir_z_h[3]);
+            writer.world_dir_w =
+                glam::Vec4::new(world_dir_w_h[0], world_dir_w_h[1], world_dir_w_h[2], world_dir_w_h[3]);
         }
 
         // Compute entity scene hash BEFORE writing to the GPU buffer so the
@@ -4803,6 +4963,7 @@ impl RenderContext {
         let mut vte_macro_word_count: usize = 0;
         let mut vte_y_slice_count: usize = 0;
         let mut vte_y_slice_lookup_entry_count: usize = 0;
+        let mut vte_visible_lod_counts = [0u32; 3];
         let mut vte_visible_chunk_min = [i32::MAX; 4];
         let mut vte_visible_chunk_max = [i32::MIN; 4];
         if let Some(input) = voxel_input {
@@ -4900,7 +5061,12 @@ impl RenderContext {
                         let chunk_index = input.visible_chunk_indices[i]
                             .min(vte_chunk_count.saturating_sub(1) as u32);
                         writer[i] = chunk_index;
-                        let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                        let header = &input.chunk_headers[chunk_index as usize];
+                        let chunk_coord = header.chunk_coord;
+                        if let Some(slot) = vte_visible_lod_counts.get_mut(header.lod_level as usize)
+                        {
+                            *slot = slot.saturating_add(1);
+                        }
                         for axis in 0..4 {
                             vte_visible_chunk_min[axis] =
                                 vte_visible_chunk_min[axis].min(chunk_coord[axis]);
@@ -4956,7 +5122,11 @@ impl RenderContext {
                 for i in 0..vte_visible_chunk_count {
                     let chunk_index = input.visible_chunk_indices[i]
                         .min(vte_chunk_count.saturating_sub(1) as u32);
-                    let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                    let header = &input.chunk_headers[chunk_index as usize];
+                    let chunk_coord = header.chunk_coord;
+                    if let Some(slot) = vte_visible_lod_counts.get_mut(header.lod_level as usize) {
+                        *slot = slot.saturating_add(1);
+                    }
                     for axis in 0..4 {
                         vte_visible_chunk_min[axis] =
                             vte_visible_chunk_min[axis].min(chunk_coord[axis]);
@@ -5281,6 +5451,16 @@ impl RenderContext {
 
         let reduced_storage_supported =
             do_voxel_vte && render_options.vte_display_mode == VteDisplayMode::Integral;
+        self.profiler.record_scene_stats(
+            do_voxel_vte,
+            vte_chunk_count,
+            vte_visible_chunk_count,
+            vte_visible_lod_counts,
+            vte_y_slice_count,
+            vte_y_slice_lookup_entry_count,
+            raster_tetrahedron_count,
+            total_tetrahedron_count,
+        );
         if storage_layers < logical_layers && !reduced_storage_supported {
             panic!(
                 "pixel storage layers ({storage_layers}) are less than logical render layers ({logical_layers}); \
@@ -5554,6 +5734,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
 
                 let fuse_integral_in_stage_a =
                     render_options.vte_display_mode == VteDisplayMode::Integral;
+                {
+                    let q = self.profiler.next_query_index("vte_stage_a_setup");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
                 builder
                     .bind_pipeline_compute(
                         self.compute_pipeline.voxel_trace_stage_a_pipeline.clone(),
@@ -5584,6 +5775,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 }
 
                 if !fuse_integral_in_stage_a {
+                    {
+                        let q = self.profiler.next_query_index("vte_stage_b_setup");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
                     builder
                         .bind_pipeline_compute(
                             self.compute_pipeline.voxel_display_stage_b_pipeline.clone(),
@@ -5650,6 +5852,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 builder
                     .fill_buffer(self.sized_buffers.atomic_counter_buffer.clone(), 0u32)
                     .unwrap();
+                {
+                    let q = self.profiler.next_query_index("tet_counter_clear");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
 
                 builder
                     .push_constants(
@@ -5690,28 +5903,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .clone(),
                     ))
                     .unwrap();
-
-                if do_tetrahedron_edges {
-                    line_render_count = raster_preprocess_tetrahedron_count * 6;
-                }
-            }
-
-            if do_raster {
-                // Zero tile counts
-                builder
-                    .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
-                    .unwrap();
-
-                // Bin tetrahedra into tiles
-                builder
-                    .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
-                    .unwrap();
-                unsafe {
-                    builder.dispatch([(self.sized_buffers.max_tetrahedrons as u32 + 63) / 64, 1, 1])
-                }
-                .unwrap();
                 {
-                    let q = self.profiler.next_query_index("tet_bin");
+                    let q = self.profiler.next_query_index("tet_counter_copy");
                     unsafe {
                         builder.write_timestamp(
                             self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -5722,16 +5915,93 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 }
 
+                if do_tetrahedron_edges {
+                    line_render_count = raster_preprocess_tetrahedron_count * 6;
+                }
+            }
+
+            if do_raster {
+                if !do_voxel_vte {
+                    // Zero tile counts
+                    builder
+                        .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
+                        .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("tet_bin_clear");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
+
+                    // Bin tetrahedra into tiles
+                    builder
+                        .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
+                        .unwrap();
+                    unsafe {
+                        builder.dispatch([
+                            (self.sized_buffers.max_tetrahedrons as u32 + 63) / 64,
+                            1,
+                            1,
+                        ])
+                    }
+                    .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("tet_bin");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
+                }
+
                 // Tetrahedron pixel raster (tile-based)
                 builder
                     .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone())
                     .unwrap();
+                let (raster_dispatch_push, raster_dispatch_dims) = if do_voxel_vte {
+                    let region = self.vte_overlay_raster_region();
+                    let overlay_work_w =
+                        (region[2] + VTE_OVERLAY_RASTER_SCALE - 1) / VTE_OVERLAY_RASTER_SCALE;
+                    let overlay_work_h =
+                        (region[3] + VTE_OVERLAY_RASTER_SCALE - 1) / VTE_OVERLAY_RASTER_SCALE;
+                    if self.frames_rendered == 0 {
+                        println!(
+                            "VTE overlay raster region: origin=({}, {}) size={}x{} (work {}x{} @{}x upsample)",
+                            region[0], region[1], region[2], region[3], overlay_work_w, overlay_work_h, VTE_OVERLAY_RASTER_SCALE
+                        );
+                    }
+                    (
+                        region,
+                        [(overlay_work_w + 7) / 8, (overlay_work_h + 7) / 8, 1],
+                    )
+                } else {
+                    (
+                        [0, 0, 0, 0],
+                        [
+                            (self.sized_buffers.render_dimensions[0] + 7) / 8,
+                            (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                            1,
+                        ],
+                    )
+                };
+                builder
+                    .push_constants(
+                        self.compute_pipeline.pipeline_layout.clone(),
+                        0,
+                        raster_dispatch_push,
+                    )
+                    .unwrap();
                 unsafe {
-                    builder.dispatch([
-                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
-                        1,
-                    ])
+                    builder.dispatch(raster_dispatch_dims)
                 }
                 .unwrap();
                 {
@@ -6127,6 +6397,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             ],
                         )
                         .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("present_begin");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
 
                     // Render from compute shader buffer
                     {
@@ -6135,6 +6416,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .unwrap();
                         unsafe { builder.draw(6, 1, 0, 0) }.unwrap();
                     }
+                    {
+                        let q = self.profiler.next_query_index("present_buffer");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
 
                     // Render the edge lines
                     if line_render_count > 0 {
@@ -6142,6 +6434,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .bind_pipeline_graphics(present_pipeline.line_pipeline.clone())
                             .unwrap();
                         unsafe { builder.draw(line_render_count as u32 * 2, 1, 0, 0) }.unwrap();
+                    }
+                    {
+                        let q = self.profiler.next_query_index("present_lines");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
                     }
 
                     // Render HUD quads (text + panels, alpha-blended on top)
@@ -6190,6 +6493,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             unsafe { builder.draw(batch.vertex_count, 1, 0, 0) }.unwrap();
                         }
                     }
+                    {
+                        let q = self.profiler.next_query_index("present_hud");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
 
                     // End render pass
                     builder
@@ -6197,6 +6511,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         // have called `next_subpass` to jump to the next subpass.
                         .end_render_pass(Default::default())
                         .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("present_end");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
                     if render_options.take_framebuffer_screenshot {
                         builder
                             .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
@@ -6206,6 +6531,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 self.cpu_screen_capture_buffer.clone(),
                             ))
                             .unwrap();
+                        {
+                            let q = self.profiler.next_query_index("present_screenshot_copy");
+                            unsafe {
+                                builder.write_timestamp(
+                                    self.frames_in_flight[frame_idx].query_pool.clone(),
+                                    q,
+                                    PipelineStage::AllCommands,
+                                )
+                            }
+                            .unwrap();
+                        }
                     }
                 }
             }
@@ -6218,6 +6554,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     self.sized_buffers.output_cpu_pixel_buffer.clone(),
                 ))
                 .unwrap();
+            {
+                let q = self.profiler.next_query_index("render_screenshot_copy");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
         }
 
         // Final frame marker so profiling includes graphics/present-tail work

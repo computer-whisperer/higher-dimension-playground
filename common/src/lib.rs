@@ -93,4 +93,9 @@ pub struct WorkingData {
     pub focal_length_xy: f32,
     pub focal_length_zw: f32,
     pub padding: [u32; 2],
+    pub world_origin: Vec4,
+    pub world_dir_x: Vec4,
+    pub world_dir_y: Vec4,
+    pub world_dir_z: Vec4,
+    pub world_dir_w: Vec4,
 }

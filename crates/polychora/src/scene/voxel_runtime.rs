@@ -167,6 +167,25 @@ impl Scene {
         (min_dist_sq, max_dist_sq)
     }
 
+    fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    }
+
+    fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
+        let len_sq = Self::dot4(v, v);
+        if len_sq > 1e-12 {
+            let inv_len = len_sq.sqrt().recip();
+            [
+                v[0] * inv_len,
+                v[1] * inv_len,
+                v[2] * inv_len,
+                v[3] * inv_len,
+            ]
+        } else {
+            fallback
+        }
+    }
+
     fn queue_payload_upload(&mut self, payload_id: u32) {
         if self.voxel_pending_payload_upload_set.insert(payload_id) {
             self.voxel_pending_payload_uploads.push(payload_id);
@@ -410,6 +429,7 @@ impl Scene {
     fn rebuild_visible_voxel_metadata(
         &mut self,
         cam_pos: [f32; 4],
+        cam_forward: [f32; 4],
         near_lod_max_distance: f32,
         mid_lod_max_distance: f32,
         max_trace_distance: f32,
@@ -428,7 +448,6 @@ impl Scene {
         struct Candidate {
             key: RuntimeChunkKey,
             payload_id: u32,
-            ring_priority: u8,
             min_dist_sq: f32,
         }
 
@@ -443,6 +462,7 @@ impl Scene {
         let near_max_sq = near_max_distance * near_max_distance;
         let mid_max_sq = mid_max_distance * mid_max_distance;
         let trace_max_sq = trace_max_distance * trace_max_distance;
+        let view_forward = Self::normalize4_with_fallback(cam_forward, [0.0, 0.0, 1.0, 0.0]);
 
         let mut candidates = Vec::<Candidate>::with_capacity(self.voxel_active_chunks.len());
         for &key in &self.voxel_active_chunks {
@@ -450,6 +470,33 @@ impl Scene {
                 && key.lod_level != VOXEL_LOD_LEVEL_MID
                 && key.lod_level != VOXEL_LOD_LEVEL_FAR
             {
+                continue;
+            }
+
+            // Cheap directional cull: drop chunks fully behind the camera's
+            // current forward half-space so Stage A traces fewer chunk candidates.
+            let lod_scale = Self::lod_chunk_world_scale(key.lod_level);
+            let chunk_span = (CHUNK_SIZE as f32) * lod_scale;
+            let half_span = 0.5 * chunk_span;
+            let center = [
+                (key.chunk_pos.x as f32 + 0.5) * chunk_span,
+                (key.chunk_pos.y as f32 + 0.5) * chunk_span,
+                (key.chunk_pos.z as f32 + 0.5) * chunk_span,
+                (key.chunk_pos.w as f32 + 0.5) * chunk_span,
+            ];
+            let to_center = [
+                center[0] - cam_pos[0],
+                center[1] - cam_pos[1],
+                center[2] - cam_pos[2],
+                center[3] - cam_pos[3],
+            ];
+            let forward_center = Self::dot4(to_center, view_forward);
+            let forward_radius = half_span
+                * (view_forward[0].abs()
+                    + view_forward[1].abs()
+                    + view_forward[2].abs()
+                    + view_forward[3].abs());
+            if forward_center + forward_radius < 0.0 {
                 continue;
             }
 
@@ -470,43 +517,32 @@ impl Scene {
                 continue;
             }
             let (min_dist_sq, max_dist_sq) = Self::chunk_distance_bounds_sq(cam_pos, key);
-            let ring_priority = match key.lod_level {
+            let in_ring = match key.lod_level {
                 VOXEL_LOD_LEVEL_NEAR => {
-                    if min_dist_sq <= near_max_sq {
-                        0
-                    } else {
-                        1
-                    }
+                    min_dist_sq <= near_max_sq
                 }
                 VOXEL_LOD_LEVEL_MID => {
-                    if min_dist_sq <= mid_max_sq && max_dist_sq >= near_max_sq {
-                        0
-                    } else {
-                        1
-                    }
+                    min_dist_sq <= mid_max_sq && max_dist_sq >= near_max_sq
                 }
                 VOXEL_LOD_LEVEL_FAR => {
-                    if min_dist_sq <= trace_max_sq && max_dist_sq >= mid_max_sq {
-                        0
-                    } else {
-                        1
-                    }
+                    min_dist_sq <= trace_max_sq && max_dist_sq >= mid_max_sq
                 }
-                _ => 1,
+                _ => false,
             };
+            if !in_ring {
+                continue;
+            }
 
             candidates.push(Candidate {
                 key,
                 payload_id: chunk_payload_mapping.payload_id,
-                ring_priority,
                 min_dist_sq,
             });
         }
 
         candidates.sort_unstable_by(|a, b| {
-            a.ring_priority
-                .cmp(&b.ring_priority)
-                .then_with(|| a.min_dist_sq.total_cmp(&b.min_dist_sq))
+            a.min_dist_sq
+                .total_cmp(&b.min_dist_sq)
                 .then_with(|| a.key.lod_level.cmp(&b.key.lod_level))
                 .then_with(|| a.key.chunk_pos.w.cmp(&b.key.chunk_pos.w))
                 .then_with(|| a.key.chunk_pos.z.cmp(&b.key.chunk_pos.z))
@@ -679,6 +715,7 @@ impl Scene {
     pub fn build_voxel_frame_data(
         &mut self,
         cam_pos: [f32; 4],
+        cam_forward: [f32; 4],
         near_lod_max_distance: f32,
         mid_lod_max_distance: f32,
         max_trace_distance: f32,
@@ -694,6 +731,8 @@ impl Scene {
             cam_pos[2].floor() as i32,
             cam_pos[3].floor() as i32,
         ];
+        let view_forward = Self::normalize4_with_fallback(cam_forward, [0.0, 0.0, 1.0, 0.0]);
+        const VIEW_BIN_SCALE: f32 = 32.0;
         let cam_key = [
             cam_chunk[0],
             cam_chunk[1],
@@ -707,12 +746,17 @@ impl Scene {
             cam_voxel[1],
             cam_voxel[2],
             cam_voxel[3],
+            (view_forward[0] * VIEW_BIN_SCALE).round() as i32,
+            (view_forward[1] * VIEW_BIN_SCALE).round() as i32,
+            (view_forward[2] * VIEW_BIN_SCALE).round() as i32,
+            (view_forward[3] * VIEW_BIN_SCALE).round() as i32,
         ];
         let visibility_cache_valid = self.voxel_cached_visibility_camera_chunk == Some(cam_key)
             && self.voxel_cached_visibility_world_revision == self.voxel_world_revision;
         if !visibility_cache_valid {
             self.rebuild_visible_voxel_metadata(
                 cam_pos,
+                view_forward,
                 near_lod_max_distance,
                 mid_lod_max_distance,
                 max_trace_distance,

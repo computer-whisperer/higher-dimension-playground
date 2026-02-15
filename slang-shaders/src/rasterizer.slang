@@ -516,6 +516,9 @@ float2 getZWAngleRange(WorkingData workingData)
 // Maximum ZW lines per pixel. With tile-based binning, each pixel only processes
 // tets overlapping its tile (~30-50), so 64 is rarely hit.
 static const uint MAX_ZW_LINES = 64;
+static const uint OVERLAY_MAX_ZW_LINES = 16;
+static const uint OVERLAY_ZW_SAMPLE_COUNT = 16;
+static const uint OVERLAY_RASTER_SCALE = 3;
 
 // Remove dead lines (textureId == 0) and compact the array
 uint condenseZWLines(inout ZWLine lines[MAX_ZW_LINES], uint numLines)
@@ -659,7 +662,12 @@ float4 renderZWLines2(inout ZWLine lines[MAX_ZW_LINES], uint numLines, WorkingDa
     // skip O(n^2) occlusion prepass and reduce hidden-dimension sampling.
     if (workingData.padding[0] != 0u)
     {
-        return renderZWLinesSimple(lines, numLines, workingData, 64u);
+        return renderZWLinesSimple(
+            lines,
+            min(numLines, OVERLAY_MAX_ZW_LINES),
+            workingData,
+            OVERLAY_ZW_SAMPLE_COUNT
+        );
     }
 
     // Stage 1: Remove completely occluded lines.
@@ -765,30 +773,77 @@ groupshared uint sharedTetIndices[MAX_TETS_PER_TILE];
 void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex)
 {
     WorkingData workingData = workingDataBuffer[0];
+    bool overlayMode = workingData.padding[0] != 0u;
+    uint2 overlayOrigin = overlayMode
+        ? uint2(dispatchParams.instanceBase, dispatchParams.tetrahedronCount)
+        : uint2(0, 0);
+    uint2 overlayExtent = overlayMode
+        ? uint2(dispatchParams.outputBase, dispatchParams.padding)
+        : workingData.renderDimensions.xy;
     // Combinations for iterating over tetrahedron faces
     static const uint3 COMBINATIONS_4_3[4] = {
         uint3(0, 1, 2), uint3(0, 1, 3), uint3(0, 2, 3), uint3(1, 2, 3)
     };
 
-    // Load tile tet list into shared memory
-    uint tilesX = (workingData.renderDimensions.x + 7) / 8;
-    uint tileIdx = groupId.y * tilesX + groupId.x;
+    // Load per-workgroup tetra list into shared memory.
+    // Overlay mode bypasses tile binning and just consumes the compact clipped list.
+    uint tetCount = 0;
+    if (overlayMode)
+    {
+        if (localIndex == 0)
+            sharedTetCount = min(atomicCounter[0], MAX_TETS_PER_TILE);
+        GroupMemoryBarrierWithGroupSync();
 
-    if (localIndex == 0)
-        sharedTetCount = min(tileTetCounts[tileIdx], MAX_TETS_PER_TILE);
-    GroupMemoryBarrierWithGroupSync();
+        tetCount = sharedTetCount;
+        for (uint loadIdx = localIndex; loadIdx < tetCount; loadIdx += 64)
+            sharedTetIndices[loadIdx] = loadIdx;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    else
+    {
+        uint tilesX = (workingData.renderDimensions.x + 7) / 8;
+        uint tileIdx = groupId.y * tilesX + groupId.x;
 
-    uint tetCount = sharedTetCount;
-    for (uint loadIdx = localIndex; loadIdx < tetCount; loadIdx += 64)
-        sharedTetIndices[loadIdx] = tileTetIndices[tileIdx * MAX_TETS_PER_TILE + loadIdx];
-    GroupMemoryBarrierWithGroupSync();
+        if (localIndex == 0)
+            sharedTetCount = min(tileTetCounts[tileIdx], MAX_TETS_PER_TILE);
+        GroupMemoryBarrierWithGroupSync();
+
+        tetCount = sharedTetCount;
+        for (uint loadIdx = localIndex; loadIdx < tetCount; loadIdx += 64)
+            sharedTetIndices[loadIdx] = tileTetIndices[tileIdx * MAX_TETS_PER_TILE + loadIdx];
+        GroupMemoryBarrierWithGroupSync();
+    }
 
     ZWLine currentZWLines[MAX_ZW_LINES];
     uint numZWLines = 0;
+    uint maxZWLines = overlayMode ? OVERLAY_MAX_ZW_LINES : MAX_ZW_LINES;
 
-    uint2 uPixelPos = globalId.xy;
-    if (uPixelPos.x >= workingData.renderDimensions.x || uPixelPos.y >= workingData.renderDimensions.y)
-        return;
+    uint2 uPixelPos;
+    uint2 overlayPixelBase = uint2(0, 0);
+    if (overlayMode)
+    {
+        uint2 overlayPixel = globalId.xy;
+        uint2 overlayWorkExtent = uint2(
+            (overlayExtent.x + OVERLAY_RASTER_SCALE - 1) / OVERLAY_RASTER_SCALE,
+            (overlayExtent.y + OVERLAY_RASTER_SCALE - 1) / OVERLAY_RASTER_SCALE
+        );
+        if (overlayPixel.x >= overlayWorkExtent.x || overlayPixel.y >= overlayWorkExtent.y)
+            return;
+        overlayPixelBase = overlayPixel * OVERLAY_RASTER_SCALE;
+        uint2 overlaySamplePixel = min(
+            overlayPixelBase + uint2(OVERLAY_RASTER_SCALE / 2, OVERLAY_RASTER_SCALE / 2),
+            overlayExtent - uint2(1, 1)
+        );
+        uPixelPos = overlayOrigin + overlaySamplePixel;
+        if (uPixelPos.x >= workingData.renderDimensions.x || uPixelPos.y >= workingData.renderDimensions.y)
+            return;
+    }
+    else
+    {
+        uPixelPos = globalId.xy;
+        if (uPixelPos.x >= workingData.renderDimensions.x || uPixelPos.y >= workingData.renderDimensions.y)
+            return;
+    }
 
     float2 pixelPos = float2(
         float(uPixelPos.x) / float(workingData.renderDimensions.x) * 2.0 - 1.0,
@@ -894,7 +949,7 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
             newLine.texturePositions[j] = texValue;
         }
 
-        if (numZWLines < MAX_ZW_LINES)
+        if (numZWLines < maxZWLines)
         {
             currentZWLines[numZWLines] = newLine;
             numZWLines++;
@@ -906,7 +961,7 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
             float newDepth = length(newLine.zwPositions[0]) + length(newLine.zwPositions[1]);
             float maxDepth = 0.0;
             uint maxIdx = 0;
-            for (uint k = 0; k < MAX_ZW_LINES; k++)
+            for (uint k = 0; k < maxZWLines; k++)
             {
                 float d = length(currentZWLines[k].zwPositions[0]) + length(currentZWLines[k].zwPositions[1]);
                 if (d > maxDepth) { maxDepth = d; maxIdx = k; }
@@ -916,32 +971,50 @@ void mainTetrahedronPixelCS(uint3 globalId : SV_DispatchThreadID, uint3 groupId 
         }
     }
 
-    uint pixelIndex = uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x;
-
     if (numZWLines > 0)
     {
         float4 overlayColor = renderZWLines2(currentZWLines, numZWLines, workingData);
 
-        if (workingData.padding[0] != 0u)
+        if (overlayMode)
         {
-            // VTE overlay mode: composite overlay over existing voxel scene.
-            // overlayColor.rgb is premultiplied by alpha (coverage fraction).
-            // Standard premultiplied alpha "over" operation:
-            //   result = overlay + background * (1 - overlay.alpha)
-            float4 background = pixelBuffer[pixelIndex];
-            pixelBuffer[pixelIndex] = float4(
-                overlayColor.rgb + background.rgb * (1.0 - overlayColor.a),
-                overlayColor.a + background.a * (1.0 - overlayColor.a)
-            );
+            // VTE overlay mode: shade at reduced resolution and stamp to a small block.
+            for (uint oy = 0; oy < OVERLAY_RASTER_SCALE; oy++)
+            {
+                uint localY = overlayPixelBase.y + oy;
+                if (localY >= overlayExtent.y)
+                    break;
+                uint dstY = overlayOrigin.y + localY;
+                if (dstY >= workingData.renderDimensions.y)
+                    continue;
+
+                for (uint ox = 0; ox < OVERLAY_RASTER_SCALE; ox++)
+                {
+                    uint localX = overlayPixelBase.x + ox;
+                    if (localX >= overlayExtent.x)
+                        break;
+                    uint dstX = overlayOrigin.x + localX;
+                    if (dstX >= workingData.renderDimensions.x)
+                        continue;
+
+                    uint dstIndex = dstY * workingData.renderDimensions.x + dstX;
+                    float4 background = pixelBuffer[dstIndex];
+                    pixelBuffer[dstIndex] = float4(
+                        overlayColor.rgb + background.rgb * (1.0 - overlayColor.a),
+                        overlayColor.a + background.a * (1.0 - overlayColor.a)
+                    );
+                }
+            }
         }
         else
         {
+            uint pixelIndex = uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x;
             pixelBuffer[pixelIndex] = overlayColor;
         }
     }
-    else if (workingData.padding[0] == 0u)
+    else if (!overlayMode)
     {
         // Legacy raster/ray paths expect uncovered pixels to be cleared each frame.
+        uint pixelIndex = uPixelPos.y * workingData.renderDimensions.x + uPixelPos.x;
         pixelBuffer[pixelIndex] = float4(0, 0, 0, 1.0);
     }
     // In VTE mode (padding[0] != 0), leave uncovered pixels untouched so

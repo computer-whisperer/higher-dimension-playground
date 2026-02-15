@@ -30,7 +30,7 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<WorkingData>(),
-            256,
+            336,
             "WorkingData size mismatch"
         );
         assert_eq!(std::mem::size_of::<MatN<5>>(), 100, "MatN<5> size mismatch");
@@ -91,6 +91,11 @@ mod tests {
         // Slang: focalLengthXY: offset=240, size=4
         // Slang: focalLengthZW: offset=244, size=4
         // Slang: padding: offset=248, size=8
+        // Slang: worldOrigin: offset=256, size=16
+        // Slang: worldDirX: offset=272, size=16
+        // Slang: worldDirY: offset=288, size=16
+        // Slang: worldDirZ: offset=304, size=16
+        // Slang: worldDirW: offset=320, size=16
         assert_eq!(std::mem::offset_of!(WorkingData, render_dimensions), 0);
         assert_eq!(std::mem::offset_of!(WorkingData, present_dimensions), 16);
         assert_eq!(std::mem::offset_of!(WorkingData, raytrace_seed), 24);
@@ -104,5 +109,10 @@ mod tests {
         assert_eq!(std::mem::offset_of!(WorkingData, focal_length_xy), 240);
         assert_eq!(std::mem::offset_of!(WorkingData, focal_length_zw), 244);
         assert_eq!(std::mem::offset_of!(WorkingData, padding), 248);
+        assert_eq!(std::mem::offset_of!(WorkingData, world_origin), 256);
+        assert_eq!(std::mem::offset_of!(WorkingData, world_dir_x), 272);
+        assert_eq!(std::mem::offset_of!(WorkingData, world_dir_y), 288);
+        assert_eq!(std::mem::offset_of!(WorkingData, world_dir_z), 304);
+        assert_eq!(std::mem::offset_of!(WorkingData, world_dir_w), 320);
     }
 }

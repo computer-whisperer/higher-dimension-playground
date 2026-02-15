@@ -2515,15 +2515,11 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
 
         const float PI = 3.14159265;
         float viewAngle = (PI / 2.0) / wd.focalLengthZW;
-        float4 viewOrigin = float4(0.0, 0.0, 0.0, 0.0);
-
-        VecN<5> origin5 = VecN<4>.fromFloat4(viewOrigin).extend(1.0);
-        VecN<5> worldOrigin5 = wd.viewMatrixInverse * origin5;
-        float4 worldOrigin = worldOrigin5.toFloat4();
-        float4 worldDirX = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(1.0, 0.0, 0.0, 0.0)).extend(0.0)).toFloat4();
-        float4 worldDirY = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(0.0, 1.0, 0.0, 0.0)).extend(0.0)).toFloat4();
-        float4 worldDirZ = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(0.0, 0.0, 1.0, 0.0)).extend(0.0)).toFloat4();
-        float4 worldDirW = (wd.viewMatrixInverse * VecN<4>.fromFloat4(float4(0.0, 0.0, 0.0, 1.0)).extend(0.0)).toFloat4();
+        float4 worldOrigin = wd.worldOrigin;
+        float4 worldDirX = wd.worldDirX;
+        float4 worldDirY = wd.worldDirY;
+        float4 worldDirZ = wd.worldDirZ;
+        float4 worldDirW = wd.worldDirW;
         float4 worldXY = worldDirX * sx + worldDirY * sy;
 
         float invLayerCount = 1.0 / float(layerCount);
@@ -2694,21 +2690,15 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     float zNorm = ((float(globalId.z) + 0.5) / float(max(1u, wd.renderDimensions.z))) * 2.0 - 1.0;
     float zwAngle = zNorm * (viewAngle * 0.5) + (PI * 0.25);
 
-    float4 viewOrigin = float4(0.0, 0.0, 0.0, 0.0);
-    float4 viewDirection = normalize(float4(
-        pixelPos.x / wd.focalLengthXY,
-        (-pixelPos.y / aspectRatio) / wd.focalLengthXY,
-        cos(zwAngle),
-        sin(zwAngle)
-    ));
-
-    VecN<5> origin5 = VecN<4>.fromFloat4(viewOrigin).extend(1.0);
-    VecN<5> dir5 = VecN<4>.fromFloat4(viewOrigin + viewDirection).extend(1.0);
-    VecN<5> worldOrigin5 = wd.viewMatrixInverse * origin5;
-    VecN<5> worldDir5 = wd.viewMatrixInverse * dir5;
-
-    float4 worldOrigin = worldOrigin5.toFloat4();
-    float4 worldDirection = normalize(worldDir5.toFloat4() - worldOrigin);
+    float sx = pixelPos.x / wd.focalLengthXY;
+    float sy = (-pixelPos.y / aspectRatio) / wd.focalLengthXY;
+    float4 worldOrigin = wd.worldOrigin;
+    float4 worldDirection = normalize(
+        wd.worldDirX * sx
+        + wd.worldDirY * sy
+        + wd.worldDirZ * cos(zwAngle)
+        + wd.worldDirW * sin(zwAngle)
+    );
 
     uint hitMaterial = 0;
     float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
