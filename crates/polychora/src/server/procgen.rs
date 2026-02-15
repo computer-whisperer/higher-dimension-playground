@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 const STRUCTURE_CELL_SIZE: i32 = 32;
 const STRUCTURE_CELL_JITTER: i32 = 10;
 const STRUCTURE_SPAWN_NUMERATOR: u64 = 1;
-const STRUCTURE_SPAWN_DENOMINATOR: u64 = 32;
+const STRUCTURE_SPAWN_DENOMINATOR: u64 = 48;
 const STRUCTURE_ORIGIN_EXCLUSION_RADIUS: i32 = 16;
 const STRUCTURE_HASH_SALT: u64 = 0x9f07_c9ab_33f2_3a11;
 const STRUCTURE_PICK_SALT: u64 = 0x2d99_1f4e_47ba_8c6d;
@@ -21,7 +21,7 @@ const ROTATION_VARIANTS: u64 = 48;
 const MAZE_CELL_SIZE: i32 = 128;
 const MAZE_CELL_JITTER: i32 = 20;
 const MAZE_SPAWN_NUMERATOR: u64 = 1;
-const MAZE_SPAWN_DENOMINATOR: u64 = 20;
+const MAZE_SPAWN_DENOMINATOR: u64 = 36;
 const MAZE_ORIGIN_EXCLUSION_RADIUS: i32 = 24;
 const MAZE_HASH_SALT: u64 = 0x6f1d_05ce_294a_719b;
 const MAZE_LAYOUT_SALT: u64 = 0x49ec_66d6_0d13_9e75;
@@ -520,7 +520,7 @@ static STRUCTURE_SET: OnceLock<StructureSet> = OnceLock::new();
 
 fn structure_set() -> &'static StructureSet {
     STRUCTURE_SET.get_or_init(|| {
-        let sources: [(&str, &[u8]); 18] = [
+        let sources: [(&str, &[u8]); 21] = [
             (
                 "cross_shrine.json",
                 &include_bytes!("../../assets/structures/cross_shrine.json")[..],
@@ -528,6 +528,10 @@ fn structure_set() -> &'static StructureSet {
             (
                 "hyper_arch.json",
                 &include_bytes!("../../assets/structures/hyper_arch.json")[..],
+            ),
+            (
+                "duoprism_exchange.json",
+                &include_bytes!("../../assets/structures/duoprism_exchange.json")[..],
             ),
             (
                 "tetra_spire.json",
@@ -584,6 +588,14 @@ fn structure_set() -> &'static StructureSet {
             (
                 "phase_ladder.json",
                 &include_bytes!("../../assets/structures/phase_ladder.json")[..],
+            ),
+            (
+                "phase_cloister.json",
+                &include_bytes!("../../assets/structures/phase_cloister.json")[..],
+            ),
+            (
+                "pentachord_spindle.json",
+                &include_bytes!("../../assets/structures/pentachord_spindle.json")[..],
             ),
             (
                 "orthoplex_nexus.json",

@@ -1,7 +1,7 @@
 {
   "name": "cathedral_spine",
   "description": "A long basilica-like hall with mossy side buttresses, a raised rib, and a tall wooden spine tower.",
-  "spawn_weight": 2,
+  "spawn_weight": 1,
   "ground_offset_y": 0,
   "fills": [
     { "min": [-7, 0, -2, -2], "size": [15, 1, 5, 5], "material": 11 },

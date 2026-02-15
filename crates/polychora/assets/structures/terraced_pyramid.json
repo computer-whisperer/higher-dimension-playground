@@ -1,7 +1,7 @@
 {
   "name": "terraced_pyramid",
   "description": "A stepped ceremonial mound built from layered exotic materials and crowned with a single light voxel.",
-  "spawn_weight": 3,
+  "spawn_weight": 2,
   "ground_offset_y": 0,
   "fills": [
     { "min": [-5, 0, -5, -5], "size": [11, 1, 11, 11], "material": 15 },
