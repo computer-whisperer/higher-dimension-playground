@@ -1193,10 +1193,12 @@ struct RemoteEntityState {
     scale: f32,
     material: u8,
     render_position: [f32; 4],
+    render_orientation: [f32; 4],
     last_received_at: Instant,
 }
 
 const REMOTE_ENTITY_POSITION_SMOOTH_HZ: f32 = 12.0;
+const REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ: f32 = 16.0;
 const REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE: f32 = 20.0;
 
 #[derive(Clone)]
@@ -2523,13 +2525,23 @@ impl App {
             return;
         }
         let pos_alpha = 1.0 - (-REMOTE_ENTITY_POSITION_SMOOTH_HZ * dt).exp();
+        let orientation_alpha = 1.0 - (-REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ * dt).exp();
         for entity in self.remote_entities.values_mut() {
             if distance4(entity.render_position, entity.position)
                 > REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE
             {
                 entity.render_position = entity.position;
+                entity.render_orientation = entity.orientation;
             } else {
                 entity.render_position = lerp4(entity.render_position, entity.position, pos_alpha);
+                entity.render_orientation = normalize4_with_fallback(
+                    lerp4(
+                        entity.render_orientation,
+                        entity.orientation,
+                        orientation_alpha,
+                    ),
+                    entity.orientation,
+                );
             }
         }
     }
@@ -2767,6 +2779,7 @@ impl App {
                         scale: entity.scale,
                         material: entity.material,
                         render_position: entity.position,
+                        render_orientation: entity.orientation,
                         last_received_at: received_at,
                     },
                 );
@@ -2794,6 +2807,7 @@ impl App {
                                 scale: entity.scale,
                                 material: entity.material,
                                 render_position: entity.position,
+                                render_orientation: entity.orientation,
                                 last_received_at: received_at,
                             },
                         );
@@ -2874,7 +2888,7 @@ impl App {
             if let Some(entity) = self.remote_entities.get(&entity_id) {
                 match entity.kind {
                     multiplayer::EntityKind::TestCube => {
-                        let basis = orthonormal_basis_from_forward(entity.orientation);
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         instances.push(build_centered_model_instance(
                             entity.render_position,
                             &basis,
