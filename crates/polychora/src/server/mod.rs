@@ -36,6 +36,13 @@ const CREEPER_EXPLOSION_RADIUS_VOXELS: i32 = 3;
 const CREEPER_EXPLOSION_IMPULSE_RADIUS: f32 = 7.0;
 const CREEPER_EXPLOSION_MAX_IMPULSE_DISTANCE: f32 = 5.0;
 const CREEPER_POUNCE_TARGET_BELOW_PLAYER_Y: f32 = 1.05;
+const MOB_HARD_WORLD_FLOOR_Y: f32 = -4.0;
+const MOB_COLLISION_RADIUS_SCALE: f32 = 0.42;
+const MOB_COLLISION_RADIUS_MIN: f32 = 0.20;
+const MOB_COLLISION_RADIUS_MAX: f32 = 0.55;
+const MOB_COLLISION_BINARY_STEPS: usize = 12;
+const MOB_COLLISION_PUSHUP_STEP: f32 = 0.05;
+const MOB_COLLISION_MAX_PUSHUP_STEPS: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -872,6 +879,142 @@ fn distance4_sq(a: [f32; 4], b: [f32; 4]) -> f32 {
     dx * dx + dy * dy + dz * dz + dw * dw
 }
 
+fn mob_collision_radius_for_scale(scale: f32) -> f32 {
+    let clamped_scale = if scale.is_finite() { scale } else { 0.5 };
+    (clamped_scale * MOB_COLLISION_RADIUS_SCALE)
+        .clamp(MOB_COLLISION_RADIUS_MIN, MOB_COLLISION_RADIUS_MAX)
+}
+
+fn sample_effective_voxel_for_collision(
+    state: &ServerState,
+    cache: &mut HashMap<ChunkPos, Option<voxel::Chunk>>,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    ww: i32,
+) -> VoxelType {
+    let (chunk_pos, voxel_index) = voxel::world_to_chunk(wx, wy, wz, ww);
+    if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
+        return override_chunk.voxels[voxel_index];
+    }
+    if !cache.contains_key(&chunk_pos) {
+        let effective_chunk = build_effective_l0_chunk_for_sampling(
+            state,
+            chunk_pos,
+            state.world_seed,
+            state.procgen_structures,
+        );
+        cache.insert(chunk_pos, effective_chunk);
+    }
+    cache
+        .get(&chunk_pos)
+        .and_then(|chunk| chunk.as_ref())
+        .map(|chunk| chunk.voxels[voxel_index])
+        .unwrap_or(VoxelType::AIR)
+}
+
+fn mob_collides_at(
+    state: &ServerState,
+    cache: &mut HashMap<ChunkPos, Option<voxel::Chunk>>,
+    position: [f32; 4],
+    radius: f32,
+) -> bool {
+    if position[1] - radius < MOB_HARD_WORLD_FLOOR_Y {
+        return true;
+    }
+
+    let min = [
+        position[0] - radius,
+        position[1] - radius,
+        position[2] - radius,
+        position[3] - radius,
+    ];
+    let max = [
+        position[0] + radius,
+        position[1] + radius,
+        position[2] + radius,
+        position[3] + radius,
+    ];
+    let max_epsilon = 1e-4f32;
+    let lo = [
+        min[0].floor() as i32,
+        min[1].floor() as i32,
+        min[2].floor() as i32,
+        min[3].floor() as i32,
+    ];
+    let hi = [
+        (max[0] - max_epsilon).floor() as i32,
+        (max[1] - max_epsilon).floor() as i32,
+        (max[2] - max_epsilon).floor() as i32,
+        (max[3] - max_epsilon).floor() as i32,
+    ];
+    if hi[0] < lo[0] || hi[1] < lo[1] || hi[2] < lo[2] || hi[3] < lo[3] {
+        return false;
+    }
+
+    for x in lo[0]..=hi[0] {
+        for y in lo[1]..=hi[1] {
+            for z in lo[2]..=hi[2] {
+                for w in lo[3]..=hi[3] {
+                    if sample_effective_voxel_for_collision(state, cache, x, y, z, w).is_solid() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn resolve_mob_collision(
+    state: &ServerState,
+    old_pos: [f32; 4],
+    attempted_pos: [f32; 4],
+    scale: f32,
+) -> [f32; 4] {
+    let radius = mob_collision_radius_for_scale(scale);
+    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let mut pos = old_pos;
+    if mob_collides_at(state, &mut cache, pos, radius) {
+        for _ in 0..MOB_COLLISION_MAX_PUSHUP_STEPS {
+            pos[1] += MOB_COLLISION_PUSHUP_STEP;
+            if !mob_collides_at(state, &mut cache, pos, radius) {
+                break;
+            }
+        }
+    }
+
+    for axis in [0usize, 2, 3, 1] {
+        let target = attempted_pos[axis];
+        if (target - pos[axis]).abs() <= 1e-6 {
+            continue;
+        }
+
+        let mut candidate = pos;
+        candidate[axis] = target;
+        if !mob_collides_at(state, &mut cache, candidate, radius) {
+            pos = candidate;
+            continue;
+        }
+
+        let mut feasible = pos[axis];
+        let mut blocked = target;
+        for _ in 0..MOB_COLLISION_BINARY_STEPS {
+            let mid = 0.5 * (feasible + blocked);
+            let mut probe = pos;
+            probe[axis] = mid;
+            if mob_collides_at(state, &mut cache, probe, radius) {
+                blocked = mid;
+            } else {
+                feasible = mid;
+            }
+        }
+        pos[axis] = feasible;
+    }
+
+    pos
+}
+
 fn simulate_seeker_step(
     mob: &MobState,
     position: [f32; 4],
@@ -1105,7 +1248,9 @@ fn simulate_mobs(
                 snapshot.last_update_ms,
             ),
         };
-        updates.push((mob.entity_id, next_position, next_forward));
+        let resolved_position =
+            resolve_mob_collision(state, snapshot.position, next_position, snapshot.scale);
+        updates.push((mob.entity_id, resolved_position, next_forward));
     }
 
     let mut persistent_motion = false;
