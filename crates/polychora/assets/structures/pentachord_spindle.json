@@ -1,0 +1,49 @@
+{
+  "name": "pentachord_spindle",
+  "description": "A tall five-stage spindle where each deck highlights a different axis pairing, so movement around it constantly recontextualizes the geometry.",
+  "spawn_weight": 2,
+  "ground_offset_y": 2,
+  "fills": [
+    { "min": [-2, -2, -2, -2], "size": [5, 1, 5, 5], "material": 61 },
+    { "min": [0, -2, 0, 0], "size": [1, 21, 1, 1], "material": 58 },
+
+    { "min": [-14, 0, 0, 0], "size": [29, 1, 1, 1], "material": 55 },
+    { "min": [0, 0, -14, 0], "size": [1, 1, 29, 1], "material": 55 },
+
+    { "min": [-14, 4, 0, 0], "size": [29, 1, 1, 1], "material": 56 },
+    { "min": [0, 4, 0, -14], "size": [1, 1, 1, 29], "material": 56 },
+
+    { "min": [0, 8, -14, 0], "size": [1, 1, 29, 1], "material": 57 },
+    { "min": [0, 8, 0, -14], "size": [1, 1, 1, 29], "material": 57 },
+
+    { "min": [-10, 12, -10, 0], "size": [21, 1, 1, 1], "material": 62 },
+    { "min": [-10, 12, 10, 0], "size": [21, 1, 1, 1], "material": 62 },
+    { "min": [-10, 12, -9, 0], "size": [1, 1, 19, 1], "material": 62 },
+    { "min": [10, 12, -9, 0], "size": [1, 1, 19, 1], "material": 62 },
+
+    { "min": [-10, 12, 0, -10], "size": [21, 1, 1, 1], "material": 60 },
+    { "min": [-10, 12, 0, 10], "size": [21, 1, 1, 1], "material": 60 },
+    { "min": [-10, 12, 0, -9], "size": [1, 1, 1, 19], "material": 60 },
+    { "min": [10, 12, 0, -9], "size": [1, 1, 1, 19], "material": 60 },
+
+    { "min": [-8, 16, 0, 0], "size": [17, 1, 1, 1], "material": 61 },
+    { "min": [0, 16, -8, 0], "size": [1, 1, 17, 1], "material": 61 },
+    { "min": [0, 16, 0, -8], "size": [1, 1, 1, 17], "material": 61 },
+
+    { "min": [-14, 1, 0, 0], "size": [1, 16, 1, 1], "material": 62 },
+    { "min": [14, 1, 0, 0], "size": [1, 16, 1, 1], "material": 62 },
+    { "min": [0, 5, -14, 0], "size": [1, 12, 1, 1], "material": 57 },
+    { "min": [0, 5, 14, 0], "size": [1, 12, 1, 1], "material": 57 },
+    { "min": [0, 9, 0, -14], "size": [1, 8, 1, 1], "material": 56 },
+    { "min": [0, 9, 0, 14], "size": [1, 8, 1, 1], "material": 56 }
+  ],
+  "voxels": [
+    { "offset": [0, 18, 0, 0], "material": 58 },
+    { "offset": [-14, 16, 0, 0], "material": 58 },
+    { "offset": [14, 16, 0, 0], "material": 58 },
+    { "offset": [0, 16, -8, 0], "material": 58 },
+    { "offset": [0, 16, 8, 0], "material": 58 },
+    { "offset": [0, 16, 0, -8], "material": 58 },
+    { "offset": [0, 16, 0, 8], "material": 58 }
+  ]
+}

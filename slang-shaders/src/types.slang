@@ -58,6 +58,11 @@ struct WorkingData
     float focalLengthXY;
     float focalLengthZW;
     uint padding[2];
+    float4 worldOrigin;
+    float4 worldDirX;
+    float4 worldDirY;
+    float4 worldDirZ;
+    float4 worldDirW;
 
     property uint64_t raytraceSeed
     {

@@ -6,7 +6,8 @@ use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_p
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
-    push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine, HUD_VERTEX_CAPACITY,
+    push_text_quads, text_width_px, HudResources, HudVertex, LineVertex, OverlayLine,
+    HUD_VERTEX_CAPACITY,
 };
 pub use self::vte::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VteDebugCounters, VTE_MAX_CHUNKS,
@@ -19,7 +20,7 @@ use glam::{Vec2, Vec4, Vec4Swizzles};
 use image::{ImageBuffer, Rgba};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -71,6 +72,25 @@ use vulkano::sync::PipelineStage;
 use vulkano::{sync, Validated, VulkanError};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
+
+const VTE_LOD_TINT_ENV: &str = "R4D_VTE_LOD_TINT";
+// Keep in sync with OVERLAY_RASTER_SCALE in `slang-shaders/src/rasterizer.slang`.
+const VTE_OVERLAY_RASTER_SCALE: u32 = 3;
+
+fn env_flag_enabled(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
+        }
+        Err(_) => false,
+    }
+}
+
+fn vte_lod_tint_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(VTE_LOD_TINT_ENV))
+}
 
 /// Collection of all shader modules loaded from Slang-compiled SPIR-V
 struct ShaderModules {
@@ -242,6 +262,8 @@ pub struct RenderOptions {
     pub render_backend: RenderBackend,
     pub vte_max_trace_steps: u32,
     pub vte_max_trace_distance: f32,
+    pub vte_lod_near_max_distance: f32,
+    pub vte_lod_mid_max_distance: f32,
     pub vte_display_mode: VteDisplayMode,
     pub vte_slice_layer: Option<u32>,
     pub vte_thick_half_width: u32,
@@ -267,6 +289,7 @@ pub struct RenderOptions {
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
     pub hud_player_tags: Vec<HudPlayerTag>,
+    pub waila_text: Option<String>,
     pub egui_paint: Option<EguiPaintData>,
 }
 
@@ -279,6 +302,8 @@ impl Default for RenderOptions {
             render_backend: RenderBackend::Auto,
             vte_max_trace_steps: 320,
             vte_max_trace_distance: 160.0,
+            vte_lod_near_max_distance: 48.0,
+            vte_lod_mid_max_distance: 112.0,
             vte_display_mode: VteDisplayMode::Integral,
             vte_slice_layer: None,
             vte_thick_half_width: 2,
@@ -304,6 +329,7 @@ impl Default for RenderOptions {
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
             hud_player_tags: Vec::new(),
+            waila_text: None,
             egui_paint: None,
         }
     }
@@ -341,7 +367,6 @@ struct FrameInFlight {
     pending_voxel_payload_slots: Vec<u32>,
     pending_voxel_payload_slot_set: HashSet<u32>,
     last_voxel_metadata_generation: Option<u64>,
-    last_non_voxel_scene_hash: u64,
 }
 
 struct EguiResources {
@@ -1659,7 +1684,7 @@ impl ComputePipelineContext {
     }
 }
 
-const PROFILER_MAX_TIMESTAMPS: u32 = 16;
+const PROFILER_MAX_TIMESTAMPS: u32 = 64;
 const PROFILER_REPORT_INTERVAL: usize = 100;
 const PROFILER_SLOW_FRAME_THRESHOLD_MS: f64 = 100.0;
 const PROFILER_SLOW_FRAME_REPORT_INTERVAL: usize = 60;
@@ -1677,6 +1702,17 @@ struct GpuProfiler {
     last_gpu_total_ms: f32,
     /// Last frame's per-phase breakdown (for HUD display)
     last_frame_phases: Vec<(&'static str, f32)>,
+    vte_frame_samples: usize,
+    vte_chunk_headers_sum: u64,
+    vte_visible_chunks_sum: u64,
+    vte_visible_lod0_sum: u64,
+    vte_visible_lod1_sum: u64,
+    vte_visible_lod2_sum: u64,
+    vte_y_slices_sum: u64,
+    vte_y_slice_lookup_entries_sum: u64,
+    raster_frame_samples: usize,
+    raster_tetrahedrons_sum: u64,
+    entity_tetrahedrons_sum: u64,
 }
 
 impl GpuProfiler {
@@ -1692,6 +1728,17 @@ impl GpuProfiler {
             last_slow_report_frame: None,
             last_gpu_total_ms: 0.0,
             last_frame_phases: Vec::new(),
+            vte_frame_samples: 0,
+            vte_chunk_headers_sum: 0,
+            vte_visible_chunks_sum: 0,
+            vte_visible_lod0_sum: 0,
+            vte_visible_lod1_sum: 0,
+            vte_visible_lod2_sum: 0,
+            vte_y_slices_sum: 0,
+            vte_y_slice_lookup_entries_sum: 0,
+            raster_frame_samples: 0,
+            raster_tetrahedrons_sum: 0,
+            entity_tetrahedrons_sum: 0,
         }
     }
 
@@ -1779,27 +1826,119 @@ impl GpuProfiler {
         }
     }
 
+    fn record_scene_stats(
+        &mut self,
+        is_vte: bool,
+        vte_chunk_headers: usize,
+        vte_visible_chunks: usize,
+        vte_visible_lod_counts: [u32; 3],
+        vte_y_slices: usize,
+        vte_y_slice_lookup_entries: usize,
+        raster_tetrahedrons: usize,
+        entity_tetrahedrons: usize,
+    ) {
+        if is_vte {
+            self.vte_frame_samples = self.vte_frame_samples.saturating_add(1);
+            self.vte_chunk_headers_sum = self
+                .vte_chunk_headers_sum
+                .saturating_add(vte_chunk_headers as u64);
+            self.vte_visible_chunks_sum = self
+                .vte_visible_chunks_sum
+                .saturating_add(vte_visible_chunks as u64);
+            self.vte_visible_lod0_sum = self
+                .vte_visible_lod0_sum
+                .saturating_add(vte_visible_lod_counts[0] as u64);
+            self.vte_visible_lod1_sum = self
+                .vte_visible_lod1_sum
+                .saturating_add(vte_visible_lod_counts[1] as u64);
+            self.vte_visible_lod2_sum = self
+                .vte_visible_lod2_sum
+                .saturating_add(vte_visible_lod_counts[2] as u64);
+            self.vte_y_slices_sum = self.vte_y_slices_sum.saturating_add(vte_y_slices as u64);
+            self.vte_y_slice_lookup_entries_sum = self
+                .vte_y_slice_lookup_entries_sum
+                .saturating_add(vte_y_slice_lookup_entries as u64);
+        }
+
+        self.raster_frame_samples = self.raster_frame_samples.saturating_add(1);
+        self.raster_tetrahedrons_sum = self
+            .raster_tetrahedrons_sum
+            .saturating_add(raster_tetrahedrons as u64);
+        self.entity_tetrahedrons_sum = self
+            .entity_tetrahedrons_sum
+            .saturating_add(entity_tetrahedrons as u64);
+    }
+
     fn print_report(&mut self) {
         println!("=== GPU Profile ({} frames) ===", self.total_frames);
 
-        let mut total_avg = 0.0f64;
-        for (name, total_ms, count) in &self.accum {
-            if *count > 0 {
-                let avg = total_ms / *count as f64;
-                total_avg += avg;
-                println!("  {}: {:.3} ms (avg over {} samples)", name, avg, count);
-            }
+        let mut rows: Vec<(&'static str, f64, usize)> = self
+            .accum
+            .iter()
+            .filter_map(|(name, total_ms, count)| {
+                if *count == 0 {
+                    None
+                } else {
+                    Some((*name, total_ms / *count as f64, *count))
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let total_avg: f64 = rows.iter().map(|(_, avg, _)| *avg).sum();
+        for (name, avg, count) in rows {
+            let pct = if total_avg > 0.0 {
+                (avg / total_avg) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "  {}: {:.3} ms ({:.1}%) (avg over {} samples)",
+                name, avg, pct, count
+            );
         }
         println!(
             "  Total avg: {:.3} ms ({:.0} FPS)",
             total_avg,
             1000.0 / total_avg.max(0.001)
         );
+        if self.vte_frame_samples > 0 {
+            let s = self.vte_frame_samples as f64;
+            println!(
+                "  VTE avg chunks: headers {:.1} visible {:.1} (L0 {:.1} / L1 {:.1} / L2 {:.1}) y_slices {:.1} y_lookup {:.1}",
+                self.vte_chunk_headers_sum as f64 / s,
+                self.vte_visible_chunks_sum as f64 / s,
+                self.vte_visible_lod0_sum as f64 / s,
+                self.vte_visible_lod1_sum as f64 / s,
+                self.vte_visible_lod2_sum as f64 / s,
+                self.vte_y_slices_sum as f64 / s,
+                self.vte_y_slice_lookup_entries_sum as f64 / s,
+            );
+        }
+        if self.raster_frame_samples > 0 {
+            let s = self.raster_frame_samples as f64;
+            println!(
+                "  Tetra avg: raster_tets {:.1} entity_tets {:.1}",
+                self.raster_tetrahedrons_sum as f64 / s,
+                self.entity_tetrahedrons_sum as f64 / s,
+            );
+        }
 
         println!("================================");
 
         // Reset accumulators
         self.accum.clear();
+        self.vte_frame_samples = 0;
+        self.vte_chunk_headers_sum = 0;
+        self.vte_visible_chunks_sum = 0;
+        self.vte_visible_lod0_sum = 0;
+        self.vte_visible_lod1_sum = 0;
+        self.vte_visible_lod2_sum = 0;
+        self.vte_y_slices_sum = 0;
+        self.vte_y_slice_lookup_entries_sum = 0;
+        self.raster_frame_samples = 0;
+        self.raster_tetrahedrons_sum = 0;
+        self.entity_tetrahedrons_sum = 0;
     }
 }
 
@@ -1964,6 +2103,7 @@ pub struct RenderContext {
     memory_allocator: Arc<StandardMemoryAllocator>,
     frames_rendered: usize,
     bvh_scene_hash: u64,
+    vte_non_voxel_scene_hash: u64,
     last_clipped_tet_count: u32,
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
@@ -2550,7 +2690,6 @@ impl RenderContext {
                 pending_voxel_payload_slots: Vec::new(),
                 pending_voxel_payload_slot_set: HashSet::new(),
                 last_voxel_metadata_generation: None,
-                last_non_voxel_scene_hash: 0,
             });
         }
 
@@ -2572,6 +2711,7 @@ impl RenderContext {
             cpu_screen_capture_buffer,
             frames_rendered: 0,
             bvh_scene_hash: 0,
+            vte_non_voxel_scene_hash: 0,
             last_clipped_tet_count: 0,
             profiler,
             hud_font,
@@ -2733,6 +2873,25 @@ impl RenderContext {
         }
     }
 
+    /// Screen-space raster region for VTE overlay tetra pass (held block preview).
+    /// Keeping this bounded avoids full-frame tet pixel traversal for a tiny HUD element.
+    fn vte_overlay_raster_region(&self) -> [u32; 4] {
+        let render_w = self.sized_buffers.render_dimensions[0].max(1);
+        let render_h = self.sized_buffers.render_dimensions[1].max(1);
+
+        let side = ((render_w.min(render_h) as f32) * 0.28).round() as u32;
+        let side = side.clamp(208, 360).min(render_w).min(render_h);
+        let width = side;
+        let height = side;
+        let margin_x = (render_w / 64).clamp(8, 24);
+        let margin_y = (render_h / 64).clamp(8, 24);
+
+        let origin_x = render_w.saturating_sub(width + margin_x);
+        let origin_y = render_h.saturating_sub(height + margin_y);
+
+        [origin_x, origin_y, width.max(1), height.max(1)]
+    }
+
     fn refresh_egui_descriptor_sets(&mut self) {
         let Some(present_ctx) = self.present_pipeline.as_ref() else {
             return;
@@ -2780,8 +2939,8 @@ impl RenderContext {
         let sampler = Sampler::new(
             queue.device().clone(),
             SamplerCreateInfo {
-                mag_filter: Filter::Linear,
-                min_filter: Filter::Linear,
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
                 address_mode: [SamplerAddressMode::ClampToEdge; 3],
                 ..Default::default()
             },
@@ -3004,6 +3163,7 @@ impl RenderContext {
         target_hit_voxel: Option<[i32; 4]>,
         target_hit_face: Option<[i32; 4]>,
         player_tags: &[HudPlayerTag],
+        waila_text: Option<&str>,
     ) -> (usize, usize) {
         let max_lines = LINE_VERTEX_CAPACITY / 2;
         if base_line_count >= max_lines {
@@ -4133,6 +4293,61 @@ impl RenderContext {
             crosshair_outline,
         );
 
+        // WAILA: show targeted block name in a styled box at the top center of the screen
+        if let Some(name) = waila_text {
+            if let Some(hud_res) = self.hud_resources.as_ref() {
+                let waila_size = 16.0 * hud_scale;
+                let waila_color = Vec4::new(0.95, 0.95, 0.95, 0.85);
+                let tw = text_width_px(&hud_res.font_atlas, name, waila_size);
+
+                // Position at top center of screen
+                let center_x = present_w * 0.5;
+                let padding_h = 8.0 * hud_scale;
+                let padding_v = 4.0 * hud_scale;
+
+                // Y-up coordinate system: Y=0 is bottom, Y=present_h is top
+                // Place box 40px from top edge
+                let box_top_y = present_h - 40.0 * hud_scale;
+
+                // Calculate text height (approximate based on font size)
+                let text_height = waila_size;
+                let box_height = text_height + padding_v * 2.0;
+                let box_width = tw + padding_h * 2.0;
+
+                // Box positioning in pixels (Y-up)
+                let box_min_x = center_x - box_width * 0.5;
+                let box_max_x = center_x + box_width * 0.5;
+                let box_min_y = box_top_y - box_height;
+                let box_max_y = box_top_y;
+
+                // Convert to NDC for background rect
+                let box_min_ndc = pixels_to_ndc(Vec2::new(box_min_x, box_min_y), present_size);
+                let box_max_ndc = pixels_to_ndc(Vec2::new(box_max_x, box_max_y), present_size);
+
+                // Draw dark semi-transparent background
+                let bg_color = Vec4::new(0.1, 0.1, 0.15, 0.7);
+                push_filled_rect_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    box_min_ndc,
+                    box_max_ndc,
+                    bg_color,
+                );
+
+                // Draw text centered in the box
+                let text_top_left_px = Vec2::new(center_x - tw * 0.5, box_max_y - padding_v);
+                push_text_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    name,
+                    text_top_left_px,
+                    waila_size,
+                    waila_color,
+                    present_size,
+                );
+            }
+        }
+
         // Write line data to GPU buffer
         let lines_to_write = lines.len().min(max_lines - base_line_count);
         if lines_to_write > 0 {
@@ -4249,6 +4464,10 @@ impl RenderContext {
         self.profiler.last_gpu_total_ms = 0.0;
         self.profiler.last_slow_report_frame = None;
         self.drop_next_profile_sample = true;
+    }
+
+    pub fn last_gpu_frame_ms(&self) -> f32 {
+        self.profiler.last_gpu_total_ms
     }
 
     fn wait_for_all_frames(&mut self) {
@@ -4609,6 +4828,23 @@ impl RenderContext {
             }
         }
         {
+            let world_origin_h =
+                mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
+            let world_origin_inv_w = if world_origin_h[4].abs() > 1e-6 {
+                1.0 / world_origin_h[4]
+            } else {
+                1.0
+            };
+            let world_origin = glam::Vec4::new(
+                world_origin_h[0] * world_origin_inv_w,
+                world_origin_h[1] * world_origin_inv_w,
+                world_origin_h[2] * world_origin_inv_w,
+                world_origin_h[3] * world_origin_inv_w,
+            );
+            let world_dir_x_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [1.0, 0.0, 0.0, 0.0, 0.0]);
+            let world_dir_y_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 1.0, 0.0, 0.0, 0.0]);
+            let world_dir_z_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 1.0, 0.0, 0.0]);
+            let world_dir_w_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 1.0, 0.0]);
             let mut writer = self.frames_in_flight[frame_idx]
                 .live_buffers
                 .working_data_buffer
@@ -4644,6 +4880,31 @@ impl RenderContext {
                 u32::from(voxel_input.is_some()),
                 render_options.vte_display_mode.as_u32(),
             ];
+            writer.world_origin = world_origin;
+            writer.world_dir_x = glam::Vec4::new(
+                world_dir_x_h[0],
+                world_dir_x_h[1],
+                world_dir_x_h[2],
+                world_dir_x_h[3],
+            );
+            writer.world_dir_y = glam::Vec4::new(
+                world_dir_y_h[0],
+                world_dir_y_h[1],
+                world_dir_y_h[2],
+                world_dir_y_h[3],
+            );
+            writer.world_dir_z = glam::Vec4::new(
+                world_dir_z_h[0],
+                world_dir_z_h[1],
+                world_dir_z_h[2],
+                world_dir_z_h[3],
+            );
+            writer.world_dir_w = glam::Vec4::new(
+                world_dir_w_h[0],
+                world_dir_w_h[1],
+                world_dir_w_h[2],
+                world_dir_w_h[3],
+            );
         }
 
         // Compute non-voxel scene hash BEFORE writing to the GPU buffer so the
@@ -4685,6 +4946,7 @@ impl RenderContext {
         let mut vte_macro_word_count: usize = 0;
         let mut vte_y_slice_count: usize = 0;
         let mut vte_y_slice_lookup_entry_count: usize = 0;
+        let mut vte_visible_lod_counts = [0u32; 3];
         let mut vte_visible_chunk_min = [i32::MAX; 4];
         let mut vte_visible_chunk_max = [i32::MIN; 4];
         if let Some(input) = voxel_input {
@@ -4782,7 +5044,13 @@ impl RenderContext {
                         let chunk_index = input.visible_chunk_indices[i]
                             .min(vte_chunk_count.saturating_sub(1) as u32);
                         writer[i] = chunk_index;
-                        let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                        let header = &input.chunk_headers[chunk_index as usize];
+                        let chunk_coord = header.chunk_coord;
+                        if let Some(slot) =
+                            vte_visible_lod_counts.get_mut(header.lod_level as usize)
+                        {
+                            *slot = slot.saturating_add(1);
+                        }
                         for axis in 0..4 {
                             vte_visible_chunk_min[axis] =
                                 vte_visible_chunk_min[axis].min(chunk_coord[axis]);
@@ -4809,8 +5077,10 @@ impl RenderContext {
                             let chunk_index = input.visible_chunk_indices[i]
                                 .min(vte_chunk_count.saturating_sub(1) as u32);
                             let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                            let lod_level = input.chunk_headers[chunk_index as usize].lod_level;
                             let mut slot =
-                                (vte::vte_hash_chunk_coord(chunk_coord) & hash_mask) as usize;
+                                (vte::vte_hash_chunk_coord_with_lod(chunk_coord, lod_level)
+                                    & hash_mask) as usize;
 
                             for _ in 0..vte_chunk_lookup_capacity {
                                 let entry = &mut writer[slot];
@@ -4820,7 +5090,8 @@ impl RenderContext {
                                     *entry = vte::GpuVoxelChunkLookupEntry {
                                         chunk_coord,
                                         chunk_index,
-                                        _padding: [0; 3],
+                                        lod_level,
+                                        _padding: [0; 2],
                                     };
                                     break;
                                 }
@@ -4835,7 +5106,11 @@ impl RenderContext {
                 for i in 0..vte_visible_chunk_count {
                     let chunk_index = input.visible_chunk_indices[i]
                         .min(vte_chunk_count.saturating_sub(1) as u32);
-                    let chunk_coord = input.chunk_headers[chunk_index as usize].chunk_coord;
+                    let header = &input.chunk_headers[chunk_index as usize];
+                    let chunk_coord = header.chunk_coord;
+                    if let Some(slot) = vte_visible_lod_counts.get_mut(header.lod_level as usize) {
+                        *slot = slot.saturating_add(1);
+                    }
                     for axis in 0..4 {
                         vte_visible_chunk_min[axis] =
                             vte_visible_chunk_min[axis].min(chunk_coord[axis]);
@@ -4894,6 +5169,15 @@ impl RenderContext {
             } else {
                 0.0
             };
+            let max_trace_distance = render_options.vte_max_trace_distance.max(1.0);
+            let lod_near_max_distance = render_options
+                .vte_lod_near_max_distance
+                .max(1.0)
+                .min(max_trace_distance);
+            let lod_mid_max_distance = render_options
+                .vte_lod_mid_max_distance
+                .max(lod_near_max_distance)
+                .min(max_trace_distance);
             *writer = vte::GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 visible_chunk_count: vte_visible_chunk_count as u32,
@@ -4901,7 +5185,9 @@ impl RenderContext {
                 material_word_count: vte_material_word_count as u32,
                 macro_word_count: vte_macro_word_count as u32,
                 max_trace_steps: render_options.vte_max_trace_steps.max(1),
-                max_trace_distance: render_options.vte_max_trace_distance.max(1.0),
+                max_trace_distance,
+                lod_near_max_distance,
+                lod_mid_max_distance,
                 chunk_lookup_capacity: vte_chunk_lookup_capacity as u32,
                 y_slice_count: vte_y_slice_count as u32,
                 y_slice_lookup_entry_count: vte_y_slice_lookup_entry_count as u32,
@@ -4921,6 +5207,9 @@ impl RenderContext {
                     }
                     if render_options.vte_y_slice_lookup_cache {
                         flags |= vte::VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
+                    }
+                    if vte_lod_tint_enabled() {
+                        flags |= vte::VTE_DEBUG_FLAG_LOD_TINT;
                     }
                     flags
                 },
@@ -5071,7 +5360,10 @@ impl RenderContext {
                         let Some(header) = input.chunk_headers.get(chunk_index as usize) else {
                             continue;
                         };
-                        let h = vte::vte_hash_chunk_coord(header.chunk_coord);
+                        let h = vte::vte_hash_chunk_coord_with_lod(
+                            header.chunk_coord,
+                            header.lod_level,
+                        );
                         hash ^= h;
                         hash = hash.wrapping_mul(0x0100_0193);
                     }
@@ -5109,7 +5401,7 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, lod_near={:.1}, lod_mid={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, lod_tint={}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
@@ -5117,6 +5409,8 @@ impl RenderContext {
                     payload_updates_applied,
                     render_options.vte_max_trace_steps.max(1),
                     render_options.vte_max_trace_distance.max(1.0),
+                    render_options.vte_lod_near_max_distance,
+                    render_options.vte_lod_mid_max_distance,
                     render_options.vte_display_mode.label(),
                     render_options.vte_slice_layer,
                     render_options.vte_thick_half_width,
@@ -5124,6 +5418,7 @@ impl RenderContext {
                     render_options.vte_reference_mismatch_only,
                     render_options.vte_compare_slice_only,
                     render_options.vte_y_slice_lookup_cache,
+                    vte_lod_tint_enabled(),
                     storage_layers,
                     logical_layers,
                 );
@@ -5132,14 +5427,22 @@ impl RenderContext {
         } else {
             // Non-VTE passes reuse the same tetra/BVH buffers for other pipelines.
             // Force non-voxel reprovisioning when VTE is re-enabled.
-            for fif in &mut self.frames_in_flight {
-                fif.last_non_voxel_scene_hash = 0;
-            }
+            self.vte_non_voxel_scene_hash = 0;
             self.clear_vte_compare_diagnostics();
         }
 
         let reduced_storage_supported =
             do_voxel_vte && render_options.vte_display_mode == VteDisplayMode::Integral;
+        self.profiler.record_scene_stats(
+            do_voxel_vte,
+            vte_chunk_count,
+            vte_visible_chunk_count,
+            vte_visible_lod_counts,
+            vte_y_slice_count,
+            vte_y_slice_lookup_entry_count,
+            raster_tetrahedron_count,
+            total_tetrahedron_count,
+        );
         if storage_layers < logical_layers && !reduced_storage_supported {
             panic!(
                 "pixel storage layers ({storage_layers}) are less than logical render layers ({logical_layers}); \
@@ -5241,10 +5544,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             if do_voxel_vte {
                 let non_voxel_tetrahedron_count = total_tetrahedron_count;
                 if non_voxel_tetrahedron_count == 0 {
-                    self.frames_in_flight[frame_idx].last_non_voxel_scene_hash = 0;
+                    self.vte_non_voxel_scene_hash = 0;
                 } else {
-                    let non_voxel_rebuild_needed = non_voxel_scene_hash
-                        != self.frames_in_flight[frame_idx].last_non_voxel_scene_hash;
+                    let non_voxel_rebuild_needed =
+                        non_voxel_scene_hash != self.vte_non_voxel_scene_hash;
                     if non_voxel_rebuild_needed {
                         // Preprocess tetra non-voxel instances into world-space tetrahedra.
                         let vte_preprocess_push_data: [u32; 4] =
@@ -5411,13 +5714,23 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             }
                         }
 
-                        self.frames_in_flight[frame_idx].last_non_voxel_scene_hash =
-                            non_voxel_scene_hash;
+                        self.vte_non_voxel_scene_hash = non_voxel_scene_hash;
                     }
                 }
 
                 let fuse_integral_in_stage_a =
                     render_options.vte_display_mode == VteDisplayMode::Integral;
+                {
+                    let q = self.profiler.next_query_index("vte_stage_a_setup");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
                 builder
                     .bind_pipeline_compute(
                         self.compute_pipeline.voxel_trace_stage_a_pipeline.clone(),
@@ -5448,6 +5761,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 }
 
                 if !fuse_integral_in_stage_a {
+                    {
+                        let q = self.profiler.next_query_index("vte_stage_b_setup");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
                     builder
                         .bind_pipeline_compute(
                             self.compute_pipeline.voxel_display_stage_b_pipeline.clone(),
@@ -5514,6 +5838,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 builder
                     .fill_buffer(self.sized_buffers.atomic_counter_buffer.clone(), 0u32)
                     .unwrap();
+                {
+                    let q = self.profiler.next_query_index("tet_counter_clear");
+                    unsafe {
+                        builder.write_timestamp(
+                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                            q,
+                            PipelineStage::AllCommands,
+                        )
+                    }
+                    .unwrap();
+                }
 
                 builder
                     .push_constants(
@@ -5554,28 +5889,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .clone(),
                     ))
                     .unwrap();
-
-                if do_tetrahedron_edges {
-                    line_render_count = raster_preprocess_tetrahedron_count * 6;
-                }
-            }
-
-            if do_raster {
-                // Zero tile counts
-                builder
-                    .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
-                    .unwrap();
-
-                // Bin tetrahedra into tiles
-                builder
-                    .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
-                    .unwrap();
-                unsafe {
-                    builder.dispatch([(self.sized_buffers.max_tetrahedrons as u32 + 63) / 64, 1, 1])
-                }
-                .unwrap();
                 {
-                    let q = self.profiler.next_query_index("tet_bin");
+                    let q = self.profiler.next_query_index("tet_counter_copy");
                     unsafe {
                         builder.write_timestamp(
                             self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -5586,18 +5901,92 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 }
 
+                if do_tetrahedron_edges {
+                    line_render_count = raster_preprocess_tetrahedron_count * 6;
+                }
+            }
+
+            if do_raster {
+                if !do_voxel_vte {
+                    // Zero tile counts
+                    builder
+                        .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
+                        .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("tet_bin_clear");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
+
+                    // Bin tetrahedra into tiles
+                    builder
+                        .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
+                        .unwrap();
+                    unsafe {
+                        builder.dispatch([
+                            (self.sized_buffers.max_tetrahedrons as u32 + 63) / 64,
+                            1,
+                            1,
+                        ])
+                    }
+                    .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("tet_bin");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
+                }
+
                 // Tetrahedron pixel raster (tile-based)
                 builder
                     .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone())
                     .unwrap();
-                unsafe {
-                    builder.dispatch([
-                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
-                        1,
-                    ])
-                }
-                .unwrap();
+                let (raster_dispatch_push, raster_dispatch_dims) = if do_voxel_vte {
+                    let region = self.vte_overlay_raster_region();
+                    let overlay_work_w =
+                        (region[2] + VTE_OVERLAY_RASTER_SCALE - 1) / VTE_OVERLAY_RASTER_SCALE;
+                    let overlay_work_h =
+                        (region[3] + VTE_OVERLAY_RASTER_SCALE - 1) / VTE_OVERLAY_RASTER_SCALE;
+                    if self.frames_rendered == 0 {
+                        println!(
+                            "VTE overlay raster region: origin=({}, {}) size={}x{} (work {}x{} @{}x upsample)",
+                            region[0], region[1], region[2], region[3], overlay_work_w, overlay_work_h, VTE_OVERLAY_RASTER_SCALE
+                        );
+                    }
+                    (
+                        region,
+                        [(overlay_work_w + 7) / 8, (overlay_work_h + 7) / 8, 1],
+                    )
+                } else {
+                    (
+                        [0, 0, 0, 0],
+                        [
+                            (self.sized_buffers.render_dimensions[0] + 7) / 8,
+                            (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                            1,
+                        ],
+                    )
+                };
+                builder
+                    .push_constants(
+                        self.compute_pipeline.pipeline_layout.clone(),
+                        0,
+                        raster_dispatch_push,
+                    )
+                    .unwrap();
+                unsafe { builder.dispatch(raster_dispatch_dims) }.unwrap();
                 {
                     let q = self.profiler.next_query_index("tet_raster");
                     unsafe {
@@ -5918,6 +6307,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 render_options.hud_target_hit_voxel,
                 render_options.hud_target_hit_face,
                 &render_options.hud_player_tags,
+                render_options.waila_text.as_deref(),
             );
             line_render_count += hud_line_count;
             hud_vertex_count = hud_quad_count;
@@ -5990,6 +6380,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             ],
                         )
                         .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("present_begin");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
 
                     // Render from compute shader buffer
                     {
@@ -5998,6 +6399,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .unwrap();
                         unsafe { builder.draw(6, 1, 0, 0) }.unwrap();
                     }
+                    {
+                        let q = self.profiler.next_query_index("present_buffer");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
 
                     // Render the edge lines
                     if line_render_count > 0 {
@@ -6005,6 +6417,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .bind_pipeline_graphics(present_pipeline.line_pipeline.clone())
                             .unwrap();
                         unsafe { builder.draw(line_render_count as u32 * 2, 1, 0, 0) }.unwrap();
+                    }
+                    {
+                        let q = self.profiler.next_query_index("present_lines");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
                     }
 
                     // Render HUD quads (text + panels, alpha-blended on top)
@@ -6053,6 +6476,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             unsafe { builder.draw(batch.vertex_count, 1, 0, 0) }.unwrap();
                         }
                     }
+                    {
+                        let q = self.profiler.next_query_index("present_hud");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
 
                     // End render pass
                     builder
@@ -6060,6 +6494,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         // have called `next_subpass` to jump to the next subpass.
                         .end_render_pass(Default::default())
                         .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("present_end");
+                        unsafe {
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
+                        }
+                        .unwrap();
+                    }
                     if render_options.take_framebuffer_screenshot {
                         builder
                             .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
@@ -6069,6 +6514,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 self.cpu_screen_capture_buffer.clone(),
                             ))
                             .unwrap();
+                        {
+                            let q = self.profiler.next_query_index("present_screenshot_copy");
+                            unsafe {
+                                builder.write_timestamp(
+                                    self.frames_in_flight[frame_idx].query_pool.clone(),
+                                    q,
+                                    PipelineStage::AllCommands,
+                                )
+                            }
+                            .unwrap();
+                        }
                     }
                 }
             }
@@ -6081,6 +6537,17 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     self.sized_buffers.output_cpu_pixel_buffer.clone(),
                 ))
                 .unwrap();
+            {
+                let q = self.profiler.next_query_index("render_screenshot_copy");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
         }
 
         // Final frame marker so profiling includes graphics/present-tail work
@@ -6333,16 +6800,19 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 );
                                 if self.last_backend == RenderBackend::VoxelTraversal {
                                     println!(
-                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} reference_compare={} mismatch_only={} compare_slice_only={} yslice_fastpath=true chunk_solid_clip=true yslice_lookup_cache={}",
+                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} lod_near={:.1} lod_mid={:.1} reference_compare={} mismatch_only={} compare_slice_only={} yslice_fastpath=true chunk_solid_clip=true yslice_lookup_cache={} lod_tint={}",
                                         render_options.vte_display_mode.label(),
                                         render_options.vte_slice_layer,
                                         render_options.vte_thick_half_width,
                                         render_options.vte_max_trace_steps,
                                         render_options.vte_max_trace_distance,
+                                        render_options.vte_lod_near_max_distance,
+                                        render_options.vte_lod_mid_max_distance,
                                         render_options.vte_reference_compare,
                                         render_options.vte_reference_mismatch_only,
                                         render_options.vte_compare_slice_only,
                                         render_options.vte_y_slice_lookup_cache,
+                                        vte_lod_tint_enabled(),
                                     );
                                     if self.vte_compare_stats.compared > 0
                                         || self.vte_compare_stats.mismatches > 0

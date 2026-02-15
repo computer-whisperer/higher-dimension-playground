@@ -162,23 +162,25 @@ The default scene includes:
 | Input | Action |
 |-------|--------|
 | W/A/S/D | Move forward/left/back/right |
-| Mouse | Look around (`LOOK-TR` default: transport yaw/pitch) |
-| Space/Shift | Move up/down (Y axis) |
-| Q/E | Hidden-dimension strafe (friendly side axis in `UPRIGHT`) |
-| Mouse Back | Hold for XW turning (`UPRIGHT`/`LEG-SIDE`: XW/ZW) |
-| Mouse Back+Forward | Legacy only: double rotation (XZ yaw + YW) |
-| Middle click | Pick pointed block's material |
-| Scroll wheel | Cycle block material (`LEG-SCRL` keeps legacy rotation-pair cycling) |
-| Tab | Cycle control scheme (`LOOK-TR` -> `ROTOR` -> `LEG-SIDE` -> `LEG-SCRL` -> `UPRIGHT`) |
-| Hold R | Pull orientation toward canonical +X home pose |
-| Hold F | Pull orientation toward nearest 3D-native pose |
+| Mouse | Look around |
+| Space | Jump (double-tap to toggle fly mode) |
+| Shift | Descend / Crouch |
+| Q/E | Move in 4D (W-axis negative/positive) |
+| Hold R | Reset orientation |
+| Hold F | Pull to 3D |
+| G | Look at nearest block |
+| Left Click | Break block |
+| Right Click | Place block |
+| Middle Click | Pick pointed block's material |
+| Scroll Wheel | Cycle hotbar slot |
+| [ / ] | Previous / Next material |
+| 1-9, 0 | Select hotbar slot |
+| Tab / I | Toggle inventory |
+| T | Toggle teleport dialog |
+| Escape | Open / close menu |
 | F5 / F9 | Save/load world (`--world-file`) |
 | F12 | Screenshot |
-| Escape | Toggle pause menu / mouse capture |
-| Up/Down + Left/Right + Enter | Navigate and tune pause-menu actions |
-| Click | Re-grab mouse |
-| Double-tap Space | Toggle fly/gravity mode |
-| Double-tap W | Start sprint (auto-cancels when stopping) |
+| Click | Re-grab mouse (when menu is open) |
 
 ### Game Options
 

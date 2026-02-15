@@ -4,8 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - main
   pull_request:
+
+env:
+  SLANG_VERSION: "2026.2.1"
 
 jobs:
   build:
@@ -31,23 +34,30 @@ jobs:
             libx11-dev \
             libxext-dev \
             libxcb1-dev \
-            libwayland-dev
+            libwayland-dev \
+            libasound2-dev
 
       - name: Download and install Slang compiler
         run: |
-          wget https://github.com/shader-slang/slang/releases/download/v2026.2.1/slang-2026.2.1-linux-x86_64.tar.gz
-          tar -xzf slang-2026.2.1-linux-x86_64.tar.gz
-          echo "$GITHUB_WORKSPACE/slang-2026.2.1-linux-x86_64/bin" >> $GITHUB_PATH
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/slang-2026.2.1-linux-x86_64/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          mkdir -p slang-install
+          wget -q "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-linux-x86_64.tar.gz"
+          tar -xzf "slang-${SLANG_VERSION}-linux-x86_64.tar.gz" -C slang-install --strip-components=0
+          # Find slangc regardless of tarball directory structure
+          SLANGC_PATH=$(find slang-install -name slangc -type f | head -1)
+          SLANG_BIN=$(dirname "$SLANGC_PATH")
+          SLANG_LIB=$(cd "$SLANG_BIN/../lib" 2>/dev/null && pwd || echo "$SLANG_BIN")
+          echo "Found slangc at: $SLANGC_PATH"
+          echo "$SLANG_BIN" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=$SLANG_LIB:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Verify shader toolchain
         run: |
-          slangc --version
+          slangc -v
           spirv-link --version
           spirv-val --version
 
       - name: Build workspace
-        run: cargo build --release --workspace
+        run: cargo build --release --locked --workspace
 
       - name: Package binaries
         run: |

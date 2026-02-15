@@ -757,6 +757,42 @@ impl Camera4D {
         self.stabilize_look_up_axis(LOOK_TRANSPORT_UPRIGHT_DAMPING);
     }
 
+    /// Smoothly pull look-frame orientation to face a target direction.
+    /// Constructs a target frame from the direction, keeping the side axis
+    /// as close to the current one as possible and the up axis close to world +Y.
+    /// Returns true when converged.
+    pub fn pull_toward_target_direction_look_frame(
+        &mut self,
+        target_dir: [f32; 4],
+        dt: f32,
+    ) -> bool {
+        let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_HOME, dt);
+        let target_forward = Self::normalize_with_fallback(target_dir, self.look_forward);
+
+        // Side: project current side out of target_forward, normalize
+        let mut target_side = Self::sub_projection(self.look_side, target_forward);
+        target_side = Self::normalize_with_fallback(target_side, [0.0, 0.0, 0.0, 1.0]);
+
+        // Up: world +Y projected away from forward and side
+        let world_up = [0.0, 1.0, 0.0, 0.0];
+        let mut target_up = Self::sub_projection(world_up, target_forward);
+        target_up = Self::sub_projection(target_up, target_side);
+        target_up = Self::normalize_with_fallback(target_up, self.look_up);
+
+        // Right: whatever is left in the orthogonal complement
+        let mut target_right = Self::sub_projection(self.look_right, target_forward);
+        target_right = Self::sub_projection(target_right, target_side);
+        target_right = Self::sub_projection(target_right, target_up);
+        target_right = Self::normalize_with_fallback(target_right, [0.0, 0.0, 1.0, 0.0]);
+
+        self.blend_look_frame_toward(target_right, target_up, target_forward, target_side, alpha);
+        self.stabilize_look_up_axis(LOOK_TRANSPORT_YAW_UPRIGHT_LOCK);
+
+        // Check convergence
+        let dot = Self::dot4(self.look_forward, target_forward);
+        dot > 0.9999
+    }
+
     /// Smoothly pull angle-parameterized orientation toward canonical +X home.
     pub fn pull_toward_home_angles(&mut self, dt: f32) {
         let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_HOME, dt);
@@ -775,6 +811,168 @@ impl Camera4D {
         Self::pull_wrapped_toward(&mut self.xw_angle, 0.0, alpha);
         Self::pull_wrapped_toward(&mut self.zw_angle, 0.0, alpha);
         Self::pull_wrapped_toward(&mut self.yw_deviation, 0.0, alpha);
+    }
+
+    /// Smoothly pull angles toward specific target values (used by look-at).
+    pub fn pull_toward_target_angles(
+        &mut self,
+        target_yaw: f32,
+        target_pitch: f32,
+        target_xw: f32,
+        target_zw: f32,
+        dt: f32,
+    ) -> bool {
+        let alpha = Self::pull_alpha(ORIENTATION_PULL_RATE_HOME, dt);
+        Self::pull_wrapped_toward(&mut self.yaw, target_yaw, alpha);
+        Self::pull_pitch_toward(&mut self.pitch, target_pitch, alpha);
+        Self::pull_wrapped_toward(&mut self.xw_angle, target_xw, alpha);
+        Self::pull_wrapped_toward(&mut self.zw_angle, target_zw, alpha);
+
+        let yaw_err = wrap_angle(self.yaw - target_yaw).abs();
+        let pitch_err = (self.pitch - target_pitch).abs();
+        let xw_err = wrap_angle(self.xw_angle - target_xw).abs();
+        let zw_err = wrap_angle(self.zw_angle - target_zw).abs();
+        yaw_err < 0.01 && pitch_err < 0.01 && xw_err < 0.01 && zw_err < 0.01
+    }
+
+    /// Compute the upright-mode angles (yaw, pitch, xw_angle, zw_angle) that make
+    /// the camera look in the given world-space direction.
+    ///
+    /// Analytical decomposition of the rotation chain:
+    /// R = Pitch(p) * Yaw(y) * ZW(zw+pi/4) * XW(xw-pi/2)
+    /// d = R^T * [0, 0, s2, s2], so R * d = [0, 0, s2, s2].
+    pub fn angles_for_direction_upright(target_dir: [f32; 4]) -> (f32, f32, f32, f32) {
+        let d = Self::normalize_dir(target_dir);
+        let s2 = std::f32::consts::FRAC_1_SQRT_2;
+
+        // R * d = Pitch(p) * Yaw(y) * ZW(a_zw) * XW(a_xw) * d = [0, 0, s2, s2]
+        // where a_xw = xw_angle - PI/2, a_zw = zw_angle + PI/4.
+        //
+        // Step-by-step:
+        //   u = XW(a_xw) * d:
+        //     u[0] = d[0]*cos(a_xw) + d[3]*sin(a_xw)
+        //     u[1] = d[1], u[2] = d[2]
+        //     u[3] = -d[0]*sin(a_xw) + d[3]*cos(a_xw)
+        //
+        //   v = ZW(a_zw) * u:
+        //     v[0] = u[0], v[1] = d[1]
+        //     v[2] = d[2]*cos(a_zw) + u[3]*sin(a_zw)
+        //     v[3] = -d[2]*sin(a_zw) + u[3]*cos(a_zw)
+        //
+        //   w = Yaw(y) * v:
+        //     w[0] = v[0]*cos(y) + v[2]*sin(y)
+        //     w[1] = d[1], w[2] = -v[0]*sin(y) + v[2]*cos(y)
+        //     w[3] = v[3]
+        //
+        //   result = Pitch(p) * w:
+        //     result[0] = w[0] = 0
+        //     result[1] = -w[2]*sin(p) + d[1]*cos(p) = 0
+        //     result[2] = w[2]*cos(p) + d[1]*sin(p) = s2
+        //     result[3] = v[3] = s2
+        //
+        // Constraints: v[3] = s2, w[0] = 0.
+        // From w[0] = 0: yaw y = atan2(-v[0], v[2])
+        // From result[1] = 0: p = atan2(d[1], w[2])
+        //
+        // v[3] = s2 gives: -d[2]*sin(a_zw) + u[3]*cos(a_zw) = s2
+        // where u[3] = -d[0]*sin(a_xw) + d[3]*cos(a_xw)
+        //
+        // We have 2 unknowns (a_xw, a_zw) and 1 constraint. The extra DOF
+        // means multiple solutions exist. We choose the one that minimizes
+        // a_xw^2 + a_zw^2 (smallest hidden-dim rotations).
+        //
+        // Parameterize: a_xw is free, a_zw is determined from v[3]=s2.
+        // Given a_xw: u[3] = sqrt(d[0]^2+d[3]^2)*cos(a_xw+atan2(d[0],d[3]))
+        // Then: v[3] = sqrt(d[2]^2+u[3]^2)*cos(a_zw+atan2(d[2],u[3])) = s2
+        // So: a_zw = acos(s2/sqrt(d[2]^2+u[3]^2)) - atan2(d[2],u[3])
+        //
+        // Search over a_xw to minimize a_xw^2 + a_zw^2.
+        // Since this is a 1D search, sample a few candidates and pick the best.
+
+        let r_xw = (d[0] * d[0] + d[3] * d[3]).sqrt();
+        let phi_xw = d[0].atan2(d[3]); // atan2(d[0], d[3])
+
+        let best_solution = |a_xw: f32| -> Option<(f32, f32, f32, f32, f32)> {
+            let u3 = r_xw * (a_xw + phi_xw).cos();
+            let r_zw = (d[2] * d[2] + u3 * u3).sqrt();
+            if r_zw < s2 - 1e-6 {
+                return None; // Can't reach v[3] = s2
+            }
+            let ratio = (s2 / r_zw).clamp(-1.0, 1.0);
+            let phi_zw = d[2].atan2(u3);
+            // Two solutions: a_zw = +-acos(ratio) - phi_zw
+            let base = ratio.acos();
+            let a_zw_1 = wrap_angle(base - phi_zw);
+            let a_zw_2 = wrap_angle(-base - phi_zw);
+
+            // Pick the a_zw with smaller total cost
+            let cost1 = a_xw * a_xw + a_zw_1 * a_zw_1;
+            let cost2 = a_xw * a_xw + a_zw_2 * a_zw_2;
+            let (a_zw, cost) = if cost1 <= cost2 {
+                (a_zw_1, cost1)
+            } else {
+                (a_zw_2, cost2)
+            };
+
+            // Compute the remaining angles
+            let u0 = d[0] * a_xw.cos() + d[3] * a_xw.sin();
+            let u3_actual = -d[0] * a_xw.sin() + d[3] * a_xw.cos();
+            let v2 = d[2] * a_zw.cos() + u3_actual * a_zw.sin();
+            let v0 = u0;
+
+            let y = (-v0).atan2(v2);
+
+            // w[2] = -v0*sin(y) + v2*cos(y) = sqrt(v0^2 + v2^2) [positive by construction]
+            let w2 = v0.hypot(v2);
+            let p = d[1].atan2(w2);
+
+            Some((y, p, a_xw, a_zw, cost))
+        };
+
+        // Sample a_xw values and find the one with minimum cost
+        let n_samples = 64;
+        let mut best: Option<(f32, f32, f32, f32, f32)> = None;
+
+        for i in 0..n_samples {
+            let a_xw = -PI + 2.0 * PI * (i as f32 + 0.5) / n_samples as f32;
+            if let Some(sol) = best_solution(a_xw) {
+                if best.is_none() || sol.4 < best.unwrap().4 {
+                    best = Some(sol);
+                }
+            }
+        }
+
+        // Refine the best a_xw with golden section search
+        if let Some((_, _, best_axw, _, _)) = best {
+            let step = 2.0 * PI / n_samples as f32;
+            let mut lo = best_axw - step;
+            let mut hi = best_axw + step;
+            let gr = 0.5 * (5.0_f32.sqrt() - 1.0); // golden ratio
+
+            for _ in 0..30 {
+                let mid1 = hi - gr * (hi - lo);
+                let mid2 = lo + gr * (hi - lo);
+                let c1 = best_solution(mid1).map_or(f32::INFINITY, |s| s.4);
+                let c2 = best_solution(mid2).map_or(f32::INFINITY, |s| s.4);
+                if c1 < c2 {
+                    hi = mid2;
+                } else {
+                    lo = mid1;
+                }
+            }
+
+            let final_axw = 0.5 * (lo + hi);
+            if let Some((y, p, _, a_zw, _)) = best_solution(final_axw) {
+                // Convert from effective angles back to camera angles
+                let xw_angle = wrap_angle(final_axw - UPRIGHT_XW_ZERO_OFFSET);
+                let zw_angle = wrap_angle(a_zw - UPRIGHT_ZW_ZERO_OFFSET);
+                let max_pitch = 81.0_f32.to_radians();
+                return (y, p.clamp(-max_pitch, max_pitch), xw_angle, zw_angle);
+            }
+        }
+
+        // Fallback: no valid solution found (shouldn't happen for valid directions)
+        (0.0, 0.0, 0.0, 0.0)
     }
 
     /// Constrain camera orientation to an upright, no-roll/no-twist mode.
@@ -1750,6 +1948,50 @@ mod tests {
                 got[axis],
                 expected[axis]
             );
+        }
+    }
+
+    #[test]
+    fn angles_for_direction_upright_roundtrip() {
+        // Test various angle combinations: compute look direction, then recover angles,
+        // then verify the recovered angles produce the same look direction.
+        let test_cases = [
+            (0.0, 0.0, 0.0, 0.0),
+            (0.5, 0.3, 0.0, 0.0),
+            (-1.0, -0.5, 0.4, -0.3),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, -1.0),
+            (2.0, 0.7, -0.8, 0.6),
+            (-0.3, -0.2, 0.9, -0.7),
+        ];
+        for (yaw, pitch, xw, zw) in test_cases {
+            let mut cam = Camera4D::new();
+            cam.yaw = yaw;
+            cam.pitch = pitch;
+            cam.xw_angle = xw;
+            cam.zw_angle = zw;
+            cam.enforce_upright_constraints();
+
+            let dir = cam.look_direction_upright();
+            let (ry, rp, rxw, rzw) = Camera4D::angles_for_direction_upright(dir);
+
+            // Set recovered angles and check look direction matches
+            let mut cam2 = Camera4D::new();
+            cam2.yaw = ry;
+            cam2.pitch = rp;
+            cam2.xw_angle = rxw;
+            cam2.zw_angle = rzw;
+            cam2.enforce_upright_constraints();
+            let dir2 = cam2.look_direction_upright();
+
+            for axis in 0..4 {
+                assert!(
+                    (dir[axis] - dir2[axis]).abs() < 1e-3,
+                    "roundtrip failed for angles ({yaw},{pitch},{xw},{zw}): \
+                     original dir={dir:?}, recovered dir={dir2:?}, \
+                     recovered angles=({ry},{rp},{rxw},{rzw})"
+                );
+            }
         }
     }
 

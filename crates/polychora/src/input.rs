@@ -133,7 +133,9 @@ pub struct InputState {
     vte_sweep_requested: bool,
     vte_integral_sky_emissive_toggle_requested: bool,
     vte_integral_log_merge_toggle_requested: bool,
+    look_at_requested: bool,
     inventory_toggle_requested: bool,
+    teleport_dialog_requested: bool,
     menu_left_requested: bool,
     menu_right_requested: bool,
     menu_up_requested: bool,
@@ -181,7 +183,9 @@ impl InputState {
             vte_sweep_requested: false,
             vte_integral_sky_emissive_toggle_requested: false,
             vte_integral_log_merge_toggle_requested: false,
+            look_at_requested: false,
             inventory_toggle_requested: false,
+            teleport_dialog_requested: false,
             menu_left_requested: false,
             menu_right_requested: false,
             menu_up_requested: false,
@@ -218,6 +222,11 @@ impl InputState {
                 KeyCode::KeyI => {
                     if pressed && !event.repeat {
                         self.inventory_toggle_requested = true;
+                    }
+                }
+                KeyCode::KeyT => {
+                    if pressed && !event.repeat {
+                        self.teleport_dialog_requested = true;
                     }
                 }
                 KeyCode::F12 => {
@@ -305,6 +314,11 @@ impl InputState {
                 }
                 KeyCode::KeyF => {
                     self.pull_to_3d_held = pressed;
+                }
+                KeyCode::KeyG => {
+                    if pressed && !event.repeat {
+                        self.look_at_requested = true;
+                    }
                 }
                 KeyCode::F6 => {
                     if pressed {
@@ -593,9 +607,25 @@ impl InputState {
         v
     }
 
+    pub fn request_look_at(&mut self) {
+        self.look_at_requested = true;
+    }
+
+    pub fn take_look_at(&mut self) -> bool {
+        let v = self.look_at_requested;
+        self.look_at_requested = false;
+        v
+    }
+
     pub fn take_inventory_toggle(&mut self) -> bool {
         let v = self.inventory_toggle_requested;
         self.inventory_toggle_requested = false;
+        v
+    }
+
+    pub fn take_teleport_dialog(&mut self) -> bool {
+        let v = self.teleport_dialog_requested;
+        self.teleport_dialog_requested = false;
         v
     }
 

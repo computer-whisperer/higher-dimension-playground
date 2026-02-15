@@ -44,9 +44,9 @@ fn place_material_showcase(world: &mut VoxelWorld, origin: [i32; 4]) {
     }
 }
 
-/// Generate a voxelized version of the demo "cube layout":
-/// - 2x2x2x2 outer block lattice (colored materials 1..=5 cycling)
-/// - one bright center block (material 13)
+/// Generate the menu/demo showcase world:
+/// - one cube at each 4D corner of a 2x2x2x2 lattice
+/// - one bright center cube
 ///
 /// This is intended for reproducible VTE quality sweeps.
 pub fn generate_demo_cube_layout_world() -> VoxelWorld {
@@ -66,9 +66,7 @@ pub fn generate_demo_cube_layout_world() -> VoxelWorld {
         }
     }
 
-    // Central bright cube, analogous to the demo light block.
     fill_hypercube(&mut world, [0, 0, 0, 0], 2, VoxelType(13));
-    place_material_showcase(&mut world, [-10, -2, 8, -4]);
 
     world
 }

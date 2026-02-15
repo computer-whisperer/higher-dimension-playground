@@ -14,6 +14,7 @@ use std::path::Path;
 mod voxel_runtime;
 
 const RENDER_DISTANCE: f32 = 64.0;
+const VOXEL_NEAR_ACTIVE_DISTANCE: f32 = 32.0;
 const OCCUPANCY_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 32;
 const MATERIAL_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 4; // packed 4x u8 per u32
 const MACRO_CELLS_PER_AXIS: usize = CHUNK_SIZE / 2; // 2x2x2x2 macro cells
@@ -29,6 +30,9 @@ const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
 const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
+pub const VOXEL_LOD_LEVEL_NEAR: u8 = 0;
+pub const VOXEL_LOD_LEVEL_MID: u8 = 1;
+pub const VOXEL_LOD_LEVEL_FAR: u8 = 2;
 
 struct CachedChunkPayload {
     hash: u64,
@@ -48,8 +52,15 @@ struct ChunkPayloadCacheEntry {
     payload_id: u32,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct RuntimeChunkKey {
+    lod_level: u8,
+    chunk_pos: ChunkPos,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum ScenePreset {
+    Empty,
     Flat,
     DemoCubes,
 }
@@ -57,6 +68,7 @@ pub enum ScenePreset {
 impl ScenePreset {
     fn label(self) -> &'static str {
         match self {
+            Self::Empty => "empty",
             Self::Flat => "flat",
             Self::DemoCubes => "demo_cubes",
         }
@@ -93,10 +105,13 @@ impl VoxelFrameData {
 
 pub struct Scene {
     pub world: crate::voxel::world::VoxelWorld,
+    voxel_lod_chunks: HashMap<RuntimeChunkKey, crate::voxel::chunk::Chunk>,
+    voxel_pending_lod_chunk_updates: Vec<RuntimeChunkKey>,
+    voxel_pending_lod_chunk_update_set: HashSet<RuntimeChunkKey>,
     surface: SurfaceData,
     culled_instances: Vec<common::ModelInstance>,
     cull_log_counter: u64,
-    voxel_chunk_payload_cache: HashMap<ChunkPos, ChunkPayloadCacheEntry>,
+    voxel_chunk_payload_cache: HashMap<RuntimeChunkKey, ChunkPayloadCacheEntry>,
     voxel_chunk_payloads: Vec<Option<CachedChunkPayload>>,
     voxel_chunk_payload_free_ids: Vec<u32>,
     voxel_chunk_payload_hash_buckets: HashMap<u64, Vec<u32>>,
@@ -104,11 +119,11 @@ pub struct Scene {
     voxel_payload_free_slots: Vec<u32>,
     voxel_pending_payload_uploads: Vec<u32>,
     voxel_pending_payload_upload_set: HashSet<u32>,
-    voxel_active_chunks: Vec<ChunkPos>,
-    voxel_active_chunk_indices: HashMap<ChunkPos, usize>,
+    voxel_active_chunks: Vec<RuntimeChunkKey>,
+    voxel_active_chunk_indices: HashMap<RuntimeChunkKey, usize>,
     voxel_world_revision: u64,
     voxel_visibility_generation: u64,
-    voxel_cached_visibility_camera_chunk: Option<[i32; 4]>,
+    voxel_cached_visibility_camera_chunk: Option<[i32; 16]>,
     voxel_cached_visibility_world_revision: u64,
     voxel_payload_slot_overflow_logged: bool,
     voxel_frame_data: VoxelFrameData,
@@ -149,6 +164,7 @@ impl Scene {
 
     pub fn new(preset: ScenePreset) -> Self {
         let world = match preset {
+            ScenePreset::Empty => crate::voxel::world::VoxelWorld::new(),
             ScenePreset::Flat => worldgen::generate_flat_world(
                 5,             // 5×5×5 chunks in X, Z, W
                 VoxelType(11), // neutral grid floor
@@ -159,6 +175,9 @@ impl Scene {
         let surface = cull::extract_surfaces(&world);
         let scene = Self {
             world,
+            voxel_lod_chunks: HashMap::new(),
+            voxel_pending_lod_chunk_updates: Vec::new(),
+            voxel_pending_lod_chunk_update_set: HashSet::new(),
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,
@@ -201,6 +220,9 @@ impl Scene {
 
     pub fn replace_world(&mut self, world: crate::voxel::world::VoxelWorld) {
         self.world = world;
+        self.voxel_lod_chunks.clear();
+        self.voxel_pending_lod_chunk_updates.clear();
+        self.voxel_pending_lod_chunk_update_set.clear();
         self.voxel_chunk_payload_cache.clear();
         self.voxel_chunk_payloads.clear();
         self.voxel_chunk_payload_free_ids.clear();
@@ -257,6 +279,52 @@ impl Scene {
             .count();
         self.replace_world(world);
         Ok(non_empty_chunks)
+    }
+
+    fn queue_lod_chunk_update(&mut self, key: RuntimeChunkKey) {
+        if self.voxel_pending_lod_chunk_update_set.insert(key) {
+            self.voxel_pending_lod_chunk_updates.push(key);
+        }
+    }
+
+    pub fn insert_lod_chunk(
+        &mut self,
+        lod_level: u8,
+        chunk_pos: ChunkPos,
+        mut chunk: crate::voxel::chunk::Chunk,
+    ) {
+        if lod_level == VOXEL_LOD_LEVEL_NEAR {
+            self.world.insert_chunk(chunk_pos, chunk);
+            return;
+        }
+
+        let key = RuntimeChunkKey {
+            lod_level,
+            chunk_pos,
+        };
+        chunk.dirty = true;
+        if chunk.is_empty() {
+            self.voxel_lod_chunks.remove(&key);
+        } else {
+            self.voxel_lod_chunks.insert(key, chunk);
+        }
+        self.queue_lod_chunk_update(key);
+    }
+
+    pub fn remove_lod_chunk(&mut self, lod_level: u8, chunk_pos: ChunkPos) -> bool {
+        if lod_level == VOXEL_LOD_LEVEL_NEAR {
+            return self.world.remove_chunk_override(chunk_pos);
+        }
+
+        let key = RuntimeChunkKey {
+            lod_level,
+            chunk_pos,
+        };
+        let removed = self.voxel_lod_chunks.remove(&key).is_some();
+        if removed {
+            self.queue_lod_chunk_update(key);
+        }
+        removed
     }
 
     /// Rebuild surface data if any chunk is dirty.
@@ -530,6 +598,62 @@ impl Scene {
         }
     }
 
+    /// Fan-cast across the ZW viewing wedge and return the nearest solid
+    /// voxel hit.  `view_z` and `view_w` are the camera's world-space Z and W
+    /// basis vectors (obtained from the view basis).  The sweep mirrors the VTE
+    /// shader: theta ranges from `PI/4 - viewAngle/2` to `PI/4 + viewAngle/2`
+    /// where `viewAngle = (PI/2) / focal_length_zw`.
+    pub fn fan_cast_nearest_block(
+        &self,
+        ray_origin: [f32; 4],
+        view_z: [f32; 4],
+        view_w: [f32; 4],
+        focal_length_zw: f32,
+        max_distance: f32,
+        num_samples: usize,
+    ) -> Option<[i32; 4]> {
+        let pi = std::f32::consts::PI;
+        let view_angle = (pi / 2.0) / focal_length_zw.max(0.01);
+        let theta_min = pi / 4.0 - view_angle / 2.0;
+        let theta_max = pi / 4.0 + view_angle / 2.0;
+
+        let samples = num_samples.max(1);
+        let mut best_voxel: Option<[i32; 4]> = None;
+        let mut best_dist_sq = f32::INFINITY;
+
+        for i in 0..samples {
+            let t = if samples == 1 {
+                0.5
+            } else {
+                i as f32 / (samples - 1) as f32
+            };
+            let theta = theta_min + t * (theta_max - theta_min);
+            let cz = theta.cos();
+            let sw = theta.sin();
+
+            let dir = [
+                cz * view_z[0] + sw * view_w[0],
+                cz * view_z[1] + sw * view_w[1],
+                cz * view_z[2] + sw * view_w[2],
+                cz * view_z[3] + sw * view_w[3],
+            ];
+
+            if let Some(hit) = self.trace_first_solid_voxel(ray_origin, dir, max_distance) {
+                let dx = hit.solid_voxel[0] as f32 + 0.5 - ray_origin[0];
+                let dy = hit.solid_voxel[1] as f32 + 0.5 - ray_origin[1];
+                let dz = hit.solid_voxel[2] as f32 + 0.5 - ray_origin[2];
+                let dw = hit.solid_voxel[3] as f32 + 0.5 - ray_origin[3];
+                let dist_sq = dx * dx + dy * dy + dz * dz + dw * dw;
+                if dist_sq < best_dist_sq {
+                    best_dist_sq = dist_sq;
+                    best_voxel = Some(hit.solid_voxel);
+                }
+            }
+        }
+
+        best_voxel
+    }
+
     /// Place a voxel in the last empty cell before the first solid hit.
     pub fn place_block_along_ray(
         &mut self,
@@ -561,6 +685,9 @@ mod tests {
         let surface = cull::extract_surfaces(&world);
         Scene {
             world,
+            voxel_lod_chunks: std::collections::HashMap::new(),
+            voxel_pending_lod_chunk_updates: Vec::new(),
+            voxel_pending_lod_chunk_update_set: std::collections::HashSet::new(),
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,

@@ -45,8 +45,8 @@ const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
-const FOOTSTEP_DISTANCE_WALK: f32 = 1.75;
-const FOOTSTEP_DISTANCE_SPRINT: f32 = 1.20;
+const FOOTSTEP_DISTANCE_WALK: f32 = 3.50;
+const FOOTSTEP_DISTANCE_SPRINT: f32 = 2.40;
 const FOOTSTEP_MIN_XZW_SPEED: f32 = 0.55;
 const REMOTE_FOOTSTEP_MAX_DISTANCE: f32 = 36.0;
 const REMOTE_FOOTSTEP_MIN_XZW_SPEED: f32 = 0.40;
@@ -60,6 +60,9 @@ const VTE_TEST_NON_VOXEL_CENTER: [f32; 4] = [0.0, 3.0, 0.0, 0.0];
 const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
 const VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_NON_VOXEL_INSTANCES";
 const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
+const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
+// Tags held-block preview instances so shaders can apply preview-only shading boosts.
+const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
 const FOCAL_LENGTH_MAX: f32 = 4.00;
 const FOCAL_LENGTH_STEP: f32 = 0.05;
@@ -81,6 +84,7 @@ const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 const MULTIPLAYER_PENDING_EDIT_TIMEOUT: Duration = Duration::from_secs(5);
 const MULTIPLAYER_PENDING_EDIT_MAX: usize = 512;
+const CLIENT_PROFILE_REPORT_INTERVAL: Duration = Duration::from_secs(2);
 const AVATAR_MATERIAL_ID: u32 = 21;
 const AVATAR_FORWARD_FRAGMENT_COUNT: usize = 4;
 const REMOTE_AVATAR_PART_COUNT_ESTIMATE: usize = 7 + AVATAR_FORWARD_FRAGMENT_COUNT;
@@ -94,6 +98,15 @@ const REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE: f32 = 8.0;
 const REMOTE_PLAYER_MAX_PREDICTED_SPEED: f32 = 24.0;
 const REMOTE_PLAYER_TAG_FOV_DOT_MIN: f32 = 0.16;
 const REMOTE_PLAYER_TAG_MAX_COUNT: usize = 32;
+const MENU_ORBIT_CENTER: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+const MENU_ORBIT_RADIUS_XZ: f32 = 16.0;
+const MENU_ORBIT_RADIUS_W: f32 = 7.0;
+const MENU_ORBIT_HEIGHT_BASE: f32 = PLAYER_HEIGHT + 1.2;
+const MENU_ORBIT_HEIGHT_BOB: f32 = 0.8;
+const MENU_ORBIT_RATE_XZ: f32 = 0.23;
+const MENU_ORBIT_RATE_W: f32 = 0.17;
+const MENU_ORBIT_RATE_Y: f32 = 0.11;
+const MENU_ORBIT_TARGET_Y_OFFSET: f32 = 0.6;
 
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
@@ -184,6 +197,7 @@ fn parse_keycode(key: &str) -> Option<KeyCode> {
         "q" => Some(KeyCode::KeyQ),
         "r" => Some(KeyCode::KeyR),
         "f" => Some(KeyCode::KeyF),
+        "g" => Some(KeyCode::KeyG),
         "tab" => Some(KeyCode::Tab),
         "space" => Some(KeyCode::Space),
         "shift" => Some(KeyCode::ShiftLeft),
@@ -251,11 +265,11 @@ fn parse_commands(input: &str) -> Vec<AutoCommand> {
 #[command(version, about = "4D polychora explorer")]
 struct Args {
     /// Render buffer width in pixels
-    #[arg(long, short = 'W', default_value_t = 1920)]
+    #[arg(long, short = 'W', default_value_t = 960)]
     width: u32,
 
     /// Render buffer height in pixels
-    #[arg(long, short = 'H', default_value_t = 1080)]
+    #[arg(long, short = 'H', default_value_t = 540)]
     height: u32,
 
     /// Number of depth layers (supersampling)
@@ -320,6 +334,14 @@ struct Args {
     /// VTE max ray distance in world units before miss (quality/perf tradeoff)
     #[arg(long, default_value_t = 160.0)]
     vte_max_trace_distance: f32,
+
+    /// World-space distance where L0 tracing hands off to coarser LODs.
+    #[arg(long, default_value_t = 48.0)]
+    vte_lod_near_max_distance: f32,
+
+    /// World-space distance where L1 tracing hands off to L2 tracing.
+    #[arg(long, default_value_t = 112.0)]
+    vte_lod_mid_max_distance: f32,
 
     /// VTE Stage-B display operator (integral, slice, thick-slice, debug-compare, debug-integral)
     #[arg(long, value_enum, default_value_t = VteDisplayModeArg::Integral)]
@@ -418,9 +440,17 @@ struct Args {
     #[arg(long, default_value_t = true)]
     singleplayer_procgen_structures: bool,
 
-    /// Chunk radius around player to evaluate server-side procgen in singleplayer.
+    /// Chunk radius around player for streamed near (L0) chunk updates in singleplayer.
     #[arg(long, default_value_t = 6)]
     singleplayer_procgen_chunk_radius: i32,
+
+    /// Chunk radius around player for streamed mid (L1) chunk updates in singleplayer.
+    #[arg(long, default_value_t = 10)]
+    singleplayer_procgen_mid_chunk_radius: i32,
+
+    /// Chunk radius around player for streamed far (L2) chunk updates in singleplayer.
+    #[arg(long, default_value_t = 6)]
+    singleplayer_procgen_far_chunk_radius: i32,
 
     /// Derive a procgen keepout mask from persisted world chunks in singleplayer.
     #[arg(long, default_value_t = true)]
@@ -636,6 +666,14 @@ fn main() {
     let initial_vte_integral_log_merge_k = args.vte_integral_log_merge_k.max(0.0);
     let initial_vte_max_trace_steps = args.vte_max_trace_steps.max(1);
     let initial_vte_max_trace_distance = args.vte_max_trace_distance.max(1.0);
+    let initial_vte_lod_near_max_distance = args
+        .vte_lod_near_max_distance
+        .max(1.0)
+        .min(initial_vte_max_trace_distance);
+    let initial_vte_lod_mid_max_distance = args
+        .vte_lod_mid_max_distance
+        .max(initial_vte_lod_near_max_distance)
+        .min(initial_vte_max_trace_distance);
 
     let world_file = args.world_file.clone();
     // Determine whether to skip the main menu and go straight to playing.
@@ -653,7 +691,16 @@ fn main() {
         AppState::MainMenu
     };
 
-    let mut scene = Scene::new(args.scene.to_scene_preset());
+    let start_with_network_world = args.server.is_some() || start_with_integrated_singleplayer;
+    let scene_preset = if initial_app_state == AppState::MainMenu {
+        ScenePreset::DemoCubes
+    } else if start_with_network_world {
+        // Networked play should render server-authoritative world data only.
+        ScenePreset::Empty
+    } else {
+        args.scene.to_scene_preset()
+    };
+    let mut scene = Scene::new(scene_preset);
     if args.load_world && !start_with_integrated_singleplayer {
         match scene.load_world_from_path(&world_file) {
             Ok(chunks) => eprintln!(
@@ -725,6 +772,10 @@ fn main() {
     let initial_render_width = args.width;
     let initial_render_height = args.height;
     let initial_render_layers = args.layers;
+    let initial_player_name = args
+        .player_name
+        .clone()
+        .unwrap_or_else(default_multiplayer_player_name);
     let audio = AudioEngine::new(args.audio, args.audio_volume);
     if args.audio {
         if audio.is_active() {
@@ -785,11 +836,21 @@ fn main() {
         vte_max_trace_steps: initial_vte_max_trace_steps,
         vte_max_trace_distance: initial_vte_max_trace_distance,
         vte_sweep_include_no_non_voxel,
+        vte_lod_near_max_distance: initial_vte_lod_near_max_distance,
+        vte_lod_mid_max_distance: initial_vte_lod_mid_max_distance,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
         hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
         hotbar_selected_index: 0,
         inventory_open: false,
+        teleport_dialog_open: false,
+        teleport_coords: [
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+        ],
+        controls_dialog_open: false,
         menu_open: false,
         menu_selection: 0,
         egui_ctx: egui::Context::default(),
@@ -807,22 +868,26 @@ fn main() {
         command_wait_frames: 0,
         app_state: initial_app_state,
         main_menu_page: MainMenuPage::Root,
-        main_menu_server_address: "localhost:4000".to_string(),
+        main_menu_server_address: "c-gateway.computer-whisperer.network:4000".to_string(),
+        main_menu_player_name: initial_player_name,
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
         main_menu_connect_error: None,
-        menu_camera: {
-            let mut c = Camera4D::new();
-            c.position = [5.0, 3.0, 5.0, 2.0];
-            c.yaw = -0.8;
-            c.pitch = -0.3;
-            c.xw_angle = 0.4;
-            c
-        },
+        look_at_target: None,
+        menu_camera: make_menu_camera(),
         menu_time: 0.0,
         pending_render_width: initial_render_width,
         pending_render_height: initial_render_height,
         pending_render_layers: initial_render_layers,
+        profile_window_start: Instant::now(),
+        profile_frame_samples: 0,
+        profile_client_cpu_ms_sum: 0.0,
+        profile_client_cpu_ms_max: 0.0,
+        profile_gpu_ms_sum: 0.0,
+        profile_gpu_ms_max: 0.0,
+        profile_gpu_samples: 0,
+        world_ready: initial_app_state == AppState::MainMenu,
+        vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
     };
 
     if app.vte_reference_compare_enabled {
@@ -872,6 +937,17 @@ fn main() {
         );
     } else {
         eprintln!("VTE sweep: non-voxel mode (default, non-voxel instances stay enabled).");
+    }
+    if app.vte_overlay_raster_enabled {
+        eprintln!(
+            "VTE overlay raster enabled via {} (legacy held-block raster pass; higher GPU cost).",
+            VTE_OVERLAY_RASTER_ENV
+        );
+    } else {
+        eprintln!(
+            "VTE held-block preview uses VTE entity path (default). Set {}=1 to use legacy overlay raster path.",
+            VTE_OVERLAY_RASTER_ENV
+        );
     }
 
     event_loop.run_app(&mut app).unwrap();
@@ -950,7 +1026,7 @@ fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
     eprintln!("Saved frames/cpu_render.png");
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum AppState {
     MainMenu,
     Playing,
@@ -983,6 +1059,17 @@ fn format_file_size(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+#[derive(Copy, Clone)]
+enum LookAtTarget {
+    Angles {
+        yaw: f32,
+        pitch: f32,
+        xw_angle: f32,
+        zw_angle: f32,
+    },
+    Direction([f32; 4]),
 }
 
 struct App {
@@ -1024,11 +1111,16 @@ struct App {
     vte_max_trace_steps: u32,
     vte_max_trace_distance: f32,
     vte_sweep_include_no_non_voxel: bool,
+    vte_lod_near_max_distance: f32,
+    vte_lod_mid_max_distance: f32,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
     hotbar_slots: [u8; 9],
     hotbar_selected_index: usize,
     inventory_open: bool,
+    teleport_dialog_open: bool,
+    teleport_coords: [String; 4],
+    controls_dialog_open: bool,
     menu_open: bool,
     menu_selection: usize,
     egui_ctx: egui::Context,
@@ -1047,15 +1139,26 @@ struct App {
     app_state: AppState,
     main_menu_page: MainMenuPage,
     main_menu_server_address: String,
+    main_menu_player_name: String,
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
     main_menu_connect_error: Option<String>,
+    look_at_target: Option<LookAtTarget>,
     menu_camera: Camera4D,
     menu_time: f32,
     // Runtime resolution UI state (edited values before Apply)
     pending_render_width: u32,
     pending_render_height: u32,
     pending_render_layers: u32,
+    profile_window_start: Instant,
+    profile_frame_samples: u32,
+    profile_client_cpu_ms_sum: f64,
+    profile_client_cpu_ms_max: f64,
+    profile_gpu_ms_sum: f64,
+    profile_gpu_ms_max: f64,
+    profile_gpu_samples: u32,
+    world_ready: bool,
+    vte_overlay_raster_enabled: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -1109,6 +1212,7 @@ enum PauseMenuItem {
     Resume,
     InfoPanel,
     ControlScheme,
+    MasterVolume,
     FocalLengthXy,
     FocalLengthZw,
     VteMaxTraceSteps,
@@ -1125,10 +1229,11 @@ enum PauseMenuItem {
     Quit,
 }
 
-const PAUSE_MENU_ITEMS: [PauseMenuItem; 17] = [
+const PAUSE_MENU_ITEMS: [PauseMenuItem; 18] = [
     PauseMenuItem::Resume,
     PauseMenuItem::InfoPanel,
     PauseMenuItem::ControlScheme,
+    PauseMenuItem::MasterVolume,
     PauseMenuItem::FocalLengthXy,
     PauseMenuItem::FocalLengthZw,
     PauseMenuItem::VteMaxTraceSteps,
@@ -1176,6 +1281,16 @@ fn env_flag_enabled(name: &str) -> bool {
     }
 }
 
+fn env_flag_enabled_or(name: &str, default_enabled: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
+        }
+        Err(_) => default_enabled,
+    }
+}
+
 fn normalize_server_addr(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -1186,6 +1301,44 @@ fn normalize_server_addr(raw: &str) -> String {
     } else {
         format!("{trimmed}:{MULTIPLAYER_DEFAULT_PORT}")
     }
+}
+
+fn make_menu_camera() -> Camera4D {
+    let mut camera = Camera4D::new();
+    apply_menu_camera_orbit_pose(&mut camera, 0.0);
+    camera
+}
+
+fn apply_menu_camera_orbit_pose(camera: &mut Camera4D, time_s: f32) {
+    let orbit_phase_xz = time_s * MENU_ORBIT_RATE_XZ;
+    let orbit_phase_w = time_s * MENU_ORBIT_RATE_W;
+    let orbit_phase_y = time_s * MENU_ORBIT_RATE_Y;
+
+    camera.position = [
+        MENU_ORBIT_CENTER[0] + MENU_ORBIT_RADIUS_XZ * orbit_phase_xz.cos(),
+        MENU_ORBIT_HEIGHT_BASE + MENU_ORBIT_HEIGHT_BOB * orbit_phase_y.sin(),
+        MENU_ORBIT_CENTER[2] + MENU_ORBIT_RADIUS_XZ * orbit_phase_xz.sin(),
+        MENU_ORBIT_CENTER[3] + MENU_ORBIT_RADIUS_W * orbit_phase_w.sin(),
+    ];
+
+    let orbit_target = [
+        MENU_ORBIT_CENTER[0],
+        MENU_ORBIT_CENTER[1] + MENU_ORBIT_TARGET_Y_OFFSET,
+        MENU_ORBIT_CENTER[2],
+        MENU_ORBIT_CENTER[3],
+    ];
+    let target_dir = [
+        orbit_target[0] - camera.position[0],
+        orbit_target[1] - camera.position[1],
+        orbit_target[2] - camera.position[2],
+        orbit_target[3] - camera.position[3],
+    ];
+    let (yaw, pitch, xw_angle, zw_angle) = Camera4D::angles_for_direction_upright(target_dir);
+    camera.yaw = yaw;
+    camera.pitch = pitch;
+    camera.xw_angle = xw_angle;
+    camera.zw_angle = zw_angle;
+    camera.yw_deviation = 0.0;
 }
 
 fn build_singleplayer_runtime_config(
@@ -1199,7 +1352,9 @@ fn build_singleplayer_runtime_config(
         save_interval_secs: args.singleplayer_save_interval_secs,
         snapshot_on_join: args.singleplayer_snapshot_on_join,
         procgen_structures: args.singleplayer_procgen_structures,
-        procgen_chunk_radius: args.singleplayer_procgen_chunk_radius,
+        procgen_near_chunk_radius: args.singleplayer_procgen_chunk_radius,
+        procgen_mid_chunk_radius: args.singleplayer_procgen_mid_chunk_radius,
+        procgen_far_chunk_radius: args.singleplayer_procgen_far_chunk_radius,
         procgen_keepout_from_existing_world: args.singleplayer_procgen_keepout_from_existing_world,
         procgen_keepout_padding_chunks: args.singleplayer_procgen_keepout_padding_chunks,
         world_seed: args.singleplayer_world_seed,
@@ -1536,9 +1691,10 @@ fn build_place_preview_instance(
     control_scheme: ControlScheme,
     aspect: f32,
 ) -> common::ModelInstance {
-    let material = selected_material
+    let preview_material = selected_material
         .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
-        as u32;
+        as u32
+        | PREVIEW_MATERIAL_FLAG;
     let (right, up, view_z, view_w) = match control_scheme {
         ControlScheme::IntuitiveUpright => camera.view_basis_upright(),
         ControlScheme::LookTransport | ControlScheme::RotorFree => camera.view_basis_look_frame(),
@@ -1560,36 +1716,41 @@ fn build_place_preview_instance(
         view_w[3] - view_z[3],
     ]);
     let aspect = aspect.max(0.25);
-    let up_bias = -0.62 * ((16.0 / 9.0) / aspect).clamp(0.72, 1.35);
+    let up_bias = -0.56 * ((16.0 / 9.0) / aspect).clamp(0.72, 1.35);
 
     let anchor = [
         camera.position[0]
-            + 0.92 * right[0]
+            + 0.88 * right[0]
             + up_bias * up[0]
-            + 1.35 * center_forward[0]
-            + 0.52 * side_w[0],
+            + 1.20 * center_forward[0]
+            + 0.46 * side_w[0],
         camera.position[1]
-            + 0.92 * right[1]
+            + 0.88 * right[1]
             + up_bias * up[1]
-            + 1.35 * center_forward[1]
-            + 0.52 * side_w[1],
+            + 1.20 * center_forward[1]
+            + 0.46 * side_w[1],
         camera.position[2]
-            + 0.92 * right[2]
+            + 0.88 * right[2]
             + up_bias * up[2]
-            + 1.35 * center_forward[2]
-            + 0.52 * side_w[2],
+            + 1.20 * center_forward[2]
+            + 0.46 * side_w[2],
         camera.position[3]
-            + 0.92 * right[3]
+            + 0.88 * right[3]
             + up_bias * up[3]
-            + 1.35 * center_forward[3]
-            + 0.52 * side_w[3],
+            + 1.20 * center_forward[3]
+            + 0.46 * side_w[3],
     ];
 
     let mut basis = [right, up, center_forward, side_w];
     rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
     rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
 
-    build_centered_model_instance(anchor, &basis, [0.23; 4], [material; 8])
+    build_centered_model_instance(
+        anchor,
+        &basis,
+        [0.35, 0.35, 0.38, 0.38],
+        [preview_material; 8],
+    )
 }
 
 fn build_vte_test_non_voxel_instance(time_s: f32) -> common::ModelInstance {
@@ -1797,7 +1958,9 @@ impl App {
     fn inject_key_press(&mut self, keycode: KeyCode) {
         match keycode {
             KeyCode::Escape => {
-                if self.inventory_open {
+                if self.teleport_dialog_open {
+                    self.teleport_dialog_open = false;
+                } else if self.inventory_open {
                     self.inventory_open = false;
                 } else {
                     self.menu_open = !self.menu_open;
@@ -1849,6 +2012,9 @@ impl App {
                     // Handle menu activation
                 }
             }
+            KeyCode::KeyG => {
+                self.input.request_look_at();
+            }
             _ => {}
         }
     }
@@ -1867,6 +2033,63 @@ impl App {
         } else {
             "non-voxel"
         }
+    }
+
+    fn record_runtime_profile_sample(&mut self, frame_start: Instant) {
+        let client_cpu_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        self.profile_frame_samples = self.profile_frame_samples.saturating_add(1);
+        self.profile_client_cpu_ms_sum += client_cpu_ms;
+        self.profile_client_cpu_ms_max = self.profile_client_cpu_ms_max.max(client_cpu_ms);
+
+        if let Some(rcx) = self.rcx.as_ref() {
+            let gpu_ms = rcx.last_gpu_frame_ms().max(0.0) as f64;
+            self.profile_gpu_samples = self.profile_gpu_samples.saturating_add(1);
+            self.profile_gpu_ms_sum += gpu_ms;
+            self.profile_gpu_ms_max = self.profile_gpu_ms_max.max(gpu_ms);
+        }
+
+        if self.profile_window_start.elapsed() < CLIENT_PROFILE_REPORT_INTERVAL {
+            return;
+        }
+
+        if self.profile_frame_samples > 0 {
+            let frame_samples = self.profile_frame_samples as f64;
+            let client_avg_ms = self.profile_client_cpu_ms_sum / frame_samples;
+            let client_max_ms = self.profile_client_cpu_ms_max;
+            let (gpu_avg_ms, gpu_max_ms, gpu_samples) = if self.profile_gpu_samples > 0 {
+                (
+                    self.profile_gpu_ms_sum / self.profile_gpu_samples as f64,
+                    self.profile_gpu_ms_max,
+                    self.profile_gpu_samples,
+                )
+            } else {
+                (0.0, 0.0, 0)
+            };
+            if gpu_samples > 0 {
+                eprintln!(
+                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu avg={:.3}ms max={:.3}ms samples={}",
+                    client_avg_ms,
+                    client_max_ms,
+                    self.profile_frame_samples,
+                    gpu_avg_ms,
+                    gpu_max_ms,
+                    gpu_samples,
+                );
+            } else {
+                eprintln!(
+                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu unavailable",
+                    client_avg_ms, client_max_ms, self.profile_frame_samples,
+                );
+            }
+        }
+
+        self.profile_window_start = Instant::now();
+        self.profile_frame_samples = 0;
+        self.profile_client_cpu_ms_sum = 0.0;
+        self.profile_client_cpu_ms_max = 0.0;
+        self.profile_gpu_ms_sum = 0.0;
+        self.profile_gpu_ms_max = 0.0;
+        self.profile_gpu_samples = 0;
     }
 
     fn grab_mouse(&mut self, window: &Window) {
@@ -1947,6 +2170,26 @@ impl App {
         }
     }
 
+    fn toggle_teleport_dialog(&mut self) {
+        self.teleport_dialog_open = !self.teleport_dialog_open;
+        let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+        if let Some(window) = window {
+            if self.teleport_dialog_open {
+                // Pre-fill with current position
+                let pos = self.camera.position;
+                self.teleport_coords = [
+                    format!("{:.1}", pos[0]),
+                    format!("{:.1}", pos[1]),
+                    format!("{:.1}", pos[2]),
+                    format!("{:.1}", pos[3]),
+                ];
+                self.release_mouse(&window);
+            } else {
+                self.grab_mouse(&window);
+            }
+        }
+    }
+
     fn cycle_control_scheme(&mut self) {
         let previous_scheme = self.control_scheme;
         self.control_scheme = self.control_scheme.next();
@@ -2013,6 +2256,16 @@ impl App {
             FOCAL_LENGTH_STEP,
             FOCAL_LENGTH_MIN,
             FOCAL_LENGTH_MAX,
+        );
+    }
+
+    fn adjust_master_volume(&mut self, delta: i32) {
+        self.audio.master_volume = Self::step_f32(
+            self.audio.master_volume,
+            delta,
+            0.05, // 5% steps
+            0.0,  // minimum
+            2.0,  // maximum (200% - allows boosting quiet audio)
         );
     }
 
@@ -2325,7 +2578,7 @@ impl App {
         &mut self,
         revision: u64,
         chunks: Vec<multiplayer::WorldChunkPayload>,
-    ) {
+    ) -> usize {
         let mut applied_chunks = 0usize;
 
         for payload in chunks {
@@ -2363,7 +2616,8 @@ impl App {
                 payload.chunk_pos[2],
                 payload.chunk_pos[3],
             );
-            self.scene.world.insert_chunk(chunk_pos, chunk);
+            self.scene
+                .insert_lod_chunk(payload.lod_level, chunk_pos, chunk);
             applied_chunks += 1;
         }
 
@@ -2373,13 +2627,23 @@ impl App {
                 revision, applied_chunks
             );
         }
+        applied_chunks
     }
 
-    fn apply_multiplayer_chunk_unload_batch(&mut self, revision: u64, chunks: Vec<[i32; 4]>) {
+    fn apply_multiplayer_chunk_unload_batch(
+        &mut self,
+        revision: u64,
+        chunks: Vec<multiplayer::WorldChunkCoordPayload>,
+    ) {
         let mut removed_chunks = 0usize;
-        for chunk_pos in chunks {
-            let pos = voxel::ChunkPos::new(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]);
-            if self.scene.world.remove_chunk_override(pos) {
+        for payload in chunks {
+            let pos = voxel::ChunkPos::new(
+                payload.chunk_pos[0],
+                payload.chunk_pos[1],
+                payload.chunk_pos[2],
+                payload.chunk_pos[3],
+            );
+            if self.scene.remove_lod_chunk(payload.lod_level, pos) {
                 removed_chunks += 1;
             }
         }
@@ -2469,6 +2733,13 @@ impl App {
                             "Applied multiplayer world snapshot rev={} chunks={}",
                             world.revision, world.non_empty_chunks
                         );
+                        // Warm near chunks so the first drawn frame has local payloads ready.
+                        self.scene.preload_spawn_chunks(
+                            self.camera.position,
+                            self.vte_lod_near_max_distance,
+                        );
+                        self.world_ready = true;
+                        eprintln!("World ready: snapshot applied");
                     }
                     Err(error) => {
                         eprintln!("Failed to load multiplayer world snapshot: {error}");
@@ -2476,7 +2747,11 @@ impl App {
                 }
             }
             multiplayer::ServerMessage::WorldChunkBatch { revision, chunks } => {
-                self.apply_multiplayer_chunk_batch(revision, chunks);
+                let applied_chunks = self.apply_multiplayer_chunk_batch(revision, chunks);
+                if applied_chunks > 0 && !self.world_ready {
+                    self.world_ready = true;
+                    eprintln!("World ready: streamed chunk data applied");
+                }
             }
             multiplayer::ServerMessage::WorldChunkUnloadBatch { revision, chunks } => {
                 self.apply_multiplayer_chunk_unload_batch(revision, chunks);
@@ -2775,6 +3050,7 @@ impl App {
         self.input.take_menu_up();
         self.input.take_menu_down();
         self.input.take_menu_activate();
+        // Do NOT drain take_look_at() - G key should work during gameplay
         self.input.take_scheme_cycle();
         self.input.take_vte_sweep();
         self.input.take_vte_non_voxel_instances_toggle();
@@ -2794,6 +3070,7 @@ impl App {
         self.input.take_place_block();
         self.input.take_pick_material();
         self.input.take_inventory_toggle();
+        self.input.take_teleport_dialog();
         self.input.take_mouse_delta();
     }
 
@@ -2801,6 +3078,7 @@ impl App {
         let len = PAUSE_MENU_ITEMS.len() as i32;
         let index = self.menu_selection as i32;
         self.menu_selection = (index + delta).rem_euclid(len) as usize;
+        self.audio.play(SoundEffect::UiTick);
     }
 
     fn selected_menu_item(&self) -> PauseMenuItem {
@@ -2811,6 +3089,7 @@ impl App {
         match self.selected_menu_item() {
             PauseMenuItem::InfoPanel => self.adjust_info_panel_mode(delta),
             PauseMenuItem::ControlScheme => self.cycle_control_scheme_by(delta),
+            PauseMenuItem::MasterVolume => self.adjust_master_volume(delta),
             PauseMenuItem::FocalLengthXy => self.adjust_focal_length_xy(delta),
             PauseMenuItem::FocalLengthZw => self.adjust_focal_length_zw(delta),
             PauseMenuItem::VteMaxTraceSteps => self.adjust_vte_max_trace_steps(delta),
@@ -2829,9 +3108,20 @@ impl App {
             | PauseMenuItem::LoadWorld
             | PauseMenuItem::Quit => {}
         }
+        // Play UI tick sound for any adjustment (except when it's an action item that does nothing)
+        if !matches!(
+            self.selected_menu_item(),
+            PauseMenuItem::Resume
+                | PauseMenuItem::SaveWorld
+                | PauseMenuItem::LoadWorld
+                | PauseMenuItem::Quit
+        ) {
+            self.audio.play(SoundEffect::UiTick);
+        }
     }
 
     fn activate_selected_menu_item(&mut self) {
+        self.audio.play(SoundEffect::UiTick);
         match self.selected_menu_item() {
             PauseMenuItem::Resume => {
                 self.menu_open = false;
@@ -2855,6 +3145,9 @@ impl App {
             }
             PauseMenuItem::ControlScheme => {
                 format!("Control scheme: {}", self.control_scheme.label())
+            }
+            PauseMenuItem::MasterVolume => {
+                format!("Volume: {:.0}%", self.audio.master_volume * 100.0)
             }
             PauseMenuItem::FocalLengthXy => {
                 format!("Focal XY: {:.2}", self.focal_length_xy)
@@ -3238,6 +3531,9 @@ impl App {
                     if ui.button("Load World").clicked() {
                         self.load_world();
                     }
+                    if ui.button("Controls").clicked() {
+                        self.controls_dialog_open = !self.controls_dialog_open;
+                    }
                     if ui.button("Main Menu").clicked() {
                         *return_to_main_menu = true;
                     }
@@ -3316,10 +3612,38 @@ impl App {
                 );
                 ui.add(
                     egui::Slider::new(
+                        &mut self.vte_lod_near_max_distance,
+                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
+                    )
+                    .text("VTE L0->L1 Distance"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.vte_lod_mid_max_distance,
+                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
+                    )
+                    .text("VTE L1->L2 Distance"),
+                );
+                self.vte_max_trace_distance = self
+                    .vte_max_trace_distance
+                    .clamp(VTE_TRACE_DISTANCE_MIN, VTE_TRACE_DISTANCE_MAX);
+                self.vte_lod_near_max_distance = self
+                    .vte_lod_near_max_distance
+                    .clamp(1.0, self.vte_max_trace_distance);
+                self.vte_lod_mid_max_distance = self
+                    .vte_lod_mid_max_distance
+                    .clamp(self.vte_lod_near_max_distance, self.vte_max_trace_distance);
+                ui.add(
+                    egui::Slider::new(
                         &mut self.place_material,
                         BLOCK_EDIT_PLACE_MATERIAL_MIN..=BLOCK_EDIT_PLACE_MATERIAL_MAX,
                     )
                     .text("Place Material"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.audio.master_volume, 0.0..=2.0)
+                        .text("Master Volume")
+                        .step_by(0.05),
                 );
 
                 ui.separator();
@@ -3428,11 +3752,11 @@ impl App {
 
     fn draw_egui_hotbar(&self, ctx: &egui::Context) {
         let screen_rect = ctx.screen_rect();
-        let slot_size = 62.0;
-        let gap = 5.0;
+        let slot_size = 80.0;
+        let gap = 6.5;
         let total_width = 9.0 * slot_size + 8.0 * gap;
         let start_x = (screen_rect.width() - total_width) / 2.0;
-        let start_y = screen_rect.height() - slot_size - 50.0;
+        let start_y = screen_rect.height() - slot_size - 65.0;
 
         egui::Area::new(egui::Id::new("hotbar"))
             .fixed_pos(egui::pos2(start_x, start_y))
@@ -3456,7 +3780,7 @@ impl App {
                         ui.painter().rect_filled(rect, 3.0, bg_color);
 
                         // Material icon (tesseract image or color fallback)
-                        let icon_rect = rect.shrink(4.0);
+                        let icon_rect = rect.shrink(5.0);
                         if let (Some(sheet), Some(tex_id)) =
                             (&self.material_icon_sheet, self.material_icons_texture_id)
                         {
@@ -3484,7 +3808,7 @@ impl App {
                             ui.painter().rect_stroke(
                                 rect,
                                 3.0,
-                                egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 255, 100)),
+                                egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 255, 100)),
                                 egui::epaint::StrokeKind::Outside,
                             );
                         } else {
@@ -3492,7 +3816,7 @@ impl App {
                                 rect,
                                 3.0,
                                 egui::Stroke::new(
-                                    1.0,
+                                    1.3,
                                     egui::Color32::from_rgba_unmultiplied(200, 200, 200, 80),
                                 ),
                                 egui::epaint::StrokeKind::Outside,
@@ -3500,28 +3824,105 @@ impl App {
                         }
 
                         // Slot number label (top-left corner)
-                        let label_pos = rect.left_top() + egui::vec2(3.0, 1.0);
+                        let label_pos = rect.left_top() + egui::vec2(4.0, 1.3);
                         ui.painter().text(
                             label_pos,
                             egui::Align2::LEFT_TOP,
                             format!("{}", i + 1),
-                            egui::FontId::proportional(10.0),
+                            egui::FontId::proportional(13.0),
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
                         );
 
                         // Material name (bottom center, small text)
                         let name = materials::material_name(material_id);
-                        let label_pos = rect.center_bottom() + egui::vec2(0.0, -2.0);
+                        let label_pos = rect.center_bottom() + egui::vec2(0.0, -3.0);
                         ui.painter().text(
                             label_pos,
                             egui::Align2::CENTER_BOTTOM,
                             name,
-                            egui::FontId::proportional(8.0),
+                            egui::FontId::proportional(10.0),
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200),
                         );
                     }
                 });
             });
+    }
+
+    fn draw_egui_teleport_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        teleport_target: &mut Option<[f32; 4]>,
+        close_teleport: &mut bool,
+    ) {
+        let mut open = true;
+        egui::Window::new("Teleport")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(260.0)
+            .show(ctx, |ui| {
+                ui.label("Coordinates:");
+                let labels = ["X:", "Y:", "Z:", "W:"];
+                for (i, label) in labels.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(*label);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.teleport_coords[i])
+                                .desired_width(120.0),
+                        );
+                    });
+                }
+
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Teleport").clicked() {
+                        let parsed: Option<[f32; 4]> = (|| {
+                            Some([
+                                self.teleport_coords[0].parse().ok()?,
+                                self.teleport_coords[1].parse().ok()?,
+                                self.teleport_coords[2].parse().ok()?,
+                                self.teleport_coords[3].parse().ok()?,
+                            ])
+                        })();
+                        if let Some(pos) = parsed {
+                            *teleport_target = Some(pos);
+                        }
+                    }
+
+                    if ui.button("Go to Origin").clicked() {
+                        *teleport_target = Some([0.0, 0.0, 0.0, 0.0]);
+                    }
+                });
+
+                if self.multiplayer.is_some() && !self.remote_players.is_empty() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label("Players:");
+                    let mut sorted_ids: Vec<u64> = self.remote_players.keys().copied().collect();
+                    sorted_ids.sort();
+                    for id in sorted_ids {
+                        if let Some(player) = self.remote_players.get(&id) {
+                            let name = if player.name.is_empty() {
+                                format!("Player {}", id)
+                            } else {
+                                player.name.clone()
+                            };
+                            let pos = player.position;
+                            let label = format!(
+                                "{} ({:.1}, {:.1}, {:.1}, {:.1})",
+                                name, pos[0], pos[1], pos[2], pos[3],
+                            );
+                            if ui.button(label).clicked() {
+                                *teleport_target = Some(pos);
+                            }
+                        }
+                    }
+                }
+            });
+        if !open {
+            *close_teleport = true;
+        }
     }
 
     fn draw_egui_inventory(
@@ -3536,7 +3937,7 @@ impl App {
             .resizable(false)
             .collapsible(false)
             .open(&mut open)
-            .default_width(520.0)
+            .default_width(676.0)
             .show(ctx, |ui| {
                 // Category tabs
                 ui.horizontal(|ui| {
@@ -3555,11 +3956,11 @@ impl App {
 
                 // Material grid
                 let items_per_row = 10;
-                let cell_size = 57.0;
-                let cell_gap = 4.0;
+                let cell_size = 74.0;
+                let cell_gap = 5.0;
 
                 egui::ScrollArea::vertical()
-                    .max_height(320.0)
+                    .max_height(416.0)
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
@@ -3584,7 +3985,7 @@ impl App {
                                 ui.painter().rect_filled(rect, 3.0, bg);
 
                                 // Material icon (tesseract image or color fallback)
-                                let icon_rect = rect.shrink(3.0);
+                                let icon_rect = rect.shrink(4.0);
                                 if let (Some(sheet), Some(tex_id)) =
                                     (&self.material_icon_sheet, self.material_icons_texture_id)
                                 {
@@ -3611,7 +4012,7 @@ impl App {
                                     text_pos,
                                     egui::Align2::CENTER_BOTTOM,
                                     mat.name,
-                                    egui::FontId::proportional(8.0),
+                                    egui::FontId::proportional(10.0),
                                     egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
                                 );
 
@@ -3619,7 +4020,7 @@ impl App {
                                     ui.painter().rect_stroke(
                                         rect,
                                         3.0,
-                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 255, 100)),
+                                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 100)),
                                         egui::epaint::StrokeKind::Outside,
                                     );
                                 }
@@ -3640,6 +4041,142 @@ impl App {
         }
     }
 
+    fn draw_egui_controls_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Controls")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(400.0)
+            .show(ctx, |ui| {
+                ui.heading("Movement");
+                egui::Grid::new("controls_movement")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("W / A / S / D").strong());
+                        ui.label("Move forward / left / backward / right");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Space").strong());
+                        ui.label("Jump (double-tap to toggle fly mode)");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Shift").strong());
+                        ui.label("Descend / Crouch");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Q / E").strong());
+                        ui.label("Move in 4D (W-axis negative / positive)");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("Camera");
+                egui::Grid::new("controls_camera")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Mouse").strong());
+                        ui.label("Look around");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("R (hold)").strong());
+                        ui.label("Reset orientation");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("F (hold)").strong());
+                        ui.label("Pull to 3D");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("G").strong());
+                        ui.label("Look at nearest block");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("Building");
+                egui::Grid::new("controls_building")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Left Click").strong());
+                        ui.label("Break block");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Right Click").strong());
+                        ui.label("Place block");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Middle Click").strong());
+                        ui.label("Pick material");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("[ / ]").strong());
+                        ui.label("Previous / Next material");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Scroll Wheel").strong());
+                        ui.label("Cycle hotbar slot");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("1-9, 0").strong());
+                        ui.label("Select hotbar slot");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("UI");
+                egui::Grid::new("controls_ui")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Escape").strong());
+                        ui.label("Open / close menu");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Tab / I").strong());
+                        ui.label("Toggle inventory");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("T").strong());
+                        ui.label("Toggle teleport dialog");
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.heading("World");
+                egui::Grid::new("controls_world")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("F5").strong());
+                        ui.label("Save world");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("F9").strong());
+                        ui.label("Load world");
+                        ui.end_row();
+                    });
+            });
+
+        if !open {
+            self.controls_dialog_open = false;
+        }
+    }
+
     fn run_egui_frame(&mut self) -> Option<EguiPaintData> {
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone())?;
         let raw_input = self.egui_winit_state.as_mut()?.take_egui_input(&window);
@@ -3648,17 +4185,27 @@ impl App {
         let mut close_menu = false;
         let mut close_inventory = false;
         let mut inventory_pick: Option<u8> = None;
+        let mut teleport_target: Option<[f32; 4]> = None;
+        let mut close_teleport = false;
         let mut transition_to_playing: Option<MainMenuTransition> = None;
         let mut return_to_main_menu = false;
         let full_output = egui_ctx.run(raw_input, |ctx| {
             if self.app_state == AppState::MainMenu {
                 self.draw_egui_main_menu(ctx, &mut transition_to_playing);
+            } else if !self.world_ready {
+                self.draw_egui_loading_screen(ctx);
             } else {
                 if self.menu_open {
                     self.draw_egui_pause_menu(ctx, &mut close_menu, &mut return_to_main_menu);
                 }
                 if self.inventory_open {
                     self.draw_egui_inventory(ctx, &mut close_inventory, &mut inventory_pick);
+                }
+                if self.teleport_dialog_open {
+                    self.draw_egui_teleport_dialog(ctx, &mut teleport_target, &mut close_teleport);
+                }
+                if self.controls_dialog_open {
+                    self.draw_egui_controls_dialog(ctx);
                 }
                 self.draw_egui_hotbar(ctx);
             }
@@ -3683,6 +4230,7 @@ impl App {
         }
         if close_menu {
             self.menu_open = false;
+            self.controls_dialog_open = false;
             self.grab_mouse(&window);
         }
         if close_inventory || inventory_pick.is_some() {
@@ -3697,6 +4245,23 @@ impl App {
                 self.hotbar_selected_index + 1,
                 material_id,
                 materials::material_name(material_id),
+            );
+        }
+        if close_teleport {
+            self.teleport_dialog_open = false;
+            if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
+                self.grab_mouse(&window);
+            }
+        }
+        if let Some(pos) = teleport_target {
+            self.camera.position = pos;
+            self.teleport_dialog_open = false;
+            if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
+                self.grab_mouse(&window);
+            }
+            eprintln!(
+                "Teleported to ({:.1}, {:.1}, {:.1}, {:.1})",
+                pos[0], pos[1], pos[2], pos[3],
             );
         }
 
@@ -4050,11 +4615,11 @@ impl App {
     }
 
     fn connect_multiplayer_remote(&mut self, server_addr: String) -> Result<(), String> {
-        let player_name = self
-            .args
-            .player_name
-            .clone()
-            .unwrap_or_else(default_multiplayer_player_name);
+        let player_name = if self.main_menu_player_name.trim().is_empty() {
+            default_multiplayer_player_name()
+        } else {
+            self.main_menu_player_name.trim().to_string()
+        };
         match MultiplayerClient::connect(server_addr.clone(), player_name.clone()) {
             Ok(client) => {
                 eprintln!(
@@ -4071,11 +4636,11 @@ impl App {
     }
 
     fn connect_singleplayer_local(&mut self, world_file: PathBuf) -> Result<(), String> {
-        let player_name = self
-            .args
-            .player_name
-            .clone()
-            .unwrap_or_else(default_multiplayer_player_name);
+        let player_name = if self.main_menu_player_name.trim().is_empty() {
+            default_multiplayer_player_name()
+        } else {
+            self.main_menu_player_name.trim().to_string()
+        };
         let config = build_singleplayer_runtime_config(&self.args, world_file.clone());
         match MultiplayerClient::connect_local(config, player_name.clone()) {
             Ok(client) => {
@@ -4097,11 +4662,18 @@ impl App {
     }
 
     fn enter_play_state(&mut self, window: &Window) {
-        self.scene = Scene::new(ScenePreset::Flat);
+        // Start from an empty client scene; multiplayer snapshot/chunks are authoritative.
+        self.scene = Scene::new(ScenePreset::Empty);
         self.camera = Camera4D::new();
         self.app_state = AppState::Playing;
         self.menu_open = false;
         self.main_menu_connect_error = None;
+        self.world_ready = false;
+
+        // Pre-load chunks around spawn position
+        self.scene
+            .preload_spawn_chunks(self.camera.position, self.vte_lod_near_max_distance);
+
         self.grab_mouse(window);
     }
 
@@ -4161,23 +4733,21 @@ impl App {
             self.reset_multiplayer_connection_state();
             eprintln!("Disconnected from multiplayer server");
         }
+        // Reset scene to show demo background (DemoCubes has visible geometry near origin)
+        self.scene = Scene::new(ScenePreset::DemoCubes);
         self.app_state = AppState::MainMenu;
         self.main_menu_page = MainMenuPage::Root;
         self.main_menu_connect_error = None;
         self.menu_open = false;
         self.inventory_open = false;
-        // Reset the menu demo camera
+        self.teleport_dialog_open = false;
+        self.world_ready = true;
         self.menu_time = 0.0;
-        self.menu_camera.position = [5.0, 3.0, 5.0, 2.0];
-        self.menu_camera.yaw = -0.8;
-        self.menu_camera.pitch = -0.3;
-        self.menu_camera.xw_angle = 0.4;
-        self.menu_camera.zw_angle = 0.0;
-        self.menu_camera.yw_deviation = 0.0;
+        self.menu_camera = make_menu_camera();
         self.release_mouse(window);
     }
 
-    fn update_and_render_main_menu(&mut self) {
+    fn update_and_render_main_menu(&mut self, dt: f32) {
         // Drain any inputs that accumulated
         self.input.take_mouse_delta();
         self.input.take_jump();
@@ -4187,13 +4757,8 @@ impl App {
         let _ = self.input.take_scroll_steps();
 
         // Advance menu camera animation
-        let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
-        self.menu_time += dt;
-
-        // Slowly orbit: rotate yaw and xw_angle for a gentle 4D tumble
-        self.menu_camera.yaw = -0.8 + self.menu_time * 0.08;
-        self.menu_camera.xw_angle = 0.4 + self.menu_time * 0.05;
+        self.menu_time += dt.min(0.1);
+        apply_menu_camera_orbit_pose(&mut self.menu_camera, self.menu_time);
 
         let egui_paint = if self.args.no_hud {
             None
@@ -4201,13 +4766,15 @@ impl App {
             self.run_egui_frame()
         };
 
-        let view_matrix = self.menu_camera.view_matrix();
+        let view_matrix = self.menu_camera.view_matrix_upright();
         let backend = self.args.backend.to_render_backend();
         let render_options = RenderOptions {
             do_raster: true,
             render_backend: backend,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
+            vte_lod_near_max_distance: self.vte_lod_near_max_distance,
+            vte_lod_mid_max_distance: self.vte_lod_mid_max_distance,
             vte_display_mode: self.args.vte_display_mode.to_render_mode(),
             vte_slice_layer: self.args.vte_slice_layer,
             vte_thick_half_width: self.args.vte_thick_half_width,
@@ -4236,7 +4803,13 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let voxel_frame = self.scene.build_voxel_frame_data(self.menu_camera.position);
+            let voxel_frame = self.scene.build_voxel_frame_data(
+                self.menu_camera.position,
+                self.menu_camera.look_direction(),
+                self.vte_lod_near_max_distance,
+                self.vte_lod_mid_max_distance,
+                self.vte_max_trace_distance,
+            );
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
@@ -4257,6 +4830,15 @@ impl App {
                 },
             );
         }
+    }
+
+    fn draw_egui_loading_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.4);
+                ui.heading("Loading world...");
+            });
+        });
     }
 
     fn draw_egui_main_menu(
@@ -4427,6 +5009,11 @@ impl App {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
+                    ui.label("Player name:");
+                    ui.text_edit_singleline(&mut self.main_menu_player_name);
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
                     ui.label("Server address:");
                     ui.text_edit_singleline(&mut self.main_menu_server_address);
                 });
@@ -4451,12 +5038,14 @@ impl App {
     }
 
     fn update_and_render(&mut self) {
+        let frame_start = Instant::now();
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
 
         if self.app_state == AppState::MainMenu {
-            self.update_and_render_main_menu();
+            self.update_and_render_main_menu(dt);
+            self.record_runtime_profile_sample(frame_start);
             return;
         }
 
@@ -4488,7 +5077,7 @@ impl App {
             self.should_exit_after_render = true;
         }
 
-        if self.menu_open || self.inventory_open {
+        if self.menu_open || self.inventory_open || self.teleport_dialog_open {
             self.drain_gameplay_inputs_while_menu_open();
         } else {
             self.input.take_menu_left();
@@ -4561,6 +5150,10 @@ impl App {
             if self.mouse_grabbed {
                 let pair = self.active_rotation_pair();
                 let (dx, dy) = self.input.take_mouse_delta();
+                // Cancel look-at pull on any mouse movement
+                if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                    self.look_at_target = None;
+                }
                 match self.control_scheme {
                     ControlScheme::LookTransport => {
                         self.camera.apply_mouse_look_transport(
@@ -4597,6 +5190,7 @@ impl App {
 
             if self.input.reset_orientation_held() || self.input.pull_to_3d_held() {
                 let pull_home = self.input.reset_orientation_held();
+                self.look_at_target = None; // Cancel look-at when holding R or F
                 match self.control_scheme {
                     ControlScheme::LookTransport | ControlScheme::RotorFree => {
                         if pull_home {
@@ -4614,6 +5208,72 @@ impl App {
                             self.camera.pull_toward_nearest_3d_angles(dt);
                         }
                     }
+                }
+            }
+
+            // Look-at: on G press, fan-cast across the ZW viewing wedge to
+            // find the nearest solid block and smoothly rotate toward it.
+            if self.input.take_look_at() && self.mouse_grabbed {
+                let edit_reach = self
+                    .args
+                    .edit_reach
+                    .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
+                let (_right, _up, view_z, view_w) = self.current_view_basis();
+                let hit = self.scene.fan_cast_nearest_block(
+                    self.camera.position,
+                    view_z,
+                    view_w,
+                    self.focal_length_zw,
+                    edit_reach,
+                    32,
+                );
+                if let Some([x, y, z, w]) = hit {
+                    let target_pos = [
+                        x as f32 + 0.5,
+                        y as f32 + 0.5,
+                        z as f32 + 0.5,
+                        w as f32 + 0.5,
+                    ];
+                    let dir = [
+                        target_pos[0] - self.camera.position[0],
+                        target_pos[1] - self.camera.position[1],
+                        target_pos[2] - self.camera.position[2],
+                        target_pos[3] - self.camera.position[3],
+                    ];
+                    match self.control_scheme {
+                        ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                            self.look_at_target = Some(LookAtTarget::Direction(dir));
+                        }
+                        _ => {
+                            let (ty, tp, txw, tzw) = Camera4D::angles_for_direction_upright(dir);
+                            self.look_at_target = Some(LookAtTarget::Angles {
+                                yaw: ty,
+                                pitch: tp,
+                                xw_angle: txw,
+                                zw_angle: tzw,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Apply smooth pull toward look-at target
+            if let Some(target) = self.look_at_target {
+                let converged = match target {
+                    LookAtTarget::Angles {
+                        yaw,
+                        pitch,
+                        xw_angle,
+                        zw_angle,
+                    } => self
+                        .camera
+                        .pull_toward_target_angles(yaw, pitch, xw_angle, zw_angle, dt),
+                    LookAtTarget::Direction(dir) => {
+                        self.camera.pull_toward_target_direction_look_frame(dir, dt)
+                    }
+                };
+                if converged {
+                    self.look_at_target = None;
                 }
             }
 
@@ -4664,6 +5324,10 @@ impl App {
             if self.input.take_inventory_toggle() {
                 self.toggle_inventory();
             }
+            // T key toggles teleport dialog.
+            if self.input.take_teleport_dialog() {
+                self.toggle_teleport_dialog();
+            }
         }
 
         // Determine active rotation pair
@@ -4674,7 +5338,7 @@ impl App {
             .edit_reach
             .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
 
-        if !self.menu_open && !self.inventory_open {
+        if !self.menu_open && !self.inventory_open && !self.teleport_dialog_open {
             // Jump when in gravity mode, consume jump either way.
             if self.camera.is_flying {
                 self.input.take_jump();
@@ -4889,6 +5553,25 @@ impl App {
             }
         }
 
+        // WAILA: show targeted block name below crosshair
+        let waila_text = if !self.menu_open && self.mouse_grabbed && !self.args.no_hud {
+            let waila_targets =
+                self.scene
+                    .block_edit_targets(self.camera.position, look_dir, edit_reach);
+            if let Some([x, y, z, w]) = waila_targets.hit_voxel {
+                let voxel = self.scene.world.get_voxel(x, y, z, w);
+                if voxel.0 != 0 {
+                    Some(materials::material_name(voxel.0).to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut custom_overlay_lines = Vec::with_capacity(64);
         if highlight_mode.uses_edges() {
             if let Some(targets) = targets {
@@ -5005,6 +5688,8 @@ impl App {
             render_backend: backend,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
+            vte_lod_near_max_distance: self.vte_lod_near_max_distance,
+            vte_lod_mid_max_distance: self.vte_lod_mid_max_distance,
             vte_display_mode: self.args.vte_display_mode.to_render_mode(),
             vte_slice_layer: self.args.vte_slice_layer,
             vte_thick_half_width: self.args.vte_thick_half_width,
@@ -5040,6 +5725,7 @@ impl App {
             } else {
                 hud_player_tags
             },
+            waila_text,
             egui_paint,
             ..Default::default()
         };
@@ -5059,15 +5745,36 @@ impl App {
             }
             vte_non_voxel_instances.extend(self.remote_player_instances(preview_time_s));
             vte_non_voxel_instances.extend(self.remote_entity_instances(preview_time_s));
-            let voxel_frame = self.scene.build_voxel_frame_data(self.camera.position);
-            let preview_overlay_instances = [preview_instance];
+            let mut preview_overlay_instances: &[common::ModelInstance] = &[];
+            if self.vte_overlay_raster_enabled {
+                preview_overlay_instances = std::slice::from_ref(&preview_instance);
+            } else {
+                // Default: render held-block preview through Stage A entity path for full quality.
+                vte_non_voxel_instances.push(preview_instance);
+            }
+            let voxel_frame = self.scene.build_voxel_frame_data(
+                self.camera.position,
+                look_dir,
+                self.vte_lod_near_max_distance,
+                self.vte_lod_mid_max_distance,
+                self.vte_max_trace_distance,
+            );
+
+            // If we are playing without a live server connection, do not keep the loading gate up.
+            if !self.world_ready
+                && self.app_state == AppState::Playing
+                && self.multiplayer.is_none()
+            {
+                self.world_ready = true;
+                eprintln!("World ready: no multiplayer connection");
+            }
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
                 &vte_non_voxel_instances,
-                &preview_overlay_instances,
+                preview_overlay_instances,
             );
         } else {
             let remote_instances = self.remote_player_instances(preview_time_s);
@@ -5200,6 +5907,7 @@ impl App {
         }
 
         self.advance_vte_runtime_sweep_after_frame();
+        self.record_runtime_profile_sample(frame_start);
     }
 }
 
@@ -5290,8 +5998,10 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
-        let show_egui_overlay =
-            self.app_state == AppState::MainMenu || self.menu_open || self.inventory_open;
+        let show_egui_overlay = self.app_state == AppState::MainMenu
+            || self.menu_open
+            || self.inventory_open
+            || self.teleport_dialog_open;
         let egui_consumed = if let (Some(egui_state), Some(window)) =
             (self.egui_winit_state.as_mut(), window.as_ref())
         {
@@ -5323,6 +6033,11 @@ impl ApplicationHandler for App {
                         } else {
                             event_loop.exit();
                         }
+                    } else if self.teleport_dialog_open {
+                        self.teleport_dialog_open = false;
+                        if let Some(window) = window.as_ref() {
+                            self.grab_mouse(window);
+                        }
                     } else if self.inventory_open {
                         self.inventory_open = false;
                         if let Some(window) = window.as_ref() {
@@ -5353,7 +6068,13 @@ impl ApplicationHandler for App {
                             if !egui_consumed {
                                 self.input.handle_mouse_button(button, state);
                             }
-                        } else if !self.menu_open && !self.inventory_open {
+                        } else if self.teleport_dialog_open && !egui_consumed {
+                            // Click outside teleport dialog — close it and grab mouse
+                            self.toggle_teleport_dialog();
+                        } else if !self.menu_open
+                            && !self.inventory_open
+                            && !self.teleport_dialog_open
+                        {
                             if let Some(window) = window.as_ref() {
                                 self.grab_mouse(window);
                                 self.menu_open = false;

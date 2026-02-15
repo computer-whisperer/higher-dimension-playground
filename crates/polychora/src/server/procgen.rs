@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 const STRUCTURE_CELL_SIZE: i32 = 32;
 const STRUCTURE_CELL_JITTER: i32 = 10;
 const STRUCTURE_SPAWN_NUMERATOR: u64 = 1;
-const STRUCTURE_SPAWN_DENOMINATOR: u64 = 32;
+const STRUCTURE_SPAWN_DENOMINATOR: u64 = 48;
 const STRUCTURE_ORIGIN_EXCLUSION_RADIUS: i32 = 16;
 const STRUCTURE_HASH_SALT: u64 = 0x9f07_c9ab_33f2_3a11;
 const STRUCTURE_PICK_SALT: u64 = 0x2d99_1f4e_47ba_8c6d;
@@ -21,7 +21,7 @@ const ROTATION_VARIANTS: u64 = 48;
 const MAZE_CELL_SIZE: i32 = 128;
 const MAZE_CELL_JITTER: i32 = 20;
 const MAZE_SPAWN_NUMERATOR: u64 = 1;
-const MAZE_SPAWN_DENOMINATOR: u64 = 20;
+const MAZE_SPAWN_DENOMINATOR: u64 = 36;
 const MAZE_ORIGIN_EXCLUSION_RADIUS: i32 = 24;
 const MAZE_HASH_SALT: u64 = 0x6f1d_05ce_294a_719b;
 const MAZE_LAYOUT_SALT: u64 = 0x49ec_66d6_0d13_9e75;
@@ -48,10 +48,10 @@ const MAZE_HALF_SPAN: i32 = MAZE_SPAN / 2;
 const MAZE_HEIGHT: i32 = 7;
 const MAZE_WORLD_Y_MIN: i32 = 0;
 const MAZE_FLOOR_MATERIAL: u8 = 55;
-const MAZE_CEILING_MATERIAL: u8 = 63;
-const MAZE_WALL_MATERIAL: u8 = 66;
-const MAZE_GATE_FRAME_MATERIAL: u8 = 68;
-const MAZE_BEACON_MATERIAL: u8 = 64;
+const MAZE_CEILING_MATERIAL: u8 = 60;
+const MAZE_WALL_MATERIAL: u8 = 62;
+const MAZE_GATE_FRAME_MATERIAL: u8 = 51;
+const MAZE_BEACON_MATERIAL: u8 = 67;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -520,7 +520,7 @@ static STRUCTURE_SET: OnceLock<StructureSet> = OnceLock::new();
 
 fn structure_set() -> &'static StructureSet {
     STRUCTURE_SET.get_or_init(|| {
-        let sources: [(&str, &[u8]); 18] = [
+        let sources: [(&str, &[u8]); 21] = [
             (
                 "cross_shrine.json",
                 &include_bytes!("../../assets/structures/cross_shrine.json")[..],
@@ -528,6 +528,10 @@ fn structure_set() -> &'static StructureSet {
             (
                 "hyper_arch.json",
                 &include_bytes!("../../assets/structures/hyper_arch.json")[..],
+            ),
+            (
+                "duoprism_exchange.json",
+                &include_bytes!("../../assets/structures/duoprism_exchange.json")[..],
             ),
             (
                 "tetra_spire.json",
@@ -584,6 +588,14 @@ fn structure_set() -> &'static StructureSet {
             (
                 "phase_ladder.json",
                 &include_bytes!("../../assets/structures/phase_ladder.json")[..],
+            ),
+            (
+                "phase_cloister.json",
+                &include_bytes!("../../assets/structures/phase_cloister.json")[..],
+            ),
+            (
+                "pentachord_spindle.json",
+                &include_bytes!("../../assets/structures/pentachord_spindle.json")[..],
             ),
             (
                 "orthoplex_nexus.json",
@@ -652,6 +664,12 @@ pub fn structure_chunk_y_bounds() -> (i32, i32) {
         min_world_y.div_euclid(chunk_size),
         max_world_y.div_euclid(chunk_size),
     )
+}
+
+pub fn structure_chunk_y_bounds_for_scale(chunk_scale: i32) -> (i32, i32) {
+    let (min_chunk_y, max_chunk_y) = structure_chunk_y_bounds();
+    let scale = chunk_scale.max(1);
+    (min_chunk_y.div_euclid(scale), max_chunk_y.div_euclid(scale))
 }
 
 pub type StructureCell = [i32; 3];
@@ -1219,6 +1237,45 @@ pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool
     structure_chunk_has_content_with_keepout(world_seed, chunk_pos, None)
 }
 
+pub fn structure_chunk_has_content_for_scale_with_keepout(
+    world_seed: u64,
+    chunk_pos: ChunkPos,
+    chunk_scale: i32,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> bool {
+    let scale = chunk_scale.max(1);
+    if scale == 1 {
+        return structure_chunk_has_content_with_keepout(world_seed, chunk_pos, blocked_cells);
+    }
+
+    for dw in 0..scale {
+        for dz in 0..scale {
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let child = ChunkPos::new(
+                        chunk_pos.x * scale + dx,
+                        chunk_pos.y * scale + dy,
+                        chunk_pos.z * scale + dz,
+                        chunk_pos.w * scale + dw,
+                    );
+                    if structure_chunk_has_content_with_keepout(world_seed, child, blocked_cells) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn structure_chunk_has_content_for_scale(
+    world_seed: u64,
+    chunk_pos: ChunkPos,
+    chunk_scale: i32,
+) -> bool {
+    structure_chunk_has_content_for_scale_with_keepout(world_seed, chunk_pos, chunk_scale, None)
+}
+
 fn jitter_from_hash(hash: u64) -> i32 {
     jitter_from_hash_with_radius(hash, STRUCTURE_CELL_JITTER)
 }
@@ -1478,6 +1535,57 @@ mod tests {
                         assert_eq!(
                             has_content, generated,
                             "content mismatch for chunk ({x}, {y}, {z}, {w})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_has_content_for_scale_matches_child_chunks() {
+        let seed = 1717_u64;
+        let scale = 2;
+        let (min_y, max_y) = structure_chunk_y_bounds_for_scale(scale);
+
+        for x in -6..=6 {
+            for z in -6..=6 {
+                for w in -6..=6 {
+                    for y in min_y..=max_y {
+                        let coarse = ChunkPos::new(x, y, z, w);
+                        let mut expected = false;
+                        for dw in 0..scale {
+                            for dz in 0..scale {
+                                for dy in 0..scale {
+                                    for dx in 0..scale {
+                                        let child = ChunkPos::new(
+                                            coarse.x * scale + dx,
+                                            coarse.y * scale + dy,
+                                            coarse.z * scale + dz,
+                                            coarse.w * scale + dw,
+                                        );
+                                        if structure_chunk_has_content(seed, child) {
+                                            expected = true;
+                                            break;
+                                        }
+                                    }
+                                    if expected {
+                                        break;
+                                    }
+                                }
+                                if expected {
+                                    break;
+                                }
+                            }
+                            if expected {
+                                break;
+                            }
+                        }
+
+                        assert_eq!(
+                            structure_chunk_has_content_for_scale(seed, coarse, scale),
+                            expected,
+                            "scaled content mismatch for chunk ({x}, {y}, {z}, {w})"
                         );
                     }
                 }

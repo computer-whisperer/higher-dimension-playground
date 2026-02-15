@@ -4,19 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - main
   pull_request:
 
 jobs:
   build:
-    name: Build ${{ matrix.package }} (windows)
+    name: Build binaries (windows)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        package:
-          - polychora
-          - polychora-server
 
     steps:
       - name: Checkout
@@ -28,28 +22,33 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Vulkan SDK (polychora only)
-        if: matrix.package == 'polychora'
+      - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
           version: 1.4.309.0
           cache: true
 
-      - name: Verify shader toolchain (polychora only)
-        if: matrix.package == 'polychora'
+      - name: Verify shader toolchain
         shell: pwsh
         run: |
           Write-Host "VULKAN_SDK=$env:VULKAN_SDK"
-          slangc --version
+          slangc -v
           spirv-link --version
           spirv-val --version
 
-      - name: Build package
-        run: cargo build --release --locked -p ${{ matrix.package }}
+      - name: Build polychora binaries
+        run: cargo build --release --locked -p polychora
 
-      - name: Upload executable artifact
+      - name: Upload polychora client
         uses: actions/upload-artifact@v4
         with:
-          name: windows-${{ matrix.package }}
-          path: target/release/${{ matrix.package }}.exe
+          name: windows-polychora
+          path: target/release/polychora.exe
+          if-no-files-found: error
+
+      - name: Upload polychora server
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-polychora-server
+          path: target/release/polychora-server.exe
           if-no-files-found: error

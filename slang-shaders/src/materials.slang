@@ -6,6 +6,9 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
 {
     const float basicLuminance = 0.001;
     const float tau = 6.2831853;
+    const uint previewMaterialFlag = 0x80000000u;
+    bool isPreviewMaterial = (textureId & previewMaterialFlag) != 0u;
+    uint baseTextureId = textureId & (~previewMaterialFlag);
     float4 p4 = texturePos;
     float3 p = p4.xyz;
     float t = float(timeTicksMs) * 0.001;
@@ -16,7 +19,7 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
     mat.luminance = basicLuminance;
     mat.integrationWeight = 1.0;
 
-    switch (textureId)
+    switch (baseTextureId)
     {
     case 1:
         mat.albedo = float4(1.0, 0.0, 0.0, 1.0); // Red
@@ -1158,6 +1161,14 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
         mat.albedo = float4(0.0, 0.0, 0.0, 1.0);
         mat.luminance = 0.0;
         break;
+    }
+
+    if (isPreviewMaterial)
+    {
+        // Held-block preview should over-contribute enough to read clearly in
+        // integral mode, while preserving material hue (avoid whitening).
+        mat.integrationWeight *= 5.0;
+        mat.luminance += 0.02;
     }
 
     return mat;
