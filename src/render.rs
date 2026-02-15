@@ -2103,7 +2103,7 @@ pub struct RenderContext {
     memory_allocator: Arc<StandardMemoryAllocator>,
     frames_rendered: usize,
     bvh_scene_hash: u64,
-    vte_entity_scene_hash: u64,
+    vte_non_voxel_scene_hash: u64,
     last_clipped_tet_count: u32,
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
@@ -2711,7 +2711,7 @@ impl RenderContext {
             cpu_screen_capture_buffer,
             frames_rendered: 0,
             bvh_scene_hash: 0,
-            vte_entity_scene_hash: 0,
+            vte_non_voxel_scene_hash: 0,
             last_clipped_tet_count: 0,
             profiler,
             hud_font,
@@ -3409,8 +3409,7 @@ impl RenderContext {
             );
 
             // Label position: pushed outside the circle boundary for clean separation
-            let label_pos =
-                rose_origin + px_delta_to_ndc(ray_dir * (rose_radius_px * 1.08));
+            let label_pos = rose_origin + px_delta_to_ndc(ray_dir * (rose_radius_px * 1.08));
             arrows.push(ArrowData {
                 color: axis_color,
                 label_pos,
@@ -3658,15 +3657,13 @@ impl RenderContext {
                 push_line(
                     &mut lines,
                     xz_center,
-                    xz_center
-                        + Vec2::new(fov_left_dir.x * fov_len.x, fov_left_dir.y * fov_len.y),
+                    xz_center + Vec2::new(fov_left_dir.x * fov_len.x, fov_left_dir.y * fov_len.y),
                     fov_color,
                 );
                 push_line(
                     &mut lines,
                     xz_center,
-                    xz_center
-                        + Vec2::new(fov_right_dir.x * fov_len.x, fov_right_dir.y * fov_len.y),
+                    xz_center + Vec2::new(fov_right_dir.x * fov_len.x, fov_right_dir.y * fov_len.y),
                     fov_color,
                 );
             }
@@ -3751,10 +3748,7 @@ impl RenderContext {
             // Cardinal labels on XZ panel edges: +X right, -X left, +Z top, -Z bottom
             // In Vulkan NDC: xz_min.y = top of screen (lower NDC), xz_max.y = bottom
             let xz_cardinals: &[(&str, Vec2)] = &[
-                (
-                    "+X",
-                    Vec2::new(xz_max.x - edge_inset.x * 3.0, xz_center.y),
-                ),
+                ("+X", Vec2::new(xz_max.x - edge_inset.x * 3.0, xz_center.y)),
                 ("-X", Vec2::new(xz_min.x + edge_inset.x, xz_center.y)),
                 (
                     "+Z",
@@ -3762,10 +3756,7 @@ impl RenderContext {
                 ),
                 (
                     "-Z",
-                    Vec2::new(
-                        xz_center.x - edge_inset.x,
-                        xz_max.y - edge_inset.y * 3.0,
-                    ),
+                    Vec2::new(xz_center.x - edge_inset.x, xz_max.y - edge_inset.y * 3.0),
                 ),
             ];
             for (label, ndc_pos) in xz_cardinals {
@@ -3783,10 +3774,7 @@ impl RenderContext {
 
             // Cardinal labels on YW panel edges: +Y right, -Y left, +W top, -W bottom
             let yw_cardinals: &[(&str, Vec2)] = &[
-                (
-                    "+Y",
-                    Vec2::new(yw_max.x - edge_inset.x * 3.0, yw_center.y),
-                ),
+                ("+Y", Vec2::new(yw_max.x - edge_inset.x * 3.0, yw_center.y)),
                 ("-Y", Vec2::new(yw_min.x + edge_inset.x, yw_center.y)),
                 (
                     "+W",
@@ -3794,10 +3782,7 @@ impl RenderContext {
                 ),
                 (
                     "-W",
-                    Vec2::new(
-                        yw_center.x - edge_inset.x,
-                        yw_max.y - edge_inset.y * 3.0,
-                    ),
+                    Vec2::new(yw_center.x - edge_inset.x, yw_max.y - edge_inset.y * 3.0),
                 ),
             ];
             for (label, ndc_pos) in yw_cardinals {
@@ -4039,18 +4024,16 @@ impl RenderContext {
             // Performance line -- compact
             readout_text.push_str(&format!(
                 "{:.0} fps  {:.1}/{:.1} ms  [{}]",
-                fps, self.frame_time_ms, self.profiler.last_gpu_total_ms, self.last_backend.label()
+                fps,
+                self.frame_time_ms,
+                self.profiler.last_gpu_total_ms,
+                self.last_backend.label()
             ));
             // Position and orientation table -- clean aligned columns
-            readout_text.push_str(
-                "\n          X        Y        Z        W",
-            );
+            readout_text.push_str("\n          X        Y        Z        W");
             readout_text.push_str(&format!(
                 "\npos  {:+7.1}  {:+7.1}  {:+7.1}  {:+7.1}",
-                camera_position[0],
-                camera_position[1],
-                camera_position[2],
-                camera_position[3],
+                camera_position[0], camera_position[1], camera_position[2], camera_position[3],
             ));
             readout_text.push_str(&format!(
                 "\ndir  {:+7.3}  {:+7.3}  {:+7.3}  {:+7.3}",
@@ -4171,24 +4154,14 @@ impl RenderContext {
                 &hud_res.font_atlas,
                 Vec2::new(xz_min.x, xz_min.y),
                 Vec2::new(xz_max.x, xz_min.y + border_h),
-                Vec4::new(
-                    xz_frame_color.x,
-                    xz_frame_color.y,
-                    xz_frame_color.z,
-                    0.35,
-                ),
+                Vec4::new(xz_frame_color.x, xz_frame_color.y, xz_frame_color.z, 0.35),
             );
             push_filled_rect_quads(
                 &mut hud_quads,
                 &hud_res.font_atlas,
                 Vec2::new(yw_min.x, yw_min.y),
                 Vec2::new(yw_max.x, yw_min.y + border_h),
-                Vec4::new(
-                    yw_frame_color.x,
-                    yw_frame_color.y,
-                    yw_frame_color.z,
-                    0.35,
-                ),
+                Vec4::new(yw_frame_color.x, yw_frame_color.y, yw_frame_color.z, 0.35),
             );
             push_filled_rect_quads(
                 &mut hud_quads,
@@ -4362,10 +4335,7 @@ impl RenderContext {
                 );
 
                 // Draw text centered in the box
-                let text_top_left_px = Vec2::new(
-                    center_x - tw * 0.5,
-                    box_max_y - padding_v,
-                );
+                let text_top_left_px = Vec2::new(center_x - tw * 0.5, box_max_y - padding_v);
                 push_text_quads(
                     &mut hud_quads,
                     &hud_res.font_atlas,
@@ -4457,11 +4427,7 @@ impl RenderContext {
         );
 
         // The sized descriptor set layout is set_layouts[1] in the compute pipeline layout.
-        let sized_ds_layout = self
-            .compute_pipeline
-            .pipeline_layout
-            .set_layouts()[1]
-            .clone();
+        let sized_ds_layout = self.compute_pipeline.pipeline_layout.set_layouts()[1].clone();
 
         for frame in &mut self.frames_in_flight {
             frame.sized_descriptor_set = new_sized.create_sized_descriptor_set(
@@ -4768,9 +4734,9 @@ impl RenderContext {
         )
         .unwrap_or(usize::MAX);
         let use_split_voxel_instances = voxel_input.is_some();
-        let entity_used_instance_count = model_instances.len().min(model_instance_capacity);
+        let non_voxel_used_instance_count = model_instances.len().min(model_instance_capacity);
         let overlay_instance_capacity =
-            model_instance_capacity.saturating_sub(entity_used_instance_count);
+            model_instance_capacity.saturating_sub(non_voxel_used_instance_count);
         let overlay_used_instance_count = if use_split_voxel_instances {
             raster_overlay_instances
                 .len()
@@ -4778,10 +4744,10 @@ impl RenderContext {
         } else {
             0
         };
-        let used_instance_count = entity_used_instance_count + overlay_used_instance_count;
+        let used_instance_count = non_voxel_used_instance_count + overlay_used_instance_count;
 
         let requested_tetrahedron_count =
-            self.one_time_buffers.model_tetrahedron_count * entity_used_instance_count;
+            self.one_time_buffers.model_tetrahedron_count * non_voxel_used_instance_count;
         let total_tetrahedron_count =
             requested_tetrahedron_count.min(self.sized_buffers.max_tetrahedrons);
         let requested_raster_overlay_tetrahedron_count =
@@ -4789,7 +4755,7 @@ impl RenderContext {
         let raster_overlay_tetrahedron_count =
             requested_raster_overlay_tetrahedron_count.min(self.sized_buffers.max_tetrahedrons);
         let raster_instance_base = if use_split_voxel_instances {
-            entity_used_instance_count
+            non_voxel_used_instance_count
         } else {
             0
         };
@@ -4802,11 +4768,11 @@ impl RenderContext {
         // Debug: print scene info on first frame only
         if self.frames_rendered == 0 {
             if use_split_voxel_instances {
-                if model_instances.len() > entity_used_instance_count {
+                if model_instances.len() > non_voxel_used_instance_count {
                     eprintln!(
-                        "VTE entity input truncated to buffer capacity: {} -> {}",
+                        "VTE non-voxel input truncated to buffer capacity: {} -> {}",
                         model_instances.len(),
-                        entity_used_instance_count
+                        non_voxel_used_instance_count
                     );
                 }
                 if raster_overlay_instances.len() > overlay_used_instance_count {
@@ -4818,7 +4784,7 @@ impl RenderContext {
                 }
                 if requested_tetrahedron_count > total_tetrahedron_count {
                     eprintln!(
-                        "VTE entity tetrahedrons truncated to buffer capacity: {} -> {}",
+                        "VTE non-voxel tetrahedrons truncated to buffer capacity: {} -> {}",
                         requested_tetrahedron_count, total_tetrahedron_count
                     );
                 }
@@ -4830,15 +4796,15 @@ impl RenderContext {
                     );
                 }
                 println!(
-                    "VTE scene: {} entity tetrahedrons, {} raster overlay tetrahedrons ({} per instance × entities={}, overlays={})",
+                    "VTE scene: {} non-voxel tetrahedrons, {} raster overlay tetrahedrons ({} per instance × non_voxel_instances={}, overlays={})",
                     total_tetrahedron_count,
                     raster_overlay_tetrahedron_count,
                     self.one_time_buffers.model_tetrahedron_count,
-                    entity_used_instance_count,
+                    non_voxel_used_instance_count,
                     overlay_used_instance_count
                 );
                 println!(
-                    "VTE entity BVH: {} internal nodes, {} total nodes",
+                    "VTE non-voxel BVH: {} internal nodes, {} total nodes",
                     total_tetrahedron_count.saturating_sub(1),
                     2 * total_tetrahedron_count.saturating_sub(1) + 1
                 );
@@ -4870,7 +4836,8 @@ impl RenderContext {
             }
         }
         {
-            let world_origin_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
+            let world_origin_h =
+                mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
             let world_origin_inv_w = if world_origin_h[4].abs() > 1e-6 {
                 1.0 / world_origin_h[4]
             } else {
@@ -4922,27 +4889,43 @@ impl RenderContext {
                 render_options.vte_display_mode.as_u32(),
             ];
             writer.world_origin = world_origin;
-            writer.world_dir_x =
-                glam::Vec4::new(world_dir_x_h[0], world_dir_x_h[1], world_dir_x_h[2], world_dir_x_h[3]);
-            writer.world_dir_y =
-                glam::Vec4::new(world_dir_y_h[0], world_dir_y_h[1], world_dir_y_h[2], world_dir_y_h[3]);
-            writer.world_dir_z =
-                glam::Vec4::new(world_dir_z_h[0], world_dir_z_h[1], world_dir_z_h[2], world_dir_z_h[3]);
-            writer.world_dir_w =
-                glam::Vec4::new(world_dir_w_h[0], world_dir_w_h[1], world_dir_w_h[2], world_dir_w_h[3]);
+            writer.world_dir_x = glam::Vec4::new(
+                world_dir_x_h[0],
+                world_dir_x_h[1],
+                world_dir_x_h[2],
+                world_dir_x_h[3],
+            );
+            writer.world_dir_y = glam::Vec4::new(
+                world_dir_y_h[0],
+                world_dir_y_h[1],
+                world_dir_y_h[2],
+                world_dir_y_h[3],
+            );
+            writer.world_dir_z = glam::Vec4::new(
+                world_dir_z_h[0],
+                world_dir_z_h[1],
+                world_dir_z_h[2],
+                world_dir_z_h[3],
+            );
+            writer.world_dir_w = glam::Vec4::new(
+                world_dir_w_h[0],
+                world_dir_w_h[1],
+                world_dir_w_h[2],
+                world_dir_w_h[3],
+            );
         }
 
-        // Compute entity scene hash BEFORE writing to the GPU buffer so the
+        // Compute non-voxel scene hash BEFORE writing to the GPU buffer so the
         // BVH rebuild decision later in this frame reflects what is actually in
         // the buffer.  Using a per-frame hash avoids stale comparisons when
         // multiple frames are in flight.
-        let entity_scene_hash = if total_tetrahedron_count == 0 {
+        let non_voxel_scene_hash = if total_tetrahedron_count == 0 {
             0u64
         } else {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            entity_used_instance_count.hash(&mut hasher);
+            non_voxel_used_instance_count.hash(&mut hasher);
             total_tetrahedron_count.hash(&mut hasher);
-            bytemuck::cast_slice::<_, u8>(&model_instances[..entity_used_instance_count])
+            bytemuck::cast_slice::<_, u8>(&model_instances[..non_voxel_used_instance_count])
                 .hash(&mut hasher);
             hasher.finish()
         };
@@ -4953,11 +4936,11 @@ impl RenderContext {
                 .model_instance_buffer
                 .write()
                 .unwrap();
-            for i in 0..entity_used_instance_count {
+            for i in 0..non_voxel_used_instance_count {
                 writer[i] = model_instances[i];
             }
             for i in 0..overlay_used_instance_count {
-                writer[entity_used_instance_count + i] = raster_overlay_instances[i];
+                writer[non_voxel_used_instance_count + i] = raster_overlay_instances[i];
             }
         }
 
@@ -5071,7 +5054,8 @@ impl RenderContext {
                         writer[i] = chunk_index;
                         let header = &input.chunk_headers[chunk_index as usize];
                         let chunk_coord = header.chunk_coord;
-                        if let Some(slot) = vte_visible_lod_counts.get_mut(header.lod_level as usize)
+                        if let Some(slot) =
+                            vte_visible_lod_counts.get_mut(header.lod_level as usize)
                         {
                             *slot = slot.saturating_add(1);
                         }
@@ -5335,7 +5319,7 @@ impl RenderContext {
                 do_raytrace = true;
             }
             RenderBackend::VoxelTraversal => {
-                // VTE resolves entity tetrahedra directly in Stage A for depth correctness.
+                // VTE resolves non-voxel tetrahedra directly in Stage A for depth correctness.
                 // Optional post-raster overlays (e.g. held block preview) are rasterized from
                 // a separate instance range to avoid double-rendering depth-tested entities.
                 do_raster = raster_tetrahedron_count > 0;
@@ -5450,8 +5434,8 @@ impl RenderContext {
             }
         } else {
             // Non-VTE passes reuse the same tetra/BVH buffers for other pipelines.
-            // Force entity reprovisioning when VTE is re-enabled.
-            self.vte_entity_scene_hash = 0;
+            // Force non-voxel reprovisioning when VTE is re-enabled.
+            self.vte_non_voxel_scene_hash = 0;
             self.clear_vte_compare_diagnostics();
         }
 
@@ -5566,15 +5550,16 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             }
 
             if do_voxel_vte {
-                let entity_tetrahedron_count = total_tetrahedron_count;
-                if entity_tetrahedron_count == 0 {
-                    self.vte_entity_scene_hash = 0;
+                let non_voxel_tetrahedron_count = total_tetrahedron_count;
+                if non_voxel_tetrahedron_count == 0 {
+                    self.vte_non_voxel_scene_hash = 0;
                 } else {
-                    let entity_rebuild_needed = entity_scene_hash != self.vte_entity_scene_hash;
-                    if entity_rebuild_needed {
-                        // Preprocess tetra entity instances into world-space tetrahedra.
+                    let non_voxel_rebuild_needed =
+                        non_voxel_scene_hash != self.vte_non_voxel_scene_hash;
+                    if non_voxel_rebuild_needed {
+                        // Preprocess tetra non-voxel instances into world-space tetrahedra.
                         let vte_preprocess_push_data: [u32; 4] =
-                            [0, entity_tetrahedron_count as u32, 0, 0];
+                            [0, non_voxel_tetrahedron_count as u32, 0, 0];
                         builder
                             .push_constants(
                                 self.compute_pipeline.pipeline_layout.clone(),
@@ -5588,11 +5573,15 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(entity_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
+                            builder.dispatch([
+                                (non_voxel_tetrahedron_count as u32 + 63) / 64u32,
+                                1,
+                                1,
+                            ])
                         }
                         .unwrap();
                         {
-                            let q = self.profiler.next_query_index("vte_entity_preprocess");
+                            let q = self.profiler.next_query_index("vte_non_voxel_preprocess");
                             unsafe {
                                 builder.write_timestamp(
                                     self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -5603,9 +5592,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .unwrap();
                         }
 
-                        if entity_tetrahedron_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
-                            // Build an entity-only BVH used by the VTE Stage A tetra pass.
-                            let n = entity_tetrahedron_count as u32;
+                        if non_voxel_tetrahedron_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
+                            // Build a non-voxel-only BVH used by the VTE Stage A tetra pass.
+                            let n = non_voxel_tetrahedron_count as u32;
                             let n_pow2 = n.next_power_of_two();
 
                             builder
@@ -5703,7 +5692,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
 
                             let num_internal_nodes =
-                                entity_tetrahedron_count.saturating_sub(1) as u32;
+                                non_voxel_tetrahedron_count.saturating_sub(1) as u32;
                             if num_internal_nodes > 0 {
                                 let num_passes =
                                     2 * (32 - num_internal_nodes.leading_zeros()).max(1);
@@ -5721,7 +5710,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             }
 
                             {
-                                let q = self.profiler.next_query_index("vte_entity_bvh");
+                                let q = self.profiler.next_query_index("vte_non_voxel_bvh");
                                 unsafe {
                                     builder.write_timestamp(
                                         self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -5733,7 +5722,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             }
                         }
 
-                        self.vte_entity_scene_hash = entity_scene_hash;
+                        self.vte_non_voxel_scene_hash = non_voxel_scene_hash;
                     }
                 }
 
@@ -6005,10 +5994,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         raster_dispatch_push,
                     )
                     .unwrap();
-                unsafe {
-                    builder.dispatch(raster_dispatch_dims)
-                }
-                .unwrap();
+                unsafe { builder.dispatch(raster_dispatch_dims) }.unwrap();
                 {
                     let q = self.profiler.next_query_index("tet_raster");
                     unsafe {

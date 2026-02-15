@@ -7,6 +7,8 @@ pub const WORLD_CHUNK_LOD_FAR: u8 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityKind {
     TestCube,
+    TestRotor,
+    TestDrifter,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,7 +1,9 @@
+mod entities;
 mod procgen;
 
+use self::entities::EntityStore;
 use crate::shared::protocol::{
-    ClientMessage, EntityKind, EntitySnapshot, PlayerSnapshot, ServerMessage,
+    ClientMessage, EntityKind, PlayerSnapshot, ServerMessage,
     WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
     WORLD_CHUNK_LOD_FAR, WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
 };
@@ -24,12 +26,15 @@ const STREAM_MID_LOD_SCALE: i32 = 2;
 const STREAM_FAR_LOD_SCALE: i32 = 4;
 const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
+const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
+const ENTITY_SIM_STEP_MAX_PER_BROADCAST: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub bind: String,
     pub world_file: PathBuf,
     pub tick_hz: f32,
+    pub entity_sim_hz: f32,
     pub save_interval_secs: u64,
     pub snapshot_on_join: bool,
     pub procgen_structures: bool,
@@ -47,6 +52,7 @@ impl Default for RuntimeConfig {
             bind: "0.0.0.0:4000".to_string(),
             world_file: PathBuf::from("saves/world.v4dw"),
             tick_hz: 10.0,
+            entity_sim_hz: 30.0,
             save_interval_secs: 5,
             snapshot_on_join: true,
             procgen_structures: true,
@@ -84,17 +90,6 @@ struct StreamChunkKey {
 }
 
 #[derive(Clone, Debug)]
-struct EntityState {
-    entity_id: u64,
-    kind: EntityKind,
-    position: [f32; 4],
-    orientation: [f32; 4],
-    scale: f32,
-    material: u8,
-    last_update_ms: u64,
-}
-
-#[derive(Clone, Debug)]
 struct ServerCpuProfile {
     window_start: Instant,
     message_samples: u64,
@@ -103,6 +98,10 @@ struct ServerCpuProfile {
     tick_samples: u64,
     tick_cpu_ms_sum: f64,
     tick_cpu_ms_max: f64,
+    tick_player_snapshots_sum: u64,
+    tick_player_snapshots_max: u64,
+    tick_entity_snapshots_sum: u64,
+    tick_entity_snapshots_max: u64,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -113,6 +112,10 @@ struct ServerCpuProfileReport {
     tick_samples: u64,
     tick_cpu_ms_sum: f64,
     tick_cpu_ms_max: f64,
+    tick_player_snapshots_sum: u64,
+    tick_player_snapshots_max: u64,
+    tick_entity_snapshots_sum: u64,
+    tick_entity_snapshots_max: u64,
 }
 
 impl ServerCpuProfile {
@@ -125,6 +128,10 @@ impl ServerCpuProfile {
             tick_samples: 0,
             tick_cpu_ms_sum: 0.0,
             tick_cpu_ms_max: 0.0,
+            tick_player_snapshots_sum: 0,
+            tick_player_snapshots_max: 0,
+            tick_entity_snapshots_sum: 0,
+            tick_entity_snapshots_max: 0,
         }
     }
 
@@ -135,11 +142,26 @@ impl ServerCpuProfile {
         self.message_cpu_ms_max = self.message_cpu_ms_max.max(elapsed_ms);
     }
 
-    fn record_tick_sample(&mut self, elapsed: Duration) {
+    fn record_tick_sample(
+        &mut self,
+        elapsed: Duration,
+        player_snapshots: usize,
+        entity_snapshots: usize,
+    ) {
         let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
         self.tick_samples = self.tick_samples.saturating_add(1);
         self.tick_cpu_ms_sum += elapsed_ms;
         self.tick_cpu_ms_max = self.tick_cpu_ms_max.max(elapsed_ms);
+        let player_snapshots = player_snapshots as u64;
+        let entity_snapshots = entity_snapshots as u64;
+        self.tick_player_snapshots_sum = self
+            .tick_player_snapshots_sum
+            .saturating_add(player_snapshots);
+        self.tick_player_snapshots_max = self.tick_player_snapshots_max.max(player_snapshots);
+        self.tick_entity_snapshots_sum = self
+            .tick_entity_snapshots_sum
+            .saturating_add(entity_snapshots);
+        self.tick_entity_snapshots_max = self.tick_entity_snapshots_max.max(entity_snapshots);
     }
 
     fn take_report_if_due(&mut self, now: Instant) -> Option<ServerCpuProfileReport> {
@@ -154,6 +176,10 @@ impl ServerCpuProfile {
             tick_samples: self.tick_samples,
             tick_cpu_ms_sum: self.tick_cpu_ms_sum,
             tick_cpu_ms_max: self.tick_cpu_ms_max,
+            tick_player_snapshots_sum: self.tick_player_snapshots_sum,
+            tick_player_snapshots_max: self.tick_player_snapshots_max,
+            tick_entity_snapshots_sum: self.tick_entity_snapshots_sum,
+            tick_entity_snapshots_max: self.tick_entity_snapshots_max,
         };
 
         self.window_start = now;
@@ -163,6 +189,10 @@ impl ServerCpuProfile {
         self.tick_samples = 0;
         self.tick_cpu_ms_sum = 0.0;
         self.tick_cpu_ms_max = 0.0;
+        self.tick_player_snapshots_sum = 0;
+        self.tick_player_snapshots_max = 0;
+        self.tick_entity_snapshots_sum = 0;
+        self.tick_entity_snapshots_max = 0;
 
         if report.message_samples == 0 && report.tick_samples == 0 {
             None
@@ -172,29 +202,16 @@ impl ServerCpuProfile {
     }
 }
 
-fn entity_snapshot(entity: &EntityState) -> EntitySnapshot {
-    EntitySnapshot {
-        entity_id: entity.entity_id,
-        kind: entity.kind,
-        position: entity.position,
-        orientation: entity.orientation,
-        scale: entity.scale,
-        material: entity.material,
-        last_update_ms: entity.last_update_ms,
-    }
-}
-
 #[derive(Debug)]
 struct ServerState {
     next_client_id: u64,
-    next_entity_id: u64,
+    entity_store: EntityStore,
     world: VoxelWorld,
     world_revision: u64,
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
     stream_worldgen_has_content_cache: HashMap<StreamChunkKey, bool>,
     players: HashMap<u64, PlayerState>,
     clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
-    entities: HashMap<u64, EntityState>,
     cpu_profile: ServerCpuProfile,
 }
 
@@ -207,20 +224,22 @@ fn monotonic_ms(start: Instant) -> u64 {
 fn record_server_cpu_sample(
     state: &SharedState,
     message_elapsed: Option<Duration>,
-    tick_elapsed: Option<Duration>,
+    tick_sample: Option<(Duration, usize, usize)>,
 ) {
     let maybe_report = {
         let mut guard = state.lock().expect("server state lock poisoned");
         if let Some(elapsed) = message_elapsed {
             guard.cpu_profile.record_message_sample(elapsed);
         }
-        if let Some(elapsed) = tick_elapsed {
-            guard.cpu_profile.record_tick_sample(elapsed);
+        if let Some((elapsed, player_snapshots, entity_snapshots)) = tick_sample {
+            guard
+                .cpu_profile
+                .record_tick_sample(elapsed, player_snapshots, entity_snapshots);
         }
         guard
             .cpu_profile
             .take_report_if_due(Instant::now())
-            .map(|report| (report, guard.players.len(), guard.entities.len()))
+            .map(|report| (report, guard.players.len(), guard.entity_store.len()))
     };
 
     let Some((report, player_count, entity_count)) = maybe_report else {
@@ -237,15 +256,29 @@ fn record_server_cpu_sample(
     } else {
         0.0
     };
+    let tick_players_avg = if report.tick_samples > 0 {
+        report.tick_player_snapshots_sum as f64 / report.tick_samples as f64
+    } else {
+        0.0
+    };
+    let tick_entities_avg = if report.tick_samples > 0 {
+        report.tick_entity_snapshots_sum as f64 / report.tick_samples as f64
+    } else {
+        0.0
+    };
 
     eprintln!(
-        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} players={} entities={}",
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={}",
         msg_avg_ms,
         report.message_cpu_ms_max,
         report.message_samples,
         tick_avg_ms,
         report.tick_cpu_ms_max,
         report.tick_samples,
+        tick_players_avg,
+        report.tick_player_snapshots_max,
+        tick_entities_avg,
+        report.tick_entity_snapshots_max,
         player_count,
         entity_count,
     );
@@ -277,6 +310,14 @@ fn world_chunk_from_position(position: [f32; 4]) -> [i32; 4] {
         (position[2].floor() as i32).div_euclid(cs),
         (position[3].floor() as i32).div_euclid(cs),
     ]
+}
+
+fn chunk_distance2(a: [i32; 4], b: [i32; 4]) -> i64 {
+    let dx = (a[0] - b[0]) as i64;
+    let dy = (a[1] - b[1]) as i64;
+    let dz = (a[2] - b[2]) as i64;
+    let dw = (a[3] - b[3]) as i64;
+    dx * dx + dy * dy + dz * dz + dw * dw
 }
 
 fn encode_world_chunk_payload(
@@ -1296,10 +1337,20 @@ fn build_world_snapshot_payload(state: &ServerState) -> io::Result<WorldSnapshot
 fn start_broadcast_thread(
     state: SharedState,
     tick_hz: f32,
+    entity_sim_hz: f32,
+    entity_interest_radius_chunks: i32,
     start: Instant,
     shutdown: Arc<AtomicBool>,
 ) {
     let interval = Duration::from_secs_f64(1.0 / tick_hz.max(0.1) as f64);
+    let entity_sim_step_ms = (1000.0 / entity_sim_hz.max(0.1) as f64)
+        .round()
+        .max(1.0) as u64;
+    let entity_interest_radius_sq = {
+        let radius = entity_interest_radius_chunks.max(0) as i64;
+        radius * radius
+    };
+    let mut next_entity_sim_ms = 0u64;
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             thread::sleep(interval);
@@ -1307,8 +1358,18 @@ fn start_broadcast_thread(
                 break;
             }
             let tick_cpu_start = Instant::now();
-            let (players, entities) = {
-                let guard = state.lock().expect("server state lock poisoned");
+            let now = monotonic_ms(start);
+            let (players, entity_batches) = {
+                let mut guard = state.lock().expect("server state lock poisoned");
+                let mut sim_steps = 0usize;
+                while next_entity_sim_ms <= now && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
+                    guard.entity_store.simulate(next_entity_sim_ms);
+                    next_entity_sim_ms = next_entity_sim_ms.saturating_add(entity_sim_step_ms);
+                    sim_steps += 1;
+                }
+                if sim_steps == ENTITY_SIM_STEP_MAX_PER_BROADCAST && next_entity_sim_ms <= now {
+                    next_entity_sim_ms = now.saturating_add(entity_sim_step_ms);
+                }
                 let players = if guard.players.is_empty() {
                     None
                 } else {
@@ -1316,17 +1377,31 @@ fn start_broadcast_thread(
                     all.sort_by_key(|p| p.client_id);
                     Some(all)
                 };
-                let entities = if guard.entities.is_empty() {
-                    None
+                let entity_batches = if guard.entity_store.is_empty() || guard.players.is_empty() {
+                    Vec::new()
                 } else {
-                    let mut all: Vec<_> = guard.entities.values().map(entity_snapshot).collect();
-                    all.sort_by_key(|e| e.entity_id);
-                    Some(all)
+                    let all_entities = guard.entity_store.sorted_snapshots();
+                    let mut batches = Vec::with_capacity(guard.players.len());
+                    for player in guard.players.values() {
+                        let player_chunk = world_chunk_from_position(player.position);
+                        let mut visible = Vec::new();
+                        for entity in &all_entities {
+                            let entity_chunk = world_chunk_from_position(entity.position);
+                            if chunk_distance2(entity_chunk, player_chunk) <= entity_interest_radius_sq
+                            {
+                                visible.push(entity.clone());
+                            }
+                        }
+                        batches.push((player.client_id, visible));
+                    }
+                    batches
                 };
-                (players, entities)
+                (players, entity_batches)
             };
-            let did_broadcast = players.is_some() || entities.is_some();
-            let now = monotonic_ms(start);
+            let player_snapshot_count = players.as_ref().map_or(0, Vec::len);
+            let entity_snapshot_count: usize =
+                entity_batches.iter().map(|(_, entities)| entities.len()).sum();
+            let did_broadcast = player_snapshot_count > 0 || !entity_batches.is_empty();
             if let Some(players) = players {
                 broadcast(
                     &state,
@@ -1336,9 +1411,10 @@ fn start_broadcast_thread(
                     },
                 );
             }
-            if let Some(entities) = entities {
-                broadcast(
+            for (client_id, entities) in entity_batches {
+                send_to_client(
                     &state,
+                    client_id,
                     ServerMessage::EntityPositions {
                         server_time_ms: now,
                         entities,
@@ -1346,7 +1422,15 @@ fn start_broadcast_thread(
                 );
             }
             if did_broadcast {
-                record_server_cpu_sample(&state, None, Some(tick_cpu_start.elapsed()));
+                record_server_cpu_sample(
+                    &state,
+                    None,
+                    Some((
+                        tick_cpu_start.elapsed(),
+                        player_snapshot_count,
+                        entity_snapshot_count,
+                    )),
+                );
             }
         }
     });
@@ -1500,12 +1584,11 @@ fn handle_message(
             }
             {
                 let guard = state.lock().expect("server state lock poisoned");
-                for entity in guard.entities.values() {
-                    let _ = guard.clients.get(&client_id).map(|tx| {
-                        let _ = tx.send(ServerMessage::EntitySpawned {
-                            entity: entity_snapshot(entity),
-                        });
-                    });
+                let entities = guard.entity_store.sorted_snapshots();
+                if let Some(tx) = guard.clients.get(&client_id) {
+                    for entity in entities {
+                        let _ = tx.send(ServerMessage::EntitySpawned { entity });
+                    }
                 }
             }
             let center_chunk = world_chunk_from_position(snapshot.position);
@@ -1756,39 +1839,65 @@ fn spawn_entity(
     start: Instant,
 ) -> u64 {
     let mut guard = state.lock().expect("server state lock poisoned");
-    let entity_id = guard.next_entity_id;
-    guard.next_entity_id = guard.next_entity_id.wrapping_add(1).max(1);
-    let entity = EntityState {
-        entity_id,
+    guard.entity_store.spawn(
         kind,
         position,
         orientation,
         scale,
         material,
-        last_update_ms: monotonic_ms(start),
-    };
-    guard.entities.insert(entity_id, entity);
-    entity_id
+        monotonic_ms(start),
+    )
 }
 
 fn spawn_default_test_entities(state: &SharedState, start: Instant) {
-    let test_positions: [[f32; 4]; 3] = [
-        [3.0, 2.0, 3.0, 0.0],
-        [-2.0, 1.5, 5.0, 1.0],
-        [0.0, 3.0, -4.0, 2.0],
+    let test_entities: [(EntityKind, [f32; 4], [f32; 4], f32, u8); 5] = [
+        (
+            EntityKind::TestCube,
+            [3.0, 2.0, 3.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            0.50,
+            12,
+        ),
+        (
+            EntityKind::TestRotor,
+            [-2.0, 1.5, 5.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            0.54,
+            8,
+        ),
+        (
+            EntityKind::TestDrifter,
+            [0.0, 3.0, -4.0, 2.0],
+            [0.4, 0.2, 1.0, 0.3],
+            0.48,
+            15,
+        ),
+        (
+            EntityKind::TestRotor,
+            [5.5, 2.4, -1.0, -2.5],
+            [0.8, 0.0, 1.0, -0.4],
+            0.46,
+            17,
+        ),
+        (
+            EntityKind::TestDrifter,
+            [-5.0, 2.8, 1.5, 3.5],
+            [0.3, -0.2, 1.0, 0.7],
+            0.58,
+            21,
+        ),
     ];
-    let test_materials: [u8; 3] = [12, 8, 15];
-    for (i, (pos, mat)) in test_positions.iter().zip(test_materials.iter()).enumerate() {
+    for (i, (kind, pos, orientation, scale, material)) in test_entities.iter().enumerate() {
         let id = spawn_entity(
             state,
-            EntityKind::TestCube,
+            *kind,
             *pos,
-            [0.0, 0.0, 1.0, 0.0],
-            0.5,
-            *mat,
+            *orientation,
+            *scale,
+            *material,
             start,
         );
-        eprintln!("spawned test entity {} (id={}) at {:?}", i, id, pos);
+        eprintln!("spawned test entity {} {:?} (id={}) at {:?}", i, kind, id, pos);
     }
 }
 
@@ -1839,19 +1948,28 @@ fn initialize_state(
 
     let state = Arc::new(Mutex::new(ServerState {
         next_client_id: 1,
-        next_entity_id: 1,
+        entity_store: EntityStore::new(),
         world: initial_world,
         world_revision: 0,
         procgen_blocked_cells,
         stream_worldgen_has_content_cache: HashMap::new(),
         players: HashMap::new(),
         clients: HashMap::new(),
-        entities: HashMap::new(),
         cpu_profile: ServerCpuProfile::new(start),
     }));
 
+    let entity_interest_radius_chunks =
+        config.procgen_far_chunk_radius.max(1) * STREAM_FAR_LOD_SCALE
+            + ENTITY_INTEREST_RADIUS_PADDING_CHUNKS;
     spawn_default_test_entities(&state, start);
-    start_broadcast_thread(state.clone(), config.tick_hz, start, shutdown.clone());
+    start_broadcast_thread(
+        state.clone(),
+        config.tick_hz,
+        config.entity_sim_hz,
+        entity_interest_radius_chunks,
+        start,
+        shutdown.clone(),
+    );
     start_autosave_thread(
         state.clone(),
         config.world_file.clone(),
@@ -1910,9 +2028,10 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
 
     let listener = TcpListener::bind(&config.bind)?;
     eprintln!(
-        "polychora-server listening on {} (tick {:.2} Hz, autosave {}s, procgen={}, seed={}, near_radius={} chunks, mid_radius={} chunks, far_radius={} chunks, keepout={}, keepout_padding={} chunks)",
+        "polychora-server listening on {} (tick {:.2} Hz, entity_sim {:.2} Hz, autosave {}s, procgen={}, seed={}, near_radius={} chunks, mid_radius={} chunks, far_radius={} chunks, keepout={}, keepout_padding={} chunks)",
         config.bind,
         config.tick_hz.max(0.1),
+        config.entity_sim_hz.max(0.1),
         config.save_interval_secs,
         config.procgen_structures,
         config.world_seed,

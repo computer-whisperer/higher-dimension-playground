@@ -14,6 +14,8 @@ struct Args {
     world_file: PathBuf,
     #[arg(long, default_value_t = 10.0)]
     tick_hz: f32,
+    #[arg(long, default_value_t = 30.0)]
+    entity_sim_hz: f32,
     #[arg(long, default_value_t = 5)]
     save_interval_secs: u64,
     #[arg(long, default_value_t = true)]
@@ -40,6 +42,7 @@ fn main() -> std::io::Result<()> {
         bind: args.bind,
         world_file: args.world_file,
         tick_hz: args.tick_hz,
+        entity_sim_hz: args.entity_sim_hz,
         save_interval_secs: args.save_interval_secs,
         snapshot_on_join: args.snapshot_on_join,
         procgen_structures: args.procgen_structures,

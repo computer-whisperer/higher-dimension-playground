@@ -16,7 +16,7 @@ use higher_dimension_playground::render::{
     RenderOptions, TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -56,9 +56,9 @@ const REMOTE_FOOTSTEP_MAX_PER_FRAME: usize = 6;
 const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
 const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
 const WORLD_FILE_DEFAULT: &str = "saves/world.v4dw";
-const VTE_TEST_ENTITY_CENTER: [f32; 4] = [0.0, 3.0, 0.0, 0.0];
 const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
-const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
+const VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_NON_VOXEL_INSTANCES";
+const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
 const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
 // Tags held-block preview instances so shaders can apply preview-only shading boosts.
 const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
@@ -113,7 +113,7 @@ const MENU_ORBIT_TARGET_Y_OFFSET: f32 = 0.6;
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
     label: &'static str,
-    entities: bool,
+    non_voxel_instances: bool,
     y_slice_lookup_cache: bool,
 }
 
@@ -241,12 +241,12 @@ const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 5] = [
 const VTE_SWEEP_PROFILES_ENTITIES: [VteRuntimeProfile; 2] = [
     VteRuntimeProfile {
         label: "A baseline",
-        entities: true,
+        non_voxel_instances: true,
         y_slice_lookup_cache: true,
     },
     VteRuntimeProfile {
         label: "B no-lookup-cache",
-        entities: true,
+        non_voxel_instances: true,
         y_slice_lookup_cache: false,
     },
 ];
@@ -254,22 +254,22 @@ const VTE_SWEEP_PROFILES_ENTITIES: [VteRuntimeProfile; 2] = [
 const VTE_SWEEP_PROFILES_EXTENDED: [VteRuntimeProfile; 4] = [
     VteRuntimeProfile {
         label: "A baseline",
-        entities: true,
+        non_voxel_instances: true,
         y_slice_lookup_cache: true,
     },
     VteRuntimeProfile {
-        label: "B no-entities",
-        entities: false,
+        label: "B no-nonvoxel",
+        non_voxel_instances: false,
         y_slice_lookup_cache: true,
     },
     VteRuntimeProfile {
         label: "C no-lookup-cache",
-        entities: true,
+        non_voxel_instances: true,
         y_slice_lookup_cache: false,
     },
     VteRuntimeProfile {
-        label: "D no-entities-no-lookup-cache",
-        entities: false,
+        label: "D no-nonvoxel-no-lookup-cache",
+        non_voxel_instances: false,
         y_slice_lookup_cache: false,
     },
 ];
@@ -478,10 +478,15 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     vte_thick_half_width: u32,
 
-    /// Enable tetra-entity integration in VTE Stage A (test tesseract + entity BVH).
+    /// Enable non-voxel instance integration in VTE Stage A (test tesseract + non-voxel BVH).
     /// Set to false to profile pure voxel traversal without the secondary tetra pipeline.
-    #[arg(long, action = ArgAction::Set, default_value_t = true)]
-    vte_entities: bool,
+    #[arg(
+        long = "vte-non-voxel-instances",
+        alias = "vte-entities",
+        action = ArgAction::Set,
+        default_value_t = true
+    )]
+    vte_non_voxel_instances: bool,
 
     /// Deprecated no-op: y-slice fastpath is now always enabled on normal VTE path.
     #[arg(long, action = ArgAction::Set, default_value_t = true, hide = true)]
@@ -545,6 +550,10 @@ struct Args {
     /// Integrated singleplayer server tick rate in Hz.
     #[arg(long, default_value_t = 10.0)]
     singleplayer_tick_hz: f32,
+
+    /// Integrated singleplayer entity simulation rate in Hz.
+    #[arg(long, default_value_t = 30.0)]
+    singleplayer_entity_sim_hz: f32,
 
     /// Autosave interval for integrated singleplayer server (seconds).
     #[arg(long, default_value_t = 5)]
@@ -795,8 +804,9 @@ fn main() {
     let vte_reference_compare_enabled = env_flag_enabled("R4D_VTE_REFERENCE_COMPARE")
         || vte_reference_mismatch_only_enabled
         || vte_compare_slice_only_enabled;
-    let vte_sweep_include_no_entities = env_flag_enabled(VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV);
-    let initial_vte_entities_enabled = args.vte_entities;
+    let vte_sweep_include_no_non_voxel = env_flag_enabled(VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV)
+        || env_flag_enabled(VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY);
+    let initial_vte_non_voxel_instances_enabled = args.vte_non_voxel_instances;
     let initial_vte_y_slice_lookup_cache_enabled = args.vte_y_slice_lookup_cache;
     let initial_vte_integral_sky_emissive_enabled = args.vte_integral_sky_emissive_tweak;
     let initial_vte_integral_log_merge_enabled = args.vte_integral_log_merge_tweak;
@@ -980,7 +990,7 @@ fn main() {
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
         vte_compare_slice_only_enabled,
-        vte_entities_enabled: initial_vte_entities_enabled,
+        vte_non_voxel_instances_enabled: initial_vte_non_voxel_instances_enabled,
         vte_y_slice_lookup_cache_enabled: initial_vte_y_slice_lookup_cache_enabled,
         vte_integral_sky_emissive_enabled: initial_vte_integral_sky_emissive_enabled,
         vte_integral_sky_scale: initial_vte_integral_sky_scale,
@@ -989,9 +999,9 @@ fn main() {
         vte_integral_log_merge_k: initial_vte_integral_log_merge_k,
         vte_max_trace_steps: initial_vte_max_trace_steps,
         vte_max_trace_distance: initial_vte_max_trace_distance,
+        vte_sweep_include_no_non_voxel,
         vte_lod_near_max_distance: initial_vte_lod_near_max_distance,
         vte_lod_mid_max_distance: initial_vte_lod_mid_max_distance,
-        vte_sweep_include_no_entities,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
         hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
@@ -1054,8 +1064,10 @@ fn main() {
     if app.vte_compare_slice_only_enabled {
         eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
     }
-    if !app.vte_entities_enabled {
-        eprintln!("VTE tetra-entity pipeline disabled via --vte-entities=false");
+    if !app.vte_non_voxel_instances_enabled {
+        eprintln!(
+            "VTE non-voxel pipeline disabled via --vte-non-voxel-instances=false (alias: --vte-entities=false)"
+        );
     }
     if !app.args.vte_y_slice_fastpath {
         eprintln!(
@@ -1083,13 +1095,13 @@ fn main() {
             app.vte_integral_log_merge_k
         );
     }
-    if app.vte_sweep_include_no_entities {
+    if app.vte_sweep_include_no_non_voxel {
         eprintln!(
-            "VTE sweep: extended mode enabled via {} (includes no-entities profiles).",
-            VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV
+            "VTE sweep: extended mode enabled via {} or {} (includes no-nonvoxel profiles).",
+            VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV, VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY
         );
     } else {
-        eprintln!("VTE sweep: entities mode (default, entities stay enabled).");
+        eprintln!("VTE sweep: non-voxel mode (default, non-voxel instances stay enabled).");
     }
     if app.vte_overlay_raster_enabled {
         eprintln!(
@@ -1265,7 +1277,7 @@ struct App {
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
     vte_compare_slice_only_enabled: bool,
-    vte_entities_enabled: bool,
+    vte_non_voxel_instances_enabled: bool,
     vte_y_slice_lookup_cache_enabled: bool,
     vte_integral_sky_emissive_enabled: bool,
     vte_integral_sky_scale: f32,
@@ -1274,9 +1286,9 @@ struct App {
     vte_integral_log_merge_k: f32,
     vte_max_trace_steps: u32,
     vte_max_trace_distance: f32,
+    vte_sweep_include_no_non_voxel: bool,
     vte_lod_near_max_distance: f32,
     vte_lod_mid_max_distance: f32,
-    vte_sweep_include_no_entities: bool,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
     hotbar_slots: [u8; 9],
@@ -1331,7 +1343,7 @@ struct VteSweepState {
     run_id: u32,
     profile_index: usize,
     frames_remaining: usize,
-    previous_entities: bool,
+    previous_non_voxel_instances: bool,
     previous_y_slice_lookup_cache: bool,
 }
 
@@ -1358,10 +1370,12 @@ struct RemoteEntityState {
     scale: f32,
     material: u8,
     render_position: [f32; 4],
+    render_orientation: [f32; 4],
     last_received_at: Instant,
 }
 
 const REMOTE_ENTITY_POSITION_SMOOTH_HZ: f32 = 12.0;
+const REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ: f32 = 16.0;
 const REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE: f32 = 20.0;
 
 #[derive(Clone)]
@@ -1382,7 +1396,7 @@ enum PauseMenuItem {
     FocalLengthZw,
     VteMaxTraceSteps,
     VteMaxTraceDistance,
-    VteEntities,
+    VteNonVoxelInstances,
     VteYSliceLookupCache,
     IntegralSkyEmissive,
     IntegralSkyScale,
@@ -1403,7 +1417,7 @@ const PAUSE_MENU_ITEMS: [PauseMenuItem; 18] = [
     PauseMenuItem::FocalLengthZw,
     PauseMenuItem::VteMaxTraceSteps,
     PauseMenuItem::VteMaxTraceDistance,
-    PauseMenuItem::VteEntities,
+    PauseMenuItem::VteNonVoxelInstances,
     PauseMenuItem::VteYSliceLookupCache,
     PauseMenuItem::IntegralSkyEmissive,
     PauseMenuItem::IntegralSkyScale,
@@ -1514,6 +1528,7 @@ fn build_singleplayer_runtime_config(
         bind: "127.0.0.1:0".to_string(),
         world_file,
         tick_hz: args.singleplayer_tick_hz.max(0.1),
+        entity_sim_hz: args.singleplayer_entity_sim_hz.max(0.1),
         save_interval_secs: args.singleplayer_save_interval_secs,
         snapshot_on_join: args.singleplayer_snapshot_on_join,
         procgen_structures: args.singleplayer_procgen_structures,
@@ -1918,39 +1933,6 @@ fn build_place_preview_instance(
     )
 }
 
-fn build_vte_test_entity_instance(time_s: f32) -> common::ModelInstance {
-    let mut basis = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
-    rotate_basis_plane(&mut basis, 0, 2, time_s * 0.55);
-    rotate_basis_plane(&mut basis, 1, 3, time_s * 0.85 + 0.3);
-    rotate_basis_plane(&mut basis, 0, 3, time_s * 0.35 + 1.1);
-
-    let scale = 0.65;
-    let mut model_transform = common::MatN::<5>::identity();
-    for row in 0..4 {
-        model_transform[[row, 0]] = basis[0][row] * scale;
-        model_transform[[row, 1]] = basis[1][row] * scale;
-        model_transform[[row, 2]] = basis[2][row] * scale;
-        model_transform[[row, 3]] = basis[3][row] * scale;
-
-        let center_offset = 0.5
-            * (model_transform[[row, 0]]
-                + model_transform[[row, 1]]
-                + model_transform[[row, 2]]
-                + model_transform[[row, 3]]);
-        model_transform[[row, 4]] = VTE_TEST_ENTITY_CENTER[row] - center_offset;
-    }
-
-    common::ModelInstance {
-        model_transform,
-        cell_material_ids: [12; 8],
-    }
-}
-
 fn build_remote_player_avatar_instances(
     client_id: u64,
     name_hash: u32,
@@ -2185,7 +2167,7 @@ impl App {
     }
 
     fn vte_sweep_profiles(&self) -> &'static [VteRuntimeProfile] {
-        if self.vte_sweep_include_no_entities {
+        if self.vte_sweep_include_no_non_voxel {
             &VTE_SWEEP_PROFILES_EXTENDED
         } else {
             &VTE_SWEEP_PROFILES_ENTITIES
@@ -2193,10 +2175,10 @@ impl App {
     }
 
     fn vte_sweep_mode_label(&self) -> &'static str {
-        if self.vte_sweep_include_no_entities {
+        if self.vte_sweep_include_no_non_voxel {
             "extended"
         } else {
-            "entities"
+            "non-voxel"
         }
     }
 
@@ -2985,13 +2967,23 @@ impl App {
             return;
         }
         let pos_alpha = 1.0 - (-REMOTE_ENTITY_POSITION_SMOOTH_HZ * dt).exp();
+        let orientation_alpha = 1.0 - (-REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ * dt).exp();
         for entity in self.remote_entities.values_mut() {
             if distance4(entity.render_position, entity.position)
                 > REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE
             {
                 entity.render_position = entity.position;
+                entity.render_orientation = entity.orientation;
             } else {
                 entity.render_position = lerp4(entity.render_position, entity.position, pos_alpha);
+                entity.render_orientation = normalize4_with_fallback(
+                    lerp4(
+                        entity.render_orientation,
+                        entity.orientation,
+                        orientation_alpha,
+                    ),
+                    entity.orientation,
+                );
             }
         }
     }
@@ -3150,12 +3142,12 @@ impl App {
                 self.remote_players.remove(&client_id);
             }
             multiplayer::ServerMessage::PlayerPositions { players, .. } => {
-                let mut seen = Vec::with_capacity(players.len());
+                let mut seen = HashSet::with_capacity(players.len());
                 for player in players {
                     if Some(player.client_id) == self.multiplayer_self_id {
                         continue;
                     }
-                    seen.push(player.client_id);
+                    seen.insert(player.client_id);
                     self.upsert_remote_player_snapshot(player, received_at);
                 }
                 self.remote_players
@@ -3229,6 +3221,7 @@ impl App {
                         scale: entity.scale,
                         material: entity.material,
                         render_position: entity.position,
+                        render_orientation: entity.orientation,
                         last_received_at: received_at,
                     },
                 );
@@ -3237,9 +3230,9 @@ impl App {
                 self.remote_entities.remove(&entity_id);
             }
             multiplayer::ServerMessage::EntityPositions { entities, .. } => {
-                let mut seen = Vec::with_capacity(entities.len());
+                let mut seen = HashSet::with_capacity(entities.len());
                 for entity in entities {
-                    seen.push(entity.entity_id);
+                    seen.insert(entity.entity_id);
                     if let Some(existing) = self.remote_entities.get_mut(&entity.entity_id) {
                         existing.position = entity.position;
                         existing.orientation = entity.orientation;
@@ -3256,6 +3249,7 @@ impl App {
                                 scale: entity.scale,
                                 material: entity.material,
                                 render_position: entity.position,
+                                render_orientation: entity.orientation,
                                 last_received_at: received_at,
                             },
                         );
@@ -3328,7 +3322,7 @@ impl App {
         instances
     }
 
-    fn remote_entity_instances(&self, time_s: f32) -> Vec<common::ModelInstance> {
+    fn remote_entity_instances(&self) -> Vec<common::ModelInstance> {
         let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
         ids.sort_unstable();
         let mut instances = Vec::with_capacity(ids.len());
@@ -3336,20 +3330,58 @@ impl App {
             if let Some(entity) = self.remote_entities.get(&entity_id) {
                 match entity.kind {
                     multiplayer::EntityKind::TestCube => {
-                        let mut basis = [
-                            [1.0, 0.0, 0.0, 0.0],
-                            [0.0, 1.0, 0.0, 0.0],
-                            [0.0, 0.0, 1.0, 0.0],
-                            [0.0, 0.0, 0.0, 1.0],
-                        ];
-                        let phase = entity_id as f32 * 0.7;
-                        rotate_basis_plane(&mut basis, 0, 2, time_s * 0.55 + phase);
-                        rotate_basis_plane(&mut basis, 1, 3, time_s * 0.35 + phase * 0.6);
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         instances.push(build_centered_model_instance(
                             entity.render_position,
                             &basis,
                             [entity.scale; 4],
                             [entity.material as u32; 8],
+                        ));
+                    }
+                    multiplayer::EntityKind::TestRotor => {
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [
+                                entity.scale * 0.56,
+                                entity.scale * 0.56,
+                                entity.scale * 1.35,
+                                entity.scale * 0.82,
+                            ],
+                            [
+                                entity.material as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                            ],
+                        ));
+                    }
+                    multiplayer::EntityKind::TestDrifter => {
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [
+                                entity.scale * 1.15,
+                                entity.scale * 0.44,
+                                entity.scale * 0.72,
+                                entity.scale * 1.05,
+                            ],
+                            [
+                                (entity.material.saturating_add(2)) as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                entity.material as u32,
+                                entity.material as u32,
+                            ],
                         ));
                     }
                 }
@@ -3435,21 +3467,21 @@ impl App {
         tags
     }
 
-    fn toggle_vte_entities(&mut self) {
+    fn toggle_vte_non_voxel_instances(&mut self) {
         if let Some(state) = self.vte_sweep_state {
             eprintln!(
-                "[VTE sweep #{}] ignoring manual entities toggle while sweep is active.",
+                "[VTE sweep #{}] ignoring manual non-voxel toggle while sweep is active.",
                 state.run_id
             );
             return;
         }
-        self.vte_entities_enabled = !self.vte_entities_enabled;
+        self.vte_non_voxel_instances_enabled = !self.vte_non_voxel_instances_enabled;
         if let Some(rcx) = self.rcx.as_mut() {
             rcx.reset_gpu_profile_window();
         }
         eprintln!(
-            "VTE runtime entities: {}",
-            if self.vte_entities_enabled {
+            "VTE runtime non-voxel instances: {}",
+            if self.vte_non_voxel_instances_enabled {
                 "on"
             } else {
                 "off"
@@ -3515,7 +3547,7 @@ impl App {
         // Do NOT drain take_look_at() - G key should work during gameplay
         self.input.take_scheme_cycle();
         self.input.take_vte_sweep();
-        self.input.take_vte_entities_toggle();
+        self.input.take_vte_non_voxel_instances_toggle();
         self.input.take_vte_y_slice_lookup_cache_toggle();
         self.input.take_vte_integral_sky_emissive_toggle();
         self.input.take_vte_integral_log_merge_toggle();
@@ -3556,7 +3588,7 @@ impl App {
             PauseMenuItem::FocalLengthZw => self.adjust_focal_length_zw(delta),
             PauseMenuItem::VteMaxTraceSteps => self.adjust_vte_max_trace_steps(delta),
             PauseMenuItem::VteMaxTraceDistance => self.adjust_vte_max_trace_distance(delta),
-            PauseMenuItem::VteEntities => self.toggle_vte_entities(),
+            PauseMenuItem::VteNonVoxelInstances => self.toggle_vte_non_voxel_instances(),
             PauseMenuItem::VteYSliceLookupCache => self.toggle_vte_y_slice_lookup_cache(),
             PauseMenuItem::IntegralSkyEmissive => self.toggle_vte_integral_sky_emissive(),
             PauseMenuItem::IntegralSkyScale => self.adjust_vte_integral_sky_scale(delta),
@@ -3623,9 +3655,9 @@ impl App {
             PauseMenuItem::VteMaxTraceDistance => {
                 format!("VTE max dist: {:.0}", self.vte_max_trace_distance)
             }
-            PauseMenuItem::VteEntities => format!(
-                "VTE entities: {}",
-                if self.vte_entities_enabled {
+            PauseMenuItem::VteNonVoxelInstances => format!(
+                "VTE non-voxel: {}",
+                if self.vte_non_voxel_instances_enabled {
                     "on"
                 } else {
                     "off"
@@ -3865,7 +3897,7 @@ impl App {
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
                  world:F5 save, F9 load\n\
-                 vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                 vte:F6 nonvox:{} F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 self.control_scheme.label(),
                 self.move_speed,
@@ -3881,7 +3913,7 @@ impl App {
                 self.place_material,
                 edit_reach,
                 highlight_mode.label(),
-                if self.vte_entities_enabled {
+                if self.vte_non_voxel_instances_enabled {
                     "on"
                 } else {
                     "off"
@@ -3911,7 +3943,7 @@ impl App {
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
                  world:F5 save, F9 load\n\
-                 vte:F6 ent:{} F7 ycache:{} F8 sweep:{}\n\
+                 vte:F6 nonvox:{} F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 pair.label(),
                 self.control_scheme.label(),
@@ -3929,7 +3961,7 @@ impl App {
                 self.place_material,
                 edit_reach,
                 highlight_mode.label(),
-                if self.vte_entities_enabled {
+                if self.vte_non_voxel_instances_enabled {
                     "on"
                 } else {
                     "off"
@@ -4157,9 +4189,12 @@ impl App {
 
                 ui.separator();
 
-                let mut entities_enabled = self.vte_entities_enabled;
-                if ui.checkbox(&mut entities_enabled, "VTE Entities").changed() {
-                    self.toggle_vte_entities();
+                let mut non_voxel_enabled = self.vte_non_voxel_instances_enabled;
+                if ui
+                    .checkbox(&mut non_voxel_enabled, "VTE Non-Voxel Instances")
+                    .changed()
+                {
+                    self.toggle_vte_non_voxel_instances();
                 }
                 let mut y_cache_enabled = self.vte_y_slice_lookup_cache_enabled;
                 if ui
@@ -4880,8 +4915,8 @@ impl App {
         }
     }
 
-    fn set_vte_runtime_flags(&mut self, entities: bool, y_slice_lookup_cache: bool) {
-        self.vte_entities_enabled = entities;
+    fn set_vte_runtime_flags(&mut self, non_voxel_instances: bool, y_slice_lookup_cache: bool) {
+        self.vte_non_voxel_instances_enabled = non_voxel_instances;
         self.vte_y_slice_lookup_cache_enabled = y_slice_lookup_cache;
     }
 
@@ -4896,16 +4931,16 @@ impl App {
 
         if let Some(state) = self.vte_sweep_state.take() {
             self.set_vte_runtime_flags(
-                state.previous_entities,
+                state.previous_non_voxel_instances,
                 state.previous_y_slice_lookup_cache,
             );
             if let Some(rcx) = self.rcx.as_mut() {
                 rcx.reset_gpu_profile_window();
             }
             eprintln!(
-                "[VTE sweep #{}] cancelled; restored runtime flags (entities={}, y_slice_lookup_cache={}).",
+                "[VTE sweep #{}] cancelled; restored runtime flags (non_voxel_instances={}, y_slice_lookup_cache={}).",
                 state.run_id,
-                self.vte_entities_enabled,
+                self.vte_non_voxel_instances_enabled,
                 self.vte_y_slice_lookup_cache_enabled
             );
             return;
@@ -4916,12 +4951,15 @@ impl App {
             self.vte_sweep_run_id = 1;
         }
         let run_id = self.vte_sweep_run_id;
-        let previous_entities = self.vte_entities_enabled;
+        let previous_non_voxel_instances = self.vte_non_voxel_instances_enabled;
         let previous_y_slice_lookup_cache = self.vte_y_slice_lookup_cache_enabled;
         let profiles = self.vte_sweep_profiles();
         let profile_count = profiles.len();
         let first_profile = profiles[0];
-        self.set_vte_runtime_flags(first_profile.entities, first_profile.y_slice_lookup_cache);
+        self.set_vte_runtime_flags(
+            first_profile.non_voxel_instances,
+            first_profile.y_slice_lookup_cache,
+        );
         if let Some(rcx) = self.rcx.as_mut() {
             rcx.reset_gpu_profile_window();
         }
@@ -4929,7 +4967,7 @@ impl App {
             run_id,
             profile_index: 0,
             frames_remaining: VTE_SWEEP_SAMPLE_FRAMES,
-            previous_entities,
+            previous_non_voxel_instances,
             previous_y_slice_lookup_cache,
         });
         eprintln!(
@@ -4940,11 +4978,11 @@ impl App {
             VTE_SWEEP_SAMPLE_FRAMES
         );
         eprintln!(
-            "[VTE sweep #{}] profile 1/{} '{}' (entities={}, y_slice_lookup_cache={}).",
+            "[VTE sweep #{}] profile 1/{} '{}' (non_voxel_instances={}, y_slice_lookup_cache={}).",
             run_id,
             profile_count,
             first_profile.label,
-            first_profile.entities,
+            first_profile.non_voxel_instances,
             first_profile.y_slice_lookup_cache
         );
     }
@@ -4976,31 +5014,37 @@ impl App {
             state.profile_index += 1;
             state.frames_remaining = VTE_SWEEP_SAMPLE_FRAMES;
             let next_profile = profiles[state.profile_index];
-            self.set_vte_runtime_flags(next_profile.entities, next_profile.y_slice_lookup_cache);
+            self.set_vte_runtime_flags(
+                next_profile.non_voxel_instances,
+                next_profile.y_slice_lookup_cache,
+            );
             if let Some(rcx) = self.rcx.as_mut() {
                 rcx.reset_gpu_profile_window();
             }
             eprintln!(
-                "[VTE sweep #{}] profile {}/{} '{}' (entities={}, y_slice_lookup_cache={}).",
+                "[VTE sweep #{}] profile {}/{} '{}' (non_voxel_instances={}, y_slice_lookup_cache={}).",
                 state.run_id,
                 state.profile_index + 1,
                 profile_count,
                 next_profile.label,
-                next_profile.entities,
+                next_profile.non_voxel_instances,
                 next_profile.y_slice_lookup_cache
             );
             self.vte_sweep_state = Some(state);
             return;
         }
 
-        self.set_vte_runtime_flags(state.previous_entities, state.previous_y_slice_lookup_cache);
+        self.set_vte_runtime_flags(
+            state.previous_non_voxel_instances,
+            state.previous_y_slice_lookup_cache,
+        );
         if let Some(rcx) = self.rcx.as_mut() {
             rcx.reset_gpu_profile_window();
         }
         eprintln!(
-            "[VTE sweep #{}] completed; restored runtime flags (entities={}, y_slice_lookup_cache={}).",
+            "[VTE sweep #{}] completed; restored runtime flags (non_voxel_instances={}, y_slice_lookup_cache={}).",
             state.run_id,
-            self.vte_entities_enabled,
+            self.vte_non_voxel_instances_enabled,
             self.vte_y_slice_lookup_cache_enabled
         );
         self.vte_sweep_state = None;
@@ -5556,8 +5600,8 @@ impl App {
             if self.input.take_vte_sweep() {
                 self.toggle_vte_runtime_sweep();
             }
-            if self.input.take_vte_entities_toggle() {
-                self.toggle_vte_entities();
+            if self.input.take_vte_non_voxel_instances_toggle() {
+                self.toggle_vte_non_voxel_instances();
             }
             if self.input.take_vte_y_slice_lookup_cache_toggle() {
                 self.toggle_vte_y_slice_lookup_cache();
@@ -6211,18 +6255,15 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let mut vte_entity_instances = Vec::new();
-            if self.vte_entities_enabled {
-                vte_entity_instances.push(build_vte_test_entity_instance(preview_time_s));
-            }
-            vte_entity_instances.extend(self.remote_player_instances(preview_time_s));
-            vte_entity_instances.extend(self.remote_entity_instances(preview_time_s));
+            let mut vte_non_voxel_instances = Vec::new();
+            vte_non_voxel_instances.extend(self.remote_player_instances(preview_time_s));
+            vte_non_voxel_instances.extend(self.remote_entity_instances());
             let mut preview_overlay_instances: &[common::ModelInstance] = &[];
             if self.vte_overlay_raster_enabled {
                 preview_overlay_instances = std::slice::from_ref(&preview_instance);
             } else {
                 // Default: render held-block preview through Stage A entity path for full quality.
-                vte_entity_instances.push(preview_instance);
+                vte_non_voxel_instances.push(preview_instance);
             }
             let voxel_frame = self.scene.build_voxel_frame_data(
                 self.camera.position,
@@ -6240,18 +6281,17 @@ impl App {
                 self.world_ready = true;
                 eprintln!("World ready: no multiplayer connection");
             }
-
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
-                &vte_entity_instances,
-                &preview_overlay_instances,
+                &vte_non_voxel_instances,
+                preview_overlay_instances,
             );
         } else {
             let remote_instances = self.remote_player_instances(preview_time_s);
-            let entity_instances = self.remote_entity_instances(preview_time_s);
+            let entity_instances = self.remote_entity_instances();
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
             let mut render_instances = Vec::with_capacity(
