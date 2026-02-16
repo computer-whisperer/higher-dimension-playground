@@ -488,15 +488,15 @@ impl App {
                     position[3],
                     voxel::VoxelType(material),
                 );
-                let from_self = source_client_id == self.multiplayer_self_id;
+                let from_self = source_client_id.is_some()
+                    && source_client_id == self.multiplayer_self_id;
                 if from_self {
                     self.acknowledge_pending_voxel_edit(client_edit_id, position, material);
-                } else if source_client_id.is_some() {
+                } else {
                     if material == voxel::VoxelType::AIR.0 {
                         self.play_spatial_sound_voxel(SoundEffect::Break, position, 1.0);
                     } else {
-                        // Place transients are softer than break transients after spatial attenuation.
-                        self.play_spatial_sound_voxel(SoundEffect::Place, position, 1.5);
+                        self.play_spatial_sound_voxel(SoundEffect::Place, position, 1.0);
                     }
                 }
             }
