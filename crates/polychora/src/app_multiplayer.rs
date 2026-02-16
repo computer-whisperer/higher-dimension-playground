@@ -495,7 +495,8 @@ impl App {
                     if material == voxel::VoxelType::AIR.0 {
                         self.play_spatial_sound_voxel(SoundEffect::Break, position, 1.0);
                     } else {
-                        self.play_spatial_sound_voxel(SoundEffect::Place, position, 1.0);
+                        // Place transients are softer than break transients after spatial attenuation.
+                        self.play_spatial_sound_voxel(SoundEffect::Place, position, 1.5);
                     }
                 }
             }
