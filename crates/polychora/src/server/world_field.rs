@@ -682,8 +682,12 @@ fn set_chunk_voxel_by_index(chunk: &mut Chunk, voxel_index: usize, value: VoxelT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::region_tree_cache::RegionTreeWorkingSet;
     use crate::shared::voxel::{world_to_chunk, BaseWorldKind, Chunk, VoxelType, VoxelWorld};
-    use crate::shared::worldfield::{ChunkArrayIndexCodec, QUERY_CONTENT_BOUNDS_SCAN_BUDGET_CELLS};
+    use crate::shared::worldfield::{
+        collect_non_empty_chunks_from_core_in_bounds, ChunkArrayIndexCodec,
+        QUERY_CONTENT_BOUNDS_SCAN_BUDGET_CELLS,
+    };
     use crate::shared::worldfield_testkit::{
         payload_has_solid_material, random_chunk_key_in_bounds, random_chunk_payload,
         DeterministicRng,
@@ -712,6 +716,14 @@ mod tests {
             }
         }
         panic!("failed to find a procgen structure chunk in search radius");
+    }
+
+    fn procgen_query_bounds(center: ChunkPos, radius: i32) -> Aabb4i {
+        let r = radius.max(0);
+        Aabb4i::new(
+            [center.x - r, center.y - r, center.z - r, center.w - r],
+            [center.x + r, center.y + r, center.z + r, center.w + r],
+        )
     }
 
     #[test]
@@ -955,5 +967,59 @@ mod tests {
         expected.sort_unstable_by_key(|(key, _)| key.pos);
 
         assert_eq!(from_tree, expected);
+    }
+
+    #[test]
+    fn procgen_query_region_core_is_stable_for_fixed_bounds() {
+        let seed = 1337;
+        let center = find_procgen_chunk(seed);
+        let field = world_field_from_world(VoxelWorld::new(), seed, true);
+        let bounds = procgen_query_bounds(center, 2);
+        let query = QueryVolume { bounds };
+
+        let first = field.query_region_core(query, QueryDetail::Exact);
+        let first_chunks = collect_non_empty_chunks_from_core_in_bounds(first.as_ref(), bounds);
+        assert!(
+            !first_chunks.is_empty(),
+            "expected non-empty procgen bounds around {:?}",
+            center
+        );
+
+        for _ in 0..6 {
+            let next = field.query_region_core(query, QueryDetail::Exact);
+            let next_chunks = collect_non_empty_chunks_from_core_in_bounds(next.as_ref(), bounds);
+            assert_eq!(next_chunks, first_chunks);
+        }
+    }
+
+    #[test]
+    fn procgen_working_set_refresh_is_idempotent_for_stationary_bounds() {
+        let seed = 1337;
+        let center = find_procgen_chunk(seed);
+        let field = world_field_from_world(VoxelWorld::new(), seed, true);
+        let bounds = procgen_query_bounds(center, 2);
+        let query = QueryVolume { bounds };
+        let mut working = RegionTreeWorkingSet::new();
+
+        let first_core = field.query_region_core(query, QueryDetail::Exact);
+        let first = working.refresh_from_core(bounds, first_core.as_ref());
+        assert!(
+            !first.load_chunks.is_empty(),
+            "expected first refresh to load procgen chunks"
+        );
+        assert!(first.unload_positions.is_empty());
+
+        for _ in 0..6 {
+            let next_core = field.query_region_core(query, QueryDetail::Exact);
+            let refresh = working.refresh_from_core(bounds, next_core.as_ref());
+            assert!(
+                refresh.load_chunks.is_empty(),
+                "stationary refresh should not emit additional loads"
+            );
+            assert!(
+                refresh.unload_positions.is_empty(),
+                "stationary refresh should not unload chunks"
+            );
+        }
     }
 }

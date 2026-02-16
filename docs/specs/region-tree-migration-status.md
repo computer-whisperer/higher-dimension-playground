@@ -52,6 +52,9 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - `apply_non_empty_core_in_bounds`
 - `RegionTreeWorkingSet::refresh_from_core` now consumes tree-native core diff/apply output and carries direct `(ChunkPos, ChunkPayload)` load results (no intermediate desired-map rebuild).
 - `ServerWorldField::query_region_core` now emits sparse branch topology by y-slice and trims each slice to realized non-empty x/z/w bounds (instead of always emitting full query-volume chunk arrays).
+- Added deterministic procgen query/stream stability regression coverage:
+  - fixed-bounds `query_region_core` output for procgen regions is stable across repeated calls
+  - stationary `RegionTreeWorkingSet::refresh_from_core` over procgen regions is idempotent (no load/unload churn)
 
 ## System Status Matrix
 
