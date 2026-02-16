@@ -505,6 +505,7 @@ impl App {
                 match voxel::io::load_world(&mut cursor) {
                     Ok(new_world) => {
                         self.scene.replace_world(new_world);
+                        self.multiplayer_region_clocks.clear();
                         eprintln!(
                             "Applied multiplayer world snapshot rev={} chunks={}",
                             world.revision, world.non_empty_chunks
@@ -533,9 +534,26 @@ impl App {
                 self.apply_multiplayer_chunk_unload_batch(revision, chunks);
             }
             multiplayer::ServerMessage::WorldRegionClockUpdate { updates } => {
+                let mut regressed = 0usize;
                 for update in updates {
-                    self.multiplayer_region_clocks
-                        .insert(update.region_id, update.clock);
+                    match self.multiplayer_region_clocks.get_mut(&update.region_id) {
+                        Some(existing) if update.clock < *existing => {
+                            regressed = regressed.saturating_add(1);
+                        }
+                        Some(existing) => {
+                            *existing = update.clock;
+                        }
+                        None => {
+                            self.multiplayer_region_clocks
+                                .insert(update.region_id, update.clock);
+                        }
+                    }
+                }
+                if regressed > 0 {
+                    eprintln!(
+                        "Ignored {} regressed multiplayer region clock updates",
+                        regressed
+                    );
                 }
             }
             multiplayer::ServerMessage::Pong { .. } => {}
