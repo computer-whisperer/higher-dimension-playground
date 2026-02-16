@@ -71,7 +71,7 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
     },
     ShaderEntry {
         file: "bvh.slang",
-        entry: "mainBVHComputeLeafAABBs",
+        entry: "mainBVHLinkParents",
         profile: "cs_6_5",
     },
     ShaderEntry {

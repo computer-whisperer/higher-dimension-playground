@@ -2371,9 +2371,29 @@ fn handle_message(
             );
         }
         ClientMessage::UpdatePlayer { position, look } => {
-            let (_snapshot, _spawned_now) =
-                install_or_update_player(state, client_id, None, Some(position), Some(look), start);
-            let center_chunk = world_chunk_from_position(position);
+            let safe_position = if position.iter().all(|axis| axis.is_finite()) {
+                position
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
+            let safe_look = normalize4_or_default(
+                look,
+                [
+                    0.0,
+                    0.0,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                ],
+            );
+            let (_snapshot, _spawned_now) = install_or_update_player(
+                state,
+                client_id,
+                None,
+                Some(safe_position),
+                Some(safe_look),
+                start,
+            );
+            let center_chunk = world_chunk_from_position(safe_position);
             sync_streamed_chunks_for_client(
                 state,
                 client_id,

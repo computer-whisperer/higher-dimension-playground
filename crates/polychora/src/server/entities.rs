@@ -18,7 +18,7 @@ pub struct EntityCore {
 
 fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
     let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
-    if len_sq <= 1e-8 {
+    if len_sq <= 1e-8 || !len_sq.is_finite() {
         return fallback;
     }
     let inv_len = len_sq.sqrt().recip();

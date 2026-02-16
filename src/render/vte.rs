@@ -140,6 +140,30 @@ pub(super) struct VteCompareStats {
     pub(super) zero_interval_flags: u32,
     pub(super) tie_stepped_flags: u32,
     pub(super) lookup_fallback_flags: u32,
+    pub(super) entity_bvh_samples: u32,
+    pub(super) entity_bvh_mismatches: u32,
+    pub(super) entity_bvh_hit_state_mismatches: u32,
+    pub(super) entity_bvh_material_mismatches: u32,
+    pub(super) entity_bvh_distance_mismatches: u32,
+    pub(super) entity_bvh_tetra_mismatches: u32,
+    pub(super) entity_bvh_miss_linear_hit: u32,
+    pub(super) entity_bvh_hit_linear_miss: u32,
+    pub(super) entity_bvh_noprune_mismatches: u32,
+    pub(super) entity_bvh_noprune_hit_state_mismatches: u32,
+    pub(super) entity_bvh_noprune_distance_mismatches: u32,
+    pub(super) entity_bvh_noprune_tetra_mismatches: u32,
+    pub(super) entity_bvh_noaabb_mismatches: u32,
+    pub(super) entity_bvh_noaabb_hit_state_mismatches: u32,
+    pub(super) entity_bvh_noaabb_distance_mismatches: u32,
+    pub(super) entity_bvh_noaabb_tetra_mismatches: u32,
+    pub(super) entity_linear_order_mismatches: u32,
+    pub(super) entity_linear_order_hit_state_mismatches: u32,
+    pub(super) entity_linear_order_distance_mismatches: u32,
+    pub(super) entity_linear_order_tetra_mismatches: u32,
+    pub(super) entity_bvh_leafarray_mismatches: u32,
+    pub(super) entity_bvh_leafarray_hit_state_mismatches: u32,
+    pub(super) entity_bvh_leafarray_distance_mismatches: u32,
+    pub(super) entity_bvh_leafarray_tetra_mismatches: u32,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -177,9 +201,11 @@ pub(super) const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
 pub(super) const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
 pub(super) const VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE: u32 = 1 << 3;
 pub(super) const VTE_DEBUG_FLAG_LOD_TINT: u32 = 1 << 4;
+pub(super) const VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY: u32 = 1 << 5;
+pub(super) const VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE: u32 = 1 << 6;
 pub(super) const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
 pub(super) const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
-pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 16;
+pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 40;
 pub(super) const VTE_COMPARE_STAT_COMPARED: usize = 0;
 pub(super) const VTE_COMPARE_STAT_MATCHES: usize = 1;
 pub(super) const VTE_COMPARE_STAT_MISMATCHES: usize = 2;
@@ -196,6 +222,30 @@ pub(super) const VTE_COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE: usize = 12;
 pub(super) const VTE_COMPARE_STAT_ZERO_INTERVAL_FLAG: usize = 13;
 pub(super) const VTE_COMPARE_STAT_TIE_STEPPED_FLAG: usize = 14;
 pub(super) const VTE_COMPARE_STAT_LOOKUP_FALLBACK_FLAG: usize = 15;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_SAMPLE: usize = 16;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_MISMATCH: usize = 17;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_HIT_STATE_MISMATCH: usize = 18;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_MATERIAL_MISMATCH: usize = 19;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_DISTANCE_MISMATCH: usize = 20;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_MISS_LINEAR_HIT: usize = 21;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_HIT_LINEAR_MISS: usize = 22;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_TETRA_MISMATCH: usize = 23;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_MISMATCH: usize = 24;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_HIT_STATE_MISMATCH: usize = 25;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_DISTANCE_MISMATCH: usize = 26;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_TETRA_MISMATCH: usize = 27;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_MISMATCH: usize = 28;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_HIT_STATE_MISMATCH: usize = 29;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_DISTANCE_MISMATCH: usize = 30;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_TETRA_MISMATCH: usize = 31;
+pub(super) const VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_MISMATCH: usize = 32;
+pub(super) const VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_HIT_STATE_MISMATCH: usize = 33;
+pub(super) const VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_DISTANCE_MISMATCH: usize = 34;
+pub(super) const VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_TETRA_MISMATCH: usize = 35;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_MISMATCH: usize = 36;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_HIT_STATE_MISMATCH: usize = 37;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH: usize = 38;
+pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH: usize = 39;
 pub(super) const VTE_FIRST_MISMATCH_WORD_COUNT: usize = 27;
 pub(super) const VTE_FIRST_MISMATCH_VALID: usize = 0;
 pub(super) const VTE_FIRST_MISMATCH_PIXEL_X: usize = 1;

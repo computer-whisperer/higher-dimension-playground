@@ -42,7 +42,11 @@ static const uint META_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY = 1u << 1u;
 static const uint META_DEBUG_FLAG_COMPARE_SLICE_ONLY = 1u << 2u;
 static const uint META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE = 1u << 3u;
 static const uint META_DEBUG_FLAG_LOD_TINT = 1u << 4u;
+static const uint META_DEBUG_FLAG_ENTITY_LINEAR_ONLY = 1u << 5u;
+static const uint META_DEBUG_FLAG_ENTITY_BVH_COMPARE = 1u << 6u;
 static const uint ENABLE_YSLICE_FASTPATH = 0u;
+static const float ENTITY_BVH_TOL_REL = 1e-3;
+static const float ENTITY_BVH_TOL_ABS = 1e-3;
 static const uint DEBUG_FLAG_CHUNK_TIE_STEPPED = 1u << 1u;
 static const uint DEBUG_FLAG_CHUNK_ZERO_INTERVAL = 1u << 2u;
 
@@ -66,7 +70,31 @@ static const uint COMPARE_STAT_REASON_LOOKUP_FALSE_NEGATIVE = 12u;
 static const uint COMPARE_STAT_ZERO_INTERVAL_FLAG = 13u;
 static const uint COMPARE_STAT_TIE_STEPPED_FLAG = 14u;
 static const uint COMPARE_STAT_LOOKUP_FALLBACK_FLAG = 15u;
-static const uint COMPARE_STAT_COUNT = 16u;
+static const uint COMPARE_STAT_ENTITY_BVH_SAMPLE = 16u;
+static const uint COMPARE_STAT_ENTITY_BVH_MISMATCH = 17u;
+static const uint COMPARE_STAT_ENTITY_BVH_HIT_STATE_MISMATCH = 18u;
+static const uint COMPARE_STAT_ENTITY_BVH_MATERIAL_MISMATCH = 19u;
+static const uint COMPARE_STAT_ENTITY_BVH_DISTANCE_MISMATCH = 20u;
+static const uint COMPARE_STAT_ENTITY_BVH_MISS_LINEAR_HIT = 21u;
+static const uint COMPARE_STAT_ENTITY_BVH_HIT_LINEAR_MISS = 22u;
+static const uint COMPARE_STAT_ENTITY_BVH_TETRA_MISMATCH = 23u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOPRUNE_MISMATCH = 24u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOPRUNE_HIT_STATE_MISMATCH = 25u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOPRUNE_DISTANCE_MISMATCH = 26u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOPRUNE_TETRA_MISMATCH = 27u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOAABB_MISMATCH = 28u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOAABB_HIT_STATE_MISMATCH = 29u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOAABB_DISTANCE_MISMATCH = 30u;
+static const uint COMPARE_STAT_ENTITY_BVH_NOAABB_TETRA_MISMATCH = 31u;
+static const uint COMPARE_STAT_ENTITY_LINEAR_ORDER_MISMATCH = 32u;
+static const uint COMPARE_STAT_ENTITY_LINEAR_ORDER_HIT_STATE_MISMATCH = 33u;
+static const uint COMPARE_STAT_ENTITY_LINEAR_ORDER_DISTANCE_MISMATCH = 34u;
+static const uint COMPARE_STAT_ENTITY_LINEAR_ORDER_TETRA_MISMATCH = 35u;
+static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_MISMATCH = 36u;
+static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_HIT_STATE_MISMATCH = 37u;
+static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH = 38u;
+static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH = 39u;
+static const uint COMPARE_STAT_COUNT = 40u;
 
 static const uint FIRST_MISMATCH_VALID = 0u;
 static const uint FIRST_MISMATCH_PIXEL_X = 1u;
@@ -357,6 +385,7 @@ struct EntityTetraHit
     float4 hitNormal;
     float4 textureCoordinates;
     uint materialId;
+    uint tetrahedronIndex;
 }
 
 EntityTetraHit entityTetraHitNone()
@@ -368,19 +397,84 @@ EntityTetraHit entityTetraHitNone()
     hit.hitNormal = float4(0.0, 0.0, 0.0, 0.0);
     hit.textureCoordinates = float4(0.0, 0.0, 0.0, 0.0);
     hit.materialId = 0u;
+    hit.tetrahedronIndex = INVALID_INDEX;
     return hit;
 }
 
-float2 rayAABBIntersect4DEntity(float4 origin, float4 invDir, float4 minB, float4 maxB)
+bool rayAABBIntersectAxisEntity(
+    float origin,
+    float direction,
+    float invDirection,
+    float minB,
+    float maxB,
+    inout float tmin,
+    inout float tmax)
 {
-    float4 t1 = (minB - origin) * invDir;
-    float4 t2 = (maxB - origin) * invDir;
+    // Treat near-zero direction components as parallel to the slab and perform
+    // an explicit containment test. Finite reciprocal approximations can
+    // otherwise over/under-estimate t and reject valid nearer nodes.
+    if (abs(direction) <= 1e-8)
+    {
+        float slabTolerance = max(
+            ENTITY_BVH_TOL_ABS,
+            ENTITY_BVH_TOL_REL * max(abs(minB), abs(maxB)));
+        return origin >= (minB - slabTolerance) && origin <= (maxB + slabTolerance);
+    }
 
-    float4 tmin4 = min(t1, t2);
-    float4 tmax4 = max(t1, t2);
+    float t1 = (minB - origin) * invDirection;
+    float t2 = (maxB - origin) * invDirection;
+    float axisMin = min(t1, t2);
+    float axisMax = max(t1, t2);
+    tmin = max(tmin, axisMin);
+    tmax = min(tmax, axisMax);
+    return tmin <= tmax;
+}
 
-    float tmin = max(max(tmin4.x, tmin4.y), max(tmin4.z, tmin4.w));
-    float tmax = min(min(tmax4.x, tmax4.y), min(tmax4.z, tmax4.w));
+float2 rayAABBIntersect4DEntity(
+    float4 origin,
+    float4 direction,
+    float4 invDir,
+    float4 minB,
+    float4 maxB)
+{
+    float tmin = 0.0;
+    float tmax = 1e30;
+
+    if (!rayAABBIntersectAxisEntity(
+            origin.x,
+            direction.x,
+            invDir.x,
+            minB.x,
+            maxB.x,
+            tmin,
+            tmax)
+        || !rayAABBIntersectAxisEntity(
+            origin.y,
+            direction.y,
+            invDir.y,
+            minB.y,
+            maxB.y,
+            tmin,
+            tmax)
+        || !rayAABBIntersectAxisEntity(
+            origin.z,
+            direction.z,
+            invDir.z,
+            minB.z,
+            maxB.z,
+            tmin,
+            tmax)
+        || !rayAABBIntersectAxisEntity(
+            origin.w,
+            direction.w,
+            invDir.w,
+            minB.w,
+            maxB.w,
+            tmin,
+            tmax))
+    {
+        return float2(-1.0, -1.0);
+    }
 
     if (tmax < 0.0 || tmin > tmax)
     {
@@ -415,9 +509,18 @@ bool testEntityTetrahedronHit(
     {
         return false;
     }
-    if (closestHit.didHit && closestHit.hitDistance <= hitDistance)
+    if (closestHit.didHit)
     {
-        return false;
+        float distTolerance = max(1e-4, 1e-4 * max(closestHit.hitDistance, hitDistance));
+        if (hitDistance > closestHit.hitDistance + distTolerance)
+        {
+            return false;
+        }
+        if (abs(hitDistance - closestHit.hitDistance) <= distTolerance
+            && tetIndex >= closestHit.tetrahedronIndex)
+        {
+            return false;
+        }
     }
 
     float4 q = b + hitDistance * direction;
@@ -486,6 +589,7 @@ bool testEntityTetrahedronHit(
             + v * tet.texturePositions[2]
             + w * tet.texturePositions[3];
         closestHit.materialId = tet.materialId;
+        closestHit.tetrahedronIndex = tetIndex;
         return true;
     }
 
@@ -506,11 +610,26 @@ EntityTetraHit traceEntityTetraLinear(
     return closestHit;
 }
 
-EntityTetraHit traceEntityTetraBVH(
+EntityTetraHit traceEntityTetraLinearReverse(
     float4 start,
     float4 direction,
     uint numTetrahedrons,
     float maxDistance)
+{
+    EntityTetraHit closestHit = entityTetraHitNone();
+    for (uint i = numTetrahedrons; i > 0u; i--)
+    {
+        testEntityTetrahedronHit(start, direction, i - 1u, maxDistance, closestHit);
+    }
+    return closestHit;
+}
+
+EntityTetraHit traceEntityTetraBVH(
+    float4 start,
+    float4 direction,
+    uint numTetrahedrons,
+    float maxDistance,
+    bool enableBoundPrune)
 {
     EntityTetraHit closestHit = entityTetraHitNone();
     if (numTetrahedrons == 0u)
@@ -528,10 +647,15 @@ EntityTetraHit traceEntityTetraBVH(
 
     float2 rootT = rayAABBIntersect4DEntity(
         start,
+        direction,
         invDir,
         bvhNodes[0].minBounds,
         bvhNodes[0].maxBounds);
-    if (rootT.x < 0.0 || rootT.x > maxDistance)
+    float rootTolerance = max(
+        ENTITY_BVH_TOL_ABS,
+        ENTITY_BVH_TOL_REL * maxDistance);
+    float rootMaxDistance = maxDistance + rootTolerance;
+    if (rootT.x < 0.0 || rootT.x > rootMaxDistance)
     {
         return closestHit;
     }
@@ -572,21 +696,30 @@ EntityTetraHit traceEntityTetraBVH(
                 stackOverflowed = true;
                 break;
             }
-            float bestBound = closestHit.didHit ? min(maxDistance, closestHit.hitDistance) : maxDistance;
+            float bestBound = maxDistance;
+            if (enableBoundPrune && closestHit.didHit)
+            {
+                bestBound = min(maxDistance, closestHit.hitDistance);
+            }
 
             float2 leftT = rayAABBIntersect4DEntity(
                 start,
+                direction,
                 invDir,
                 bvhNodes[left].minBounds,
                 bvhNodes[left].maxBounds);
             float2 rightT = rayAABBIntersect4DEntity(
                 start,
+                direction,
                 invDir,
                 bvhNodes[right].minBounds,
                 bvhNodes[right].maxBounds);
 
-            bool leftHit = leftT.x >= 0.0 && leftT.x <= bestBound;
-            bool rightHit = rightT.x >= 0.0 && rightT.x <= bestBound;
+            float boundTolerance = max(
+                ENTITY_BVH_TOL_ABS,
+                ENTITY_BVH_TOL_REL * bestBound);
+            bool leftHit = leftT.x >= 0.0 && leftT.x <= (bestBound + boundTolerance);
+            bool rightHit = rightT.x >= 0.0 && rightT.x <= (bestBound + boundTolerance);
 
             if (leftHit && rightHit)
             {
@@ -656,7 +789,120 @@ EntityTetraHit traceEntityTetra(
         return traceEntityTetraLinear(start, direction, numTetrahedrons, maxDistance);
     }
 
-    return traceEntityTetraBVH(start, direction, numTetrahedrons, maxDistance);
+    return traceEntityTetraBVH(start, direction, numTetrahedrons, maxDistance, true);
+}
+
+EntityTetraHit traceEntityTetraBVHNoAabb(
+    float4 start,
+    float4 direction,
+    uint numTetrahedrons,
+    float maxDistance)
+{
+    EntityTetraHit closestHit = entityTetraHitNone();
+    if (numTetrahedrons == 0u)
+    {
+        return closestHit;
+    }
+    uint totalNodes = 2u * numTetrahedrons - 1u;
+    uint stack[BVH_STACK_SIZE];
+    int stackPtr = 0;
+    bool stackOverflowed = false;
+    stack[stackPtr++] = 0u;
+
+    while (stackPtr > 0)
+    {
+        uint nodeIdx = stack[--stackPtr];
+        if (nodeIdx >= totalNodes)
+        {
+            stackOverflowed = true;
+            break;
+        }
+        BVHNode node = bvhNodes[nodeIdx];
+        if (node.isLeaf != 0u)
+        {
+            if (node.tetrahedronIndex < numTetrahedrons)
+            {
+                testEntityTetrahedronHit(
+                    start,
+                    direction,
+                    node.tetrahedronIndex,
+                    maxDistance,
+                    closestHit);
+            }
+        }
+        else
+        {
+            uint left = node.leftChild;
+            uint right = node.rightChild;
+            if (left >= totalNodes || right >= totalNodes)
+            {
+                stackOverflowed = true;
+                break;
+            }
+            if (stackPtr + 2 > int(BVH_STACK_SIZE))
+            {
+                stackOverflowed = true;
+                break;
+            }
+            stack[stackPtr++] = right;
+            stack[stackPtr++] = left;
+        }
+    }
+
+    if (stackOverflowed)
+    {
+        for (uint i = 0u; i < numTetrahedrons; i++)
+        {
+            testEntityTetrahedronHit(start, direction, i, maxDistance, closestHit);
+        }
+    }
+
+    return closestHit;
+}
+
+EntityTetraHit traceEntityTetraBVHLeafArray(
+    float4 start,
+    float4 direction,
+    uint numTetrahedrons,
+    float maxDistance)
+{
+    EntityTetraHit closestHit = entityTetraHitNone();
+    if (numTetrahedrons == 0u)
+    {
+        return closestHit;
+    }
+
+    if (numTetrahedrons == 1u)
+    {
+        if (bvhNodes[0].isLeaf != 0u && bvhNodes[0].tetrahedronIndex < numTetrahedrons)
+        {
+            testEntityTetrahedronHit(
+                start,
+                direction,
+                bvhNodes[0].tetrahedronIndex,
+                maxDistance,
+                closestHit);
+        }
+        return closestHit;
+    }
+
+    uint numInternalNodes = numTetrahedrons - 1u;
+    for (uint i = 0u; i < numTetrahedrons; i++)
+    {
+        uint leafIdx = numInternalNodes + i;
+        BVHNode leaf = bvhNodes[leafIdx];
+        if (leaf.isLeaf == 0u)
+        {
+            continue;
+        }
+        uint tetIdx = leaf.tetrahedronIndex;
+        if (tetIdx >= numTetrahedrons)
+        {
+            continue;
+        }
+        testEntityTetrahedronHit(start, direction, tetIdx, maxDistance, closestHit);
+    }
+    return closestHit;
 }
 
 float4 estimateVoxelHitNormal(float4 hitPos, float4 rayDir)
@@ -2625,11 +2871,216 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 float nearestVoxelDistance = hit
                     ? max(1e-4, dot(hitPos - worldOrigin, worldDirection))
                     : maxEntityDistance;
-                entityHit = traceEntityTetra(
-                    worldOrigin,
-                    worldDirection,
-                    wd.totalNumTetrahedrons,
-                    nearestVoxelDistance);
+                bool forceEntityLinear = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_LINEAR_ONLY) != 0u;
+                bool doEntityBvhCompare = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_BVH_COMPARE) != 0u
+                    && (((globalId.x + 3u * globalId.y + 5u * sampleLayer) & 15u) == 0u);
+                if (doEntityBvhCompare)
+                {
+                    EntityTetraHit linearHit = traceEntityTetraLinear(
+                        worldOrigin,
+                        worldDirection,
+                        wd.totalNumTetrahedrons,
+                        nearestVoxelDistance);
+                    EntityTetraHit linearReverseHit = traceEntityTetraLinearReverse(
+                        worldOrigin,
+                        worldDirection,
+                        wd.totalNumTetrahedrons,
+                        nearestVoxelDistance);
+                    EntityTetraHit bvhHit = traceEntityTetraBVH(
+                        worldOrigin,
+                        worldDirection,
+                        wd.totalNumTetrahedrons,
+                        nearestVoxelDistance,
+                        true);
+                    EntityTetraHit bvhNoPruneHit = traceEntityTetraBVH(
+                        worldOrigin,
+                        worldDirection,
+                        wd.totalNumTetrahedrons,
+                        nearestVoxelDistance,
+                        false);
+                    EntityTetraHit bvhNoAabbHit = traceEntityTetraBVHNoAabb(
+                        worldOrigin,
+                        worldDirection,
+                        wd.totalNumTetrahedrons,
+                        nearestVoxelDistance);
+                    EntityTetraHit bvhLeafArrayHit = traceEntityTetraBVHLeafArray(
+                        worldOrigin,
+                        worldDirection,
+                        wd.totalNumTetrahedrons,
+                        nearestVoxelDistance);
+                    incrementCompareStat(COMPARE_STAT_ENTITY_BVH_SAMPLE);
+
+                    bool hitStateMismatch = (linearHit.didHit != bvhHit.didHit);
+                    bool materialMismatch = false;
+                    bool distanceMismatch = false;
+                    bool tetraMismatch = false;
+                    if (!hitStateMismatch && linearHit.didHit && bvhHit.didHit)
+                    {
+                        materialMismatch = linearHit.materialId != bvhHit.materialId;
+                        float distDelta = abs(linearHit.hitDistance - bvhHit.hitDistance);
+                        float distTolerance = max(1e-3, 1e-3 * max(linearHit.hitDistance, bvhHit.hitDistance));
+                        distanceMismatch = distDelta > distTolerance;
+                        tetraMismatch = linearHit.tetrahedronIndex != bvhHit.tetrahedronIndex;
+                    }
+                    if (hitStateMismatch || materialMismatch || distanceMismatch || tetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_MISMATCH);
+                    }
+                    if (hitStateMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_HIT_STATE_MISMATCH);
+                        if (!bvhHit.didHit && linearHit.didHit)
+                        {
+                            incrementCompareStat(COMPARE_STAT_ENTITY_BVH_MISS_LINEAR_HIT);
+                        }
+                        else if (bvhHit.didHit && !linearHit.didHit)
+                        {
+                            incrementCompareStat(COMPARE_STAT_ENTITY_BVH_HIT_LINEAR_MISS);
+                        }
+                    }
+                    if (materialMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_MATERIAL_MISMATCH);
+                    }
+                    if (distanceMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_DISTANCE_MISMATCH);
+                    }
+                    if (tetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_TETRA_MISMATCH);
+                    }
+                    bool noPruneHitStateMismatch = (linearHit.didHit != bvhNoPruneHit.didHit);
+                    bool noPruneDistanceMismatch = false;
+                    bool noPruneTetraMismatch = false;
+                    if (!noPruneHitStateMismatch && linearHit.didHit && bvhNoPruneHit.didHit)
+                    {
+                        float noPruneDistDelta = abs(linearHit.hitDistance - bvhNoPruneHit.hitDistance);
+                        float noPruneDistTolerance = max(
+                            1e-3,
+                            1e-3 * max(linearHit.hitDistance, bvhNoPruneHit.hitDistance));
+                        noPruneDistanceMismatch = noPruneDistDelta > noPruneDistTolerance;
+                        noPruneTetraMismatch = linearHit.tetrahedronIndex != bvhNoPruneHit.tetrahedronIndex;
+                    }
+                    if (noPruneHitStateMismatch || noPruneDistanceMismatch || noPruneTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_MISMATCH);
+                    }
+                    if (noPruneHitStateMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_HIT_STATE_MISMATCH);
+                    }
+                    if (noPruneDistanceMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_DISTANCE_MISMATCH);
+                    }
+                    if (noPruneTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_TETRA_MISMATCH);
+                    }
+                    bool noAabbHitStateMismatch = (linearHit.didHit != bvhNoAabbHit.didHit);
+                    bool noAabbDistanceMismatch = false;
+                    bool noAabbTetraMismatch = false;
+                    if (!noAabbHitStateMismatch && linearHit.didHit && bvhNoAabbHit.didHit)
+                    {
+                        float noAabbDistDelta = abs(linearHit.hitDistance - bvhNoAabbHit.hitDistance);
+                        float noAabbDistTolerance = max(
+                            1e-3,
+                            1e-3 * max(linearHit.hitDistance, bvhNoAabbHit.hitDistance));
+                        noAabbDistanceMismatch = noAabbDistDelta > noAabbDistTolerance;
+                        noAabbTetraMismatch = linearHit.tetrahedronIndex != bvhNoAabbHit.tetrahedronIndex;
+                    }
+                    if (noAabbHitStateMismatch || noAabbDistanceMismatch || noAabbTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_MISMATCH);
+                    }
+                    if (noAabbHitStateMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_HIT_STATE_MISMATCH);
+                    }
+                    if (noAabbDistanceMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_DISTANCE_MISMATCH);
+                    }
+                    if (noAabbTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_TETRA_MISMATCH);
+                    }
+                    bool linearOrderHitStateMismatch = (linearHit.didHit != linearReverseHit.didHit);
+                    bool linearOrderDistanceMismatch = false;
+                    bool linearOrderTetraMismatch = false;
+                    if (!linearOrderHitStateMismatch && linearHit.didHit && linearReverseHit.didHit)
+                    {
+                        float linearOrderDistDelta = abs(linearHit.hitDistance - linearReverseHit.hitDistance);
+                        float linearOrderDistTolerance = max(
+                            1e-3,
+                            1e-3 * max(linearHit.hitDistance, linearReverseHit.hitDistance));
+                        linearOrderDistanceMismatch = linearOrderDistDelta > linearOrderDistTolerance;
+                        linearOrderTetraMismatch =
+                            linearHit.tetrahedronIndex != linearReverseHit.tetrahedronIndex;
+                    }
+                    if (linearOrderHitStateMismatch
+                        || linearOrderDistanceMismatch
+                        || linearOrderTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_MISMATCH);
+                    }
+                    if (linearOrderHitStateMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_HIT_STATE_MISMATCH);
+                    }
+                    if (linearOrderDistanceMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_DISTANCE_MISMATCH);
+                    }
+                    if (linearOrderTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_TETRA_MISMATCH);
+                    }
+                    bool leafArrayHitStateMismatch = (linearHit.didHit != bvhLeafArrayHit.didHit);
+                    bool leafArrayDistanceMismatch = false;
+                    bool leafArrayTetraMismatch = false;
+                    if (!leafArrayHitStateMismatch && linearHit.didHit && bvhLeafArrayHit.didHit)
+                    {
+                        float leafArrayDistDelta = abs(linearHit.hitDistance - bvhLeafArrayHit.hitDistance);
+                        float leafArrayDistTolerance = max(
+                            1e-3,
+                            1e-3 * max(linearHit.hitDistance, bvhLeafArrayHit.hitDistance));
+                        leafArrayDistanceMismatch = leafArrayDistDelta > leafArrayDistTolerance;
+                        leafArrayTetraMismatch = linearHit.tetrahedronIndex != bvhLeafArrayHit.tetrahedronIndex;
+                    }
+                    if (leafArrayHitStateMismatch || leafArrayDistanceMismatch || leafArrayTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_MISMATCH);
+                    }
+                    if (leafArrayHitStateMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_HIT_STATE_MISMATCH);
+                    }
+                    if (leafArrayDistanceMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH);
+                    }
+                    if (leafArrayTetraMismatch)
+                    {
+                        incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH);
+                    }
+                    entityHit = forceEntityLinear ? linearHit : bvhHit;
+                }
+                else
+                {
+                    entityHit = forceEntityLinear
+                        ? traceEntityTetraLinear(
+                            worldOrigin,
+                            worldDirection,
+                            wd.totalNumTetrahedrons,
+                            nearestVoxelDistance)
+                        : traceEntityTetra(
+                            worldOrigin,
+                            worldDirection,
+                            wd.totalNumTetrahedrons,
+                            nearestVoxelDistance);
+                }
             }
 
             if (entityHit.didHit)
@@ -2814,11 +3265,213 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         {
             maxEntityDistance = max(1e-4, dot(hitPos - worldOrigin, worldDirection));
         }
-        entityHit = traceEntityTetra(
-            worldOrigin,
-            worldDirection,
-            wd.totalNumTetrahedrons,
-            maxEntityDistance);
+        bool forceEntityLinear = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_LINEAR_ONLY) != 0u;
+        bool doEntityBvhCompare = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_BVH_COMPARE) != 0u
+            && (((globalId.x + 3u * globalId.y) & 15u) == 0u);
+        if (doEntityBvhCompare)
+        {
+            EntityTetraHit linearHit = traceEntityTetraLinear(
+                worldOrigin,
+                worldDirection,
+                wd.totalNumTetrahedrons,
+                maxEntityDistance);
+            EntityTetraHit linearReverseHit = traceEntityTetraLinearReverse(
+                worldOrigin,
+                worldDirection,
+                wd.totalNumTetrahedrons,
+                maxEntityDistance);
+            EntityTetraHit bvhHit = traceEntityTetraBVH(
+                worldOrigin,
+                worldDirection,
+                wd.totalNumTetrahedrons,
+                maxEntityDistance,
+                true);
+            EntityTetraHit bvhNoPruneHit = traceEntityTetraBVH(
+                worldOrigin,
+                worldDirection,
+                wd.totalNumTetrahedrons,
+                maxEntityDistance,
+                false);
+            EntityTetraHit bvhNoAabbHit = traceEntityTetraBVHNoAabb(
+                worldOrigin,
+                worldDirection,
+                wd.totalNumTetrahedrons,
+                maxEntityDistance);
+            EntityTetraHit bvhLeafArrayHit = traceEntityTetraBVHLeafArray(
+                worldOrigin,
+                worldDirection,
+                wd.totalNumTetrahedrons,
+                maxEntityDistance);
+            incrementCompareStat(COMPARE_STAT_ENTITY_BVH_SAMPLE);
+
+            bool hitStateMismatch = (linearHit.didHit != bvhHit.didHit);
+            bool materialMismatch = false;
+            bool distanceMismatch = false;
+            bool tetraMismatch = false;
+            if (!hitStateMismatch && linearHit.didHit && bvhHit.didHit)
+            {
+                materialMismatch = linearHit.materialId != bvhHit.materialId;
+                float distDelta = abs(linearHit.hitDistance - bvhHit.hitDistance);
+                float distTolerance = max(1e-3, 1e-3 * max(linearHit.hitDistance, bvhHit.hitDistance));
+                distanceMismatch = distDelta > distTolerance;
+                tetraMismatch = linearHit.tetrahedronIndex != bvhHit.tetrahedronIndex;
+            }
+            if (hitStateMismatch || materialMismatch || distanceMismatch || tetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_MISMATCH);
+            }
+            if (hitStateMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_HIT_STATE_MISMATCH);
+                if (!bvhHit.didHit && linearHit.didHit)
+                {
+                    incrementCompareStat(COMPARE_STAT_ENTITY_BVH_MISS_LINEAR_HIT);
+                }
+                else if (bvhHit.didHit && !linearHit.didHit)
+                {
+                    incrementCompareStat(COMPARE_STAT_ENTITY_BVH_HIT_LINEAR_MISS);
+                }
+            }
+            if (materialMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_MATERIAL_MISMATCH);
+            }
+            if (distanceMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_DISTANCE_MISMATCH);
+            }
+            if (tetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_TETRA_MISMATCH);
+            }
+            bool noPruneHitStateMismatch = (linearHit.didHit != bvhNoPruneHit.didHit);
+            bool noPruneDistanceMismatch = false;
+            bool noPruneTetraMismatch = false;
+            if (!noPruneHitStateMismatch && linearHit.didHit && bvhNoPruneHit.didHit)
+            {
+                float noPruneDistDelta = abs(linearHit.hitDistance - bvhNoPruneHit.hitDistance);
+                float noPruneDistTolerance = max(
+                    1e-3,
+                    1e-3 * max(linearHit.hitDistance, bvhNoPruneHit.hitDistance));
+                noPruneDistanceMismatch = noPruneDistDelta > noPruneDistTolerance;
+                noPruneTetraMismatch = linearHit.tetrahedronIndex != bvhNoPruneHit.tetrahedronIndex;
+            }
+            if (noPruneHitStateMismatch || noPruneDistanceMismatch || noPruneTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_MISMATCH);
+            }
+            if (noPruneHitStateMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_HIT_STATE_MISMATCH);
+            }
+            if (noPruneDistanceMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_DISTANCE_MISMATCH);
+            }
+            if (noPruneTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOPRUNE_TETRA_MISMATCH);
+            }
+            bool noAabbHitStateMismatch = (linearHit.didHit != bvhNoAabbHit.didHit);
+            bool noAabbDistanceMismatch = false;
+            bool noAabbTetraMismatch = false;
+            if (!noAabbHitStateMismatch && linearHit.didHit && bvhNoAabbHit.didHit)
+            {
+                float noAabbDistDelta = abs(linearHit.hitDistance - bvhNoAabbHit.hitDistance);
+                float noAabbDistTolerance = max(
+                    1e-3,
+                    1e-3 * max(linearHit.hitDistance, bvhNoAabbHit.hitDistance));
+                noAabbDistanceMismatch = noAabbDistDelta > noAabbDistTolerance;
+                noAabbTetraMismatch = linearHit.tetrahedronIndex != bvhNoAabbHit.tetrahedronIndex;
+            }
+            if (noAabbHitStateMismatch || noAabbDistanceMismatch || noAabbTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_MISMATCH);
+            }
+            if (noAabbHitStateMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_HIT_STATE_MISMATCH);
+            }
+            if (noAabbDistanceMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_DISTANCE_MISMATCH);
+            }
+            if (noAabbTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_NOAABB_TETRA_MISMATCH);
+            }
+            bool linearOrderHitStateMismatch = (linearHit.didHit != linearReverseHit.didHit);
+            bool linearOrderDistanceMismatch = false;
+            bool linearOrderTetraMismatch = false;
+            if (!linearOrderHitStateMismatch && linearHit.didHit && linearReverseHit.didHit)
+            {
+                float linearOrderDistDelta = abs(linearHit.hitDistance - linearReverseHit.hitDistance);
+                float linearOrderDistTolerance = max(
+                    1e-3,
+                    1e-3 * max(linearHit.hitDistance, linearReverseHit.hitDistance));
+                linearOrderDistanceMismatch = linearOrderDistDelta > linearOrderDistTolerance;
+                linearOrderTetraMismatch = linearHit.tetrahedronIndex != linearReverseHit.tetrahedronIndex;
+            }
+            if (linearOrderHitStateMismatch || linearOrderDistanceMismatch || linearOrderTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_MISMATCH);
+            }
+            if (linearOrderHitStateMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_HIT_STATE_MISMATCH);
+            }
+            if (linearOrderDistanceMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_DISTANCE_MISMATCH);
+            }
+            if (linearOrderTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_LINEAR_ORDER_TETRA_MISMATCH);
+            }
+            bool leafArrayHitStateMismatch = (linearHit.didHit != bvhLeafArrayHit.didHit);
+            bool leafArrayDistanceMismatch = false;
+            bool leafArrayTetraMismatch = false;
+            if (!leafArrayHitStateMismatch && linearHit.didHit && bvhLeafArrayHit.didHit)
+            {
+                float leafArrayDistDelta = abs(linearHit.hitDistance - bvhLeafArrayHit.hitDistance);
+                float leafArrayDistTolerance = max(
+                    1e-3,
+                    1e-3 * max(linearHit.hitDistance, bvhLeafArrayHit.hitDistance));
+                leafArrayDistanceMismatch = leafArrayDistDelta > leafArrayDistTolerance;
+                leafArrayTetraMismatch = linearHit.tetrahedronIndex != bvhLeafArrayHit.tetrahedronIndex;
+            }
+            if (leafArrayHitStateMismatch || leafArrayDistanceMismatch || leafArrayTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_MISMATCH);
+            }
+            if (leafArrayHitStateMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_HIT_STATE_MISMATCH);
+            }
+            if (leafArrayDistanceMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH);
+            }
+            if (leafArrayTetraMismatch)
+            {
+                incrementCompareStat(COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH);
+            }
+            entityHit = forceEntityLinear ? linearHit : bvhHit;
+        }
+        else
+        {
+            entityHit = forceEntityLinear
+                ? traceEntityTetraLinear(
+                    worldOrigin,
+                    worldDirection,
+                    wd.totalNumTetrahedrons,
+                    maxEntityDistance)
+                : traceEntityTetra(
+                    worldOrigin,
+                    worldDirection,
+                    wd.totalNumTetrahedrons,
+                    maxEntityDistance);
+        }
     }
 
     float3 outColor;

@@ -108,6 +108,7 @@ pub(super) struct SizedBuffers {
     // Debug readback buffers
     pub(super) cpu_bvh_nodes_buffer: Subbuffer<[common::BVHNode]>,
     pub(super) cpu_morton_codes_buffer: Subbuffer<[common::MortonCode]>,
+    pub(super) cpu_bvh_root_buffer: Subbuffer<[common::BVHNode]>,
 }
 
 impl SizedBuffers {
@@ -312,6 +313,20 @@ impl SizedBuffers {
             vec![common::MortonCode::zeroed(); morton_codes_padded_count],
         )
         .unwrap();
+        let cpu_bvh_root_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            vec![common::BVHNode::zeroed(); 1],
+        )
+        .unwrap();
 
         Self {
             render_dimensions,
@@ -328,6 +343,7 @@ impl SizedBuffers {
             tile_tet_indices_buffer,
             cpu_bvh_nodes_buffer,
             cpu_morton_codes_buffer,
+            cpu_bvh_root_buffer,
         }
     }
 

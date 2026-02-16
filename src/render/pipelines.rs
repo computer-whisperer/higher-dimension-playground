@@ -264,7 +264,7 @@ pub(super) struct ComputePipelineContext {
     pub(super) bvh_bitonic_sort_local_merge_pipeline: Arc<ComputePipeline>,
     pub(super) bvh_init_leaves_pipeline: Arc<ComputePipeline>,
     pub(super) bvh_build_tree_pipeline: Arc<ComputePipeline>,
-    pub(super) bvh_compute_leaf_aabbs_pipeline: Arc<ComputePipeline>,
+    pub(super) bvh_link_parents_pipeline: Arc<ComputePipeline>,
     pub(super) bvh_propagate_aabbs_pipeline: Arc<ComputePipeline>,
     pub(super) pipeline_layout: Arc<PipelineLayout>,
 }
@@ -495,14 +495,14 @@ impl ComputePipelineContext {
                 ),
             )
             .unwrap(),
-            bvh_compute_leaf_aabbs_pipeline: ComputePipeline::new(
+            bvh_link_parents_pipeline: ComputePipeline::new(
                 device.clone(),
                 None,
                 ComputePipelineCreateInfo::stage_layout(
                     PipelineShaderStageCreateInfo::new(
                         shaders
-                            .bvh_compute_leaf_aabbs
-                            .entry_point("mainBVHComputeLeafAABBs")
+                            .bvh_link_parents
+                            .entry_point("mainBVHLinkParents")
                             .unwrap(),
                     ),
                     pipeline_layout.clone(),
