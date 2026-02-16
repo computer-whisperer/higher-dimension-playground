@@ -14,7 +14,10 @@ use crate::shared::protocol::{
     WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
-use crate::shared::worldfield::{Aabb4i, ChunkPayload, QueryDetail, QueryVolume, WorldField};
+use crate::shared::worldfield::{
+    Aabb4i, ChunkPayload, QueryDetail, QueryVolume, RegionClockMap, RegionId, WorldField,
+    REGION_TILE_EDGE_CHUNKS,
+};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet};
@@ -108,7 +111,7 @@ struct PlayerState {
     entity_id: u64,
     working_set: RegionTreeWorkingSet,
     last_stream_center_chunk: Option<[i32; 4]>,
-    last_stream_world_revision: u64,
+    last_stream_region_clocks: RegionClockMap,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,6 +428,7 @@ struct ServerState {
     region_chunk_edge: i32,
     world: ServerWorldField,
     world_revision: u64,
+    region_clocks: RegionClockMap,
     players: HashMap<u64, PlayerState>,
     last_players_persisted_ms: u64,
     mobs: HashMap<u64, MobState>,
@@ -468,6 +472,25 @@ fn mark_entities_dirty(state: &mut ServerState) {
 fn mark_block_region_dirty(state: &mut ServerState, chunk_pos: ChunkPos) {
     let region = save_v3::region_from_chunk_pos(chunk_pos, state.region_chunk_edge.max(1));
     state.dirty_block_regions.insert(region);
+}
+
+fn advance_world_revision(state: &mut ServerState) -> u64 {
+    state.world_revision = state.world_revision.wrapping_add(1);
+    state.world_revision
+}
+
+fn bump_region_clocks_for_chunks<I>(state: &mut ServerState, chunks: I)
+where
+    I: IntoIterator<Item = ChunkPos>,
+{
+    let mut touched_regions = HashSet::<RegionId>::new();
+    for chunk_pos in chunks {
+        touched_regions.insert(RegionId::from_chunk_pos(chunk_pos));
+    }
+    for region_id in touched_regions {
+        let clock = state.region_clocks.entry(region_id).or_insert(0);
+        *clock = clock.wrapping_add(1);
+    }
 }
 
 fn upsert_entity_record(
@@ -2338,14 +2361,7 @@ fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
     dx * dx + dy * dy + dz * dz + dw * dw
 }
 
-fn plan_stream_window_update(
-    state: &mut ServerState,
-    client_id: u64,
-    center_chunk: [i32; 4],
-    near_chunk_radius: i32,
-    _mid_chunk_radius: i32,
-    _far_chunk_radius: i32,
-) -> Option<(u64, Vec<WorldChunkPayload>, Vec<WorldChunkCoordPayload>)> {
+fn stream_near_bounds(center_chunk: [i32; 4], near_chunk_radius: i32) -> Aabb4i {
     let near_radius = near_chunk_radius.max(0);
     let min_chunk = [
         center_chunk[0] - near_radius,
@@ -2359,8 +2375,65 @@ fn plan_stream_window_update(
         center_chunk[2] + near_radius,
         center_chunk[3] + near_radius,
     ];
+    Aabb4i::new(min_chunk, max_chunk)
+}
 
-    let near_bounds = Aabb4i::new(min_chunk, max_chunk);
+fn region_bounds_for_chunk_bounds(bounds: Aabb4i) -> Aabb4i {
+    Aabb4i::new(
+        [
+            bounds.min[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
+            bounds.min[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
+            bounds.min[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
+            bounds.min[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        ],
+        [
+            bounds.max[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
+            bounds.max[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
+            bounds.max[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
+            bounds.max[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        ],
+    )
+}
+
+fn collect_region_clocks_in_chunk_bounds(
+    region_clocks: &RegionClockMap,
+    chunk_bounds: Aabb4i,
+) -> RegionClockMap {
+    if !chunk_bounds.is_valid() {
+        return HashMap::new();
+    }
+    let region_bounds = region_bounds_for_chunk_bounds(chunk_bounds);
+    let mut out = HashMap::new();
+    for rw in region_bounds.min[3]..=region_bounds.max[3] {
+        for rz in region_bounds.min[2]..=region_bounds.max[2] {
+            for ry in region_bounds.min[1]..=region_bounds.max[1] {
+                for rx in region_bounds.min[0]..=region_bounds.max[0] {
+                    let region_id = RegionId {
+                        x: rx,
+                        y: ry,
+                        z: rz,
+                        w: rw,
+                    };
+                    let clock = *region_clocks.get(&region_id).unwrap_or(&0);
+                    if clock != 0 {
+                        out.insert(region_id, clock);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn plan_stream_window_update(
+    state: &mut ServerState,
+    client_id: u64,
+    center_chunk: [i32; 4],
+    near_chunk_radius: i32,
+    _mid_chunk_radius: i32,
+    _far_chunk_radius: i32,
+) -> Option<(u64, Vec<WorldChunkPayload>, Vec<WorldChunkCoordPayload>)> {
+    let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
     let query_core = state.world.query_region_core(
         QueryVolume {
             bounds: near_bounds,
@@ -2542,13 +2615,16 @@ fn sync_streamed_chunks_for_client(
 ) {
     let update = {
         let mut guard = state.lock().expect("server state lock poisoned");
-        let world_revision = guard.world_revision;
+        let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
+        let current_region_clocks =
+            collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
         let should_sync = match guard.players.get_mut(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
-                let world_changed = player.last_stream_world_revision != world_revision;
+                let world_changed = player.last_stream_region_clocks != current_region_clocks;
                 if force || changed || world_changed {
                     player.last_stream_center_chunk = Some(center_chunk);
+                    player.last_stream_region_clocks = current_region_clocks.clone();
                     true
                 } else {
                     false
@@ -2566,11 +2642,6 @@ fn sync_streamed_chunks_for_client(
                 mid_chunk_radius,
                 far_chunk_radius,
             );
-            if let Some((revision, _, _)) = update.as_ref() {
-                if let Some(player) = guard.players.get_mut(&client_id) {
-                    player.last_stream_world_revision = *revision;
-                }
-            }
             update
         } else {
             None
@@ -2632,12 +2703,12 @@ fn apply_authoritative_voxel_edit(
     state: &mut ServerState,
     position: [i32; 4],
     material: VoxelType,
-) -> bool {
+) -> Option<ChunkPos> {
     let Some(chunk_pos) = state.world.apply_voxel_edit(position, material) else {
-        return false;
+        return None;
     };
     mark_block_region_dirty(state, chunk_pos);
-    true
+    Some(chunk_pos)
 }
 
 fn apply_creeper_explosion(
@@ -2665,6 +2736,7 @@ fn apply_creeper_explosion(
     ];
 
     let mut changed_positions = HashSet::new();
+    let mut changed_chunks = HashSet::new();
     for blast_center in blast_centers {
         for dx in -radius..=radius {
             for dy in -radius..=radius {
@@ -2680,8 +2752,11 @@ fn apply_creeper_explosion(
                             blast_center[2] + dz,
                             blast_center[3] + dw,
                         ];
-                        if apply_authoritative_voxel_edit(state, pos, VoxelType::AIR) {
+                        if let Some(chunk_pos) =
+                            apply_authoritative_voxel_edit(state, pos, VoxelType::AIR)
+                        {
                             changed_positions.insert(pos);
+                            changed_chunks.insert(chunk_pos);
                         }
                     }
                 }
@@ -2691,8 +2766,8 @@ fn apply_creeper_explosion(
 
     let mut voxel_sets = Vec::new();
     if !changed_positions.is_empty() {
-        state.world_revision = state.world_revision.wrapping_add(1);
-        let revision = state.world_revision;
+        bump_region_clocks_for_chunks(state, changed_chunks);
+        let revision = advance_world_revision(state);
         let mut sorted_positions: Vec<[i32; 4]> = changed_positions.into_iter().collect();
         sorted_positions.sort_unstable_by_key(|pos| (pos[3], pos[2], pos[1], pos[0]));
         voxel_sets.reserve(sorted_positions.len());
@@ -3210,7 +3285,7 @@ fn install_or_update_player(
                 entity_id,
                 working_set: RegionTreeWorkingSet::new(),
                 last_stream_center_chunk: None,
-                last_stream_world_revision: 0,
+                last_stream_region_clocks: HashMap::new(),
             });
             guard.entity_store.spawn(
                 entity_id,
@@ -3567,9 +3642,11 @@ fn handle_message(
             let requested_voxel = VoxelType(material);
             let maybe_revision = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                if apply_authoritative_voxel_edit(&mut guard, position, requested_voxel) {
-                    guard.world_revision = guard.world_revision.wrapping_add(1);
-                    Some(guard.world_revision)
+                if let Some(chunk_pos) =
+                    apply_authoritative_voxel_edit(&mut guard, position, requested_voxel)
+                {
+                    bump_region_clocks_for_chunks(&mut guard, std::iter::once(chunk_pos));
+                    Some(advance_world_revision(&mut guard))
                 } else {
                     None
                 }
@@ -4029,6 +4106,7 @@ fn initialize_state(
         region_chunk_edge,
         world: initial_world,
         world_revision: 0,
+        region_clocks: HashMap::new(),
         players: HashMap::new(),
         last_players_persisted_ms: last_persisted_ms,
         mobs: HashMap::new(),
