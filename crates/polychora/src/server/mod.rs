@@ -53,6 +53,10 @@ const MOB_NAV_PATH_MAX_SEARCH_RADIUS_CELLS: i32 = 42;
 const MOB_NAV_PATH_GOAL_ADJUST_RADIUS_CELLS: i32 = 6;
 const MOB_NAV_PATH_MAX_WAYPOINTS: usize = 96;
 const MOB_NAV_DEBUG_MIN_INTERVAL_MS: u64 = 250;
+const MOB_WALK_GROUND_STICK_STEP: f32 = 0.05;
+const MOB_WALK_GROUND_STICK_MAX_DROP: f32 = 0.65;
+const MOB_WALK_STEP_UP_MAX_HEIGHT: f32 = 1.10;
+const MOB_WALK_STEP_UP_SAMPLE_STEP: f32 = 0.05;
 const PHASE_SPIDER_PHASE_MIN_INTERVAL_MS: u64 = 720;
 const PHASE_SPIDER_PHASE_MAX_INTERVAL_MS: u64 = 1520;
 const PHASE_SPIDER_PHASE_DISTANCE: f32 = 2.8;
@@ -114,6 +118,26 @@ enum MobArchetype {
     Seeker,
     Creeper4d,
     PhaseSpider,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MobLocomotionMode {
+    Walking,
+    Flying,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MobArchetypeDefaults {
+    move_speed: f32,
+    preferred_distance: f32,
+    tangent_weight: f32,
+    locomotion: MobLocomotionMode,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MobSteeringCommand {
+    desired_direction: [f32; 4],
+    speed_factor: f32,
 }
 
 type MobNavCell = [i32; 4];
@@ -731,11 +755,26 @@ fn default_spawn_pose_for_client(state: &ServerState, client_id: u64) -> ([f32; 
     (position, look)
 }
 
-fn mob_archetype_defaults(archetype: MobArchetype) -> (f32, f32, f32) {
+fn mob_archetype_defaults(archetype: MobArchetype) -> MobArchetypeDefaults {
     match archetype {
-        MobArchetype::Seeker => (2.9, 2.6, 0.64),
-        MobArchetype::Creeper4d => (2.4, 3.8, 1.15),
-        MobArchetype::PhaseSpider => (3.1, 2.4, 0.95),
+        MobArchetype::Seeker => MobArchetypeDefaults {
+            move_speed: 2.9,
+            preferred_distance: 2.6,
+            tangent_weight: 0.64,
+            locomotion: MobLocomotionMode::Walking,
+        },
+        MobArchetype::Creeper4d => MobArchetypeDefaults {
+            move_speed: 2.4,
+            preferred_distance: 3.8,
+            tangent_weight: 1.15,
+            locomotion: MobLocomotionMode::Walking,
+        },
+        MobArchetype::PhaseSpider => MobArchetypeDefaults {
+            move_speed: 3.1,
+            preferred_distance: 2.4,
+            tangent_weight: 0.95,
+            locomotion: MobLocomotionMode::Flying,
+        },
     }
 }
 
@@ -1101,10 +1140,16 @@ fn nearest_position_to(position: [f32; 4], candidates: &[[f32; 4]]) -> Option<[f
     })
 }
 
-fn mob_nav_base_cell_from_position(position: [f32; 4]) -> MobNavCell {
+fn mob_nav_base_cell_from_position(
+    position: [f32; 4],
+    locomotion: MobLocomotionMode,
+) -> MobNavCell {
+    let y = match locomotion {
+        MobLocomotionMode::Walking | MobLocomotionMode::Flying => position[1].ceil() as i32,
+    };
     [
         position[0].round() as i32,
-        position[1].ceil() as i32,
+        y,
         position[2].round() as i32,
         position[3].round() as i32,
     ]
@@ -1132,6 +1177,7 @@ fn mob_nav_has_line_of_sight(
     from: [f32; 4],
     to: [f32; 4],
     collision_radius: f32,
+    locomotion: MobLocomotionMode,
 ) -> bool {
     let delta = [
         to[0] - from[0],
@@ -1157,8 +1203,88 @@ fn mob_nav_has_line_of_sight(
         if mob_collides_at(state, &mut cache, probe, collision_radius) {
             return false;
         }
+        if locomotion == MobLocomotionMode::Walking {
+            let probe_cell = mob_nav_base_cell_from_position(probe, locomotion);
+            if !mob_nav_cell_is_walkable(
+                state,
+                &mut cache,
+                probe_cell,
+                collision_radius,
+                locomotion,
+            ) {
+                return false;
+            }
+        }
     }
     true
+}
+
+fn mob_nav_cell_is_walkable(
+    state: &ServerState,
+    cache: &mut HashMap<ChunkPos, Option<voxel::Chunk>>,
+    cell: MobNavCell,
+    collision_radius: f32,
+    locomotion: MobLocomotionMode,
+) -> bool {
+    if mob_collides_at(
+        state,
+        cache,
+        mob_nav_position_from_cell(cell),
+        collision_radius,
+    ) {
+        return false;
+    }
+    if locomotion == MobLocomotionMode::Walking {
+        let support = sample_effective_voxel_for_collision(
+            state,
+            cache,
+            cell[0],
+            cell[1] - 2,
+            cell[2],
+            cell[3],
+        );
+        if !support.is_solid() {
+            return false;
+        }
+    }
+    true
+}
+
+fn mob_nav_neighbor_steps(locomotion: MobLocomotionMode) -> &'static [MobNavCell] {
+    const FLYING_STEPS: [MobNavCell; 8] = [
+        [1, 0, 0, 0],
+        [-1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, -1, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, -1, 0],
+        [0, 0, 0, 1],
+        [0, 0, 0, -1],
+    ];
+    const WALKING_STEPS: [MobNavCell; 18] = [
+        [1, 0, 0, 0],
+        [1, 1, 0, 0],
+        [1, -1, 0, 0],
+        [-1, 0, 0, 0],
+        [-1, 1, 0, 0],
+        [-1, -1, 0, 0],
+        [0, 0, 1, 0],
+        [0, 1, 1, 0],
+        [0, -1, 1, 0],
+        [0, 0, -1, 0],
+        [0, 1, -1, 0],
+        [0, -1, -1, 0],
+        [0, 0, 0, 1],
+        [0, 1, 0, 1],
+        [0, -1, 0, 1],
+        [0, 0, 0, -1],
+        [0, 1, 0, -1],
+        [0, -1, 0, -1],
+    ];
+    match locomotion {
+        MobLocomotionMode::Walking => &WALKING_STEPS,
+        MobLocomotionMode::Flying => &FLYING_STEPS,
+    }
 }
 
 fn mob_nav_find_walkable_goal_cell(
@@ -1166,13 +1292,15 @@ fn mob_nav_find_walkable_goal_cell(
     desired_goal: MobNavCell,
     origin: MobNavCell,
     collision_radius: f32,
+    locomotion: MobLocomotionMode,
 ) -> Option<MobNavCell> {
     let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
-    if !mob_collides_at(
+    if mob_nav_cell_is_walkable(
         state,
         &mut cache,
-        mob_nav_position_from_cell(desired_goal),
+        desired_goal,
         collision_radius,
+        locomotion,
     ) {
         return Some(desired_goal);
     }
@@ -1193,11 +1321,12 @@ fn mob_nav_find_walkable_goal_cell(
                         desired_goal[2] + dz,
                         desired_goal[3] + dw,
                     ];
-                    if mob_collides_at(
+                    if !mob_nav_cell_is_walkable(
                         state,
                         &mut cache,
-                        mob_nav_position_from_cell(candidate),
+                        candidate,
                         collision_radius,
+                        locomotion,
                     ) {
                         continue;
                     }
@@ -1246,6 +1375,7 @@ fn mob_nav_find_path(
     start: MobNavCell,
     goal: MobNavCell,
     collision_radius: f32,
+    locomotion: MobLocomotionMode,
 ) -> Option<MobNavPathResult> {
     if start == goal {
         return Some(MobNavPathResult {
@@ -1257,20 +1387,10 @@ fn mob_nav_find_path(
         });
     }
     let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
-    if mob_collides_at(
-        state,
-        &mut cache,
-        mob_nav_position_from_cell(start),
-        collision_radius,
-    ) {
+    if !mob_nav_cell_is_walkable(state, &mut cache, start, collision_radius, locomotion) {
         return None;
     }
-    if mob_collides_at(
-        state,
-        &mut cache,
-        mob_nav_position_from_cell(goal),
-        collision_radius,
-    ) {
+    if !mob_nav_cell_is_walkable(state, &mut cache, goal, collision_radius, locomotion) {
         return None;
     }
 
@@ -1312,16 +1432,7 @@ fn mob_nav_find_path(
             break;
         }
 
-        for step in [
-            [1, 0, 0, 0],
-            [-1, 0, 0, 0],
-            [0, 1, 0, 0],
-            [0, -1, 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, -1, 0],
-            [0, 0, 0, 1],
-            [0, 0, 0, -1],
-        ] {
+        for step in mob_nav_neighbor_steps(locomotion) {
             let next = [
                 cell[0] + step[0],
                 cell[1] + step[1],
@@ -1337,12 +1448,7 @@ fn mob_nav_find_path(
             if tentative_g >= known_next_g {
                 continue;
             }
-            if mob_collides_at(
-                state,
-                &mut cache,
-                mob_nav_position_from_cell(next),
-                collision_radius,
-            ) {
+            if !mob_nav_cell_is_walkable(state, &mut cache, next, collision_radius, locomotion) {
                 continue;
             }
 
@@ -1396,6 +1502,7 @@ fn update_mob_navigation_state(
     mut navigation: MobNavigationState,
     mob_entity_id: u64,
     archetype: MobArchetype,
+    locomotion: MobLocomotionMode,
     debug_enabled: bool,
     position: [f32; 4],
     scale: f32,
@@ -1410,15 +1517,20 @@ fn update_mob_navigation_state(
     };
 
     let collision_radius = mob_collision_radius_for_scale(scale);
-    let desired_start_cell = mob_nav_base_cell_from_position(position);
+    let direct_target = match locomotion {
+        MobLocomotionMode::Walking => [target[0], position[1], target[2], target[3]],
+        MobLocomotionMode::Flying => target,
+    };
+    let desired_start_cell = mob_nav_base_cell_from_position(position, locomotion);
     let start_cell = mob_nav_find_walkable_goal_cell(
         state,
         desired_start_cell,
         desired_start_cell,
         collision_radius,
+        locomotion,
     )
     .unwrap_or(desired_start_cell);
-    let desired_goal_cell = mob_nav_base_cell_from_position(target);
+    let desired_goal_cell = mob_nav_base_cell_from_position(target, locomotion);
     let goal_changed = navigation
         .goal_cell
         .map(|goal| {
@@ -1430,7 +1542,8 @@ fn update_mob_navigation_state(
     let repath_due =
         now_ms.saturating_sub(navigation.last_repath_ms) >= MOB_NAV_PATH_REPLAN_INTERVAL_MS;
 
-    let has_los = mob_nav_has_line_of_sight(state, position, target, collision_radius);
+    let has_los =
+        mob_nav_has_line_of_sight(state, position, direct_target, collision_radius, locomotion);
     if has_los {
         navigation.goal_cell = Some(desired_goal_cell);
         navigation.path_cells.clear();
@@ -1448,17 +1561,23 @@ fn update_mob_navigation_state(
                 ),
             );
         }
-        return (Some(target), false, navigation);
+        return (Some(direct_target), false, navigation);
     }
 
     if goal_changed || path_exhausted || repath_due {
-        let goal_cell =
-            mob_nav_find_walkable_goal_cell(state, desired_goal_cell, start_cell, collision_radius)
-                .unwrap_or(desired_goal_cell);
+        let goal_cell = mob_nav_find_walkable_goal_cell(
+            state,
+            desired_goal_cell,
+            start_cell,
+            collision_radius,
+            locomotion,
+        )
+        .unwrap_or(desired_goal_cell);
         navigation.goal_cell = Some(goal_cell);
         navigation.last_repath_ms = now_ms;
 
-        if let Some(path_result) = mob_nav_find_path(state, start_cell, goal_cell, collision_radius)
+        if let Some(path_result) =
+            mob_nav_find_path(state, start_cell, goal_cell, collision_radius, locomotion)
         {
             let path_len = path_result.path_cells.len();
             let reached_goal = path_result.reached_goal;
@@ -1514,7 +1633,135 @@ fn update_mob_navigation_state(
         let waypoint = mob_nav_position_from_cell(navigation.path_cells[navigation.path_cursor]);
         (Some(waypoint), true, navigation)
     } else {
-        (Some(target), false, navigation)
+        (Some(direct_target), false, navigation)
+    }
+}
+
+fn mob_direction_for_locomotion(direction: [f32; 4], locomotion: MobLocomotionMode) -> [f32; 4] {
+    match locomotion {
+        MobLocomotionMode::Walking => normalize4_or_default(
+            [direction[0], 0.0, direction[2], direction[3]],
+            [0.0, 0.0, 1.0, 0.0],
+        ),
+        MobLocomotionMode::Flying => normalize4_or_default(direction, [0.0, 0.0, 1.0, 0.0]),
+    }
+}
+
+fn integrate_mob_steering_step(
+    mob: &MobState,
+    position: [f32; 4],
+    steering: MobSteeringCommand,
+    locomotion: MobLocomotionMode,
+    now_ms: u64,
+    previous_update_ms: u64,
+) -> ([f32; 4], [f32; 4]) {
+    let dt_s = (now_ms.saturating_sub(previous_update_ms)).max(1) as f32 * 0.001;
+    let move_dir = mob_direction_for_locomotion(steering.desired_direction, locomotion);
+    let step = mob.move_speed.max(0.1) * steering.speed_factor.max(0.0) * dt_s;
+    let next_position = [
+        position[0] + move_dir[0] * step,
+        position[1] + move_dir[1] * step,
+        position[2] + move_dir[2] * step,
+        position[3] + move_dir[3] * step,
+    ];
+    (next_position, move_dir)
+}
+
+fn mob_horizontal_distance_sq(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let dx = a[0] - b[0];
+    let dz = a[2] - b[2];
+    let dw = a[3] - b[3];
+    dx * dx + dz * dz + dw * dw
+}
+
+fn stick_mob_to_ground(
+    state: &ServerState,
+    position: [f32; 4],
+    scale: f32,
+    max_drop: f32,
+) -> [f32; 4] {
+    if !max_drop.is_finite() || max_drop <= 0.0 {
+        return position;
+    }
+    let radius = mob_collision_radius_for_scale(scale);
+    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let mut pos = position;
+    let mut dropped = 0.0f32;
+    while dropped + MOB_WALK_GROUND_STICK_STEP <= max_drop {
+        let mut probe = pos;
+        probe[1] -= MOB_WALK_GROUND_STICK_STEP;
+        if mob_collides_at(state, &mut cache, probe, radius) {
+            break;
+        }
+        pos = probe;
+        dropped += MOB_WALK_GROUND_STICK_STEP;
+    }
+    pos
+}
+
+fn resolve_walking_collision_with_steps(
+    state: &ServerState,
+    old_position: [f32; 4],
+    attempted_position: [f32; 4],
+    scale: f32,
+) -> [f32; 4] {
+    let resolved = resolve_mob_collision(state, old_position, attempted_position, scale);
+    let mut best = stick_mob_to_ground(state, resolved, scale, MOB_WALK_GROUND_STICK_MAX_DROP);
+    let desired_progress_sq = mob_horizontal_distance_sq(old_position, attempted_position);
+    if desired_progress_sq <= 1e-6 {
+        return best;
+    }
+
+    let mut best_progress_sq = mob_horizontal_distance_sq(old_position, best);
+    let mut lift = MOB_WALK_STEP_UP_SAMPLE_STEP;
+    while lift <= MOB_WALK_STEP_UP_MAX_HEIGHT + 1e-5 {
+        let raised_old = [
+            old_position[0],
+            old_position[1] + lift,
+            old_position[2],
+            old_position[3],
+        ];
+        let raised_attempted = [
+            attempted_position[0],
+            attempted_position[1] + lift,
+            attempted_position[2],
+            attempted_position[3],
+        ];
+        let raised_resolved = resolve_mob_collision(state, raised_old, raised_attempted, scale);
+        let grounded = stick_mob_to_ground(
+            state,
+            raised_resolved,
+            scale,
+            MOB_WALK_GROUND_STICK_MAX_DROP + lift,
+        );
+        let progress_sq = mob_horizontal_distance_sq(old_position, grounded);
+        if progress_sq > best_progress_sq + 1e-5 {
+            best = grounded;
+            best_progress_sq = progress_sq;
+            if best_progress_sq + 1e-5 >= desired_progress_sq {
+                break;
+            }
+        }
+        lift += MOB_WALK_STEP_UP_SAMPLE_STEP;
+    }
+
+    best
+}
+
+fn apply_mob_locomotion_post_collision(
+    state: &ServerState,
+    old_position: [f32; 4],
+    attempted_position: [f32; 4],
+    scale: f32,
+    locomotion: MobLocomotionMode,
+) -> [f32; 4] {
+    match locomotion {
+        MobLocomotionMode::Walking => {
+            resolve_walking_collision_with_steps(state, old_position, attempted_position, scale)
+        }
+        MobLocomotionMode::Flying => {
+            resolve_mob_collision(state, old_position, attempted_position, scale)
+        }
     }
 }
 
@@ -1525,11 +1772,9 @@ fn simulate_seeker_step(
     path_following: bool,
     simple_steer: bool,
     now_ms: u64,
-    previous_update_ms: u64,
-) -> ([f32; 4], [f32; 4]) {
-    let dt_s = (now_ms.saturating_sub(previous_update_ms)).max(1) as f32 * 0.001;
+) -> MobSteeringCommand {
     let t_s = now_ms as f32 * 0.001;
-    let (desired_dir, slow_factor) = if let Some(target) = target_position {
+    let (desired_dir, speed_factor) = if let Some(target) = target_position {
         let to_target = [
             target[0] - position[0],
             target[1] - position[1],
@@ -1601,15 +1846,10 @@ fn simulate_seeker_step(
             0.35,
         )
     };
-
-    let step = mob.move_speed.max(0.1) * slow_factor * dt_s;
-    let next_position = [
-        position[0] + desired_dir[0] * step,
-        position[1] + desired_dir[1] * step,
-        position[2] + desired_dir[2] * step,
-        position[3] + desired_dir[3] * step,
-    ];
-    (next_position, desired_dir)
+    MobSteeringCommand {
+        desired_direction: desired_dir,
+        speed_factor,
+    }
 }
 
 fn simulate_creeper_step(
@@ -1619,9 +1859,7 @@ fn simulate_creeper_step(
     path_following: bool,
     simple_steer: bool,
     now_ms: u64,
-    previous_update_ms: u64,
-) -> ([f32; 4], [f32; 4]) {
-    let dt_s = (now_ms.saturating_sub(previous_update_ms)).max(1) as f32 * 0.001;
+) -> MobSteeringCommand {
     let t_s = now_ms as f32 * 0.001;
     let (desired_dir, speed_factor) = if let Some(target) = target_position {
         let to_target = [
@@ -1708,15 +1946,10 @@ fn simulate_creeper_step(
             0.38,
         )
     };
-
-    let step = mob.move_speed.max(0.1) * speed_factor * dt_s;
-    let next_position = [
-        position[0] + desired_dir[0] * step,
-        position[1] + desired_dir[1] * step,
-        position[2] + desired_dir[2] * step,
-        position[3] + desired_dir[3] * step,
-    ];
-    (next_position, desired_dir)
+    MobSteeringCommand {
+        desired_direction: desired_dir,
+        speed_factor,
+    }
 }
 
 fn simulate_phase_spider_step(
@@ -1726,9 +1959,7 @@ fn simulate_phase_spider_step(
     path_following: bool,
     simple_steer: bool,
     now_ms: u64,
-    previous_update_ms: u64,
-) -> ([f32; 4], [f32; 4]) {
-    let dt_s = (now_ms.saturating_sub(previous_update_ms)).max(1) as f32 * 0.001;
+) -> MobSteeringCommand {
     let t_s = now_ms as f32 * 0.001;
     let (desired_dir, speed_factor) = if let Some(target) = target_position {
         let to_target = [
@@ -1823,15 +2054,10 @@ fn simulate_phase_spider_step(
             0.44,
         )
     };
-
-    let step = mob.move_speed.max(0.1) * speed_factor * dt_s;
-    let next_position = [
-        position[0] + desired_dir[0] * step,
-        position[1] + desired_dir[1] * step,
-        position[2] + desired_dir[2] * step,
-        position[3] + desired_dir[3] * step,
-    ];
-    (next_position, desired_dir)
+    MobSteeringCommand {
+        desired_direction: desired_dir,
+        speed_factor,
+    }
 }
 
 fn attempt_phase_spider_blink(
@@ -1923,6 +2149,7 @@ fn simulate_mobs(
             stale.push(mob.entity_id);
             continue;
         };
+        let locomotion = mob_archetype_defaults(mob.archetype).locomotion;
         let nearest_target = nearest_position_to(snapshot.position, &player_positions);
         let navigation_target = match mob.archetype {
             MobArchetype::Seeker => nearest_target,
@@ -1951,13 +2178,14 @@ fn simulate_mobs(
             mob.navigation.clone(),
             mob.entity_id,
             mob.archetype,
+            locomotion,
             state.mob_nav_debug,
             snapshot.position,
             snapshot.scale,
             navigation_target,
             now_ms,
         );
-        let (next_position, next_forward) = match mob.archetype {
+        let steering = match mob.archetype {
             MobArchetype::Seeker => simulate_seeker_step(
                 &mob,
                 snapshot.position,
@@ -1965,7 +2193,6 @@ fn simulate_mobs(
                 path_following,
                 state.mob_nav_simple_steer,
                 now_ms,
-                snapshot.last_update_ms,
             ),
             MobArchetype::Creeper4d => simulate_creeper_step(
                 &mob,
@@ -1974,7 +2201,6 @@ fn simulate_mobs(
                 path_following,
                 state.mob_nav_simple_steer,
                 now_ms,
-                snapshot.last_update_ms,
             ),
             MobArchetype::PhaseSpider => simulate_phase_spider_step(
                 &mob,
@@ -1983,11 +2209,23 @@ fn simulate_mobs(
                 path_following,
                 state.mob_nav_simple_steer,
                 now_ms,
-                snapshot.last_update_ms,
             ),
         };
-        let mut final_position =
-            resolve_mob_collision(state, snapshot.position, next_position, snapshot.scale);
+        let (next_position, next_forward) = integrate_mob_steering_step(
+            &mob,
+            snapshot.position,
+            steering,
+            locomotion,
+            now_ms,
+            snapshot.last_update_ms,
+        );
+        let mut final_position = apply_mob_locomotion_post_collision(
+            state,
+            snapshot.position,
+            next_position,
+            snapshot.scale,
+            locomotion,
+        );
         let mut final_forward = next_forward;
         if mob.archetype == MobArchetype::PhaseSpider && now_ms >= mob.next_phase_ms {
             let attempted = distance4_sq(snapshot.position, next_position).sqrt();
@@ -4524,7 +4762,7 @@ fn spawn_mob_entity(
         material,
         now_ms,
     );
-    let (default_speed, default_distance, default_tangent) = mob_archetype_defaults(archetype);
+    let defaults = mob_archetype_defaults(archetype);
     let phase_offset = persisted_mob
         .as_ref()
         .map(|mob| mob.phase_offset)
@@ -4532,17 +4770,17 @@ fn spawn_mob_entity(
     let move_speed = persisted_mob
         .as_ref()
         .map(|mob| mob.move_speed)
-        .unwrap_or(default_speed)
+        .unwrap_or(defaults.move_speed)
         .max(0.1);
     let preferred_distance = persisted_mob
         .as_ref()
         .map(|mob| mob.preferred_distance)
-        .unwrap_or(default_distance)
+        .unwrap_or(defaults.preferred_distance)
         .max(0.1);
     let tangent_weight = persisted_mob
         .as_ref()
         .map(|mob| mob.tangent_weight)
-        .unwrap_or(default_tangent)
+        .unwrap_or(defaults.tangent_weight)
         .clamp(0.0, 2.0);
     let initial_phase_tick_seed = (entity_id as u32).wrapping_mul(7477);
     let next_phase_ms =
@@ -4857,4 +5095,132 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_server_state_with_world(world: VoxelWorld) -> ServerState {
+        ServerState {
+            next_object_id: 1,
+            entity_store: EntityStore::new(),
+            entity_records: HashMap::new(),
+            entities_dirty: false,
+            entity_revision: 0,
+            dirty_block_regions: HashSet::new(),
+            region_chunk_edge: 1,
+            world_seed: 0,
+            procgen_structures: false,
+            world,
+            world_revision: 0,
+            procgen_blocked_cells: HashSet::new(),
+            stream_worldgen_has_content_cache: HashMap::new(),
+            players: HashMap::new(),
+            last_players_persisted_ms: 0,
+            mobs: HashMap::new(),
+            mob_nav_debug: false,
+            mob_nav_simple_steer: false,
+            clients: HashMap::new(),
+            client_visible_entities: HashMap::new(),
+            cpu_profile: ServerCpuProfile::new(Instant::now()),
+        }
+    }
+
+    #[test]
+    fn walking_neighbor_steps_include_elevation_transitions() {
+        let steps = mob_nav_neighbor_steps(MobLocomotionMode::Walking);
+        assert!(steps.contains(&[1, 1, 0, 0]));
+        assert!(steps.contains(&[1, -1, 0, 0]));
+        assert!(steps.contains(&[0, 1, 1, 0]));
+        assert!(!steps.contains(&[0, 1, 0, 0]));
+    }
+
+    #[test]
+    fn walking_line_of_sight_requires_supported_cells() {
+        let mut state =
+            test_server_state_with_world(VoxelWorld::new_with_base(BaseWorldKind::Empty));
+        state.world.set_voxel(0, 1, 0, 0, VoxelType(1));
+        state.world.set_voxel(2, 1, 0, 0, VoxelType(1));
+
+        let from = [0.0, 2.2, 0.0, 0.0];
+        let to = [2.0, 2.2, 0.0, 0.0];
+        assert!(!mob_nav_has_line_of_sight(
+            &state,
+            from,
+            to,
+            0.2,
+            MobLocomotionMode::Walking
+        ));
+
+        state.world.set_voxel(1, 1, 0, 0, VoxelType(1));
+        assert!(mob_nav_has_line_of_sight(
+            &state,
+            from,
+            to,
+            0.2,
+            MobLocomotionMode::Walking
+        ));
+    }
+
+    #[test]
+    fn walking_path_can_use_one_cell_step_up() {
+        let mut world = VoxelWorld::new_with_base(BaseWorldKind::Empty);
+        world.set_voxel(0, 1, 0, 0, VoxelType(1));
+        world.set_voxel(1, 2, 0, 0, VoxelType(1));
+        world.set_voxel(2, 2, 0, 0, VoxelType(1));
+        let state = test_server_state_with_world(world);
+
+        let start = [0, 3, 0, 0];
+        let goal = [2, 4, 0, 0];
+        let path = mob_nav_find_path(&state, start, goal, 0.2, MobLocomotionMode::Walking)
+            .expect("walking path should step up onto one-cell rise");
+        assert!(path.reached_goal);
+        assert_eq!(path.path_cells.last().copied(), Some(goal));
+
+        let mut cursor = start;
+        let mut saw_vertical_step = false;
+        for cell in path.path_cells {
+            if (cell[1] - cursor[1]).abs() == 1 {
+                saw_vertical_step = true;
+            }
+            cursor = cell;
+        }
+        assert!(
+            saw_vertical_step,
+            "walking path should include an elevation transition"
+        );
+    }
+
+    #[test]
+    fn walking_step_resolution_climbs_lip_when_progress_is_blocked() {
+        let mut world = VoxelWorld::new_with_base(BaseWorldKind::Empty);
+        world.set_voxel(0, 0, 0, 0, VoxelType(1));
+        world.set_voxel(1, 0, 0, 0, VoxelType(1));
+        world.set_voxel(1, 1, 0, 0, VoxelType(1));
+        world.set_voxel(2, 1, 0, 0, VoxelType(1));
+        let state = test_server_state_with_world(world);
+
+        let old_pos = [0.2, 2.0, 0.0, 0.0];
+        let attempted_pos = [1.2, 2.0, 0.0, 0.0];
+        let scale = 0.78;
+        let baseline = resolve_mob_collision(&state, old_pos, attempted_pos, scale);
+        let stepped = resolve_walking_collision_with_steps(&state, old_pos, attempted_pos, scale);
+        assert!(
+            stepped[0] > baseline[0] + 0.15,
+            "expected step solver to improve horizontal progress: baseline_x={} stepped_x={}",
+            baseline[0],
+            stepped[0]
+        );
+    }
+
+    #[test]
+    fn ground_stick_respects_max_drop_budget() {
+        let state = test_server_state_with_world(VoxelWorld::new_with_base(BaseWorldKind::Empty));
+        let start = [0.0, 10.0, 0.0, 0.0];
+        let stuck = stick_mob_to_ground(&state, start, 0.3, MOB_WALK_GROUND_STICK_MAX_DROP);
+        let dropped = start[1] - stuck[1];
+        assert!(dropped <= MOB_WALK_GROUND_STICK_MAX_DROP + 1e-4);
+        assert!(dropped + 1e-4 >= MOB_WALK_GROUND_STICK_MAX_DROP - MOB_WALK_GROUND_STICK_STEP);
+    }
 }
