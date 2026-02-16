@@ -124,7 +124,7 @@ impl App {
         let pos_alpha = 1.0 - (-REMOTE_PLAYER_POSITION_SMOOTH_HZ * dt).exp();
         let look_alpha = 1.0 - (-REMOTE_PLAYER_LOOK_SMOOTH_HZ * dt).exp();
         let listener_position = self.camera.position;
-        let mut footstep_scales = Vec::new();
+        let mut footstep_events: Vec<([f32; 4], f32)> = Vec::new();
         for player in self.remote_players.values_mut() {
             let previous_render_position = player.render_position;
             let network_age = now.duration_since(player.last_received_at).as_secs_f32();
@@ -175,7 +175,7 @@ impl App {
 
             player.footstep_distance_accum += moved_xzw;
             while player.footstep_distance_accum >= FOOTSTEP_DISTANCE_WALK {
-                if footstep_scales.len() >= REMOTE_FOOTSTEP_MAX_PER_FRAME {
+                if footstep_events.len() >= REMOTE_FOOTSTEP_MAX_PER_FRAME {
                     player.footstep_distance_accum = 0.0;
                     break;
                 }
@@ -187,15 +187,15 @@ impl App {
                     let distance_gain = distance_t * distance_t;
                     let speed_gain =
                         (moved_speed_xzw / REMOTE_PLAYER_MAX_PREDICTED_SPEED).clamp(0.30, 1.0);
-                    let gain = (distance_gain * speed_gain).clamp(0.05, 0.65);
-                    footstep_scales.push(gain);
+                    let gain = (distance_gain * speed_gain).clamp(0.08, 0.75);
+                    footstep_events.push((player.render_position, gain));
                 }
                 player.footstep_distance_accum -= FOOTSTEP_DISTANCE_WALK;
             }
         }
 
-        for scale in footstep_scales {
-            self.audio.play_scaled(SoundEffect::Footstep, scale);
+        for (position, scale) in footstep_events {
+            self.play_spatial_sound(SoundEffect::Footstep, position, scale);
         }
     }
 
@@ -493,9 +493,9 @@ impl App {
                     self.acknowledge_pending_voxel_edit(client_edit_id, position, material);
                 } else if source_client_id.is_some() {
                     if material == voxel::VoxelType::AIR.0 {
-                        self.audio.play(SoundEffect::Break);
+                        self.play_spatial_sound_voxel(SoundEffect::Break, position, 1.0);
                     } else {
-                        self.audio.play(SoundEffect::Place);
+                        self.play_spatial_sound_voxel(SoundEffect::Place, position, 1.0);
                     }
                 }
             }
@@ -620,10 +620,9 @@ impl App {
                 let distance = distance4(self.camera.position, position);
                 if distance <= max_distance {
                     let distance_t = 1.0 - (distance / max_distance).clamp(0.0, 1.0);
-                    let distance_gain = distance_t * distance_t;
                     let radius_gain = (radius / 2.5).clamp(0.6, 1.6);
-                    self.audio
-                        .play_scaled(SoundEffect::Break, distance_gain * radius_gain * 1.4);
+                    let gain = (distance_t * radius_gain * 1.2).clamp(0.1, 2.0);
+                    self.play_spatial_sound(SoundEffect::Break, position, gain);
                 }
             }
             multiplayer::ServerMessage::PlayerMovementModifier {

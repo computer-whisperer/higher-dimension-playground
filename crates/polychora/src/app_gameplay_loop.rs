@@ -470,7 +470,7 @@ impl App {
                             edit_reach,
                         ) {
                             eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
-                            self.audio.play(SoundEffect::Break);
+                            self.play_spatial_sound_voxel(SoundEffect::Break, [x, y, z, w], 1.0);
                             self.send_multiplayer_voxel_update(
                                 now,
                                 [x, y, z, w],
@@ -488,7 +488,7 @@ impl App {
                                 "Placed voxel material {} at ({x}, {y}, {z}, {w})",
                                 self.place_material
                             );
-                            self.audio.play(SoundEffect::Place);
+                            self.play_spatial_sound_voxel(SoundEffect::Place, [x, y, z, w], 1.0);
                             self.send_multiplayer_voxel_update(
                                 now,
                                 [x, y, z, w],
