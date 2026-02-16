@@ -35,10 +35,6 @@ impl RegionTreeWorkingSet {
         bounds: Aabb4i,
         core: &RegionTreeCore,
     ) -> RegionTreeRefreshResult {
-        let old_chunks = self
-            .interest_bounds
-            .map(|old_bounds| collect_non_empty_chunks_in_bounds(&self.tree, old_bounds))
-            .unwrap_or_default();
         let desired_chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
         let patch_bounds = self
             .interest_bounds
@@ -53,17 +49,16 @@ impl RegionTreeWorkingSet {
         self.tree.apply_chunk_diff(&patch);
         self.interest_bounds = Some(bounds);
 
-        let load_positions = desired_chunks
+        let load_positions = patch
+            .upserts
             .iter()
-            .filter_map(|(chunk_pos, payload)| match old_chunks.get(chunk_pos) {
-                Some(old_payload) if old_payload == payload => None,
-                _ => Some(*chunk_pos),
-            })
+            .map(|(key, _)| key.to_chunk_pos())
             .collect();
 
-        let unload_positions = old_chunks
-            .keys()
-            .filter_map(|chunk_pos| (!desired_chunks.contains_key(chunk_pos)).then_some(*chunk_pos))
+        let unload_positions = patch
+            .removals
+            .iter()
+            .map(|key| key.to_chunk_pos())
             .collect();
 
         RegionTreeRefreshResult {
@@ -182,24 +177,6 @@ fn collect_non_empty_chunks_from_core_in_bounds(
     let mut out = HashMap::new();
     collect_non_empty_region_chunks_from_core_in_bounds(core, bounds, &mut out);
     out
-}
-
-fn collect_non_empty_chunks_in_bounds(
-    tree: &RegionChunkTree,
-    bounds: Aabb4i,
-) -> HashMap<ChunkPos, ChunkPayload> {
-    if !bounds.is_valid() {
-        return HashMap::new();
-    }
-    tree.collect_chunks_in_bounds(bounds)
-        .into_iter()
-        .filter_map(|(key, payload)| {
-            if !chunk_payload_has_content(&payload) {
-                return None;
-            }
-            Some((key.to_chunk_pos(), payload))
-        })
-        .collect()
 }
 
 fn union_aabb(a: Aabb4i, b: Aabb4i) -> Aabb4i {
