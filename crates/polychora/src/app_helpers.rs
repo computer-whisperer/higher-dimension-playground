@@ -312,7 +312,7 @@ pub(super) fn distance4(a: [f32; 4], b: [f32; 4]) -> f32 {
 
 pub(super) fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
     let len_sq = dot4(v, v);
-    if len_sq <= 1e-8 {
+    if len_sq <= 1e-8 || !len_sq.is_finite() {
         return fallback;
     }
     let inv_len = len_sq.sqrt().recip();

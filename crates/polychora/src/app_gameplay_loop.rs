@@ -544,6 +544,7 @@ impl App {
         // Build view matrix and scene
         let view_matrix = self.current_view_matrix();
         let backend = self.args.backend.to_render_backend();
+        let disable_remote_non_voxel = env_flag_enabled("R4D_DISABLE_REMOTE_NON_VOXEL");
         let highlight_mode = self.args.edit_highlight_mode;
         let hud_player_tags =
             self.remote_player_tags(&view_matrix, look_dir, self.focal_length_xy, aspect);
@@ -767,8 +768,10 @@ impl App {
 
         if backend == RenderBackend::VoxelTraversal {
             let mut vte_non_voxel_instances = Vec::new();
-            vte_non_voxel_instances.extend(self.remote_player_instances(preview_time_s));
-            vte_non_voxel_instances.extend(self.remote_entity_instances());
+            if !disable_remote_non_voxel {
+                vte_non_voxel_instances.extend(self.remote_player_instances(preview_time_s));
+                vte_non_voxel_instances.extend(self.remote_entity_instances());
+            }
             let mut preview_overlay_instances: &[common::ModelInstance] = &[];
             if self.vte_overlay_raster_enabled {
                 preview_overlay_instances = std::slice::from_ref(&preview_instance);
@@ -801,8 +804,16 @@ impl App {
                 preview_overlay_instances,
             );
         } else {
-            let remote_instances = self.remote_player_instances(preview_time_s);
-            let entity_instances = self.remote_entity_instances();
+            let remote_instances = if disable_remote_non_voxel {
+                Vec::new()
+            } else {
+                self.remote_player_instances(preview_time_s)
+            };
+            let entity_instances = if disable_remote_non_voxel {
+                Vec::new()
+            } else {
+                self.remote_entity_instances()
+            };
             self.scene.update_surfaces_if_dirty();
             let instances = self.scene.build_instances(self.camera.position);
             let mut render_instances = Vec::with_capacity(

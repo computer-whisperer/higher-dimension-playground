@@ -188,8 +188,7 @@ impl RenderContext {
         );
         let bvh_init_leaves = load_shader(device.clone(), shader_spirv!("mainBVHInitLeaves"));
         let bvh_build_tree = load_shader(device.clone(), shader_spirv!("mainBVHBuildTree"));
-        let bvh_compute_leaf_aabbs =
-            load_shader(device.clone(), shader_spirv!("mainBVHComputeLeafAABBs"));
+        let bvh_link_parents = load_shader(device.clone(), shader_spirv!("mainBVHLinkParents"));
         let bvh_propagate_aabbs =
             load_shader(device.clone(), shader_spirv!("mainBVHPropagateAABBs"));
 
@@ -317,7 +316,7 @@ impl RenderContext {
             bvh_bitonic_sort_local_merge,
             bvh_init_leaves,
             bvh_build_tree,
-            bvh_compute_leaf_aabbs,
+            bvh_link_parents,
             bvh_propagate_aabbs,
         };
 
@@ -562,7 +561,31 @@ impl RenderContext {
                 pending_voxel_payload_slots: Vec::new(),
                 pending_voxel_payload_slot_set: HashSet::new(),
                 last_voxel_metadata_generation: None,
+                vte_entity_diag_copy_scheduled: false,
+                vte_entity_diag_non_voxel_tet_count: 0,
             });
+        }
+
+        let vte_entity_diag_enabled = env_flag_enabled(VTE_ENTITY_DIAG_ENV);
+        let vte_entity_diag_verbose =
+            vte_entity_diag_enabled && env_flag_enabled(VTE_ENTITY_DIAG_VERBOSE_ENV);
+        let vte_entity_diag_bvh_readback =
+            vte_entity_diag_enabled && env_flag_enabled(VTE_ENTITY_DIAG_BVH_READBACK_ENV);
+        let vte_entity_diag_bvh_topology = vte_entity_diag_bvh_readback
+            && vte_entity_diag_enabled
+            && env_flag_enabled(VTE_ENTITY_DIAG_BVH_TOPOLOGY_ENV);
+        let vte_entity_diag_interval = env_usize(
+            VTE_ENTITY_DIAG_BVH_INTERVAL_ENV,
+            VTE_ENTITY_DIAG_DEFAULT_INTERVAL,
+        );
+        if vte_entity_diag_enabled {
+            eprintln!(
+                "VTE entity diagnostics enabled (verbose={}, bvh_readback={}, bvh_topology={}, interval={} frames).",
+                vte_entity_diag_verbose,
+                vte_entity_diag_bvh_readback,
+                vte_entity_diag_bvh_topology,
+                vte_entity_diag_interval
+            );
         }
 
         RenderContext {
@@ -603,6 +626,14 @@ impl RenderContext {
             vte_compare_stats: vte::VteCompareStats::default(),
             vte_first_mismatch: vte::VteFirstMismatch::default(),
             vte_backend_notice_printed: false,
+            vte_entity_diag_enabled,
+            vte_entity_diag_verbose,
+            vte_entity_diag_bvh_readback,
+            vte_entity_diag_bvh_topology,
+            vte_entity_diag_interval,
+            vte_entity_diag_last_log_frame: None,
+            vte_entity_diag_prev_used_non_voxel: None,
+            vte_entity_diag_prev_tets_non_voxel: None,
             drop_next_profile_sample: false,
             voxel_payload_cache_occupancy_words: vec![
                 0u32;

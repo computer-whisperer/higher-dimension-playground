@@ -14,6 +14,30 @@ fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] 
     velocity
 }
 
+fn vec4_is_finite(v: [f32; 4]) -> bool {
+    v.iter().all(|axis| axis.is_finite())
+}
+
+fn sanitize_remote_position(position: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
+    if vec4_is_finite(position) {
+        position
+    } else {
+        fallback
+    }
+}
+
+fn sanitize_remote_orientation(orientation: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
+    normalize4_with_fallback(orientation, fallback)
+}
+
+fn sanitize_remote_scale(scale: f32, fallback: f32) -> f32 {
+    if scale.is_finite() {
+        scale
+    } else {
+        fallback
+    }
+}
+
 impl App {
     pub(super) fn poll_multiplayer_events(&mut self) {
         loop {
@@ -42,7 +66,8 @@ impl App {
         entity: multiplayer::EntitySnapshot,
         received_at: Instant,
     ) {
-        let normalized_look = normalize4_with_fallback(entity.orientation, [0.0, 0.0, 1.0, 0.0]);
+        let normalized_look = sanitize_remote_orientation(entity.orientation, [0.0, 0.0, 1.0, 0.0]);
+        let sanitized_position = sanitize_remote_position(entity.position, [0.0; 4]);
         let player_name = entity.display_name.clone().unwrap_or_else(|| {
             entity
                 .owner_client_id
@@ -51,18 +76,18 @@ impl App {
         });
         if let Some(existing) = self.remote_players.get_mut(&entity.entity_id) {
             let previous_position = existing.position;
+            let next_position = sanitize_remote_position(entity.position, existing.position);
 
             existing.owner_client_id = entity.owner_client_id;
             existing.name = player_name;
-            existing.position = entity.position;
+            existing.position = next_position;
             existing.look = normalized_look;
             existing.last_update_ms = entity.last_update_ms;
             existing.last_received_at = received_at;
             existing.velocity =
                 sanitize_remote_velocity(entity.velocity, REMOTE_PLAYER_MAX_PREDICTED_SPEED);
 
-            if distance4(previous_position, entity.position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
-            {
+            if distance4(previous_position, next_position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE {
                 existing.render_position = existing.position;
                 existing.render_look = existing.look;
                 existing.velocity = [0.0; 4];
@@ -76,10 +101,10 @@ impl App {
             RemotePlayerState {
                 owner_client_id: entity.owner_client_id,
                 name: player_name,
-                position: entity.position,
+                position: sanitized_position,
                 look: normalized_look,
                 last_update_ms: entity.last_update_ms,
-                render_position: entity.position,
+                render_position: sanitized_position,
                 render_look: normalized_look,
                 velocity: sanitize_remote_velocity(
                     entity.velocity,
@@ -517,20 +542,25 @@ impl App {
                     }
                 }
                 multiplayer::EntityClass::Accent | multiplayer::EntityClass::Mob => {
+                    let fallback_orientation = [0.0, 0.0, 1.0, 0.0];
+                    let sanitized_position = sanitize_remote_position(entity.position, [0.0; 4]);
+                    let sanitized_orientation =
+                        sanitize_remote_orientation(entity.orientation, fallback_orientation);
+                    let sanitized_scale = sanitize_remote_scale(entity.scale, 1.0);
                     self.remote_entities.insert(
                         entity.entity_id,
                         RemoteEntityState {
                             kind: entity.kind,
-                            position: entity.position,
-                            orientation: entity.orientation,
+                            position: sanitized_position,
+                            orientation: sanitized_orientation,
                             velocity: sanitize_remote_velocity(
                                 entity.velocity,
                                 REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                             ),
-                            scale: entity.scale,
+                            scale: sanitized_scale,
                             material: entity.material,
-                            render_position: entity.position,
-                            render_orientation: entity.orientation,
+                            render_position: sanitized_position,
+                            render_orientation: sanitized_orientation,
                             last_received_at: received_at,
                         },
                     );
@@ -544,9 +574,11 @@ impl App {
                 for transform in entities {
                     if let Some(player) = self.remote_players.get_mut(&transform.entity_id) {
                         let previous_position = player.position;
+                        let next_position =
+                            sanitize_remote_position(transform.position, player.position);
                         let normalized_look =
-                            normalize4_with_fallback(transform.orientation, [0.0, 0.0, 1.0, 0.0]);
-                        player.position = transform.position;
+                            sanitize_remote_orientation(transform.orientation, player.look);
+                        player.position = next_position;
                         player.look = normalized_look;
                         player.last_update_ms = transform.last_update_ms;
                         player.last_received_at = received_at;
@@ -554,7 +586,7 @@ impl App {
                             transform.velocity,
                             REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                         );
-                        if distance4(previous_position, transform.position)
+                        if distance4(previous_position, next_position)
                             > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE
                         {
                             player.render_position = player.position;
@@ -565,13 +597,17 @@ impl App {
                         continue;
                     }
                     if let Some(existing) = self.remote_entities.get_mut(&transform.entity_id) {
-                        existing.position = transform.position;
-                        existing.orientation = transform.orientation;
+                        existing.position =
+                            sanitize_remote_position(transform.position, existing.position);
+                        existing.orientation = sanitize_remote_orientation(
+                            transform.orientation,
+                            existing.orientation,
+                        );
                         existing.velocity = sanitize_remote_velocity(
                             transform.velocity,
                             REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                         );
-                        existing.scale = transform.scale;
+                        existing.scale = sanitize_remote_scale(transform.scale, existing.scale);
                         existing.material = transform.material;
                         existing.last_received_at = received_at;
                     }
@@ -675,6 +711,9 @@ impl App {
         let mut instances = Vec::with_capacity(ids.len() * REMOTE_AVATAR_PART_COUNT_ESTIMATE);
         for entity_id in ids {
             if let Some(player) = self.remote_players.get(&entity_id) {
+                if !vec4_is_finite(player.render_position) || !vec4_is_finite(player.render_look) {
+                    continue;
+                }
                 let avatar_seed_id = player.owner_client_id.unwrap_or(entity_id);
                 instances.extend(build_remote_player_avatar_instances(
                     avatar_seed_id,
@@ -694,6 +733,12 @@ impl App {
         let mut instances = Vec::with_capacity(ids.len() * 8);
         for entity_id in ids {
             if let Some(entity) = self.remote_entities.get(&entity_id) {
+                if !vec4_is_finite(entity.render_position)
+                    || !vec4_is_finite(entity.render_orientation)
+                    || !entity.scale.is_finite()
+                {
+                    continue;
+                }
                 match entity.kind {
                     multiplayer::EntityKind::PlayerAvatar => {}
                     multiplayer::EntityKind::TestCube => {

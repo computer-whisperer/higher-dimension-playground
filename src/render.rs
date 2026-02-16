@@ -8,6 +8,8 @@ mod pipelines;
 mod profiler;
 mod types;
 mod vte;
+#[cfg(test)]
+mod bvh_topology_tests;
 
 use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers};
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
@@ -85,6 +87,15 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 const VTE_LOD_TINT_ENV: &str = "R4D_VTE_LOD_TINT";
+const VTE_ENTITY_LINEAR_ONLY_ENV: &str = "R4D_VTE_ENTITY_LINEAR_ONLY";
+const VTE_ENTITY_BVH_COMPARE_ENV: &str = "R4D_VTE_ENTITY_BVH_COMPARE";
+const VTE_ENTITY_DIAG_ENV: &str = "R4D_VTE_ENTITY_DIAG";
+const VTE_ENTITY_DIAG_VERBOSE_ENV: &str = "R4D_VTE_ENTITY_DIAG_VERBOSE";
+const VTE_ENTITY_DIAG_BVH_READBACK_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_READBACK";
+const VTE_ENTITY_DIAG_BVH_TOPOLOGY_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_TOPOLOGY";
+const VTE_ENTITY_DIAG_BVH_INTERVAL_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_INTERVAL";
+const VTE_ENTITY_DIAG_DEFAULT_INTERVAL: usize = 120;
+const VTE_ENTITY_DIAG_TRANSFORM_ABS_WARN: f32 = 16_384.0;
 // Keep in sync with OVERLAY_RASTER_SCALE in `slang-shaders/src/rasterizer.slang`.
 const VTE_OVERLAY_RASTER_SCALE: u32 = 3;
 const WORKING_FLAG_VTE_COLLAPSED: u32 = 1u32 << 0u32;
@@ -104,6 +115,28 @@ fn env_flag_enabled(name: &str) -> bool {
 fn vte_lod_tint_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled(VTE_LOD_TINT_ENV))
+}
+
+fn vte_entity_linear_only_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(VTE_ENTITY_LINEAR_ONLY_ENV))
+}
+
+fn vte_entity_bvh_compare_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(VTE_ENTITY_BVH_COMPARE_ENV))
+}
+
+fn env_usize(name: &str, default_value: usize) -> usize {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|v| *v > 0)
+            .unwrap_or(default_value),
+        Err(_) => default_value,
+    }
 }
 
 /// Collection of all shader modules loaded from Slang-compiled SPIR-V
@@ -136,7 +169,7 @@ struct ShaderModules {
     bvh_bitonic_sort_local_merge: Arc<ShaderModule>,
     bvh_init_leaves: Arc<ShaderModule>,
     bvh_build_tree: Arc<ShaderModule>,
-    bvh_compute_leaf_aabbs: Arc<ShaderModule>,
+    bvh_link_parents: Arc<ShaderModule>,
     bvh_propagate_aabbs: Arc<ShaderModule>,
 }
 
@@ -160,6 +193,8 @@ struct FrameInFlight {
     pending_voxel_payload_slots: Vec<u32>,
     pending_voxel_payload_slot_set: HashSet<u32>,
     last_voxel_metadata_generation: Option<u64>,
+    vte_entity_diag_copy_scheduled: bool,
+    vte_entity_diag_non_voxel_tet_count: usize,
 }
 
 struct EguiResources {
@@ -266,6 +301,176 @@ fn create_hud_descriptor_set(
     .unwrap()
 }
 
+fn model_instance_is_finite(instance: &common::ModelInstance) -> bool {
+    for row in 0..5 {
+        for col in 0..5 {
+            if !instance.model_transform[[row, col]].is_finite() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn model_instance_transform_extrema(instances: &[common::ModelInstance]) -> (f32, f32, usize) {
+    let mut translation_abs_max = 0.0f32;
+    let mut basis_abs_max = 0.0f32;
+    let mut outlier_count = 0usize;
+
+    for instance in instances {
+        let mut instance_translation_abs_max = 0.0f32;
+        let mut instance_basis_abs_max = 0.0f32;
+        for axis in 0..4 {
+            instance_translation_abs_max =
+                instance_translation_abs_max.max(instance.model_transform[[axis, 4]].abs());
+            for basis_axis in 0..4 {
+                instance_basis_abs_max =
+                    instance_basis_abs_max.max(instance.model_transform[[axis, basis_axis]].abs());
+            }
+        }
+        translation_abs_max = translation_abs_max.max(instance_translation_abs_max);
+        basis_abs_max = basis_abs_max.max(instance_basis_abs_max);
+        if instance_translation_abs_max > VTE_ENTITY_DIAG_TRANSFORM_ABS_WARN
+            || instance_basis_abs_max > VTE_ENTITY_DIAG_TRANSFORM_ABS_WARN
+        {
+            outlier_count += 1;
+        }
+    }
+
+    (translation_abs_max, basis_abs_max, outlier_count)
+}
+
+struct BvhTopologySummary {
+    total_nodes: usize,
+    internal_nodes: usize,
+    internal_ready: usize,
+    invalid_child_edges: usize,
+    self_child_edges: usize,
+    nodes_without_parent_excluding_root: usize,
+    nodes_with_multiple_parents: usize,
+    unreachable_internal_nodes: usize,
+    unreachable_leaf_nodes: usize,
+    leaf_invalid_tetra_indices: usize,
+    leaf_duplicate_tetra_indices: usize,
+    leaf_missing_tetra_indices: usize,
+}
+
+fn summarize_bvh_topology(
+    bvh_nodes: &[common::BVHNode],
+    num_tetrahedrons: usize,
+) -> Option<BvhTopologySummary> {
+    if num_tetrahedrons == 0 {
+        return None;
+    }
+    let total_nodes = num_tetrahedrons
+        .checked_mul(2)?
+        .checked_sub(1)?;
+    if total_nodes == 0 || total_nodes > bvh_nodes.len() {
+        return None;
+    }
+    let internal_nodes = num_tetrahedrons.saturating_sub(1);
+    let mut parent_ref_counts = vec![0u32; total_nodes];
+    let mut invalid_child_edges = 0usize;
+    let mut self_child_edges = 0usize;
+    let mut internal_ready = 0usize;
+
+    for idx in 0..internal_nodes {
+        let node = &bvh_nodes[idx];
+        if node.atomic_visit_count >= 2 {
+            internal_ready += 1;
+        }
+        for child in [node.left_child, node.right_child] {
+            if child == u32::MAX {
+                invalid_child_edges += 1;
+                continue;
+            }
+            let child_idx = child as usize;
+            if child_idx >= total_nodes {
+                invalid_child_edges += 1;
+                continue;
+            }
+            if child_idx == idx {
+                self_child_edges += 1;
+            }
+            parent_ref_counts[child_idx] = parent_ref_counts[child_idx].saturating_add(1);
+        }
+    }
+
+    let mut nodes_without_parent_excluding_root = 0usize;
+    let mut nodes_with_multiple_parents = 0usize;
+    for (idx, &count) in parent_ref_counts.iter().enumerate() {
+        if idx == 0 {
+            continue;
+        }
+        if count == 0 {
+            nodes_without_parent_excluding_root += 1;
+        } else if count > 1 {
+            nodes_with_multiple_parents += 1;
+        }
+    }
+
+    let mut visited = vec![false; total_nodes];
+    let mut stack = Vec::with_capacity(total_nodes.min(256));
+    stack.push(0usize);
+    while let Some(idx) = stack.pop() {
+        if idx >= total_nodes || visited[idx] {
+            continue;
+        }
+        visited[idx] = true;
+        let node = &bvh_nodes[idx];
+        if node.is_leaf == 0 {
+            for child in [node.left_child, node.right_child] {
+                if child != u32::MAX {
+                    let child_idx = child as usize;
+                    if child_idx < total_nodes {
+                        stack.push(child_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    let unreachable_internal_nodes = visited[..internal_nodes]
+        .iter()
+        .filter(|&&seen| !seen)
+        .count();
+    let unreachable_leaf_nodes = visited[internal_nodes..total_nodes]
+        .iter()
+        .filter(|&&seen| !seen)
+        .count();
+    let mut leaf_seen = vec![0u8; num_tetrahedrons];
+    let mut leaf_invalid_tetra_indices = 0usize;
+    let mut leaf_duplicate_tetra_indices = 0usize;
+    for idx in internal_nodes..total_nodes {
+        let tet_idx = bvh_nodes[idx].tetrahedron_index as usize;
+        if tet_idx >= num_tetrahedrons {
+            leaf_invalid_tetra_indices += 1;
+            continue;
+        }
+        if leaf_seen[tet_idx] != 0 {
+            leaf_duplicate_tetra_indices += 1;
+        } else {
+            leaf_seen[tet_idx] = 1;
+        }
+    }
+    let leaf_missing_tetra_indices = leaf_seen.iter().filter(|&&count| count == 0).count();
+
+    Some(BvhTopologySummary {
+        total_nodes,
+        internal_nodes,
+        internal_ready,
+        invalid_child_edges,
+        self_child_edges,
+        nodes_without_parent_excluding_root,
+        nodes_with_multiple_parents,
+        unreachable_internal_nodes,
+        unreachable_leaf_nodes,
+        leaf_invalid_tetra_indices,
+        leaf_duplicate_tetra_indices,
+        leaf_missing_tetra_indices,
+    })
+}
+
 pub struct RenderContext {
     pub window: Option<Arc<Window>>,
     swapchain: Option<Arc<Swapchain>>,
@@ -304,6 +509,14 @@ pub struct RenderContext {
     vte_compare_stats: vte::VteCompareStats,
     vte_first_mismatch: vte::VteFirstMismatch,
     vte_backend_notice_printed: bool,
+    vte_entity_diag_enabled: bool,
+    vte_entity_diag_verbose: bool,
+    vte_entity_diag_bvh_readback: bool,
+    vte_entity_diag_bvh_topology: bool,
+    vte_entity_diag_interval: usize,
+    vte_entity_diag_last_log_frame: Option<usize>,
+    vte_entity_diag_prev_used_non_voxel: Option<usize>,
+    vte_entity_diag_prev_tets_non_voxel: Option<usize>,
     drop_next_profile_sample: bool,
     voxel_payload_cache_occupancy_words: Vec<u32>,
     voxel_payload_cache_material_words: Vec<u32>,
@@ -362,6 +575,52 @@ impl RenderContext {
                 zero_interval_flags: stats_words[vte::VTE_COMPARE_STAT_ZERO_INTERVAL_FLAG],
                 tie_stepped_flags: stats_words[vte::VTE_COMPARE_STAT_TIE_STEPPED_FLAG],
                 lookup_fallback_flags: stats_words[vte::VTE_COMPARE_STAT_LOOKUP_FALLBACK_FLAG],
+                entity_bvh_samples: stats_words[vte::VTE_COMPARE_STAT_ENTITY_BVH_SAMPLE],
+                entity_bvh_mismatches: stats_words[vte::VTE_COMPARE_STAT_ENTITY_BVH_MISMATCH],
+                entity_bvh_hit_state_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_HIT_STATE_MISMATCH],
+                entity_bvh_material_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_MATERIAL_MISMATCH],
+                entity_bvh_distance_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_DISTANCE_MISMATCH],
+                entity_bvh_tetra_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_TETRA_MISMATCH],
+                entity_bvh_miss_linear_hit: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_MISS_LINEAR_HIT],
+                entity_bvh_hit_linear_miss: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_HIT_LINEAR_MISS],
+                entity_bvh_noprune_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_MISMATCH],
+                entity_bvh_noprune_hit_state_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_HIT_STATE_MISMATCH],
+                entity_bvh_noprune_distance_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_DISTANCE_MISMATCH],
+                entity_bvh_noprune_tetra_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOPRUNE_TETRA_MISMATCH],
+                entity_bvh_noaabb_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_MISMATCH],
+                entity_bvh_noaabb_hit_state_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_HIT_STATE_MISMATCH],
+                entity_bvh_noaabb_distance_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_DISTANCE_MISMATCH],
+                entity_bvh_noaabb_tetra_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_NOAABB_TETRA_MISMATCH],
+                entity_linear_order_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_MISMATCH],
+                entity_linear_order_hit_state_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_HIT_STATE_MISMATCH],
+                entity_linear_order_distance_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_DISTANCE_MISMATCH],
+                entity_linear_order_tetra_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_LINEAR_ORDER_TETRA_MISMATCH],
+                entity_bvh_leafarray_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_MISMATCH],
+                entity_bvh_leafarray_hit_state_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_HIT_STATE_MISMATCH],
+                entity_bvh_leafarray_distance_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH],
+                entity_bvh_leafarray_tetra_mismatches: stats_words
+                    [vte::VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH],
             };
         } else {
             self.vte_compare_stats = vte::VteCompareStats::default();
@@ -618,8 +877,8 @@ impl RenderContext {
         device: Arc<Device>,
         queue: Arc<Queue>,
         frame_params: FrameParams,
-        model_instances: &[common::ModelInstance],
-        raster_overlay_instances: &[common::ModelInstance],
+        model_instances_input: &[common::ModelInstance],
+        raster_overlay_instances_input: &[common::ModelInstance],
         voxel_input: Option<&VoxelFrameInput<'_>>,
     ) {
         let FrameParams {
@@ -630,6 +889,53 @@ impl RenderContext {
             render_options,
         } = frame_params;
         let view_matrix_view = view_matrix.into_owned();
+
+        // Guard against non-finite transforms/material data poisoning shared
+        // non-voxel preprocess/BVH buffers for the entire frame.
+        let mut filtered_model_instances: Vec<common::ModelInstance> = Vec::new();
+        let mut dropped_model_instance_count = 0usize;
+        let model_instances: &[common::ModelInstance] =
+            if model_instances_input.iter().all(model_instance_is_finite) {
+                model_instances_input
+            } else {
+                filtered_model_instances.reserve(model_instances_input.len());
+                for instance in model_instances_input.iter().copied() {
+                    if model_instance_is_finite(&instance) {
+                        filtered_model_instances.push(instance);
+                    } else {
+                        dropped_model_instance_count += 1;
+                    }
+                }
+                filtered_model_instances.as_slice()
+            };
+
+        let mut filtered_overlay_instances: Vec<common::ModelInstance> = Vec::new();
+        let mut dropped_overlay_instance_count = 0usize;
+        let raster_overlay_instances: &[common::ModelInstance] = if raster_overlay_instances_input
+            .iter()
+            .all(model_instance_is_finite)
+        {
+            raster_overlay_instances_input
+        } else {
+            filtered_overlay_instances.reserve(raster_overlay_instances_input.len());
+            for instance in raster_overlay_instances_input.iter().copied() {
+                if model_instance_is_finite(&instance) {
+                    filtered_overlay_instances.push(instance);
+                } else {
+                    dropped_overlay_instance_count += 1;
+                }
+            }
+            filtered_overlay_instances.as_slice()
+        };
+
+        if dropped_model_instance_count > 0 || dropped_overlay_instance_count > 0 {
+            eprintln!(
+                "Dropped non-finite model instances before render: non-voxel {} overlay {} (frame {}).",
+                dropped_model_instance_count,
+                dropped_overlay_instance_count,
+                self.frames_rendered
+            );
+        }
 
         let slice = view_matrix_view.view().to_slice().unwrap();
         let view_matrix_nalgebra: nalgebra::OMatrix<f32, nalgebra::U5, nalgebra::U5> =
@@ -775,6 +1081,8 @@ impl RenderContext {
         } else {
             total_tetrahedron_count
         };
+        let (non_voxel_translation_abs_max, non_voxel_basis_abs_max, non_voxel_outlier_count) =
+            model_instance_transform_extrema(&model_instances[..non_voxel_used_instance_count]);
 
         // Debug: print scene info on first frame only
         if self.frames_rendered == 0 {
@@ -1240,6 +1548,12 @@ impl RenderContext {
                     if vte_lod_tint_enabled() {
                         flags |= vte::VTE_DEBUG_FLAG_LOD_TINT;
                     }
+                    if vte_entity_linear_only_enabled() {
+                        flags |= vte::VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY;
+                    }
+                    if vte_entity_bvh_compare_enabled() {
+                        flags |= vte::VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE;
+                    }
                     flags
                 },
                 visible_chunk_min_x: vte_visible_chunk_min[0],
@@ -1351,13 +1665,20 @@ impl RenderContext {
             }
         }
 
+        let previous_vte_non_voxel_scene_hash = self.vte_non_voxel_scene_hash;
+        let mut vte_non_voxel_rebuild_needed = false;
+        let mut vte_non_voxel_rebuild_executed = false;
+        let mut vte_non_voxel_rebuild_reason = "non_vte";
+
         if do_voxel_vte {
+            vte_non_voxel_rebuild_reason = "empty";
             vte_compare_diagnostics_enabled = render_options.vte_reference_compare
                 && matches!(
                     render_options.vte_display_mode,
                     VteDisplayMode::DebugCompare | VteDisplayMode::DebugIntegral
                 );
-            if vte_compare_diagnostics_enabled {
+            let vte_entity_bvh_compare = vte_entity_bvh_compare_enabled();
+            if vte_compare_diagnostics_enabled || vte_entity_bvh_compare {
                 self.reset_vte_compare_buffers(frame_idx);
             } else {
                 self.clear_vte_compare_diagnostics();
@@ -1430,7 +1751,7 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, lod_near={:.1}, lod_mid={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, lod_tint={}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, lod_near={:.1}, lod_mid={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, lod_tint={}, entity_linear_only={}, entity_bvh_compare={}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
@@ -1448,6 +1769,8 @@ impl RenderContext {
                     render_options.vte_compare_slice_only,
                     render_options.vte_y_slice_lookup_cache,
                     vte_lod_tint_enabled(),
+                    vte_entity_linear_only_enabled(),
+                    vte_entity_bvh_compare_enabled(),
                     storage_layers,
                     logical_layers,
                 );
@@ -1480,7 +1803,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
         }
 
         self.frames_in_flight[frame_idx].vte_compare_enabled =
-            do_voxel_vte && vte_compare_diagnostics_enabled;
+            do_voxel_vte && (vte_compare_diagnostics_enabled || vte_entity_bvh_compare_enabled());
 
         self.last_backend = if do_voxel_vte {
             RenderBackend::VoxelTraversal
@@ -1573,11 +1896,27 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             if do_voxel_vte {
                 let non_voxel_tetrahedron_count = total_tetrahedron_count;
                 if non_voxel_tetrahedron_count == 0 {
+                    vte_non_voxel_rebuild_needed = false;
+                    vte_non_voxel_rebuild_reason = "empty";
                     self.vte_non_voxel_scene_hash = 0;
                 } else {
-                    let non_voxel_rebuild_needed =
-                        non_voxel_scene_hash != self.vte_non_voxel_scene_hash;
-                    if non_voxel_rebuild_needed {
+                    // In overlay-raster mode, the shared tetra output buffer is reused by the
+                    // overlay tet preprocess pass later in the frame. Force non-voxel
+                    // reprovision every frame in that mode so Stage A never consumes stale
+                    // non-voxel tetra/BVH data on the next frame.
+                    vte_non_voxel_rebuild_needed =
+                        do_raster || non_voxel_scene_hash != self.vte_non_voxel_scene_hash;
+                    vte_non_voxel_rebuild_reason = match (
+                        do_raster,
+                        non_voxel_scene_hash != self.vte_non_voxel_scene_hash,
+                    ) {
+                        (true, true) => "overlay_raster+scene_hash",
+                        (true, false) => "overlay_raster",
+                        (false, true) => "scene_hash",
+                        (false, false) => "unchanged",
+                    };
+                    if vte_non_voxel_rebuild_needed {
+                        vte_non_voxel_rebuild_executed = true;
                         // Preprocess tetra non-voxel instances into world-space tetrahedra.
                         let vte_preprocess_push_data: [u32; 4] =
                             [0, non_voxel_tetrahedron_count as u32, 0, 0];
@@ -1703,32 +2042,25 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 .unwrap();
                             unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
 
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline
-                                        .bvh_compute_leaf_aabbs_pipeline
-                                        .clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
-
                             let num_internal_nodes =
                                 non_voxel_tetrahedron_count.saturating_sub(1) as u32;
                             if num_internal_nodes > 0 {
-                                let num_passes =
-                                    2 * (32 - num_internal_nodes.leading_zeros()).max(1);
                                 builder
                                     .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                                        self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                     )
                                     .unwrap();
-                                for _ in 0..num_passes {
-                                    unsafe {
-                                        builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
-                                    }
-                                    .unwrap();
+                                unsafe {
+                                    builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
                                 }
+                                .unwrap();
                             }
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
 
                             {
                                 let q = self.profiler.next_query_index("vte_non_voxel_bvh");
@@ -2230,33 +2562,28 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         }
                         .unwrap();
 
-                        // 2f. Compute leaf AABBs
+                        // 2f. Link parent pointers for leaf-to-root propagation.
+                        let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
+                        if num_internal_nodes > 0 {
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_link_parents_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1]) }
+                                .unwrap();
+                        }
+
+                        // 2g. Compute leaf AABBs and propagate all parent bounds in one pass.
                         builder
                             .bind_pipeline_compute(
-                                self.compute_pipeline
-                                    .bvh_compute_leaf_aabbs_pipeline
-                                    .clone(),
+                                self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
                             )
                             .unwrap();
                         unsafe {
                             builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
                         }
                         .unwrap();
-
-                        // 2g. Propagate AABBs from leaves to root (multi-pass)
-                        let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
-                        if num_internal_nodes > 0 {
-                            let num_passes = 2 * (32 - num_internal_nodes.leading_zeros()).max(1);
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
-                                )
-                                .unwrap();
-                            for _ in 0..num_passes {
-                                unsafe { builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1]) }
-                                    .unwrap();
-                            }
-                        }
                     }
 
                     self.bvh_scene_hash = scene_hash;
@@ -2314,6 +2641,149 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 }
             }
+        }
+
+        let prev_used_non_voxel = self.vte_entity_diag_prev_used_non_voxel;
+        let prev_tets_non_voxel = self.vte_entity_diag_prev_tets_non_voxel;
+        let used_non_voxel_went_zero = do_voxel_vte
+            && prev_used_non_voxel
+                .map(|prev| prev > 0 && non_voxel_used_instance_count == 0)
+                .unwrap_or(false);
+        let tets_non_voxel_went_zero = do_voxel_vte
+            && prev_tets_non_voxel
+                .map(|prev| prev > 0 && total_tetrahedron_count == 0)
+                .unwrap_or(false);
+        if do_voxel_vte {
+            self.vte_entity_diag_prev_used_non_voxel = Some(non_voxel_used_instance_count);
+            self.vte_entity_diag_prev_tets_non_voxel = Some(total_tetrahedron_count);
+        } else {
+            self.vte_entity_diag_prev_used_non_voxel = None;
+            self.vte_entity_diag_prev_tets_non_voxel = None;
+        }
+
+        let vte_entity_diag_anomaly = do_voxel_vte
+            && (dropped_model_instance_count > 0
+                || non_voxel_outlier_count > 0
+                || used_non_voxel_went_zero
+                || tets_non_voxel_went_zero
+                || (model_instances_input.len() > 0 && non_voxel_used_instance_count == 0)
+                || (non_voxel_used_instance_count > 0 && total_tetrahedron_count == 0));
+        let vte_entity_diag_periodic_due = self
+            .vte_entity_diag_last_log_frame
+            .map(|last| {
+                self.frames_rendered.saturating_sub(last) >= self.vte_entity_diag_interval.max(1)
+            })
+            .unwrap_or(true);
+        let vte_entity_diag_copy_requested = self.vte_entity_diag_enabled
+            && self.vte_entity_diag_bvh_readback
+            && do_voxel_vte
+            && total_tetrahedron_count > 0
+            && (self.vte_entity_diag_verbose
+                || vte_entity_diag_anomaly
+                || self.frames_rendered % self.vte_entity_diag_interval.max(1) == 0);
+        self.frames_in_flight[frame_idx].vte_entity_diag_copy_scheduled =
+            vte_entity_diag_copy_requested;
+        self.frames_in_flight[frame_idx].vte_entity_diag_non_voxel_tet_count = if do_voxel_vte {
+            total_tetrahedron_count
+        } else {
+            0
+        };
+        if vte_entity_diag_copy_requested {
+            if self.vte_entity_diag_bvh_topology {
+                builder
+                    .copy_buffer(CopyBufferInfo::buffers(
+                        self.sized_buffers.bvh_nodes_buffer.clone(),
+                        self.sized_buffers.cpu_bvh_nodes_buffer.clone(),
+                    ))
+                    .unwrap();
+            } else {
+                builder
+                    .copy_buffer(CopyBufferInfo::buffers(
+                        self.sized_buffers.bvh_nodes_buffer.clone(),
+                        self.sized_buffers.cpu_bvh_root_buffer.clone(),
+                    ))
+                    .unwrap();
+            }
+        }
+
+        if self.vte_entity_diag_enabled
+            && (self.vte_entity_diag_verbose
+                || vte_entity_diag_anomaly
+                || (do_voxel_vte && vte_entity_diag_periodic_due))
+        {
+            eprintln!(
+                "[vte-entity-diag] frame={} backend={} mode={} input_non_voxel={} input_overlay={} used_non_voxel={} dropped_non_finite={} tets_non_voxel={} tets_overlay={} do_raster={} prev_hash=0x{:016x} hash=0x{:016x} rebuild_needed={} rebuild_executed={} rebuild_reason={} max_abs_translation={:.2} max_abs_basis={:.2} outlier_instances={}",
+                self.frames_rendered,
+                self.last_backend.label(),
+                render_options.vte_display_mode.label(),
+                model_instances_input.len(),
+                raster_overlay_instances_input.len(),
+                non_voxel_used_instance_count,
+                dropped_model_instance_count,
+                total_tetrahedron_count,
+                raster_overlay_tetrahedron_count,
+                do_raster,
+                previous_vte_non_voxel_scene_hash,
+                non_voxel_scene_hash,
+                vte_non_voxel_rebuild_needed,
+                vte_non_voxel_rebuild_executed,
+                vte_non_voxel_rebuild_reason,
+                non_voxel_translation_abs_max,
+                non_voxel_basis_abs_max,
+                non_voxel_outlier_count
+            );
+            if self.vte_compare_stats.entity_bvh_samples > 0 {
+                eprintln!(
+                    "[vte-entity-diag][bvh-compare] frame={} samples={} mismatches={} hit_state={} material={} distance={} tetra={} bvh_miss_linear_hit={} bvh_hit_linear_miss={} noprune_mismatches={} noprune_hit_state={} noprune_distance={} noprune_tetra={} noaabb_mismatches={} noaabb_hit_state={} noaabb_distance={} noaabb_tetra={} linear_order_mismatches={} linear_order_hit_state={} linear_order_distance={} linear_order_tetra={} leafarray_mismatches={} leafarray_hit_state={} leafarray_distance={} leafarray_tetra={}",
+                    self.frames_rendered,
+                    self.vte_compare_stats.entity_bvh_samples,
+                    self.vte_compare_stats.entity_bvh_mismatches,
+                    self.vte_compare_stats.entity_bvh_hit_state_mismatches,
+                    self.vte_compare_stats.entity_bvh_material_mismatches,
+                    self.vte_compare_stats.entity_bvh_distance_mismatches,
+                    self.vte_compare_stats.entity_bvh_tetra_mismatches,
+                    self.vte_compare_stats.entity_bvh_miss_linear_hit,
+                    self.vte_compare_stats.entity_bvh_hit_linear_miss,
+                    self.vte_compare_stats.entity_bvh_noprune_mismatches,
+                    self.vte_compare_stats.entity_bvh_noprune_hit_state_mismatches,
+                    self.vte_compare_stats.entity_bvh_noprune_distance_mismatches,
+                    self.vte_compare_stats.entity_bvh_noprune_tetra_mismatches,
+                    self.vte_compare_stats.entity_bvh_noaabb_mismatches,
+                    self.vte_compare_stats.entity_bvh_noaabb_hit_state_mismatches,
+                    self.vte_compare_stats.entity_bvh_noaabb_distance_mismatches,
+                    self.vte_compare_stats.entity_bvh_noaabb_tetra_mismatches,
+                    self.vte_compare_stats.entity_linear_order_mismatches,
+                    self.vte_compare_stats.entity_linear_order_hit_state_mismatches,
+                    self.vte_compare_stats.entity_linear_order_distance_mismatches,
+                    self.vte_compare_stats.entity_linear_order_tetra_mismatches,
+                    self.vte_compare_stats.entity_bvh_leafarray_mismatches,
+                    self.vte_compare_stats.entity_bvh_leafarray_hit_state_mismatches,
+                    self.vte_compare_stats.entity_bvh_leafarray_distance_mismatches,
+                    self.vte_compare_stats.entity_bvh_leafarray_tetra_mismatches,
+                );
+            }
+            self.vte_entity_diag_last_log_frame = Some(self.frames_rendered);
+        }
+        if self.vte_entity_diag_enabled && (used_non_voxel_went_zero || tets_non_voxel_went_zero) {
+            eprintln!(
+                "[vte-entity-diag][transition-zero] frame={} backend={} mode={} used_non_voxel:{}->{} tets_non_voxel:{}->{} input_non_voxel={} input_overlay={} dropped_non_finite={} do_raster={} prev_hash=0x{:016x} hash=0x{:016x} rebuild_needed={} rebuild_executed={} rebuild_reason={}",
+                self.frames_rendered,
+                self.last_backend.label(),
+                render_options.vte_display_mode.label(),
+                prev_used_non_voxel.unwrap_or(0),
+                non_voxel_used_instance_count,
+                prev_tets_non_voxel.unwrap_or(0),
+                total_tetrahedron_count,
+                model_instances_input.len(),
+                raster_overlay_instances_input.len(),
+                dropped_model_instance_count,
+                do_raster,
+                previous_vte_non_voxel_scene_hash,
+                non_voxel_scene_hash,
+                vte_non_voxel_rebuild_needed,
+                vte_non_voxel_rebuild_executed,
+                vte_non_voxel_rebuild_reason
+            );
         }
 
         let mut hud_vertex_count = 0usize;
@@ -2632,6 +3102,139 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         &self.frames_in_flight[prev_idx].query_pool,
                         clipped_count,
                     );
+                }
+
+                if self.vte_entity_diag_enabled
+                    && self.vte_entity_diag_bvh_readback
+                    && self.frames_in_flight[prev_idx].vte_entity_diag_copy_scheduled
+                {
+                    let prev_non_voxel_tets =
+                        self.frames_in_flight[prev_idx].vte_entity_diag_non_voxel_tet_count;
+                    if prev_non_voxel_tets > 0 {
+                        if self.vte_entity_diag_bvh_topology {
+                            if let Ok(bvh_data) = self.sized_buffers.cpu_bvh_nodes_buffer.read() {
+                                if let Some(root) = bvh_data.get(0) {
+                                    let finite = root.min_bounds.x.is_finite()
+                                        && root.min_bounds.y.is_finite()
+                                        && root.min_bounds.z.is_finite()
+                                        && root.min_bounds.w.is_finite()
+                                        && root.max_bounds.x.is_finite()
+                                        && root.max_bounds.y.is_finite()
+                                        && root.max_bounds.z.is_finite()
+                                        && root.max_bounds.w.is_finite();
+                                    let ordered = root.min_bounds.x <= root.max_bounds.x
+                                        && root.min_bounds.y <= root.max_bounds.y
+                                        && root.min_bounds.z <= root.max_bounds.z
+                                        && root.min_bounds.w <= root.max_bounds.w;
+                                    if let Some(summary) =
+                                        summarize_bvh_topology(&bvh_data, prev_non_voxel_tets)
+                                    {
+                                        let root_child_valid = root.is_leaf != 0
+                                            || (root.left_child < summary.total_nodes as u32
+                                                && root.right_child < summary.total_nodes as u32);
+                                        let root_ready =
+                                            root.is_leaf != 0 || root.atomic_visit_count >= 2;
+                                        let topology_anomaly = !finite
+                                            || !ordered
+                                            || !root_child_valid
+                                            || !root_ready
+                                            || summary.invalid_child_edges > 0
+                                            || summary.self_child_edges > 0
+                                            || summary.nodes_with_multiple_parents > 0
+                                            || summary.nodes_without_parent_excluding_root > 0
+                                            || summary.unreachable_internal_nodes > 0
+                                            || summary.unreachable_leaf_nodes > 0
+                                            || summary.leaf_invalid_tetra_indices > 0
+                                            || summary.leaf_duplicate_tetra_indices > 0
+                                            || summary.leaf_missing_tetra_indices > 0
+                                            || summary.internal_ready < summary.internal_nodes;
+                                        if self.vte_entity_diag_verbose || topology_anomaly {
+                                            eprintln!(
+                                                "[vte-entity-diag][bvh-topology] frame={} prev_frame={} tets={} total_nodes={} internal_ready={}/{} root_ready={} root_finite={} root_ordered={} root_child_valid={} invalid_child_edges={} self_child_edges={} no_parent_ex_root={} multi_parent={} unreachable_internal={} unreachable_leaf={} leaf_invalid_tet={} leaf_duplicate_tet={} leaf_missing_tet={} root(is_leaf={}, visit={}, left={}, right={}) min=({:.3},{:.3},{:.3},{:.3}) max=({:.3},{:.3},{:.3},{:.3})",
+                                                self.frames_rendered,
+                                                self.frames_rendered.saturating_sub(1),
+                                                prev_non_voxel_tets,
+                                                summary.total_nodes,
+                                                summary.internal_ready,
+                                                summary.internal_nodes,
+                                                root_ready,
+                                                finite,
+                                                ordered,
+                                                root_child_valid,
+                                                summary.invalid_child_edges,
+                                                summary.self_child_edges,
+                                                summary.nodes_without_parent_excluding_root,
+                                                summary.nodes_with_multiple_parents,
+                                                summary.unreachable_internal_nodes,
+                                                summary.unreachable_leaf_nodes,
+                                                summary.leaf_invalid_tetra_indices,
+                                                summary.leaf_duplicate_tetra_indices,
+                                                summary.leaf_missing_tetra_indices,
+                                                root.is_leaf,
+                                                root.atomic_visit_count,
+                                                root.left_child,
+                                                root.right_child,
+                                                root.min_bounds.x,
+                                                root.min_bounds.y,
+                                                root.min_bounds.z,
+                                                root.min_bounds.w,
+                                                root.max_bounds.x,
+                                                root.max_bounds.y,
+                                                root.max_bounds.z,
+                                                root.max_bounds.w,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let Ok(root_data) = self.sized_buffers.cpu_bvh_root_buffer.read() {
+                            if let Some(root) = root_data.get(0) {
+                                let finite = root.min_bounds.x.is_finite()
+                                    && root.min_bounds.y.is_finite()
+                                    && root.min_bounds.z.is_finite()
+                                    && root.min_bounds.w.is_finite()
+                                    && root.max_bounds.x.is_finite()
+                                    && root.max_bounds.y.is_finite()
+                                    && root.max_bounds.z.is_finite()
+                                    && root.max_bounds.w.is_finite();
+                                let ordered = root.min_bounds.x <= root.max_bounds.x
+                                    && root.min_bounds.y <= root.max_bounds.y
+                                    && root.min_bounds.z <= root.max_bounds.z
+                                    && root.min_bounds.w <= root.max_bounds.w;
+                                let total_nodes =
+                                    prev_non_voxel_tets.saturating_mul(2).saturating_sub(1) as u32;
+                                let child_valid = root.is_leaf != 0
+                                    || (root.left_child < total_nodes
+                                        && root.right_child < total_nodes);
+                                if self.vte_entity_diag_verbose
+                                    || !finite
+                                    || !ordered
+                                    || !child_valid
+                                {
+                                    eprintln!(
+                                        "[vte-entity-diag] frame={} prev_frame={} bvh_root finite={} ordered={} child_valid={} is_leaf={} left={} right={} tets={} min=({:.3},{:.3},{:.3},{:.3}) max=({:.3},{:.3},{:.3},{:.3})",
+                                        self.frames_rendered,
+                                        self.frames_rendered.saturating_sub(1),
+                                        finite,
+                                        ordered,
+                                        child_valid,
+                                        root.is_leaf,
+                                        root.left_child,
+                                        root.right_child,
+                                        prev_non_voxel_tets,
+                                        root.min_bounds.x,
+                                        root.min_bounds.y,
+                                        root.min_bounds.z,
+                                        root.min_bounds.w,
+                                        root.max_bounds.x,
+                                        root.max_bounds.y,
+                                        root.max_bounds.z,
+                                        root.max_bounds.w,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

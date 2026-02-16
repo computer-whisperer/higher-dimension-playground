@@ -379,12 +379,12 @@ void mainBVHInitLeaves(uint3 globalId : SV_DispatchThreadID)
     uint numInternalNodes = numLeaves - 1;
     uint leafIdx = numInternalNodes + idx;
 
-    // Initialize leaf node - parent will be set by internal node construction
+    // Initialize leaf node.
     bvhNodes[leafIdx].minBounds = float4(0);
     bvhNodes[leafIdx].maxBounds = float4(0);
     bvhNodes[leafIdx].leftChild = BVH_INVALID_INDEX;
     bvhNodes[leafIdx].rightChild = BVH_INVALID_INDEX;
-    bvhNodes[leafIdx].parent = BVH_INVALID_INDEX; // Will be overwritten by internal node construction
+    bvhNodes[leafIdx].parent = BVH_INVALID_INDEX;
     bvhNodes[leafIdx].isLeaf = 1;
     bvhNodes[leafIdx].tetrahedronIndex = mortonCodes[idx].tetrahedronIndex;
     bvhNodes[leafIdx].atomicVisitCount = 0;
@@ -434,25 +434,20 @@ void mainBVHBuildTree(uint3 globalId : SV_DispatchThreadID)
 
     int j = int(idx) + l * d;
 
-    // Find the split position
-    // NOTE: gamma must be in range [min(idx,j), max(idx,j) - 1] to leave room for right subtree
-    // This means s must be in range [0, l - 1], so we use maxS = l - 1
+    // Find the split position using Karras' binary search refinement.
+    // The (s + t) probe naturally clamps because delta(idx, j) == deltaNode,
+    // so the final step cannot cross the range endpoint.
     int deltaNode = delta(idx, j, numLeaves);
     int s = 0;
-    int maxS = max(l - 1, 0);  // Prevent s from reaching l (which would put gamma out of range)
-
-    for (int t2 = (maxS + 1) / 2; t2 >= 1; t2 = (t2 + 1) / 2)
+    int t2 = l;
+    while (t2 > 1)
     {
-        int testS = s + t2;
-        if (testS <= maxS)
+        t2 = (t2 + 1) / 2;
+        int splitIdx = int(idx) + (s + t2) * d;
+        if (delta(idx, splitIdx, numLeaves) > deltaNode)
         {
-            int splitIdx = int(idx) + testS * d;
-            if (delta(idx, splitIdx, numLeaves) > deltaNode)
-            {
-                s = testS;
-            }
+            s += t2;
         }
-        if (t2 == 1) break;
     }
 
     int gamma = int(idx) + s * d + min(d, 0);
@@ -502,16 +497,77 @@ void mainBVHBuildTree(uint3 globalId : SV_DispatchThreadID)
     uint dummy;
     InterlockedExchange(bvhNodes[idx].atomicVisitCount, 0, dummy);
 
-    // Set parent pointers
-    bvhNodes[leftChild].parent = idx;
-    bvhNodes[rightChild].parent = idx;
+    // Parent links are populated in a dedicated pass (`mainBVHLinkParents`).
+    // Keep this pass write-local to avoid cross-thread child-node races.
+}
+
+void computeTetrahedronAabb(uint tetIdx, out float4 minB, out float4 maxB)
+{
+    Tetrahedron tet = outputTetrahedrons[tetIdx];
+    minB = min(min(tet.vertexPositions[0], tet.vertexPositions[1]),
+               min(tet.vertexPositions[2], tet.vertexPositions[3]));
+    maxB = max(max(tet.vertexPositions[0], tet.vertexPositions[1]),
+               max(tet.vertexPositions[2], tet.vertexPositions[3]));
 }
 
 // ============================================================================
-// Phase 5: Compute AABBs Bottom-Up (Split into two dispatches for proper sync)
+// Phase 5: Link parent pointers
 // ============================================================================
 
-// Phase 5a: Compute leaf AABBs only (separate dispatch)
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mainBVHLinkParents(uint3 globalId : SV_DispatchThreadID)
+{
+    WorkingData workingData = workingDataBuffer[0];
+    uint numLeaves = workingData.totalNumTetrahedrons;
+    uint idx = globalId.x;
+
+    if (numLeaves == 0)
+        return;
+
+    if (numLeaves == 1)
+    {
+        if (idx == 0)
+        {
+            bvhNodes[0].parent = BVH_INVALID_INDEX;
+            uint dummy;
+            InterlockedExchange(bvhNodes[0].atomicVisitCount, 0, dummy);
+        }
+        return;
+    }
+
+    uint numInternalNodes = numLeaves - 1;
+    if (idx >= numInternalNodes)
+        return;
+
+    uint totalNodes = numInternalNodes + numLeaves;
+
+    uint dummy;
+    InterlockedExchange(bvhNodes[idx].atomicVisitCount, 0, dummy);
+    if (idx == 0)
+    {
+        bvhNodes[idx].parent = BVH_INVALID_INDEX;
+    }
+
+    uint left = bvhNodes[idx].leftChild;
+    uint right = bvhNodes[idx].rightChild;
+
+    if (left < totalNodes)
+    {
+        bvhNodes[left].parent = idx;
+    }
+    if (right < totalNodes)
+    {
+        bvhNodes[right].parent = idx;
+    }
+}
+
+// ============================================================================
+// Phase 6: Compute leaf AABBs and propagate to root in one dispatch
+// ============================================================================
+
+// Legacy leaf-AABB kernel kept for diagnostics/back-compat; the runtime path now
+// uses `mainBVHPropagateAABBs` directly.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mainBVHComputeLeafAABBs(uint3 globalId : SV_DispatchThreadID)
@@ -525,17 +581,10 @@ void mainBVHComputeLeafAABBs(uint3 globalId : SV_DispatchThreadID)
 
     if (numLeaves == 1)
     {
-        // Single node case - leaf is at index 0
         if (idx == 0)
         {
-            uint tetIdx = bvhNodes[0].tetrahedronIndex;
-            Tetrahedron tet = outputTetrahedrons[tetIdx];
-
-            float4 minB = min(min(tet.vertexPositions[0], tet.vertexPositions[1]),
-                              min(tet.vertexPositions[2], tet.vertexPositions[3]));
-            float4 maxB = max(max(tet.vertexPositions[0], tet.vertexPositions[1]),
-                              max(tet.vertexPositions[2], tet.vertexPositions[3]));
-
+            float4 minB, maxB;
+            computeTetrahedronAabb(bvhNodes[0].tetrahedronIndex, minB, maxB);
             bvhNodes[0].minBounds = minB;
             bvhNodes[0].maxBounds = maxB;
         }
@@ -545,23 +594,14 @@ void mainBVHComputeLeafAABBs(uint3 globalId : SV_DispatchThreadID)
     uint numInternalNodes = numLeaves - 1;
     uint leafIdx = numInternalNodes + idx;
 
-    // Compute leaf AABB from tetrahedron
-    uint tetIdx = bvhNodes[leafIdx].tetrahedronIndex;
-    Tetrahedron tet = outputTetrahedrons[tetIdx];
-
-    float4 minB = min(min(tet.vertexPositions[0], tet.vertexPositions[1]),
-                      min(tet.vertexPositions[2], tet.vertexPositions[3]));
-    float4 maxB = max(max(tet.vertexPositions[0], tet.vertexPositions[1]),
-                      max(tet.vertexPositions[2], tet.vertexPositions[3]));
-
+    float4 minB, maxB;
+    computeTetrahedronAabb(bvhNodes[leafIdx].tetrahedronIndex, minB, maxB);
     bvhNodes[leafIdx].minBounds = minB;
     bvhNodes[leafIdx].maxBounds = maxB;
 }
 
-// Phase 5b: Propagate AABBs from leaves to root
-// Uses atomicVisitCount as a validity marker (2 = both children processed, AABB is valid)
-// Must be called log2(N) times to fully propagate to root
-// Each dispatch processes all internal nodes whose children have both been marked as valid
+// Each leaf thread computes its own AABB, then climbs parent links.
+// The second child to arrive at each parent computes that internal-node AABB and continues.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mainBVHPropagateAABBs(uint3 globalId : SV_DispatchThreadID)
@@ -570,64 +610,61 @@ void mainBVHPropagateAABBs(uint3 globalId : SV_DispatchThreadID)
     uint numLeaves = workingData.totalNumTetrahedrons;
     uint idx = globalId.x;
 
-    // Edge cases
-    if (numLeaves <= 1)
+    if (numLeaves == 0 || idx >= numLeaves)
         return;
+
+    if (numLeaves == 1)
+    {
+        if (idx == 0)
+        {
+            float4 minB, maxB;
+            computeTetrahedronAabb(bvhNodes[0].tetrahedronIndex, minB, maxB);
+            bvhNodes[0].minBounds = minB;
+            bvhNodes[0].maxBounds = maxB;
+            uint dummy;
+            InterlockedExchange(bvhNodes[0].atomicVisitCount, 2, dummy);
+        }
+        return;
+    }
 
     uint numInternalNodes = numLeaves - 1;
-
-    // Each thread handles one internal node
-    if (idx >= numInternalNodes)
+    uint leafIdx = numInternalNodes + idx;
+    uint tetIdx = bvhNodes[leafIdx].tetrahedronIndex;
+    if (tetIdx >= numLeaves)
         return;
 
-    // Check if this node already has a valid AABB (atomicVisitCount >= 2)
-    // Use atomic load to ensure we see the latest value
-    uint myCount;
-    InterlockedAdd(bvhNodes[idx].atomicVisitCount, 0, myCount);
-    if (myCount >= 2)
-        return; // Already processed
+    float4 leafMin, leafMax;
+    computeTetrahedronAabb(tetIdx, leafMin, leafMax);
+    bvhNodes[leafIdx].minBounds = leafMin;
+    bvhNodes[leafIdx].maxBounds = leafMax;
+    DeviceMemoryBarrier();
 
-    // Check if both children have valid AABBs
-    uint left = bvhNodes[idx].leftChild;
-    uint right = bvhNodes[idx].rightChild;
+    uint nodeIdx = leafIdx;
+    while (true)
+    {
+        uint parentIdx = bvhNodes[nodeIdx].parent;
+        if (parentIdx == BVH_INVALID_INDEX)
+            break;
 
-    if (left == BVH_INVALID_INDEX || right == BVH_INVALID_INDEX)
-        return;
+        uint priorCount;
+        InterlockedAdd(bvhNodes[parentIdx].atomicVisitCount, 1u, priorCount);
+        if (priorCount != 1u)
+        {
+            break; // First child arrived (or already processed) - sibling will continue upward.
+        }
 
-    // Use the isLeaf field directly instead of index comparison
-    // This is more reliable as it's explicitly set during tree construction
-    bool leftValid;
-    if (bvhNodes[left].isLeaf != 0) {
-        leftValid = true; // Leaf - always valid (AABB computed in leaf dispatch)
-    } else {
-        uint leftCount;
-        InterlockedAdd(bvhNodes[left].atomicVisitCount, 0, leftCount);
-        leftValid = (leftCount >= 2);
+        uint left = bvhNodes[parentIdx].leftChild;
+        uint right = bvhNodes[parentIdx].rightChild;
+        if (left == BVH_INVALID_INDEX || right == BVH_INVALID_INDEX)
+        {
+            break;
+        }
+
+        DeviceMemoryBarrier();
+        bvhNodes[parentIdx].minBounds = min(bvhNodes[left].minBounds, bvhNodes[right].minBounds);
+        bvhNodes[parentIdx].maxBounds = max(bvhNodes[left].maxBounds, bvhNodes[right].maxBounds);
+        DeviceMemoryBarrier();
+
+        nodeIdx = parentIdx;
     }
-
-    bool rightValid;
-    if (bvhNodes[right].isLeaf != 0) {
-        rightValid = true; // Leaf - always valid
-    } else {
-        uint rightCount;
-        InterlockedAdd(bvhNodes[right].atomicVisitCount, 0, rightCount);
-        rightValid = (rightCount >= 2);
-    }
-
-    if (!leftValid || !rightValid)
-        return; // Children not ready yet, will try again in next dispatch
-
-    // Both children are valid - compute this node's AABB
-    float4 leftMin = bvhNodes[left].minBounds;
-    float4 leftMax = bvhNodes[left].maxBounds;
-    float4 rightMin = bvhNodes[right].minBounds;
-    float4 rightMax = bvhNodes[right].maxBounds;
-
-    bvhNodes[idx].minBounds = min(leftMin, rightMin);
-    bvhNodes[idx].maxBounds = max(leftMax, rightMax);
-
-    // Mark this node as valid using atomic exchange to ensure visibility
-    uint oldVal;
-    InterlockedExchange(bvhNodes[idx].atomicVisitCount, 2, oldVal);
 }
-
