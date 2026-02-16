@@ -21,6 +21,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   4. diff old/new payload maps via `RegionTreeRefreshResult` for load/unload
 - Stream refresh gating now uses per-player near-bounds `RegionClockMap` snapshots (instead of global `world_revision`) to avoid unnecessary out-of-area refresh work.
 - Server now emits `WorldRegionClockUpdate` messages carrying updated region clocks on authoritative voxel edits/explosions.
+- Stream sync now also sends near-bounds region-clock snapshots (same message) so clients can establish/refresh local clock baselines.
 - Authoritative voxel edits now route through `ServerWorldField::apply_voxel_edit`.
 - Region tree naming is now unified in runtime-facing code:
   - `RegionChunkTree` (removed `RegionOverrideTree` alias)

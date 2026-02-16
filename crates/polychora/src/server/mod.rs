@@ -2440,6 +2440,25 @@ fn collect_region_clocks_in_chunk_bounds(
     out
 }
 
+fn region_clock_payloads_from_map(clocks: &RegionClockMap) -> Vec<RegionClockPayload> {
+    let mut out: Vec<RegionClockPayload> = clocks
+        .iter()
+        .map(|(region_id, clock)| RegionClockPayload {
+            region_id: [region_id.x, region_id.y, region_id.z, region_id.w],
+            clock: *clock,
+        })
+        .collect();
+    out.sort_unstable_by_key(|update| {
+        (
+            update.region_id[3],
+            update.region_id[2],
+            update.region_id[1],
+            update.region_id[0],
+        )
+    });
+    out
+}
+
 fn plan_stream_window_update(
     state: &mut ServerState,
     client_id: u64,
@@ -2664,13 +2683,20 @@ fn sync_streamed_chunks_for_client(
                 mid_chunk_radius,
                 far_chunk_radius,
             );
-            update
+            update.map(|(revision, loads, unloads)| {
+                (
+                    revision,
+                    loads,
+                    unloads,
+                    region_clock_payloads_from_map(&current_region_clocks),
+                )
+            })
         } else {
             None
         }
     };
 
-    let Some((revision, chunk_loads, chunk_unloads)) = update else {
+    let Some((revision, chunk_loads, chunk_unloads, region_clock_snapshot)) = update else {
         return;
     };
 
@@ -2681,6 +2707,12 @@ fn sync_streamed_chunks_for_client(
     let Some(sender) = sender else {
         return;
     };
+
+    if !region_clock_snapshot.is_empty() {
+        let _ = sender.send(ServerMessage::WorldRegionClockUpdate {
+            updates: region_clock_snapshot,
+        });
+    }
 
     if !chunk_loads.is_empty() {
         let mut batch = Vec::with_capacity(STREAM_MESSAGE_CHUNK_LIMIT);
