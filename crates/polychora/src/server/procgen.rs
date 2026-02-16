@@ -1,9 +1,9 @@
 use crate::shared::voxel::{Chunk, ChunkPos, VoxelType, CHUNK_SIZE};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const STRUCTURE_CELL_SIZE: i32 = 32;
 const STRUCTURE_CELL_JITTER: i32 = 10;
@@ -67,6 +67,7 @@ const MAZE_LEVEL_HEIGHT: i32 = 4;
 const MAZE_WORLD_Y_BASE: i32 = 0;
 const MAZE_WORLD_Y_JITTER: i32 = 8;
 const MAZE_MAX_HALF_SPAN_XZW: i32 = (MAZE_GRID_XZW_CELLS_MAX * MAZE_STRIDE + 1) / 2;
+const MAZE_LAYOUT_CACHE_CAPACITY: usize = 96;
 const MAZE_FLOOR_MATERIAL: u8 = 55;
 const MAZE_CEILING_MATERIAL: u8 = 60;
 const MAZE_WALL_MATERIAL: u8 = 62;
@@ -1153,6 +1154,107 @@ impl MazeTopology {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct MazeLayoutCacheKey {
+    origin: [i32; 4],
+    layout_seed: u64,
+    shape: MazeShape,
+}
+
+#[derive(Clone, Debug)]
+struct MazeCompiledLayout {
+    topology: MazeTopology,
+    x_neg_gate: [i32; 3],
+    x_pos_gate: [i32; 3],
+    z_neg_gate: [i32; 3],
+    z_pos_gate: [i32; 3],
+    w_neg_gate: [i32; 3],
+    w_pos_gate: [i32; 3],
+    center_u: [i32; 4],
+}
+
+#[derive(Clone, Debug)]
+struct MazeLayoutCacheEntry {
+    layout: Arc<MazeCompiledLayout>,
+    last_used: u64,
+}
+
+#[derive(Clone, Debug)]
+struct MazeLayoutCache {
+    entries: HashMap<MazeLayoutCacheKey, MazeLayoutCacheEntry>,
+    next_use_id: u64,
+}
+
+impl MazeLayoutCache {
+    fn next_use_id(&mut self) -> u64 {
+        self.next_use_id = self.next_use_id.wrapping_add(1);
+        if self.next_use_id == 0 {
+            self.next_use_id = 1;
+        }
+        self.next_use_id
+    }
+
+    fn evict_lru_entry(&mut self) {
+        let Some(stale_key) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| *key)
+        else {
+            return;
+        };
+        self.entries.remove(&stale_key);
+    }
+
+    fn get_or_insert(&mut self, key: MazeLayoutCacheKey) -> Arc<MazeCompiledLayout> {
+        let use_id = self.next_use_id();
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.last_used = use_id;
+            return Arc::clone(&entry.layout);
+        }
+
+        let layout = Arc::new(maze_compile_layout(key.layout_seed, key.shape));
+        self.entries.insert(
+            key,
+            MazeLayoutCacheEntry {
+                layout: Arc::clone(&layout),
+                last_used: use_id,
+            },
+        );
+        while self.entries.len() > MAZE_LAYOUT_CACHE_CAPACITY {
+            self.evict_lru_entry();
+        }
+        layout
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.next_use_id = 0;
+    }
+}
+
+impl Default for MazeLayoutCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_use_id: 0,
+        }
+    }
+}
+
+static MAZE_LAYOUT_CACHE: OnceLock<Mutex<MazeLayoutCache>> = OnceLock::new();
+
+fn maze_layout_cache() -> &'static Mutex<MazeLayoutCache> {
+    MAZE_LAYOUT_CACHE.get_or_init(|| Mutex::new(MazeLayoutCache::default()))
+}
+
+pub fn clear_runtime_maze_layout_cache() {
+    if let Some(cache) = MAZE_LAYOUT_CACHE.get() {
+        let mut guard = cache.lock().expect("maze layout cache lock poisoned");
+        guard.clear();
+    }
+}
+
 fn maze_axis_salt(axis: usize) -> u64 {
     match axis {
         0 => MAZE_EDGE_X_SALT,
@@ -1303,6 +1405,60 @@ fn maze_build_topology(layout_seed: u64, shape: MazeShape) -> MazeTopology {
     topology
 }
 
+fn maze_compile_layout(layout_seed: u64, shape: MazeShape) -> MazeCompiledLayout {
+    MazeCompiledLayout {
+        topology: maze_build_topology(layout_seed, shape),
+        x_neg_gate: [
+            maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_Y_SALT, shape.grid_cells[1]),
+            maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_Z_SALT, shape.grid_cells[2]),
+            maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_W_SALT, shape.grid_cells[3]),
+        ],
+        x_pos_gate: [
+            maze_gate_cell(layout_seed, MAZE_GATE_X_POS_Y_SALT, shape.grid_cells[1]),
+            maze_gate_cell(layout_seed, MAZE_GATE_X_POS_Z_SALT, shape.grid_cells[2]),
+            maze_gate_cell(layout_seed, MAZE_GATE_X_POS_W_SALT, shape.grid_cells[3]),
+        ],
+        z_neg_gate: [
+            maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_X_SALT, shape.grid_cells[0]),
+            maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_Y_SALT, shape.grid_cells[1]),
+            maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_W_SALT, shape.grid_cells[3]),
+        ],
+        z_pos_gate: [
+            maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_X_SALT, shape.grid_cells[0]),
+            maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_Y_SALT, shape.grid_cells[1]),
+            maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_W_SALT, shape.grid_cells[3]),
+        ],
+        w_neg_gate: [
+            maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_X_SALT, shape.grid_cells[0]),
+            maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_Y_SALT, shape.grid_cells[1]),
+            maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_Z_SALT, shape.grid_cells[2]),
+        ],
+        w_pos_gate: [
+            maze_gate_cell(layout_seed, MAZE_GATE_W_POS_X_SALT, shape.grid_cells[0]),
+            maze_gate_cell(layout_seed, MAZE_GATE_W_POS_Y_SALT, shape.grid_cells[1]),
+            maze_gate_cell(layout_seed, MAZE_GATE_W_POS_Z_SALT, shape.grid_cells[2]),
+        ],
+        center_u: [
+            (shape.grid_cells[0] / 2) * MAZE_STRIDE + MAZE_STRIDE / 2,
+            (shape.grid_cells[1] / 2) * MAZE_LEVEL_HEIGHT + MAZE_LEVEL_HEIGHT / 2,
+            (shape.grid_cells[2] / 2) * MAZE_STRIDE + MAZE_STRIDE / 2,
+            (shape.grid_cells[3] / 2) * MAZE_STRIDE + MAZE_STRIDE / 2,
+        ],
+    }
+}
+
+fn maze_compiled_layout_for_placement(placement: MazePlacement) -> Arc<MazeCompiledLayout> {
+    let key = MazeLayoutCacheKey {
+        origin: placement.origin,
+        layout_seed: placement.layout_seed,
+        shape: placement.shape,
+    };
+    let mut cache = maze_layout_cache()
+        .lock()
+        .expect("maze layout cache lock poisoned");
+    cache.get_or_insert(key)
+}
+
 fn collect_maze_placements_for_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Vec<MazePlacement> {
     let (maze_world_min_y, maze_world_max_y) = maze_world_y_bounds();
     let maze_min_chunk_y = maze_world_min_y.div_euclid(CHUNK_SIZE as i32);
@@ -1385,6 +1541,15 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
     }
 
     let shape = placement.shape;
+    let compiled_layout = maze_compiled_layout_for_placement(placement);
+    let topology = &compiled_layout.topology;
+    let x_neg_gate = compiled_layout.x_neg_gate;
+    let x_pos_gate = compiled_layout.x_pos_gate;
+    let z_neg_gate = compiled_layout.z_neg_gate;
+    let z_pos_gate = compiled_layout.z_pos_gate;
+    let w_neg_gate = compiled_layout.w_neg_gate;
+    let w_pos_gate = compiled_layout.w_pos_gate;
+    let center_u = compiled_layout.center_u;
     let (maze_min, maze_max) = maze_bounds(placement.origin, shape);
     let mut loop_min = [0i32; 4];
     let mut loop_max = [0i32; 4];
@@ -1395,45 +1560,6 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
             return;
         }
     }
-
-    let layout_seed = placement.layout_seed;
-    let topology = maze_build_topology(layout_seed, shape);
-    let x_neg_gate = [
-        maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_Y_SALT, shape.grid_cells[1]),
-        maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_Z_SALT, shape.grid_cells[2]),
-        maze_gate_cell(layout_seed, MAZE_GATE_X_NEG_W_SALT, shape.grid_cells[3]),
-    ];
-    let x_pos_gate = [
-        maze_gate_cell(layout_seed, MAZE_GATE_X_POS_Y_SALT, shape.grid_cells[1]),
-        maze_gate_cell(layout_seed, MAZE_GATE_X_POS_Z_SALT, shape.grid_cells[2]),
-        maze_gate_cell(layout_seed, MAZE_GATE_X_POS_W_SALT, shape.grid_cells[3]),
-    ];
-    let z_neg_gate = [
-        maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_X_SALT, shape.grid_cells[0]),
-        maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_Y_SALT, shape.grid_cells[1]),
-        maze_gate_cell(layout_seed, MAZE_GATE_Z_NEG_W_SALT, shape.grid_cells[3]),
-    ];
-    let z_pos_gate = [
-        maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_X_SALT, shape.grid_cells[0]),
-        maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_Y_SALT, shape.grid_cells[1]),
-        maze_gate_cell(layout_seed, MAZE_GATE_Z_POS_W_SALT, shape.grid_cells[3]),
-    ];
-    let w_neg_gate = [
-        maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_X_SALT, shape.grid_cells[0]),
-        maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_Y_SALT, shape.grid_cells[1]),
-        maze_gate_cell(layout_seed, MAZE_GATE_W_NEG_Z_SALT, shape.grid_cells[2]),
-    ];
-    let w_pos_gate = [
-        maze_gate_cell(layout_seed, MAZE_GATE_W_POS_X_SALT, shape.grid_cells[0]),
-        maze_gate_cell(layout_seed, MAZE_GATE_W_POS_Y_SALT, shape.grid_cells[1]),
-        maze_gate_cell(layout_seed, MAZE_GATE_W_POS_Z_SALT, shape.grid_cells[2]),
-    ];
-    let center_u = [
-        (shape.grid_cells[0] / 2) * MAZE_STRIDE + MAZE_STRIDE / 2,
-        (shape.grid_cells[1] / 2) * MAZE_LEVEL_HEIGHT + MAZE_LEVEL_HEIGHT / 2,
-        (shape.grid_cells[2] / 2) * MAZE_STRIDE + MAZE_STRIDE / 2,
-        (shape.grid_cells[3] / 2) * MAZE_STRIDE + MAZE_STRIDE / 2,
-    ];
 
     for wx in loop_min[0]..=loop_max[0] {
         for wy in loop_min[1]..=loop_max[1] {

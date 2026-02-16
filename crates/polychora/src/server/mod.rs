@@ -4647,6 +4647,7 @@ fn initialize_state(
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<(SharedState, Instant)> {
     let start = Instant::now();
+    procgen::clear_runtime_maze_layout_cache();
     let loaded = load_or_init_world_state(&config.world_file, config.world_seed)?;
     let save_generation = loaded.manifest.current_generation;
     let last_persisted_ms = loaded.manifest.last_modified_ms;
