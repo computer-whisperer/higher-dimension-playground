@@ -585,6 +585,7 @@ fn run_inspect_v3(input: PathBuf) -> io::Result<()> {
             EntityKind::TestDrifter => "test_drifter",
             EntityKind::MobSeeker => "mob_seeker",
             EntityKind::MobCreeper4d => "mob_creeper4d",
+            EntityKind::MobPhaseSpider => "mob_phase_spider",
         };
         *entity_kind_counts
             .entry(kind_label.to_string())

@@ -53,6 +53,11 @@ const MOB_NAV_PATH_MAX_SEARCH_RADIUS_CELLS: i32 = 42;
 const MOB_NAV_PATH_GOAL_ADJUST_RADIUS_CELLS: i32 = 6;
 const MOB_NAV_PATH_MAX_WAYPOINTS: usize = 96;
 const MOB_NAV_DEBUG_MIN_INTERVAL_MS: u64 = 250;
+const PHASE_SPIDER_PHASE_MIN_INTERVAL_MS: u64 = 720;
+const PHASE_SPIDER_PHASE_MAX_INTERVAL_MS: u64 = 1520;
+const PHASE_SPIDER_PHASE_DISTANCE: f32 = 2.8;
+const PHASE_SPIDER_PHASE_MIN_DISTANCE: f32 = 1.0;
+const PHASE_SPIDER_BLOCKED_PROGRESS_EPSILON: f32 = 0.08;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -108,6 +113,7 @@ struct PlayerState {
 enum MobArchetype {
     Seeker,
     Creeper4d,
+    PhaseSpider,
 }
 
 type MobNavCell = [i32; 4];
@@ -138,6 +144,7 @@ struct MobState {
     move_speed: f32,
     preferred_distance: f32,
     tangent_weight: f32,
+    next_phase_ms: u64,
     navigation: MobNavigationState,
 }
 
@@ -274,6 +281,21 @@ const SPAWNABLE_ENTITY_SPECS: &[SpawnableEntitySpec] = &[
         aliases: &["creeper", "4dcreeper", "mobcreeper4d"],
         default_scale: 0.78,
         default_material: 19,
+    },
+    SpawnableEntitySpec {
+        kind: EntityKind::MobPhaseSpider,
+        class: EntityClass::Mob,
+        mob_archetype: Some(MobArchetype::PhaseSpider),
+        canonical_name: "phase_spider",
+        aliases: &[
+            "phase_spider",
+            "phasespider",
+            "phase-spider",
+            "spider",
+            "mobphasespider",
+        ],
+        default_scale: 0.86,
+        default_material: 62,
     },
 ];
 
@@ -713,13 +735,26 @@ fn mob_archetype_defaults(archetype: MobArchetype) -> (f32, f32, f32) {
     match archetype {
         MobArchetype::Seeker => (2.9, 2.6, 0.64),
         MobArchetype::Creeper4d => (2.4, 3.8, 1.15),
+        MobArchetype::PhaseSpider => (3.1, 2.4, 0.95),
     }
+}
+
+fn phase_spider_next_phase_deadline(now_ms: u64, phase_offset: f32, phase_ticks: u32) -> u64 {
+    let span = PHASE_SPIDER_PHASE_MAX_INTERVAL_MS
+        .saturating_sub(PHASE_SPIDER_PHASE_MIN_INTERVAL_MS)
+        .max(1);
+    let wobble =
+        ((phase_offset * 31.0 + phase_ticks as f32 * 1.73).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+    now_ms.saturating_add(
+        PHASE_SPIDER_PHASE_MIN_INTERVAL_MS + ((span as f32 * wobble).round() as u64),
+    )
 }
 
 fn mob_archetype_for_kind(kind: EntityKind) -> Option<MobArchetype> {
     match kind {
         EntityKind::MobSeeker => Some(MobArchetype::Seeker),
         EntityKind::MobCreeper4d => Some(MobArchetype::Creeper4d),
+        EntityKind::MobPhaseSpider => Some(MobArchetype::PhaseSpider),
         EntityKind::PlayerAvatar
         | EntityKind::TestCube
         | EntityKind::TestRotor
@@ -1684,6 +1719,181 @@ fn simulate_creeper_step(
     (next_position, desired_dir)
 }
 
+fn simulate_phase_spider_step(
+    mob: &MobState,
+    position: [f32; 4],
+    target_position: Option<[f32; 4]>,
+    path_following: bool,
+    simple_steer: bool,
+    now_ms: u64,
+    previous_update_ms: u64,
+) -> ([f32; 4], [f32; 4]) {
+    let dt_s = (now_ms.saturating_sub(previous_update_ms)).max(1) as f32 * 0.001;
+    let t_s = now_ms as f32 * 0.001;
+    let (desired_dir, speed_factor) = if let Some(target) = target_position {
+        let to_target = [
+            target[0] - position[0],
+            target[1] - position[1],
+            target[2] - position[2],
+            target[3] - position[3],
+        ];
+        let distance = distance4_sq(target, position).sqrt();
+        let direct = normalize4_or_default(to_target, [0.0, 0.0, 1.0, 0.0]);
+        if path_following {
+            let phase = t_s * 6.8 + mob.phase_offset;
+            let tangent = normalize4_or_default(
+                [direct[3], 0.0, -direct[0], direct[2]],
+                [-direct[2], direct[3], direct[0], -direct[1]],
+            );
+            let lateral_scale = if simple_steer { 0.0 } else { 0.18 };
+            let desired = normalize4_or_default(
+                [
+                    direct[0] + tangent[0] * lateral_scale * phase.sin(),
+                    direct[1] + tangent[1] * lateral_scale * (phase * 0.7).sin(),
+                    direct[2] + tangent[2] * lateral_scale * phase.sin(),
+                    direct[3] + tangent[3] * lateral_scale * (phase * 0.9).cos(),
+                ],
+                direct,
+            );
+            let speed = if distance > MOB_NAV_PATH_NODE_REACH_DISTANCE * 1.4 {
+                1.32
+            } else {
+                0.78
+            };
+            (desired, speed)
+        } else if simple_steer {
+            let speed = if distance > mob.preferred_distance {
+                1.20
+            } else {
+                0.74
+            };
+            (direct, speed)
+        } else {
+            let phase = t_s * 5.2 + mob.phase_offset;
+            let strafe_a = normalize4_or_default(
+                [-direct[2], direct[3], direct[0], -direct[1]],
+                [direct[3], 0.0, -direct[0], direct[1]],
+            );
+            let strafe_b = normalize4_or_default(
+                [direct[1], -direct[0], direct[3], -direct[2]],
+                [0.0, direct[2], -direct[1], direct[0]],
+            );
+            let strafe_mix = [
+                strafe_a[0] * phase.sin() + strafe_b[0] * phase.cos(),
+                strafe_a[1] * phase.sin() + strafe_b[1] * phase.cos(),
+                strafe_a[2] * phase.sin() + strafe_b[2] * phase.cos(),
+                strafe_a[3] * phase.sin() + strafe_b[3] * phase.cos(),
+            ];
+            let stalk = if distance > mob.preferred_distance * 1.35 {
+                1.0
+            } else if distance < mob.preferred_distance * 0.65 {
+                -0.52
+            } else {
+                0.24
+            };
+            let vertical = 0.11 * (phase * 1.4).sin();
+            let desired = normalize4_or_default(
+                [
+                    direct[0] * stalk + strafe_mix[0] * mob.tangent_weight * 1.30,
+                    direct[1] * stalk + strafe_mix[1] * mob.tangent_weight * 1.30 + vertical,
+                    direct[2] * stalk + strafe_mix[2] * mob.tangent_weight * 1.30,
+                    direct[3] * stalk + strafe_mix[3] * mob.tangent_weight * 1.30,
+                ],
+                direct,
+            );
+            let speed = if distance > mob.preferred_distance {
+                1.15
+            } else {
+                0.70
+            };
+            (desired, speed)
+        }
+    } else {
+        let phase = t_s * 0.93 + mob.phase_offset;
+        (
+            normalize4_or_default(
+                [
+                    0.9 * phase.sin(),
+                    0.28 * (phase * 1.1).cos(),
+                    0.9 * phase.cos(),
+                    (phase * 1.6).sin(),
+                ],
+                [0.0, 0.0, 1.0, 0.0],
+            ),
+            0.44,
+        )
+    };
+
+    let step = mob.move_speed.max(0.1) * speed_factor * dt_s;
+    let next_position = [
+        position[0] + desired_dir[0] * step,
+        position[1] + desired_dir[1] * step,
+        position[2] + desired_dir[2] * step,
+        position[3] + desired_dir[3] * step,
+    ];
+    (next_position, desired_dir)
+}
+
+fn attempt_phase_spider_blink(
+    state: &ServerState,
+    position: [f32; 4],
+    forward: [f32; 4],
+    scale: f32,
+    phase_offset: f32,
+    now_ms: u64,
+) -> Option<[f32; 4]> {
+    let forward = normalize4_or_default(forward, [0.0, 0.0, 1.0, 0.0]);
+    let phase = now_ms as f32 * 0.0047 + phase_offset * 1.3;
+    let strafe_a = normalize4_or_default(
+        [-forward[2], forward[3], forward[0], -forward[1]],
+        [forward[3], 0.0, -forward[0], forward[1]],
+    );
+    let strafe_b = normalize4_or_default(
+        [forward[1], -forward[0], forward[3], -forward[2]],
+        [0.0, forward[2], -forward[1], forward[0]],
+    );
+    let drift = normalize4_or_default(
+        [
+            strafe_a[0] * phase.sin() + strafe_b[0] * phase.cos(),
+            strafe_a[1] * phase.sin() + strafe_b[1] * phase.cos(),
+            strafe_a[2] * phase.sin() + strafe_b[2] * phase.cos(),
+            strafe_a[3] * phase.sin() + strafe_b[3] * phase.cos(),
+        ],
+        strafe_a,
+    );
+    let blink_dir = normalize4_or_default(
+        [
+            forward[0] * 1.0 + drift[0] * 0.42,
+            forward[1] * 1.0 + drift[1] * 0.42,
+            forward[2] * 1.0 + drift[2] * 0.42,
+            forward[3] * 1.0 + drift[3] * 0.42,
+        ],
+        forward,
+    );
+
+    let radius = mob_collision_radius_for_scale(scale);
+    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let lift_primary = 0.16 + 0.12 * (phase * 0.8).sin().abs();
+    let lift_options = [lift_primary, 0.05, -0.08];
+
+    let mut distance = PHASE_SPIDER_PHASE_DISTANCE;
+    while distance >= PHASE_SPIDER_PHASE_MIN_DISTANCE {
+        for &lift in &lift_options {
+            let candidate = [
+                position[0] + blink_dir[0] * distance,
+                position[1] + blink_dir[1] * distance + lift,
+                position[2] + blink_dir[2] * distance,
+                position[3] + blink_dir[3] * distance,
+            ];
+            if !mob_collides_at(state, &mut cache, candidate, radius) {
+                return Some(candidate);
+            }
+        }
+        distance -= 0.55;
+    }
+    None
+}
+
 fn simulate_mobs(
     state: &mut ServerState,
     now_ms: u64,
@@ -1702,6 +1912,7 @@ fn simulate_mobs(
     let mut stale = Vec::new();
     let mut detonations = Vec::new();
     let mut navigation_updates = Vec::with_capacity(state.mobs.len());
+    let mut phase_deadline_updates = Vec::with_capacity(state.mobs.len());
     let mut updates = Vec::with_capacity(state.mobs.len());
     let mob_entity_ids: Vec<u64> = state.mobs.keys().copied().collect();
     for entity_id in mob_entity_ids {
@@ -1723,6 +1934,7 @@ fn simulate_mobs(
                     target[3],
                 ]
             }),
+            MobArchetype::PhaseSpider => nearest_target,
         };
         if mob.archetype == MobArchetype::Creeper4d {
             let should_detonate = player_positions.iter().any(|player_position| {
@@ -1734,7 +1946,7 @@ fn simulate_mobs(
                 continue;
             }
         }
-        let (target_position, path_following, navigation) = update_mob_navigation_state(
+        let (target_position, path_following, mut navigation) = update_mob_navigation_state(
             state,
             mob.navigation.clone(),
             mob.entity_id,
@@ -1745,7 +1957,6 @@ fn simulate_mobs(
             navigation_target,
             now_ms,
         );
-        navigation_updates.push((mob.entity_id, navigation));
         let (next_position, next_forward) = match mob.archetype {
             MobArchetype::Seeker => simulate_seeker_step(
                 &mob,
@@ -1765,15 +1976,82 @@ fn simulate_mobs(
                 now_ms,
                 snapshot.last_update_ms,
             ),
+            MobArchetype::PhaseSpider => simulate_phase_spider_step(
+                &mob,
+                snapshot.position,
+                target_position,
+                path_following,
+                state.mob_nav_simple_steer,
+                now_ms,
+                snapshot.last_update_ms,
+            ),
         };
-        let resolved_position =
+        let mut final_position =
             resolve_mob_collision(state, snapshot.position, next_position, snapshot.scale);
-        updates.push((mob.entity_id, resolved_position, next_forward));
+        let mut final_forward = next_forward;
+        if mob.archetype == MobArchetype::PhaseSpider && now_ms >= mob.next_phase_ms {
+            let attempted = distance4_sq(snapshot.position, next_position).sqrt();
+            let resolved = distance4_sq(snapshot.position, final_position).sqrt();
+            let blocked =
+                attempted > 0.12 && resolved + PHASE_SPIDER_BLOCKED_PROGRESS_EPSILON < attempted;
+            let should_phase = nearest_target.is_some() && (path_following || blocked);
+            if should_phase {
+                if let Some(phase_position) = attempt_phase_spider_blink(
+                    state,
+                    snapshot.position,
+                    next_forward,
+                    snapshot.scale,
+                    mob.phase_offset,
+                    now_ms,
+                ) {
+                    final_forward = normalize4_or_default(
+                        [
+                            phase_position[0] - snapshot.position[0],
+                            phase_position[1] - snapshot.position[1],
+                            phase_position[2] - snapshot.position[2],
+                            phase_position[3] - snapshot.position[3],
+                        ],
+                        next_forward,
+                    );
+                    final_position = phase_position;
+                    mob_nav_debug_log(
+                        &mut navigation,
+                        state.mob_nav_debug,
+                        now_ms,
+                        mob.entity_id,
+                        mob.archetype,
+                        &format!("mode=phase-blink success pos={:?}", phase_position),
+                    );
+                } else {
+                    mob_nav_debug_log(
+                        &mut navigation,
+                        state.mob_nav_debug,
+                        now_ms,
+                        mob.entity_id,
+                        mob.archetype,
+                        "mode=phase-blink fail (no valid destination)",
+                    );
+                }
+            }
+            let next_deadline = phase_spider_next_phase_deadline(
+                now_ms,
+                mob.phase_offset,
+                (mob.entity_id as u32) ^ (now_ms as u32),
+            );
+            phase_deadline_updates.push((mob.entity_id, next_deadline));
+        }
+        navigation_updates.push((mob.entity_id, navigation));
+        updates.push((mob.entity_id, final_position, final_forward));
     }
 
     for (entity_id, navigation) in navigation_updates {
         if let Some(mob) = state.mobs.get_mut(&entity_id) {
             mob.navigation = navigation;
+        }
+    }
+    for (entity_id, next_phase_ms) in phase_deadline_updates {
+        if let Some(mob) = state.mobs.get_mut(&entity_id) {
+            mob.next_phase_ms = next_phase_ms;
         }
     }
 
@@ -4246,6 +4524,9 @@ fn spawn_mob_entity(
         .map(|mob| mob.tangent_weight)
         .unwrap_or(default_tangent)
         .clamp(0.0, 2.0);
+    let initial_phase_tick_seed = (entity_id as u32).wrapping_mul(7477);
+    let next_phase_ms =
+        phase_spider_next_phase_deadline(now_ms, phase_offset, initial_phase_tick_seed);
     guard.mobs.insert(
         entity_id,
         MobState {
@@ -4255,6 +4536,7 @@ fn spawn_mob_entity(
             move_speed,
             preferred_distance,
             tangent_weight,
+            next_phase_ms,
             navigation: MobNavigationState::default(),
         },
     );
@@ -4301,7 +4583,10 @@ fn restore_persisted_entities(
                     );
                     restored = restored.saturating_add(1);
                 }
-                EntityKind::PlayerAvatar | EntityKind::MobSeeker | EntityKind::MobCreeper4d => {}
+                EntityKind::PlayerAvatar
+                | EntityKind::MobSeeker
+                | EntityKind::MobCreeper4d
+                | EntityKind::MobPhaseSpider => {}
             },
             EntityClass::Mob => {
                 let Some(default_archetype) = mob_archetype_for_kind(entry.kind) else {

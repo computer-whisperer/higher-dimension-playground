@@ -691,7 +691,7 @@ impl App {
     pub(super) fn remote_entity_instances(&self) -> Vec<common::ModelInstance> {
         let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
         ids.sort_unstable();
-        let mut instances = Vec::with_capacity(ids.len());
+        let mut instances = Vec::with_capacity(ids.len() * 8);
         for entity_id in ids {
             if let Some(entity) = self.remote_entities.get(&entity_id) {
                 match entity.kind {
@@ -796,6 +796,128 @@ impl App {
                                 entity.material as u32,
                             ],
                         ));
+                    }
+                    multiplayer::EntityKind::MobPhaseSpider => {
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        let anim_t = entity.last_received_at.elapsed().as_secs_f32() * 6.0
+                            + entity_id as f32 * 0.23;
+                        let body_bob = 0.05 * (anim_t * 0.7).sin();
+                        let body_center = offset_point_along_basis(
+                            entity.render_position,
+                            &basis,
+                            [0.0, 0.08 + body_bob, 0.0, 0.0],
+                        );
+                        instances.push(build_centered_model_instance(
+                            body_center,
+                            &basis,
+                            [
+                                entity.scale * 0.88,
+                                entity.scale * 0.36,
+                                entity.scale * 0.78,
+                                entity.scale * 0.96,
+                            ],
+                            [
+                                (entity.material.saturating_add(2)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(4)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(3)) as u32,
+                                entity.material as u32,
+                                (entity.material.saturating_add(5)) as u32,
+                                entity.material as u32,
+                            ],
+                        ));
+
+                        let core_center =
+                            offset_point_along_basis(body_center, &basis, [0.0, 0.11, 0.0, 0.0]);
+                        instances.push(build_centered_model_instance(
+                            core_center,
+                            &basis,
+                            [
+                                entity.scale * 0.32,
+                                entity.scale * 0.30,
+                                entity.scale * 0.32,
+                                entity.scale * 0.32,
+                            ],
+                            [
+                                (entity.material.saturating_add(7)) as u32,
+                                (entity.material.saturating_add(9)) as u32,
+                                (entity.material.saturating_add(8)) as u32,
+                                (entity.material.saturating_add(9)) as u32,
+                                (entity.material.saturating_add(7)) as u32,
+                                (entity.material.saturating_add(9)) as u32,
+                                (entity.material.saturating_add(8)) as u32,
+                                (entity.material.saturating_add(9)) as u32,
+                            ],
+                        ));
+
+                        let splay = 0.12 * anim_t.sin();
+                        let leg_y = -0.16 + 0.04 * (anim_t * 1.5).cos();
+                        let leg_specs = [
+                            (
+                                [0.56 + splay, leg_y, 0.42, 0.20],
+                                [0.72, 0.08, 0.14, 0.18],
+                                1u8,
+                            ),
+                            (
+                                [0.56 + splay, leg_y, -0.42, -0.20],
+                                [0.72, 0.08, 0.14, 0.18],
+                                2u8,
+                            ),
+                            (
+                                [-0.56 - splay, leg_y, 0.42, -0.20],
+                                [0.72, 0.08, 0.14, 0.18],
+                                3u8,
+                            ),
+                            (
+                                [-0.56 - splay, leg_y, -0.42, 0.20],
+                                [0.72, 0.08, 0.14, 0.18],
+                                4u8,
+                            ),
+                            (
+                                [0.20, leg_y, 0.52 + splay, 0.56],
+                                [0.16, 0.08, 0.72, 0.18],
+                                5u8,
+                            ),
+                            (
+                                [-0.20, leg_y, -0.52 - splay, -0.56],
+                                [0.16, 0.08, 0.72, 0.18],
+                                6u8,
+                            ),
+                            (
+                                [0.20, leg_y, -0.52 - splay, 0.56],
+                                [0.16, 0.08, 0.72, 0.18],
+                                7u8,
+                            ),
+                            (
+                                [-0.20, leg_y, 0.52 + splay, -0.56],
+                                [0.16, 0.08, 0.72, 0.18],
+                                8u8,
+                            ),
+                        ];
+                        for (offset, axis_scale, material_bias) in leg_specs {
+                            let leg_center = offset_point_along_basis(body_center, &basis, offset);
+                            instances.push(build_centered_model_instance(
+                                leg_center,
+                                &basis,
+                                [
+                                    entity.scale * axis_scale[0],
+                                    entity.scale * axis_scale[1],
+                                    entity.scale * axis_scale[2],
+                                    entity.scale * axis_scale[3],
+                                ],
+                                [
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(material_bias)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(material_bias)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(material_bias)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(material_bias)) as u32,
+                                ],
+                            ));
+                        }
                     }
                 }
             }

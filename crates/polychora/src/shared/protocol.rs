@@ -12,6 +12,7 @@ pub enum EntityKind {
     TestDrifter,
     MobSeeker,
     MobCreeper4d,
+    MobPhaseSpider,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
