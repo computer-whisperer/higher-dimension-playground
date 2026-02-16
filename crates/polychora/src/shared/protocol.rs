@@ -1,3 +1,4 @@
+use crate::shared::worldfield::{RegionResyncRequest, RegionSubtreePatch};
 use serde::{Deserialize, Serialize};
 
 pub const WORLD_CHUNK_LOD_NEAR: u8 = 0;
@@ -105,6 +106,9 @@ pub enum ClientMessage {
     ConsoleCommand {
         command: String,
     },
+    WorldRegionResyncRequest {
+        request: RegionResyncRequest,
+    },
     RequestWorldSnapshot,
     Ping {
         nonce: u64,
@@ -142,6 +146,9 @@ pub enum ServerMessage {
     },
     WorldRegionClockUpdate {
         updates: Vec<RegionClockPayload>,
+    },
+    WorldRegionPatch {
+        patch: RegionSubtreePatch,
     },
     Pong {
         nonce: u64,

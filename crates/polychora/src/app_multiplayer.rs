@@ -1,4 +1,123 @@
 use super::*;
+use polychora::shared::worldfield::{
+    collect_non_empty_chunks_from_core_in_bounds, Aabb4i, ChunkPayload, RegionClockPrecondition,
+    RegionClockUpdate, RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch,
+    REGION_TILE_EDGE_CHUNKS,
+};
+
+const MULTIPLAYER_REGION_RESYNC_MAX_REGIONS: usize = 512;
+
+fn region_id_to_clock_key(region_id: RegionId) -> [i32; 4] {
+    [region_id.x, region_id.y, region_id.z, region_id.w]
+}
+
+fn apply_region_clock_updates<I>(clocks: &mut HashMap<[i32; 4], u64>, updates: I) -> usize
+where
+    I: IntoIterator<Item = ([i32; 4], u64)>,
+{
+    let mut regressed = 0usize;
+    for (region_id, clock) in updates {
+        match clocks.get_mut(&region_id) {
+            Some(existing) if clock < *existing => {
+                regressed = regressed.saturating_add(1);
+            }
+            Some(existing) => {
+                *existing = clock;
+            }
+            None => {
+                clocks.insert(region_id, clock);
+            }
+        }
+    }
+    regressed
+}
+
+fn region_clock_precondition_mismatch_count(
+    clocks: &HashMap<[i32; 4], u64>,
+    preconditions: &[RegionClockPrecondition],
+) -> usize {
+    preconditions
+        .iter()
+        .filter(|precondition| {
+            let key = region_id_to_clock_key(precondition.region_id);
+            clocks.get(&key).copied().unwrap_or(0) != precondition.expected_clock
+        })
+        .count()
+}
+
+fn region_resync_entries_for_bounds(
+    clocks: &HashMap<[i32; 4], u64>,
+    bounds: Aabb4i,
+    max_regions: usize,
+) -> Vec<RegionResyncEntry> {
+    if !bounds.is_valid() || max_regions == 0 {
+        return Vec::new();
+    }
+
+    let region_min = [
+        bounds.min[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        bounds.min[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        bounds.min[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        bounds.min[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
+    ];
+    let region_max = [
+        bounds.max[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        bounds.max[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        bounds.max[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
+        bounds.max[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
+    ];
+
+    let mut entries = Vec::new();
+    for rw in region_min[3]..=region_max[3] {
+        for rz in region_min[2]..=region_max[2] {
+            for ry in region_min[1]..=region_max[1] {
+                for rx in region_min[0]..=region_max[0] {
+                    if entries.len() >= max_regions {
+                        return entries;
+                    }
+                    let key = [rx, ry, rz, rw];
+                    let clock = clocks.get(&key).copied().unwrap_or(0);
+                    entries.push(RegionResyncEntry {
+                        region_id: RegionId {
+                            x: rx,
+                            y: ry,
+                            z: rz,
+                            w: rw,
+                        },
+                        client_clock: clock,
+                    });
+                }
+            }
+        }
+    }
+    entries
+}
+
+fn region_resync_entries_for_mismatched_preconditions(
+    clocks: &HashMap<[i32; 4], u64>,
+    preconditions: &[RegionClockPrecondition],
+    max_regions: usize,
+) -> Vec<RegionResyncEntry> {
+    if max_regions == 0 {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    for precondition in preconditions {
+        if entries.len() >= max_regions {
+            break;
+        }
+        let key = region_id_to_clock_key(precondition.region_id);
+        let local_clock = clocks.get(&key).copied().unwrap_or(0);
+        if local_clock == precondition.expected_clock {
+            continue;
+        }
+        entries.push(RegionResyncEntry {
+            region_id: precondition.region_id,
+            client_clock: local_clock,
+        });
+    }
+    entries
+}
 
 fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
     if velocity.iter().any(|v| !v.is_finite()) {
@@ -448,6 +567,170 @@ impl App {
         }
     }
 
+    fn request_multiplayer_region_resync(
+        &mut self,
+        mut regions: Vec<RegionResyncEntry>,
+        reason: &str,
+    ) {
+        if regions.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.multiplayer_last_region_resync_request)
+            < MULTIPLAYER_REGION_RESYNC_MIN_INTERVAL
+        {
+            return;
+        }
+        regions.sort_unstable_by_key(|entry| {
+            (
+                entry.region_id.w,
+                entry.region_id.z,
+                entry.region_id.y,
+                entry.region_id.x,
+            )
+        });
+        regions.dedup_by_key(|entry| entry.region_id);
+        if regions.len() > MULTIPLAYER_REGION_RESYNC_MAX_REGIONS {
+            regions.truncate(MULTIPLAYER_REGION_RESYNC_MAX_REGIONS);
+        }
+        let region_count = regions.len();
+
+        if let Some(client) = self.multiplayer.as_ref() {
+            self.multiplayer_last_region_resync_request = now;
+            client.send(MultiplayerClientMessage::WorldRegionResyncRequest {
+                request: RegionResyncRequest { regions },
+            });
+            eprintln!(
+                "Requested multiplayer region resync: reason={reason} regions={region_count}"
+            );
+        }
+    }
+
+    fn request_multiplayer_region_resync_for_bounds(&mut self, bounds: Aabb4i, reason: &str) {
+        let regions = region_resync_entries_for_bounds(
+            &self.multiplayer_region_clocks,
+            bounds,
+            MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
+        );
+        self.request_multiplayer_region_resync(regions, reason);
+    }
+
+    pub(super) fn apply_multiplayer_region_patch(
+        &mut self,
+        patch: RegionSubtreePatch,
+    ) -> Option<(usize, usize)> {
+        if let Some(last_seq) = self.multiplayer_last_region_patch_seq {
+            if patch.patch_seq <= last_seq {
+                eprintln!(
+                    "Ignoring stale multiplayer region patch seq={} last_seq={}",
+                    patch.patch_seq, last_seq
+                );
+                return None;
+            }
+            let expected_next = last_seq.wrapping_add(1).max(1);
+            if patch.patch_seq != expected_next {
+                eprintln!(
+                    "Rejecting out-of-order multiplayer region patch seq={} expected_next={}",
+                    patch.patch_seq, expected_next
+                );
+                self.request_multiplayer_region_resync_for_bounds(
+                    patch.bounds,
+                    "out_of_order_patch_seq",
+                );
+                return None;
+            }
+        }
+
+        let mismatches = region_clock_precondition_mismatch_count(
+            &self.multiplayer_region_clocks,
+            &patch.preconditions,
+        );
+        if mismatches > 0 {
+            eprintln!(
+                "Rejecting multiplayer region patch seq={} due to {} clock precondition mismatches",
+                patch.patch_seq, mismatches
+            );
+            let mut regions = region_resync_entries_for_mismatched_preconditions(
+                &self.multiplayer_region_clocks,
+                &patch.preconditions,
+                MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
+            );
+            if regions.is_empty() {
+                regions = region_resync_entries_for_bounds(
+                    &self.multiplayer_region_clocks,
+                    patch.bounds,
+                    MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
+                );
+            }
+            self.request_multiplayer_region_resync(regions, "clock_precondition_mismatch");
+            return None;
+        }
+
+        let desired_chunks: HashMap<voxel::ChunkPos, ChunkPayload> =
+            collect_non_empty_chunks_from_core_in_bounds(&patch.subtree, patch.bounds)
+                .into_iter()
+                .map(|(key, payload)| (key.to_chunk_pos(), payload))
+                .collect();
+
+        let mut current_chunks = Vec::new();
+        self.scene.world.gather_non_empty_chunks_in_bounds(
+            patch.bounds.min,
+            patch.bounds.max,
+            &mut current_chunks,
+        );
+
+        let mut removed_chunks = 0usize;
+        for chunk_pos in current_chunks {
+            if !desired_chunks.contains_key(&chunk_pos)
+                && self
+                    .scene
+                    .remove_lod_chunk(scene::VOXEL_LOD_LEVEL_NEAR, chunk_pos)
+            {
+                removed_chunks += 1;
+            }
+        }
+
+        let mut applied_chunks = 0usize;
+        for (chunk_pos, payload) in desired_chunks {
+            let chunk = match payload.to_voxel_chunk() {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    eprintln!(
+                        "Ignoring malformed region patch payload at ({}, {}, {}, {}): {}",
+                        chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w, error
+                    );
+                    continue;
+                }
+            };
+            self.scene
+                .insert_lod_chunk(scene::VOXEL_LOD_LEVEL_NEAR, chunk_pos, chunk);
+            applied_chunks += 1;
+        }
+
+        let regressed = apply_region_clock_updates(
+            &mut self.multiplayer_region_clocks,
+            patch
+                .clock_updates
+                .iter()
+                .map(|update: &RegionClockUpdate| {
+                    (region_id_to_clock_key(update.region_id), update.new_clock)
+                }),
+        );
+        if regressed > 0 {
+            eprintln!(
+                "Ignored {} regressed multiplayer region clock updates from region patch",
+                regressed
+            );
+        }
+
+        self.multiplayer_last_region_patch_seq = Some(patch.patch_seq);
+        eprintln!(
+            "Applied multiplayer region patch seq={} bounds={:?}->{:?} upserts={} removals={}",
+            patch.patch_seq, patch.bounds.min, patch.bounds.max, applied_chunks, removed_chunks
+        );
+        Some((applied_chunks, removed_chunks))
+    }
+
     pub(super) fn handle_multiplayer_message(&mut self, message: multiplayer::ServerMessage) {
         let received_at = Instant::now();
         match message {
@@ -459,6 +742,7 @@ impl App {
             } => {
                 self.multiplayer_self_id = Some(client_id);
                 self.multiplayer_region_clocks.clear();
+                self.multiplayer_last_region_patch_seq = None;
                 self.next_multiplayer_edit_id = 1;
                 self.pending_voxel_edits.clear();
                 self.pending_player_movement_modifiers.clear();
@@ -506,6 +790,7 @@ impl App {
                     Ok(new_world) => {
                         self.scene.replace_world(new_world);
                         self.multiplayer_region_clocks.clear();
+                        self.multiplayer_last_region_patch_seq = None;
                         eprintln!(
                             "Applied multiplayer world snapshot rev={} chunks={}",
                             world.revision, world.non_empty_chunks
@@ -534,26 +819,23 @@ impl App {
                 self.apply_multiplayer_chunk_unload_batch(revision, chunks);
             }
             multiplayer::ServerMessage::WorldRegionClockUpdate { updates } => {
-                let mut regressed = 0usize;
-                for update in updates {
-                    match self.multiplayer_region_clocks.get_mut(&update.region_id) {
-                        Some(existing) if update.clock < *existing => {
-                            regressed = regressed.saturating_add(1);
-                        }
-                        Some(existing) => {
-                            *existing = update.clock;
-                        }
-                        None => {
-                            self.multiplayer_region_clocks
-                                .insert(update.region_id, update.clock);
-                        }
-                    }
-                }
+                let regressed = apply_region_clock_updates(
+                    &mut self.multiplayer_region_clocks,
+                    updates
+                        .into_iter()
+                        .map(|update| (update.region_id, update.clock)),
+                );
                 if regressed > 0 {
                     eprintln!(
                         "Ignored {} regressed multiplayer region clock updates",
                         regressed
                     );
+                }
+            }
+            multiplayer::ServerMessage::WorldRegionPatch { patch } => {
+                if self.apply_multiplayer_region_patch(patch).is_some() && !self.world_ready {
+                    self.world_ready = true;
+                    eprintln!("World ready: region patch applied");
                 }
             }
             multiplayer::ServerMessage::Pong { .. } => {}
@@ -1073,5 +1355,135 @@ impl App {
         }
 
         tags
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_region_clock_updates_ignores_regressions() {
+        let mut clocks = HashMap::new();
+        clocks.insert([0, 0, 0, 0], 5);
+
+        let regressed = apply_region_clock_updates(
+            &mut clocks,
+            vec![([0, 0, 0, 0], 4), ([0, 0, 0, 0], 6), ([1, 0, 0, 0], 2)],
+        );
+
+        assert_eq!(regressed, 1);
+        assert_eq!(clocks.get(&[0, 0, 0, 0]), Some(&6));
+        assert_eq!(clocks.get(&[1, 0, 0, 0]), Some(&2));
+    }
+
+    #[test]
+    fn region_clock_precondition_mismatch_count_treats_missing_as_zero() {
+        let mut clocks = HashMap::new();
+        clocks.insert([0, 0, 0, 0], 3);
+
+        let preconditions = vec![
+            RegionClockPrecondition {
+                region_id: RegionId {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    w: 0,
+                },
+                expected_clock: 3,
+            },
+            RegionClockPrecondition {
+                region_id: RegionId {
+                    x: 1,
+                    y: 0,
+                    z: 0,
+                    w: 0,
+                },
+                expected_clock: 0,
+            },
+            RegionClockPrecondition {
+                region_id: RegionId {
+                    x: 2,
+                    y: 0,
+                    z: 0,
+                    w: 0,
+                },
+                expected_clock: 9,
+            },
+        ];
+
+        let mismatches = region_clock_precondition_mismatch_count(&clocks, &preconditions);
+        assert_eq!(mismatches, 1);
+    }
+
+    #[test]
+    fn region_resync_entries_for_bounds_reads_existing_and_default_clocks() {
+        let mut clocks = HashMap::new();
+        clocks.insert([0, 0, 0, 0], 9);
+        let bounds = Aabb4i::new([0, 0, 0, 0], [7, 3, 3, 3]);
+
+        let entries = region_resync_entries_for_bounds(&clocks, bounds, 16);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].region_id,
+            RegionId {
+                x: 0,
+                y: 0,
+                z: 0,
+                w: 0
+            }
+        );
+        assert_eq!(entries[0].client_clock, 9);
+        assert_eq!(
+            entries[1].region_id,
+            RegionId {
+                x: 1,
+                y: 0,
+                z: 0,
+                w: 0
+            }
+        );
+        assert_eq!(entries[1].client_clock, 0);
+    }
+
+    #[test]
+    fn region_resync_entries_for_mismatched_preconditions_filters_equal_clocks() {
+        let mut clocks = HashMap::new();
+        clocks.insert([0, 0, 0, 0], 3);
+
+        let preconditions = vec![
+            RegionClockPrecondition {
+                region_id: RegionId {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    w: 0,
+                },
+                expected_clock: 3,
+            },
+            RegionClockPrecondition {
+                region_id: RegionId {
+                    x: 1,
+                    y: 0,
+                    z: 0,
+                    w: 0,
+                },
+                expected_clock: 8,
+            },
+        ];
+
+        let entries =
+            region_resync_entries_for_mismatched_preconditions(&clocks, &preconditions, 16);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].region_id,
+            RegionId {
+                x: 1,
+                y: 0,
+                z: 0,
+                w: 0
+            }
+        );
+        assert_eq!(entries[0].client_clock, 0);
     }
 }

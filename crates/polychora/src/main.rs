@@ -94,6 +94,7 @@ const VTE_TRACE_STEPS_MIN: u32 = 16;
 const VTE_TRACE_STEPS_MAX: u32 = 4096;
 const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const MULTIPLAYER_REGION_RESYNC_MIN_INTERVAL: Duration = Duration::from_millis(150);
 const MULTIPLAYER_PENDING_EDIT_TIMEOUT: Duration = Duration::from_secs(5);
 const MULTIPLAYER_PENDING_EDIT_MAX: usize = 512;
 const MULTIPLAYER_PENDING_PLAYER_MODIFIER_MAX: usize = 128;
@@ -978,6 +979,8 @@ fn main() {
         multiplayer,
         multiplayer_self_id: None,
         multiplayer_region_clocks: HashMap::new(),
+        multiplayer_last_region_patch_seq: None,
+        multiplayer_last_region_resync_request: Instant::now(),
         next_multiplayer_edit_id: 1,
         pending_voxel_edits: Vec::new(),
         pending_player_movement_modifiers: VecDeque::new(),
@@ -1228,6 +1231,8 @@ struct App {
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
     multiplayer_region_clocks: HashMap<[i32; 4], u64>,
+    multiplayer_last_region_patch_seq: Option<u64>,
+    multiplayer_last_region_resync_request: Instant,
     next_multiplayer_edit_id: u64,
     pending_voxel_edits: Vec<PendingVoxelEdit>,
     pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,

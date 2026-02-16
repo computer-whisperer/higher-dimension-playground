@@ -21,7 +21,14 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   4. diff old/new payload maps via `RegionTreeRefreshResult` for load/unload
 - Stream refresh gating now uses per-player near-bounds `RegionClockMap` snapshots (instead of global `world_revision`) to avoid unnecessary out-of-area refresh work.
 - Server now emits `WorldRegionClockUpdate` messages carrying updated region clocks on authoritative voxel edits/explosions.
-- Stream sync now also sends near-bounds region-clock snapshots (same message) so clients can establish/refresh local clock baselines.
+- Stream sync now sends near-bounds region-clock snapshots in chunk-batch mode so clients can establish/refresh local clock baselines.
+- Optional bridge mode: `R4D_STREAM_REGION_PATCH=1` emits `WorldRegionPatch` (`RegionSubtreePatch`) alongside chunk batches for live patch-path exercise.
+- Optional bridge-only mode: `R4D_STREAM_REGION_PATCH_ONLY=1` emits/syncs via `WorldRegionPatch` without chunk load/unload batches.
+- Bridge patch payloads now include region clock preconditions derived from each client's prior streamed region clock snapshot.
+- Bridge patch `patch_seq` is now per-client monotonic (`PlayerState.next_stream_patch_seq`), decoupled from global `world_revision`.
+- Client now applies `WorldRegionPatch` by validating preconditions, enforcing monotonic patch sequence, grafting bounded near-chunk payloads, and applying patch clock updates.
+- Client now emits `WorldRegionResyncRequest` on patch sequence/precondition failures; server replies with bounded `WorldRegionPatch` built from requested regions.
+- Bridge path now enforces `MAX_PATCH_BYTES` wire budget; oversized stream patches fall back to chunk batches, oversized resync responses return server error.
 - Authoritative voxel edits now route through `ServerWorldField::apply_voxel_edit`.
 - Region tree naming is now unified in runtime-facing code:
   - `RegionChunkTree` (removed `RegionOverrideTree` alias)
@@ -31,6 +38,8 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - `collect_chunks_in_bounds`
   - `diff_chunks_in_bounds`
   - `apply_chunk_diff`
+- Shared `RegionTreeCore` extraction helper now exists:
+  - `collect_non_empty_chunks_from_core_in_bounds`
 - Server now tracks internal `RegionClockMap` and bumps touched region clocks on authoritative voxel edits/explosions.
 
 ## System Status Matrix
@@ -47,7 +56,8 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - `WorldChunkBatch`
   - `WorldChunkUnloadBatch`
   - `WorldVoxelSet`
-  - `WorldRegionClockUpdate` (clock updates only; no patch preconditions yet)
+  - `WorldRegionClockUpdate`
+  - `WorldRegionPatch` + `WorldRegionResyncRequest` bridge messages are now emitted/applied optionally, but chunk batches remain canonical.
 - Region refresh now applies per-chunk diff between prior/new working-set views; subtree-native patch ops are still pending.
 
 ### Old / to-be-replaced
@@ -80,8 +90,9 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Geometry entering stream cache is sourced from `WorldField` query responses.
 
 ## Current gaps vs region-tree-worldfield spec
-- Replication still uses `world_revision` + chunk batch messages; region clocks and `RegionSubtreePatch` are not implemented yet.
-- Tracked region clocks are now sent as updates, but preconditioned patch apply/resync flow is still not implemented.
+- Replication still uses `world_revision` + chunk batch messages as canonical transport; `RegionSubtreePatch` is bridge-only.
+- Bridge patch flow still lacks spec-complete behavior:
+  - Client/server now use bounded resync requests with a client-side throttle interval, but full server-side coalesce/throttle policy from spec is still missing.
 - Persistence still roundtrips through `VoxelWorld` bridge; canonical semantic-tree persistence is pending.
 - `query_region_core` currently materializes bounded `ChunkArray` responses directly from base/procgen/chunk-tree composition rather than returning long-lived symbolic `ProceduralRef`/branch topology from a persistent semantic tree.
 - Runtime realization cache key is currently `(chunk_key, profile)` in `ServerWorldField`; full snapshot/node-handle/generator-version keyed sidecar cache is pending.

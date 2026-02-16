@@ -15,8 +15,9 @@ use crate::shared::protocol::{
 };
 use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
 use crate::shared::worldfield::{
-    Aabb4i, ChunkPayload, QueryDetail, QueryVolume, RegionClockMap, RegionId, WorldField,
-    REGION_TILE_EDGE_CHUNKS,
+    Aabb4i, ChunkPayload, QueryDetail, QueryVolume, RegionClockMap, RegionClockPrecondition,
+    RegionClockUpdate, RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch,
+    WorldField, MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -112,6 +113,8 @@ struct PlayerState {
     working_set: RegionTreeWorkingSet,
     last_stream_center_chunk: Option<[i32; 4]>,
     last_stream_region_clocks: RegionClockMap,
+    known_region_clocks: RegionClockMap,
+    next_stream_patch_seq: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2459,6 +2462,124 @@ fn region_clock_payloads_from_map(clocks: &RegionClockMap) -> Vec<RegionClockPay
     out
 }
 
+fn region_clock_updates_from_map(clocks: &RegionClockMap) -> Vec<RegionClockUpdate> {
+    let mut out: Vec<RegionClockUpdate> = clocks
+        .iter()
+        .map(|(region_id, clock)| RegionClockUpdate {
+            region_id: *region_id,
+            new_clock: *clock,
+        })
+        .collect();
+    out.sort_unstable_by_key(|update| {
+        (
+            update.region_id.w,
+            update.region_id.z,
+            update.region_id.y,
+            update.region_id.x,
+        )
+    });
+    out
+}
+
+fn region_clock_preconditions_for_patch(
+    previous_clocks: &RegionClockMap,
+    current_clocks: &RegionClockMap,
+) -> Vec<RegionClockPrecondition> {
+    let mut out: Vec<RegionClockPrecondition> = current_clocks
+        .keys()
+        .map(|region_id| RegionClockPrecondition {
+            region_id: *region_id,
+            expected_clock: *previous_clocks.get(region_id).unwrap_or(&0),
+        })
+        .collect();
+    out.sort_unstable_by_key(|precondition| {
+        (
+            precondition.region_id.w,
+            precondition.region_id.z,
+            precondition.region_id.y,
+            precondition.region_id.x,
+        )
+    });
+    out
+}
+
+fn next_stream_patch_seq(next_seq: &mut u64) -> u64 {
+    let seq = (*next_seq).max(1);
+    *next_seq = seq.wrapping_add(1);
+    if *next_seq == 0 {
+        *next_seq = 1;
+    }
+    seq
+}
+
+fn sanitize_region_resync_entries(mut entries: Vec<RegionResyncEntry>) -> Vec<RegionResyncEntry> {
+    const MAX_REGION_RESYNC_ENTRIES: usize = 512;
+    entries.sort_unstable_by_key(|entry| {
+        (
+            entry.region_id.w,
+            entry.region_id.z,
+            entry.region_id.y,
+            entry.region_id.x,
+        )
+    });
+    entries.dedup_by_key(|entry| entry.region_id);
+    if entries.len() > MAX_REGION_RESYNC_ENTRIES {
+        entries.truncate(MAX_REGION_RESYNC_ENTRIES);
+    }
+    entries
+}
+
+fn chunk_bounds_for_region_id(region_id: RegionId) -> Aabb4i {
+    let min = [
+        region_id.x.saturating_mul(REGION_TILE_EDGE_CHUNKS),
+        region_id.y.saturating_mul(REGION_TILE_EDGE_CHUNKS),
+        region_id.z.saturating_mul(REGION_TILE_EDGE_CHUNKS),
+        region_id.w.saturating_mul(REGION_TILE_EDGE_CHUNKS),
+    ];
+    let max = [
+        min[0].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
+        min[1].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
+        min[2].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
+        min[3].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
+    ];
+    Aabb4i::new(min, max)
+}
+
+fn merge_aabb(a: Aabb4i, b: Aabb4i) -> Aabb4i {
+    Aabb4i::new(
+        [
+            a.min[0].min(b.min[0]),
+            a.min[1].min(b.min[1]),
+            a.min[2].min(b.min[2]),
+            a.min[3].min(b.min[3]),
+        ],
+        [
+            a.max[0].max(b.max[0]),
+            a.max[1].max(b.max[1]),
+            a.max[2].max(b.max[2]),
+            a.max[3].max(b.max[3]),
+        ],
+    )
+}
+
+fn chunk_bounds_for_resync_entries(entries: &[RegionResyncEntry]) -> Option<Aabb4i> {
+    let mut iter = entries.iter();
+    let first = iter.next()?;
+    let mut bounds = chunk_bounds_for_region_id(first.region_id);
+    for entry in iter {
+        bounds = merge_aabb(bounds, chunk_bounds_for_region_id(entry.region_id));
+    }
+    Some(bounds)
+}
+
+fn region_patch_wire_size_bytes(patch: &RegionSubtreePatch) -> Option<usize> {
+    postcard::to_stdvec(&ServerMessage::WorldRegionPatch {
+        patch: patch.clone(),
+    })
+    .ok()
+    .map(|bytes| bytes.len())
+}
+
 fn plan_stream_window_update(
     state: &mut ServerState,
     client_id: u64,
@@ -2642,6 +2763,23 @@ fn send_region_clock_updates_to_clients(state: &SharedState, updates: Vec<Region
     if updates.is_empty() {
         return;
     }
+    {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        for player in guard.players.values_mut() {
+            for update in &updates {
+                let region_id = RegionId {
+                    x: update.region_id[0],
+                    y: update.region_id[1],
+                    z: update.region_id[2],
+                    w: update.region_id[3],
+                };
+                let entry = player.known_region_clocks.entry(region_id).or_insert(0);
+                if update.clock > *entry {
+                    *entry = update.clock;
+                }
+            }
+        }
+    }
     broadcast(state, ServerMessage::WorldRegionClockUpdate { updates });
 }
 
@@ -2654,16 +2792,31 @@ fn sync_streamed_chunks_for_client(
     far_chunk_radius: i32,
     force: bool,
 ) {
+    let emit_region_patch_only = env_flag_enabled("R4D_STREAM_REGION_PATCH_ONLY");
+    let emit_region_patch = emit_region_patch_only || env_flag_enabled("R4D_STREAM_REGION_PATCH");
     let update = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
         let current_region_clocks =
             collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
+        let mut region_patch_preconditions = Vec::new();
+        let mut region_patch_seq = None::<u64>;
         let should_sync = match guard.players.get_mut(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
                 let world_changed = player.last_stream_region_clocks != current_region_clocks;
                 if force || changed || world_changed {
+                    if emit_region_patch {
+                        region_patch_preconditions = region_clock_preconditions_for_patch(
+                            &player.known_region_clocks,
+                            &current_region_clocks,
+                        );
+                        region_patch_seq =
+                            Some(next_stream_patch_seq(&mut player.next_stream_patch_seq));
+                    }
+                    for (region_id, clock) in &current_region_clocks {
+                        player.known_region_clocks.insert(*region_id, *clock);
+                    }
                     player.last_stream_center_chunk = Some(center_chunk);
                     player.last_stream_region_clocks = current_region_clocks.clone();
                     true
@@ -2684,11 +2837,33 @@ fn sync_streamed_chunks_for_client(
                 far_chunk_radius,
             );
             update.map(|(revision, loads, unloads)| {
+                let region_patch = if emit_region_patch {
+                    let subtree = guard
+                        .world
+                        .query_region_core(
+                            QueryVolume {
+                                bounds: near_bounds,
+                            },
+                            QueryDetail::Exact,
+                        )
+                        .as_ref()
+                        .clone();
+                    Some(RegionSubtreePatch {
+                        patch_seq: region_patch_seq.unwrap_or(revision),
+                        bounds: near_bounds,
+                        preconditions: region_patch_preconditions,
+                        clock_updates: region_clock_updates_from_map(&current_region_clocks),
+                        subtree,
+                    })
+                } else {
+                    None
+                };
                 (
                     revision,
                     loads,
                     unloads,
                     region_clock_payloads_from_map(&current_region_clocks),
+                    region_patch,
                 )
             })
         } else {
@@ -2696,7 +2871,8 @@ fn sync_streamed_chunks_for_client(
         }
     };
 
-    let Some((revision, chunk_loads, chunk_unloads, region_clock_snapshot)) = update else {
+    let Some((revision, chunk_loads, chunk_unloads, region_clock_snapshot, region_patch)) = update
+    else {
         return;
     };
 
@@ -2708,13 +2884,32 @@ fn sync_streamed_chunks_for_client(
         return;
     };
 
-    if !region_clock_snapshot.is_empty() {
+    let mut should_send_chunk_batches = !emit_region_patch_only;
+    let mut should_send_clock_snapshot = false;
+
+    if let Some(patch) = region_patch {
+        let patch_size = region_patch_wire_size_bytes(&patch).unwrap_or(usize::MAX);
+        if patch_size <= MAX_PATCH_BYTES {
+            let _ = sender.send(ServerMessage::WorldRegionPatch { patch });
+        } else {
+            eprintln!(
+                "Skipping oversized stream region patch for client {}: {} bytes (limit {})",
+                client_id, patch_size, MAX_PATCH_BYTES
+            );
+            should_send_chunk_batches = true;
+            should_send_clock_snapshot = !region_clock_snapshot.is_empty();
+        }
+    } else {
+        should_send_clock_snapshot = !region_clock_snapshot.is_empty();
+    }
+
+    if should_send_clock_snapshot {
         let _ = sender.send(ServerMessage::WorldRegionClockUpdate {
             updates: region_clock_snapshot,
         });
     }
 
-    if !chunk_loads.is_empty() {
+    if should_send_chunk_batches && !chunk_loads.is_empty() {
         let mut batch = Vec::with_capacity(STREAM_MESSAGE_CHUNK_LIMIT);
         for chunk in chunk_loads {
             batch.push(chunk);
@@ -2733,7 +2928,7 @@ fn sync_streamed_chunks_for_client(
         }
     }
 
-    if !chunk_unloads.is_empty() {
+    if should_send_chunk_batches && !chunk_unloads.is_empty() {
         let mut batch = Vec::with_capacity(STREAM_MESSAGE_CHUNK_LIMIT);
         for chunk in chunk_unloads {
             batch.push(chunk);
@@ -2750,6 +2945,94 @@ fn sync_streamed_chunks_for_client(
                 chunks: batch,
             });
         }
+    }
+}
+
+fn send_region_resync_patch_to_client(
+    state: &SharedState,
+    client_id: u64,
+    request: RegionResyncRequest,
+) {
+    let patch = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        if !guard.players.contains_key(&client_id) {
+            None
+        } else {
+            let entries = sanitize_region_resync_entries(request.regions);
+            let Some(bounds) = chunk_bounds_for_resync_entries(&entries) else {
+                return;
+            };
+
+            {
+                let Some(player) = guard.players.get_mut(&client_id) else {
+                    return;
+                };
+                for entry in &entries {
+                    player
+                        .known_region_clocks
+                        .insert(entry.region_id, entry.client_clock);
+                }
+            }
+
+            let current_region_clocks =
+                collect_region_clocks_in_chunk_bounds(&guard.region_clocks, bounds);
+            let preconditions = {
+                let Some(player) = guard.players.get(&client_id) else {
+                    return;
+                };
+                region_clock_preconditions_for_patch(
+                    &player.known_region_clocks,
+                    &current_region_clocks,
+                )
+            };
+
+            {
+                let Some(player) = guard.players.get_mut(&client_id) else {
+                    return;
+                };
+                for (region_id, clock) in &current_region_clocks {
+                    player.known_region_clocks.insert(*region_id, *clock);
+                }
+            }
+
+            let patch_seq = {
+                let Some(player) = guard.players.get_mut(&client_id) else {
+                    return;
+                };
+                next_stream_patch_seq(&mut player.next_stream_patch_seq)
+            };
+
+            let subtree = guard
+                .world
+                .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
+                .as_ref()
+                .clone();
+            Some(RegionSubtreePatch {
+                patch_seq,
+                bounds,
+                preconditions,
+                clock_updates: region_clock_updates_from_map(&current_region_clocks),
+                subtree,
+            })
+        }
+    };
+
+    if let Some(patch) = patch {
+        let patch_size = region_patch_wire_size_bytes(&patch).unwrap_or(usize::MAX);
+        if patch_size > MAX_PATCH_BYTES {
+            send_to_client(
+                state,
+                client_id,
+                ServerMessage::Error {
+                    message: format!(
+                        "region resync patch exceeded wire budget ({} > {} bytes); request a smaller region set",
+                        patch_size, MAX_PATCH_BYTES
+                    ),
+                },
+            );
+            return;
+        }
+        send_to_client(state, client_id, ServerMessage::WorldRegionPatch { patch });
     }
 }
 
@@ -3347,6 +3630,8 @@ fn install_or_update_player(
                 working_set: RegionTreeWorkingSet::new(),
                 last_stream_center_chunk: None,
                 last_stream_region_clocks: HashMap::new(),
+                known_region_clocks: HashMap::new(),
+                next_stream_patch_seq: 1,
             });
             guard.entity_store.spawn(
                 entity_id,
@@ -3750,6 +4035,9 @@ fn handle_message(
             if let Err(message) = run_server_console_command(state, client_id, &command, start) {
                 send_to_client(state, client_id, ServerMessage::Error { message });
             }
+        }
+        ClientMessage::WorldRegionResyncRequest { request } => {
+            send_region_resync_patch_to_client(state, client_id, request);
         }
         ClientMessage::RequestWorldSnapshot => {
             let snapshot_message = {
@@ -4363,5 +4651,114 @@ mod tests {
         let bounds = stream_near_bounds(center, 3);
         assert_eq!(bounds.min, [7, -5, 4, -2]);
         assert_eq!(bounds.max, [13, 1, 10, 4]);
+    }
+
+    #[test]
+    fn region_clock_preconditions_default_to_zero_for_new_regions() {
+        let mut previous = RegionClockMap::new();
+        previous.insert(
+            RegionId {
+                x: -1,
+                y: 0,
+                z: 0,
+                w: 0,
+            },
+            2,
+        );
+
+        let mut current = previous.clone();
+        current.insert(
+            RegionId {
+                x: 0,
+                y: 0,
+                z: 0,
+                w: 0,
+            },
+            7,
+        );
+
+        let preconditions = region_clock_preconditions_for_patch(&previous, &current);
+        assert_eq!(preconditions.len(), 2);
+        assert_eq!(
+            preconditions[0],
+            RegionClockPrecondition {
+                region_id: RegionId {
+                    x: -1,
+                    y: 0,
+                    z: 0,
+                    w: 0
+                },
+                expected_clock: 2,
+            }
+        );
+        assert_eq!(
+            preconditions[1],
+            RegionClockPrecondition {
+                region_id: RegionId {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    w: 0
+                },
+                expected_clock: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn next_stream_patch_seq_is_monotonic_and_non_zero() {
+        let mut next = 1u64;
+        assert_eq!(next_stream_patch_seq(&mut next), 1);
+        assert_eq!(next_stream_patch_seq(&mut next), 2);
+
+        next = u64::MAX;
+        assert_eq!(next_stream_patch_seq(&mut next), u64::MAX);
+        assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn chunk_bounds_for_resync_entries_unions_region_bounds() {
+        let entries = vec![
+            RegionResyncEntry {
+                region_id: RegionId {
+                    x: -1,
+                    y: 0,
+                    z: 0,
+                    w: 0,
+                },
+                client_clock: 0,
+            },
+            RegionResyncEntry {
+                region_id: RegionId {
+                    x: 1,
+                    y: 0,
+                    z: 0,
+                    w: 0,
+                },
+                client_clock: 2,
+            },
+        ];
+        let bounds = chunk_bounds_for_resync_entries(&entries).expect("bounds");
+        assert_eq!(bounds.min, [-4, 0, 0, 0]);
+        assert_eq!(bounds.max, [7, 3, 3, 3]);
+    }
+
+    #[test]
+    fn region_patch_wire_size_bytes_serializes_patch_message() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let patch = RegionSubtreePatch {
+            patch_seq: 1,
+            bounds,
+            preconditions: Vec::new(),
+            clock_updates: Vec::new(),
+            subtree: crate::shared::worldfield::RegionTreeCore {
+                bounds,
+                kind: crate::shared::worldfield::RegionNodeKind::Uniform(3),
+                generator_version_hash: 0,
+            },
+        };
+        let size = region_patch_wire_size_bytes(&patch).expect("serialized size");
+        assert!(size > 0);
+        assert!(size <= MAX_PATCH_BYTES);
     }
 }
