@@ -458,6 +458,7 @@ impl App {
                 ..
             } => {
                 self.multiplayer_self_id = Some(client_id);
+                self.multiplayer_region_clocks.clear();
                 self.next_multiplayer_edit_id = 1;
                 self.pending_voxel_edits.clear();
                 self.pending_player_movement_modifiers.clear();
@@ -530,6 +531,12 @@ impl App {
             }
             multiplayer::ServerMessage::WorldChunkUnloadBatch { revision, chunks } => {
                 self.apply_multiplayer_chunk_unload_batch(revision, chunks);
+            }
+            multiplayer::ServerMessage::WorldRegionClockUpdate { updates } => {
+                for update in updates {
+                    self.multiplayer_region_clocks
+                        .insert(update.region_id, update.clock);
+                }
             }
             multiplayer::ServerMessage::Pong { .. } => {}
             multiplayer::ServerMessage::EntitySpawned { entity } => match entity.class {

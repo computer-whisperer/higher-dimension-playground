@@ -20,6 +20,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   3. refresh/graft through `RegionTreeWorkingSet::refresh_from_core`
   4. diff old/new payload maps via `RegionTreeRefreshResult` for load/unload
 - Stream refresh gating now uses per-player near-bounds `RegionClockMap` snapshots (instead of global `world_revision`) to avoid unnecessary out-of-area refresh work.
+- Server now emits `WorldRegionClockUpdate` messages carrying updated region clocks on authoritative voxel edits/explosions.
 - Authoritative voxel edits now route through `ServerWorldField::apply_voxel_edit`.
 - Region tree naming is now unified in runtime-facing code:
   - `RegionChunkTree` (removed `RegionOverrideTree` alias)
@@ -45,6 +46,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - `WorldChunkBatch`
   - `WorldChunkUnloadBatch`
   - `WorldVoxelSet`
+  - `WorldRegionClockUpdate` (clock updates only; no patch preconditions yet)
 - Region refresh now applies per-chunk diff between prior/new working-set views; subtree-native patch ops are still pending.
 
 ### Old / to-be-replaced
@@ -78,7 +80,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 
 ## Current gaps vs region-tree-worldfield spec
 - Replication still uses `world_revision` + chunk batch messages; region clocks and `RegionSubtreePatch` are not implemented yet.
-- Tracked region clocks are not yet part of replication preconditions/updates on the wire.
+- Tracked region clocks are now sent as updates, but preconditioned patch apply/resync flow is still not implemented.
 - Persistence still roundtrips through `VoxelWorld` bridge; canonical semantic-tree persistence is pending.
 - `query_region_core` currently materializes bounded `ChunkArray` responses directly from base/procgen/chunk-tree composition rather than returning long-lived symbolic `ProceduralRef`/branch topology from a persistent semantic tree.
 - Runtime realization cache key is currently `(chunk_key, profile)` in `ServerWorldField`; full snapshot/node-handle/generator-version keyed sidecar cache is pending.

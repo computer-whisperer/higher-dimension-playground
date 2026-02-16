@@ -75,6 +75,12 @@ pub struct WorldChunkCoordPayload {
     pub chunk_pos: [i32; 4],
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RegionClockPayload {
+    pub region_id: [i32; 4],
+    pub clock: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMessage {
     Hello {
@@ -133,6 +139,9 @@ pub enum ServerMessage {
     WorldChunkUnloadBatch {
         revision: u64,
         chunks: Vec<WorldChunkCoordPayload>,
+    },
+    WorldRegionClockUpdate {
+        updates: Vec<RegionClockPayload>,
     },
     Pong {
         nonce: u64,

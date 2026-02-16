@@ -9,8 +9,8 @@ use self::world_field::ServerWorldField;
 use crate::materials;
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
-    ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
-    WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
+    ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, RegionClockPayload,
+    ServerMessage, WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
     WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
@@ -213,6 +213,7 @@ struct QueuedWorldVoxelSet {
     source_client_id: Option<u64>,
     client_edit_id: Option<u64>,
     revision: u64,
+    clock_updates: Option<Vec<RegionClockPayload>>,
 }
 
 #[derive(Clone, Debug)]
@@ -479,7 +480,7 @@ fn advance_world_revision(state: &mut ServerState) -> u64 {
     state.world_revision
 }
 
-fn bump_region_clocks_for_chunks<I>(state: &mut ServerState, chunks: I)
+fn bump_region_clocks_for_chunks<I>(state: &mut ServerState, chunks: I) -> Vec<RegionClockPayload>
 where
     I: IntoIterator<Item = ChunkPos>,
 {
@@ -487,10 +488,24 @@ where
     for chunk_pos in chunks {
         touched_regions.insert(RegionId::from_chunk_pos(chunk_pos));
     }
+    let mut updates = Vec::with_capacity(touched_regions.len());
     for region_id in touched_regions {
         let clock = state.region_clocks.entry(region_id).or_insert(0);
         *clock = clock.wrapping_add(1);
+        updates.push(RegionClockPayload {
+            region_id: [region_id.x, region_id.y, region_id.z, region_id.w],
+            clock: *clock,
+        });
     }
+    updates.sort_unstable_by_key(|update| {
+        (
+            update.region_id[3],
+            update.region_id[2],
+            update.region_id[1],
+            update.region_id[0],
+        )
+    });
+    updates
 }
 
 fn upsert_entity_record(
@@ -2604,6 +2619,13 @@ fn send_world_voxel_set_to_streamed_clients(
     prune_stale_clients(state, stale, true);
 }
 
+fn send_region_clock_updates_to_clients(state: &SharedState, updates: Vec<RegionClockPayload>) {
+    if updates.is_empty() {
+        return;
+    }
+    broadcast(state, ServerMessage::WorldRegionClockUpdate { updates });
+}
+
 fn sync_streamed_chunks_for_client(
     state: &SharedState,
     client_id: u64,
@@ -2766,10 +2788,11 @@ fn apply_creeper_explosion(
 
     let mut voxel_sets = Vec::new();
     if !changed_positions.is_empty() {
-        bump_region_clocks_for_chunks(state, changed_chunks);
+        let clock_updates = bump_region_clocks_for_chunks(state, changed_chunks);
         let revision = advance_world_revision(state);
         let mut sorted_positions: Vec<[i32; 4]> = changed_positions.into_iter().collect();
         sorted_positions.sort_unstable_by_key(|pos| (pos[3], pos[2], pos[1], pos[0]));
+        let mut pending_clock_updates = Some(clock_updates);
         voxel_sets.reserve(sorted_positions.len());
         for pos in sorted_positions {
             voxel_sets.push(QueuedWorldVoxelSet {
@@ -2778,6 +2801,9 @@ fn apply_creeper_explosion(
                 source_client_id: None,
                 client_edit_id: None,
                 revision,
+                clock_updates: pending_clock_updates
+                    .take()
+                    .filter(|updates| !updates.is_empty()),
             });
         }
     }
@@ -3049,6 +3075,9 @@ fn start_broadcast_thread(
                 || player_modifier_count > 0;
 
             for update in world_voxel_updates {
+                if let Some(clock_updates) = update.clock_updates {
+                    send_region_clock_updates_to_clients(&state, clock_updates);
+                }
                 send_world_voxel_set_to_streamed_clients(
                     &state,
                     update.position,
@@ -3640,19 +3669,22 @@ fn handle_message(
             client_edit_id,
         } => {
             let requested_voxel = VoxelType(material);
-            let maybe_revision = {
+            let maybe_update = {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 if let Some(chunk_pos) =
                     apply_authoritative_voxel_edit(&mut guard, position, requested_voxel)
                 {
-                    bump_region_clocks_for_chunks(&mut guard, std::iter::once(chunk_pos));
-                    Some(advance_world_revision(&mut guard))
+                    let clock_updates =
+                        bump_region_clocks_for_chunks(&mut guard, std::iter::once(chunk_pos));
+                    let revision = advance_world_revision(&mut guard);
+                    Some((revision, clock_updates))
                 } else {
                     None
                 }
             };
 
-            if let Some(revision) = maybe_revision {
+            if let Some((revision, clock_updates)) = maybe_update {
+                send_region_clock_updates_to_clients(state, clock_updates);
                 send_world_voxel_set_to_streamed_clients(
                     state,
                     position,
