@@ -596,7 +596,16 @@ impl App {
             None
         };
 
-        let mut custom_overlay_lines = Vec::with_capacity(64);
+        let overlay_line_capacity = if self.multiplayer_stream_tree_diag_enabled {
+            64usize.saturating_add(
+                self.multiplayer_stream_tree_diag_max_nodes
+                    .saturating_mul(32)
+                    .min(8192),
+            )
+        } else {
+            64
+        };
+        let mut custom_overlay_lines = Vec::with_capacity(overlay_line_capacity);
         if highlight_mode.uses_edges() {
             if let Some(targets) = targets {
                 if let Some(hit_voxel) = targets.hit_voxel {
@@ -621,6 +630,12 @@ impl App {
                 }
             }
         }
+        self.append_multiplayer_stream_tree_diag_overlay_lines(
+            &mut custom_overlay_lines,
+            &view_matrix,
+            1.0,
+            aspect,
+        );
         if self.args.no_hud {
             custom_overlay_lines.clear();
         }

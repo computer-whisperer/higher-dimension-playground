@@ -75,6 +75,9 @@ const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
 const VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_NON_VOXEL_INSTANCES";
 const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
 const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
+const CLIENT_REGION_TREE_BOUNDS_DIAG_ENV: &str = "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG";
+const CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES_ENV: &str =
+    "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES";
 // Tags held-block preview instances so shaders can apply preview-only shading boosts.
 const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
@@ -980,6 +983,12 @@ fn main() {
         multiplayer_self_id: None,
         multiplayer_region_clocks: HashMap::new(),
         multiplayer_last_region_patch_seq: None,
+        multiplayer_stream_tree_diag: polychora::shared::worldfield::RegionChunkTree::new(),
+        multiplayer_stream_tree_diag_enabled: env_flag_enabled(CLIENT_REGION_TREE_BOUNDS_DIAG_ENV),
+        multiplayer_stream_tree_diag_max_nodes: env_usize_or(
+            CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES_ENV,
+            192,
+        ),
         multiplayer_last_region_resync_request: Instant::now(),
         next_multiplayer_edit_id: 1,
         pending_voxel_edits: Vec::new(),
@@ -1101,6 +1110,12 @@ fn main() {
         eprintln!(
             "VTE held-block preview uses VTE entity path (default). Set {}=1 to use legacy overlay raster path.",
             VTE_OVERLAY_RASTER_ENV
+        );
+    }
+    if app.multiplayer_stream_tree_diag_enabled {
+        eprintln!(
+            "Client region-tree bounds diagnostics enabled via {} (max nodes {}).",
+            CLIENT_REGION_TREE_BOUNDS_DIAG_ENV, app.multiplayer_stream_tree_diag_max_nodes
         );
     }
     if app.perf_suite_active() {
@@ -1232,6 +1247,9 @@ struct App {
     multiplayer_self_id: Option<u64>,
     multiplayer_region_clocks: HashMap<[i32; 4], u64>,
     multiplayer_last_region_patch_seq: Option<u64>,
+    multiplayer_stream_tree_diag: polychora::shared::worldfield::RegionChunkTree,
+    multiplayer_stream_tree_diag_enabled: bool,
+    multiplayer_stream_tree_diag_max_nodes: usize,
     multiplayer_last_region_resync_request: Instant,
     next_multiplayer_edit_id: u64,
     pending_voxel_edits: Vec<PendingVoxelEdit>,

@@ -41,6 +41,14 @@ pub(super) fn env_flag_enabled_or(name: &str, default_enabled: bool) -> bool {
     }
 }
 
+pub(super) fn env_usize_or(name: &str, default_value: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_value)
+}
+
 pub(super) fn normalize_server_addr(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -233,6 +241,86 @@ pub(super) fn append_voxel_outline_lines(
             voxel[1] as f32 + ((vertex_mask >> 1) & 1) as f32,
             voxel[2] as f32 + ((vertex_mask >> 2) & 1) as f32,
             voxel[3] as f32 + ((vertex_mask >> 3) & 1) as f32,
+        ];
+        projected_vertices[vertex_mask] =
+            project_world_point_to_ndc(view_matrix, world_point, focal_length_xy, aspect);
+    }
+
+    for vertex_mask in 0..16usize {
+        for axis in 0..4usize {
+            if ((vertex_mask >> axis) & 1) != 0 {
+                continue;
+            }
+            let next_mask = vertex_mask | (1usize << axis);
+            let Some(start_ndc) = projected_vertices[vertex_mask] else {
+                continue;
+            };
+            let Some(end_ndc) = projected_vertices[next_mask] else {
+                continue;
+            };
+            overlay_lines.push(CustomOverlayLine {
+                start_ndc,
+                end_ndc,
+                color,
+            });
+        }
+    }
+}
+
+pub(super) fn append_chunk_bounds_outline_lines(
+    overlay_lines: &mut Vec<CustomOverlayLine>,
+    view_matrix: &ndarray::Array2<f32>,
+    min_chunk: [i32; 4],
+    max_chunk: [i32; 4],
+    focal_length_xy: f32,
+    aspect: f32,
+    color: [f32; 4],
+) {
+    if min_chunk
+        .iter()
+        .zip(max_chunk.iter())
+        .any(|(min, max)| min > max)
+    {
+        return;
+    }
+
+    let chunk_size = voxel::CHUNK_SIZE as i32;
+    let min_world = [
+        min_chunk[0].saturating_mul(chunk_size),
+        min_chunk[1].saturating_mul(chunk_size),
+        min_chunk[2].saturating_mul(chunk_size),
+        min_chunk[3].saturating_mul(chunk_size),
+    ];
+    let max_world = [
+        max_chunk[0].saturating_add(1).saturating_mul(chunk_size),
+        max_chunk[1].saturating_add(1).saturating_mul(chunk_size),
+        max_chunk[2].saturating_add(1).saturating_mul(chunk_size),
+        max_chunk[3].saturating_add(1).saturating_mul(chunk_size),
+    ];
+
+    let mut projected_vertices: [Option<[f32; 2]>; 16] = [None; 16];
+    for vertex_mask in 0..16usize {
+        let world_point = [
+            if (vertex_mask & 1) != 0 {
+                max_world[0] as f32
+            } else {
+                min_world[0] as f32
+            },
+            if ((vertex_mask >> 1) & 1) != 0 {
+                max_world[1] as f32
+            } else {
+                min_world[1] as f32
+            },
+            if ((vertex_mask >> 2) & 1) != 0 {
+                max_world[2] as f32
+            } else {
+                min_world[2] as f32
+            },
+            if ((vertex_mask >> 3) & 1) != 0 {
+                max_world[3] as f32
+            } else {
+                min_world[3] as f32
+            },
         ];
         projected_vertices[vertex_mask] =
             project_world_point_to_ndc(view_matrix, world_point, focal_length_xy, aspect);

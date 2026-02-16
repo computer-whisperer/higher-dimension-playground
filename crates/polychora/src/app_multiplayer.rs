@@ -1,11 +1,48 @@
 use super::*;
 use polychora::shared::worldfield::{
-    collect_non_empty_chunks_from_core_in_bounds, Aabb4i, ChunkPayload, RegionClockPrecondition,
-    RegionClockUpdate, RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch,
-    REGION_TILE_EDGE_CHUNKS,
+    collect_non_empty_chunks_from_core_in_bounds, Aabb4i, ChunkKey, ChunkPayload,
+    RegionClockPrecondition, RegionClockUpdate, RegionId, RegionNodeKind, RegionResyncEntry,
+    RegionResyncRequest, RegionSubtreePatch, RegionTreeCore, REGION_TILE_EDGE_CHUNKS,
 };
 
 const MULTIPLAYER_REGION_RESYNC_MAX_REGIONS: usize = 512;
+const REGION_TREE_BOUNDS_DIAG_DEPTH_COLORS: [[f32; 4]; 8] = [
+    [1.00, 0.35, 0.35, 0.95],
+    [0.98, 0.63, 0.26, 0.90],
+    [0.92, 0.86, 0.24, 0.85],
+    [0.52, 0.90, 0.32, 0.80],
+    [0.28, 0.86, 0.82, 0.75],
+    [0.34, 0.68, 0.98, 0.70],
+    [0.60, 0.54, 0.96, 0.65],
+    [0.90, 0.40, 0.86, 0.60],
+];
+
+fn collect_region_tree_bounds_hierarchy(
+    node: &RegionTreeCore,
+    depth: usize,
+    max_nodes: usize,
+    out: &mut Vec<(Aabb4i, usize)>,
+) {
+    if out.len() >= max_nodes {
+        return;
+    }
+    out.push((node.bounds, depth));
+    if out.len() >= max_nodes {
+        return;
+    }
+    if let RegionNodeKind::Branch(children) = &node.kind {
+        for child in children {
+            if out.len() >= max_nodes {
+                return;
+            }
+            collect_region_tree_bounds_hierarchy(child, depth.saturating_add(1), max_nodes, out);
+        }
+    }
+}
+
+fn region_tree_bounds_diag_color_for_depth(depth: usize) -> [f32; 4] {
+    REGION_TREE_BOUNDS_DIAG_DEPTH_COLORS[depth % REGION_TREE_BOUNDS_DIAG_DEPTH_COLORS.len()]
+}
 
 fn region_id_to_clock_key(region_id: RegionId) -> [i32; 4] {
     [region_id.x, region_id.y, region_id.z, region_id.w]
@@ -530,6 +567,9 @@ impl App {
             );
             self.scene
                 .insert_lod_chunk(payload.lod_level, chunk_pos, chunk);
+            if payload.lod_level == scene::VOXEL_LOD_LEVEL_NEAR {
+                self.sync_multiplayer_stream_tree_diag_chunk(chunk_pos);
+            }
             applied_chunks += 1;
         }
 
@@ -557,6 +597,9 @@ impl App {
             );
             if self.scene.remove_lod_chunk(payload.lod_level, pos) {
                 removed_chunks += 1;
+                if payload.lod_level == scene::VOXEL_LOD_LEVEL_NEAR {
+                    self.sync_multiplayer_stream_tree_diag_chunk(pos);
+                }
             }
         }
         if removed_chunks > 0 {
@@ -613,6 +656,79 @@ impl App {
             MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
         );
         self.request_multiplayer_region_resync(regions, reason);
+    }
+
+    fn rebuild_multiplayer_stream_tree_diag_from_scene_world(&mut self) {
+        if !self.multiplayer_stream_tree_diag_enabled {
+            return;
+        }
+        self.multiplayer_stream_tree_diag =
+            polychora::shared::worldfield::RegionChunkTree::from_chunks(
+                self.scene
+                    .world
+                    .chunks
+                    .iter()
+                    .filter(|(_, chunk)| !chunk.is_empty())
+                    .map(|(&chunk_pos, chunk)| {
+                        (
+                            ChunkKey::from_chunk_pos(chunk_pos),
+                            ChunkPayload::from_chunk_dense(chunk),
+                        )
+                    }),
+            );
+    }
+
+    fn sync_multiplayer_stream_tree_diag_chunk(&mut self, chunk_pos: voxel::ChunkPos) {
+        if !self.multiplayer_stream_tree_diag_enabled {
+            return;
+        }
+        let key = ChunkKey::from_chunk_pos(chunk_pos);
+        if let Some(chunk) = self.scene.world.chunks.get(&chunk_pos) {
+            if chunk.is_empty() {
+                let _ = self.multiplayer_stream_tree_diag.remove_chunk(key);
+            } else {
+                let payload = ChunkPayload::from_chunk_dense(chunk);
+                let _ = self
+                    .multiplayer_stream_tree_diag
+                    .set_chunk(key, Some(payload));
+            }
+        } else {
+            let _ = self.multiplayer_stream_tree_diag.remove_chunk(key);
+        }
+    }
+
+    pub(super) fn append_multiplayer_stream_tree_diag_overlay_lines(
+        &self,
+        overlay_lines: &mut Vec<CustomOverlayLine>,
+        view_matrix: &ndarray::Array2<f32>,
+        focal_length_xy: f32,
+        aspect: f32,
+    ) {
+        if !self.multiplayer_stream_tree_diag_enabled {
+            return;
+        }
+        let Some(root) = self.multiplayer_stream_tree_diag.root() else {
+            return;
+        };
+
+        let mut bounds_hierarchy = Vec::new();
+        collect_region_tree_bounds_hierarchy(
+            root,
+            0,
+            self.multiplayer_stream_tree_diag_max_nodes.max(1),
+            &mut bounds_hierarchy,
+        );
+        for (bounds, depth) in bounds_hierarchy {
+            append_chunk_bounds_outline_lines(
+                overlay_lines,
+                view_matrix,
+                bounds.min,
+                bounds.max,
+                focal_length_xy,
+                aspect,
+                region_tree_bounds_diag_color_for_depth(depth),
+            );
+        }
     }
 
     pub(super) fn apply_multiplayer_region_patch(
@@ -687,6 +803,7 @@ impl App {
                     .remove_lod_chunk(scene::VOXEL_LOD_LEVEL_NEAR, chunk_pos)
             {
                 removed_chunks += 1;
+                self.sync_multiplayer_stream_tree_diag_chunk(chunk_pos);
             }
         }
 
@@ -704,6 +821,7 @@ impl App {
             };
             self.scene
                 .insert_lod_chunk(scene::VOXEL_LOD_LEVEL_NEAR, chunk_pos, chunk);
+            self.sync_multiplayer_stream_tree_diag_chunk(chunk_pos);
             applied_chunks += 1;
         }
 
@@ -743,6 +861,8 @@ impl App {
                 self.multiplayer_self_id = Some(client_id);
                 self.multiplayer_region_clocks.clear();
                 self.multiplayer_last_region_patch_seq = None;
+                self.multiplayer_stream_tree_diag =
+                    polychora::shared::worldfield::RegionChunkTree::new();
                 self.next_multiplayer_edit_id = 1;
                 self.pending_voxel_edits.clear();
                 self.pending_player_movement_modifiers.clear();
@@ -773,6 +893,13 @@ impl App {
                     position[3],
                     voxel::VoxelType(material),
                 );
+                let (chunk_pos, _) = polychora::shared::voxel::world_to_chunk(
+                    position[0],
+                    position[1],
+                    position[2],
+                    position[3],
+                );
+                self.sync_multiplayer_stream_tree_diag_chunk(chunk_pos);
                 let from_self = source_client_id == self.multiplayer_self_id;
                 if from_self {
                     self.acknowledge_pending_voxel_edit(client_edit_id, position, material);
@@ -791,6 +918,7 @@ impl App {
                         self.scene.replace_world(new_world);
                         self.multiplayer_region_clocks.clear();
                         self.multiplayer_last_region_patch_seq = None;
+                        self.rebuild_multiplayer_stream_tree_diag_from_scene_world();
                         eprintln!(
                             "Applied multiplayer world snapshot rev={} chunks={}",
                             world.revision, world.non_empty_chunks
