@@ -292,7 +292,7 @@ When edits target space currently represented by `ProceduralRef`, server MUST:
 
 1. Split to touched chunk coverage only.
 2. Materialize touched chunks only.
-3. Write overrides at touched leaves.
+3. Write explicit chunk payloads at touched leaves.
 4. Keep untouched surrounding space symbolic `ProceduralRef`.
 5. Emit region-scoped patches only for affected regions.
 

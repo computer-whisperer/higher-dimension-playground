@@ -1,11 +1,11 @@
 mod entities;
 mod procgen;
+pub mod region_tree_cache;
 pub mod world_field;
-pub mod world_tree;
 
 use self::entities::{EntityId, EntityStore};
-use self::world_field::LegacyWorldField;
-use self::world_tree::ServerWorldTree;
+use self::region_tree_cache::RegionTreeWorkingSet;
+use self::world_field::ServerWorldField;
 use crate::materials;
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
@@ -14,10 +14,7 @@ use crate::shared::protocol::{
     WORLD_CHUNK_LOD_NEAR,
 };
 use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
-use crate::shared::worldfield::{
-    Aabb4i, ChunkKey, ChunkPayload, QueryDetail, QueryVolume, RegionNodeKind, RegionOverrideTree,
-    RegionTreeCore, WorldField,
-};
+use crate::shared::worldfield::{Aabb4i, ChunkPayload, QueryDetail, QueryVolume, WorldField};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet};
@@ -109,7 +106,7 @@ pub struct LocalConnection {
 #[derive(Clone, Debug)]
 struct PlayerState {
     entity_id: u64,
-    streamed_near_tree: RegionOverrideTree,
+    working_set: RegionTreeWorkingSet,
     last_stream_center_chunk: Option<[i32; 4]>,
     last_stream_world_revision: u64,
 }
@@ -426,11 +423,8 @@ struct ServerState {
     entity_revision: u64,
     dirty_block_regions: HashSet<[i32; 4]>,
     region_chunk_edge: i32,
-    world_seed: u64,
-    procgen_structures: bool,
-    world: ServerWorldTree,
+    world: ServerWorldField,
     world_revision: u64,
-    procgen_blocked_cells: HashSet<procgen::StructureCell>,
     players: HashMap<u64, PlayerState>,
     last_players_persisted_ms: u64,
     mobs: HashMap<u64, MobState>,
@@ -963,8 +957,8 @@ fn mob_collision_radius_for_scale(scale: f32) -> f32 {
 
 #[derive(Clone, Debug)]
 enum CollisionChunkCacheEntry {
-    Override(voxel::Chunk),
-    OverrideEmpty,
+    Explicit(voxel::Chunk),
+    ExplicitEmpty,
     Effective(Option<voxel::Chunk>),
 }
 
@@ -979,8 +973,8 @@ fn sample_effective_voxel_for_collision(
     let (chunk_pos, voxel_index) = voxel::world_to_chunk(wx, wy, wz, ww);
     if let Some(entry) = cache.get(&chunk_pos) {
         return match entry {
-            CollisionChunkCacheEntry::Override(chunk) => chunk.voxels[voxel_index],
-            CollisionChunkCacheEntry::OverrideEmpty => VoxelType::AIR,
+            CollisionChunkCacheEntry::Explicit(chunk) => chunk.voxels[voxel_index],
+            CollisionChunkCacheEntry::ExplicitEmpty => VoxelType::AIR,
             CollisionChunkCacheEntry::Effective(chunk) => chunk
                 .as_ref()
                 .map(|chunk| chunk.voxels[voxel_index])
@@ -988,25 +982,17 @@ fn sample_effective_voxel_for_collision(
         };
     }
 
-    if let Some(override_chunk) = chunk_override_from_tree(state, chunk_pos) {
-        if override_chunk.is_empty() {
-            cache.insert(chunk_pos, CollisionChunkCacheEntry::OverrideEmpty);
+    if let Some(chunk_data) = state.world.chunk_at(chunk_pos) {
+        if chunk_data.is_empty() {
+            cache.insert(chunk_pos, CollisionChunkCacheEntry::ExplicitEmpty);
             return VoxelType::AIR;
         }
-        let voxel = override_chunk.voxels[voxel_index];
-        cache.insert(
-            chunk_pos,
-            CollisionChunkCacheEntry::Override(override_chunk),
-        );
+        let voxel = chunk_data.voxels[voxel_index];
+        cache.insert(chunk_pos, CollisionChunkCacheEntry::Explicit(chunk_data));
         return voxel;
     }
 
-    let effective_chunk = build_effective_l0_chunk_for_sampling(
-        state,
-        chunk_pos,
-        state.world_seed,
-        state.procgen_structures,
-    );
+    let effective_chunk = state.world.effective_chunk(chunk_pos, false);
     let voxel = effective_chunk
         .as_ref()
         .map(|chunk| chunk.voxels[voxel_index])
@@ -2344,92 +2330,6 @@ fn encode_world_chunk_payload_from_realized(
     })
 }
 
-fn chunks_equal(a: &voxel::Chunk, b: &voxel::Chunk) -> bool {
-    a.solid_count == b.solid_count && a.voxels[..] == b.voxels[..]
-}
-
-fn merge_non_air_voxels(dst: &mut voxel::Chunk, src: &voxel::Chunk) {
-    for (idx, voxel) in src.voxels.iter().enumerate() {
-        if voxel.is_air() {
-            continue;
-        }
-        dst.voxels[idx] = *voxel;
-    }
-    dst.solid_count = dst.voxels.iter().filter(|v| v.is_solid()).count() as u32;
-    dst.dirty = true;
-}
-
-fn set_chunk_voxel_by_index(chunk: &mut voxel::Chunk, voxel_index: usize, value: VoxelType) {
-    let old = chunk.voxels[voxel_index];
-    if old == value {
-        return;
-    }
-    if old.is_solid() && value.is_air() {
-        chunk.solid_count = chunk.solid_count.saturating_sub(1);
-    } else if old.is_air() && value.is_solid() {
-        chunk.solid_count = chunk.solid_count.saturating_add(1);
-    }
-    chunk.voxels[voxel_index] = value;
-    chunk.dirty = true;
-}
-
-fn chunk_override_from_tree(state: &ServerState, chunk_pos: ChunkPos) -> Option<voxel::Chunk> {
-    state.world.override_chunk_at(chunk_pos)
-}
-
-fn upsert_chunk_override(state: &mut ServerState, chunk_pos: ChunkPos, chunk: voxel::Chunk) {
-    let _ = state.world.set_chunk_override(chunk_pos, chunk);
-}
-
-fn remove_chunk_override(state: &mut ServerState, chunk_pos: ChunkPos) -> bool {
-    state.world.remove_chunk_override(chunk_pos)
-}
-
-fn build_virgin_chunk_for_edit(
-    world: &ServerWorldTree,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-    blocked_cells: Option<&HashSet<procgen::StructureCell>>,
-) -> Option<voxel::Chunk> {
-    let mut chunk = world.clone_base_chunk_or_empty_at(chunk_pos);
-    if procgen_structures {
-        if let Some(structure_chunk) =
-            procgen::generate_structure_chunk_with_keepout(world_seed, chunk_pos, blocked_cells)
-        {
-            merge_non_air_voxels(&mut chunk, &structure_chunk);
-        }
-    }
-    if chunk.is_empty() {
-        None
-    } else {
-        Some(chunk)
-    }
-}
-
-fn build_effective_l0_chunk_for_sampling(
-    state: &ServerState,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-) -> Option<voxel::Chunk> {
-    if let Some(override_chunk) = chunk_override_from_tree(state, chunk_pos) {
-        return (!override_chunk.is_empty()).then_some(override_chunk);
-    }
-
-    let mut chunk = state.world.clone_base_chunk_or_empty_at(chunk_pos);
-    if procgen_structures {
-        if let Some(structure_chunk) = procgen::generate_structure_chunk_with_keepout(
-            world_seed,
-            chunk_pos,
-            Some(&state.procgen_blocked_cells),
-        ) {
-            merge_non_air_voxels(&mut chunk, &structure_chunk);
-        }
-    }
-    (!chunk.is_empty()).then_some(chunk)
-}
-
 fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
     let dx = (chunk_pos.x - center_chunk[0]) as i64;
     let dy = (chunk_pos.y - center_chunk[1]) as i64;
@@ -2438,98 +2338,10 @@ fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
     dx * dx + dy * dy + dz * dz + dw * dw
 }
 
-fn chunk_payload_has_content(payload: &ChunkPayload) -> bool {
-    match payload {
-        ChunkPayload::Empty => false,
-        ChunkPayload::Uniform(material) => *material != 0,
-        ChunkPayload::Dense16 { materials } => materials.iter().any(|material| *material != 0),
-        ChunkPayload::PalettePacked { .. } => payload
-            .dense_materials()
-            .map(|materials| materials.into_iter().any(|material| material != 0))
-            .unwrap_or(true),
-    }
-}
-
-fn linear_chunk_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
-    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
-}
-
-fn collect_non_empty_region_chunks_from_core(
-    node: &RegionTreeCore,
-    out: &mut Vec<(ChunkPos, ChunkPayload)>,
-) {
-    match &node.kind {
-        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            if *material == 0 {
-                return;
-            }
-            let payload = ChunkPayload::Uniform(*material);
-            for chunk_w in node.bounds.min[3]..=node.bounds.max[3] {
-                for chunk_z in node.bounds.min[2]..=node.bounds.max[2] {
-                    for chunk_y in node.bounds.min[1]..=node.bounds.max[1] {
-                        for chunk_x in node.bounds.min[0]..=node.bounds.max[0] {
-                            out.push((
-                                ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w),
-                                payload.clone(),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            let Ok(indices) = chunk_array.decode_dense_indices() else {
-                return;
-            };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
-                return;
-            };
-            for chunk_w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
-                for chunk_z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
-                    for chunk_y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
-                        for chunk_x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
-                            let local = [
-                                (chunk_x - chunk_array.bounds.min[0]) as usize,
-                                (chunk_y - chunk_array.bounds.min[1]) as usize,
-                                (chunk_z - chunk_array.bounds.min[2]) as usize,
-                                (chunk_w - chunk_array.bounds.min[3]) as usize,
-                            ];
-                            let linear_idx = linear_chunk_cell_index(local, extents);
-                            let Some(palette_idx) = indices.get(linear_idx) else {
-                                continue;
-                            };
-                            let Some(payload) =
-                                chunk_array.chunk_palette.get(*palette_idx as usize)
-                            else {
-                                continue;
-                            };
-                            if !chunk_payload_has_content(payload) {
-                                continue;
-                            }
-                            out.push((
-                                ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w),
-                                payload.clone(),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::Branch(children) => {
-            for child in children {
-                collect_non_empty_region_chunks_from_core(child, out);
-            }
-        }
-    }
-}
-
 fn plan_stream_window_update(
     state: &mut ServerState,
     client_id: u64,
     center_chunk: [i32; 4],
-    world_seed: u64,
-    procgen_structures: bool,
     near_chunk_radius: i32,
     _mid_chunk_radius: i32,
     _far_chunk_radius: i32,
@@ -2548,47 +2360,26 @@ fn plan_stream_window_update(
         center_chunk[3] + near_radius,
     ];
 
-    let old_streamed_tree = {
-        let player = state.players.get_mut(&client_id)?;
-        std::mem::take(&mut player.streamed_near_tree)
-    };
-    let old_streamed = old_streamed_tree
-        .collect_chunk_overrides()
-        .into_iter()
-        .filter_map(|(key, payload)| {
-            chunk_payload_has_content(&payload).then_some((key.to_chunk_pos(), payload))
-        })
-        .collect::<HashMap<ChunkPos, ChunkPayload>>();
-
     let near_bounds = Aabb4i::new(min_chunk, max_chunk);
-    let world_field = LegacyWorldField::new(
-        state.world.base_kind(),
-        Some(state.world.override_tree()),
-        world_seed,
-        procgen_structures,
-        Some(&state.procgen_blocked_cells),
-    );
-
-    let query_core = world_field.query_region_core(
+    let query_core = state.world.query_region_core(
         QueryVolume {
             bounds: near_bounds,
         },
         QueryDetail::Exact,
     );
-    let mut desired_streamed = HashMap::<ChunkPos, ChunkPayload>::new();
-    let mut desired_pairs = Vec::new();
-    collect_non_empty_region_chunks_from_core(query_core.as_ref(), &mut desired_pairs);
-    for (chunk_pos, payload) in desired_pairs {
-        desired_streamed.insert(chunk_pos, payload);
-    }
 
-    let mut load_chunk_positions: Vec<ChunkPos> = desired_streamed
-        .iter()
-        .filter_map(|(chunk_pos, payload)| match old_streamed.get(chunk_pos) {
-            Some(old_payload) if old_payload == payload => None,
-            _ => Some(*chunk_pos),
-        })
-        .collect();
+    let (mut desired_streamed, mut load_chunk_positions, unload_positions) = {
+        let player = state.players.get_mut(&client_id)?;
+        let refresh = player
+            .working_set
+            .refresh_from_core(near_bounds, query_core.as_ref());
+        (
+            refresh.desired_chunks,
+            refresh.load_positions,
+            refresh.unload_positions,
+        )
+    };
+
     load_chunk_positions.sort_unstable_by_key(|chunk_pos| {
         (
             stream_chunk_distance2(*chunk_pos, center_chunk),
@@ -2615,15 +2406,15 @@ fn plan_stream_window_update(
     }
     for chunk_pos in invalid_positions {
         desired_streamed.remove(&chunk_pos);
+        let player = state.players.get_mut(&client_id)?;
+        let _ = player.working_set.remove_chunk(chunk_pos);
     }
 
-    let mut unload_chunks: Vec<WorldChunkCoordPayload> = old_streamed
-        .keys()
-        .filter_map(|chunk_pos| {
-            (!desired_streamed.contains_key(chunk_pos)).then_some(WorldChunkCoordPayload {
-                lod_level: WORLD_CHUNK_LOD_NEAR,
-                chunk_pos: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-            })
+    let mut unload_chunks: Vec<WorldChunkCoordPayload> = unload_positions
+        .into_iter()
+        .map(|chunk_pos| WorldChunkCoordPayload {
+            lod_level: WORLD_CHUNK_LOD_NEAR,
+            chunk_pos: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
         })
         .collect();
     unload_chunks.sort_unstable_by_key(|payload| {
@@ -2636,14 +2427,6 @@ fn plan_stream_window_update(
         )
     });
 
-    if let Some(player) = state.players.get_mut(&client_id) {
-        let mut streamed_tree = RegionOverrideTree::new();
-        for (chunk_pos, payload) in desired_streamed {
-            let _ = streamed_tree
-                .set_chunk_override(ChunkKey::from_chunk_pos(chunk_pos), Some(payload));
-        }
-        player.streamed_near_tree = streamed_tree;
-    }
     Some((state.world_revision, load_payloads, unload_chunks))
 }
 
@@ -2710,7 +2493,6 @@ fn send_world_voxel_set_to_streamed_clients(
     revision: u64,
 ) {
     let (chunk_pos, _) = voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
-    let stream_key = ChunkKey::from_chunk_pos(chunk_pos);
     let clients: Vec<_> = {
         let guard = state.lock().expect("server state lock poisoned");
         guard
@@ -2721,7 +2503,7 @@ fn send_world_voxel_set_to_streamed_clients(
                 let is_streaming_chunk = guard
                     .players
                     .get(&client_id)
-                    .map(|player| player.streamed_near_tree.has_chunk_override(stream_key))
+                    .map(|player| player.working_set.contains_chunk(chunk_pos))
                     .unwrap_or(false);
                 if is_source || is_streaming_chunk {
                     Some((client_id, tx.clone()))
@@ -2753,8 +2535,6 @@ fn sync_streamed_chunks_for_client(
     state: &SharedState,
     client_id: u64,
     center_chunk: [i32; 4],
-    world_seed: u64,
-    procgen_structures: bool,
     near_chunk_radius: i32,
     mid_chunk_radius: i32,
     far_chunk_radius: i32,
@@ -2782,8 +2562,6 @@ fn sync_streamed_chunks_for_client(
                 &mut guard,
                 client_id,
                 center_chunk,
-                world_seed,
-                procgen_structures,
                 near_chunk_radius,
                 mid_chunk_radius,
                 far_chunk_radius,
@@ -2850,66 +2628,15 @@ fn sync_streamed_chunks_for_client(
     }
 }
 
-fn trim_chunk_override_if_virgin(
-    state: &mut ServerState,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-) {
-    let Some(override_chunk) = chunk_override_from_tree(state, chunk_pos) else {
-        return;
-    };
-    let virgin_chunk = build_virgin_chunk_for_edit(
-        &state.world,
-        chunk_pos,
-        world_seed,
-        procgen_structures,
-        Some(&state.procgen_blocked_cells),
-    );
-    let matches_virgin = match virgin_chunk {
-        Some(virgin) => chunks_equal(&override_chunk, &virgin),
-        None => override_chunk.is_empty(),
-    };
-    if matches_virgin && remove_chunk_override(state, chunk_pos) {
-        mark_block_region_dirty(state, chunk_pos);
-    }
-}
-
 fn apply_authoritative_voxel_edit(
     state: &mut ServerState,
     position: [i32; 4],
     material: VoxelType,
 ) -> bool {
-    let (chunk_pos, voxel_index) =
-        voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
-    let existing_override_chunk = chunk_override_from_tree(state, chunk_pos);
-    let mut virgin_chunk_for_materialize = None;
-    let current_voxel = if let Some(override_chunk) = existing_override_chunk.as_ref() {
-        override_chunk.voxels[voxel_index]
-    } else {
-        virgin_chunk_for_materialize = build_virgin_chunk_for_edit(
-            &state.world,
-            chunk_pos,
-            state.world_seed,
-            state.procgen_structures,
-            Some(&state.procgen_blocked_cells),
-        );
-        virgin_chunk_for_materialize
-            .as_ref()
-            .map(|chunk| chunk.voxels[voxel_index])
-            .unwrap_or(VoxelType::AIR)
-    };
-    if current_voxel == material {
+    let Some(chunk_pos) = state.world.apply_voxel_edit(position, material) else {
         return false;
-    }
-
-    let mut override_chunk = existing_override_chunk
-        .or(virgin_chunk_for_materialize)
-        .unwrap_or_else(voxel::Chunk::new);
-    set_chunk_voxel_by_index(&mut override_chunk, voxel_index, material);
-    upsert_chunk_override(state, chunk_pos, override_chunk);
+    };
     mark_block_region_dirty(state, chunk_pos);
-    trim_chunk_override_if_virgin(state, chunk_pos, state.world_seed, state.procgen_structures);
     true
 }
 
@@ -3136,77 +2863,6 @@ fn apply_explosion_impulse(
         }
     }
     (persistent_motion, queued_player_modifiers)
-}
-
-fn prune_virgin_overrides(
-    world: &mut ServerWorldTree,
-    world_seed: u64,
-    procgen_structures: bool,
-) -> usize {
-    let positions: Vec<ChunkPos> = world
-        .collect_override_chunks()
-        .into_iter()
-        .map(|(pos, _)| pos)
-        .collect();
-    let mut pruned = 0usize;
-    for pos in positions {
-        let Some(override_chunk) = world.override_chunk_at(pos) else {
-            continue;
-        };
-        let virgin_chunk =
-            build_virgin_chunk_for_edit(world, pos, world_seed, procgen_structures, None);
-        let matches_virgin = match virgin_chunk {
-            Some(virgin) => chunks_equal(&override_chunk, &virgin),
-            None => override_chunk.is_empty(),
-        };
-        if matches_virgin && world.remove_chunk_override(pos) {
-            pruned += 1;
-        }
-    }
-    pruned
-}
-
-fn gather_override_chunks_with_padding(
-    world: &ServerWorldTree,
-    padding_chunks: i32,
-) -> HashSet<ChunkPos> {
-    let padding = padding_chunks.max(0);
-    let mut out = HashSet::new();
-    for (pos, chunk) in world.collect_override_chunks() {
-        if chunk.is_empty() {
-            continue;
-        }
-        for dx in -padding..=padding {
-            for dy in -padding..=padding {
-                for dz in -padding..=padding {
-                    for dw in -padding..=padding {
-                        out.insert(ChunkPos::new(
-                            pos.x + dx,
-                            pos.y + dy,
-                            pos.z + dz,
-                            pos.w + dw,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn build_procgen_keepout_cells(
-    world: &ServerWorldTree,
-    world_seed: u64,
-    padding_chunks: i32,
-) -> HashSet<procgen::StructureCell> {
-    let keepout_chunks = gather_override_chunks_with_padding(world, padding_chunks);
-    let mut blocked_cells = HashSet::new();
-    for chunk_pos in keepout_chunks {
-        for cell in procgen::structure_cells_affecting_chunk(world_seed, chunk_pos) {
-            blocked_cells.insert(cell);
-        }
-    }
-    blocked_cells
 }
 
 fn directory_is_empty(path: &std::path::Path) -> io::Result<bool> {
@@ -3448,7 +3104,7 @@ fn start_autosave_thread(
                                 world: &legacy_world,
                                 entities: &persisted_entities,
                                 players: &players,
-                                world_seed: guard.world_seed,
+                                world_seed: guard.world.world_seed(),
                                 next_entity_id: guard.next_object_id,
                                 dirty_block_regions: &dirty_block_regions,
                                 dirty_entity_regions: &dirty_entity_regions,
@@ -3552,7 +3208,7 @@ fn install_or_update_player(
             let entity_id = client_id;
             entry.insert(PlayerState {
                 entity_id,
-                streamed_near_tree: RegionOverrideTree::new(),
+                working_set: RegionTreeWorkingSet::new(),
                 last_stream_center_chunk: None,
                 last_stream_world_revision: 0,
             });
@@ -3812,11 +3468,9 @@ fn handle_message(
     message: ClientMessage,
     snapshot_on_join: bool,
     tick_hz: f32,
-    procgen_structures: bool,
     near_chunk_radius: i32,
     mid_chunk_radius: i32,
     far_chunk_radius: i32,
-    world_seed: u64,
     start: Instant,
 ) {
     let message_cpu_start = Instant::now();
@@ -3865,8 +3519,6 @@ fn handle_message(
                 state,
                 client_id,
                 center_chunk,
-                world_seed,
-                procgen_structures,
                 near_chunk_radius,
                 mid_chunk_radius,
                 far_chunk_radius,
@@ -3901,8 +3553,6 @@ fn handle_message(
                 state,
                 client_id,
                 center_chunk,
-                world_seed,
-                procgen_structures,
                 near_chunk_radius,
                 mid_chunk_radius,
                 far_chunk_radius,
@@ -3990,8 +3640,6 @@ fn handle_message(
                 state,
                 client_id,
                 center_chunk,
-                world_seed,
-                procgen_structures,
                 near_chunk_radius,
                 mid_chunk_radius,
                 far_chunk_radius,
@@ -4010,11 +3658,9 @@ fn spawn_client_thread(
     state: SharedState,
     snapshot_on_join: bool,
     tick_hz: f32,
-    procgen_structures: bool,
     near_chunk_radius: i32,
     mid_chunk_radius: i32,
     far_chunk_radius: i32,
-    world_seed: u64,
     start: Instant,
 ) {
     let peer_label = stream
@@ -4102,11 +3748,9 @@ fn spawn_client_thread(
                         message,
                         snapshot_on_join,
                         tick_hz,
-                        procgen_structures,
                         near_chunk_radius,
                         mid_chunk_radius,
                         far_chunk_radius,
-                        world_seed,
                         start,
                     );
                 }
@@ -4325,41 +3969,37 @@ fn initialize_state(
     let save_generation = loaded.manifest.current_generation;
     let last_persisted_ms = loaded.manifest.last_modified_ms;
     let region_chunk_edge = loaded.manifest.limits.region_chunk_edge.max(1);
+    let runtime_world_seed = loaded.global.world_seed;
     let persisted_entities = loaded.entities;
     let persisted_players = loaded.players.players;
-    let mut initial_world = ServerWorldTree::from_legacy_world(loaded.world);
-    let runtime_world_seed = loaded.global.world_seed;
-    let next_object_id = loaded.global.next_entity_id.max(1);
-    let pruned = prune_virgin_overrides(
-        &mut initial_world,
+    let mut initial_world = ServerWorldField::from_legacy_world(
+        loaded.world,
         runtime_world_seed,
         config.procgen_structures,
+        HashSet::new(),
     );
+    let next_object_id = loaded.global.next_entity_id.max(1);
+    let pruned = initial_world.prune_virgin_chunks();
     if pruned > 0 {
         eprintln!(
-            "pruned {} virgin chunk overrides from {}",
+            "pruned {} virgin chunks from {}",
             pruned,
             config.world_file.display()
         );
     }
-    let procgen_blocked_cells =
-        if config.procgen_structures && config.procgen_keepout_from_existing_world {
-            let blocked = build_procgen_keepout_cells(
-                &initial_world,
-                runtime_world_seed,
-                config.procgen_keepout_padding_chunks,
+    if config.procgen_structures && config.procgen_keepout_from_existing_world {
+        let blocked = initial_world
+            .rebuild_procgen_keepout_from_chunks(config.procgen_keepout_padding_chunks);
+        if blocked > 0 {
+            eprintln!(
+                "procgen keepout: {} blocked structure cells (padding={} chunks)",
+                blocked,
+                config.procgen_keepout_padding_chunks.max(0)
             );
-            if !blocked.is_empty() {
-                eprintln!(
-                    "procgen keepout: {} blocked structure cells (padding={} chunks)",
-                    blocked.len(),
-                    config.procgen_keepout_padding_chunks.max(0)
-                );
-            }
-            blocked
-        } else {
-            HashSet::new()
-        };
+        }
+    } else {
+        initial_world.set_procgen_blocked_cells(HashSet::new());
+    }
     initial_world.clear_dirty();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
@@ -4387,11 +4027,8 @@ fn initialize_state(
         entity_revision: 0,
         dirty_block_regions: HashSet::new(),
         region_chunk_edge,
-        world_seed: runtime_world_seed,
-        procgen_structures: config.procgen_structures,
         world: initial_world,
         world_revision: 0,
-        procgen_blocked_cells,
         players: HashMap::new(),
         last_players_persisted_ms: last_persisted_ms,
         mobs: HashMap::new(),
@@ -4439,10 +4076,6 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
     let (state, start) = initialize_state(config, shutdown.clone())?;
     let (client_to_server_tx, client_to_server_rx) = mpsc::channel::<ClientMessage>();
     let (server_to_client_tx, server_to_client_rx) = mpsc::channel::<ServerMessage>();
-    let runtime_world_seed = {
-        let guard = state.lock().expect("server state lock poisoned");
-        guard.world_seed
-    };
 
     let client_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
@@ -4452,8 +4085,7 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
     };
 
     let state_for_client = state.clone();
-    let mut cfg = config.clone();
-    cfg.world_seed = runtime_world_seed;
+    let cfg = config.clone();
     thread::spawn(move || {
         while let Ok(message) = client_to_server_rx.recv() {
             handle_message(
@@ -4462,11 +4094,9 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
                 message,
                 cfg.snapshot_on_join,
                 cfg.tick_hz.max(0.1),
-                cfg.procgen_structures,
                 cfg.procgen_near_chunk_radius.max(0),
                 cfg.procgen_mid_chunk_radius.max(1),
                 cfg.procgen_far_chunk_radius.max(1),
-                cfg.world_seed,
                 start,
             );
         }
@@ -4485,7 +4115,7 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
     let (state, start) = initialize_state(config, shutdown)?;
     let runtime_world_seed = {
         let guard = state.lock().expect("server state lock poisoned");
-        guard.world_seed
+        guard.world.world_seed()
     };
 
     let listener = TcpListener::bind(&config.bind)?;
@@ -4513,11 +4143,9 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
                     state.clone(),
                     config.snapshot_on_join,
                     config.tick_hz.max(0.1),
-                    config.procgen_structures,
                     config.procgen_near_chunk_radius.max(0),
                     config.procgen_mid_chunk_radius.max(1),
                     config.procgen_far_chunk_radius.max(1),
-                    runtime_world_seed,
                     start,
                 );
             }

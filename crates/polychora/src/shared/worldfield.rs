@@ -577,22 +577,22 @@ pub trait WorldField {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct RegionOverrideTree {
+pub struct RegionChunkTree {
     root: Option<Box<RegionTreeCore>>,
 }
 
-impl RegionOverrideTree {
+impl RegionChunkTree {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn from_chunk_overrides<I>(overrides: I) -> Self
+    pub fn from_chunks<I>(chunks: I) -> Self
     where
         I: IntoIterator<Item = (ChunkKey, ChunkPayload)>,
     {
         let mut tree = Self::new();
-        for (key, payload) in overrides {
-            let _ = tree.set_chunk_override(key, Some(payload));
+        for (key, payload) in chunks {
+            let _ = tree.set_chunk(key, Some(payload));
         }
         tree
     }
@@ -601,18 +601,18 @@ impl RegionOverrideTree {
         self.root.as_deref()
     }
 
-    pub fn has_chunk_override(&self, key: ChunkKey) -> bool {
-        self.chunk_override_payload(key).is_some()
+    pub fn has_chunk(&self, key: ChunkKey) -> bool {
+        self.chunk_payload(key).is_some()
     }
 
-    pub fn chunk_override_payload(&self, key: ChunkKey) -> Option<ChunkPayload> {
+    pub fn chunk_payload(&self, key: ChunkKey) -> Option<ChunkPayload> {
         self.root
             .as_ref()
-            .and_then(|node| query_override_payload_in_node(node, key.pos))
+            .and_then(|node| query_chunk_payload_in_node(node, key.pos))
     }
 
-    pub fn set_chunk_override(&mut self, key: ChunkKey, payload: Option<ChunkPayload>) -> bool {
-        let payload = payload.map(canonicalize_override_payload);
+    pub fn set_chunk(&mut self, key: ChunkKey, payload: Option<ChunkPayload>) -> bool {
+        let payload = payload.map(canonicalize_chunk_payload);
         if self.root.is_none() {
             let Some(payload) = payload else {
                 return false;
@@ -620,7 +620,7 @@ impl RegionOverrideTree {
             let bounds = Aabb4i::new(key.pos, key.pos);
             self.root = Some(Box::new(RegionTreeCore {
                 bounds,
-                kind: kind_from_override_value(bounds, Some(payload)),
+                kind: kind_from_chunk_value(bounds, Some(payload)),
                 generator_version_hash: 0,
             }));
             return true;
@@ -639,7 +639,7 @@ impl RegionOverrideTree {
         }
 
         let changed = if let Some(root) = self.root.as_mut() {
-            set_override_recursive(root, key.pos, payload)
+            set_chunk_recursive(root, key.pos, payload)
         } else {
             false
         };
@@ -657,37 +657,37 @@ impl RegionOverrideTree {
         changed
     }
 
-    pub fn remove_chunk_override(&mut self, key: ChunkKey) -> bool {
-        self.set_chunk_override(key, None)
+    pub fn remove_chunk(&mut self, key: ChunkKey) -> bool {
+        self.set_chunk(key, None)
     }
 
-    pub fn any_non_empty_override_in_bounds(&self, bounds: Aabb4i) -> bool {
+    pub fn any_non_empty_chunk_in_bounds(&self, bounds: Aabb4i) -> bool {
         if !bounds.is_valid() {
             return false;
         }
         self.root
             .as_ref()
-            .map(|node| kind_has_non_empty_override_intersection(&node.kind, node.bounds, bounds))
+            .map(|node| kind_has_non_empty_chunk_intersection(&node.kind, node.bounds, bounds))
             .unwrap_or(false)
     }
 
     pub fn non_empty_chunk_count(&self) -> usize {
         self.root
             .as_ref()
-            .map(|node| count_non_empty_override_chunks(&node.kind, node.bounds))
+            .map(|node| count_non_empty_chunks(&node.kind, node.bounds))
             .unwrap_or(0)
     }
 
-    pub fn collect_chunk_overrides(&self) -> Vec<(ChunkKey, ChunkPayload)> {
+    pub fn collect_chunks(&self) -> Vec<(ChunkKey, ChunkPayload)> {
         let mut out = Vec::new();
         if let Some(root) = self.root.as_ref() {
-            collect_chunk_overrides_from_kind(&root.kind, root.bounds, &mut out);
+            collect_chunks_from_kind(&root.kind, root.bounds, &mut out);
         }
         out
     }
 }
 
-fn set_override_recursive(
+fn set_chunk_recursive(
     node: &mut RegionTreeCore,
     key_pos: [i32; 4],
     payload: Option<ChunkPayload>,
@@ -697,7 +697,7 @@ fn set_override_recursive(
     }
 
     if is_single_chunk_bounds(node.bounds) {
-        let new_kind = kind_from_override_value(node.bounds, payload);
+        let new_kind = kind_from_chunk_value(node.bounds, payload);
         if node.kind == new_kind {
             return false;
         }
@@ -716,9 +716,9 @@ fn set_override_recursive(
         return false;
     };
 
-    let changed = set_override_recursive(&mut children[target_idx], key_pos, payload);
+    let changed = set_chunk_recursive(&mut children[target_idx], key_pos, payload);
     if changed {
-        normalize_override_node(node);
+        normalize_chunk_node(node);
     }
     changed
 }
@@ -749,7 +749,7 @@ fn ensure_binary_children(node: &mut RegionTreeCore) {
     node.kind = RegionNodeKind::Branch(children);
 }
 
-fn normalize_override_node(node: &mut RegionTreeCore) {
+fn normalize_chunk_node(node: &mut RegionTreeCore) {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
         return;
     };
@@ -796,9 +796,9 @@ fn project_node_to_bounds(
         }
         RegionNodeKind::ChunkArray(_) | RegionNodeKind::Branch(_) => {
             if let Some(uniform_value) =
-                sampled_uniform_override_value(source_kind, source_bounds, target_bounds)
+                sampled_uniform_chunk_value(source_kind, source_bounds, target_bounds)
             {
-                kind_from_override_value(target_bounds, uniform_value)
+                kind_from_chunk_value(target_bounds, uniform_value)
             } else if let Some((left_bounds, right_bounds)) =
                 split_bounds_longest_axis(target_bounds)
             {
@@ -819,12 +819,12 @@ fn project_node_to_bounds(
                     kind: RegionNodeKind::Branch(vec![left, right]),
                     generator_version_hash,
                 };
-                normalize_override_node(&mut parent);
+                normalize_chunk_node(&mut parent);
                 return parent;
             } else {
                 let value =
-                    query_override_payload_in_kind(source_kind, source_bounds, target_bounds.min);
-                kind_from_override_value(target_bounds, value)
+                    query_chunk_payload_in_kind(source_kind, source_bounds, target_bounds.min);
+                kind_from_chunk_value(target_bounds, value)
             }
         }
     };
@@ -836,7 +836,7 @@ fn project_node_to_bounds(
     }
 }
 
-fn sampled_uniform_override_value(
+fn sampled_uniform_chunk_value(
     kind: &RegionNodeKind,
     kind_bounds: Aabb4i,
     bounds: Aabb4i,
@@ -846,7 +846,7 @@ fn sampled_uniform_override_value(
         for z in bounds.min[2]..=bounds.max[2] {
             for y in bounds.min[1]..=bounds.max[1] {
                 for x in bounds.min[0]..=bounds.max[0] {
-                    let value = query_override_payload_in_kind(kind, kind_bounds, [x, y, z, w]);
+                    let value = query_chunk_payload_in_kind(kind, kind_bounds, [x, y, z, w]);
                     if let Some(ref expected) = first {
                         if *expected != value {
                             return None;
@@ -861,14 +861,11 @@ fn sampled_uniform_override_value(
     first
 }
 
-fn query_override_payload_in_node(
-    node: &RegionTreeCore,
-    key_pos: [i32; 4],
-) -> Option<ChunkPayload> {
-    query_override_payload_in_kind(&node.kind, node.bounds, key_pos)
+fn query_chunk_payload_in_node(node: &RegionTreeCore, key_pos: [i32; 4]) -> Option<ChunkPayload> {
+    query_chunk_payload_in_kind(&node.kind, node.bounds, key_pos)
 }
 
-fn query_override_payload_in_kind(
+fn query_chunk_payload_in_kind(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
     key_pos: [i32; 4],
@@ -884,7 +881,7 @@ fn query_override_payload_in_kind(
         RegionNodeKind::Branch(children) => {
             for child in children {
                 if child.bounds.contains_chunk(key_pos) {
-                    return query_override_payload_in_kind(&child.kind, child.bounds, key_pos);
+                    return query_chunk_payload_in_kind(&child.kind, child.bounds, key_pos);
                 }
             }
             None
@@ -892,7 +889,7 @@ fn query_override_payload_in_kind(
     }
 }
 
-fn kind_has_non_empty_override_intersection(
+fn kind_has_non_empty_chunk_intersection(
     kind: &RegionNodeKind,
     kind_bounds: Aabb4i,
     query_bounds: Aabb4i,
@@ -908,12 +905,12 @@ fn kind_has_non_empty_override_intersection(
             chunk_array_has_non_empty_intersection(chunk_array, query_bounds)
         }
         RegionNodeKind::Branch(children) => children.iter().any(|child| {
-            kind_has_non_empty_override_intersection(&child.kind, child.bounds, query_bounds)
+            kind_has_non_empty_chunk_intersection(&child.kind, child.bounds, query_bounds)
         }),
     }
 }
 
-fn count_non_empty_override_chunks(kind: &RegionNodeKind, bounds: Aabb4i) -> usize {
+fn count_non_empty_chunks(kind: &RegionNodeKind, bounds: Aabb4i) -> usize {
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => 0,
         RegionNodeKind::Uniform(material) => {
@@ -935,12 +932,12 @@ fn count_non_empty_override_chunks(kind: &RegionNodeKind, bounds: Aabb4i) -> usi
         }
         RegionNodeKind::Branch(children) => children
             .iter()
-            .map(|child| count_non_empty_override_chunks(&child.kind, child.bounds))
+            .map(|child| count_non_empty_chunks(&child.kind, child.bounds))
             .sum(),
     }
 }
 
-fn collect_chunk_overrides_from_kind(
+fn collect_chunks_from_kind(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
     out: &mut Vec<(ChunkKey, ChunkPayload)>,
@@ -993,7 +990,7 @@ fn collect_chunk_overrides_from_kind(
         }
         RegionNodeKind::Branch(children) => {
             for child in children {
-                collect_chunk_overrides_from_kind(&child.kind, child.bounds, out);
+                collect_chunks_from_kind(&child.kind, child.bounds, out);
             }
         }
     }
@@ -1070,7 +1067,7 @@ fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: [i32; 4]) -> Op
     chunk_array.chunk_palette.get(palette_idx).cloned()
 }
 
-fn canonicalize_override_payload(payload: ChunkPayload) -> ChunkPayload {
+fn canonicalize_chunk_payload(payload: ChunkPayload) -> ChunkPayload {
     let payload = match payload {
         ChunkPayload::Empty => ChunkPayload::Uniform(0),
         other => other,
@@ -1089,11 +1086,11 @@ fn canonicalize_override_payload(payload: ChunkPayload) -> ChunkPayload {
     }
 }
 
-fn kind_from_override_value(bounds: Aabb4i, value: Option<ChunkPayload>) -> RegionNodeKind {
+fn kind_from_chunk_value(bounds: Aabb4i, value: Option<ChunkPayload>) -> RegionNodeKind {
     let Some(payload) = value else {
         return RegionNodeKind::Empty;
     };
-    match canonicalize_override_payload(payload) {
+    match canonicalize_chunk_payload(payload) {
         ChunkPayload::Uniform(material) => RegionNodeKind::Uniform(material),
         other => repeated_payload_kind(bounds, other),
     }
@@ -1755,58 +1752,58 @@ mod tests {
     }
 
     #[test]
-    fn region_override_tree_set_get_and_remove_single_chunk() {
-        let mut tree = RegionOverrideTree::new();
-        assert!(!tree.has_chunk_override(key(0, 0, 0, 0)));
+    fn region_chunk_tree_set_get_and_remove_single_chunk() {
+        let mut tree = RegionChunkTree::new();
+        assert!(!tree.has_chunk(key(0, 0, 0, 0)));
 
-        assert!(tree.set_chunk_override(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(12))));
-        assert!(tree.has_chunk_override(key(0, 0, 0, 0)));
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(12))));
+        assert!(tree.has_chunk(key(0, 0, 0, 0)));
         assert_eq!(
-            tree.chunk_override_payload(key(0, 0, 0, 0)),
+            tree.chunk_payload(key(0, 0, 0, 0)),
             Some(ChunkPayload::Uniform(12))
         );
 
-        assert!(tree.remove_chunk_override(key(0, 0, 0, 0)));
-        assert!(!tree.has_chunk_override(key(0, 0, 0, 0)));
+        assert!(tree.remove_chunk(key(0, 0, 0, 0)));
+        assert!(!tree.has_chunk(key(0, 0, 0, 0)));
         assert!(tree.root().is_none());
     }
 
     #[test]
-    fn region_override_tree_merges_uniform_and_fragments_on_edit() {
-        let mut tree = RegionOverrideTree::new();
-        assert!(tree.set_chunk_override(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
-        assert!(tree.set_chunk_override(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
+    fn region_chunk_tree_merges_uniform_and_fragments_on_edit() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
+        assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
 
         let root = tree.root().expect("root exists");
         assert!(matches!(root.kind, RegionNodeKind::Uniform(7)));
 
-        assert!(tree.set_chunk_override(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(9))));
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(9))));
         assert_eq!(
-            tree.chunk_override_payload(key(0, 0, 0, 0)),
+            tree.chunk_payload(key(0, 0, 0, 0)),
             Some(ChunkPayload::Uniform(9))
         );
         assert_eq!(
-            tree.chunk_override_payload(key(1, 0, 0, 0)),
+            tree.chunk_payload(key(1, 0, 0, 0)),
             Some(ChunkPayload::Uniform(7))
         );
 
-        assert!(tree.set_chunk_override(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
         let root = tree.root().expect("root exists");
         assert!(matches!(root.kind, RegionNodeKind::Uniform(7)));
     }
 
     #[test]
-    fn region_override_tree_expands_for_distant_insertions() {
-        let mut tree = RegionOverrideTree::new();
-        assert!(tree.set_chunk_override(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(1))));
-        assert!(tree.set_chunk_override(key(48, -7, 13, 21), Some(ChunkPayload::Uniform(2))));
+    fn region_chunk_tree_expands_for_distant_insertions() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(1))));
+        assert!(tree.set_chunk(key(48, -7, 13, 21), Some(ChunkPayload::Uniform(2))));
 
         assert_eq!(
-            tree.chunk_override_payload(key(0, 0, 0, 0)),
+            tree.chunk_payload(key(0, 0, 0, 0)),
             Some(ChunkPayload::Uniform(1))
         );
         assert_eq!(
-            tree.chunk_override_payload(key(48, -7, 13, 21)),
+            tree.chunk_payload(key(48, -7, 13, 21)),
             Some(ChunkPayload::Uniform(2))
         );
         let root = tree.root().expect("root exists");
@@ -1815,32 +1812,32 @@ mod tests {
     }
 
     #[test]
-    fn region_override_tree_preserves_explicit_empty_override() {
-        let mut tree = RegionOverrideTree::new();
-        assert!(tree.set_chunk_override(key(2, -1, 0, 0), Some(ChunkPayload::Empty)));
-        assert!(tree.has_chunk_override(key(2, -1, 0, 0)));
+    fn region_chunk_tree_preserves_explicit_empty_chunk() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(2, -1, 0, 0), Some(ChunkPayload::Empty)));
+        assert!(tree.has_chunk(key(2, -1, 0, 0)));
 
         let payload = tree
-            .chunk_override_payload(key(2, -1, 0, 0))
-            .expect("empty override payload exists");
+            .chunk_payload(key(2, -1, 0, 0))
+            .expect("empty chunk payload exists");
         let dense = payload.dense_materials().expect("dense decode");
         assert!(dense.iter().all(|v| *v == 0));
     }
 
     #[test]
-    fn region_override_tree_non_empty_bounds_ignores_air_overrides() {
-        let mut tree = RegionOverrideTree::new();
-        assert!(tree.set_chunk_override(key(0, 0, 0, 0), Some(ChunkPayload::Empty)));
+    fn region_chunk_tree_non_empty_bounds_ignores_air_chunks() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Empty)));
         let around_origin = Aabb4i::new([-1, -1, -1, -1], [1, 1, 1, 1]);
-        assert!(!tree.any_non_empty_override_in_bounds(around_origin));
+        assert!(!tree.any_non_empty_chunk_in_bounds(around_origin));
 
-        assert!(tree.set_chunk_override(key(4, 0, 0, 0), Some(ChunkPayload::Uniform(6))));
+        assert!(tree.set_chunk(key(4, 0, 0, 0), Some(ChunkPayload::Uniform(6))));
         let around_solid = Aabb4i::new([3, -1, -1, -1], [5, 1, 1, 1]);
-        assert!(tree.any_non_empty_override_in_bounds(around_solid));
+        assert!(tree.any_non_empty_chunk_in_bounds(around_solid));
     }
 
     #[test]
-    fn region_override_tree_roundtrips_non_uniform_payload() {
+    fn region_chunk_tree_roundtrips_non_uniform_payload() {
         let mut chunk = Chunk::new();
         chunk.set(0, 0, 0, 0, VoxelType(4));
         chunk.set(1, 0, 0, 0, VoxelType(9));
@@ -1848,23 +1845,23 @@ mod tests {
         let payload = ChunkPayload::from_chunk_compact(&chunk);
         let expected = payload.dense_materials().expect("dense expected");
 
-        let mut tree = RegionOverrideTree::new();
-        assert!(tree.set_chunk_override(key(7, 1, -2, 3), Some(payload)));
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(7, 1, -2, 3), Some(payload)));
         let roundtrip = tree
-            .chunk_override_payload(key(7, 1, -2, 3))
+            .chunk_payload(key(7, 1, -2, 3))
             .expect("payload exists");
         let dense = roundtrip.dense_materials().expect("dense roundtrip");
         assert_eq!(dense, expected);
     }
 
     #[test]
-    fn region_override_tree_collects_overrides_and_counts_non_empty() {
-        let mut tree = RegionOverrideTree::new();
-        assert!(tree.set_chunk_override(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(0))));
-        assert!(tree.set_chunk_override(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(3))));
-        assert!(tree.set_chunk_override(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(5))));
+    fn region_chunk_tree_collects_chunks_and_counts_non_empty() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(0))));
+        assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(3))));
+        assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(5))));
 
-        let mut collected = tree.collect_chunk_overrides();
+        let mut collected = tree.collect_chunks();
         collected.sort_by_key(|(key, _)| key.pos);
         assert_eq!(collected.len(), 3);
         assert_eq!(collected[0].0.pos, [0, 0, 0, 0]);
