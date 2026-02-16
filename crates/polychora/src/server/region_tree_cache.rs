@@ -39,15 +39,9 @@ impl RegionTreeWorkingSet {
             .interest_bounds
             .map(|old_bounds| collect_non_empty_chunks_in_bounds(&self.tree, old_bounds))
             .unwrap_or_default();
-
-        if let Some(old_bounds) = self.interest_bounds.take() {
-            clear_chunks_in_bounds(&mut self.tree, old_bounds);
-        }
-
-        graft_region_core_into_tree(&mut self.tree, bounds, core);
+        let desired_chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
+        apply_chunk_diff(&mut self.tree, &old_chunks, &desired_chunks);
         self.interest_bounds = Some(bounds);
-
-        let desired_chunks = collect_non_empty_chunks_in_bounds(&self.tree, bounds);
 
         let load_positions = desired_chunks
             .iter()
@@ -156,6 +150,24 @@ fn collect_non_empty_region_chunks_from_core(
     }
 }
 
+fn collect_non_empty_chunks_from_core_in_bounds(
+    core: &RegionTreeCore,
+    bounds: Aabb4i,
+) -> HashMap<ChunkPos, ChunkPayload> {
+    if !bounds.is_valid() {
+        return HashMap::new();
+    }
+
+    let mut desired_pairs = Vec::new();
+    collect_non_empty_region_chunks_from_core(core, &mut desired_pairs);
+    desired_pairs
+        .into_iter()
+        .filter(|(chunk_pos, _)| {
+            bounds.contains_chunk([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w])
+        })
+        .collect()
+}
+
 fn collect_non_empty_chunks_in_bounds(
     tree: &RegionChunkTree,
     bounds: Aabb4i,
@@ -163,46 +175,33 @@ fn collect_non_empty_chunks_in_bounds(
     if !bounds.is_valid() {
         return HashMap::new();
     }
-    tree.collect_chunks()
+    tree.collect_chunks_in_bounds(bounds)
         .into_iter()
         .filter_map(|(key, payload)| {
             if !chunk_payload_has_content(&payload) {
                 return None;
             }
-            let chunk_pos = key.to_chunk_pos();
-            bounds
-                .contains_chunk([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w])
-                .then_some((chunk_pos, payload))
+            Some((key.to_chunk_pos(), payload))
         })
         .collect()
 }
 
-fn clear_chunks_in_bounds(tree: &mut RegionChunkTree, bounds: Aabb4i) {
-    if !bounds.is_valid() {
-        return;
-    }
-    for chunk_w in bounds.min[3]..=bounds.max[3] {
-        for chunk_z in bounds.min[2]..=bounds.max[2] {
-            for chunk_y in bounds.min[1]..=bounds.max[1] {
-                for chunk_x in bounds.min[0]..=bounds.max[0] {
-                    let _ = tree.remove_chunk(ChunkKey {
-                        pos: [chunk_x, chunk_y, chunk_z, chunk_w],
-                    });
-                }
-            }
+fn apply_chunk_diff(
+    tree: &mut RegionChunkTree,
+    old_chunks: &HashMap<ChunkPos, ChunkPayload>,
+    desired_chunks: &HashMap<ChunkPos, ChunkPayload>,
+) {
+    for chunk_pos in old_chunks.keys() {
+        if !desired_chunks.contains_key(chunk_pos) {
+            let _ = tree.remove_chunk(ChunkKey::from_chunk_pos(*chunk_pos));
         }
     }
-}
 
-fn graft_region_core_into_tree(tree: &mut RegionChunkTree, bounds: Aabb4i, core: &RegionTreeCore) {
-    clear_chunks_in_bounds(tree, bounds);
-    let mut desired_pairs = Vec::new();
-    collect_non_empty_region_chunks_from_core(core, &mut desired_pairs);
-    for (chunk_pos, payload) in desired_pairs {
-        if !bounds.contains_chunk([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]) {
+    for (chunk_pos, payload) in desired_chunks {
+        if old_chunks.get(chunk_pos) == Some(payload) {
             continue;
         }
-        let _ = tree.set_chunk(ChunkKey::from_chunk_pos(chunk_pos), Some(payload));
+        let _ = tree.set_chunk(ChunkKey::from_chunk_pos(*chunk_pos), Some(payload.clone()));
     }
 }
 
@@ -255,5 +254,31 @@ mod tests {
         assert!(diff.load_positions.is_empty());
         assert_eq!(diff.unload_positions, vec![ChunkPos::new(0, 0, 0, 0)]);
         assert!(!working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn refresh_window_shift_removes_stale_chunks_and_loads_new_chunks() {
+        let mut working = RegionTreeWorkingSet::new();
+        let left_bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let right_bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
+
+        let left_core = RegionTreeCore {
+            bounds: left_bounds,
+            kind: RegionNodeKind::Uniform(2),
+            generator_version_hash: 0,
+        };
+        let right_core = RegionTreeCore {
+            bounds: right_bounds,
+            kind: RegionNodeKind::Uniform(5),
+            generator_version_hash: 0,
+        };
+
+        let _ = working.refresh_from_core(left_bounds, &left_core);
+        let shifted = working.refresh_from_core(right_bounds, &right_core);
+
+        assert_eq!(shifted.unload_positions, vec![ChunkPos::new(0, 0, 0, 0)]);
+        assert_eq!(shifted.load_positions, vec![ChunkPos::new(1, 0, 0, 0)]);
+        assert!(!working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
+        assert!(working.contains_chunk(ChunkPos::new(1, 0, 0, 0)));
     }
 }

@@ -39,7 +39,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - `WorldChunkBatch`
   - `WorldChunkUnloadBatch`
   - `WorldVoxelSet`
-- Region refresh currently clears old/new bounded cells directly before graft (simple, correct, not optimized yet).
+- Region refresh now applies per-chunk diff between prior/new working-set views; subtree-native patch ops are still pending.
 
 ### Old / to-be-replaced
 - Legacy chunk-list replication model (not region-subtree patch transport).
