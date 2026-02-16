@@ -24,6 +24,10 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - `RegionChunkTree` (removed `RegionOverrideTree` alias)
   - `chunk_tree`/`chunk_at`/`set_chunk`/`remove_chunk` naming in `ServerWorldField`
   - `RegionTreeWorkingSet` helper naming now references chunk semantics (not override semantics)
+- `RegionChunkTree` now exposes bounded chunk operations used by stream cache updates:
+  - `collect_chunks_in_bounds`
+  - `diff_chunks_in_bounds`
+  - `apply_chunk_diff`
 
 ## System Status Matrix
 
@@ -60,7 +64,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - transport encoding and batching (legacy wire for now)
 
 ## Next Migration Targets
-1. Add explicit tree patch/diff operations (replace-by-bounds, subtree trim/diff) to avoid brute-force cell clears.
+1. Extend chunk-level diff ops into subtree-native patch/diff operations (replace-by-bounds, subtree trim/diff).
 2. Replace chunk batch wire transport with `RegionSubtreePatch` + region clocks.
 3. Move persistence from `VoxelWorld` bridge to canonical tree + region clocks.
 4. Introduce handshake capabilities (`protocol_version`, `generator_manifest_hash`, `feature_bits`) for symbolic/refined tree transport policy.

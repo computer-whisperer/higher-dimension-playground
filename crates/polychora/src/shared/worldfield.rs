@@ -581,6 +581,12 @@ pub struct RegionChunkTree {
     root: Option<Box<RegionTreeCore>>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RegionChunkDiff {
+    pub removals: Vec<ChunkKey>,
+    pub upserts: Vec<(ChunkKey, ChunkPayload)>,
+}
+
 impl RegionChunkTree {
     pub fn new() -> Self {
         Self::default()
@@ -695,6 +701,54 @@ impl RegionChunkTree {
             collect_chunks_from_kind_in_bounds(&root.kind, root.bounds, bounds, &mut out);
         }
         out
+    }
+
+    pub fn diff_chunks_in_bounds<I>(&self, bounds: Aabb4i, desired: I) -> RegionChunkDiff
+    where
+        I: IntoIterator<Item = (ChunkKey, ChunkPayload)>,
+    {
+        if !bounds.is_valid() {
+            return RegionChunkDiff::default();
+        }
+
+        let current_map: HashMap<ChunkKey, ChunkPayload> =
+            self.collect_chunks_in_bounds(bounds).into_iter().collect();
+
+        let mut desired_map = HashMap::<ChunkKey, ChunkPayload>::new();
+        for (key, payload) in desired {
+            if !bounds.contains_chunk(key.pos) {
+                continue;
+            }
+            desired_map.insert(key, canonicalize_chunk_payload(payload));
+        }
+
+        let mut removals = Vec::new();
+        for key in current_map.keys() {
+            if !desired_map.contains_key(key) {
+                removals.push(*key);
+            }
+        }
+        removals.sort_unstable_by_key(|key| key.pos);
+
+        let mut upserts = Vec::new();
+        for (key, payload) in desired_map {
+            if current_map.get(&key) == Some(&payload) {
+                continue;
+            }
+            upserts.push((key, payload));
+        }
+        upserts.sort_unstable_by_key(|(key, _)| key.pos);
+
+        RegionChunkDiff { removals, upserts }
+    }
+
+    pub fn apply_chunk_diff(&mut self, diff: &RegionChunkDiff) {
+        for key in &diff.removals {
+            let _ = self.remove_chunk(*key);
+        }
+        for (key, payload) in &diff.upserts {
+            let _ = self.set_chunk(*key, Some(payload.clone()));
+        }
     }
 }
 
@@ -1963,6 +2017,40 @@ mod tests {
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].0.pos, [0, 0, 0, 0]);
         assert_eq!(collected[0].1, ChunkPayload::Uniform(4));
+    }
+
+    #[test]
+    fn region_chunk_tree_diff_and_apply_updates_bounds_minimally() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
+        assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(3))));
+        assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+
+        let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+        let diff = tree.diff_chunks_in_bounds(
+            bounds,
+            vec![
+                (key(1, 0, 0, 0), ChunkPayload::Uniform(3)),
+                (key(2, 0, 0, 0), ChunkPayload::Uniform(9)),
+                (key(3, 0, 0, 0), ChunkPayload::Uniform(7)),
+            ],
+        );
+
+        assert_eq!(diff.removals, vec![key(0, 0, 0, 0)]);
+        assert_eq!(diff.upserts.len(), 1);
+        assert_eq!(diff.upserts[0], (key(2, 0, 0, 0), ChunkPayload::Uniform(9)));
+
+        tree.apply_chunk_diff(&diff);
+        assert!(!tree.has_chunk(key(0, 0, 0, 0)));
+        assert_eq!(
+            tree.chunk_payload(key(1, 0, 0, 0)),
+            Some(ChunkPayload::Uniform(3))
+        );
+        assert_eq!(
+            tree.chunk_payload(key(2, 0, 0, 0)),
+            Some(ChunkPayload::Uniform(9))
+        );
+        assert!(!tree.has_chunk(key(3, 0, 0, 0)));
     }
 
     #[test]
