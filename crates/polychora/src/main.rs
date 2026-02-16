@@ -12,6 +12,7 @@ mod app_runtime;
 mod app_settings;
 mod app_ui;
 mod audio;
+mod audio_synth;
 mod camera;
 mod cpu_render;
 mod input;

@@ -1,5 +1,5 @@
-use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, SpatialSink};
-use std::io::Cursor;
+use crate::audio_synth;
+use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink, SpatialSink};
 use std::sync::Arc;
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
@@ -249,38 +249,27 @@ fn world_point_from_voxel_center(voxel_position: [i32; 4]) -> [f32; 4] {
     ]
 }
 
-fn load_wav_samples(wav_bytes: &'static [u8], _sample_rate: u32) -> Arc<[f32]> {
-    let cursor = Cursor::new(wav_bytes);
-    let decoder = Decoder::new(cursor).expect("Failed to decode WAV");
-    let samples: Vec<f32> = decoder.map(|s| s as f32 / i16::MAX as f32).collect();
-    samples.into()
-}
-
 fn build_effect_table(sample_rate: u32) -> Vec<EffectVariations> {
-    let load = |wav: &'static [u8]| load_wav_samples(wav, sample_rate);
+    let effects = audio_synth::synthesize_effects(sample_rate);
 
     // Order must match SoundEffect::index()
     vec![
         // Place
-        EffectVariations::single(load(include_bytes!(
-            "../../../sfx5/place_block_01_medium.wav"
-        ))),
+        EffectVariations::single(Arc::<[f32]>::from(effects.place)),
         // Break
-        EffectVariations::single(load(include_bytes!(
-            "../../../sfx5/break_block_01_medium.wav"
-        ))),
+        EffectVariations::single(Arc::<[f32]>::from(effects.break_clip)),
         // Footstep (3 variations)
         EffectVariations {
-            samples: vec![
-                load(include_bytes!("../../../sfx5/footstep_01_medium.wav")),
-                load(include_bytes!("../../../sfx5/footstep_02_medium.wav")),
-                load(include_bytes!("../../../sfx5/footstep_03_medium.wav")),
-            ],
+            samples: effects
+                .footsteps
+                .into_iter()
+                .map(Arc::<[f32]>::from)
+                .collect(),
         },
         // Jump
-        EffectVariations::single(load(include_bytes!("../../../sfx5/jump_01_medium.wav"))),
+        EffectVariations::single(Arc::<[f32]>::from(effects.jump)),
         // Land
-        EffectVariations::single(load(include_bytes!("../../../sfx5/land_01_medium.wav"))),
+        EffectVariations::single(Arc::<[f32]>::from(effects.land)),
     ]
 }
 
