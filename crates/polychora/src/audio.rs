@@ -8,6 +8,10 @@ const EFFECT_BASE_GAINS: [f32; SoundEffect::COUNT] = [0.15, 0.18, 0.11, 0.14, 0.
 const SPATIAL_EAR_DISTANCE: f32 = 0.18;
 const SPATIAL_DISTANCE_SCALE: f32 = 0.35;
 const SPATIAL_MIN_FORWARD_DEPTH: f32 = 0.02;
+const SPATIAL_MIN_DISTANCE: f32 = 1e-4;
+pub const AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT: f32 = 2.0;
+pub const AUDIO_SPATIAL_FALLOFF_POWER_MIN: f32 = 1.0;
+pub const AUDIO_SPATIAL_FALLOFF_POWER_MAX: f32 = 3.5;
 
 #[derive(Copy, Clone, Debug)]
 pub enum SoundEffect {
@@ -64,12 +68,13 @@ pub struct AudioEngine {
     output: Option<AudioOutput>,
     sample_rate: u32,
     pub master_volume: f32,
+    pub spatial_falloff_power: f32,
     effects: Vec<EffectVariations>,
     rng_state: std::cell::Cell<u32>,
 }
 
 impl AudioEngine {
-    pub fn new(enabled: bool, master_volume: f32) -> Self {
+    pub fn new(enabled: bool, master_volume: f32, spatial_falloff_power: f32) -> Self {
         let sample_rate = AUDIO_SAMPLE_RATE;
         let effects = build_effect_table(sample_rate);
         let output = if enabled {
@@ -95,6 +100,10 @@ impl AudioEngine {
             } else {
                 DEFAULT_MASTER_VOLUME
             }),
+            spatial_falloff_power: spatial_falloff_power.clamp(
+                AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+                AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+            ),
             effects,
             rng_state: std::cell::Cell::new(0x12345678),
         }
@@ -139,8 +148,12 @@ impl AudioEngine {
             return;
         };
 
-        let emitter =
-            project_emitter_to_listener_space(listener_position, listener_basis, emitter_position);
+        let emitter = project_emitter_to_listener_space(
+            listener_position,
+            listener_basis,
+            emitter_position,
+            self.spatial_falloff_power,
+        );
         let half_ear = 0.5 * SPATIAL_EAR_DISTANCE;
         let left_ear = [-half_ear, 0.0, 0.0];
         let right_ear = [half_ear, 0.0, 0.0];
@@ -196,6 +209,7 @@ fn project_emitter_to_listener_space(
     listener_position: [f32; 4],
     listener_basis: ViewBasis4,
     emitter_position: [f32; 4],
+    falloff_power: f32,
 ) -> [f32; 3] {
     let delta = [
         emitter_position[0] - listener_position[0],
@@ -211,11 +225,19 @@ fn project_emitter_to_listener_space(
 
     // Match the 4D camera's ZW depth collapse so pan and attenuation track the viewport.
     let zw_depth = (z * z + w * w).sqrt().max(SPATIAL_MIN_FORWARD_DEPTH);
-    [
-        x * SPATIAL_DISTANCE_SCALE,
-        y * SPATIAL_DISTANCE_SCALE,
-        zw_depth * SPATIAL_DISTANCE_SCALE,
-    ]
+    let base_distance = (x * x + y * y + zw_depth * zw_depth)
+        .sqrt()
+        .max(SPATIAL_MIN_DISTANCE);
+    let distance_scaled = base_distance * SPATIAL_DISTANCE_SCALE;
+    // Rodio applies ~1/dist^2 attenuation. Warp radial distance so we can target 1/r^N.
+    let exponent = 0.5
+        * falloff_power.clamp(
+            AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+            AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+        );
+    let warped_distance = distance_scaled.powf(exponent);
+    let dir_scale = warped_distance / base_distance;
+    [x * dir_scale, y * dir_scale, zw_depth * dir_scale]
 }
 
 fn world_point_from_voxel_center(voxel_position: [i32; 4]) -> [f32; 4] {
@@ -300,11 +322,40 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0],
         );
 
-        let a = project_emitter_to_listener_space(listener, basis, [1.0, 0.0, 2.0, 2.0]);
-        let b = project_emitter_to_listener_space(listener, basis, [1.0, 0.0, -2.0, -2.0]);
+        let a = project_emitter_to_listener_space(
+            listener,
+            basis,
+            [1.0, 0.0, 2.0, 2.0],
+            AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT,
+        );
+        let b = project_emitter_to_listener_space(
+            listener,
+            basis,
+            [1.0, 0.0, -2.0, -2.0],
+            AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT,
+        );
 
         assert!((a[0] - b[0]).abs() <= 1e-6);
         assert!((a[1] - b[1]).abs() <= 1e-6);
         assert!((a[2] - b[2]).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn projector_distance_warp_matches_falloff_power() {
+        let listener = [0.0, 0.0, 0.0, 0.0];
+        let basis: ViewBasis4 = (
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        let emitter = [0.0, 0.0, 4.0, 0.0];
+
+        let v2 = project_emitter_to_listener_space(listener, basis, emitter, 2.0);
+        let v3 = project_emitter_to_listener_space(listener, basis, emitter, 3.0);
+        let d2 = (v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]).sqrt();
+        let d3 = (v3[0] * v3[0] + v3[1] * v3[1] + v3[2] * v3[2]).sqrt();
+
+        assert!(d3 > d2);
     }
 }

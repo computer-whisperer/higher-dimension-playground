@@ -156,6 +156,18 @@ impl App {
                         .text("Master Volume")
                         .step_by(0.05),
                 );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.audio.spatial_falloff_power,
+                        AUDIO_SPATIAL_FALLOFF_POWER_MIN..=AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+                    )
+                    .text("Spatial Falloff (1/r^N)")
+                    .step_by(0.05),
+                );
+                self.audio.spatial_falloff_power = self.audio.spatial_falloff_power.clamp(
+                    AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+                    AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+                );
 
                 ui.separator();
                 ui.label("Render Resolution");

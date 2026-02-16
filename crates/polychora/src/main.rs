@@ -46,7 +46,10 @@ use winit::{
 
 use app_bootstrap::{parse_commands, run_cpu_render};
 use app_helpers::*;
-use audio::{AudioEngine, SoundEffect};
+use audio::{
+    AudioEngine, SoundEffect, AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT, AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+    AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+};
 use camera::{Camera4D, PLAYER_HEIGHT};
 use input::{ControlScheme, InputState, RotationPair};
 use multiplayer::{ClientMessage as MultiplayerClientMessage, MultiplayerClient, MultiplayerEvent};
@@ -592,6 +595,11 @@ struct Args {
     /// Master volume for client-side sound effects.
     #[arg(long, default_value_t = 0.7)]
     audio_volume: f32,
+
+    /// Spatial attenuation power N used for 1/r^N distance falloff.
+    /// 2.0 approximates 3D inverse-square, 3.0 approximates 4D hypersphere surface falloff.
+    #[arg(long, default_value_t = AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT)]
+    audio_spatial_falloff_power: f32,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -888,12 +896,20 @@ fn main() {
         .clone()
         .unwrap_or_else(default_multiplayer_player_name);
     let initial_migrate_world_seed = args.singleplayer_world_seed.to_string();
-    let audio = AudioEngine::new(args.audio, args.audio_volume);
+    let audio = AudioEngine::new(
+        args.audio,
+        args.audio_volume,
+        args.audio_spatial_falloff_power,
+    );
     if args.audio {
         if audio.is_active() {
             eprintln!(
-                "Audio enabled (volume {:.2})",
-                args.audio_volume.clamp(0.0, 2.0)
+                "Audio enabled (volume {:.2}, spatial falloff 1/r^{:.2})",
+                args.audio_volume.clamp(0.0, 2.0),
+                args.audio_spatial_falloff_power.clamp(
+                    AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+                    AUDIO_SPATIAL_FALLOFF_POWER_MAX
+                )
             );
         } else {
             eprintln!("Audio disabled (no output device)");
