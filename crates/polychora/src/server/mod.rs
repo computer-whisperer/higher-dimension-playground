@@ -1,16 +1,22 @@
 mod entities;
 mod procgen;
+pub mod world_field;
+pub mod world_tree;
 
 use self::entities::{EntityId, EntityStore};
+use self::world_field::LegacyWorldField;
+use self::world_tree::ServerWorldTree;
 use crate::materials;
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
     WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
-    WORLD_CHUNK_LOD_FAR, WORLD_CHUNK_LOD_MID, WORLD_CHUNK_LOD_NEAR,
+    WORLD_CHUNK_LOD_NEAR,
 };
-use crate::shared::voxel::{
-    self, save_world, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
+use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
+use crate::shared::worldfield::{
+    Aabb4i, ChunkKey, ChunkPayload, QueryDetail, QueryVolume, RegionNodeKind, RegionOverrideTree,
+    RegionTreeCore, WorldField,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -25,7 +31,6 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-const STREAM_MID_LOD_SCALE: i32 = 2;
 const STREAM_FAR_LOD_SCALE: i32 = 4;
 const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
@@ -104,7 +109,7 @@ pub struct LocalConnection {
 #[derive(Clone, Debug)]
 struct PlayerState {
     entity_id: u64,
-    streamed_chunks: HashSet<StreamChunkKey>,
+    streamed_near_tree: RegionOverrideTree,
     last_stream_center_chunk: Option<[i32; 4]>,
     last_stream_world_revision: u64,
 }
@@ -299,12 +304,6 @@ const SPAWNABLE_ENTITY_SPECS: &[SpawnableEntitySpec] = &[
     },
 ];
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-struct StreamChunkKey {
-    lod_level: u8,
-    chunk_pos: ChunkPos,
-}
-
 #[derive(Clone, Debug)]
 struct ServerCpuProfile {
     window_start: Instant,
@@ -429,10 +428,9 @@ struct ServerState {
     region_chunk_edge: i32,
     world_seed: u64,
     procgen_structures: bool,
-    world: VoxelWorld,
+    world: ServerWorldTree,
     world_revision: u64,
     procgen_blocked_cells: HashSet<procgen::StructureCell>,
-    stream_worldgen_has_content_cache: HashMap<StreamChunkKey, bool>,
     players: HashMap<u64, PlayerState>,
     last_players_persisted_ms: u64,
     mobs: HashMap<u64, MobState>,
@@ -963,37 +961,66 @@ fn mob_collision_radius_for_scale(scale: f32) -> f32 {
         .clamp(MOB_COLLISION_RADIUS_MIN, MOB_COLLISION_RADIUS_MAX)
 }
 
+#[derive(Clone, Debug)]
+enum CollisionChunkCacheEntry {
+    Override(voxel::Chunk),
+    OverrideEmpty,
+    Effective(Option<voxel::Chunk>),
+}
+
 fn sample_effective_voxel_for_collision(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, Option<voxel::Chunk>>,
+    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
     wx: i32,
     wy: i32,
     wz: i32,
     ww: i32,
 ) -> VoxelType {
     let (chunk_pos, voxel_index) = voxel::world_to_chunk(wx, wy, wz, ww);
-    if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
-        return override_chunk.voxels[voxel_index];
+    if let Some(entry) = cache.get(&chunk_pos) {
+        return match entry {
+            CollisionChunkCacheEntry::Override(chunk) => chunk.voxels[voxel_index],
+            CollisionChunkCacheEntry::OverrideEmpty => VoxelType::AIR,
+            CollisionChunkCacheEntry::Effective(chunk) => chunk
+                .as_ref()
+                .map(|chunk| chunk.voxels[voxel_index])
+                .unwrap_or(VoxelType::AIR),
+        };
     }
-    if !cache.contains_key(&chunk_pos) {
-        let effective_chunk = build_effective_l0_chunk_for_sampling(
-            state,
+
+    if let Some(override_chunk) = chunk_override_from_tree(state, chunk_pos) {
+        if override_chunk.is_empty() {
+            cache.insert(chunk_pos, CollisionChunkCacheEntry::OverrideEmpty);
+            return VoxelType::AIR;
+        }
+        let voxel = override_chunk.voxels[voxel_index];
+        cache.insert(
             chunk_pos,
-            state.world_seed,
-            state.procgen_structures,
+            CollisionChunkCacheEntry::Override(override_chunk),
         );
-        cache.insert(chunk_pos, effective_chunk);
+        return voxel;
     }
-    cache
-        .get(&chunk_pos)
-        .and_then(|chunk| chunk.as_ref())
+
+    let effective_chunk = build_effective_l0_chunk_for_sampling(
+        state,
+        chunk_pos,
+        state.world_seed,
+        state.procgen_structures,
+    );
+    let voxel = effective_chunk
+        .as_ref()
         .map(|chunk| chunk.voxels[voxel_index])
-        .unwrap_or(VoxelType::AIR)
+        .unwrap_or(VoxelType::AIR);
+    cache.insert(
+        chunk_pos,
+        CollisionChunkCacheEntry::Effective(effective_chunk),
+    );
+    voxel
 }
 
 fn mob_collides_at(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, Option<voxel::Chunk>>,
+    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
     position: [f32; 4],
     radius: f32,
 ) -> bool {
@@ -1051,7 +1078,7 @@ fn resolve_mob_collision(
     scale: f32,
 ) -> [f32; 4] {
     let radius = mob_collision_radius_for_scale(scale);
-    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
     let mut pos = old_pos;
     if mob_collides_at(state, &mut cache, pos, radius) {
         for _ in 0..MOB_COLLISION_MAX_PUSHUP_STEPS {
@@ -1145,7 +1172,7 @@ fn mob_nav_has_line_of_sight(
     }
     let dist = dist_sq.sqrt();
     let steps = (dist / MOB_NAV_PATH_LOS_STEP).ceil().max(1.0).min(256.0) as usize;
-    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
     for idx in 1..=steps {
         let t = idx as f32 / steps as f32;
         let probe = [
@@ -1167,7 +1194,7 @@ fn mob_nav_find_walkable_goal_cell(
     origin: MobNavCell,
     collision_radius: f32,
 ) -> Option<MobNavCell> {
-    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
     if !mob_collides_at(
         state,
         &mut cache,
@@ -1256,7 +1283,7 @@ fn mob_nav_find_path(
             best_goal_distance: 0,
         });
     }
-    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
     if mob_collides_at(
         state,
         &mut cache,
@@ -1872,7 +1899,7 @@ fn attempt_phase_spider_blink(
     );
 
     let radius = mob_collision_radius_for_scale(scale);
-    let mut cache = HashMap::<ChunkPos, Option<voxel::Chunk>>::new();
+    let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
     let lift_primary = 0.16 + 0.12 * (phase * 0.8).sin().abs();
     let lift_options = [lift_primary, 0.05, -0.08];
 
@@ -2293,16 +2320,28 @@ fn build_entity_replication_batches(
     batches
 }
 
-fn encode_world_chunk_payload(
+fn encode_world_chunk_payload_from_realized(
     lod_level: u8,
     chunk_pos: ChunkPos,
-    chunk: &voxel::Chunk,
-) -> WorldChunkPayload {
-    WorldChunkPayload {
+    payload: &ChunkPayload,
+) -> Option<WorldChunkPayload> {
+    if matches!(payload, ChunkPayload::Empty) {
+        return None;
+    }
+    let dense = payload.dense_materials().ok()?;
+    if dense.len() != voxel::CHUNK_VOLUME {
+        return None;
+    }
+    Some(WorldChunkPayload {
         lod_level,
         chunk_pos: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-        voxels: chunk.voxels.iter().map(|v| v.0).collect(),
-    }
+        // Current wire format is u8-only. Clamp out-of-range materials to u8::MAX
+        // until the transport is upgraded to support larger material IDs.
+        voxels: dense
+            .into_iter()
+            .map(|material| u8::try_from(material).unwrap_or(u8::MAX))
+            .collect(),
+    })
 }
 
 fn chunks_equal(a: &voxel::Chunk, b: &voxel::Chunk) -> bool {
@@ -2320,24 +2359,34 @@ fn merge_non_air_voxels(dst: &mut voxel::Chunk, src: &voxel::Chunk) {
     dst.dirty = true;
 }
 
-fn build_flat_floor_scaled_chunk(material: VoxelType) -> Option<voxel::Chunk> {
-    if material.is_air() {
-        return None;
+fn set_chunk_voxel_by_index(chunk: &mut voxel::Chunk, voxel_index: usize, value: VoxelType) {
+    let old = chunk.voxels[voxel_index];
+    if old == value {
+        return;
     }
-    let mut chunk = voxel::Chunk::new();
-    let y = CHUNK_SIZE.saturating_sub(1);
-    for w in 0..CHUNK_SIZE {
-        for z in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
-                chunk.set(x, y, z, w, material);
-            }
-        }
+    if old.is_solid() && value.is_air() {
+        chunk.solid_count = chunk.solid_count.saturating_sub(1);
+    } else if old.is_air() && value.is_solid() {
+        chunk.solid_count = chunk.solid_count.saturating_add(1);
     }
-    (!chunk.is_empty()).then_some(chunk)
+    chunk.voxels[voxel_index] = value;
+    chunk.dirty = true;
+}
+
+fn chunk_override_from_tree(state: &ServerState, chunk_pos: ChunkPos) -> Option<voxel::Chunk> {
+    state.world.override_chunk_at(chunk_pos)
+}
+
+fn upsert_chunk_override(state: &mut ServerState, chunk_pos: ChunkPos, chunk: voxel::Chunk) {
+    let _ = state.world.set_chunk_override(chunk_pos, chunk);
+}
+
+fn remove_chunk_override(state: &mut ServerState, chunk_pos: ChunkPos) -> bool {
+    state.world.remove_chunk_override(chunk_pos)
 }
 
 fn build_virgin_chunk_for_edit(
-    world: &VoxelWorld,
+    world: &ServerWorldTree,
     chunk_pos: ChunkPos,
     world_seed: u64,
     procgen_structures: bool,
@@ -2358,39 +2407,14 @@ fn build_virgin_chunk_for_edit(
     }
 }
 
-fn build_effective_stream_chunk_l0(
-    state: &ServerState,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-) -> Option<voxel::Chunk> {
-    if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
-        // Preserve explicit empty overrides (carved holes) instead of falling back
-        // to virtual base generation on the client.
-        return Some(override_chunk.clone());
-    }
-
-    let mut chunk = state.world.clone_base_chunk_or_empty_at(chunk_pos);
-    if procgen_structures {
-        if let Some(structure_chunk) = procgen::generate_structure_chunk_with_keepout(
-            world_seed,
-            chunk_pos,
-            Some(&state.procgen_blocked_cells),
-        ) {
-            merge_non_air_voxels(&mut chunk, &structure_chunk);
-        }
-    }
-    (!chunk.is_empty()).then_some(chunk)
-}
-
 fn build_effective_l0_chunk_for_sampling(
     state: &ServerState,
     chunk_pos: ChunkPos,
     world_seed: u64,
     procgen_structures: bool,
 ) -> Option<voxel::Chunk> {
-    if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
-        return (!override_chunk.is_empty()).then(|| override_chunk.clone());
+    if let Some(override_chunk) = chunk_override_from_tree(state, chunk_pos) {
+        return (!override_chunk.is_empty()).then_some(override_chunk);
     }
 
     let mut chunk = state.world.clone_base_chunk_or_empty_at(chunk_pos);
@@ -2414,256 +2438,90 @@ fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
     dx * dx + dy * dy + dz * dz + dw * dw
 }
 
-fn scaled_lod_child_l0_chunk_pos(
-    parent_chunk_pos: ChunkPos,
-    lod_scale: i32,
-    child: [i32; 4],
-) -> ChunkPos {
-    ChunkPos::new(
-        parent_chunk_pos.x * lod_scale + child[0],
-        parent_chunk_pos.y * lod_scale + child[1],
-        parent_chunk_pos.z * lod_scale + child[2],
-        parent_chunk_pos.w * lod_scale + child[3],
-    )
-}
-
-fn l0_chunk_to_scaled_chunk(pos: ChunkPos, lod_scale: i32) -> ChunkPos {
-    ChunkPos::new(
-        pos.x.div_euclid(lod_scale),
-        pos.y.div_euclid(lod_scale),
-        pos.z.div_euclid(lod_scale),
-        pos.w.div_euclid(lod_scale),
-    )
-}
-
-fn stream_lod_scale(lod_level: u8) -> Option<i32> {
-    match lod_level {
-        WORLD_CHUNK_LOD_NEAR => Some(1),
-        WORLD_CHUNK_LOD_MID => Some(STREAM_MID_LOD_SCALE),
-        WORLD_CHUNK_LOD_FAR => Some(STREAM_FAR_LOD_SCALE),
-        _ => None,
+fn chunk_payload_has_content(payload: &ChunkPayload) -> bool {
+    match payload {
+        ChunkPayload::Empty => false,
+        ChunkPayload::Uniform(material) => *material != 0,
+        ChunkPayload::Dense16 { materials } => materials.iter().any(|material| *material != 0),
+        ChunkPayload::PalettePacked { .. } => payload
+            .dense_materials()
+            .map(|materials| materials.into_iter().any(|material| material != 0))
+            .unwrap_or(true),
     }
 }
 
-fn stream_lod_worldgen_y_bounds(
-    state: &ServerState,
-    lod_level: u8,
-    procgen_structures: bool,
-) -> Option<(i32, i32)> {
-    let scale = stream_lod_scale(lod_level)?;
-    let mut min_y = i32::MAX;
-    let mut max_y = i32::MIN;
-    let mut found = false;
-
-    if let Some((base_min_y, base_max_y)) = state.world.base_chunk_y_bounds_for_scale(scale) {
-        min_y = min_y.min(base_min_y);
-        max_y = max_y.max(base_max_y);
-        found = true;
-    }
-    if procgen_structures {
-        let (procgen_min_y, procgen_max_y) = procgen::structure_chunk_y_bounds_for_scale(scale);
-        min_y = min_y.min(procgen_min_y);
-        max_y = max_y.max(procgen_max_y);
-        found = true;
-    }
-
-    found.then_some((min_y, max_y))
+fn linear_chunk_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
+    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
-fn stream_lod_worldgen_has_content(
-    state: &mut ServerState,
-    lod_level: u8,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-) -> bool {
-    let cache_key = StreamChunkKey {
-        lod_level,
-        chunk_pos,
-    };
-    if let Some(cached) = state.stream_worldgen_has_content_cache.get(&cache_key) {
-        return *cached;
-    }
-
-    let Some(scale) = stream_lod_scale(lod_level) else {
-        return false;
-    };
-
-    let has_content = if state
-        .world
-        .base_chunk_has_content_for_scale(chunk_pos, scale)
-    {
-        true
-    } else if procgen_structures
-        && procgen::structure_chunk_has_content_for_scale_with_keepout(
-            world_seed,
-            chunk_pos,
-            scale,
-            Some(&state.procgen_blocked_cells),
-        )
-    {
-        true
-    } else {
-        false
-    };
-
-    state
-        .stream_worldgen_has_content_cache
-        .insert(cache_key, has_content);
-    has_content
-}
-
-fn build_effective_stream_chunk_scaled_lod(
-    state: &ServerState,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-    lod_scale: i32,
-) -> Option<voxel::Chunk> {
-    if lod_scale <= 1 {
-        return build_effective_stream_chunk_l0(state, chunk_pos, world_seed, procgen_structures);
-    }
-
-    if let BaseWorldKind::FlatFloor { material } = state.world.base_kind() {
-        let base_has_content = state
-            .world
-            .base_chunk_has_content_for_scale(chunk_pos, lod_scale);
-        if base_has_content {
-            let has_override_child = state
-                .world
-                .chunks
-                .keys()
-                .any(|&child_pos| l0_chunk_to_scaled_chunk(child_pos, lod_scale) == chunk_pos);
-            if !has_override_child {
-                let has_structure_child = procgen_structures
-                    && procgen::structure_chunk_has_content_for_scale_with_keepout(
-                        world_seed,
-                        chunk_pos,
-                        lod_scale,
-                        Some(&state.procgen_blocked_cells),
-                    );
-                if !has_structure_child {
-                    return build_flat_floor_scaled_chunk(material);
-                }
+fn collect_non_empty_region_chunks_from_core(
+    node: &RegionTreeCore,
+    out: &mut Vec<(ChunkPos, ChunkPayload)>,
+) {
+    match &node.kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
+        RegionNodeKind::Uniform(material) => {
+            if *material == 0 {
+                return;
             }
-        }
-    }
-
-    let scale = lod_scale as usize;
-    let child_count = scale * scale * scale * scale;
-    let mut child_chunks: Vec<Option<voxel::Chunk>> = vec![None; child_count];
-
-    for cw in 0..lod_scale {
-        for cz in 0..lod_scale {
-            for cy in 0..lod_scale {
-                for cx in 0..lod_scale {
-                    let child_idx = (((cw as usize * scale + cz as usize) * scale + cy as usize)
-                        * scale
-                        + cx as usize) as usize;
-                    let child_pos =
-                        scaled_lod_child_l0_chunk_pos(chunk_pos, lod_scale, [cx, cy, cz, cw]);
-                    child_chunks[child_idx] = build_effective_l0_chunk_for_sampling(
-                        state,
-                        child_pos,
-                        world_seed,
-                        procgen_structures,
-                    );
-                }
-            }
-        }
-    }
-
-    let mut out = voxel::Chunk::new();
-    let mut material_counts = [0u16; 256];
-
-    for w in 0..CHUNK_SIZE {
-        for z in 0..CHUNK_SIZE {
-            for y in 0..CHUNK_SIZE {
-                for x in 0..CHUNK_SIZE {
-                    material_counts.fill(0);
-                    let mut best_material = 0u8;
-                    let mut best_count = 0u16;
-
-                    for dw in 0..lod_scale {
-                        for dz in 0..lod_scale {
-                            for dy in 0..lod_scale {
-                                for dx in 0..lod_scale {
-                                    let fx = (x as i32) * lod_scale + dx;
-                                    let fy = (y as i32) * lod_scale + dy;
-                                    let fz = (z as i32) * lod_scale + dz;
-                                    let fw = (w as i32) * lod_scale + dw;
-                                    let ccx = fx / CHUNK_SIZE as i32;
-                                    let ccy = fy / CHUNK_SIZE as i32;
-                                    let ccz = fz / CHUNK_SIZE as i32;
-                                    let ccw = fw / CHUNK_SIZE as i32;
-                                    let lx = (fx % CHUNK_SIZE as i32) as usize;
-                                    let ly = (fy % CHUNK_SIZE as i32) as usize;
-                                    let lz = (fz % CHUNK_SIZE as i32) as usize;
-                                    let lw = (fw % CHUNK_SIZE as i32) as usize;
-                                    let child_idx = ((((ccw as usize) * scale + (ccz as usize))
-                                        * scale
-                                        + (ccy as usize))
-                                        * scale
-                                        + (ccx as usize))
-                                        as usize;
-                                    let Some(child_chunk) = child_chunks[child_idx].as_ref() else {
-                                        continue;
-                                    };
-                                    let voxel = child_chunk.get(lx, ly, lz, lw);
-                                    if voxel.is_air() {
-                                        continue;
-                                    }
-                                    let material = voxel.0 as usize;
-                                    material_counts[material] =
-                                        material_counts[material].saturating_add(1);
-                                    if material_counts[material] > best_count {
-                                        best_count = material_counts[material];
-                                        best_material = voxel.0;
-                                    }
-                                }
-                            }
+            let payload = ChunkPayload::Uniform(*material);
+            for chunk_w in node.bounds.min[3]..=node.bounds.max[3] {
+                for chunk_z in node.bounds.min[2]..=node.bounds.max[2] {
+                    for chunk_y in node.bounds.min[1]..=node.bounds.max[1] {
+                        for chunk_x in node.bounds.min[0]..=node.bounds.max[0] {
+                            out.push((
+                                ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w),
+                                payload.clone(),
+                            ));
                         }
                     }
-
-                    if best_material != VoxelType::AIR.0 {
-                        out.set(x, y, z, w, VoxelType(best_material));
+                }
+            }
+        }
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            let Ok(indices) = chunk_array.decode_dense_indices() else {
+                return;
+            };
+            let Some(extents) = chunk_array.bounds.chunk_extents() else {
+                return;
+            };
+            for chunk_w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
+                for chunk_z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
+                    for chunk_y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
+                        for chunk_x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
+                            let local = [
+                                (chunk_x - chunk_array.bounds.min[0]) as usize,
+                                (chunk_y - chunk_array.bounds.min[1]) as usize,
+                                (chunk_z - chunk_array.bounds.min[2]) as usize,
+                                (chunk_w - chunk_array.bounds.min[3]) as usize,
+                            ];
+                            let linear_idx = linear_chunk_cell_index(local, extents);
+                            let Some(palette_idx) = indices.get(linear_idx) else {
+                                continue;
+                            };
+                            let Some(payload) =
+                                chunk_array.chunk_palette.get(*palette_idx as usize)
+                            else {
+                                continue;
+                            };
+                            if !chunk_payload_has_content(payload) {
+                                continue;
+                            }
+                            out.push((
+                                ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w),
+                                payload.clone(),
+                            ));
+                        }
                     }
                 }
             }
         }
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                collect_non_empty_region_chunks_from_core(child, out);
+            }
+        }
     }
-
-    (!out.is_empty()).then_some(out)
-}
-
-fn build_effective_stream_chunk_l1(
-    state: &ServerState,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-) -> Option<voxel::Chunk> {
-    build_effective_stream_chunk_scaled_lod(
-        state,
-        chunk_pos,
-        world_seed,
-        procgen_structures,
-        STREAM_MID_LOD_SCALE,
-    )
-}
-
-fn build_effective_stream_chunk_l2(
-    state: &ServerState,
-    chunk_pos: ChunkPos,
-    world_seed: u64,
-    procgen_structures: bool,
-) -> Option<voxel::Chunk> {
-    build_effective_stream_chunk_scaled_lod(
-        state,
-        chunk_pos,
-        world_seed,
-        procgen_structures,
-        STREAM_FAR_LOD_SCALE,
-    )
 }
 
 fn plan_stream_window_update(
@@ -2673,8 +2531,8 @@ fn plan_stream_window_update(
     world_seed: u64,
     procgen_structures: bool,
     near_chunk_radius: i32,
-    mid_chunk_radius: i32,
-    far_chunk_radius: i32,
+    _mid_chunk_radius: i32,
+    _far_chunk_radius: i32,
 ) -> Option<(u64, Vec<WorldChunkPayload>, Vec<WorldChunkCoordPayload>)> {
     let near_radius = near_chunk_radius.max(0);
     let min_chunk = [
@@ -2690,271 +2548,82 @@ fn plan_stream_window_update(
         center_chunk[3] + near_radius,
     ];
 
-    let mut desired_set = HashSet::<StreamChunkKey>::new();
-    if let Some((worldgen_min_near_y, worldgen_max_near_y)) =
-        stream_lod_worldgen_y_bounds(state, WORLD_CHUNK_LOD_NEAR, procgen_structures)
-    {
-        let scan_min_near_y = worldgen_min_near_y.max(min_chunk[1]);
-        let scan_max_near_y = worldgen_max_near_y.min(max_chunk[1]);
-        if scan_min_near_y <= scan_max_near_y {
-            for chunk_x in min_chunk[0]..=max_chunk[0] {
-                for chunk_z in min_chunk[2]..=max_chunk[2] {
-                    for chunk_w in min_chunk[3]..=max_chunk[3] {
-                        for chunk_y in scan_min_near_y..=scan_max_near_y {
-                            let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
-                            if stream_lod_worldgen_has_content(
-                                state,
-                                WORLD_CHUNK_LOD_NEAR,
-                                chunk_pos,
-                                world_seed,
-                                procgen_structures,
-                            ) {
-                                desired_set.insert(StreamChunkKey {
-                                    lod_level: WORLD_CHUNK_LOD_NEAR,
-                                    chunk_pos,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    for (&chunk_pos, chunk) in &state.world.chunks {
-        if chunk_pos.x < min_chunk[0]
-            || chunk_pos.x > max_chunk[0]
-            || chunk_pos.y < min_chunk[1]
-            || chunk_pos.y > max_chunk[1]
-            || chunk_pos.z < min_chunk[2]
-            || chunk_pos.z > max_chunk[2]
-            || chunk_pos.w < min_chunk[3]
-            || chunk_pos.w > max_chunk[3]
-            || chunk.is_empty()
-        {
-            continue;
-        }
-        desired_set.insert(StreamChunkKey {
-            lod_level: WORLD_CHUNK_LOD_NEAR,
-            chunk_pos,
-        });
-    }
-
-    let center_mid_chunk = [
-        center_chunk[0].div_euclid(STREAM_MID_LOD_SCALE),
-        center_chunk[1].div_euclid(STREAM_MID_LOD_SCALE),
-        center_chunk[2].div_euclid(STREAM_MID_LOD_SCALE),
-        center_chunk[3].div_euclid(STREAM_MID_LOD_SCALE),
-    ];
-    let mid_radius = mid_chunk_radius.max(near_radius).max(1);
-    let min_mid_chunk = [
-        center_mid_chunk[0] - mid_radius,
-        center_mid_chunk[1] - mid_radius,
-        center_mid_chunk[2] - mid_radius,
-        center_mid_chunk[3] - mid_radius,
-    ];
-    let max_mid_chunk = [
-        center_mid_chunk[0] + mid_radius,
-        center_mid_chunk[1] + mid_radius,
-        center_mid_chunk[2] + mid_radius,
-        center_mid_chunk[3] + mid_radius,
-    ];
-
-    if let Some((worldgen_min_mid_y, worldgen_max_mid_y)) =
-        stream_lod_worldgen_y_bounds(state, WORLD_CHUNK_LOD_MID, procgen_structures)
-    {
-        let scan_min_mid_y = worldgen_min_mid_y.max(min_mid_chunk[1]);
-        let scan_max_mid_y = worldgen_max_mid_y.min(max_mid_chunk[1]);
-        if scan_min_mid_y <= scan_max_mid_y {
-            for chunk_x in min_mid_chunk[0]..=max_mid_chunk[0] {
-                for chunk_z in min_mid_chunk[2]..=max_mid_chunk[2] {
-                    for chunk_w in min_mid_chunk[3]..=max_mid_chunk[3] {
-                        for chunk_y in scan_min_mid_y..=scan_max_mid_y {
-                            let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
-                            if stream_lod_worldgen_has_content(
-                                state,
-                                WORLD_CHUNK_LOD_MID,
-                                chunk_pos,
-                                world_seed,
-                                procgen_structures,
-                            ) {
-                                desired_set.insert(StreamChunkKey {
-                                    lod_level: WORLD_CHUNK_LOD_MID,
-                                    chunk_pos,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    for (&chunk_pos, chunk) in &state.world.chunks {
-        if chunk.is_empty() {
-            continue;
-        }
-        let mid_pos = l0_chunk_to_scaled_chunk(chunk_pos, STREAM_MID_LOD_SCALE);
-        if mid_pos.x < min_mid_chunk[0]
-            || mid_pos.x > max_mid_chunk[0]
-            || mid_pos.y < min_mid_chunk[1]
-            || mid_pos.y > max_mid_chunk[1]
-            || mid_pos.z < min_mid_chunk[2]
-            || mid_pos.z > max_mid_chunk[2]
-            || mid_pos.w < min_mid_chunk[3]
-            || mid_pos.w > max_mid_chunk[3]
-        {
-            continue;
-        }
-        desired_set.insert(StreamChunkKey {
-            lod_level: WORLD_CHUNK_LOD_MID,
-            chunk_pos: mid_pos,
-        });
-    }
-
-    let center_far_chunk = [
-        center_chunk[0].div_euclid(STREAM_FAR_LOD_SCALE),
-        center_chunk[1].div_euclid(STREAM_FAR_LOD_SCALE),
-        center_chunk[2].div_euclid(STREAM_FAR_LOD_SCALE),
-        center_chunk[3].div_euclid(STREAM_FAR_LOD_SCALE),
-    ];
-    let min_far_radius = (mid_radius + 1).div_euclid(2).max(1);
-    let far_radius = far_chunk_radius.max(min_far_radius).max(1);
-    let min_far_chunk = [
-        center_far_chunk[0] - far_radius,
-        center_far_chunk[1] - far_radius,
-        center_far_chunk[2] - far_radius,
-        center_far_chunk[3] - far_radius,
-    ];
-    let max_far_chunk = [
-        center_far_chunk[0] + far_radius,
-        center_far_chunk[1] + far_radius,
-        center_far_chunk[2] + far_radius,
-        center_far_chunk[3] + far_radius,
-    ];
-
-    if let Some((worldgen_min_far_y, worldgen_max_far_y)) =
-        stream_lod_worldgen_y_bounds(state, WORLD_CHUNK_LOD_FAR, procgen_structures)
-    {
-        let scan_min_far_y = worldgen_min_far_y.max(min_far_chunk[1]);
-        let scan_max_far_y = worldgen_max_far_y.min(max_far_chunk[1]);
-        if scan_min_far_y <= scan_max_far_y {
-            for chunk_x in min_far_chunk[0]..=max_far_chunk[0] {
-                for chunk_z in min_far_chunk[2]..=max_far_chunk[2] {
-                    for chunk_w in min_far_chunk[3]..=max_far_chunk[3] {
-                        for chunk_y in scan_min_far_y..=scan_max_far_y {
-                            let chunk_pos = ChunkPos::new(chunk_x, chunk_y, chunk_z, chunk_w);
-                            if stream_lod_worldgen_has_content(
-                                state,
-                                WORLD_CHUNK_LOD_FAR,
-                                chunk_pos,
-                                world_seed,
-                                procgen_structures,
-                            ) {
-                                desired_set.insert(StreamChunkKey {
-                                    lod_level: WORLD_CHUNK_LOD_FAR,
-                                    chunk_pos,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    for (&chunk_pos, chunk) in &state.world.chunks {
-        if chunk.is_empty() {
-            continue;
-        }
-        let far_pos = l0_chunk_to_scaled_chunk(chunk_pos, STREAM_FAR_LOD_SCALE);
-        if far_pos.x < min_far_chunk[0]
-            || far_pos.x > max_far_chunk[0]
-            || far_pos.y < min_far_chunk[1]
-            || far_pos.y > max_far_chunk[1]
-            || far_pos.z < min_far_chunk[2]
-            || far_pos.z > max_far_chunk[2]
-            || far_pos.w < min_far_chunk[3]
-            || far_pos.w > max_far_chunk[3]
-        {
-            continue;
-        }
-        desired_set.insert(StreamChunkKey {
-            lod_level: WORLD_CHUNK_LOD_FAR,
-            chunk_pos: far_pos,
-        });
-    }
-
-    let old_streamed = {
+    let old_streamed_tree = {
         let player = state.players.get_mut(&client_id)?;
-        std::mem::take(&mut player.streamed_chunks)
+        std::mem::take(&mut player.streamed_near_tree)
     };
+    let old_streamed = old_streamed_tree
+        .collect_chunk_overrides()
+        .into_iter()
+        .filter_map(|(key, payload)| {
+            chunk_payload_has_content(&payload).then_some((key.to_chunk_pos(), payload))
+        })
+        .collect::<HashMap<ChunkPos, ChunkPayload>>();
 
-    let mut load_chunk_keys: Vec<StreamChunkKey> =
-        desired_set.difference(&old_streamed).copied().collect();
-    load_chunk_keys.sort_unstable_by_key(|key| {
-        let center = match key.lod_level {
-            WORLD_CHUNK_LOD_NEAR => center_chunk,
-            WORLD_CHUNK_LOD_MID => center_mid_chunk,
-            WORLD_CHUNK_LOD_FAR => center_far_chunk,
-            _ => center_chunk,
-        };
+    let near_bounds = Aabb4i::new(min_chunk, max_chunk);
+    let world_field = LegacyWorldField::new(
+        state.world.base_kind(),
+        Some(state.world.override_tree()),
+        world_seed,
+        procgen_structures,
+        Some(&state.procgen_blocked_cells),
+    );
+
+    let query_core = world_field.query_region_core(
+        QueryVolume {
+            bounds: near_bounds,
+        },
+        QueryDetail::Exact,
+    );
+    let mut desired_streamed = HashMap::<ChunkPos, ChunkPayload>::new();
+    let mut desired_pairs = Vec::new();
+    collect_non_empty_region_chunks_from_core(query_core.as_ref(), &mut desired_pairs);
+    for (chunk_pos, payload) in desired_pairs {
+        desired_streamed.insert(chunk_pos, payload);
+    }
+
+    let mut load_chunk_positions: Vec<ChunkPos> = desired_streamed
+        .iter()
+        .filter_map(|(chunk_pos, payload)| match old_streamed.get(chunk_pos) {
+            Some(old_payload) if old_payload == payload => None,
+            _ => Some(*chunk_pos),
+        })
+        .collect();
+    load_chunk_positions.sort_unstable_by_key(|chunk_pos| {
         (
-            key.lod_level,
-            stream_chunk_distance2(key.chunk_pos, center),
-            key.chunk_pos.w,
-            key.chunk_pos.z,
-            key.chunk_pos.y,
-            key.chunk_pos.x,
+            stream_chunk_distance2(*chunk_pos, center_chunk),
+            chunk_pos.w,
+            chunk_pos.z,
+            chunk_pos.y,
+            chunk_pos.x,
         )
     });
 
-    let mut realized_desired = desired_set;
-    let mut load_payloads = Vec::with_capacity(load_chunk_keys.len());
-    for key in load_chunk_keys {
-        let chunk = match key.lod_level {
-            WORLD_CHUNK_LOD_NEAR => build_effective_stream_chunk_l0(
-                state,
-                key.chunk_pos,
-                world_seed,
-                procgen_structures,
-            ),
-            WORLD_CHUNK_LOD_MID => build_effective_stream_chunk_l1(
-                state,
-                key.chunk_pos,
-                world_seed,
-                procgen_structures,
-            ),
-            WORLD_CHUNK_LOD_FAR => build_effective_stream_chunk_l2(
-                state,
-                key.chunk_pos,
-                world_seed,
-                procgen_structures,
-            ),
-            _ => None,
+    let mut load_payloads = Vec::with_capacity(load_chunk_positions.len());
+    let mut invalid_positions = Vec::new();
+    for chunk_pos in load_chunk_positions {
+        let Some(payload) = desired_streamed.get(&chunk_pos) else {
+            continue;
         };
-        if let Some(chunk) = chunk {
-            load_payloads.push(encode_world_chunk_payload(
-                key.lod_level,
-                key.chunk_pos,
-                &chunk,
-            ));
+        if let Some(encoded) =
+            encode_world_chunk_payload_from_realized(WORLD_CHUNK_LOD_NEAR, chunk_pos, payload)
+        {
+            load_payloads.push(encoded);
         } else {
-            realized_desired.remove(&key);
+            invalid_positions.push(chunk_pos);
         }
+    }
+    for chunk_pos in invalid_positions {
+        desired_streamed.remove(&chunk_pos);
     }
 
     let mut unload_chunks: Vec<WorldChunkCoordPayload> = old_streamed
-        .difference(&realized_desired)
-        .copied()
-        .map(|key| WorldChunkCoordPayload {
-            lod_level: key.lod_level,
-            chunk_pos: [
-                key.chunk_pos.x,
-                key.chunk_pos.y,
-                key.chunk_pos.z,
-                key.chunk_pos.w,
-            ],
+        .keys()
+        .filter_map(|chunk_pos| {
+            (!desired_streamed.contains_key(chunk_pos)).then_some(WorldChunkCoordPayload {
+                lod_level: WORLD_CHUNK_LOD_NEAR,
+                chunk_pos: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+            })
         })
         .collect();
     unload_chunks.sort_unstable_by_key(|payload| {
@@ -2968,7 +2637,12 @@ fn plan_stream_window_update(
     });
 
     if let Some(player) = state.players.get_mut(&client_id) {
-        player.streamed_chunks = realized_desired;
+        let mut streamed_tree = RegionOverrideTree::new();
+        for (chunk_pos, payload) in desired_streamed {
+            let _ = streamed_tree
+                .set_chunk_override(ChunkKey::from_chunk_pos(chunk_pos), Some(payload));
+        }
+        player.streamed_near_tree = streamed_tree;
     }
     Some((state.world_revision, load_payloads, unload_chunks))
 }
@@ -3036,10 +2710,7 @@ fn send_world_voxel_set_to_streamed_clients(
     revision: u64,
 ) {
     let (chunk_pos, _) = voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
-    let stream_key = StreamChunkKey {
-        lod_level: WORLD_CHUNK_LOD_NEAR,
-        chunk_pos,
-    };
+    let stream_key = ChunkKey::from_chunk_pos(chunk_pos);
     let clients: Vec<_> = {
         let guard = state.lock().expect("server state lock poisoned");
         guard
@@ -3050,7 +2721,7 @@ fn send_world_voxel_set_to_streamed_clients(
                 let is_streaming_chunk = guard
                     .players
                     .get(&client_id)
-                    .map(|player| player.streamed_chunks.contains(&stream_key))
+                    .map(|player| player.streamed_near_tree.has_chunk_override(stream_key))
                     .unwrap_or(false);
                 if is_source || is_streaming_chunk {
                     Some((client_id, tx.clone()))
@@ -3185,7 +2856,7 @@ fn trim_chunk_override_if_virgin(
     world_seed: u64,
     procgen_structures: bool,
 ) {
-    let Some(override_chunk) = state.world.override_chunk_at(chunk_pos).cloned() else {
+    let Some(override_chunk) = chunk_override_from_tree(state, chunk_pos) else {
         return;
     };
     let virgin_chunk = build_virgin_chunk_for_edit(
@@ -3199,10 +2870,8 @@ fn trim_chunk_override_if_virgin(
         Some(virgin) => chunks_equal(&override_chunk, &virgin),
         None => override_chunk.is_empty(),
     };
-    if matches_virgin {
-        if state.world.remove_chunk_override(chunk_pos) {
-            mark_block_region_dirty(state, chunk_pos);
-        }
+    if matches_virgin && remove_chunk_override(state, chunk_pos) {
+        mark_block_region_dirty(state, chunk_pos);
     }
 }
 
@@ -3213,8 +2882,9 @@ fn apply_authoritative_voxel_edit(
 ) -> bool {
     let (chunk_pos, voxel_index) =
         voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
+    let existing_override_chunk = chunk_override_from_tree(state, chunk_pos);
     let mut virgin_chunk_for_materialize = None;
-    let current_voxel = if let Some(override_chunk) = state.world.override_chunk_at(chunk_pos) {
+    let current_voxel = if let Some(override_chunk) = existing_override_chunk.as_ref() {
         override_chunk.voxels[voxel_index]
     } else {
         virgin_chunk_for_materialize = build_virgin_chunk_for_edit(
@@ -3232,15 +2902,12 @@ fn apply_authoritative_voxel_edit(
     if current_voxel == material {
         return false;
     }
-    if !state.world.has_chunk_override(chunk_pos) {
-        if let Some(chunk) = virgin_chunk_for_materialize {
-            state.world.insert_chunk(chunk_pos, chunk);
-            mark_block_region_dirty(state, chunk_pos);
-        }
-    }
-    state
-        .world
-        .set_voxel(position[0], position[1], position[2], position[3], material);
+
+    let mut override_chunk = existing_override_chunk
+        .or(virgin_chunk_for_materialize)
+        .unwrap_or_else(voxel::Chunk::new);
+    set_chunk_voxel_by_index(&mut override_chunk, voxel_index, material);
+    upsert_chunk_override(state, chunk_pos, override_chunk);
     mark_block_region_dirty(state, chunk_pos);
     trim_chunk_override_if_virgin(state, chunk_pos, state.world_seed, state.procgen_structures);
     true
@@ -3472,14 +3139,18 @@ fn apply_explosion_impulse(
 }
 
 fn prune_virgin_overrides(
-    world: &mut VoxelWorld,
+    world: &mut ServerWorldTree,
     world_seed: u64,
     procgen_structures: bool,
 ) -> usize {
-    let positions: Vec<ChunkPos> = world.chunks.keys().copied().collect();
+    let positions: Vec<ChunkPos> = world
+        .collect_override_chunks()
+        .into_iter()
+        .map(|(pos, _)| pos)
+        .collect();
     let mut pruned = 0usize;
     for pos in positions {
-        let Some(override_chunk) = world.override_chunk_at(pos).cloned() else {
+        let Some(override_chunk) = world.override_chunk_at(pos) else {
             continue;
         };
         let virgin_chunk =
@@ -3496,12 +3167,12 @@ fn prune_virgin_overrides(
 }
 
 fn gather_override_chunks_with_padding(
-    world: &VoxelWorld,
+    world: &ServerWorldTree,
     padding_chunks: i32,
 ) -> HashSet<ChunkPos> {
     let padding = padding_chunks.max(0);
     let mut out = HashSet::new();
-    for (&pos, chunk) in &world.chunks {
+    for (pos, chunk) in world.collect_override_chunks() {
         if chunk.is_empty() {
             continue;
         }
@@ -3524,7 +3195,7 @@ fn gather_override_chunks_with_padding(
 }
 
 fn build_procgen_keepout_cells(
-    world: &VoxelWorld,
+    world: &ServerWorldTree,
     world_seed: u64,
     padding_chunks: i32,
 ) -> HashSet<procgen::StructureCell> {
@@ -3579,7 +3250,8 @@ fn load_or_init_world_state(
 
 fn build_world_snapshot_payload(state: &ServerState) -> io::Result<WorldSnapshotPayload> {
     let mut bytes = Vec::new();
-    save_world(&state.world, &mut bytes)?;
+    let legacy_world = state.world.to_legacy_world();
+    voxel::save_world(&legacy_world, &mut bytes)?;
     Ok(WorldSnapshotPayload {
         format: "v4dw".to_string(),
         non_empty_chunks: state.world.non_empty_chunk_count(),
@@ -3762,6 +3434,7 @@ fn start_autosave_thread(
                 if !should_save {
                     None
                 } else {
+                    let legacy_world = guard.world.to_legacy_world();
                     let persisted_entities = collect_persisted_entities(&guard, now_ms);
                     let dirty_block_regions = guard.dirty_block_regions.clone();
                     let dirty_entity_regions = HashSet::new();
@@ -3772,7 +3445,7 @@ fn start_autosave_thread(
                         save_v3::save_state(
                             &world_file,
                             SaveRequest {
-                                world: &guard.world,
+                                world: &legacy_world,
                                 entities: &persisted_entities,
                                 players: &players,
                                 world_seed: guard.world_seed,
@@ -3879,7 +3552,7 @@ fn install_or_update_player(
             let entity_id = client_id;
             entry.insert(PlayerState {
                 entity_id,
-                streamed_chunks: HashSet::new(),
+                streamed_near_tree: RegionOverrideTree::new(),
                 last_stream_center_chunk: None,
                 last_stream_world_revision: 0,
             });
@@ -4654,7 +4327,7 @@ fn initialize_state(
     let region_chunk_edge = loaded.manifest.limits.region_chunk_edge.max(1);
     let persisted_entities = loaded.entities;
     let persisted_players = loaded.players.players;
-    let mut initial_world = loaded.world;
+    let mut initial_world = ServerWorldTree::from_legacy_world(loaded.world);
     let runtime_world_seed = loaded.global.world_seed;
     let next_object_id = loaded.global.next_entity_id.max(1);
     let pruned = prune_virgin_overrides(
@@ -4688,7 +4361,6 @@ fn initialize_state(
             HashSet::new()
         };
     initial_world.clear_dirty();
-    let _ = initial_world.drain_pending_chunk_updates();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
         "loaded v3 world {} (generation {}, {} non-empty chunks, {} persisted entities, {} player records)",
@@ -4720,7 +4392,6 @@ fn initialize_state(
         world: initial_world,
         world_revision: 0,
         procgen_blocked_cells,
-        stream_worldgen_has_content_cache: HashMap::new(),
         players: HashMap::new(),
         last_players_persisted_ms: last_persisted_ms,
         mobs: HashMap::new(),
