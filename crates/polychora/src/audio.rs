@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
 const DEFAULT_MASTER_VOLUME: f32 = 1.0;
-const EFFECT_BASE_GAINS: [f32; SoundEffect::COUNT] = [0.15, 0.18, 0.11, 0.14, 0.19, 0.24];
+const EFFECT_BASE_GAINS: [f32; SoundEffect::COUNT] = [0.15, 0.18, 0.11, 0.14, 0.19, 0.16];
 const SPATIAL_EAR_DISTANCE: f32 = 0.18;
 const SPATIAL_DISTANCE_SCALE: f32 = 0.35;
 const SPATIAL_MIN_FORWARD_DEPTH: f32 = 0.02;
