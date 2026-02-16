@@ -28,7 +28,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Bridge patch `patch_seq` is now per-client monotonic (`PlayerState.next_stream_patch_seq`), decoupled from global `world_revision`.
 - Client now applies `WorldRegionPatch` by validating preconditions, enforcing monotonic patch sequence, grafting bounded near-chunk payloads, and applying patch clock updates.
 - Client now emits `WorldRegionResyncRequest` on patch sequence/precondition failures; server replies with bounded `WorldRegionPatch` built from requested regions.
-- Bridge path now enforces `MAX_PATCH_BYTES` wire budget; oversized stream patches fall back to chunk batches, oversized resync responses return server error.
+- Bridge path now enforces `MAX_PATCH_BYTES` wire budget with recursive spatial split attempts; stream falls back to chunk batches only if splitting cannot satisfy budget, and resync replies return server error only when splitting still cannot satisfy budget.
 - Authoritative voxel edits now route through `ServerWorldField::apply_voxel_edit`.
 - Region tree naming is now unified in runtime-facing code:
   - `RegionChunkTree` (removed `RegionOverrideTree` alias)
@@ -41,6 +41,12 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Shared `RegionTreeCore` extraction helper now exists:
   - `collect_non_empty_chunks_from_core_in_bounds`
 - Server now tracks internal `RegionClockMap` and bumps touched region clocks on authoritative voxel edits/explosions.
+- Added reusable deterministic test tooling for tree semantics in `shared/worldfield_testkit.rs`:
+  - deterministic RNG helpers
+  - reference chunk-store model with canonicalization + bounded diff/apply behavior
+- Added randomized integration-style coverage for final datastructures:
+  - `RegionChunkTree` set/remove and bounded diff/apply invariants vs reference model
+  - `ServerWorldField::query_region_core` coherence vs realized non-empty chunk materialization
 
 ## System Status Matrix
 

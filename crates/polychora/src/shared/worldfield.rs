@@ -1913,6 +1913,10 @@ fn page_coords_from_linear(mut index: usize, pages_dims: [usize; 4]) -> [usize; 
 mod tests {
     use super::*;
     use crate::shared::voxel::{Chunk, VoxelType, CHUNK_SIZE};
+    use crate::shared::worldfield_testkit::{
+        assert_tree_matches_reference, expand_bounds, random_chunk_key_in_bounds,
+        random_chunk_payload, random_sub_bounds, DeterministicRng, ReferenceChunkStore,
+    };
 
     fn key(x: i32, y: i32, z: i32, w: i32) -> ChunkKey {
         ChunkKey { pos: [x, y, z, w] }
@@ -2310,5 +2314,104 @@ mod tests {
             error,
             ChunkArrayCodecError::DefaultIndexOutOfRange { .. }
         ));
+    }
+
+    #[test]
+    fn region_chunk_tree_randomized_set_remove_matches_reference_model() {
+        let domain = Aabb4i::new([-12, -4, -12, -12], [12, 4, 12, 12]);
+        for seed in [0x31_u64, 0x7265_6769_6f6e_31, 0x7265_6769_6f6e_32] {
+            let mut rng = DeterministicRng::new(seed);
+            let mut tree = RegionChunkTree::new();
+            let mut reference = ReferenceChunkStore::new();
+
+            for step in 0..900 {
+                let key = random_chunk_key_in_bounds(&mut rng, domain);
+                let payload = if rng.chance(1, 4) {
+                    None
+                } else {
+                    Some(random_chunk_payload(&mut rng))
+                };
+
+                let tree_changed = tree.set_chunk(key, payload.clone());
+                let reference_changed = reference.set_chunk(key, payload);
+                assert_eq!(
+                    tree_changed, reference_changed,
+                    "set/remove change mismatch seed={seed} step={step}"
+                );
+
+                if step % 75 == 0 {
+                    assert_tree_matches_reference(&tree, &reference);
+
+                    let probe_bounds = random_sub_bounds(&mut rng, domain);
+                    let mut tree_subset = tree.collect_chunks_in_bounds(probe_bounds);
+                    tree_subset.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
+                    assert_eq!(
+                        tree_subset,
+                        reference.collect_chunks_in_bounds_sorted(probe_bounds),
+                        "subset mismatch seed={seed} step={step}"
+                    );
+                    assert_eq!(
+                        tree.any_non_empty_chunk_in_bounds(probe_bounds),
+                        reference.any_non_empty_chunk_in_bounds(probe_bounds),
+                        "non-empty mismatch seed={seed} step={step}"
+                    );
+                }
+            }
+
+            assert_tree_matches_reference(&tree, &reference);
+        }
+    }
+
+    #[test]
+    fn region_chunk_tree_randomized_diff_apply_matches_reference_model() {
+        let domain = Aabb4i::new([-10, -3, -10, -10], [10, 3, 10, 10]);
+        for seed in [0x91_u64, 0x4449_4646_4d4f_4445] {
+            let mut rng = DeterministicRng::new(seed);
+            let mut tree = RegionChunkTree::new();
+            let mut reference = ReferenceChunkStore::new();
+
+            for _ in 0..120 {
+                let key = random_chunk_key_in_bounds(&mut rng, domain);
+                let payload = if rng.chance(1, 5) {
+                    None
+                } else {
+                    Some(random_chunk_payload(&mut rng))
+                };
+                let _ = tree.set_chunk(key, payload.clone());
+                let _ = reference.set_chunk(key, payload);
+            }
+            assert_tree_matches_reference(&tree, &reference);
+
+            for step in 0..96 {
+                let bounds = random_sub_bounds(&mut rng, domain);
+                let desired_count = rng.range_usize(0, 24);
+                let mut desired = Vec::with_capacity(desired_count);
+                let expanded = expand_bounds(domain, 3);
+                for _ in 0..desired_count {
+                    let key = if rng.chance(1, 5) {
+                        random_chunk_key_in_bounds(&mut rng, expanded)
+                    } else {
+                        random_chunk_key_in_bounds(&mut rng, bounds)
+                    };
+                    desired.push((key, random_chunk_payload(&mut rng)));
+                }
+
+                let tree_diff = tree.diff_chunks_in_bounds(bounds, desired.clone());
+                let reference_diff = reference.diff_chunks_in_bounds(bounds, desired);
+                assert_eq!(
+                    tree_diff, reference_diff,
+                    "diff mismatch seed={seed} step={step}"
+                );
+
+                tree.apply_chunk_diff(&tree_diff);
+                reference.apply_chunk_diff(&reference_diff);
+
+                if step % 24 == 0 {
+                    assert_tree_matches_reference(&tree, &reference);
+                }
+            }
+
+            assert_tree_matches_reference(&tree, &reference);
+        }
     }
 }

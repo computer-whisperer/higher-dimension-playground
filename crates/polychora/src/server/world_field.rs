@@ -544,6 +544,10 @@ mod tests {
     use super::*;
     use crate::shared::voxel::{world_to_chunk, BaseWorldKind, Chunk, VoxelType, VoxelWorld};
     use crate::shared::worldfield::{ChunkArrayIndexCodec, QUERY_CONTENT_BOUNDS_SCAN_BUDGET_CELLS};
+    use crate::shared::worldfield_testkit::{
+        payload_has_solid_material, random_chunk_key_in_bounds, random_chunk_payload,
+        DeterministicRng,
+    };
 
     fn world_field_from_world(world: VoxelWorld, seed: u64, procgen: bool) -> ServerWorldField {
         ServerWorldField::from_legacy_world(world, seed, procgen, HashSet::new())
@@ -725,5 +729,48 @@ mod tests {
 
         let _ = field.apply_voxel_edit(world_pos, VoxelType(11));
         assert!(!field.has_chunk(chunk_pos));
+    }
+
+    #[test]
+    fn query_region_core_matches_realized_non_empty_chunks_after_randomized_edits() {
+        let mut field = world_field_from_world(VoxelWorld::new(), 2026, false);
+        let domain = Aabb4i::new([-4, -2, -4, -4], [4, 2, 4, 4]);
+        let mut rng = DeterministicRng::new(0x5157_4f52_4c44_544b);
+
+        for _ in 0..220 {
+            let key = random_chunk_key_in_bounds(&mut rng, domain);
+            if rng.chance(1, 5) {
+                let _ = field.remove_chunk(key.to_chunk_pos());
+            } else {
+                let payload = random_chunk_payload(&mut rng);
+                let chunk = payload.to_voxel_chunk().expect("random payload decode");
+                let _ = field.set_chunk(key.to_chunk_pos(), chunk);
+            }
+        }
+
+        let core = field.query_region_core(QueryVolume { bounds: domain }, QueryDetail::Exact);
+        let mut from_tree = crate::shared::worldfield::collect_non_empty_chunks_from_core_in_bounds(
+            core.as_ref(),
+            domain,
+        );
+        from_tree.sort_unstable_by_key(|(key, _)| key.pos);
+
+        let mut expected = Vec::new();
+        for w in domain.min[3]..=domain.max[3] {
+            for z in domain.min[2]..=domain.max[2] {
+                for y in domain.min[1]..=domain.max[1] {
+                    for x in domain.min[0]..=domain.max[0] {
+                        let key = ChunkKey { pos: [x, y, z, w] };
+                        let payload = field.realize_chunk(key, RealizeProfile::Render);
+                        if payload_has_solid_material(&payload) {
+                            expected.push((key, payload));
+                        }
+                    }
+                }
+            }
+        }
+        expected.sort_unstable_by_key(|(key, _)| key.pos);
+
+        assert_eq!(from_tree, expected);
     }
 }
