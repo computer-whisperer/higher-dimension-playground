@@ -758,15 +758,15 @@ fn default_spawn_pose_for_client(state: &ServerState, client_id: u64) -> ([f32; 
 fn mob_archetype_defaults(archetype: MobArchetype) -> MobArchetypeDefaults {
     match archetype {
         MobArchetype::Seeker => MobArchetypeDefaults {
-            move_speed: 2.9,
+            move_speed: 3.0,
             preferred_distance: 2.6,
-            tangent_weight: 0.64,
+            tangent_weight: 0.72,
             locomotion: MobLocomotionMode::Walking,
         },
         MobArchetype::Creeper4d => MobArchetypeDefaults {
-            move_speed: 2.4,
+            move_speed: 2.55,
             preferred_distance: 3.8,
-            tangent_weight: 1.15,
+            tangent_weight: 0.92,
             locomotion: MobLocomotionMode::Walking,
         },
         MobArchetype::PhaseSpider => MobArchetypeDefaults {
@@ -1784,66 +1784,74 @@ fn simulate_seeker_step(
         let distance = distance4_sq(target, position).sqrt();
         let direct = normalize4_or_default(to_target, [0.0, 0.0, 1.0, 0.0]);
         if path_following {
-            let slow = if distance < MOB_NAV_PATH_NODE_REACH_DISTANCE * 0.9 {
-                0.62
+            let speed = if distance > MOB_NAV_PATH_NODE_REACH_DISTANCE * 1.35 {
+                1.16
             } else {
-                1.05
+                0.74
             };
-            (direct, slow)
+            (direct, speed)
         } else if simple_steer {
-            let slow = if distance < mob.preferred_distance * 0.6 {
-                0.42
+            let speed = if distance < mob.preferred_distance * 0.62 {
+                0.48
             } else {
-                1.0
+                1.03
             };
-            (direct, slow)
+            (direct, speed)
         } else {
-            // A 4D tangent that rotates [x,z] and [y,w] planes together.
+            // Seeker should stalk and strafe around player range bands.
             let tangent = normalize4_or_default(
-                [-direct[2], -direct[3], direct[0], direct[1]],
-                [direct[3], 0.0, -direct[0], direct[1]],
+                [-direct[2], 0.0, direct[0], direct[3]],
+                [direct[3], 0.0, -direct[0], direct[2]],
             );
-            let weave_phase = t_s * 1.7 + mob.phase_offset;
+            let weave_phase = t_s * 2.2 + mob.phase_offset;
             let weave = [
-                0.10 * weave_phase.sin(),
-                0.08 * (weave_phase * 0.7).cos(),
-                -0.10 * weave_phase.sin(),
-                0.08 * (weave_phase * 1.3).sin(),
+                0.08 * weave_phase.sin(),
+                0.0,
+                -0.08 * weave_phase.sin(),
+                0.08 * (weave_phase * 0.8).cos(),
             ];
-            let pursuit = if distance > mob.preferred_distance {
-                1.0
+            let strafe = (weave_phase * 0.9).sin();
+            let advance = if distance > mob.preferred_distance * 1.30 {
+                1.22
+            } else if distance < mob.preferred_distance * 0.72 {
+                -0.54
             } else {
-                -0.45
+                0.18 + 0.24 * (weave_phase * 0.45).cos()
             };
-            let slow = if distance < mob.preferred_distance * 0.6 {
-                0.42
+            let speed = if distance > mob.preferred_distance * 1.35 {
+                1.22
+            } else if distance < mob.preferred_distance * 0.72 {
+                0.58
             } else {
-                1.0
+                0.88 + 0.14 * strafe.abs()
             };
             let desired = normalize4_or_default(
                 [
-                    direct[0] * pursuit + tangent[0] * mob.tangent_weight + weave[0],
-                    direct[1] * pursuit + tangent[1] * mob.tangent_weight + weave[1],
-                    direct[2] * pursuit + tangent[2] * mob.tangent_weight + weave[2],
-                    direct[3] * pursuit + tangent[3] * mob.tangent_weight + weave[3],
+                    direct[0] * advance
+                        + tangent[0] * mob.tangent_weight * 0.88 * strafe
+                        + weave[0],
+                    direct[1] * advance
+                        + tangent[1] * mob.tangent_weight * 0.88 * strafe
+                        + weave[1],
+                    direct[2] * advance
+                        + tangent[2] * mob.tangent_weight * 0.88 * strafe
+                        + weave[2],
+                    direct[3] * advance
+                        + tangent[3] * mob.tangent_weight * 0.88 * strafe
+                        + weave[3],
                 ],
                 direct,
             );
-            (desired, slow)
+            (desired, speed)
         }
     } else {
-        let phase = t_s * 0.65 + mob.phase_offset;
+        let phase = t_s * 0.93 + mob.phase_offset;
         (
             normalize4_or_default(
-                [
-                    phase.cos(),
-                    0.45 * (phase * 0.7).sin(),
-                    phase.sin(),
-                    (phase * 1.1).cos(),
-                ],
+                [phase.cos(), 0.0, phase.sin(), 0.55 * (phase * 1.2).cos()],
                 [0.0, 0.0, 1.0, 0.0],
             ),
-            0.35,
+            0.42,
         )
     };
     MobSteeringCommand {
@@ -1871,79 +1879,84 @@ fn simulate_creeper_step(
         let distance = distance4_sq(target, position).sqrt();
         let direct = normalize4_or_default(to_target, [0.0, 0.0, 1.0, 0.0]);
         if path_following {
-            let speed = if distance > MOB_NAV_PATH_NODE_REACH_DISTANCE * 1.2 {
-                1.18
+            let speed = if distance > MOB_NAV_PATH_NODE_REACH_DISTANCE * 1.25 {
+                1.26
             } else {
-                0.66
+                0.76
             };
             (direct, speed)
         } else if simple_steer {
-            let speed = if distance > mob.preferred_distance * 0.9 {
-                1.15
+            let speed = if distance > mob.preferred_distance * 0.95 {
+                1.24
             } else {
-                0.70
+                0.74
             };
             (direct, speed)
         } else {
-            // Creeper keeps pressure by orbiting in two coupled 4D planes, then lunges.
-            let orbit_a = normalize4_or_default(
-                [-direct[2], direct[3], direct[0], -direct[1]],
-                [direct[3], 0.0, -direct[0], direct[1]],
+            // Creeper should feel like pressure-build-charge with quick lateral feints.
+            let tangent = normalize4_or_default(
+                [-direct[2], 0.0, direct[0], direct[3]],
+                [direct[3], 0.0, -direct[0], direct[2]],
             );
-            let orbit_b = normalize4_or_default(
-                [direct[1], -direct[0], direct[3], -direct[2]],
-                [0.0, direct[2], -direct[1], direct[0]],
-            );
-            let phase = t_s * 2.35 + mob.phase_offset;
-            let orbit_mix = [
-                orbit_a[0] * phase.sin() + orbit_b[0] * phase.cos(),
-                orbit_a[1] * phase.sin() + orbit_b[1] * phase.cos(),
-                orbit_a[2] * phase.sin() + orbit_b[2] * phase.cos(),
-                orbit_a[3] * phase.sin() + orbit_b[3] * phase.cos(),
-            ];
-            let too_close = distance < mob.preferred_distance * 0.55;
-            let in_lunge_band = distance > mob.preferred_distance * 0.80
-                && distance < mob.preferred_distance * 1.95;
-            let lunge = in_lunge_band && phase.sin() > 0.58;
+            let phase = t_s * 2.6 + mob.phase_offset;
+            let sidestep = (phase * 0.85).sin();
+            let too_close = distance < mob.preferred_distance * 0.62;
+            let in_charge_band = distance > mob.preferred_distance * 0.95
+                && distance < mob.preferred_distance * 2.25;
+            let charge = in_charge_band && (phase * 1.55).sin() > 0.72;
             let pressure = if too_close {
-                -0.72
-            } else if lunge {
-                1.85
+                -0.86
+            } else if charge {
+                2.10
             } else {
-                0.68
+                0.96
             };
-            let speed = if lunge {
-                1.65
+            let speed = if charge {
+                1.98
             } else if too_close {
-                0.48
+                0.58
             } else {
-                0.95
+                1.02 + 0.12 * sidestep.abs()
             };
+            let rumble = [
+                0.05 * (phase * 2.9).sin(),
+                0.0,
+                0.05 * (phase * 2.2).cos(),
+                0.04 * (phase * 1.7).sin(),
+            ];
 
             let desired = normalize4_or_default(
                 [
-                    direct[0] * pressure + orbit_mix[0] * mob.tangent_weight,
-                    direct[1] * pressure + orbit_mix[1] * mob.tangent_weight,
-                    direct[2] * pressure + orbit_mix[2] * mob.tangent_weight,
-                    direct[3] * pressure + orbit_mix[3] * mob.tangent_weight,
+                    direct[0] * pressure
+                        + tangent[0] * mob.tangent_weight * 0.72 * sidestep
+                        + rumble[0],
+                    direct[1] * pressure
+                        + tangent[1] * mob.tangent_weight * 0.72 * sidestep
+                        + rumble[1],
+                    direct[2] * pressure
+                        + tangent[2] * mob.tangent_weight * 0.72 * sidestep
+                        + rumble[2],
+                    direct[3] * pressure
+                        + tangent[3] * mob.tangent_weight * 0.72 * sidestep
+                        + rumble[3],
                 ],
                 direct,
             );
             (desired, speed)
         }
     } else {
-        let phase = t_s * 0.72 + mob.phase_offset;
+        let phase = t_s * 1.05 + mob.phase_offset;
         (
             normalize4_or_default(
                 [
-                    0.7 * phase.sin(),
-                    (phase * 0.9).cos(),
-                    0.7 * phase.cos(),
-                    (phase * 1.4).sin(),
+                    0.55 * phase.sin(),
+                    0.0,
+                    0.55 * phase.cos(),
+                    0.45 * (phase * 1.1).sin(),
                 ],
                 [0.0, 0.0, 1.0, 0.0],
             ),
-            0.38,
+            0.44,
         )
     };
     MobSteeringCommand {
