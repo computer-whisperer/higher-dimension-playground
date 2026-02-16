@@ -1,9 +1,5 @@
 use crate::shared::voxel::ChunkPos;
-use crate::shared::worldfield::{
-    collect_non_empty_chunks_from_core_in_bounds, Aabb4i, ChunkKey, ChunkPayload, RegionChunkTree,
-    RegionTreeCore,
-};
-use std::collections::HashMap;
+use crate::shared::worldfield::{Aabb4i, ChunkKey, ChunkPayload, RegionChunkTree, RegionTreeCore};
 
 #[derive(Clone, Debug, Default)]
 pub struct RegionTreeWorkingSet {
@@ -13,8 +9,7 @@ pub struct RegionTreeWorkingSet {
 
 #[derive(Debug)]
 pub struct RegionTreeRefreshResult {
-    pub desired_chunks: HashMap<ChunkPos, ChunkPayload>,
-    pub load_positions: Vec<ChunkPos>,
+    pub load_chunks: Vec<(ChunkPos, ChunkPayload)>,
     pub unload_positions: Vec<ChunkPos>,
 }
 
@@ -36,28 +31,17 @@ impl RegionTreeWorkingSet {
         bounds: Aabb4i,
         core: &RegionTreeCore,
     ) -> RegionTreeRefreshResult {
-        let desired_chunks: HashMap<ChunkPos, ChunkPayload> =
-            collect_non_empty_chunks_from_core_in_bounds(core, bounds)
-                .into_iter()
-                .map(|(key, payload)| (key.to_chunk_pos(), payload))
-                .collect();
         let patch_bounds = self
             .interest_bounds
             .map(|old_bounds| union_aabb(old_bounds, bounds))
             .unwrap_or(bounds);
-        let patch = self.tree.diff_chunks_in_bounds(
-            patch_bounds,
-            desired_chunks.iter().map(|(chunk_pos, payload)| {
-                (ChunkKey::from_chunk_pos(*chunk_pos), payload.clone())
-            }),
-        );
-        self.tree.apply_chunk_diff(&patch);
+        let patch = self.tree.apply_non_empty_core_in_bounds(patch_bounds, core);
         self.interest_bounds = Some(bounds);
 
-        let load_positions = patch
+        let load_chunks = patch
             .upserts
             .iter()
-            .map(|(key, _)| key.to_chunk_pos())
+            .map(|(key, payload)| (key.to_chunk_pos(), payload.clone()))
             .collect();
 
         let unload_positions = patch
@@ -67,8 +51,7 @@ impl RegionTreeWorkingSet {
             .collect();
 
         RegionTreeRefreshResult {
-            desired_chunks,
-            load_positions,
+            load_chunks,
             unload_positions,
         }
     }
@@ -111,12 +94,15 @@ mod tests {
         };
 
         let first = working.refresh_from_core(bounds, &core);
-        assert_eq!(first.load_positions, vec![ChunkPos::new(0, 0, 0, 0)]);
+        assert_eq!(
+            first.load_chunks,
+            vec![(ChunkPos::new(0, 0, 0, 0), ChunkPayload::Uniform(3))]
+        );
         assert!(first.unload_positions.is_empty());
         assert!(working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
 
         let second = working.refresh_from_core(bounds, &core);
-        assert!(second.load_positions.is_empty());
+        assert!(second.load_chunks.is_empty());
         assert!(second.unload_positions.is_empty());
     }
 
@@ -137,7 +123,7 @@ mod tests {
 
         let _ = working.refresh_from_core(bounds, &filled);
         let diff = working.refresh_from_core(bounds, &empty);
-        assert!(diff.load_positions.is_empty());
+        assert!(diff.load_chunks.is_empty());
         assert_eq!(diff.unload_positions, vec![ChunkPos::new(0, 0, 0, 0)]);
         assert!(!working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
     }
@@ -163,8 +149,35 @@ mod tests {
         let shifted = working.refresh_from_core(right_bounds, &right_core);
 
         assert_eq!(shifted.unload_positions, vec![ChunkPos::new(0, 0, 0, 0)]);
-        assert_eq!(shifted.load_positions, vec![ChunkPos::new(1, 0, 0, 0)]);
+        assert_eq!(
+            shifted.load_chunks,
+            vec![(ChunkPos::new(1, 0, 0, 0), ChunkPayload::Uniform(5))]
+        );
         assert!(!working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
         assert!(working.contains_chunk(ChunkPos::new(1, 0, 0, 0)));
+    }
+
+    #[test]
+    fn refresh_reports_load_when_payload_changes_in_place() {
+        let bounds = one_chunk_bounds();
+        let mut working = RegionTreeWorkingSet::new();
+        let first_core = RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::Uniform(2),
+            generator_version_hash: 0,
+        };
+        let second_core = RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::Uniform(8),
+            generator_version_hash: 0,
+        };
+
+        let _ = working.refresh_from_core(bounds, &first_core);
+        let updated = working.refresh_from_core(bounds, &second_core);
+        assert_eq!(
+            updated.load_chunks,
+            vec![(ChunkPos::new(0, 0, 0, 0), ChunkPayload::Uniform(8))]
+        );
+        assert!(updated.unload_positions.is_empty());
     }
 }

@@ -742,6 +742,17 @@ impl RegionChunkTree {
         RegionChunkDiff { removals, upserts }
     }
 
+    pub fn diff_non_empty_core_in_bounds(
+        &self,
+        bounds: Aabb4i,
+        core: &RegionTreeCore,
+    ) -> RegionChunkDiff {
+        self.diff_chunks_in_bounds(
+            bounds,
+            collect_non_empty_chunks_from_core_in_bounds(core, bounds),
+        )
+    }
+
     pub fn apply_chunk_diff(&mut self, diff: &RegionChunkDiff) {
         for key in &diff.removals {
             let _ = self.remove_chunk(*key);
@@ -749,6 +760,16 @@ impl RegionChunkTree {
         for (key, payload) in &diff.upserts {
             let _ = self.set_chunk(*key, Some(payload.clone()));
         }
+    }
+
+    pub fn apply_non_empty_core_in_bounds(
+        &mut self,
+        bounds: Aabb4i,
+        core: &RegionTreeCore,
+    ) -> RegionChunkDiff {
+        let diff = self.diff_non_empty_core_in_bounds(bounds, core);
+        self.apply_chunk_diff(&diff);
+        diff
     }
 }
 
@@ -2209,6 +2230,41 @@ mod tests {
             Some(ChunkPayload::Uniform(9))
         );
         assert!(!tree.has_chunk(key(3, 0, 0, 0)));
+    }
+
+    #[test]
+    fn region_chunk_tree_apply_non_empty_core_in_bounds_replaces_window_contents() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
+        assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+
+        let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+        let chunk_array = ChunkArrayData::from_dense_indices(
+            bounds,
+            vec![ChunkPayload::Empty, ChunkPayload::Uniform(9)],
+            vec![0, 1, 0],
+            Some(0),
+        )
+        .expect("chunk array encoding");
+        let core = RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::ChunkArray(chunk_array),
+            generator_version_hash: 0,
+        };
+
+        let diff = tree.apply_non_empty_core_in_bounds(bounds, &core);
+        assert_eq!(diff.removals, vec![key(0, 0, 0, 0), key(2, 0, 0, 0)]);
+        assert_eq!(
+            diff.upserts,
+            vec![(key(1, 0, 0, 0), ChunkPayload::Uniform(9))]
+        );
+
+        assert!(!tree.has_chunk(key(0, 0, 0, 0)));
+        assert_eq!(
+            tree.chunk_payload(key(1, 0, 0, 0)),
+            Some(ChunkPayload::Uniform(9))
+        );
+        assert!(!tree.has_chunk(key(2, 0, 0, 0)));
     }
 
     #[test]

@@ -2731,19 +2731,15 @@ fn plan_stream_window_update(
         QueryDetail::Exact,
     );
 
-    let (mut desired_streamed, mut load_chunk_positions, unload_positions) = {
+    let (mut load_chunks, unload_positions) = {
         let player = state.players.get_mut(&client_id)?;
         let refresh = player
             .working_set
             .refresh_from_core(near_bounds, query_core.as_ref());
-        (
-            refresh.desired_chunks,
-            refresh.load_positions,
-            refresh.unload_positions,
-        )
+        (refresh.load_chunks, refresh.unload_positions)
     };
 
-    load_chunk_positions.sort_unstable_by_key(|chunk_pos| {
+    load_chunks.sort_unstable_by_key(|(chunk_pos, _)| {
         (
             stream_chunk_distance2(*chunk_pos, center_chunk),
             chunk_pos.w,
@@ -2753,14 +2749,11 @@ fn plan_stream_window_update(
         )
     });
 
-    let mut load_payloads = Vec::with_capacity(load_chunk_positions.len());
+    let mut load_payloads = Vec::with_capacity(load_chunks.len());
     let mut invalid_positions = Vec::new();
-    for chunk_pos in load_chunk_positions {
-        let Some(payload) = desired_streamed.get(&chunk_pos) else {
-            continue;
-        };
+    for (chunk_pos, payload) in load_chunks {
         if let Some(encoded) =
-            encode_world_chunk_payload_from_realized(WORLD_CHUNK_LOD_NEAR, chunk_pos, payload)
+            encode_world_chunk_payload_from_realized(WORLD_CHUNK_LOD_NEAR, chunk_pos, &payload)
         {
             load_payloads.push(encoded);
         } else {
@@ -2768,7 +2761,6 @@ fn plan_stream_window_update(
         }
     }
     for chunk_pos in invalid_positions {
-        desired_streamed.remove(&chunk_pos);
         let player = state.players.get_mut(&client_id)?;
         let _ = player.working_set.remove_chunk(chunk_pos);
     }

@@ -47,6 +47,11 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Added randomized integration-style coverage for final datastructures:
   - `RegionChunkTree` set/remove and bounded diff/apply invariants vs reference model
   - `ServerWorldField::query_region_core` coherence vs realized non-empty chunk materialization
+- `RegionChunkTree` now supports direct core-driven bounded updates:
+  - `diff_non_empty_core_in_bounds`
+  - `apply_non_empty_core_in_bounds`
+- `RegionTreeWorkingSet::refresh_from_core` now consumes tree-native core diff/apply output and carries direct `(ChunkPos, ChunkPayload)` load results (no intermediate desired-map rebuild).
+- `ServerWorldField::query_region_core` now emits sparse branch topology by y-slice and trims each slice to realized non-empty x/z/w bounds (instead of always emitting full query-volume chunk arrays).
 
 ## System Status Matrix
 
