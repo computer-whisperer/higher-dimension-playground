@@ -1,4 +1,4 @@
-# Region Tree WorldField Spec (Draft v5)
+# Region Tree WorldField Spec (Draft v6)
 
 Status: Draft  
 Audience: server/runtime/procgen/networking  
@@ -40,6 +40,7 @@ Normative invariants:
 - Patch applicability is region-scoped using region clocks.
 - Every accepted patch atomically applies subtree graft + clock updates.
 - Edits bump clocks for intersecting regions in the single-resolution lattice.
+- Region clocks are the only authoritative version counters for replication and persistence contracts.
 - Singular block edits must produce local region patches; full-tree resend is recovery-only.
 - Network transport unit is `RegionSubtreePatch` (tree-native, not chunk-list batches).
 - Canonical persisted state is semantic tree + region clocks only.
@@ -51,6 +52,7 @@ Normative invariants:
 - `ChunkKey { pos: [i32; 4] }`
 - `RegionId` from fixed replication lattice in chunk space.
 - `RegionClockMap: RegionId -> u64`.
+- `NodeHandle` (opaque, snapshot-local runtime handle; never serialized).
 
 Rules:
 
@@ -64,7 +66,7 @@ Node kinds:
 - `Empty`
 - `Uniform(MaterialId)`
 - `ProceduralRef(GeneratorRef)`
-- `ChunkArray(ChunkArrayRef)`
+- `ChunkArray(ChunkArrayData)`
 - `Branch(children)`
 
 Notes:
@@ -77,7 +79,6 @@ Required fields:
 
 - `bounds: Aabb4i` (chunk-aligned)
 - `kind`
-- `local_revision: u64`
 - `generator_version_hash: u64` (generator-dependent nodes)
 
 ### 3.2.1 `ChunkArray` Leaf (Bounded Materialized Region)
@@ -92,10 +93,10 @@ Fields:
 - `index_data: Vec<u8>` (codec-defined mapping from covered chunk cells to palette indices)
 - `default_chunk_idx: Option<u16>` (implicit index for untouched/omitted cells)
 
-`ChunkArrayIndexCodec` (phase-1 required support):
+`ChunkArrayIndexCodec`:
 
-- `DenseU16` (dense palette index grid; use only for bounded, high-occupancy regions)
-- `PagedSparseRle` (sparse/paged + run-length encoding for large or mostly uniform regions)
+- `DenseU16` (runtime/internal codec for bounded, high-occupancy regions)
+- `PagedSparseRle` (canonical wire/persist codec; runtime also supported)
 
 Rules:
 
@@ -103,6 +104,13 @@ Rules:
 - `ChunkArray` must not force dense n^4 index storage when sparse codec is more efficient.
 - Single-voxel edit inside a `ChunkArray` mutates one chunk payload via copy-on-write and updates only touched cell mapping.
 - Palette growth or churn may trigger local split/repartition under normal tree optimization rules.
+- `ChunkArray` content is logically inline in semantic tree nodes; external reference indirection is not part of the semantic model.
+- Implementations may still use internal sharing (for example `Arc<ChunkArrayData>`) as an in-memory optimization.
+- Canonical wire/persist serialization for `ChunkArray` MUST use `PagedSparseRle`.
+- Canonical traversal order for chunk-cell indexing is x, y, z, w (minor to major).
+- Canonical palette order is first appearance in canonical traversal; unused palette entries are forbidden.
+- If a `ChunkArray` region is representable as `Empty` or `Uniform`, writer MUST collapse to that simpler node kind.
+- Before replication, any `ChunkArray` exceeding `MAX_CHUNKARRAY_CELLS_PER_NODE` or `MAX_PATCH_BYTES` MUST be spatially split into smaller nodes; protocol-level continuation framing is out of scope.
 
 ### 3.3 Runtime Sidecar (`RegionRuntimeSidecar`)
 
@@ -116,16 +124,21 @@ Ephemeral state keyed by node identity (not serialized, not persisted):
 `RealizedEntry`:
 
 - `payload: ChunkPayload`
-- `cache_local_revision: u64`
 - `cache_generator_version_hash: u64`
 - `cache_profile: RealizeProfile`
+- `source_snapshot_epoch: u64`
 - `last_access_tick: u64`
 
 ### 3.4 Realization Cache Key
 
 Realization cache identity:
 
-- `(node_id, realize_profile, local_revision, generator_version_hash)`
+- `(source_snapshot_epoch, node_handle, realize_profile, generator_version_hash)`
+
+Invalidation rule:
+
+- Accepted patches invalidate overlapping cached entries by spatial intersection.
+- Snapshot retirement invalidates all entries keyed by retired `source_snapshot_epoch`.
 
 Phase 1 `RealizeProfile`:
 
@@ -219,10 +232,9 @@ For `SetVoxelIntent { pos, material, client_edit_id }`, server MUST:
 2. Apply copy-on-write mutation in the minimal touched chunk-sized region.
 3. Stop if effective value is unchanged.
 4. Bump clocks for intersecting regions.
-5. Bump `local_revision` only for affected semantic subtrees.
-6. Invalidate overlapping sidecar realized entries for relevant profiles only.
-7. Emit minimal per-client `RegionSubtreePatch` intersected with client interest.
-8. Persist only dirty regions touched by payload changes.
+5. Invalidate overlapping sidecar realized entries for relevant profiles only.
+6. Emit minimal per-client `RegionSubtreePatch` intersected with client interest.
+7. Persist only dirty regions touched by payload changes.
 
 ### 6.3 Client Apply Contract
 
@@ -252,6 +264,7 @@ When edits target space represented by `ChunkArray`, server MUST:
 Exactly one compatibility rule:
 
 - Symbolic `ProceduralRef` leaves are allowed over wire only when peers have exact `generator_manifest_hash` match from handshake capabilities; otherwise sender must transmit concrete content (`ChunkArray`, `Uniform`, and/or `Empty` leaves) for the affected region.
+- When transmitting concrete `ChunkArray` content, sender MUST canonicalize to `PagedSparseRle` and enforce pre-send spatial split limits from section 3.2.1.
 
 ## 7. Streaming and Realization
 
@@ -302,7 +315,7 @@ Optional WAL/journal is recovery-only and must fold into canonical snapshot befo
 ### Phase A: Core/Sidecar Split
 
 - Introduce `RegionTreeCore` + `RegionRuntimeSidecar`.
-- Remove runtime metadata from semantic nodes.
+- Remove runtime metadata and semantic `local_revision` from nodes.
 
 ### Phase B: Region Clock Lattice
 
@@ -317,7 +330,7 @@ Optional WAL/journal is recovery-only and must fold into canonical snapshot befo
 ### Phase D: Payload + Realization Profiles
 
 - Route realization through profile-keyed sidecar cache.
-- Use variable payload encodings for realized leaves.
+- Use variable payload encodings for realized leaves internally, while canonicalizing `ChunkArray` wire/persist output.
 
 ### Phase E: Platform-Volume Procgen
 
@@ -333,6 +346,7 @@ Optional WAL/journal is recovery-only and must fold into canonical snapshot befo
 - Resync storms require region-level coalescing/throttling.
 - Sidecar memory budget and eviction policy need concrete targets.
 - Platform generator layering policy (`Uniform` first vs mixed symbolic) remains to tune.
+- Concrete values for `MAX_CHUNKARRAY_CELLS_PER_NODE` and `MAX_PATCH_BYTES` require profiling.
 
 ## 11. Success Metrics
 
