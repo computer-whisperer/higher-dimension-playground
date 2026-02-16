@@ -12,6 +12,7 @@ pub struct SynthesizedEffects {
     pub footsteps: [Vec<f32>; 3],
     pub jump: Vec<f32>,
     pub land: Vec<f32>,
+    pub explosions: [Vec<f32>; 2],
 }
 
 pub fn synthesize_effects(sample_rate: u32) -> SynthesizedEffects {
@@ -72,6 +73,9 @@ pub fn synthesize_effects(sample_rate: u32) -> SynthesizedEffects {
     let land_crunch = gen_crunch(&mut rng, sample_rate, 0.10, 0.35);
     let land = mix(&[&land_thud, &land_crunch]);
 
+    let explosion_1 = gen_explosion(&mut rng, sample_rate);
+    let explosion_2 = gen_explosion(&mut rng, sample_rate);
+
     let mut dither_rng = Rng::new(DITHER_SEED);
     let place = process_medium(place_block, SoundClass::UiLike, sr, &mut dither_rng);
     let break_clip = process_medium(break_block, SoundClass::Body, sr, &mut dither_rng);
@@ -80,6 +84,8 @@ pub fn synthesize_effects(sample_rate: u32) -> SynthesizedEffects {
     let footstep_3 = process_medium(footstep_3, SoundClass::Body, sr, &mut dither_rng);
     let jump = process_medium(jump, SoundClass::Jump, sr, &mut dither_rng);
     let land = process_medium(land, SoundClass::Body, sr, &mut dither_rng);
+    let explosion_1 = process_medium(explosion_1, SoundClass::Explosion, sr, &mut dither_rng);
+    let explosion_2 = process_medium(explosion_2, SoundClass::Explosion, sr, &mut dither_rng);
 
     SynthesizedEffects {
         place,
@@ -87,6 +93,7 @@ pub fn synthesize_effects(sample_rate: u32) -> SynthesizedEffects {
         footsteps: [footstep_1, footstep_2, footstep_3],
         jump,
         land,
+        explosions: [explosion_1, explosion_2],
     }
 }
 
@@ -400,6 +407,29 @@ fn gen_whoosh(rng: &mut Rng, sample_rate: u32, duration_s: f32, amp: f32) -> Vec
     out
 }
 
+fn gen_explosion(rng: &mut Rng, sample_rate: u32) -> Vec<f32> {
+    let sr = sample_rate as f32;
+    let thud_a_f0 = rng.f32_range(95.0, 120.0);
+    let thud_a_f1 = rng.f32_range(40.0, 60.0);
+    let thud_b_f0 = rng.f32_range(70.0, 92.0);
+    let thud_b_f1 = rng.f32_range(20.0, 38.0);
+
+    let thud_a = gen_thud(rng, sample_rate, 0.22, thud_a_f0, thud_a_f1, 1.0);
+    let thud_b = gen_thud(rng, sample_rate, 0.38, thud_b_f0, thud_b_f1, 0.9);
+    let debris = gen_crunch(rng, sample_rate, 0.32, 0.72);
+    let tail = gen_whoosh(rng, sample_rate, 0.45, 0.55);
+
+    let mut out = mix(&[&thud_a, &thud_b, &debris, &tail]);
+    out = onepole_lowpass(&out, 5200.0, sr);
+
+    for (i, sample) in out.iter_mut().enumerate() {
+        let t = i as f32 / sr;
+        let decay = (-t / 0.36).exp();
+        *sample *= decay * 1.25;
+    }
+    out
+}
+
 fn soften_medium(
     x: &[f32],
     sr: f32,
@@ -460,6 +490,7 @@ enum SoundClass {
     UiLike,
     Jump,
     Body,
+    Explosion,
 }
 
 impl SoundClass {
@@ -468,6 +499,7 @@ impl SoundClass {
             Self::UiLike => (4200.0, 0.60, 9000.0, 0.12, 0.82),
             Self::Jump => (4000.0, 0.65, 9000.0, 0.08, 0.85),
             Self::Body => (3600.0, 0.58, 8500.0, 0.10, 0.92),
+            Self::Explosion => (3000.0, 0.50, 7600.0, 0.14, 0.96),
         }
     }
 }
@@ -505,6 +537,8 @@ mod tests {
             &effects.footsteps[2],
             &effects.jump,
             &effects.land,
+            &effects.explosions[0],
+            &effects.explosions[1],
         ];
         for clip in clips {
             assert!(!clip.is_empty());
@@ -525,5 +559,7 @@ mod tests {
         assert_eq!(a.footsteps[2], b.footsteps[2]);
         assert_eq!(a.jump, b.jump);
         assert_eq!(a.land, b.land);
+        assert_eq!(a.explosions[0], b.explosions[0]);
+        assert_eq!(a.explosions[1], b.explosions[1]);
     }
 }

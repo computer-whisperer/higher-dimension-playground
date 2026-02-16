@@ -623,7 +623,7 @@ impl App {
                     let distance_t = 1.0 - (distance / max_distance).clamp(0.0, 1.0);
                     let radius_gain = (radius / 2.5).clamp(0.6, 1.6);
                     let gain = (distance_t * radius_gain * 1.2).clamp(0.1, 2.0);
-                    self.play_spatial_sound(SoundEffect::Break, position, gain);
+                    self.play_spatial_sound(SoundEffect::Explosion, position, gain);
                 }
             }
             multiplayer::ServerMessage::PlayerMovementModifier {
