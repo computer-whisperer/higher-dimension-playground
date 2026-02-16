@@ -1,4 +1,4 @@
-# Region Tree WorldField Spec (Draft v6)
+# Region Tree WorldField Spec (Draft v7)
 
 Status: Draft  
 Audience: server/runtime/procgen/networking  
@@ -54,10 +54,15 @@ Normative invariants:
 - `RegionClockMap: RegionId -> u64`.
 - `NodeHandle` (opaque, snapshot-local runtime handle; never serialized).
 
+Defaults:
+
+- `REGION_TILE_EDGE_CHUNKS = 4`
+
 Rules:
 
 - Every chunk maps to exactly one `RegionId`.
 - Region clocks are monotonic per `RegionId`.
+- `RegionId` mapping is `floor_div(chunk_pos_axis, REGION_TILE_EDGE_CHUNKS)` for each axis.
 
 ### 3.2 Semantic Tree (`RegionTreeCore`)
 
@@ -112,6 +117,16 @@ Rules:
 - If a `ChunkArray` region is representable as `Empty` or `Uniform`, writer MUST collapse to that simpler node kind.
 - Before replication, any `ChunkArray` exceeding `MAX_CHUNKARRAY_CELLS_PER_NODE` or `MAX_PATCH_BYTES` MUST be spatially split into smaller nodes; protocol-level continuation framing is out of scope.
 
+Canonical `PagedSparseRle` layout requirements:
+
+- Integer encoding is little-endian for all multi-byte numeric fields.
+- Chunk-cell traversal order is x, y, z, w.
+- Default page edge is `PAGED_RLE_PAGE_EDGE_CELLS = 4` (4^4 = 256 cells per page).
+- Pages are emitted in canonical page-grid traversal order (x, y, z, w).
+- Inside each page, runs are emitted in canonical cell traversal order.
+- Runs are `(run_len, palette_idx)` pairs with `run_len >= 1`; adjacent runs with identical `palette_idx` are forbidden.
+- Empty pages are represented by omission when `default_chunk_idx` is present; otherwise they are represented by a single run covering full page length.
+
 ### 3.3 Runtime Sidecar (`RegionRuntimeSidecar`)
 
 Ephemeral state keyed by node identity (not serialized, not persisted):
@@ -144,6 +159,13 @@ Phase 1 `RealizeProfile`:
 
 - `Render`
 - `Simulation`
+
+Sidecar cache policy defaults:
+
+- `Render` cache soft limit: 256 MiB, hard limit: 384 MiB.
+- `Simulation` cache soft limit: 64 MiB, hard limit: 96 MiB.
+- Eviction policy: weighted LRU within profile, never evict pinned entries, prefer evicting larger cold entries first.
+- On hard-limit breach, insertion path must evict until under hard limit before accepting new entries.
 
 ### 3.5 Chunk Payload
 
@@ -188,7 +210,9 @@ pub trait WorldField {
 Semantics:
 
 - `query_region_core` is the planning/trim source of truth.
+- `query_content_bounds` returns a conservative bounding box for non-empty content inside `query`; it may over-approximate but must never under-approximate.
 - `query_content_bounds` should avoid forced realization where possible.
+- If exact bounds exceed budget, implementation should return a conservative coarse bounds quickly (including full `query` if needed).
 - `realize_chunk` uses sidecar cache key from section 3.4.
 
 ## 5. Topology and Mutation Rules
@@ -214,7 +238,13 @@ Optimization passes may rebalance/refit/repartition snapshot-local subtrees, but
 
 Primary message:
 
-- `RegionSubtreePatch { bounds, preconditions, clock_updates, subtree }`
+- `RegionSubtreePatch { patch_seq, bounds, preconditions, clock_updates, subtree }`
+
+Transport defaults:
+
+- `MAX_PATCH_BYTES = 1_048_576` (1 MiB serialized)
+- `MAX_PATCHES_PER_TICK_PER_CLIENT = 16`
+- `MAX_CHUNKARRAY_CELLS_PER_NODE = 256`
 
 Preconditions:
 
@@ -223,6 +253,19 @@ Preconditions:
 Clock updates:
 
 - `RegionClockUpdate { region_id, new_clock }`
+
+Resync request:
+
+- `RegionResyncRequest { regions: Vec<RegionResyncEntry> }`
+- `RegionResyncEntry { region_id, client_clock }`
+
+Ordering rules:
+
+- `patch_seq` is per-client and strictly monotonic (`+1` for each sent patch).
+- Client applies patches in `patch_seq` order only.
+- If client detects a gap or duplicate `patch_seq`, it rejects out-of-order patch and requests bounded resync for covered regions.
+- Server must spatially split patches until each serialized patch is within `MAX_PATCH_BYTES`.
+- When a subtree is split into multiple patches, emission order is canonical by patch bounds min corner (x, y, z, w).
 
 ### 6.2 Server Obligations per Edit
 
@@ -240,7 +283,7 @@ For `SetVoxelIntent { pos, material, client_edit_id }`, server MUST:
 
 1. Validate all region clock preconditions.
 2. If valid: atomically `graft_replace(bounds, subtree)` and apply `clock_updates`.
-3. If invalid: reject and request bounded region resync (`RegionResyncRequest { region_ids }`).
+3. If invalid: reject and request bounded region resync (`RegionResyncRequest { regions }` with current `client_clock` values).
 4. Coalesce and throttle repeated resync failures for same regions.
 
 ### 6.4 Procedural Edit Locality
@@ -265,6 +308,20 @@ Exactly one compatibility rule:
 
 - Symbolic `ProceduralRef` leaves are allowed over wire only when peers have exact `generator_manifest_hash` match from handshake capabilities; otherwise sender must transmit concrete content (`ChunkArray`, `Uniform`, and/or `Empty` leaves) for the affected region.
 - When transmitting concrete `ChunkArray` content, sender MUST canonicalize to `PagedSparseRle` and enforce pre-send spatial split limits from section 3.2.1.
+
+### 6.6 Handshake Capability Contract
+
+`WorldField` replication handshake MUST exchange:
+
+- `protocol_version: u16` (exact match required; mismatch disconnects)
+- `generator_manifest_hash: u64`
+- `feature_bits: u64`
+
+Rules:
+
+- Version mismatch disconnects before world replication starts.
+- Generator manifest mismatch does not require disconnect; it disables symbolic `ProceduralRef` transport and forces concrete fallback.
+- `feature_bits` unknown-required mismatch disconnects; unknown-optional bits are ignored.
 
 ## 7. Streaming and Realization
 
@@ -310,6 +367,24 @@ Do not persist:
 
 Optional WAL/journal is recovery-only and must fold into canonical snapshot before export.
 
+Persistence cadence defaults:
+
+- World snapshot save interval: 5 seconds when dirty.
+- Player record refresh interval: 60 seconds when dirty.
+- Force save on orderly shutdown.
+
+Atomic commit procedure:
+
+1. Write payload files to `*.tmp` paths, flush, and `fsync`.
+2. Rename each payload temp file to final path.
+3. Write manifest to `manifest.json.tmp`, flush, and `fsync`.
+4. Rename manifest temp to `manifest.json` (commit point).
+5. `fsync` save root directory.
+
+Recovery rule:
+
+- Loader treats manifest as source of truth; orphan temp files are ignored and may be GCed.
+
 ## 9. Migration Plan
 
 ### Phase A: Core/Sidecar Split
@@ -326,11 +401,13 @@ Optional WAL/journal is recovery-only and must fold into canonical snapshot befo
 
 - Replace chunk-list protocol with `RegionSubtreePatch`.
 - Implement trim/serialize/deserialize/graft and bounded region resync.
+- Add `patch_seq`, patch size splitting, and handshake capability exchange (`protocol_version`, `generator_manifest_hash`, `feature_bits`).
 
 ### Phase D: Payload + Realization Profiles
 
 - Route realization through profile-keyed sidecar cache.
 - Use variable payload encodings for realized leaves internally, while canonicalizing `ChunkArray` wire/persist output.
+- Implement canonical `PagedSparseRle` writer/reader and collapse-to-`Empty`/`Uniform` fast path.
 
 ### Phase E: Platform-Volume Procgen
 
@@ -340,13 +417,13 @@ Optional WAL/journal is recovery-only and must fold into canonical snapshot befo
 
 ## 10. Tuning Knobs and Risks
 
-- Region tile edge length tradeoff: coarse invalidation vs bookkeeping overhead.
+- Region tile edge default (`REGION_TILE_EDGE_CHUNKS = 4`) may require retuning for very dense edit workloads.
 - Sustained local edits can fragment trees and require rebuild triggers.
 - Over-culling can violate simulation correctness if simulation domain rules are weak.
 - Resync storms require region-level coalescing/throttling.
-- Sidecar memory budget and eviction policy need concrete targets.
+- Sidecar cache defaults may need retuning under high-entity multiplayer load.
 - Platform generator layering policy (`Uniform` first vs mixed symbolic) remains to tune.
-- Concrete values for `MAX_CHUNKARRAY_CELLS_PER_NODE` and `MAX_PATCH_BYTES` require profiling.
+- Patch/ChunkArray size defaults may need telemetry-driven adjustment.
 
 ## 11. Success Metrics
 
