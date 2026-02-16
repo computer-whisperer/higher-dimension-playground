@@ -4235,3 +4235,69 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_bounds_use_floor_division_for_negative_chunks() {
+        let bounds = Aabb4i::new([-5, -1, 0, 7], [3, 2, 0, 7]);
+        let region_bounds = region_bounds_for_chunk_bounds(bounds);
+        assert_eq!(region_bounds.min, [-2, -1, 0, 1]);
+        assert_eq!(region_bounds.max, [0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn collect_region_clocks_only_returns_intersecting_regions() {
+        let mut clocks = RegionClockMap::new();
+        clocks.insert(
+            RegionId {
+                x: -1,
+                y: 0,
+                z: 0,
+                w: 0,
+            },
+            5,
+        );
+        clocks.insert(
+            RegionId {
+                x: 0,
+                y: 0,
+                z: 0,
+                w: 0,
+            },
+            3,
+        );
+        clocks.insert(
+            RegionId {
+                x: 2,
+                y: 0,
+                z: 0,
+                w: 0,
+            },
+            9,
+        );
+
+        let bounds = Aabb4i::new([0, 0, 0, 0], [3, 0, 0, 0]);
+        let collected = collect_region_clocks_in_chunk_bounds(&clocks, bounds);
+        assert_eq!(collected.len(), 1);
+        assert_eq!(
+            collected.get(&RegionId {
+                x: 0,
+                y: 0,
+                z: 0,
+                w: 0,
+            }),
+            Some(&3)
+        );
+    }
+
+    #[test]
+    fn stream_near_bounds_expands_symmetrically() {
+        let center = [10, -2, 7, 1];
+        let bounds = stream_near_bounds(center, 3);
+        assert_eq!(bounds.min, [7, -5, 4, -2]);
+        assert_eq!(bounds.max, [13, 1, 10, 4]);
+    }
+}
