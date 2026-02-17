@@ -21,16 +21,24 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   4. diff old/new payload maps via `RegionTreeRefreshResult` for load/unload
 - Stream refresh gating now uses per-player near-bounds `RegionClockMap` snapshots (instead of global `world_revision`) to avoid unnecessary out-of-area refresh work.
 - Server now emits `WorldRegionClockUpdate` messages carrying updated region clocks on authoritative voxel edits/explosions.
-- Stream sync now sends near-bounds region-clock snapshots in chunk-batch mode so clients can establish/refresh local clock baselines.
-- Optional bridge mode: `R4D_STREAM_REGION_PATCH=1` emits `WorldRegionPatch` (`RegionSubtreePatch`) alongside chunk batches for live patch-path exercise.
-- Optional bridge-only mode: `R4D_STREAM_REGION_PATCH_ONLY=1` emits/syncs via `WorldRegionPatch` without chunk load/unload batches.
+- Stream sync now emits `WorldRegionPatch` as the canonical bootstrap/update transport (chunk batch/unload path removed from server stream loop).
+- Server runtime config/CLI no longer exposes join-time world snapshot behavior; bootstrap now enters through patch stream only.
 - Stream patch planning now uses changed chunk delta bounds (load/unload union) instead of always patching full near-bounds, reducing patch size/frequency and aligning patch transport with minimal local edits.
 - Stream sync now avoids building near-bounds region-clock snapshots on no-op player updates by using bounded clock-delta checks first, reducing per-message overhead when no refresh is needed.
+- Stream sync now tracks per-player last-seen `world_revision` and skips bounded region-clock scans entirely when revision is unchanged.
+- Stream planner no longer materializes `WorldChunkPayload` buffers; it now refreshes working sets and computes patch bounds directly from chunk-position deltas.
+- Wire protocol world transport is now patch-only:
+  - removed `ClientMessage::RequestWorldSnapshot`
+  - removed `ServerMessage::{WorldSnapshot, WorldChunkBatch, WorldChunkUnloadBatch}`
+  - removed legacy snapshot/chunk payload structs from protocol schema
+- Autosave now snapshots save inputs under lock and performs `save_v3::save_state` I/O outside the server-state lock, with revision-guarded dirty-flag clearing to avoid dropping concurrent edits.
+- Incremental autosave now materializes legacy-world chunk data only for dirty block regions (full-world realization only on full-block saves), reducing conversion overhead for localized edits.
+- Autosave logging now reports `snapshot_ms` (lock-held capture), `save_ms` (disk/serialize), and `finalize_ms` (post-save state reconcile) to support hitch diagnosis.
 - Bridge patch payloads now include region clock preconditions derived from each client's prior streamed region clock snapshot.
 - Bridge patch `patch_seq` is now per-client monotonic (`PlayerState.next_stream_patch_seq`), decoupled from global `world_revision`.
 - Client now applies `WorldRegionPatch` by validating preconditions, enforcing monotonic patch sequence, grafting bounded near-chunk payloads, and applying patch clock updates.
 - Client now emits `WorldRegionResyncRequest` on patch sequence/precondition failures; server replies with bounded `WorldRegionPatch` built from requested regions.
-- Bridge path now enforces `MAX_PATCH_BYTES` wire budget with recursive spatial split attempts; stream falls back to chunk batches only if splitting cannot satisfy budget, and resync replies return server error only when splitting still cannot satisfy budget.
+- Patch path now enforces `MAX_PATCH_BYTES` wire budget with recursive spatial split attempts; if splitting still cannot satisfy budget, server reports error (no chunk-batch fallback path).
 - Authoritative voxel edits now route through `ServerWorldField::apply_voxel_edit`.
 - Region tree naming is now unified in runtime-facing code:
   - `RegionChunkTree` (removed `RegionOverrideTree` alias)
@@ -68,16 +76,10 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 
 ### Temporary bridge layers (intentional)
 - Save/snapshot bridge still converts through `VoxelWorld` (`ServerWorldField::to_legacy_world`).
-- Wire protocol still uses:
-  - `WorldChunkBatch`
-  - `WorldChunkUnloadBatch`
-  - `WorldVoxelSet`
-  - `WorldRegionClockUpdate`
-  - `WorldRegionPatch` + `WorldRegionResyncRequest` bridge messages are now emitted/applied optionally, but chunk batches remain canonical.
-- Region refresh now applies per-chunk diff between prior/new working-set views; subtree-native patch ops are still pending.
+- Multiplayer voxel edits are still sent as `WorldVoxelSet` point updates (not yet folded into subtree patch transport).
+- Region refresh still uses per-chunk working-set deltas to derive patch bounds; subtree-native planner internals are still pending.
 
 ### Old / to-be-replaced
-- Legacy chunk-list replication model (not region-subtree patch transport).
 - World persistence contract based on `VoxelWorld` + region blobs, instead of semantic `RegionTreeCore` + region clocks.
 - Server/client replication versioning based on `world_revision`, not region clock preconditions.
 
@@ -92,22 +94,23 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Server runtime (`server/mod.rs`) owns:
   - entity simulation and gameplay orchestration
   - per-player working trees for streamed interest windows
-  - transport encoding and batching (legacy wire for now)
+  - patch transport and resync orchestration
 
 ## Next Migration Targets
-1. Extend chunk-level diff ops into subtree-native patch/diff operations (replace-by-bounds, subtree trim/diff).
-2. Replace chunk batch wire transport with `RegionSubtreePatch` + region clocks.
-3. Move persistence from `VoxelWorld` bridge to canonical tree + region clocks.
+1. Extend chunk-level working-set diff ops into subtree-native patch/diff operations (replace-by-bounds, subtree trim/diff).
+2. Move persistence from `VoxelWorld` bridge to canonical tree + region clocks.
+3. Fold multiplayer voxel updates into patch transport (remove `WorldVoxelSet` point-update dependence).
 4. Introduce handshake capabilities (`protocol_version`, `generator_manifest_hash`, `feature_bits`) for symbolic/refined tree transport policy.
 
 ## Acceptance checks for this stage
 - No direct base+procgen composition logic remains in `server/mod.rs` stream planner.
 - Player stream state is represented as tree + bounds, not chunk hash sets.
 - Geometry entering stream cache is sourced from `WorldField` query responses.
+- Multiplayer streamed-window world transport uses `WorldRegionPatch`/`WorldRegionResyncRequest` only.
 
 ## Current gaps vs region-tree-worldfield spec
-- Replication still uses `world_revision` + chunk batch messages as canonical transport; `RegionSubtreePatch` is bridge-only.
-- Bridge patch flow still lacks spec-complete behavior:
+- Replication still mixes `world_revision` mechanics with region-clock patch preconditions; region-clock-only replication contract is not complete yet.
+- Patch flow still lacks spec-complete behavior:
   - Client/server now use bounded resync requests with a client-side throttle interval, but full server-side coalesce/throttle policy from spec is still missing.
 - Persistence still roundtrips through `VoxelWorld` bridge; canonical semantic-tree persistence is pending.
 - `query_region_core` currently materializes bounded `ChunkArray` responses directly from base/procgen/chunk-tree composition rather than returning long-lived symbolic `ProceduralRef`/branch topology from a persistent semantic tree.

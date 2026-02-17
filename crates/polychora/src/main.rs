@@ -522,10 +522,6 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     singleplayer_save_interval_secs: u64,
 
-    /// Send full world snapshot on join for integrated singleplayer server.
-    #[arg(long, default_value_t = true)]
-    singleplayer_snapshot_on_join: bool,
-
     /// Enable server-managed random structure generation in singleplayer.
     #[arg(long, default_value_t = true)]
     singleplayer_procgen_structures: bool,

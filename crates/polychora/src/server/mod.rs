@@ -10,14 +10,13 @@ use crate::materials;
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, RegionClockPayload,
-    ServerMessage, WorldChunkCoordPayload, WorldChunkPayload, WorldSnapshotPayload, WorldSummary,
-    WORLD_CHUNK_LOD_NEAR,
+    ServerMessage, WorldSummary,
 };
-use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
+use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE};
 use crate::shared::worldfield::{
-    Aabb4i, ChunkPayload, QueryDetail, QueryVolume, RegionClockMap, RegionClockPrecondition,
-    RegionClockUpdate, RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch,
-    WorldField, MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
+    Aabb4i, QueryDetail, QueryVolume, RegionClockMap, RegionClockPrecondition, RegionClockUpdate,
+    RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch, WorldField,
+    MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -33,7 +32,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const STREAM_FAR_LOD_SCALE: i32 = 4;
-const STREAM_MESSAGE_CHUNK_LIMIT: usize = 256;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
 const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
 const ENTITY_SIM_STEP_MAX_PER_BROADCAST: usize = 16;
@@ -72,7 +70,6 @@ pub struct RuntimeConfig {
     pub tick_hz: f32,
     pub entity_sim_hz: f32,
     pub save_interval_secs: u64,
-    pub snapshot_on_join: bool,
     pub procgen_structures: bool,
     pub procgen_near_chunk_radius: i32,
     pub procgen_mid_chunk_radius: i32,
@@ -90,7 +87,6 @@ impl Default for RuntimeConfig {
             tick_hz: 10.0,
             entity_sim_hz: 30.0,
             save_interval_secs: 5,
-            snapshot_on_join: true,
             procgen_structures: true,
             procgen_near_chunk_radius: 6,
             procgen_mid_chunk_radius: 10,
@@ -112,6 +108,7 @@ struct PlayerState {
     entity_id: u64,
     working_set: RegionTreeWorkingSet,
     last_stream_center_chunk: Option<[i32; 4]>,
+    last_stream_world_revision: u64,
     last_stream_region_clocks: RegionClockMap,
     known_region_clocks: RegionClockMap,
     next_stream_patch_seq: u64,
@@ -2347,30 +2344,6 @@ fn build_entity_replication_batches(
     batches
 }
 
-fn encode_world_chunk_payload_from_realized(
-    lod_level: u8,
-    chunk_pos: ChunkPos,
-    payload: &ChunkPayload,
-) -> Option<WorldChunkPayload> {
-    if matches!(payload, ChunkPayload::Empty) {
-        return None;
-    }
-    let dense = payload.dense_materials().ok()?;
-    if dense.len() != voxel::CHUNK_VOLUME {
-        return None;
-    }
-    Some(WorldChunkPayload {
-        lod_level,
-        chunk_pos: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-        // Current wire format is u8-only. Clamp out-of-range materials to u8::MAX
-        // until the transport is upgraded to support larger material IDs.
-        voxels: dense
-            .into_iter()
-            .map(|material| u8::try_from(material).unwrap_or(u8::MAX))
-            .collect(),
-    })
-}
-
 fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
     let dx = (chunk_pos.x - center_chunk[0]) as i64;
     let dy = (chunk_pos.y - center_chunk[1]) as i64;
@@ -2472,25 +2445,6 @@ fn region_clock_map_changed_in_chunk_bounds(
         }
     }
     false
-}
-
-fn region_clock_payloads_from_map(clocks: &RegionClockMap) -> Vec<RegionClockPayload> {
-    let mut out: Vec<RegionClockPayload> = clocks
-        .iter()
-        .map(|(region_id, clock)| RegionClockPayload {
-            region_id: [region_id.x, region_id.y, region_id.z, region_id.w],
-            clock: *clock,
-        })
-        .collect();
-    out.sort_unstable_by_key(|update| {
-        (
-            update.region_id[3],
-            update.region_id[2],
-            update.region_id[1],
-            update.region_id[0],
-        )
-    });
-    out
 }
 
 fn region_clock_updates_from_map(clocks: &RegionClockMap) -> Vec<RegionClockUpdate> {
@@ -2622,34 +2576,28 @@ fn extend_chunk_bounds(
 }
 
 fn chunk_bounds_for_stream_delta(
-    chunk_loads: &[WorldChunkPayload],
-    chunk_unloads: &[WorldChunkCoordPayload],
+    chunk_loads: &[ChunkPos],
+    chunk_unloads: &[ChunkPos],
 ) -> Option<Aabb4i> {
     let mut min_bounds = [0i32; 4];
     let mut max_bounds = [0i32; 4];
     let mut any = false;
 
-    for payload in chunk_loads {
-        if payload.lod_level != WORLD_CHUNK_LOD_NEAR {
-            continue;
-        }
+    for chunk_pos in chunk_loads {
         extend_chunk_bounds(
             &mut min_bounds,
             &mut max_bounds,
             &mut any,
-            payload.chunk_pos,
+            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
         );
     }
 
-    for payload in chunk_unloads {
-        if payload.lod_level != WORLD_CHUNK_LOD_NEAR {
-            continue;
-        }
+    for chunk_pos in chunk_unloads {
         extend_chunk_bounds(
             &mut min_bounds,
             &mut max_bounds,
             &mut any,
-            payload.chunk_pos,
+            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
         );
     }
 
@@ -2806,7 +2754,7 @@ fn plan_stream_window_update(
     near_chunk_radius: i32,
     _mid_chunk_radius: i32,
     _far_chunk_radius: i32,
-) -> Option<(u64, Vec<WorldChunkPayload>, Vec<WorldChunkCoordPayload>)> {
+) -> Option<(Vec<ChunkPos>, Vec<ChunkPos>)> {
     let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
     let query_core = state.world.query_region_core(
         QueryVolume {
@@ -2820,10 +2768,17 @@ fn plan_stream_window_update(
         let refresh = player
             .working_set
             .refresh_from_core(near_bounds, query_core.as_ref());
-        (refresh.load_chunks, refresh.unload_positions)
+        (
+            refresh
+                .load_chunks
+                .into_iter()
+                .map(|(chunk_pos, _)| chunk_pos)
+                .collect::<Vec<_>>(),
+            refresh.unload_positions,
+        )
     };
 
-    load_chunks.sort_unstable_by_key(|(chunk_pos, _)| {
+    load_chunks.sort_unstable_by_key(|chunk_pos| {
         (
             stream_chunk_distance2(*chunk_pos, center_chunk),
             chunk_pos.w,
@@ -2833,40 +2788,17 @@ fn plan_stream_window_update(
         )
     });
 
-    let mut load_payloads = Vec::with_capacity(load_chunks.len());
-    let mut invalid_positions = Vec::new();
-    for (chunk_pos, payload) in load_chunks {
-        if let Some(encoded) =
-            encode_world_chunk_payload_from_realized(WORLD_CHUNK_LOD_NEAR, chunk_pos, &payload)
-        {
-            load_payloads.push(encoded);
-        } else {
-            invalid_positions.push(chunk_pos);
-        }
-    }
-    for chunk_pos in invalid_positions {
-        let player = state.players.get_mut(&client_id)?;
-        let _ = player.working_set.remove_chunk(chunk_pos);
-    }
-
-    let mut unload_chunks: Vec<WorldChunkCoordPayload> = unload_positions
-        .into_iter()
-        .map(|chunk_pos| WorldChunkCoordPayload {
-            lod_level: WORLD_CHUNK_LOD_NEAR,
-            chunk_pos: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-        })
-        .collect();
-    unload_chunks.sort_unstable_by_key(|payload| {
+    let mut unload_chunks = unload_positions;
+    unload_chunks.sort_unstable_by_key(|chunk_pos| {
         (
-            payload.lod_level,
-            payload.chunk_pos[3],
-            payload.chunk_pos[2],
-            payload.chunk_pos[1],
-            payload.chunk_pos[0],
+            chunk_pos.w,
+            chunk_pos.z,
+            chunk_pos.y,
+            chunk_pos.x,
         )
     });
 
-    Some((state.world_revision, load_payloads, unload_chunks))
+    Some((load_chunks, unload_chunks))
 }
 
 fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
@@ -3003,128 +2935,89 @@ fn sync_streamed_chunks_for_client(
     far_chunk_radius: i32,
     force: bool,
 ) {
-    let emit_region_patch_only = env_flag_enabled("R4D_STREAM_REGION_PATCH_ONLY");
-    let emit_region_patch = emit_region_patch_only || env_flag_enabled("R4D_STREAM_REGION_PATCH");
     let update = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
-        let should_sync = match guard.players.get(&client_id) {
+        let current_world_revision = guard.world_revision;
+        let (should_sync, saw_new_world_revision) = match guard.players.get(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
-                let world_changed = region_clock_map_changed_in_chunk_bounds(
-                    &guard.region_clocks,
-                    &player.last_stream_region_clocks,
-                    near_bounds,
-                );
-                force || changed || world_changed
+                let world_revision_changed =
+                    player.last_stream_world_revision != current_world_revision;
+                let world_changed = world_revision_changed
+                    && region_clock_map_changed_in_chunk_bounds(
+                        &guard.region_clocks,
+                        &player.last_stream_region_clocks,
+                        near_bounds,
+                    );
+                (force || changed || world_changed, world_revision_changed)
             }
-            None => false,
+            None => (false, false),
         };
+        if saw_new_world_revision && !should_sync {
+            if let Some(player) = guard.players.get_mut(&client_id) {
+                player.last_stream_world_revision = current_world_revision;
+            }
+        }
 
         if should_sync {
-            let current_region_clocks =
-                collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
-            let should_emit_stream_patch = emit_region_patch;
-            let tracked = if let Some(player) = guard.players.get_mut(&client_id) {
-                player.last_stream_center_chunk = Some(center_chunk);
-                player.last_stream_region_clocks = current_region_clocks.clone();
-                true
-            } else {
-                false
-            };
-
-            if !tracked {
-                None
-            } else {
-                let update = plan_stream_window_update(
-                    &mut guard,
-                    client_id,
-                    center_chunk,
-                    near_chunk_radius,
-                    mid_chunk_radius,
-                    far_chunk_radius,
-                );
-                update.map(|(revision, loads, unloads)| {
-                    let mut region_patches = Vec::new();
-                    let mut patch_fallback_to_chunks = false;
-                    let patch_bounds = chunk_bounds_for_stream_delta(&loads, &unloads);
-
-                    if should_emit_stream_patch {
-                        let (known_before, mut next_patch_seq) = {
-                            let Some(player) = guard.players.get(&client_id) else {
-                                return (
-                                    revision,
-                                    loads,
-                                    unloads,
-                                    region_clock_payloads_from_map(&current_region_clocks),
-                                    region_patches,
-                                    true,
-                                );
-                            };
-                            (
-                                player.known_region_clocks.clone(),
-                                player.next_stream_patch_seq,
-                            )
+            let update = plan_stream_window_update(
+                &mut guard,
+                client_id,
+                center_chunk,
+                near_chunk_radius,
+                mid_chunk_radius,
+                far_chunk_radius,
+            );
+            match update {
+                Some((loads, unloads)) => {
+                    let current_region_clocks =
+                        collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
+                    let patch_bounds =
+                        chunk_bounds_for_stream_delta(&loads, &unloads).unwrap_or(near_bounds);
+                    let (known_before, mut next_patch_seq) = {
+                        let Some(player) = guard.players.get(&client_id) else {
+                            return;
                         };
+                        (
+                            player.known_region_clocks.clone(),
+                            player.next_stream_patch_seq,
+                        )
+                    };
 
-                        if let Some(patch_bounds) = patch_bounds {
-                            match build_region_patches_for_bounds(
-                                &guard.world,
-                                patch_bounds,
-                                &current_region_clocks,
-                                &known_before,
-                                &mut next_patch_seq,
-                            ) {
-                                Some((patches, known_after)) => {
-                                    region_patches = patches;
-                                    if let Some(player) = guard.players.get_mut(&client_id) {
-                                        player.known_region_clocks = known_after;
-                                        player.next_stream_patch_seq = next_patch_seq;
-                                    }
-                                }
-                                None => {
-                                    patch_fallback_to_chunks = true;
-                                    if let Some(player) = guard.players.get_mut(&client_id) {
-                                        for (region_id, clock) in &current_region_clocks {
-                                            player.known_region_clocks.insert(*region_id, *clock);
-                                        }
-                                    }
-                                }
-                            }
-                        } else if let Some(player) = guard.players.get_mut(&client_id) {
-                            for (region_id, clock) in &current_region_clocks {
-                                player.known_region_clocks.insert(*region_id, *clock);
+                    match build_region_patches_for_bounds(
+                        &guard.world,
+                        patch_bounds,
+                        &current_region_clocks,
+                        &known_before,
+                        &mut next_patch_seq,
+                    ) {
+                        Some((patches, known_after)) => {
+                            if let Some(player) = guard.players.get_mut(&client_id) {
+                                player.last_stream_center_chunk = Some(center_chunk);
+                                player.last_stream_world_revision = current_world_revision;
+                                player.last_stream_region_clocks = current_region_clocks;
+                                player.known_region_clocks = known_after;
+                                player.next_stream_patch_seq = next_patch_seq;
+                                Some(Ok(patches))
+                            } else {
+                                None
                             }
                         }
-                    } else if let Some(player) = guard.players.get_mut(&client_id) {
-                        for (region_id, clock) in &current_region_clocks {
-                            player.known_region_clocks.insert(*region_id, *clock);
-                        }
+                        None => Some(Err(format!(
+                            "region stream patch exceeded wire budget after spatial splitting in bounds {:?}->{:?}",
+                            patch_bounds.min, patch_bounds.max
+                        ))),
                     }
-                    (
-                        revision,
-                        loads,
-                        unloads,
-                        region_clock_payloads_from_map(&current_region_clocks),
-                        region_patches,
-                        patch_fallback_to_chunks,
-                    )
-                })
+                }
+                None => None,
             }
         } else {
             None
         }
     };
 
-    let Some((
-        revision,
-        chunk_loads,
-        chunk_unloads,
-        region_clock_snapshot,
-        region_patches,
-        patch_fallback_to_chunks,
-    )) = update
-    else {
+    let Some(update) = update else {
         return;
     };
 
@@ -3136,59 +3029,14 @@ fn sync_streamed_chunks_for_client(
         return;
     };
 
-    let should_send_chunk_batches = !emit_region_patch_only || patch_fallback_to_chunks;
-    let mut should_send_clock_snapshot =
-        patch_fallback_to_chunks && !region_clock_snapshot.is_empty();
-
-    if !region_patches.is_empty() {
-        for patch in region_patches {
-            let _ = sender.send(ServerMessage::WorldRegionPatch { patch });
-        }
-    } else if !patch_fallback_to_chunks {
-        should_send_clock_snapshot = !region_clock_snapshot.is_empty();
-    }
-
-    if should_send_clock_snapshot {
-        let _ = sender.send(ServerMessage::WorldRegionClockUpdate {
-            updates: region_clock_snapshot,
-        });
-    }
-
-    if should_send_chunk_batches && !chunk_loads.is_empty() {
-        let mut batch = Vec::with_capacity(STREAM_MESSAGE_CHUNK_LIMIT);
-        for chunk in chunk_loads {
-            batch.push(chunk);
-            if batch.len() == STREAM_MESSAGE_CHUNK_LIMIT {
-                let _ = sender.send(ServerMessage::WorldChunkBatch {
-                    revision,
-                    chunks: std::mem::take(&mut batch),
-                });
+    match update {
+        Ok(region_patches) => {
+            for patch in region_patches {
+                let _ = sender.send(ServerMessage::WorldRegionPatch { patch });
             }
         }
-        if !batch.is_empty() {
-            let _ = sender.send(ServerMessage::WorldChunkBatch {
-                revision,
-                chunks: batch,
-            });
-        }
-    }
-
-    if should_send_chunk_batches && !chunk_unloads.is_empty() {
-        let mut batch = Vec::with_capacity(STREAM_MESSAGE_CHUNK_LIMIT);
-        for chunk in chunk_unloads {
-            batch.push(chunk);
-            if batch.len() == STREAM_MESSAGE_CHUNK_LIMIT {
-                let _ = sender.send(ServerMessage::WorldChunkUnloadBatch {
-                    revision,
-                    chunks: std::mem::take(&mut batch),
-                });
-            }
-        }
-        if !batch.is_empty() {
-            let _ = sender.send(ServerMessage::WorldChunkUnloadBatch {
-                revision,
-                chunks: batch,
-            });
+        Err(message) => {
+            let _ = sender.send(ServerMessage::Error { message });
         }
     }
 }
@@ -3544,18 +3392,6 @@ fn load_or_init_world_state(
     )
 }
 
-fn build_world_snapshot_payload(state: &ServerState) -> io::Result<WorldSnapshotPayload> {
-    let mut bytes = Vec::new();
-    let legacy_world = state.world.to_legacy_world();
-    voxel::save_world(&legacy_world, &mut bytes)?;
-    Ok(WorldSnapshotPayload {
-        format: "v4dw".to_string(),
-        non_empty_chunks: state.world.non_empty_chunk_count(),
-        revision: state.world_revision,
-        bytes,
-    })
-}
-
 fn start_broadcast_thread(
     state: SharedState,
     tick_hz: f32,
@@ -3711,6 +3547,76 @@ fn start_autosave_thread(
     save_interval_secs: u64,
     shutdown: Arc<AtomicBool>,
 ) {
+    fn chunk_bounds_for_save_region(region: [i32; 4], region_chunk_edge: i32) -> Aabb4i {
+        let edge = region_chunk_edge.max(1);
+        let min = [
+            region[0].saturating_mul(edge),
+            region[1].saturating_mul(edge),
+            region[2].saturating_mul(edge),
+            region[3].saturating_mul(edge),
+        ];
+        let max = [
+            min[0].saturating_add(edge - 1),
+            min[1].saturating_add(edge - 1),
+            min[2].saturating_add(edge - 1),
+            min[3].saturating_add(edge - 1),
+        ];
+        Aabb4i::new(min, max)
+    }
+
+    fn build_autosave_legacy_world_snapshot(
+        world: &ServerWorldField,
+        region_chunk_edge: i32,
+        dirty_block_regions: &HashSet<[i32; 4]>,
+        force_full_blocks: bool,
+    ) -> VoxelWorld {
+        if force_full_blocks {
+            return world.to_legacy_world();
+        }
+
+        let mut legacy_world = VoxelWorld::new_with_base(world.base_kind());
+        for region in dirty_block_regions {
+            let bounds = chunk_bounds_for_save_region(*region, region_chunk_edge);
+            for (key, payload) in world.chunk_tree().collect_chunks_in_bounds(bounds) {
+                let Ok(chunk) = payload.to_voxel_chunk() else {
+                    continue;
+                };
+                legacy_world.insert_chunk(key.to_chunk_pos(), chunk);
+            }
+        }
+        legacy_world.clear_dirty();
+        let _ = legacy_world.drain_pending_chunk_updates();
+        legacy_world
+    }
+
+    struct PendingAutosave {
+        now_ms: u64,
+        legacy_world: VoxelWorld,
+        persisted_entities: Vec<PersistedEntityRecord>,
+        players: Vec<PlayerRecord>,
+        world_seed: u64,
+        next_entity_id: u64,
+        dirty_block_regions: HashSet<[i32; 4]>,
+        dirty_entity_regions: HashSet<[i32; 4]>,
+        force_full_blocks: bool,
+        force_full_entities: bool,
+        chunk_count: usize,
+        world_revision: u64,
+        entity_revision: u64,
+    }
+
+    fn autosave_clear_flags(
+        saved_world_revision: u64,
+        saved_entity_revision: u64,
+        current_world_revision: u64,
+        current_entity_revision: u64,
+    ) -> (bool, bool) {
+        (
+            current_world_revision == saved_world_revision,
+            current_entity_revision == saved_entity_revision,
+        )
+    }
+
     if save_interval_secs == 0 {
         return;
     }
@@ -3721,8 +3627,9 @@ fn start_autosave_thread(
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            let save_result = {
-                let mut guard = state.lock().expect("server state lock poisoned");
+            let snapshot_start = Instant::now();
+            let pending = {
+                let guard = state.lock().expect("server state lock poisoned");
                 let now_ms = save_v3::now_unix_ms();
                 let players = collect_player_records(&guard, now_ms);
                 let should_persist_players = !players.is_empty()
@@ -3733,76 +3640,107 @@ fn start_autosave_thread(
                 if !should_save {
                     None
                 } else {
-                    let legacy_world = guard.world.to_legacy_world();
-                    let persisted_entities = collect_persisted_entities(&guard, now_ms);
                     let dirty_block_regions = guard.dirty_block_regions.clone();
-                    let dirty_entity_regions = HashSet::new();
                     let force_full_blocks =
                         guard.world.any_dirty() && dirty_block_regions.is_empty();
-                    let force_full_entities = guard.entities_dirty;
-                    Some(
-                        save_v3::save_state(
-                            &world_file,
-                            SaveRequest {
-                                world: &legacy_world,
-                                entities: &persisted_entities,
-                                players: &players,
-                                world_seed: guard.world.world_seed(),
-                                next_entity_id: guard.next_object_id,
-                                dirty_block_regions: &dirty_block_regions,
-                                dirty_entity_regions: &dirty_entity_regions,
-                                force_full_blocks,
-                                force_full_entities,
-                                now_ms,
-                            },
-                        )
-                        .map(|save_result| {
-                            let chunk_count = guard.world.non_empty_chunk_count();
-                            guard.entities_dirty = false;
-                            guard.dirty_block_regions.clear();
-                            guard.world.clear_dirty();
-                            if !players.is_empty() {
-                                guard.last_players_persisted_ms = now_ms;
-                            }
-                            (
-                                save_result,
-                                chunk_count,
-                                persisted_entities.len(),
-                                players.len(),
-                                guard.world_revision,
-                                guard.entity_revision,
-                            )
-                        }),
-                    )
+                    Some(PendingAutosave {
+                        now_ms,
+                        legacy_world: build_autosave_legacy_world_snapshot(
+                            &guard.world,
+                            guard.region_chunk_edge,
+                            &dirty_block_regions,
+                            force_full_blocks,
+                        ),
+                        persisted_entities: collect_persisted_entities(&guard, now_ms),
+                        players,
+                        world_seed: guard.world.world_seed(),
+                        next_entity_id: guard.next_object_id,
+                        dirty_block_regions,
+                        dirty_entity_regions: HashSet::new(),
+                        force_full_blocks,
+                        force_full_entities: guard.entities_dirty,
+                        chunk_count: guard.world.non_empty_chunk_count(),
+                        world_revision: guard.world_revision,
+                        entity_revision: guard.entity_revision,
+                    })
                 }
             };
+            let snapshot_elapsed = snapshot_start.elapsed();
+
+            let Some(pending) = pending else {
+                continue;
+            };
+            let entity_count = pending.persisted_entities.len();
+            let player_count = pending.players.len();
+            let saved_world_revision = pending.world_revision;
+            let saved_entity_revision = pending.entity_revision;
+            let save_start = Instant::now();
+            let save_result = save_v3::save_state(
+                &world_file,
+                SaveRequest {
+                    world: &pending.legacy_world,
+                    entities: &pending.persisted_entities,
+                    players: &pending.players,
+                    world_seed: pending.world_seed,
+                    next_entity_id: pending.next_entity_id,
+                    dirty_block_regions: &pending.dirty_block_regions,
+                    dirty_entity_regions: &pending.dirty_entity_regions,
+                    force_full_blocks: pending.force_full_blocks,
+                    force_full_entities: pending.force_full_entities,
+                    now_ms: pending.now_ms,
+                },
+            );
+            let save_elapsed = save_start.elapsed();
 
             match save_result {
-                Some(Ok((
-                    save_result,
-                    chunk_count,
-                    entity_count,
-                    player_count,
-                    world_revision,
-                    entity_revision,
-                ))) => {
+                Ok(save_result) => {
+                    let finalize_start = Instant::now();
+                    let (world_revision, entity_revision) = {
+                        let mut guard = state.lock().expect("server state lock poisoned");
+                        let (clear_world, clear_entities) = autosave_clear_flags(
+                            saved_world_revision,
+                            saved_entity_revision,
+                            guard.world_revision,
+                            guard.entity_revision,
+                        );
+                        if clear_world {
+                            guard.dirty_block_regions.clear();
+                            guard.world.clear_dirty();
+                        }
+                        if clear_entities {
+                            guard.entities_dirty = false;
+                            if !pending.players.is_empty() {
+                                guard.last_players_persisted_ms = pending.now_ms;
+                            }
+                        }
+                        (guard.world_revision, guard.entity_revision)
+                    };
+                    let finalize_elapsed = finalize_start.elapsed();
                     eprintln!(
-                        "autosave: generation {} world_rev={} entity_rev={} regions(block={}, entity={}) world_chunks={} entities={} players={} -> {}",
+                        "autosave: generation {} world_rev={} entity_rev={} regions(block={}, entity={}) world_chunks={} entities={} players={} snapshot_ms={:.3} save_ms={:.3} finalize_ms={:.3} -> {}",
                         save_result.generation,
                         world_revision,
                         entity_revision,
                         save_result.saved_block_regions,
                         save_result.saved_entity_regions,
-                        chunk_count,
+                        pending.chunk_count,
                         entity_count,
                         player_count,
+                        snapshot_elapsed.as_secs_f64() * 1000.0,
+                        save_elapsed.as_secs_f64() * 1000.0,
+                        finalize_elapsed.as_secs_f64() * 1000.0,
                         world_file.display()
                     );
                 }
-                Some(Err(error)) => {
-                    eprintln!("autosave failed ({}): {}", world_file.display(), error);
+                Err(error) => {
+                    eprintln!(
+                        "autosave failed ({}): {} (snapshot_ms={:.3} save_ms={:.3})",
+                        world_file.display(),
+                        error,
+                        snapshot_elapsed.as_secs_f64() * 1000.0,
+                        save_elapsed.as_secs_f64() * 1000.0
+                    );
                 }
-                None => {}
             }
         }
     });
@@ -3853,6 +3791,7 @@ fn install_or_update_player(
                 entity_id,
                 working_set: RegionTreeWorkingSet::new(),
                 last_stream_center_chunk: None,
+                last_stream_world_revision: 0,
                 last_stream_region_clocks: HashMap::new(),
                 known_region_clocks: HashMap::new(),
                 next_stream_patch_seq: 1,
@@ -4111,7 +4050,6 @@ fn handle_message(
     state: &SharedState,
     client_id: u64,
     message: ClientMessage,
-    snapshot_on_join: bool,
     tick_hz: f32,
     near_chunk_radius: i32,
     mid_chunk_radius: i32,
@@ -4139,26 +4077,6 @@ fn handle_message(
                     },
                 },
             );
-            if snapshot_on_join {
-                let snapshot_message = {
-                    let guard = state.lock().expect("server state lock poisoned");
-                    build_world_snapshot_payload(&guard)
-                };
-                match snapshot_message {
-                    Ok(world) => {
-                        send_to_client(state, client_id, ServerMessage::WorldSnapshot { world });
-                    }
-                    Err(error) => {
-                        send_to_client(
-                            state,
-                            client_id,
-                            ServerMessage::Error {
-                                message: format!("failed to build world snapshot: {error}"),
-                            },
-                        );
-                    }
-                }
-            }
             let center_chunk = world_chunk_from_position(snapshot.position);
             sync_streamed_chunks_for_client(
                 state,
@@ -4263,42 +4181,6 @@ fn handle_message(
         ClientMessage::WorldRegionResyncRequest { request } => {
             send_region_resync_patch_to_client(state, client_id, request);
         }
-        ClientMessage::RequestWorldSnapshot => {
-            let snapshot_message = {
-                let guard = state.lock().expect("server state lock poisoned");
-                build_world_snapshot_payload(&guard)
-            };
-            match snapshot_message {
-                Ok(world) => {
-                    send_to_client(state, client_id, ServerMessage::WorldSnapshot { world })
-                }
-                Err(error) => send_to_client(
-                    state,
-                    client_id,
-                    ServerMessage::Error {
-                        message: format!("failed to build world snapshot: {error}"),
-                    },
-                ),
-            }
-            let center_chunk = {
-                let guard = state.lock().expect("server state lock poisoned");
-                guard
-                    .players
-                    .get(&client_id)
-                    .and_then(|player| guard.entity_store.snapshot(player.entity_id))
-                    .map(|snapshot| world_chunk_from_position(snapshot.position))
-                    .unwrap_or([0, 0, 0, 0])
-            };
-            sync_streamed_chunks_for_client(
-                state,
-                client_id,
-                center_chunk,
-                near_chunk_radius,
-                mid_chunk_radius,
-                far_chunk_radius,
-                true,
-            );
-        }
         ClientMessage::Ping { nonce } => {
             send_to_client(state, client_id, ServerMessage::Pong { nonce });
         }
@@ -4309,7 +4191,6 @@ fn handle_message(
 fn spawn_client_thread(
     stream: TcpStream,
     state: SharedState,
-    snapshot_on_join: bool,
     tick_hz: f32,
     near_chunk_radius: i32,
     mid_chunk_radius: i32,
@@ -4399,7 +4280,6 @@ fn spawn_client_thread(
                         &state,
                         client_id,
                         message,
-                        snapshot_on_join,
                         tick_hz,
                         near_chunk_radius,
                         mid_chunk_radius,
@@ -4746,7 +4626,6 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
                 &state_for_client,
                 client_id,
                 message,
-                cfg.snapshot_on_join,
                 cfg.tick_hz.max(0.1),
                 cfg.procgen_near_chunk_radius.max(0),
                 cfg.procgen_mid_chunk_radius.max(1),
@@ -4795,7 +4674,6 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
                 spawn_client_thread(
                     stream,
                     state.clone(),
-                    config.snapshot_on_join,
                     config.tick_hz.max(0.1),
                     config.procgen_near_chunk_radius.max(0),
                     config.procgen_mid_chunk_radius.max(1),
@@ -5057,21 +4935,10 @@ mod tests {
     #[test]
     fn chunk_bounds_for_stream_delta_unions_loads_and_unloads() {
         let loads = vec![
-            WorldChunkPayload {
-                lod_level: WORLD_CHUNK_LOD_NEAR,
-                chunk_pos: [2, 1, -3, 0],
-                voxels: Vec::new(),
-            },
-            WorldChunkPayload {
-                lod_level: WORLD_CHUNK_LOD_NEAR,
-                chunk_pos: [5, 4, 2, 1],
-                voxels: Vec::new(),
-            },
+            ChunkPos::new(2, 1, -3, 0),
+            ChunkPos::new(5, 4, 2, 1),
         ];
-        let unloads = vec![WorldChunkCoordPayload {
-            lod_level: WORLD_CHUNK_LOD_NEAR,
-            chunk_pos: [-1, 3, 0, -2],
-        }];
+        let unloads = vec![ChunkPos::new(-1, 3, 0, -2)];
 
         let bounds =
             chunk_bounds_for_stream_delta(&loads, &unloads).expect("delta bounds should exist");
@@ -5080,16 +4947,9 @@ mod tests {
     }
 
     #[test]
-    fn chunk_bounds_for_stream_delta_ignores_non_near_lod() {
-        let loads = vec![WorldChunkPayload {
-            lod_level: WORLD_CHUNK_LOD_NEAR.saturating_add(1),
-            chunk_pos: [7, 7, 7, 7],
-            voxels: Vec::new(),
-        }];
-        let unloads = vec![WorldChunkCoordPayload {
-            lod_level: WORLD_CHUNK_LOD_NEAR.saturating_add(2),
-            chunk_pos: [-7, -7, -7, -7],
-        }];
+    fn chunk_bounds_for_stream_delta_returns_none_for_empty_delta() {
+        let loads = Vec::<ChunkPos>::new();
+        let unloads = Vec::<ChunkPos>::new();
 
         assert!(chunk_bounds_for_stream_delta(&loads, &unloads).is_none());
     }

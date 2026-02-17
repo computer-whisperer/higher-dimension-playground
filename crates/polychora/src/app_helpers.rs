@@ -110,7 +110,6 @@ pub(super) fn build_singleplayer_runtime_config(
         tick_hz: args.singleplayer_tick_hz.max(0.1),
         entity_sim_hz: args.singleplayer_entity_sim_hz.max(0.1),
         save_interval_secs: args.singleplayer_save_interval_secs,
-        snapshot_on_join: args.singleplayer_snapshot_on_join,
         procgen_structures: args.singleplayer_procgen_structures,
         procgen_near_chunk_radius: args.singleplayer_procgen_chunk_radius,
         procgen_mid_chunk_radius: args.singleplayer_procgen_mid_chunk_radius,

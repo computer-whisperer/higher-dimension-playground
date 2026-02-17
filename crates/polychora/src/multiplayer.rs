@@ -5,8 +5,7 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-pub use polychora::shared::protocol::WorldChunkCoordPayload;
-pub use polychora::shared::protocol::{EntityClass, EntityKind, EntitySnapshot, WorldChunkPayload};
+pub use polychora::shared::protocol::{EntityClass, EntityKind, EntitySnapshot};
 
 #[derive(Debug)]
 pub enum MultiplayerEvent {

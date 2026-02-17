@@ -1,10 +1,6 @@
 use crate::shared::worldfield::{RegionResyncRequest, RegionSubtreePatch};
 use serde::{Deserialize, Serialize};
 
-pub const WORLD_CHUNK_LOD_NEAR: u8 = 0;
-pub const WORLD_CHUNK_LOD_MID: u8 = 1;
-pub const WORLD_CHUNK_LOD_FAR: u8 = 2;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityKind {
     PlayerAvatar,
@@ -55,27 +51,6 @@ pub struct WorldSummary {
     pub revision: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WorldSnapshotPayload {
-    pub format: String,
-    pub non_empty_chunks: usize,
-    pub revision: u64,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WorldChunkPayload {
-    pub lod_level: u8,
-    pub chunk_pos: [i32; 4],
-    pub voxels: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct WorldChunkCoordPayload {
-    pub lod_level: u8,
-    pub chunk_pos: [i32; 4],
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct RegionClockPayload {
     pub region_id: [i32; 4],
@@ -109,7 +84,6 @@ pub enum ClientMessage {
     WorldRegionResyncRequest {
         request: RegionResyncRequest,
     },
-    RequestWorldSnapshot,
     Ping {
         nonce: u64,
     },
@@ -132,17 +106,6 @@ pub enum ServerMessage {
         source_client_id: Option<u64>,
         client_edit_id: Option<u64>,
         revision: u64,
-    },
-    WorldSnapshot {
-        world: WorldSnapshotPayload,
-    },
-    WorldChunkBatch {
-        revision: u64,
-        chunks: Vec<WorldChunkPayload>,
-    },
-    WorldChunkUnloadBatch {
-        revision: u64,
-        chunks: Vec<WorldChunkCoordPayload>,
     },
     WorldRegionClockUpdate {
         updates: Vec<RegionClockPayload>,

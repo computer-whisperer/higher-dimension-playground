@@ -829,93 +829,6 @@ impl App {
         }
     }
 
-    pub(super) fn apply_multiplayer_chunk_batch(
-        &mut self,
-        revision: u64,
-        chunks: Vec<multiplayer::WorldChunkPayload>,
-    ) -> usize {
-        let mut applied_chunks = 0usize;
-
-        for payload in chunks {
-            if payload.voxels.len() != voxel::CHUNK_VOLUME {
-                eprintln!(
-                    "Ignoring malformed multiplayer chunk payload at ({}, {}, {}, {}): expected {} voxels, got {}",
-                    payload.chunk_pos[0],
-                    payload.chunk_pos[1],
-                    payload.chunk_pos[2],
-                    payload.chunk_pos[3],
-                    voxel::CHUNK_VOLUME,
-                    payload.voxels.len()
-                );
-                continue;
-            }
-
-            let mut voxels = Box::new([voxel::VoxelType::AIR; voxel::CHUNK_VOLUME]);
-            let mut solid_count = 0u32;
-            for (idx, material) in payload.voxels.into_iter().enumerate() {
-                let voxel_type = voxel::VoxelType(material);
-                if voxel_type.is_solid() {
-                    solid_count += 1;
-                }
-                voxels[idx] = voxel_type;
-            }
-
-            let chunk = voxel::chunk::Chunk {
-                voxels,
-                solid_count,
-                dirty: true,
-            };
-            let chunk_pos = voxel::ChunkPos::new(
-                payload.chunk_pos[0],
-                payload.chunk_pos[1],
-                payload.chunk_pos[2],
-                payload.chunk_pos[3],
-            );
-            self.scene
-                .insert_lod_chunk(payload.lod_level, chunk_pos, chunk);
-            if payload.lod_level == scene::VOXEL_LOD_LEVEL_NEAR {
-                self.sync_multiplayer_stream_tree_diag_chunk(chunk_pos);
-            }
-            applied_chunks += 1;
-        }
-
-        if applied_chunks > 0 {
-            eprintln!(
-                "Applied multiplayer chunk batch rev={} chunks={}",
-                revision, applied_chunks
-            );
-        }
-        applied_chunks
-    }
-
-    pub(super) fn apply_multiplayer_chunk_unload_batch(
-        &mut self,
-        revision: u64,
-        chunks: Vec<multiplayer::WorldChunkCoordPayload>,
-    ) {
-        let mut removed_chunks = 0usize;
-        for payload in chunks {
-            let pos = voxel::ChunkPos::new(
-                payload.chunk_pos[0],
-                payload.chunk_pos[1],
-                payload.chunk_pos[2],
-                payload.chunk_pos[3],
-            );
-            if self.scene.remove_lod_chunk(payload.lod_level, pos) {
-                removed_chunks += 1;
-                if payload.lod_level == scene::VOXEL_LOD_LEVEL_NEAR {
-                    self.sync_multiplayer_stream_tree_diag_chunk(pos);
-                }
-            }
-        }
-        if removed_chunks > 0 {
-            eprintln!(
-                "Applied multiplayer chunk unload batch rev={} chunks={}",
-                revision, removed_chunks
-            );
-        }
-    }
-
     fn request_multiplayer_region_resync(
         &mut self,
         mut regions: Vec<RegionResyncEntry>,
@@ -962,26 +875,6 @@ impl App {
             MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
         );
         self.request_multiplayer_region_resync(regions, reason);
-    }
-
-    fn rebuild_multiplayer_stream_tree_diag_from_scene_world(&mut self) {
-        if !self.multiplayer_stream_tree_debug_enabled() {
-            return;
-        }
-        self.multiplayer_stream_tree_diag =
-            polychora::shared::worldfield::RegionChunkTree::from_chunks(
-                self.scene
-                    .world
-                    .chunks
-                    .iter()
-                    .filter(|(_, chunk)| !chunk.is_empty())
-                    .map(|(&chunk_pos, chunk)| {
-                        (
-                            ChunkKey::from_chunk_pos(chunk_pos),
-                            ChunkPayload::from_chunk_dense(chunk),
-                        )
-                    }),
-            );
     }
 
     fn sync_multiplayer_stream_tree_diag_chunk(&mut self, chunk_pos: voxel::ChunkPos) {
@@ -1397,9 +1290,6 @@ impl App {
                     "Multiplayer connected: client_id={} world_rev={} chunks={} server_tick_hz={:.2}",
                     client_id, world.revision, world.non_empty_chunks, tick_hz
                 );
-                // Note: server already sends WorldSnapshot + streamed chunks
-                // during Hello processing, so no need to request again here.
-                // A redundant RequestWorldSnapshot would wipe procgen chunks.
             }
             multiplayer::ServerMessage::Error { message } => {
                 eprintln!("Multiplayer server error: {message}");
@@ -1436,41 +1326,6 @@ impl App {
                         self.audio.play(SoundEffect::Place);
                     }
                 }
-            }
-            multiplayer::ServerMessage::WorldSnapshot { world } => {
-                let mut cursor = &world.bytes[..];
-                match voxel::io::load_world(&mut cursor) {
-                    Ok(new_world) => {
-                        self.scene.replace_world(new_world);
-                        self.multiplayer_region_clocks.clear();
-                        self.multiplayer_last_region_patch_seq = None;
-                        self.rebuild_multiplayer_stream_tree_diag_from_scene_world();
-                        eprintln!(
-                            "Applied multiplayer world snapshot rev={} chunks={}",
-                            world.revision, world.non_empty_chunks
-                        );
-                        // Warm near chunks so the first drawn frame has local payloads ready.
-                        self.scene.preload_spawn_chunks(
-                            self.camera.position,
-                            self.vte_lod_near_max_distance,
-                        );
-                        self.world_ready = true;
-                        eprintln!("World ready: snapshot applied");
-                    }
-                    Err(error) => {
-                        eprintln!("Failed to load multiplayer world snapshot: {error}");
-                    }
-                }
-            }
-            multiplayer::ServerMessage::WorldChunkBatch { revision, chunks } => {
-                let applied_chunks = self.apply_multiplayer_chunk_batch(revision, chunks);
-                if applied_chunks > 0 && !self.world_ready {
-                    self.world_ready = true;
-                    eprintln!("World ready: streamed chunk data applied");
-                }
-            }
-            multiplayer::ServerMessage::WorldChunkUnloadBatch { revision, chunks } => {
-                self.apply_multiplayer_chunk_unload_batch(revision, chunks);
             }
             multiplayer::ServerMessage::WorldRegionClockUpdate { updates } => {
                 let regressed = apply_region_clock_updates(

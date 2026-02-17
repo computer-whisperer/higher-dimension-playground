@@ -19,8 +19,6 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     save_interval_secs: u64,
     #[arg(long, default_value_t = true)]
-    snapshot_on_join: bool,
-    #[arg(long, default_value_t = true)]
     procgen_structures: bool,
     #[arg(long, default_value_t = 6)]
     procgen_chunk_radius: i32,
@@ -44,7 +42,6 @@ fn main() -> std::io::Result<()> {
         tick_hz: args.tick_hz,
         entity_sim_hz: args.entity_sim_hz,
         save_interval_secs: args.save_interval_secs,
-        snapshot_on_join: args.snapshot_on_join,
         procgen_structures: args.procgen_structures,
         procgen_near_chunk_radius: args.procgen_chunk_radius,
         procgen_mid_chunk_radius: args.procgen_mid_chunk_radius,
