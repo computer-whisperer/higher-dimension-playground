@@ -282,6 +282,12 @@ struct TempNode {
     kind: TempNodeKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexSubtreeKind {
+    World,
+    Entity,
+}
+
 pub fn now_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -511,9 +517,14 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
         });
     }
 
-    let world_temp = build_temp_tree_from_leaves(&world_leaves)
+    let mut world_temp = build_temp_tree_from_leaves(&world_leaves)
         .unwrap_or_else(|| make_empty_branch_root([0, 0, 0, 0], [0, 0, 0, 0]));
-    let entity_temp = build_temp_tree_from_leaves(&entity_leaves);
+    canonicalize_temp_tree(&mut world_temp);
+
+    let mut entity_temp = build_temp_tree_from_leaves(&entity_leaves);
+    if let Some(node) = entity_temp.as_mut() {
+        canonicalize_temp_tree(node);
+    }
 
     let mut nodes = Vec::<IndexNode>::new();
     let root_node_id = flatten_temp_tree(&world_temp, &mut nodes);
@@ -532,6 +543,7 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
         entity_root_node_id,
         nodes,
     };
+    validate_index_payload(&next_index)?;
     write_index_file(root.join(&next_index_file), &next_index)?;
 
     let next_global = GlobalPayload {
@@ -970,12 +982,10 @@ fn apply_chunk_array_ref_to_world(
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             apply_chunk_array_blob_to_world(root, &blob, world)
         }
-        BLOB_KIND_CHUNK_PAYLOAD => {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "world index leaf must reference chunk-array blob, not chunk-payload blob",
-            ))
-        }
+        BLOB_KIND_CHUNK_PAYLOAD => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "world index leaf must reference chunk-array blob, not chunk-payload blob",
+        )),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported block blob type {other}"),
@@ -1119,6 +1129,23 @@ fn make_empty_branch_root(min: [i32; 4], max: [i32; 4]) -> TempNode {
     }
 }
 
+fn bounds_are_valid(min: [i32; 4], max: [i32; 4]) -> bool {
+    (0..4).all(|axis| min[axis] <= max[axis])
+}
+
+fn bounds_contains(
+    parent_min: [i32; 4],
+    parent_max: [i32; 4],
+    child_min: [i32; 4],
+    child_max: [i32; 4],
+) -> bool {
+    (0..4).all(|axis| parent_min[axis] <= child_min[axis] && child_max[axis] <= parent_max[axis])
+}
+
+fn bounds_intersect(a_min: [i32; 4], a_max: [i32; 4], b_min: [i32; 4], b_max: [i32; 4]) -> bool {
+    (0..4).all(|axis| a_min[axis] <= b_max[axis] && a_max[axis] >= b_min[axis])
+}
+
 fn build_temp_tree_from_leaves(leaves: &[LeafDescriptor]) -> Option<TempNode> {
     if leaves.is_empty() {
         return None;
@@ -1171,6 +1198,52 @@ fn build_temp_tree_from_leaves(leaves: &[LeafDescriptor]) -> Option<TempNode> {
         max,
         kind: TempNodeKind::Branch(children),
     })
+}
+
+fn canonicalize_temp_tree(node: &mut TempNode) {
+    let TempNodeKind::Branch(children) = &mut node.kind else {
+        return;
+    };
+    for child in children.iter_mut() {
+        canonicalize_temp_tree(child);
+    }
+    children.sort_unstable_by_key(temp_node_order_key);
+}
+
+fn temp_node_order_key(node: &TempNode) -> ([i32; 8], u8, u64, u64, u64, u64, u64) {
+    let (kind_rank, v0, v1, v2, v3, v4) = temp_kind_order_key(&node.kind);
+    (
+        bounds_key(node.min, node.max),
+        kind_rank,
+        v0,
+        v1,
+        v2,
+        v3,
+        v4,
+    )
+}
+
+fn temp_kind_order_key(kind: &TempNodeKind) -> (u8, u64, u64, u64, u64, u64) {
+    match kind {
+        TempNodeKind::Branch(_) => (0, 0, 0, 0, 0, 0),
+        TempNodeKind::Leaf(index_kind) => index_kind_order_key(index_kind),
+    }
+}
+
+fn index_kind_order_key(kind: &IndexNodeKind) -> (u8, u64, u64, u64, u64, u64) {
+    match kind {
+        IndexNodeKind::Branch { child_node_ids } => (0, child_node_ids.len() as u64, 0, 0, 0, 0),
+        IndexNodeKind::LeafEmpty => (1, 0, 0, 0, 0, 0),
+        IndexNodeKind::LeafUniform { material } => (2, u64::from(*material), 0, 0, 0, 0),
+        IndexNodeKind::LeafChunkArray { chunk_array_ref } => (
+            3,
+            u64::from(chunk_array_ref.data_file_id),
+            chunk_array_ref.record_offset,
+            u64::from(chunk_array_ref.record_len),
+            u64::from(chunk_array_ref.record_crc32),
+            u64::from(chunk_array_ref.blob_type) | (u64::from(chunk_array_ref.blob_version) << 32),
+        ),
+    }
 }
 
 fn flatten_temp_tree(node: &TempNode, out: &mut Vec<IndexNode>) -> u32 {
@@ -1456,12 +1529,271 @@ fn read_index_file(path: PathBuf) -> io::Result<IndexPayload> {
     let entity_root_node_id =
         (entity_root_raw != INDEX_ENTITY_ROOT_NONE).then_some(entity_root_raw);
 
-    Ok(IndexPayload {
+    let index = IndexPayload {
         generation,
         root_node_id,
         entity_root_node_id,
         nodes: body.nodes,
-    })
+    };
+    validate_index_payload(&index)?;
+    Ok(index)
+}
+
+fn validate_index_payload(index: &IndexPayload) -> io::Result<()> {
+    if index.nodes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "index must contain at least one node",
+        ));
+    }
+
+    let mut node_by_id = HashMap::<u32, &IndexNode>::new();
+    for node in &index.nodes {
+        if !bounds_are_valid(node.bounds_min_chunk, node.bounds_max_chunk) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "node {} has invalid bounds min={:?} max={:?}",
+                    node.node_id, node.bounds_min_chunk, node.bounds_max_chunk
+                ),
+            ));
+        }
+        if node_by_id.insert(node.node_id, node).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate node id {}", node.node_id),
+            ));
+        }
+    }
+
+    if !node_by_id.contains_key(&index.root_node_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("missing root node id {}", index.root_node_id),
+        ));
+    }
+
+    let mut seen = HashSet::<u32>::new();
+    let mut stack = HashSet::<u32>::new();
+    validate_index_subtree(
+        index.root_node_id,
+        None,
+        IndexSubtreeKind::World,
+        &node_by_id,
+        &mut seen,
+        &mut stack,
+    )?;
+
+    if let Some(entity_root) = index.entity_root_node_id {
+        if !node_by_id.contains_key(&entity_root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("missing entity root node id {}", entity_root),
+            ));
+        }
+        validate_index_subtree(
+            entity_root,
+            None,
+            IndexSubtreeKind::Entity,
+            &node_by_id,
+            &mut seen,
+            &mut stack,
+        )?;
+    }
+
+    if seen.len() != index.nodes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "index contains {} unreachable nodes (reachable={} total={})",
+                index.nodes.len().saturating_sub(seen.len()),
+                seen.len(),
+                index.nodes.len()
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_index_subtree(
+    node_id: u32,
+    parent_bounds: Option<([i32; 4], [i32; 4])>,
+    subtree_kind: IndexSubtreeKind,
+    node_by_id: &HashMap<u32, &IndexNode>,
+    seen: &mut HashSet<u32>,
+    stack: &mut HashSet<u32>,
+) -> io::Result<()> {
+    if !stack.insert(node_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("cycle detected in index at node {}", node_id),
+        ));
+    }
+    if !seen.insert(node_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("node {} referenced multiple times", node_id),
+        ));
+    }
+
+    let Some(node) = node_by_id.get(&node_id).copied() else {
+        stack.remove(&node_id);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("missing node id {}", node_id),
+        ));
+    };
+
+    if let Some((parent_min, parent_max)) = parent_bounds {
+        if !bounds_contains(
+            parent_min,
+            parent_max,
+            node.bounds_min_chunk,
+            node.bounds_max_chunk,
+        ) {
+            stack.remove(&node_id);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "node {} bounds {:?}..{:?} not contained in parent {:?}..{:?}",
+                    node.node_id,
+                    node.bounds_min_chunk,
+                    node.bounds_max_chunk,
+                    parent_min,
+                    parent_max
+                ),
+            ));
+        }
+    }
+
+    match &node.kind {
+        IndexNodeKind::Branch { child_node_ids } => {
+            let mut child_nodes = Vec::<&IndexNode>::with_capacity(child_node_ids.len());
+            let mut unique_child_ids = HashSet::<u32>::new();
+            for child_id in child_node_ids {
+                if !unique_child_ids.insert(*child_id) {
+                    stack.remove(&node_id);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "node {} contains duplicate child id {}",
+                            node.node_id, child_id
+                        ),
+                    ));
+                }
+                let Some(child) = node_by_id.get(child_id).copied() else {
+                    stack.remove(&node_id);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "node {} references missing child id {}",
+                            node.node_id, child_id
+                        ),
+                    ));
+                };
+                child_nodes.push(child);
+            }
+
+            for window in child_nodes.windows(2) {
+                let left = window[0];
+                let right = window[1];
+                let left_key = (
+                    bounds_key(left.bounds_min_chunk, left.bounds_max_chunk),
+                    index_kind_order_key(&left.kind),
+                );
+                let right_key = (
+                    bounds_key(right.bounds_min_chunk, right.bounds_max_chunk),
+                    index_kind_order_key(&right.kind),
+                );
+                if left_key > right_key {
+                    stack.remove(&node_id);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "node {} has non-canonical child ordering between {} and {}",
+                            node.node_id, left.node_id, right.node_id
+                        ),
+                    ));
+                }
+            }
+
+            for i in 0..child_nodes.len() {
+                for j in (i + 1)..child_nodes.len() {
+                    let a = child_nodes[i];
+                    let b = child_nodes[j];
+                    if bounds_intersect(
+                        a.bounds_min_chunk,
+                        a.bounds_max_chunk,
+                        b.bounds_min_chunk,
+                        b.bounds_max_chunk,
+                    ) {
+                        stack.remove(&node_id);
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "node {} has overlapping children {} and {}",
+                                node.node_id, a.node_id, b.node_id
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            for child in child_nodes {
+                validate_index_subtree(
+                    child.node_id,
+                    Some((node.bounds_min_chunk, node.bounds_max_chunk)),
+                    subtree_kind,
+                    node_by_id,
+                    seen,
+                    stack,
+                )?;
+            }
+        }
+        IndexNodeKind::LeafEmpty => {}
+        IndexNodeKind::LeafUniform { .. } => {
+            if subtree_kind == IndexSubtreeKind::Entity {
+                stack.remove(&node_id);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "entity subtree node {} cannot use LeafUniform",
+                        node.node_id
+                    ),
+                ));
+            }
+        }
+        IndexNodeKind::LeafChunkArray { chunk_array_ref } => match subtree_kind {
+            IndexSubtreeKind::World => {
+                if chunk_array_ref.blob_type != BLOB_KIND_CHUNK_ARRAY {
+                    stack.remove(&node_id);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "world subtree node {} references blob type {}, expected {}",
+                            node.node_id, chunk_array_ref.blob_type, BLOB_KIND_CHUNK_ARRAY
+                        ),
+                    ));
+                }
+            }
+            IndexSubtreeKind::Entity => {
+                if chunk_array_ref.blob_type != BLOB_KIND_ENTITY {
+                    stack.remove(&node_id);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "entity subtree node {} references blob type {}, expected {}",
+                            node.node_id, chunk_array_ref.blob_type, BLOB_KIND_ENTITY
+                        ),
+                    ));
+                }
+            }
+        },
+    }
+
+    stack.remove(&node_id);
+    Ok(())
 }
 
 fn write_payload_file<T: Serialize>(
@@ -1726,6 +2058,171 @@ mod tests {
         assert_eq!(loaded.players.players.len(), 1);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validate_index_rejects_overlapping_siblings() {
+        let index = IndexPayload {
+            generation: 1,
+            root_node_id: 0,
+            entity_root_node_id: None,
+            nodes: vec![
+                IndexNode {
+                    node_id: 0,
+                    bounds_min_chunk: [0, 0, 0, 0],
+                    bounds_max_chunk: [1, 0, 0, 0],
+                    kind: IndexNodeKind::Branch {
+                        child_node_ids: vec![1, 2],
+                    },
+                },
+                IndexNode {
+                    node_id: 1,
+                    bounds_min_chunk: [0, 0, 0, 0],
+                    bounds_max_chunk: [0, 0, 0, 0],
+                    kind: IndexNodeKind::LeafEmpty,
+                },
+                IndexNode {
+                    node_id: 2,
+                    bounds_min_chunk: [0, 0, 0, 0],
+                    bounds_max_chunk: [0, 0, 0, 0],
+                    kind: IndexNodeKind::LeafEmpty,
+                },
+            ],
+        };
+
+        let err = validate_index_payload(&index).expect_err("overlap should fail");
+        assert!(err.to_string().contains("overlapping children"));
+    }
+
+    #[test]
+    fn validate_index_rejects_non_canonical_child_order() {
+        let index = IndexPayload {
+            generation: 1,
+            root_node_id: 0,
+            entity_root_node_id: None,
+            nodes: vec![
+                IndexNode {
+                    node_id: 0,
+                    bounds_min_chunk: [0, 0, 0, 0],
+                    bounds_max_chunk: [1, 0, 0, 0],
+                    kind: IndexNodeKind::Branch {
+                        child_node_ids: vec![2, 1],
+                    },
+                },
+                IndexNode {
+                    node_id: 1,
+                    bounds_min_chunk: [0, 0, 0, 0],
+                    bounds_max_chunk: [0, 0, 0, 0],
+                    kind: IndexNodeKind::LeafEmpty,
+                },
+                IndexNode {
+                    node_id: 2,
+                    bounds_min_chunk: [1, 0, 0, 0],
+                    bounds_max_chunk: [1, 0, 0, 0],
+                    kind: IndexNodeKind::LeafEmpty,
+                },
+            ],
+        };
+
+        let err = validate_index_payload(&index).expect_err("order should fail");
+        assert!(err.to_string().contains("non-canonical child ordering"));
+    }
+
+    #[test]
+    fn validate_index_rejects_wrong_world_leaf_blob_type() {
+        let index = IndexPayload {
+            generation: 1,
+            root_node_id: 0,
+            entity_root_node_id: None,
+            nodes: vec![IndexNode {
+                node_id: 0,
+                bounds_min_chunk: [0, 0, 0, 0],
+                bounds_max_chunk: [0, 0, 0, 0],
+                kind: IndexNodeKind::LeafChunkArray {
+                    chunk_array_ref: BlobRef {
+                        data_file_id: 1,
+                        record_offset: 12,
+                        record_len: 64,
+                        record_crc32: 0,
+                        blob_type: BLOB_KIND_ENTITY,
+                        blob_version: ENTITY_BLOB_VERSION,
+                    },
+                },
+            }],
+        };
+
+        let err = validate_index_payload(&index).expect_err("wrong blob type should fail");
+        assert!(err.to_string().contains("expected 2"));
+    }
+
+    #[test]
+    fn save_state_writes_deterministic_index_for_equivalent_worlds() {
+        let root_a = test_root("deterministic-a");
+        let root_b = test_root("deterministic-b");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+
+        let mut world_a = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            material: VoxelType(11),
+        });
+        world_a.set_voxel(1, 2, 3, 4, VoxelType(5));
+        world_a.set_voxel(-8, 0, 1, -3, VoxelType(9));
+        world_a.set_voxel(33, 7, -2, 12, VoxelType(4));
+
+        let mut world_b = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            material: VoxelType(11),
+        });
+        world_b.set_voxel(33, 7, -2, 12, VoxelType(4));
+        world_b.set_voxel(1, 2, 3, 4, VoxelType(5));
+        world_b.set_voxel(-8, 0, 1, -3, VoxelType(9));
+
+        save_state(
+            &root_a,
+            SaveRequest {
+                world: &world_a,
+                entities: &[],
+                players: &[],
+                world_seed: 99,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save root a");
+        save_state(
+            &root_b,
+            SaveRequest {
+                world: &world_b,
+                entities: &[],
+                players: &[],
+                world_seed: 99,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save root b");
+
+        let manifest_a = load_manifest(&root_a).expect("manifest a");
+        let manifest_b = load_manifest(&root_b).expect("manifest b");
+        let index_a = std::fs::read(root_a.join(&manifest_a.index_file)).expect("read index a");
+        let index_b = std::fs::read(root_b.join(&manifest_b.index_file)).expect("read index b");
+        assert_eq!(index_a, index_b);
+
+        let _ = std::fs::remove_dir_all(root_a);
+        let _ = std::fs::remove_dir_all(root_b);
     }
 
     #[test]
