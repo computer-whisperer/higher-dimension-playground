@@ -20,7 +20,6 @@ impl App {
         }
 
         self.poll_multiplayer_events();
-        self.reapply_pending_voxel_edits(now);
         self.smooth_remote_players(dt, now);
         self.smooth_remote_entities(dt);
         if let Some(scenario_index) = self

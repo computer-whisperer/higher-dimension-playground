@@ -693,46 +693,6 @@ impl App {
         }
     }
 
-    pub(super) fn acknowledge_pending_voxel_edit(
-        &mut self,
-        client_edit_id: Option<u64>,
-        position: [i32; 4],
-        material: u8,
-    ) {
-        let index = if let Some(edit_id) = client_edit_id {
-            self.pending_voxel_edits
-                .iter()
-                .position(|entry| entry.client_edit_id == edit_id)
-        } else {
-            self.pending_voxel_edits
-                .iter()
-                .position(|entry| entry.position == position && entry.material == material)
-                .or_else(|| {
-                    self.pending_voxel_edits
-                        .iter()
-                        .position(|entry| entry.position == position)
-                })
-        };
-        if let Some(index) = index {
-            let _ = self.pending_voxel_edits.remove(index);
-        }
-    }
-
-    pub(super) fn reapply_pending_voxel_edits(&mut self, now: Instant) {
-        self.pending_voxel_edits.retain(|entry| {
-            now.saturating_duration_since(entry.created_at) <= MULTIPLAYER_PENDING_EDIT_TIMEOUT
-        });
-        for entry in &self.pending_voxel_edits {
-            self.scene.world.set_voxel(
-                entry.position[0],
-                entry.position[1],
-                entry.position[2],
-                entry.position[3],
-                voxel::VoxelType(entry.material),
-            );
-        }
-    }
-
     pub(super) fn queue_pending_player_movement_modifier(
         &mut self,
         delta_position: [f32; 4],
@@ -1282,8 +1242,6 @@ impl App {
                 self.multiplayer_last_region_patch_seq = None;
                 self.multiplayer_stream_tree_diag =
                     polychora::shared::worldfield::RegionChunkTree::new();
-                self.next_multiplayer_edit_id = 1;
-                self.pending_voxel_edits.clear();
                 self.pending_player_movement_modifiers.clear();
                 self.player_modifier_external_velocity = [0.0; 4];
                 eprintln!(
@@ -1294,52 +1252,6 @@ impl App {
             multiplayer::ServerMessage::Error { message } => {
                 eprintln!("Multiplayer server error: {message}");
                 self.append_dev_console_log_line(format!("[server] {message}"));
-            }
-            multiplayer::ServerMessage::WorldVoxelSet {
-                position,
-                material,
-                source_client_id,
-                client_edit_id,
-                ..
-            } => {
-                self.scene.world.set_voxel(
-                    position[0],
-                    position[1],
-                    position[2],
-                    position[3],
-                    voxel::VoxelType(material),
-                );
-                let (chunk_pos, _) = polychora::shared::voxel::world_to_chunk(
-                    position[0],
-                    position[1],
-                    position[2],
-                    position[3],
-                );
-                self.sync_multiplayer_stream_tree_diag_chunk(chunk_pos);
-                let from_self = source_client_id == self.multiplayer_self_id;
-                if from_self {
-                    self.acknowledge_pending_voxel_edit(client_edit_id, position, material);
-                } else if source_client_id.is_some() {
-                    if material == voxel::VoxelType::AIR.0 {
-                        self.audio.play(SoundEffect::Break);
-                    } else {
-                        self.audio.play(SoundEffect::Place);
-                    }
-                }
-            }
-            multiplayer::ServerMessage::WorldRegionClockUpdate { updates } => {
-                let regressed = apply_region_clock_updates(
-                    &mut self.multiplayer_region_clocks,
-                    updates
-                        .into_iter()
-                        .map(|update| (update.region_id, update.clock)),
-                );
-                if regressed > 0 {
-                    eprintln!(
-                        "Ignored {} regressed multiplayer region clock updates",
-                        regressed
-                    );
-                }
             }
             multiplayer::ServerMessage::WorldRegionPatch { patch } => {
                 if self.apply_multiplayer_region_patch(patch).is_some() && !self.world_ready {
@@ -1479,7 +1391,7 @@ impl App {
 
     pub(super) fn send_multiplayer_voxel_update(
         &mut self,
-        now: Instant,
+        _now: Instant,
         position: [i32; 4],
         material: u8,
     ) {
@@ -1487,25 +1399,10 @@ impl App {
             return;
         }
 
-        let client_edit_id = self.next_multiplayer_edit_id;
-        self.next_multiplayer_edit_id = self.next_multiplayer_edit_id.wrapping_add(1).max(1);
-        self.pending_voxel_edits.push(PendingVoxelEdit {
-            client_edit_id,
-            position,
-            material,
-            created_at: now,
-        });
-
-        if self.pending_voxel_edits.len() > MULTIPLAYER_PENDING_EDIT_MAX {
-            let overflow = self.pending_voxel_edits.len() - MULTIPLAYER_PENDING_EDIT_MAX;
-            self.pending_voxel_edits.drain(0..overflow);
-        }
-
         if let Some(client) = self.multiplayer.as_ref() {
             client.send(MultiplayerClientMessage::SetVoxel {
                 position,
                 material,
-                client_edit_id: Some(client_edit_id),
             });
         }
     }

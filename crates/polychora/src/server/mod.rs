@@ -9,8 +9,8 @@ use self::world_field::ServerWorldField;
 use crate::materials;
 use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
-    ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, RegionClockPayload,
-    ServerMessage, WorldSummary,
+    ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
+    WorldSummary,
 };
 use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE};
 use crate::shared::worldfield::{
@@ -207,13 +207,8 @@ struct ClientEntityReplicationBatch {
 }
 
 #[derive(Clone, Debug)]
-struct QueuedWorldVoxelSet {
-    position: [i32; 4],
-    material: u8,
-    source_client_id: Option<u64>,
-    client_edit_id: Option<u64>,
-    revision: u64,
-    clock_updates: Option<Vec<RegionClockPayload>>,
+struct QueuedWorldChunkUpdate {
+    changed_chunks: Vec<ChunkPos>,
 }
 
 #[derive(Clone, Debug)]
@@ -480,7 +475,7 @@ fn advance_world_revision(state: &mut ServerState) -> u64 {
     state.world_revision
 }
 
-fn bump_region_clocks_for_chunks<I>(state: &mut ServerState, chunks: I) -> Vec<RegionClockPayload>
+fn bump_region_clocks_for_chunks<I>(state: &mut ServerState, chunks: I)
 where
     I: IntoIterator<Item = ChunkPos>,
 {
@@ -488,24 +483,10 @@ where
     for chunk_pos in chunks {
         touched_regions.insert(RegionId::from_chunk_pos(chunk_pos));
     }
-    let mut updates = Vec::with_capacity(touched_regions.len());
     for region_id in touched_regions {
         let clock = state.region_clocks.entry(region_id).or_insert(0);
         *clock = clock.wrapping_add(1);
-        updates.push(RegionClockPayload {
-            region_id: [region_id.x, region_id.y, region_id.z, region_id.w],
-            clock: *clock,
-        });
     }
-    updates.sort_unstable_by_key(|update| {
-        (
-            update.region_id[3],
-            update.region_id[2],
-            update.region_id[1],
-            update.region_id[0],
-        )
-    });
-    updates
 }
 
 fn upsert_entity_record(
@@ -1949,7 +1930,7 @@ fn simulate_mobs(
     state: &mut ServerState,
     now_ms: u64,
 ) -> (
-    Vec<QueuedWorldVoxelSet>,
+    Vec<QueuedWorldChunkUpdate>,
     Vec<QueuedExplosionEvent>,
     Vec<QueuedPlayerMovementModifier>,
 ) {
@@ -2202,7 +2183,7 @@ fn tick_entity_simulation_window(
     next_sim_ms: &mut u64,
     sim_step_ms: u64,
 ) -> (
-    Vec<QueuedWorldVoxelSet>,
+    Vec<QueuedWorldChunkUpdate>,
     Vec<QueuedExplosionEvent>,
     Vec<QueuedPlayerMovementModifier>,
 ) {
@@ -2855,75 +2836,60 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
     prune_stale_clients(state, stale, true);
 }
 
-fn send_world_voxel_set_to_streamed_clients(
+fn force_sync_streamed_clients_for_changed_chunks(
     state: &SharedState,
-    position: [i32; 4],
-    material: u8,
+    changed_chunks: &[ChunkPos],
     source_client_id: Option<u64>,
-    client_edit_id: Option<u64>,
-    revision: u64,
+    near_chunk_radius: i32,
+    mid_chunk_radius: i32,
+    far_chunk_radius: i32,
 ) {
-    let (chunk_pos, _) = voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
-    let clients: Vec<_> = {
+    if changed_chunks.is_empty() {
+        return;
+    }
+
+    let targets: Vec<(u64, [i32; 4])> = {
         let guard = state.lock().expect("server state lock poisoned");
         guard
-            .clients
+            .players
             .iter()
-            .filter_map(|(&client_id, tx)| {
-                let is_source = source_client_id == Some(client_id);
-                let is_streaming_chunk = guard
-                    .players
-                    .get(&client_id)
-                    .map(|player| player.working_set.contains_chunk(chunk_pos))
-                    .unwrap_or(false);
-                if is_source || is_streaming_chunk {
-                    Some((client_id, tx.clone()))
-                } else {
-                    None
+            .filter_map(|(&client_id, player)| {
+                if !guard.clients.contains_key(&client_id) {
+                    return None;
                 }
+                let is_source = source_client_id == Some(client_id);
+                let in_stream = changed_chunks
+                    .iter()
+                    .copied()
+                    .any(|chunk_pos| player.working_set.contains_chunk(chunk_pos));
+                if !is_source && !in_stream {
+                    return None;
+                }
+                let center_chunk = player
+                    .last_stream_center_chunk
+                    .or_else(|| {
+                        guard
+                            .entity_store
+                            .snapshot(player.entity_id)
+                            .map(|snapshot| world_chunk_from_position(snapshot.position))
+                    })
+                    .unwrap_or([0, 0, 0, 0]);
+                Some((client_id, center_chunk))
             })
             .collect()
     };
 
-    let message = ServerMessage::WorldVoxelSet {
-        position,
-        material,
-        source_client_id,
-        client_edit_id,
-        revision,
-    };
-    let mut stale = Vec::new();
-    for (client_id, tx) in clients {
-        if tx.send(message.clone()).is_err() {
-            stale.push(client_id);
-        }
+    for (client_id, center_chunk) in targets {
+        sync_streamed_chunks_for_client(
+            state,
+            client_id,
+            center_chunk,
+            near_chunk_radius,
+            mid_chunk_radius,
+            far_chunk_radius,
+            true,
+        );
     }
-
-    prune_stale_clients(state, stale, true);
-}
-
-fn send_region_clock_updates_to_clients(state: &SharedState, updates: Vec<RegionClockPayload>) {
-    if updates.is_empty() {
-        return;
-    }
-    {
-        let mut guard = state.lock().expect("server state lock poisoned");
-        for player in guard.players.values_mut() {
-            for update in &updates {
-                let region_id = RegionId {
-                    x: update.region_id[0],
-                    y: update.region_id[1],
-                    z: update.region_id[2],
-                    w: update.region_id[3],
-                };
-                let entry = player.known_region_clocks.entry(region_id).or_insert(0);
-                if update.clock > *entry {
-                    *entry = update.clock;
-                }
-            }
-        }
-    }
-    broadcast(state, ServerMessage::WorldRegionClockUpdate { updates });
 }
 
 fn sync_streamed_chunks_for_client(
@@ -3125,7 +3091,7 @@ fn apply_creeper_explosion(
     source_entity_id: u64,
     center: [f32; 4],
     radius_voxels: i32,
-) -> (Vec<QueuedWorldVoxelSet>, QueuedExplosionEvent) {
+) -> (Vec<QueuedWorldChunkUpdate>, QueuedExplosionEvent) {
     let radius = radius_voxels.max(1);
     let radius_sq = radius * radius;
     let center_voxel = [
@@ -3144,7 +3110,6 @@ fn apply_creeper_explosion(
         ],
     ];
 
-    let mut changed_positions = HashSet::new();
     let mut changed_chunks = HashSet::new();
     for blast_center in blast_centers {
         for dx in -radius..=radius {
@@ -3164,7 +3129,6 @@ fn apply_creeper_explosion(
                         if let Some(chunk_pos) =
                             apply_authoritative_voxel_edit(state, pos, VoxelType::AIR)
                         {
-                            changed_positions.insert(pos);
                             changed_chunks.insert(chunk_pos);
                         }
                     }
@@ -3173,30 +3137,17 @@ fn apply_creeper_explosion(
         }
     }
 
-    let mut voxel_sets = Vec::new();
-    if !changed_positions.is_empty() {
-        let clock_updates = bump_region_clocks_for_chunks(state, changed_chunks);
-        let revision = advance_world_revision(state);
-        let mut sorted_positions: Vec<[i32; 4]> = changed_positions.into_iter().collect();
-        sorted_positions.sort_unstable_by_key(|pos| (pos[3], pos[2], pos[1], pos[0]));
-        let mut pending_clock_updates = Some(clock_updates);
-        voxel_sets.reserve(sorted_positions.len());
-        for pos in sorted_positions {
-            voxel_sets.push(QueuedWorldVoxelSet {
-                position: pos,
-                material: VoxelType::AIR.0,
-                source_client_id: None,
-                client_edit_id: None,
-                revision,
-                clock_updates: pending_clock_updates
-                    .take()
-                    .filter(|updates| !updates.is_empty()),
-            });
-        }
+    let mut world_updates = Vec::new();
+    if !changed_chunks.is_empty() {
+        bump_region_clocks_for_chunks(state, changed_chunks.iter().copied());
+        advance_world_revision(state);
+        let mut changed_chunks: Vec<ChunkPos> = changed_chunks.into_iter().collect();
+        changed_chunks.sort_unstable_by_key(|chunk| (chunk.w, chunk.z, chunk.y, chunk.x));
+        world_updates.push(QueuedWorldChunkUpdate { changed_chunks });
     }
 
     (
-        voxel_sets,
+        world_updates,
         QueuedExplosionEvent {
             position: center,
             radius: radius as f32,
@@ -3397,6 +3348,9 @@ fn start_broadcast_thread(
     tick_hz: f32,
     entity_sim_hz: f32,
     entity_interest_radius_chunks: i32,
+    near_chunk_radius: i32,
+    mid_chunk_radius: i32,
+    far_chunk_radius: i32,
     start: Instant,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -3415,9 +3369,9 @@ fn start_broadcast_thread(
             }
             let tick_cpu_start = Instant::now();
             let now = monotonic_ms(start);
-            let (entity_batches, world_voxel_updates, explosion_events, player_movement_modifiers) = {
+            let (entity_batches, world_chunk_updates, explosion_events, player_movement_modifiers) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                let (world_voxel_updates, explosion_events, player_movement_modifiers) =
+                let (world_chunk_updates, explosion_events, player_movement_modifiers) =
                     tick_entity_simulation_window(
                         &mut guard,
                         now,
@@ -3428,7 +3382,7 @@ fn start_broadcast_thread(
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
                 (
                     entity_batches,
-                    world_voxel_updates,
+                    world_chunk_updates,
                     explosion_events,
                     player_movement_modifiers,
                 )
@@ -3438,28 +3392,25 @@ fn start_broadcast_thread(
                 .iter()
                 .map(|batch| batch.transforms.len())
                 .sum();
-            let world_voxel_update_count = world_voxel_updates.len();
+            let world_chunk_update_count = world_chunk_updates.len();
             let explosion_count = explosion_events.len();
             let player_modifier_count = player_movement_modifiers.len();
             let did_broadcast = entity_batches.iter().any(|batch| {
                 !batch.spawned.is_empty()
                     || !batch.despawned.is_empty()
                     || !batch.transforms.is_empty()
-            }) || world_voxel_update_count > 0
+            }) || world_chunk_update_count > 0
                 || explosion_count > 0
                 || player_modifier_count > 0;
 
-            for update in world_voxel_updates {
-                if let Some(clock_updates) = update.clock_updates {
-                    send_region_clock_updates_to_clients(&state, clock_updates);
-                }
-                send_world_voxel_set_to_streamed_clients(
+            for update in world_chunk_updates {
+                force_sync_streamed_clients_for_changed_chunks(
                     &state,
-                    update.position,
-                    update.material,
-                    update.source_client_id,
-                    update.client_edit_id,
-                    update.revision,
+                    &update.changed_chunks,
+                    None,
+                    near_chunk_radius,
+                    mid_chunk_radius,
+                    far_chunk_radius,
                 );
             }
             for explosion in explosion_events {
@@ -3532,7 +3483,7 @@ fn start_broadcast_thread(
                         tick_cpu_start.elapsed(),
                         spawned_count.saturating_add(explosion_count),
                         transform_count
-                            .saturating_add(world_voxel_update_count)
+                            .saturating_add(world_chunk_update_count)
                             .saturating_add(player_modifier_count),
                     )),
                 );
@@ -4125,7 +4076,6 @@ fn handle_message(
         ClientMessage::SetVoxel {
             position,
             material,
-            client_edit_id,
         } => {
             let requested_voxel = VoxelType(material);
             let maybe_update = {
@@ -4133,24 +4083,22 @@ fn handle_message(
                 if let Some(chunk_pos) =
                     apply_authoritative_voxel_edit(&mut guard, position, requested_voxel)
                 {
-                    let clock_updates =
-                        bump_region_clocks_for_chunks(&mut guard, std::iter::once(chunk_pos));
-                    let revision = advance_world_revision(&mut guard);
-                    Some((revision, clock_updates))
+                    bump_region_clocks_for_chunks(&mut guard, std::iter::once(chunk_pos));
+                    advance_world_revision(&mut guard);
+                    Some(chunk_pos)
                 } else {
                     None
                 }
             };
 
-            if let Some((revision, clock_updates)) = maybe_update {
-                send_region_clock_updates_to_clients(state, clock_updates);
-                send_world_voxel_set_to_streamed_clients(
+            if let Some(changed_chunk) = maybe_update {
+                force_sync_streamed_clients_for_changed_chunks(
                     state,
-                    position,
-                    material,
+                    &[changed_chunk],
                     Some(client_id),
-                    client_edit_id,
-                    revision,
+                    near_chunk_radius,
+                    mid_chunk_radius,
+                    far_chunk_radius,
                 );
             }
         }
@@ -4592,6 +4540,9 @@ fn initialize_state(
         config.tick_hz,
         config.entity_sim_hz,
         entity_interest_radius_chunks,
+        config.procgen_near_chunk_radius.max(0),
+        config.procgen_mid_chunk_radius.max(1),
+        config.procgen_far_chunk_radius.max(1),
         start,
         shutdown.clone(),
     );

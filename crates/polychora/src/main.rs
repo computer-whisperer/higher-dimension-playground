@@ -106,8 +106,6 @@ const VTE_TRACE_STEPS_MAX: u32 = 4096;
 const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 const MULTIPLAYER_REGION_RESYNC_MIN_INTERVAL: Duration = Duration::from_millis(150);
-const MULTIPLAYER_PENDING_EDIT_TIMEOUT: Duration = Duration::from_secs(5);
-const MULTIPLAYER_PENDING_EDIT_MAX: usize = 512;
 const MULTIPLAYER_PENDING_PLAYER_MODIFIER_MAX: usize = 128;
 const MULTIPLAYER_PLAYER_MODIFIER_MAX_TRANSLATION: f32 = 12.0;
 const MULTIPLAYER_PLAYER_MODIFIER_MAX_VELOCITY_Y_DELTA: f32 = 16.0;
@@ -1022,8 +1020,6 @@ fn main() {
         multiplayer_stream_tree_compare_diag_last_hash: None,
         multiplayer_stream_tree_compare_diag_frame_counter: 0,
         multiplayer_last_region_resync_request: Instant::now(),
-        next_multiplayer_edit_id: 1,
-        pending_voxel_edits: Vec::new(),
         pending_player_movement_modifiers: VecDeque::new(),
         player_modifier_external_velocity: [0.0; 4],
         remote_players: HashMap::new(),
@@ -1306,8 +1302,6 @@ struct App {
     multiplayer_stream_tree_compare_diag_last_hash: Option<u64>,
     multiplayer_stream_tree_compare_diag_frame_counter: u64,
     multiplayer_last_region_resync_request: Instant,
-    next_multiplayer_edit_id: u64,
-    pending_voxel_edits: Vec<PendingVoxelEdit>,
     pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,
     player_modifier_external_velocity: [f32; 4],
     remote_players: HashMap<u64, RemotePlayerState>,
@@ -1395,14 +1389,6 @@ struct RemoteEntityState {
 const REMOTE_ENTITY_POSITION_SMOOTH_HZ: f32 = 12.0;
 const REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ: f32 = 16.0;
 const REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE: f32 = 20.0;
-
-#[derive(Clone)]
-struct PendingVoxelEdit {
-    client_edit_id: u64,
-    position: [i32; 4],
-    material: u8,
-    created_at: Instant,
-}
 
 #[derive(Clone)]
 struct PendingPlayerMovementModifier {

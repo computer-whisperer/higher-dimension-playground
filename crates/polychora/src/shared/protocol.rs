@@ -51,12 +51,6 @@ pub struct WorldSummary {
     pub revision: u64,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct RegionClockPayload {
-    pub region_id: [i32; 4],
-    pub clock: u64,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMessage {
     Hello {
@@ -69,7 +63,6 @@ pub enum ClientMessage {
     SetVoxel {
         position: [i32; 4],
         material: u8,
-        client_edit_id: Option<u64>,
     },
     SpawnEntity {
         kind: EntityKind,
@@ -99,16 +92,6 @@ pub enum ServerMessage {
     },
     Error {
         message: String,
-    },
-    WorldVoxelSet {
-        position: [i32; 4],
-        material: u8,
-        source_client_id: Option<u64>,
-        client_edit_id: Option<u64>,
-        revision: u64,
-    },
-    WorldRegionClockUpdate {
-        updates: Vec<RegionClockPayload>,
     },
     WorldRegionPatch {
         patch: RegionSubtreePatch,

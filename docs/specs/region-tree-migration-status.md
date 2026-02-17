@@ -20,7 +20,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   3. refresh/graft through `RegionTreeWorkingSet::refresh_from_core`
   4. diff old/new payload maps via `RegionTreeRefreshResult` for load/unload
 - Stream refresh gating now uses per-player near-bounds `RegionClockMap` snapshots (instead of global `world_revision`) to avoid unnecessary out-of-area refresh work.
-- Server now emits `WorldRegionClockUpdate` messages carrying updated region clocks on authoritative voxel edits/explosions.
+- Region clock state is now distributed only through `WorldRegionPatch` preconditions/clock updates (side-channel clock-update message removed).
 - Stream sync now emits `WorldRegionPatch` as the canonical bootstrap/update transport (chunk batch/unload path removed from server stream loop).
 - Server runtime config/CLI no longer exposes join-time world snapshot behavior; bootstrap now enters through patch stream only.
 - Stream patch planning now uses changed chunk delta bounds (load/unload union) instead of always patching full near-bounds, reducing patch size/frequency and aligning patch transport with minimal local edits.
@@ -31,6 +31,10 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - removed `ClientMessage::RequestWorldSnapshot`
   - removed `ServerMessage::{WorldSnapshot, WorldChunkBatch, WorldChunkUnloadBatch}`
   - removed legacy snapshot/chunk payload structs from protocol schema
+- Removed point-update voxel replication:
+  - removed `ServerMessage::WorldVoxelSet`
+  - removed `client_edit_id` from `ClientMessage::SetVoxel`
+  - server now forces bounded `WorldRegionPatch` sync for clients streaming changed chunks
 - Autosave now snapshots save inputs under lock and performs `save_v3::save_state` I/O outside the server-state lock, with revision-guarded dirty-flag clearing to avoid dropping concurrent edits.
 - Incremental autosave now materializes legacy-world chunk data only for dirty block regions (full-world realization only on full-block saves), reducing conversion overhead for localized edits.
 - Autosave logging now reports `snapshot_ms` (lock-held capture), `save_ms` (disk/serialize), and `finalize_ms` (post-save state reconcile) to support hitch diagnosis.
@@ -76,7 +80,6 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 
 ### Temporary bridge layers (intentional)
 - Save/snapshot bridge still converts through `VoxelWorld` (`ServerWorldField::to_legacy_world`).
-- Multiplayer voxel edits are still sent as `WorldVoxelSet` point updates (not yet folded into subtree patch transport).
 - Region refresh still uses per-chunk working-set deltas to derive patch bounds; subtree-native planner internals are still pending.
 
 ### Old / to-be-replaced
@@ -99,8 +102,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 ## Next Migration Targets
 1. Extend chunk-level working-set diff ops into subtree-native patch/diff operations (replace-by-bounds, subtree trim/diff).
 2. Move persistence from `VoxelWorld` bridge to canonical tree + region clocks.
-3. Fold multiplayer voxel updates into patch transport (remove `WorldVoxelSet` point-update dependence).
-4. Introduce handshake capabilities (`protocol_version`, `generator_manifest_hash`, `feature_bits`) for symbolic/refined tree transport policy.
+3. Introduce handshake capabilities (`protocol_version`, `generator_manifest_hash`, `feature_bits`) for symbolic/refined tree transport policy.
 
 ## Acceptance checks for this stage
 - No direct base+procgen composition logic remains in `server/mod.rs` stream planner.
