@@ -31,23 +31,17 @@ pub struct ServerWorldField {
 }
 
 impl ServerWorldField {
-    pub fn from_legacy_world(
-        world: VoxelWorld,
+    pub fn from_chunk_tree(
+        base_kind: BaseWorldKind,
+        chunk_tree: RegionChunkTree,
         world_seed: u64,
         procgen_structures: bool,
         blocked_cells: HashSet<procgen::StructureCell>,
     ) -> Self {
-        let base_kind = world.base_kind();
         let flat_floor_chunk = match base_kind {
             BaseWorldKind::FlatFloor { material } => build_flat_floor_chunk(material),
             BaseWorldKind::Empty => Chunk::new(),
         };
-        let chunk_tree = RegionChunkTree::from_chunks(world.chunks.iter().map(|(&pos, chunk)| {
-            (
-                ChunkKey::from_chunk_pos(pos),
-                ChunkPayload::from_chunk_compact(chunk),
-            )
-        }));
         Self {
             base_kind,
             flat_floor_chunk,
@@ -55,9 +49,33 @@ impl ServerWorldField {
             world_seed,
             procgen_structures,
             blocked_cells,
-            world_dirty: world.any_dirty(),
+            world_dirty: false,
             realize_cache: HashMap::new(),
         }
+    }
+
+    pub fn from_legacy_world(
+        world: VoxelWorld,
+        world_seed: u64,
+        procgen_structures: bool,
+        blocked_cells: HashSet<procgen::StructureCell>,
+    ) -> Self {
+        let base_kind = world.base_kind();
+        let chunk_tree = RegionChunkTree::from_chunks(world.chunks.iter().map(|(&pos, chunk)| {
+            (
+                ChunkKey::from_chunk_pos(pos),
+                ChunkPayload::from_chunk_compact(chunk),
+            )
+        }));
+        let mut out = Self::from_chunk_tree(
+            base_kind,
+            chunk_tree,
+            world_seed,
+            procgen_structures,
+            blocked_cells,
+        );
+        out.world_dirty = world.any_dirty();
+        out
     }
 
     pub fn to_legacy_world(&self) -> VoxelWorld {

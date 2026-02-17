@@ -220,6 +220,8 @@ pub struct SaveRequest<'a> {
     pub dirty_entity_regions: &'a HashSet<[i32; 4]>,
     pub force_full_blocks: bool,
     pub force_full_entities: bool,
+    pub custom_global_payload: Option<Vec<u8>>,
+    pub disable_block_persistence: bool,
     pub now_ms: u64,
 }
 
@@ -363,13 +365,70 @@ pub fn load_state(root: &Path) -> io::Result<LoadedState> {
     })
 }
 
+fn load_state_without_blocks(root: &Path) -> io::Result<LoadedState> {
+    let manifest = load_manifest(root)?;
+    let global: GlobalPayload = read_payload_file(root.join(&manifest.global_file), GLOBAL_MAGIC)?;
+    let players: PlayersPayload =
+        read_payload_file(root.join(&manifest.players_file), PLAYERS_MAGIC)?;
+    let index: IndexPayload = read_payload_file(root.join(&manifest.index_file), INDEX_MAGIC)?;
+
+    let mut entities_by_id = HashMap::<u64, PersistedEntityRecord>::new();
+    for leaf in &index.leaves {
+        if let Some(entity_ref) = &leaf.entity_blob {
+            let payload = read_blob_payload(root, entity_ref)?;
+            let blob: EntityBlob = postcard::from_bytes(&payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            for entity in blob.entities {
+                entities_by_id.insert(entity.entity_id, entity);
+            }
+        }
+    }
+
+    let mut entities: Vec<PersistedEntityRecord> = entities_by_id.into_values().collect();
+    entities.sort_unstable_by_key(|entity| entity.entity_id);
+
+    let mut world = VoxelWorld::new_with_base(global.base_world_kind.to_runtime());
+    world.clear_dirty();
+    let _ = world.drain_pending_chunk_updates();
+
+    Ok(LoadedState {
+        manifest,
+        global,
+        players,
+        index,
+        world,
+        entities,
+    })
+}
+
+fn load_or_init_state_without_blocks(
+    root: &Path,
+    default_base: BaseWorldKind,
+    world_seed: u64,
+    now_ms: u64,
+) -> io::Result<LoadedState> {
+    if !is_v3_save_root(root) {
+        init_empty_save_root(root, default_base, world_seed, now_ms)?;
+    }
+    load_state_without_blocks(root)
+}
+
 pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResult> {
-    let loaded = load_or_init_state(
-        root,
-        request.world.base_kind(),
-        request.world_seed,
-        request.now_ms,
-    )?;
+    let loaded = if request.disable_block_persistence {
+        load_or_init_state_without_blocks(
+            root,
+            request.world.base_kind(),
+            request.world_seed,
+            request.now_ms,
+        )?
+    } else {
+        load_or_init_state(
+            root,
+            request.world.base_kind(),
+            request.world_seed,
+            request.now_ms,
+        )?
+    };
     let mut manifest = loaded.manifest;
     let mut index = loaded.index;
 
@@ -384,50 +443,56 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
         .map(|leaf| (leaf.region, leaf))
         .collect();
 
-    let mut block_regions = HashSet::new();
-    if request.force_full_blocks {
-        block_regions.extend(all_block_regions(
-            request.world,
-            manifest.limits.region_chunk_edge,
-        ));
-        for leaf in leaf_by_region.values() {
-            if leaf.block_blob.is_some() {
-                block_regions.insert(leaf.region);
-            }
+    let mut saved_block_regions = 0usize;
+    if request.disable_block_persistence {
+        for leaf in leaf_by_region.values_mut() {
+            leaf.block_blob = None;
         }
     } else {
-        block_regions.extend(request.dirty_block_regions.iter().copied());
-    }
-
-    let mut sorted_block_regions: Vec<[i32; 4]> = block_regions.into_iter().collect();
-    sorted_block_regions.sort_unstable();
-    let mut saved_block_regions = 0usize;
-
-    for region in sorted_block_regions {
-        let maybe_blob =
-            build_block_blob_for_region(request.world, region, manifest.limits.region_chunk_edge);
-        match maybe_blob {
-            Some(blob) => {
-                let payload = postcard::to_stdvec(&blob)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                let blob_ref = append_blob_record(
-                    root,
-                    &mut manifest,
-                    BLOB_KIND_BLOCK,
-                    BLOCK_BLOB_VERSION,
-                    &payload,
-                )?;
-                let leaf = leaf_by_region.entry(region).or_insert(LeafEntry {
-                    region,
-                    block_blob: None,
-                    entity_blob: None,
-                });
-                leaf.block_blob = Some(blob_ref);
-                saved_block_regions += 1;
+        let mut block_regions = HashSet::new();
+        if request.force_full_blocks {
+            block_regions.extend(all_block_regions(
+                request.world,
+                manifest.limits.region_chunk_edge,
+            ));
+            for leaf in leaf_by_region.values() {
+                if leaf.block_blob.is_some() {
+                    block_regions.insert(leaf.region);
+                }
             }
-            None => {
-                if let Some(leaf) = leaf_by_region.get_mut(&region) {
-                    leaf.block_blob = None;
+        } else {
+            block_regions.extend(request.dirty_block_regions.iter().copied());
+        }
+
+        let mut sorted_block_regions: Vec<[i32; 4]> = block_regions.into_iter().collect();
+        sorted_block_regions.sort_unstable();
+
+        for region in sorted_block_regions {
+            let maybe_blob =
+                build_block_blob_for_region(request.world, region, manifest.limits.region_chunk_edge);
+            match maybe_blob {
+                Some(blob) => {
+                    let payload = postcard::to_stdvec(&blob)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    let blob_ref = append_blob_record(
+                        root,
+                        &mut manifest,
+                        BLOB_KIND_BLOCK,
+                        BLOCK_BLOB_VERSION,
+                        &payload,
+                    )?;
+                    let leaf = leaf_by_region.entry(region).or_insert(LeafEntry {
+                        region,
+                        block_blob: None,
+                        entity_blob: None,
+                    });
+                    leaf.block_blob = Some(blob_ref);
+                    saved_block_regions += 1;
+                }
+                None => {
+                    if let Some(leaf) = leaf_by_region.get_mut(&region) {
+                        leaf.block_blob = None;
+                    }
                 }
             }
         }
@@ -524,7 +589,10 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
         next_data_file_id: manifest.active_data_file_id.saturating_add(1),
         last_modified_ms: request.now_ms,
         player_entity_hints: loaded.global.player_entity_hints,
-        custom_global_payload: loaded.global.custom_global_payload,
+        custom_global_payload: request
+            .custom_global_payload
+            .clone()
+            .unwrap_or(loaded.global.custom_global_payload),
     };
     write_payload_file(
         root.join(&next_global_file),
@@ -643,6 +711,8 @@ pub fn migrate_legacy_world_to_v3(
             dirty_entity_regions: &entity_regions,
             force_full_blocks: true,
             force_full_entities: true,
+            custom_global_payload: None,
+            disable_block_persistence: false,
             now_ms,
         },
     )
@@ -1156,6 +1226,8 @@ mod tests {
                 dirty_entity_regions: &empty_regions,
                 force_full_blocks: true,
                 force_full_entities: true,
+                custom_global_payload: None,
+                disable_block_persistence: false,
                 now_ms,
             },
         )
@@ -1196,6 +1268,69 @@ mod tests {
         let loaded = load_state(&output_root).expect("load migrated");
         assert_eq!(loaded.global.world_seed, 777);
         assert_eq!(loaded.world.get_voxel(2, 2, 2, 2), VoxelType(9));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disable_block_persistence_clears_block_blobs_and_keeps_custom_payload() {
+        let root = test_root("disable-block-persistence");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+
+        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            material: VoxelType(11),
+        });
+        world.set_voxel(8, 8, 8, 8, VoxelType(3));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 123,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("initial save");
+
+        let payload = vec![7, 6, 5, 4, 3, 2, 1];
+        let empty_world = VoxelWorld::new_with_base(world.base_kind());
+        save_state(
+            &root,
+            SaveRequest {
+                world: &empty_world,
+                entities: &[],
+                players: &[],
+                world_seed: 123,
+                next_entity_id: 2,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: false,
+                force_full_entities: false,
+                custom_global_payload: Some(payload.clone()),
+                disable_block_persistence: true,
+                now_ms: now_ms.saturating_add(1),
+            },
+        )
+        .expect("save without block persistence");
+
+        let loaded = load_state(&root).expect("load state");
+        assert_eq!(loaded.global.custom_global_payload, payload);
+        assert_eq!(loaded.world.get_voxel(8, 8, 8, 8), VoxelType(0));
+        assert!(loaded
+            .index
+            .leaves
+            .iter()
+            .all(|leaf| leaf.block_blob.is_none()));
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -298,6 +298,8 @@ impl Scene {
                 dirty_entity_regions: &empty_regions,
                 force_full_blocks: true,
                 force_full_entities: true,
+                custom_global_payload: None,
+                disable_block_persistence: false,
                 now_ms: save_v3::now_unix_ms(),
             },
         )?;

@@ -70,6 +70,12 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Added deterministic procgen query/stream stability regression coverage:
   - fixed-bounds `query_region_core` output for procgen regions is stable across repeated calls
   - stationary `RegionTreeWorkingSet::refresh_from_core` over procgen regions is idempotent (no load/unload churn)
+- Server autosave now persists world overrides as a tree-native payload in `save_v3` global custom bytes:
+  - `WorldOverridePayload { version, chunks }` encoded from `ServerWorldField::chunk_tree`
+  - server save path disables block-blob persistence for runtime autosaves
+  - autosave no longer builds partial/full legacy world block snapshots
+- Server load/init now prefers tree-native override payload from global custom bytes and falls back to legacy block blobs if payload decode is absent/invalid.
+- Runtime storage policy for this phase is now "all overrides in memory + periodic whole-tree override payload persistence"; streaming world-file source-of-truth remains a future migration target.
 
 ## System Status Matrix
 
@@ -80,11 +86,11 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - World-query path for stream planning (`query_region_core`) without ad-hoc base/procgen synthesis in `server/mod.rs`.
 
 ### Temporary bridge layers (intentional)
-- Save/snapshot bridge still converts through `VoxelWorld` (`ServerWorldField::to_legacy_world`).
+- `save_v3` request contract still requires a `VoxelWorld` handle for base-world metadata, but server autosave now bypasses block-region persistence and supplies override tree bytes via global custom payload.
 - Region refresh still uses per-chunk working-set deltas to derive patch bounds; subtree-native planner internals are still pending.
 
 ### Old / to-be-replaced
-- World persistence contract based on `VoxelWorld` + region blobs, instead of semantic `RegionTreeCore` + region clocks.
+- `save_v3` on-disk schema still carries legacy block-region blob facilities; long-term persistence should move to region-tree-native manifests/pages with streaming in/out.
 - Server/client handshake/version policy still lacks explicit protocol capability negotiation.
 
 ## Current Ownership Boundaries
@@ -115,5 +121,6 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Patch flow still lacks spec-complete behavior:
   - Client/server now use bounded resync requests with a client-side throttle interval, but full server-side coalesce/throttle policy from spec is still missing.
 - Persistence still roundtrips through `VoxelWorld` bridge; canonical semantic-tree persistence is pending.
+- Runtime server persistence now writes tree-native override payloads, but load compatibility still includes legacy block blob fallback and `save_v3` schema remains hybrid.
 - `query_region_core` currently materializes bounded `ChunkArray` responses directly from base/procgen/chunk-tree composition rather than returning long-lived symbolic `ProceduralRef`/branch topology from a persistent semantic tree.
 - Runtime realization cache key is currently `(chunk_key, profile)` in `ServerWorldField`; full snapshot/node-handle/generator-version keyed sidecar cache is pending.
