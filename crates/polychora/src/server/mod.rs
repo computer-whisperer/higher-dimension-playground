@@ -108,7 +108,6 @@ struct PlayerState {
     entity_id: u64,
     working_set: RegionTreeWorkingSet,
     last_stream_center_chunk: Option<[i32; 4]>,
-    last_stream_world_revision: u64,
     last_stream_region_clocks: RegionClockMap,
     known_region_clocks: RegionClockMap,
     next_stream_patch_seq: u64,
@@ -2325,14 +2324,6 @@ fn build_entity_replication_batches(
     batches
 }
 
-fn stream_chunk_distance2(chunk_pos: ChunkPos, center_chunk: [i32; 4]) -> i64 {
-    let dx = (chunk_pos.x - center_chunk[0]) as i64;
-    let dy = (chunk_pos.y - center_chunk[1]) as i64;
-    let dz = (chunk_pos.z - center_chunk[2]) as i64;
-    let dw = (chunk_pos.w - center_chunk[3]) as i64;
-    dx * dx + dy * dy + dz * dz + dw * dw
-}
-
 fn stream_near_bounds(center_chunk: [i32; 4], near_chunk_radius: i32) -> Aabb4i {
     let near_radius = near_chunk_radius.max(0);
     let min_chunk = [
@@ -2538,53 +2529,6 @@ fn chunk_bounds_for_resync_entries(entries: &[RegionResyncEntry]) -> Option<Aabb
     Some(bounds)
 }
 
-fn extend_chunk_bounds(
-    min_bounds: &mut [i32; 4],
-    max_bounds: &mut [i32; 4],
-    any: &mut bool,
-    chunk_pos: [i32; 4],
-) {
-    if !*any {
-        *min_bounds = chunk_pos;
-        *max_bounds = chunk_pos;
-        *any = true;
-        return;
-    }
-    for axis in 0..4 {
-        min_bounds[axis] = min_bounds[axis].min(chunk_pos[axis]);
-        max_bounds[axis] = max_bounds[axis].max(chunk_pos[axis]);
-    }
-}
-
-fn chunk_bounds_for_stream_delta(
-    chunk_loads: &[ChunkPos],
-    chunk_unloads: &[ChunkPos],
-) -> Option<Aabb4i> {
-    let mut min_bounds = [0i32; 4];
-    let mut max_bounds = [0i32; 4];
-    let mut any = false;
-
-    for chunk_pos in chunk_loads {
-        extend_chunk_bounds(
-            &mut min_bounds,
-            &mut max_bounds,
-            &mut any,
-            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-        );
-    }
-
-    for chunk_pos in chunk_unloads {
-        extend_chunk_bounds(
-            &mut min_bounds,
-            &mut max_bounds,
-            &mut any,
-            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-        );
-    }
-
-    any.then(|| Aabb4i::new(min_bounds, max_bounds))
-}
-
 fn region_patch_wire_size_bytes(patch: &RegionSubtreePatch) -> Option<usize> {
     postcard::to_stdvec(&ServerMessage::WorldRegionPatch {
         patch: patch.clone(),
@@ -2735,7 +2679,7 @@ fn plan_stream_window_update(
     near_chunk_radius: i32,
     _mid_chunk_radius: i32,
     _far_chunk_radius: i32,
-) -> Option<(Vec<ChunkPos>, Vec<ChunkPos>)> {
+) -> Option<Option<Aabb4i>> {
     let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
     let query_core = state.world.query_region_core(
         QueryVolume {
@@ -2744,42 +2688,15 @@ fn plan_stream_window_update(
         QueryDetail::Exact,
     );
 
-    let (mut load_chunks, unload_positions) = {
+    let changed_bounds = {
         let player = state.players.get_mut(&client_id)?;
         let refresh = player
             .working_set
             .refresh_from_core(near_bounds, query_core.as_ref());
-        (
-            refresh
-                .load_chunks
-                .into_iter()
-                .map(|(chunk_pos, _)| chunk_pos)
-                .collect::<Vec<_>>(),
-            refresh.unload_positions,
-        )
+        refresh.changed_bounds
     };
 
-    load_chunks.sort_unstable_by_key(|chunk_pos| {
-        (
-            stream_chunk_distance2(*chunk_pos, center_chunk),
-            chunk_pos.w,
-            chunk_pos.z,
-            chunk_pos.y,
-            chunk_pos.x,
-        )
-    });
-
-    let mut unload_chunks = unload_positions;
-    unload_chunks.sort_unstable_by_key(|chunk_pos| {
-        (
-            chunk_pos.w,
-            chunk_pos.z,
-            chunk_pos.y,
-            chunk_pos.x,
-        )
-    });
-
-    Some((load_chunks, unload_chunks))
+    Some(changed_bounds)
 }
 
 fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
@@ -2904,27 +2821,18 @@ fn sync_streamed_chunks_for_client(
     let update = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
-        let current_world_revision = guard.world_revision;
-        let (should_sync, saw_new_world_revision) = match guard.players.get(&client_id) {
+        let should_sync = match guard.players.get(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
-                let world_revision_changed =
-                    player.last_stream_world_revision != current_world_revision;
-                let world_changed = world_revision_changed
-                    && region_clock_map_changed_in_chunk_bounds(
-                        &guard.region_clocks,
-                        &player.last_stream_region_clocks,
-                        near_bounds,
-                    );
-                (force || changed || world_changed, world_revision_changed)
+                let world_changed = region_clock_map_changed_in_chunk_bounds(
+                    &guard.region_clocks,
+                    &player.last_stream_region_clocks,
+                    near_bounds,
+                );
+                force || changed || world_changed
             }
-            None => (false, false),
+            None => false,
         };
-        if saw_new_world_revision && !should_sync {
-            if let Some(player) = guard.players.get_mut(&client_id) {
-                player.last_stream_world_revision = current_world_revision;
-            }
-        }
 
         if should_sync {
             let update = plan_stream_window_update(
@@ -2936,11 +2844,10 @@ fn sync_streamed_chunks_for_client(
                 far_chunk_radius,
             );
             match update {
-                Some((loads, unloads)) => {
+                Some(changed_bounds) => {
                     let current_region_clocks =
                         collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
-                    let patch_bounds =
-                        chunk_bounds_for_stream_delta(&loads, &unloads).unwrap_or(near_bounds);
+                    let patch_bounds = changed_bounds.unwrap_or(near_bounds);
                     let (known_before, mut next_patch_seq) = {
                         let Some(player) = guard.players.get(&client_id) else {
                             return;
@@ -2961,7 +2868,6 @@ fn sync_streamed_chunks_for_client(
                         Some((patches, known_after)) => {
                             if let Some(player) = guard.players.get_mut(&client_id) {
                                 player.last_stream_center_chunk = Some(center_chunk);
-                                player.last_stream_world_revision = current_world_revision;
                                 player.last_stream_region_clocks = current_region_clocks;
                                 player.known_region_clocks = known_after;
                                 player.next_stream_patch_seq = next_patch_seq;
@@ -3742,7 +3648,6 @@ fn install_or_update_player(
                 entity_id,
                 working_set: RegionTreeWorkingSet::new(),
                 last_stream_center_chunk: None,
-                last_stream_world_revision: 0,
                 last_stream_region_clocks: HashMap::new(),
                 known_region_clocks: HashMap::new(),
                 next_stream_patch_seq: 1,
@@ -4884,24 +4789,29 @@ mod tests {
     }
 
     #[test]
-    fn chunk_bounds_for_stream_delta_unions_loads_and_unloads() {
-        let loads = vec![
-            ChunkPos::new(2, 1, -3, 0),
-            ChunkPos::new(5, 4, 2, 1),
-        ];
-        let unloads = vec![ChunkPos::new(-1, 3, 0, -2)];
+    fn region_chunk_diff_changed_bounds_unions_upserts_and_removals() {
+        let diff = crate::shared::worldfield::RegionChunkDiff {
+            removals: vec![crate::shared::worldfield::ChunkKey { pos: [-1, 3, 0, -2] }],
+            upserts: vec![
+                (
+                    crate::shared::worldfield::ChunkKey { pos: [2, 1, -3, 0] },
+                    crate::shared::worldfield::ChunkPayload::Uniform(1),
+                ),
+                (
+                    crate::shared::worldfield::ChunkKey { pos: [5, 4, 2, 1] },
+                    crate::shared::worldfield::ChunkPayload::Uniform(2),
+                ),
+            ],
+        };
 
-        let bounds =
-            chunk_bounds_for_stream_delta(&loads, &unloads).expect("delta bounds should exist");
+        let bounds = diff.changed_bounds().expect("delta bounds should exist");
         assert_eq!(bounds.min, [-1, 1, -3, -2]);
         assert_eq!(bounds.max, [5, 4, 2, 1]);
     }
 
     #[test]
-    fn chunk_bounds_for_stream_delta_returns_none_for_empty_delta() {
-        let loads = Vec::<ChunkPos>::new();
-        let unloads = Vec::<ChunkPos>::new();
-
-        assert!(chunk_bounds_for_stream_delta(&loads, &unloads).is_none());
+    fn region_chunk_diff_changed_bounds_returns_none_for_empty_delta() {
+        let diff = crate::shared::worldfield::RegionChunkDiff::default();
+        assert!(diff.changed_bounds().is_none());
     }
 }

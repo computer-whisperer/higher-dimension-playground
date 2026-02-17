@@ -25,8 +25,8 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Server runtime config/CLI no longer exposes join-time world snapshot behavior; bootstrap now enters through patch stream only.
 - Stream patch planning now uses changed chunk delta bounds (load/unload union) instead of always patching full near-bounds, reducing patch size/frequency and aligning patch transport with minimal local edits.
 - Stream sync now avoids building near-bounds region-clock snapshots on no-op player updates by using bounded clock-delta checks first, reducing per-message overhead when no refresh is needed.
-- Stream sync now tracks per-player last-seen `world_revision` and skips bounded region-clock scans entirely when revision is unchanged.
-- Stream planner no longer materializes `WorldChunkPayload` buffers; it now refreshes working sets and computes patch bounds directly from chunk-position deltas.
+- Stream refresh gating is now region-clock and bounds driven only; per-player `world_revision` stream-gating state was removed.
+- Stream planner no longer materializes chunk wire payloads or load/unload vectors; it now refreshes working sets and derives patch bounds directly from tree diff bounds.
 - Wire protocol world transport is now patch-only:
   - removed `ClientMessage::RequestWorldSnapshot`
   - removed `ServerMessage::{WorldSnapshot, WorldChunkBatch, WorldChunkUnloadBatch}`
@@ -84,7 +84,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 
 ### Old / to-be-replaced
 - World persistence contract based on `VoxelWorld` + region blobs, instead of semantic `RegionTreeCore` + region clocks.
-- Server/client replication versioning based on `world_revision`, not region clock preconditions.
+- Server/client handshake/version policy still lacks explicit protocol capability negotiation.
 
 ## Current Ownership Boundaries
 - `ServerWorldField` owns:
@@ -111,7 +111,6 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Multiplayer streamed-window world transport uses `WorldRegionPatch`/`WorldRegionResyncRequest` only.
 
 ## Current gaps vs region-tree-worldfield spec
-- Replication still mixes `world_revision` mechanics with region-clock patch preconditions; region-clock-only replication contract is not complete yet.
 - Patch flow still lacks spec-complete behavior:
   - Client/server now use bounded resync requests with a client-side throttle interval, but full server-side coalesce/throttle policy from spec is still missing.
 - Persistence still roundtrips through `VoxelWorld` bridge; canonical semantic-tree persistence is pending.

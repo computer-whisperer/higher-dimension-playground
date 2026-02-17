@@ -1004,21 +1004,16 @@ mod tests {
         let first_core = field.query_region_core(query, QueryDetail::Exact);
         let first = working.refresh_from_core(bounds, first_core.as_ref());
         assert!(
-            !first.load_chunks.is_empty(),
+            first.changed_bounds.is_some(),
             "expected first refresh to load procgen chunks"
         );
-        assert!(first.unload_positions.is_empty());
 
         for _ in 0..6 {
             let next_core = field.query_region_core(query, QueryDetail::Exact);
             let refresh = working.refresh_from_core(bounds, next_core.as_ref());
             assert!(
-                refresh.load_chunks.is_empty(),
+                refresh.changed_bounds.is_none(),
                 "stationary refresh should not emit additional loads"
-            );
-            assert!(
-                refresh.unload_positions.is_empty(),
-                "stationary refresh should not unload chunks"
             );
         }
     }

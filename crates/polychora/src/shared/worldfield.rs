@@ -587,6 +587,39 @@ pub struct RegionChunkDiff {
     pub upserts: Vec<(ChunkKey, ChunkPayload)>,
 }
 
+impl RegionChunkDiff {
+    pub fn is_empty(&self) -> bool {
+        self.removals.is_empty() && self.upserts.is_empty()
+    }
+
+    pub fn changed_bounds(&self) -> Option<Aabb4i> {
+        let mut min_bounds = [0i32; 4];
+        let mut max_bounds = [0i32; 4];
+        let mut any = false;
+        let mut extend = |pos: [i32; 4]| {
+            if !any {
+                min_bounds = pos;
+                max_bounds = pos;
+                any = true;
+                return;
+            }
+            for axis in 0..4 {
+                min_bounds[axis] = min_bounds[axis].min(pos[axis]);
+                max_bounds[axis] = max_bounds[axis].max(pos[axis]);
+            }
+        };
+
+        for key in &self.removals {
+            extend(key.pos);
+        }
+        for (key, _) in &self.upserts {
+            extend(key.pos);
+        }
+
+        any.then(|| Aabb4i::new(min_bounds, max_bounds))
+    }
+}
+
 impl RegionChunkTree {
     pub fn new() -> Self {
         Self::default()

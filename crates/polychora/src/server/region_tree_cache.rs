@@ -1,5 +1,5 @@
 use crate::shared::voxel::ChunkPos;
-use crate::shared::worldfield::{Aabb4i, ChunkKey, ChunkPayload, RegionChunkTree, RegionTreeCore};
+use crate::shared::worldfield::{Aabb4i, ChunkKey, RegionChunkTree, RegionTreeCore};
 
 #[derive(Clone, Debug, Default)]
 pub struct RegionTreeWorkingSet {
@@ -9,8 +9,7 @@ pub struct RegionTreeWorkingSet {
 
 #[derive(Debug)]
 pub struct RegionTreeRefreshResult {
-    pub load_chunks: Vec<(ChunkPos, ChunkPayload)>,
-    pub unload_positions: Vec<ChunkPos>,
+    pub changed_bounds: Option<Aabb4i>,
 }
 
 impl RegionTreeWorkingSet {
@@ -38,21 +37,8 @@ impl RegionTreeWorkingSet {
         let patch = self.tree.apply_non_empty_core_in_bounds(patch_bounds, core);
         self.interest_bounds = Some(bounds);
 
-        let load_chunks = patch
-            .upserts
-            .iter()
-            .map(|(key, payload)| (key.to_chunk_pos(), payload.clone()))
-            .collect();
-
-        let unload_positions = patch
-            .removals
-            .iter()
-            .map(|key| key.to_chunk_pos())
-            .collect();
-
         RegionTreeRefreshResult {
-            load_chunks,
-            unload_positions,
+            changed_bounds: patch.changed_bounds(),
         }
     }
 }
@@ -94,16 +80,11 @@ mod tests {
         };
 
         let first = working.refresh_from_core(bounds, &core);
-        assert_eq!(
-            first.load_chunks,
-            vec![(ChunkPos::new(0, 0, 0, 0), ChunkPayload::Uniform(3))]
-        );
-        assert!(first.unload_positions.is_empty());
+        assert_eq!(first.changed_bounds, Some(bounds));
         assert!(working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
 
         let second = working.refresh_from_core(bounds, &core);
-        assert!(second.load_chunks.is_empty());
-        assert!(second.unload_positions.is_empty());
+        assert!(second.changed_bounds.is_none());
     }
 
     #[test]
@@ -123,8 +104,7 @@ mod tests {
 
         let _ = working.refresh_from_core(bounds, &filled);
         let diff = working.refresh_from_core(bounds, &empty);
-        assert!(diff.load_chunks.is_empty());
-        assert_eq!(diff.unload_positions, vec![ChunkPos::new(0, 0, 0, 0)]);
+        assert_eq!(diff.changed_bounds, Some(bounds));
         assert!(!working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
     }
 
@@ -148,11 +128,7 @@ mod tests {
         let _ = working.refresh_from_core(left_bounds, &left_core);
         let shifted = working.refresh_from_core(right_bounds, &right_core);
 
-        assert_eq!(shifted.unload_positions, vec![ChunkPos::new(0, 0, 0, 0)]);
-        assert_eq!(
-            shifted.load_chunks,
-            vec![(ChunkPos::new(1, 0, 0, 0), ChunkPayload::Uniform(5))]
-        );
+        assert_eq!(shifted.changed_bounds, Some(Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0])));
         assert!(!working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
         assert!(working.contains_chunk(ChunkPos::new(1, 0, 0, 0)));
     }
@@ -174,10 +150,6 @@ mod tests {
 
         let _ = working.refresh_from_core(bounds, &first_core);
         let updated = working.refresh_from_core(bounds, &second_core);
-        assert_eq!(
-            updated.load_chunks,
-            vec![(ChunkPos::new(0, 0, 0, 0), ChunkPayload::Uniform(8))]
-        );
-        assert!(updated.unload_positions.is_empty());
+        assert_eq!(updated.changed_bounds, Some(bounds));
     }
 }
