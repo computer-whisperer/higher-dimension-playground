@@ -14,9 +14,9 @@ use crate::shared::protocol::{
 };
 use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE};
 use crate::shared::worldfield::{
-    Aabb4i, ChunkKey, ChunkPayload, QueryDetail, QueryVolume, RegionChunkTree, RegionClockMap,
-    RegionClockPrecondition, RegionClockUpdate, RegionId, RegionResyncEntry, RegionResyncRequest,
-    RegionSubtreePatch, WorldField, MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
+    Aabb4i, QueryDetail, QueryVolume, RegionClockMap, RegionClockPrecondition, RegionClockUpdate,
+    RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch, WorldField,
+    MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -62,13 +62,6 @@ const PHASE_SPIDER_PHASE_MAX_INTERVAL_MS: u64 = 1520;
 const PHASE_SPIDER_PHASE_DISTANCE: f32 = 2.8;
 const PHASE_SPIDER_PHASE_MIN_DISTANCE: f32 = 1.0;
 const PHASE_SPIDER_BLOCKED_PROGRESS_EPSILON: f32 = 0.08;
-const WORLD_OVERRIDE_PAYLOAD_VERSION: u32 = 1;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct WorldOverridePayload {
-    version: u32,
-    chunks: Vec<(ChunkKey, ChunkPayload)>,
-}
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -3221,34 +3214,6 @@ fn directory_is_empty(path: &std::path::Path) -> io::Result<bool> {
     Ok(std::fs::read_dir(path)?.next().is_none())
 }
 
-fn decode_world_override_payload(bytes: &[u8]) -> io::Result<Option<RegionChunkTree>> {
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    let payload: WorldOverridePayload = postcard::from_bytes(bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if payload.version != WORLD_OVERRIDE_PAYLOAD_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "unsupported world override payload version {}",
-                payload.version
-            ),
-        ));
-    }
-    Ok(Some(RegionChunkTree::from_chunks(payload.chunks)))
-}
-
-fn encode_world_override_payload(world: &ServerWorldField) -> io::Result<Vec<u8>> {
-    let mut chunks = world.chunk_tree().collect_chunks();
-    chunks.sort_unstable_by_key(|(key, _)| key.pos);
-    let payload = WorldOverridePayload {
-        version: WORLD_OVERRIDE_PAYLOAD_VERSION,
-        chunks,
-    };
-    postcard::to_stdvec(&payload).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
 fn load_or_init_world_state(
     root: &std::path::Path,
     world_seed: u64,
@@ -3441,14 +3406,11 @@ fn start_autosave_thread(
 ) {
     struct PendingAutosave {
         now_ms: u64,
-        base_world_kind: BaseWorldKind,
-        world_override_payload: Vec<u8>,
+        persisted_world: VoxelWorld,
         persisted_entities: Vec<PersistedEntityRecord>,
         players: Vec<PlayerRecord>,
         world_seed: u64,
         next_entity_id: u64,
-        dirty_entity_regions: HashSet<[i32; 4]>,
-        force_full_entities: bool,
         chunk_count: usize,
         world_revision: u64,
         entity_revision: u64,
@@ -3489,26 +3451,17 @@ fn start_autosave_thread(
                 if !should_save {
                     None
                 } else {
-                    match encode_world_override_payload(&guard.world) {
-                        Ok(world_override_payload) => Some(PendingAutosave {
-                            now_ms,
-                            base_world_kind: guard.world.base_kind(),
-                            world_override_payload,
-                            persisted_entities: collect_persisted_entities(&guard, now_ms),
-                            players,
-                            world_seed: guard.world.world_seed(),
-                            next_entity_id: guard.next_object_id,
-                            dirty_entity_regions: HashSet::new(),
-                            force_full_entities: guard.entities_dirty,
-                            chunk_count: guard.world.non_empty_chunk_count(),
-                            world_revision: guard.world_revision,
-                            entity_revision: guard.entity_revision,
-                        }),
-                        Err(error) => {
-                            eprintln!("autosave skipped: failed to encode world overrides: {error}");
-                            None
-                        }
-                    }
+                    Some(PendingAutosave {
+                        now_ms,
+                        persisted_world: guard.world.to_legacy_world(),
+                        persisted_entities: collect_persisted_entities(&guard, now_ms),
+                        players,
+                        world_seed: guard.world.world_seed(),
+                        next_entity_id: guard.next_object_id,
+                        chunk_count: guard.world.non_empty_chunk_count(),
+                        world_revision: guard.world_revision,
+                        entity_revision: guard.entity_revision,
+                    })
                 }
             };
             let snapshot_elapsed = snapshot_start.elapsed();
@@ -3521,23 +3474,29 @@ fn start_autosave_thread(
             let saved_world_revision = pending.world_revision;
             let saved_entity_revision = pending.entity_revision;
             let save_start = Instant::now();
-            let empty_block_regions = HashSet::new();
-            let save_world = VoxelWorld::new_with_base(pending.base_world_kind);
+            let full_block_regions = save_v4::all_block_regions(
+                &pending.persisted_world,
+                save_v4::DEFAULT_REGION_CHUNK_EDGE,
+            );
+            let full_entity_regions = save_v4::all_entity_regions(
+                &pending.persisted_entities,
+                save_v4::DEFAULT_REGION_CHUNK_EDGE,
+            );
             let save_result = save_v4::save_state(
                 &world_file,
                 SaveRequest {
-                    world: &save_world,
+                    world: &pending.persisted_world,
                     entities: &pending.persisted_entities,
                     players: &pending.players,
                     world_seed: pending.world_seed,
                     next_entity_id: pending.next_entity_id,
-                    dirty_block_regions: &empty_block_regions,
-                    dirty_entity_regions: &pending.dirty_entity_regions,
-                    force_full_blocks: false,
-                    force_full_entities: pending.force_full_entities,
+                    dirty_block_regions: &full_block_regions,
+                    dirty_entity_regions: &full_entity_regions,
+                    force_full_blocks: true,
+                    force_full_entities: true,
                     player_entity_hints: None,
-                    custom_global_payload: Some(pending.world_override_payload),
-                    disable_block_persistence: true,
+                    custom_global_payload: None,
+                    disable_block_persistence: false,
                     now_ms: pending.now_ms,
                 },
             );
@@ -3971,10 +3930,7 @@ fn handle_message(
                 false,
             );
         }
-        ClientMessage::SetVoxel {
-            position,
-            material,
-        } => {
+        ClientMessage::SetVoxel { position, material } => {
             let requested_voxel = VoxelType(material);
             let maybe_update = {
                 let mut guard = state.lock().expect("server state lock poisoned");
@@ -4347,37 +4303,16 @@ fn initialize_state(
     let loaded = load_or_init_world_state(&config.world_file, config.world_seed)?;
     let save_generation = loaded.manifest.current_generation;
     let last_persisted_ms = loaded.manifest.last_modified_ms;
-    let region_chunk_edge = loaded.manifest.limits.region_chunk_edge.max(1);
+    let region_chunk_edge = save_v4::DEFAULT_REGION_CHUNK_EDGE.max(1);
     let runtime_world_seed = loaded.global.world_seed;
-    let base_world_kind = loaded.global.base_world_kind.to_runtime();
-    let override_tree = match decode_world_override_payload(&loaded.global.custom_global_payload) {
-        Ok(tree) => tree,
-        Err(error) => {
-            eprintln!(
-                "failed to decode world override payload (falling back to legacy block blobs): {}",
-                error
-            );
-            None
-        }
-    };
     let persisted_entities = loaded.entities;
     let persisted_players = loaded.players.players;
-    let mut initial_world = if let Some(chunk_tree) = override_tree {
-        ServerWorldField::from_chunk_tree(
-            base_world_kind,
-            chunk_tree,
-            runtime_world_seed,
-            config.procgen_structures,
-            HashSet::new(),
-        )
-    } else {
-        ServerWorldField::from_legacy_world(
-            loaded.world,
-            runtime_world_seed,
-            config.procgen_structures,
-            HashSet::new(),
-        )
-    };
+    let mut initial_world = ServerWorldField::from_legacy_world(
+        loaded.world,
+        runtime_world_seed,
+        config.procgen_structures,
+        HashSet::new(),
+    );
     let next_object_id = loaded.global.next_entity_id.max(1);
     let pruned = initial_world.prune_virgin_chunks();
     if pruned > 0 {
@@ -4805,7 +4740,9 @@ mod tests {
     #[test]
     fn region_chunk_diff_changed_bounds_unions_upserts_and_removals() {
         let diff = crate::shared::worldfield::RegionChunkDiff {
-            removals: vec![crate::shared::worldfield::ChunkKey { pos: [-1, 3, 0, -2] }],
+            removals: vec![crate::shared::worldfield::ChunkKey {
+                pos: [-1, 3, 0, -2],
+            }],
             upserts: vec![
                 (
                     crate::shared::worldfield::ChunkKey { pos: [2, 1, -3, 0] },

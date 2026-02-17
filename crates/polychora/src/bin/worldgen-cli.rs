@@ -584,22 +584,24 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let data_dir = input.join("data");
     let index_dir = input.join("index");
 
-    let mut block_leaf_count = 0usize;
-    let mut entity_leaf_count = 0usize;
-    let mut leaf_min = [i32::MAX; 4];
-    let mut leaf_max = [i32::MIN; 4];
-    let mut have_leaf_bounds = false;
-    for leaf in &index.leaves {
-        if leaf.block_blob.is_some() {
-            block_leaf_count += 1;
+    let mut branch_count = 0usize;
+    let mut leaf_empty_count = 0usize;
+    let mut leaf_uniform_count = 0usize;
+    let mut leaf_chunk_array_count = 0usize;
+    let mut node_min = [i32::MAX; 4];
+    let mut node_max = [i32::MIN; 4];
+    let mut have_node_bounds = false;
+    for node in &index.nodes {
+        match &node.kind {
+            save_v4::IndexNodeKind::Branch { .. } => branch_count += 1,
+            save_v4::IndexNodeKind::LeafEmpty => leaf_empty_count += 1,
+            save_v4::IndexNodeKind::LeafUniform { .. } => leaf_uniform_count += 1,
+            save_v4::IndexNodeKind::LeafChunkArray { .. } => leaf_chunk_array_count += 1,
         }
-        if leaf.entity_blob.is_some() {
-            entity_leaf_count += 1;
-        }
-        have_leaf_bounds = true;
+        have_node_bounds = true;
         for axis in 0..4 {
-            leaf_min[axis] = leaf_min[axis].min(leaf.region[axis]);
-            leaf_max[axis] = leaf_max[axis].max(leaf.region[axis]);
+            node_min[axis] = node_min[axis].min(node.bounds_min_chunk[axis]);
+            node_max[axis] = node_max[axis].max(node.bounds_max_chunk[axis]);
         }
     }
 
@@ -663,45 +665,49 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
         count_named_files(&input, "players.g", ".v4p"),
     );
     println!(
-        "limits: region_chunk_edge={} data_file_max_bytes={} index_soft_max_bytes={} block_blob_target={} block_blob_hard={} entity_blob_target={} entity_blob_hard={}",
-        manifest.limits.region_chunk_edge,
+        "limits: data_file_max_bytes={} index_soft_max_bytes={} chunk_payload_target={} chunk_payload_hard={} entity_blob_target={} entity_blob_hard={}",
         manifest.limits.data_file_max_bytes,
         manifest.limits.index_soft_max_bytes,
-        manifest.limits.block_blob_target_bytes,
-        manifest.limits.block_blob_hard_max_bytes,
+        manifest.limits.chunk_payload_target_bytes,
+        manifest.limits.chunk_payload_hard_max_bytes,
         manifest.limits.entity_blob_target_bytes,
         manifest.limits.entity_blob_hard_max_bytes,
     );
     println!(
-        "global: base_world={:?} world_seed={} next_entity_id={} next_data_file_id={} player_hints={} custom_payload_bytes={}",
+        "global: base_world={:?} world_seed={} procgen_manifest_hash={} next_entity_id={} next_data_file_id={} player_hints={} custom_payload_bytes={}",
         global.base_world_kind,
         global.world_seed,
+        global.procgen_manifest_hash,
         global.next_entity_id,
         global.next_data_file_id,
         global.player_entity_hints.len(),
         global.custom_global_payload.len(),
     );
     println!(
-        "index: leaves={} block_leaves={} entity_leaves={} region_chunk_edge={}",
-        index.leaves.len(),
-        block_leaf_count,
-        entity_leaf_count,
-        index.region_chunk_edge,
+        "index: generation={} nodes={} root_node_id={} entity_root_node_id={:?} branches={} leaf_empty={} leaf_uniform={} leaf_chunk_array={}",
+        index.generation,
+        index.nodes.len(),
+        index.root_node_id,
+        index.entity_root_node_id,
+        branch_count,
+        leaf_empty_count,
+        leaf_uniform_count,
+        leaf_chunk_array_count,
     );
-    if have_leaf_bounds {
+    if have_node_bounds {
         println!(
-            "index_leaf_bounds: min=({}, {}, {}, {}) max=({}, {}, {}, {})",
-            leaf_min[0],
-            leaf_min[1],
-            leaf_min[2],
-            leaf_min[3],
-            leaf_max[0],
-            leaf_max[1],
-            leaf_max[2],
-            leaf_max[3]
+            "index_node_bounds: min=({}, {}, {}, {}) max=({}, {}, {}, {})",
+            node_min[0],
+            node_min[1],
+            node_min[2],
+            node_min[3],
+            node_max[0],
+            node_max[1],
+            node_max[2],
+            node_max[3]
         );
     } else {
-        println!("index_leaf_bounds: <none>");
+        println!("index_node_bounds: <none>");
     }
     println!(
         "world: override_chunks={} non_empty_override_chunks={}",
