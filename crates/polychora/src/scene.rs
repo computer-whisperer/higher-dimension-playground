@@ -1,10 +1,12 @@
 use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::cull::{self, SurfaceData};
-use crate::voxel::worldgen;
+use crate::voxel::world::BaseWorldKind;
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VTE_MAX_CHUNKS,
 };
+use polychora::shared::voxel::world_to_chunk;
+use polychora::shared::worldfield::{ChunkKey, ChunkPayload, RegionChunkTree};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod voxel_runtime;
@@ -25,10 +27,30 @@ const COLLISION_PUSHUP_STEP: f32 = 0.05;
 const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
 const HARD_WORLD_FLOOR_Y: f32 = -4.0;
+const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
 pub const VOXEL_LOD_LEVEL_NEAR: u8 = 0;
 pub const VOXEL_LOD_LEVEL_MID: u8 = 1;
 pub const VOXEL_LOD_LEVEL_FAR: u8 = 2;
+const FLAT_PRESET_FLOOR_MATERIAL: VoxelType = VoxelType(11);
+const SHOWCASE_MATERIALS: [u8; 37] = [
+    15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50, 55,
+    56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
+];
+
+fn set_chunk_voxel_by_index(chunk: &mut crate::voxel::chunk::Chunk, idx: usize, v: VoxelType) {
+    let old = chunk.voxels[idx];
+    if old == v {
+        return;
+    }
+    if old.is_solid() && v.is_air() {
+        chunk.solid_count = chunk.solid_count.saturating_sub(1);
+    } else if old.is_air() && v.is_solid() {
+        chunk.solid_count = chunk.solid_count.saturating_add(1);
+    }
+    chunk.voxels[idx] = v;
+    chunk.dirty = true;
+}
 
 struct CachedChunkPayload {
     hash: u64,
@@ -100,7 +122,13 @@ impl VoxelFrameData {
 }
 
 pub struct Scene {
-    pub world: crate::voxel::world::VoxelWorld,
+    world_tree: RegionChunkTree,
+    world_chunks: HashMap<ChunkPos, crate::voxel::chunk::Chunk>,
+    world_base_kind: BaseWorldKind,
+    world_flat_floor_chunk: crate::voxel::chunk::Chunk,
+    world_dirty: bool,
+    world_pending_chunk_updates: Vec<ChunkPos>,
+    world_pending_chunk_update_set: HashSet<ChunkPos>,
     voxel_lod_chunks: HashMap<RuntimeChunkKey, crate::voxel::chunk::Chunk>,
     voxel_pending_lod_chunk_updates: Vec<RuntimeChunkKey>,
     voxel_pending_lod_chunk_update_set: HashSet<RuntimeChunkKey>,
@@ -138,6 +166,369 @@ pub struct BlockEditTargets {
 }
 
 impl Scene {
+    fn set_chunk_map_voxel(
+        chunks: &mut HashMap<ChunkPos, crate::voxel::chunk::Chunk>,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        ww: i32,
+        v: VoxelType,
+    ) {
+        let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
+        let should_remove = {
+            let chunk = chunks
+                .entry(cp)
+                .or_insert_with(crate::voxel::chunk::Chunk::new);
+            set_chunk_voxel_by_index(chunk, idx, v);
+            chunk.is_empty()
+        };
+        if should_remove {
+            chunks.remove(&cp);
+        }
+    }
+
+    fn fill_hypercube(
+        chunks: &mut HashMap<ChunkPos, crate::voxel::chunk::Chunk>,
+        min: [i32; 4],
+        edge: i32,
+        material: VoxelType,
+    ) {
+        for x in min[0]..(min[0] + edge) {
+            for y in min[1]..(min[1] + edge) {
+                for z in min[2]..(min[2] + edge) {
+                    for w in min[3]..(min[3] + edge) {
+                        Self::set_chunk_map_voxel(chunks, x, y, z, w, material);
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_material_showcase(
+        chunks: &mut HashMap<ChunkPos, crate::voxel::chunk::Chunk>,
+        origin: [i32; 4],
+    ) {
+        for (idx, material) in SHOWCASE_MATERIALS.iter().copied().enumerate() {
+            let col = (idx % 6) as i32;
+            let row = (idx / 6) as i32;
+            let min = [
+                origin[0] + col * 4,
+                origin[1],
+                origin[2] + row * 4,
+                origin[3],
+            ];
+            Self::fill_hypercube(chunks, min, 2, VoxelType(material));
+        }
+    }
+
+    fn build_scene_preset_world(
+        preset: ScenePreset,
+    ) -> (BaseWorldKind, HashMap<ChunkPos, crate::voxel::chunk::Chunk>) {
+        let mut chunks = HashMap::<ChunkPos, crate::voxel::chunk::Chunk>::new();
+
+        let base_kind = match preset {
+            ScenePreset::Empty => BaseWorldKind::Empty,
+            ScenePreset::Flat => {
+                Self::place_material_showcase(&mut chunks, [-10, 0, -14, -4]);
+                BaseWorldKind::FlatFloor {
+                    material: FLAT_PRESET_FLOOR_MATERIAL,
+                }
+            }
+            ScenePreset::DemoCubes => {
+                let mut texture_rot = 0u8;
+                for x in 0..2 {
+                    for y in 0..2 {
+                        for z in 0..2 {
+                            for w in 0..2 {
+                                let base = [x * 4 - 2, y * 4 - 2, z * 4 - 2, w * 4 - 2];
+                                let material = VoxelType((texture_rot % 5) + 1);
+                                Self::fill_hypercube(&mut chunks, base, 2, material);
+                                texture_rot = (texture_rot + 1) % 5;
+                            }
+                        }
+                    }
+                }
+                Self::fill_hypercube(&mut chunks, [0, 0, 0, 0], 2, VoxelType(13));
+                BaseWorldKind::Empty
+            }
+        };
+
+        for chunk in chunks.values_mut() {
+            chunk.dirty = false;
+        }
+        (base_kind, chunks)
+    }
+
+    fn scene_world_from_chunk_overrides(
+        base_kind: BaseWorldKind,
+        mut world_chunks: HashMap<ChunkPos, crate::voxel::chunk::Chunk>,
+    ) -> (
+        RegionChunkTree,
+        HashMap<ChunkPos, crate::voxel::chunk::Chunk>,
+        BaseWorldKind,
+        crate::voxel::chunk::Chunk,
+        bool,
+    ) {
+        world_chunks.retain(|_, chunk| !chunk.is_empty());
+        let world_tree = RegionChunkTree::from_chunks(world_chunks.iter().map(|(&pos, chunk)| {
+            (
+                ChunkKey::from_chunk_pos(pos),
+                ChunkPayload::from_chunk_compact(chunk),
+            )
+        }));
+        let flat_floor_chunk = Self::flat_floor_chunk_for_base(base_kind);
+        (world_tree, world_chunks, base_kind, flat_floor_chunk, false)
+    }
+
+    fn build_flat_floor_chunk(material: VoxelType) -> crate::voxel::chunk::Chunk {
+        let mut chunk = crate::voxel::chunk::Chunk::new();
+        if material.is_air() {
+            chunk.dirty = false;
+            return chunk;
+        }
+
+        let local_y_top = CHUNK_SIZE - 1;
+        let local_y_bottom = CHUNK_SIZE - 2;
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for w in 0..CHUNK_SIZE {
+                    chunk.set(x, local_y_top, z, w, material);
+                    chunk.set(x, local_y_bottom, z, w, material);
+                }
+            }
+        }
+        chunk.dirty = false;
+        chunk
+    }
+
+    fn flat_floor_chunk_for_base(base_kind: BaseWorldKind) -> crate::voxel::chunk::Chunk {
+        match base_kind {
+            BaseWorldKind::FlatFloor { material } => Self::build_flat_floor_chunk(material),
+            BaseWorldKind::Empty => crate::voxel::chunk::Chunk::new(),
+        }
+    }
+
+    fn world_base_chunk_for_pos(&self, pos: ChunkPos) -> Option<&crate::voxel::chunk::Chunk> {
+        match self.world_base_kind {
+            BaseWorldKind::Empty => None,
+            BaseWorldKind::FlatFloor { .. } if pos.y == FLAT_FLOOR_CHUNK_Y => {
+                Some(&self.world_flat_floor_chunk)
+            }
+            BaseWorldKind::FlatFloor { .. } => None,
+        }
+    }
+
+    fn world_base_voxel_at(&self, pos: ChunkPos, idx: usize) -> VoxelType {
+        self.world_base_chunk_for_pos(pos)
+            .map(|chunk| chunk.voxels[idx])
+            .unwrap_or(VoxelType::AIR)
+    }
+
+    fn world_clone_base_chunk_or_empty(&self, pos: ChunkPos) -> crate::voxel::chunk::Chunk {
+        self.world_base_chunk_for_pos(pos)
+            .cloned()
+            .unwrap_or_else(crate::voxel::chunk::Chunk::new)
+    }
+
+    fn world_chunk_matches_base(&self, pos: ChunkPos, chunk: &crate::voxel::chunk::Chunk) -> bool {
+        match self.world_base_chunk_for_pos(pos) {
+            Some(base) => {
+                chunk.solid_count == base.solid_count && chunk.voxels[..] == base.voxels[..]
+            }
+            None => chunk.is_empty(),
+        }
+    }
+
+    fn world_queue_chunk_update(&mut self, pos: ChunkPos) {
+        if self.world_pending_chunk_update_set.insert(pos) {
+            self.world_pending_chunk_updates.push(pos);
+        }
+    }
+
+    fn world_set_chunk_override(
+        &mut self,
+        pos: ChunkPos,
+        chunk: Option<crate::voxel::chunk::Chunk>,
+    ) -> bool {
+        let key = ChunkKey::from_chunk_pos(pos);
+        let payload = match chunk {
+            Some(chunk) => {
+                if self.world_chunk_matches_base(pos, &chunk) {
+                    self.world_chunks.remove(&pos);
+                    None
+                } else {
+                    self.world_chunks.insert(pos, chunk.clone());
+                    Some(ChunkPayload::from_chunk_compact(&chunk))
+                }
+            }
+            None => {
+                self.world_chunks.remove(&pos);
+                None
+            }
+        };
+        let changed = self.world_tree.set_chunk(key, payload);
+        if changed {
+            self.world_dirty = true;
+            self.world_queue_chunk_update(pos);
+        }
+        changed
+    }
+
+    fn world_has_explicit_chunk(&self, pos: ChunkPos) -> bool {
+        self.world_tree.has_chunk(ChunkKey::from_chunk_pos(pos))
+    }
+
+    fn world_chunk_at(&self, pos: ChunkPos) -> Option<&crate::voxel::chunk::Chunk> {
+        if let Some(chunk) = self.world_chunks.get(&pos) {
+            return (!chunk.is_empty()).then_some(chunk);
+        }
+        if self.world_has_explicit_chunk(pos) {
+            return None;
+        }
+        self.world_base_chunk_for_pos(pos)
+            .filter(|chunk| !chunk.is_empty())
+    }
+
+    fn world_get_voxel(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> VoxelType {
+        let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
+        if let Some(chunk) = self.world_chunks.get(&cp) {
+            return chunk.voxels[idx];
+        }
+        if self.world_has_explicit_chunk(cp) {
+            return VoxelType::AIR;
+        }
+        self.world_base_voxel_at(cp, idx)
+    }
+
+    fn world_set_voxel(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, v: VoxelType) {
+        let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
+        let old = self.world_get_voxel(wx, wy, wz, ww);
+        if old == v {
+            return;
+        }
+
+        let mut chunk = if self.world_has_explicit_chunk(cp) {
+            self.world_chunks
+                .get(&cp)
+                .cloned()
+                .unwrap_or_else(crate::voxel::chunk::Chunk::new)
+        } else {
+            self.world_clone_base_chunk_or_empty(cp)
+        };
+        set_chunk_voxel_by_index(&mut chunk, idx, v);
+        let _ = self.world_set_chunk_override(cp, Some(chunk));
+    }
+
+    fn world_insert_chunk(&mut self, pos: ChunkPos, mut chunk: crate::voxel::chunk::Chunk) {
+        chunk.dirty = true;
+        let _ = self.world_set_chunk_override(pos, Some(chunk));
+    }
+
+    fn world_remove_chunk_override(&mut self, pos: ChunkPos) -> bool {
+        self.world_set_chunk_override(pos, None)
+    }
+
+    fn world_gather_non_empty_chunks_in_bounds(
+        &self,
+        min_chunk: [i32; 4],
+        max_chunk: [i32; 4],
+        out: &mut Vec<ChunkPos>,
+    ) {
+        out.clear();
+        if min_chunk[0] > max_chunk[0]
+            || min_chunk[1] > max_chunk[1]
+            || min_chunk[2] > max_chunk[2]
+            || min_chunk[3] > max_chunk[3]
+        {
+            return;
+        }
+
+        if let BaseWorldKind::FlatFloor { .. } = self.world_base_kind {
+            let y = FLAT_FLOOR_CHUNK_Y;
+            if y >= min_chunk[1] && y <= max_chunk[1] {
+                for x in min_chunk[0]..=max_chunk[0] {
+                    for z in min_chunk[2]..=max_chunk[2] {
+                        for w in min_chunk[3]..=max_chunk[3] {
+                            let pos = ChunkPos::new(x, y, z, w);
+                            if let Some(override_chunk) = self.world_chunks.get(&pos) {
+                                if !override_chunk.is_empty() {
+                                    out.push(pos);
+                                }
+                            } else if !self.world_has_explicit_chunk(pos) {
+                                out.push(pos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (&pos, chunk) in &self.world_chunks {
+            if pos.x < min_chunk[0]
+                || pos.x > max_chunk[0]
+                || pos.y < min_chunk[1]
+                || pos.y > max_chunk[1]
+                || pos.z < min_chunk[2]
+                || pos.z > max_chunk[2]
+                || pos.w < min_chunk[3]
+                || pos.w > max_chunk[3]
+                || chunk.is_empty()
+            {
+                continue;
+            }
+            if matches!(self.world_base_kind, BaseWorldKind::FlatFloor { .. })
+                && pos.y == FLAT_FLOOR_CHUNK_Y
+            {
+                continue;
+            }
+            out.push(pos);
+        }
+    }
+
+    fn world_drain_pending_chunk_updates(&mut self) -> Vec<ChunkPos> {
+        self.world_pending_chunk_update_set.clear();
+        std::mem::take(&mut self.world_pending_chunk_updates)
+    }
+
+    fn world_any_dirty(&self) -> bool {
+        self.world_dirty
+    }
+
+    fn world_clear_dirty(&mut self) {
+        self.world_dirty = false;
+        for chunk in self.world_chunks.values_mut() {
+            chunk.dirty = false;
+        }
+    }
+
+    pub fn get_voxel(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> VoxelType {
+        self.world_get_voxel(wx, wy, wz, ww)
+    }
+
+    pub fn gather_non_empty_chunks_in_bounds(
+        &self,
+        min_chunk: [i32; 4],
+        max_chunk: [i32; 4],
+        out: &mut Vec<ChunkPos>,
+    ) {
+        self.world_gather_non_empty_chunks_in_bounds(min_chunk, max_chunk, out);
+    }
+
+    pub fn explicit_chunk(&self, chunk_pos: ChunkPos) -> Option<&crate::voxel::chunk::Chunk> {
+        self.world_chunks.get(&chunk_pos)
+    }
+
+    pub fn collect_non_empty_explicit_chunk_positions(&self) -> Vec<[i32; 4]> {
+        let mut out: Vec<[i32; 4]> = self
+            .world_chunks
+            .iter()
+            .filter(|(_, chunk)| !chunk.is_empty())
+            .map(|(&chunk_pos, _)| [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w])
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
     fn surface_voxel_count(surface: &SurfaceData) -> u32 {
         surface
             .chunks
@@ -147,8 +538,12 @@ impl Scene {
     }
 
     fn rebuild_surface(&mut self, label: &str) {
-        self.surface = cull::extract_surfaces(&self.world);
-        self.world.clear_dirty();
+        self.surface = cull::extract_surfaces(
+            &self.world_tree,
+            self.world_base_kind,
+            &self.world_flat_floor_chunk,
+        );
+        self.world_clear_dirty();
         let total_voxels = Self::surface_voxel_count(&self.surface);
         eprintln!(
             "{}: {} chunks, {} surface voxels",
@@ -159,18 +554,19 @@ impl Scene {
     }
 
     pub fn new(preset: ScenePreset) -> Self {
-        let world = match preset {
-            ScenePreset::Empty => crate::voxel::world::VoxelWorld::new(),
-            ScenePreset::Flat => worldgen::generate_flat_world(
-                5,             // 5×5×5 chunks in X, Z, W
-                VoxelType(11), // neutral grid floor
-            ),
-            ScenePreset::DemoCubes => worldgen::generate_demo_cube_layout_world(),
-        };
+        let (base_kind, world_chunks_init) = Self::build_scene_preset_world(preset);
+        let (world_tree, world_chunks, world_base_kind, world_flat_floor_chunk, world_dirty) =
+            Self::scene_world_from_chunk_overrides(base_kind, world_chunks_init);
 
-        let surface = cull::extract_surfaces(&world);
+        let surface = cull::extract_surfaces(&world_tree, world_base_kind, &world_flat_floor_chunk);
         let scene = Self {
-            world,
+            world_tree,
+            world_chunks,
+            world_base_kind,
+            world_flat_floor_chunk,
+            world_dirty,
+            world_pending_chunk_updates: Vec::new(),
+            world_pending_chunk_update_set: HashSet::new(),
             voxel_lod_chunks: HashMap::new(),
             voxel_pending_lod_chunk_updates: Vec::new(),
             voxel_pending_lod_chunk_update_set: HashSet::new(),
@@ -227,7 +623,7 @@ impl Scene {
         mut chunk: crate::voxel::chunk::Chunk,
     ) {
         if lod_level == VOXEL_LOD_LEVEL_NEAR {
-            self.world.insert_chunk(chunk_pos, chunk);
+            self.world_insert_chunk(chunk_pos, chunk);
             return;
         }
 
@@ -246,7 +642,7 @@ impl Scene {
 
     pub fn remove_lod_chunk(&mut self, lod_level: u8, chunk_pos: ChunkPos) -> bool {
         if lod_level == VOXEL_LOD_LEVEL_NEAR {
-            return self.world.remove_chunk_override(chunk_pos);
+            return self.world_remove_chunk_override(chunk_pos);
         }
 
         let key = RuntimeChunkKey {
@@ -262,7 +658,7 @@ impl Scene {
 
     /// Rebuild surface data if any chunk is dirty.
     pub fn update_surfaces_if_dirty(&mut self) {
-        if self.world.any_dirty() {
+        if self.world_any_dirty() {
             self.rebuild_surface("Voxel surface rebuilt");
         }
     }
@@ -329,7 +725,7 @@ impl Scene {
             for y in lo[1]..=hi[1] {
                 for z in lo[2]..=hi[2] {
                     for w in lo[3]..=hi[3] {
-                        if self.world.get_voxel(x, y, z, w).is_solid() {
+                        if self.world_get_voxel(x, y, z, w).is_solid() {
                             return true;
                         }
                     }
@@ -464,7 +860,7 @@ impl Scene {
         }
 
         let mut last_empty_voxel = None;
-        let v0 = self.world.get_voxel(cell[0], cell[1], cell[2], cell[3]);
+        let v0 = self.world_get_voxel(cell[0], cell[1], cell[2], cell[3]);
         if v0.is_solid() {
             return Some(VoxelRayHit {
                 solid_voxel: cell,
@@ -489,7 +885,7 @@ impl Scene {
             cell[axis] += step[axis];
             t_max[axis] += t_delta[axis];
 
-            let voxel = self.world.get_voxel(cell[0], cell[1], cell[2], cell[3]);
+            let voxel = self.world_get_voxel(cell[0], cell[1], cell[2], cell[3]);
             if voxel.is_solid() {
                 return Some(VoxelRayHit {
                     solid_voxel: cell,
@@ -511,7 +907,7 @@ impl Scene {
     ) -> Option<[i32; 4]> {
         let hit = self.trace_first_solid_voxel(ray_origin, ray_direction, max_distance)?;
         let [x, y, z, w] = hit.solid_voxel;
-        self.world.set_voxel(x, y, z, w, VoxelType::AIR);
+        self.world_set_voxel(x, y, z, w, VoxelType::AIR);
         Some(hit.solid_voxel)
     }
 
@@ -601,10 +997,10 @@ impl Scene {
         let hit = self.trace_first_solid_voxel(ray_origin, ray_direction, max_distance)?;
         let target = hit.last_empty_voxel?;
         let [x, y, z, w] = target;
-        if self.world.get_voxel(x, y, z, w).is_solid() {
+        if self.world_get_voxel(x, y, z, w).is_solid() {
             return None;
         }
-        self.world.set_voxel(x, y, z, w, material);
+        self.world_set_voxel(x, y, z, w, material);
         Some(target)
     }
 }
@@ -612,65 +1008,30 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voxel::world::VoxelWorld;
 
-    fn make_scene_with_world(world: VoxelWorld) -> Scene {
-        let surface = cull::extract_surfaces(&world);
-        Scene {
-            world,
-            voxel_lod_chunks: std::collections::HashMap::new(),
-            voxel_pending_lod_chunk_updates: Vec::new(),
-            voxel_pending_lod_chunk_update_set: std::collections::HashSet::new(),
-            surface,
-            culled_instances: Vec::new(),
-            cull_log_counter: 0,
-            voxel_chunk_payload_cache: std::collections::HashMap::new(),
-            voxel_chunk_payloads: Vec::new(),
-            voxel_chunk_payload_free_ids: Vec::new(),
-            voxel_chunk_payload_hash_buckets: std::collections::HashMap::new(),
-            voxel_payload_slot_to_payload: Vec::new(),
-            voxel_payload_free_slots: Vec::new(),
-            voxel_pending_payload_uploads: Vec::new(),
-            voxel_pending_payload_upload_set: std::collections::HashSet::new(),
-            voxel_active_chunks: Vec::new(),
-            voxel_active_chunk_indices: std::collections::HashMap::new(),
-            voxel_world_revision: 0,
-            voxel_visibility_generation: 0,
-            voxel_cached_visibility_camera_chunk: None,
-            voxel_cached_visibility_world_revision: 0,
-            voxel_payload_slot_overflow_logged: false,
-            voxel_frame_data: VoxelFrameData {
-                metadata_generation: 0,
-                chunk_headers: Vec::new(),
-                payload_update_slots: Vec::new(),
-                occupancy_words: Vec::new(),
-                material_words: Vec::new(),
-                macro_words: Vec::new(),
-                visible_chunk_indices: Vec::new(),
-                y_slice_bounds: Vec::new(),
-                y_slice_lookup_entries: Vec::new(),
-            },
+    fn make_scene_with_voxels(voxels: &[([i32; 4], VoxelType)]) -> Scene {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        for ([x, y, z, w], material) in voxels.iter().copied() {
+            scene.world_set_voxel(x, y, z, w, material);
         }
+        scene.update_surfaces_if_dirty();
+        scene
     }
 
     #[test]
     fn remove_block_along_ray_hits_first_solid_voxel() {
-        let mut world = VoxelWorld::new();
-        world.set_voxel(0, 0, 0, 0, VoxelType(7));
-        let mut scene = make_scene_with_world(world);
+        let mut scene = make_scene_with_voxels(&[([0, 0, 0, 0], VoxelType(7))]);
 
         let removed =
             scene.remove_block_along_ray([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0);
 
         assert_eq!(removed, Some([0, 0, 0, 0]));
-        assert!(scene.world.get_voxel(0, 0, 0, 0).is_air());
+        assert!(scene.get_voxel(0, 0, 0, 0).is_air());
     }
 
     #[test]
     fn place_block_along_ray_places_in_last_empty_before_hit() {
-        let mut world = VoxelWorld::new();
-        world.set_voxel(0, 0, 0, 0, VoxelType(7));
-        let mut scene = make_scene_with_world(world);
+        let mut scene = make_scene_with_voxels(&[([0, 0, 0, 0], VoxelType(7))]);
 
         let placed = scene.place_block_along_ray(
             [0.5, 0.5, -2.0, 0.5],
@@ -680,15 +1041,13 @@ mod tests {
         );
 
         assert_eq!(placed, Some([0, 0, -1, 0]));
-        assert!(scene.world.get_voxel(0, 0, -1, 0) == VoxelType(3));
-        assert!(scene.world.get_voxel(0, 0, 0, 0) == VoxelType(7));
+        assert!(scene.get_voxel(0, 0, -1, 0) == VoxelType(3));
+        assert!(scene.get_voxel(0, 0, 0, 0) == VoxelType(7));
     }
 
     #[test]
     fn block_edit_targets_reports_hit_and_placement_voxels() {
-        let mut world = VoxelWorld::new();
-        world.set_voxel(0, 0, 0, 0, VoxelType(7));
-        let scene = make_scene_with_world(world);
+        let scene = make_scene_with_voxels(&[([0, 0, 0, 0], VoxelType(7))]);
 
         let targets = scene.block_edit_targets([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0);
 
@@ -703,9 +1062,7 @@ mod tests {
 
     #[test]
     fn resolve_player_collision_lands_on_voxel_surface() {
-        let mut world = VoxelWorld::new();
-        world.set_voxel(0, -1, 0, 0, VoxelType(3));
-        let scene = make_scene_with_world(world);
+        let scene = make_scene_with_voxels(&[([0, -1, 0, 0], VoxelType(3))]);
 
         let old_pos = [0.5, 2.4, 0.5, 0.5];
         let attempted = [0.5, 1.1, 0.5, 0.5];
@@ -720,9 +1077,7 @@ mod tests {
 
     #[test]
     fn resolve_player_collision_blocks_horizontal_motion() {
-        let mut world = VoxelWorld::new();
-        world.set_voxel(1, 0, 0, 0, VoxelType(3));
-        let scene = make_scene_with_world(world);
+        let scene = make_scene_with_voxels(&[([1, 0, 0, 0], VoxelType(3))]);
 
         let old_pos = [0.35, 1.2, 0.5, 0.5];
         let attempted = [1.6, 1.2, 0.5, 0.5];
@@ -736,8 +1091,7 @@ mod tests {
 
     #[test]
     fn resolve_player_collision_lands_on_hard_world_floor() {
-        let world = VoxelWorld::new();
-        let scene = make_scene_with_world(world);
+        let scene = make_scene_with_voxels(&[]);
 
         let old_pos = [0.0, 0.4, 0.0, 0.0];
         let attempted = [0.0, -6.0, 0.0, 0.0];
@@ -751,13 +1105,12 @@ mod tests {
     }
 
     #[test]
-    fn replace_world_rebuilds_surface_for_clean_loaded_world() {
-        let mut world = VoxelWorld::new();
-        world.set_voxel(0, 0, 0, 0, VoxelType(3));
-        let mut scene = make_scene_with_world(world);
+    fn edit_back_to_air_rebuilds_surface_for_clean_world() {
+        let mut scene = make_scene_with_voxels(&[([0, 0, 0, 0], VoxelType(3))]);
         assert!(!scene.surface.chunks.is_empty());
 
-        scene.replace_world(VoxelWorld::new());
+        scene.world_set_voxel(0, 0, 0, 0, VoxelType::AIR);
+        scene.update_surfaces_if_dirty();
         assert!(scene.surface.chunks.is_empty());
     }
 }

@@ -1,3 +1,4 @@
+pub mod legacy_world_io;
 pub mod protocol;
 pub mod voxel;
 pub mod worldfield;

@@ -1,10 +1,8 @@
 pub mod chunk;
-pub mod io;
 pub mod world;
 
 pub use chunk::Chunk;
-pub use io::{load_world, save_world};
-pub use world::{BaseWorldKind, VoxelWorld};
+pub use world::{BaseWorldKind, RegionChunkWorld};
 
 pub const CHUNK_SIZE: usize = 8;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096

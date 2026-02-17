@@ -12,7 +12,7 @@ pub enum BaseWorldKind {
 }
 
 #[derive(Debug)]
-pub struct VoxelWorld {
+pub struct RegionChunkWorld {
     /// Sparse full-chunk overrides relative to `base_kind`.
     pub chunks: HashMap<ChunkPos, Chunk>,
     base_kind: BaseWorldKind,
@@ -22,7 +22,7 @@ pub struct VoxelWorld {
     pending_chunk_update_set: HashSet<ChunkPos>,
 }
 
-impl VoxelWorld {
+impl RegionChunkWorld {
     pub fn new() -> Self {
         Self::new_with_base(BaseWorldKind::Empty)
     }
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn flat_floor_scaled_bounds_and_content_are_consistent() {
-        let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(1),
         });
 
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn empty_base_has_no_scaled_content() {
-        let world = VoxelWorld::new_with_base(BaseWorldKind::Empty);
+        let world = RegionChunkWorld::new_with_base(BaseWorldKind::Empty);
         assert_eq!(world.base_chunk_y_bounds_for_scale(1), None);
         assert_eq!(world.base_chunk_y_bounds_for_scale(2), None);
         assert!(!world.base_chunk_has_content_for_scale(ChunkPos::new(12, -4, -3, 7), 2));

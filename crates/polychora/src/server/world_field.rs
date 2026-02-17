@@ -1,7 +1,5 @@
 use super::procgen;
-use crate::shared::voxel::{
-    world_to_chunk, BaseWorldKind, Chunk, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE,
-};
+use crate::shared::voxel::{world_to_chunk, BaseWorldKind, Chunk, ChunkPos, VoxelType, CHUNK_SIZE};
 use crate::shared::worldfield::{
     Aabb4i, ChunkArrayData, ChunkKey, ChunkPayload, QueryDetail, QueryVolume, RealizeProfile,
     RegionChunkTree, RegionNodeKind, RegionTreeCore, WorldField,
@@ -31,6 +29,27 @@ pub struct ServerWorldField {
 }
 
 impl ServerWorldField {
+    pub fn from_chunk_payloads(
+        base_kind: BaseWorldKind,
+        chunk_payloads: impl IntoIterator<Item = ([i32; 4], ChunkPayload)>,
+        world_seed: u64,
+        procgen_structures: bool,
+        blocked_cells: HashSet<procgen::StructureCell>,
+    ) -> Self {
+        let chunk_tree = RegionChunkTree::from_chunks(
+            chunk_payloads
+                .into_iter()
+                .map(|(chunk_pos, payload)| (ChunkKey { pos: chunk_pos }, payload)),
+        );
+        Self::from_chunk_tree(
+            base_kind,
+            chunk_tree,
+            world_seed,
+            procgen_structures,
+            blocked_cells,
+        )
+    }
+
     pub fn from_chunk_tree(
         base_kind: BaseWorldKind,
         chunk_tree: RegionChunkTree,
@@ -52,42 +71,6 @@ impl ServerWorldField {
             world_dirty: false,
             realize_cache: HashMap::new(),
         }
-    }
-
-    pub fn from_legacy_world(
-        world: VoxelWorld,
-        world_seed: u64,
-        procgen_structures: bool,
-        blocked_cells: HashSet<procgen::StructureCell>,
-    ) -> Self {
-        let base_kind = world.base_kind();
-        let chunk_tree = RegionChunkTree::from_chunks(world.chunks.iter().map(|(&pos, chunk)| {
-            (
-                ChunkKey::from_chunk_pos(pos),
-                ChunkPayload::from_chunk_compact(chunk),
-            )
-        }));
-        let mut out = Self::from_chunk_tree(
-            base_kind,
-            chunk_tree,
-            world_seed,
-            procgen_structures,
-            blocked_cells,
-        );
-        out.world_dirty = world.any_dirty();
-        out
-    }
-
-    pub fn to_legacy_world(&self) -> VoxelWorld {
-        let mut world = VoxelWorld::new_with_base(self.base_kind);
-        for (key, payload) in self.chunk_tree.collect_chunks() {
-            if let Ok(chunk) = payload.to_voxel_chunk() {
-                world.insert_chunk(key.to_chunk_pos(), chunk);
-            }
-        }
-        world.clear_dirty();
-        let _ = world.drain_pending_chunk_updates();
-        world
     }
 
     pub fn world_seed(&self) -> u64 {
@@ -701,7 +684,7 @@ fn set_chunk_voxel_by_index(chunk: &mut Chunk, voxel_index: usize, value: VoxelT
 mod tests {
     use super::*;
     use crate::server::region_tree_cache::RegionTreeWorkingSet;
-    use crate::shared::voxel::{world_to_chunk, BaseWorldKind, Chunk, VoxelType, VoxelWorld};
+    use crate::shared::voxel::{world_to_chunk, BaseWorldKind, Chunk, RegionChunkWorld, VoxelType};
     use crate::shared::worldfield::{
         collect_non_empty_chunks_from_core_in_bounds, ChunkArrayIndexCodec,
         QUERY_CONTENT_BOUNDS_SCAN_BUDGET_CELLS,
@@ -711,8 +694,32 @@ mod tests {
         DeterministicRng,
     };
 
-    fn world_field_from_world(world: VoxelWorld, seed: u64, procgen: bool) -> ServerWorldField {
-        ServerWorldField::from_legacy_world(world, seed, procgen, HashSet::new())
+    fn world_field_from_world(
+        world: RegionChunkWorld,
+        seed: u64,
+        procgen: bool,
+    ) -> ServerWorldField {
+        let base_kind = world.base_kind();
+        let was_dirty = world.any_dirty();
+        let chunk_payloads: Vec<([i32; 4], ChunkPayload)> = world
+            .chunks
+            .iter()
+            .map(|(&pos, chunk)| {
+                (
+                    [pos.x, pos.y, pos.z, pos.w],
+                    ChunkPayload::from_chunk_compact(chunk),
+                )
+            })
+            .collect();
+        let mut field = ServerWorldField::from_chunk_payloads(
+            base_kind,
+            chunk_payloads,
+            seed,
+            procgen,
+            HashSet::new(),
+        );
+        field.world_dirty = was_dirty;
+        field
     }
 
     fn find_procgen_chunk(seed: u64) -> ChunkPos {
@@ -746,7 +753,7 @@ mod tests {
 
     #[test]
     fn realize_chunk_preserves_explicit_empty_chunk() {
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         let floor_chunk = ChunkPos::new(0, -1, 0, 0);
@@ -765,7 +772,7 @@ mod tests {
 
     #[test]
     fn realize_chunk_uses_flat_floor_base_when_no_chunk_exists() {
-        let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(9),
         });
         let mut field = world_field_from_world(world, 1337, false);
@@ -780,7 +787,7 @@ mod tests {
 
     #[test]
     fn query_content_bounds_matches_exact_non_empty_bounds_without_procgen() {
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(16, 0, -1, 9, VoxelType(4));
         world.set_voxel(-8, 10, 2, 2, VoxelType(5));
 
@@ -811,7 +818,7 @@ mod tests {
 
     #[test]
     fn query_content_bounds_uses_conservative_fallback_for_large_queries() {
-        let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(7),
         });
         let field = world_field_from_world(world, 1337, false);
@@ -831,8 +838,8 @@ mod tests {
     fn procgen_chunk_realization_is_controlled_by_toggle() {
         let seed = 1337;
         let chunk_pos = find_procgen_chunk(seed);
-        let mut disabled = world_field_from_world(VoxelWorld::new(), seed, false);
-        let mut enabled = world_field_from_world(VoxelWorld::new(), seed, true);
+        let mut disabled = world_field_from_world(RegionChunkWorld::new(), seed, false);
+        let mut enabled = world_field_from_world(RegionChunkWorld::new(), seed, true);
 
         let disabled_payload =
             disabled.realize_chunk(ChunkKey::from_chunk_pos(chunk_pos), RealizeProfile::Render);
@@ -848,7 +855,7 @@ mod tests {
 
     #[test]
     fn query_region_core_returns_empty_node_when_no_content_exists() {
-        let world = VoxelWorld::new();
+        let world = RegionChunkWorld::new();
         let field = world_field_from_world(world, 1337, false);
 
         let query = QueryVolume {
@@ -860,7 +867,7 @@ mod tests {
 
     #[test]
     fn query_region_core_materializes_sparse_branch_for_non_empty_queries() {
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(0, 0, 0, 0, VoxelType(6));
 
         let field = world_field_from_world(world, 1337, false);
@@ -891,7 +898,7 @@ mod tests {
 
     #[test]
     fn query_region_core_flat_floor_emits_sparse_floor_slice() {
-        let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(9),
         });
         let field = world_field_from_world(world, 1337, false);
@@ -929,7 +936,7 @@ mod tests {
 
     #[test]
     fn apply_voxel_edit_sets_and_prunes_chunk_against_virgin_world() {
-        let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         let mut field = world_field_from_world(world, 1337, false);
@@ -946,7 +953,7 @@ mod tests {
 
     #[test]
     fn query_region_core_matches_realized_non_empty_chunks_after_randomized_edits() {
-        let mut field = world_field_from_world(VoxelWorld::new(), 2026, false);
+        let mut field = world_field_from_world(RegionChunkWorld::new(), 2026, false);
         let domain = Aabb4i::new([-4, -2, -4, -4], [4, 2, 4, 4]);
         let mut rng = DeterministicRng::new(0x5157_4f52_4c44_544b);
 
@@ -991,7 +998,7 @@ mod tests {
     fn procgen_query_region_core_is_stable_for_fixed_bounds() {
         let seed = 1337;
         let center = find_procgen_chunk(seed);
-        let field = world_field_from_world(VoxelWorld::new(), seed, true);
+        let field = world_field_from_world(RegionChunkWorld::new(), seed, true);
         let bounds = procgen_query_bounds(center, 2);
         let query = QueryVolume { bounds };
 
@@ -1014,7 +1021,7 @@ mod tests {
     fn procgen_working_set_refresh_is_idempotent_for_stationary_bounds() {
         let seed = 1337;
         let center = find_procgen_chunk(seed);
-        let field = world_field_from_world(VoxelWorld::new(), seed, true);
+        let field = world_field_from_world(RegionChunkWorld::new(), seed, true);
         let bounds = procgen_query_bounds(center, 2);
         let query = QueryVolume { bounds };
         let mut working = RegionTreeWorkingSet::new();

@@ -1,7 +1,6 @@
+use crate::shared::legacy_world_io::load_world;
 use crate::shared::protocol::{EntityClass, EntityKind};
-use crate::shared::voxel::{
-    load_world, BaseWorldKind, Chunk, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE, CHUNK_VOLUME,
-};
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, RegionChunkWorld, VoxelType, CHUNK_SIZE};
 use crate::shared::worldfield::{
     Aabb4i, ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload,
 };
@@ -218,12 +217,19 @@ pub struct LoadedState {
     pub global: GlobalPayload,
     pub players: PlayersPayload,
     pub index: IndexPayload,
-    pub world: VoxelWorld,
+    pub world_chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
     pub entities: Vec<PersistedEntityRecord>,
 }
 
-pub struct SaveRequest<'a> {
-    pub world: &'a VoxelWorld,
+#[derive(Debug)]
+struct LoadedSaveMetadata {
+    manifest: Manifest,
+    global: GlobalPayload,
+    index: IndexPayload,
+}
+
+struct SaveWorldRequest<'a> {
+    pub world: &'a RegionChunkWorld,
     pub entities: &'a [PersistedEntityRecord],
     pub players: &'a [PlayerRecord],
     pub world_seed: u64,
@@ -370,7 +376,7 @@ pub fn region_from_chunk_pos(chunk: ChunkPos, region_chunk_edge: i32) -> [i32; 4
     region_from_chunk([chunk.x, chunk.y, chunk.z, chunk.w], region_chunk_edge)
 }
 
-pub fn all_block_regions(world: &VoxelWorld, region_chunk_edge: i32) -> HashSet<[i32; 4]> {
+fn all_block_regions(world: &RegionChunkWorld, region_chunk_edge: i32) -> HashSet<[i32; 4]> {
     world
         .chunks
         .keys()
@@ -406,33 +412,48 @@ pub fn load_or_init_state(
     load_state(root)
 }
 
+fn load_or_init_save_metadata(
+    root: &Path,
+    default_base: BaseWorldKind,
+    world_seed: u64,
+    now_ms: u64,
+) -> io::Result<LoadedSaveMetadata> {
+    if !is_v4_save_root(root) {
+        init_empty_save_root(root, default_base, world_seed, now_ms)?;
+    }
+    let manifest = load_manifest(root)?;
+    let global: GlobalPayload = read_payload_file(root.join(&manifest.global_file), GLOBAL_MAGIC)?;
+    let index = read_index_file(root.join(&manifest.index_file))?;
+    Ok(LoadedSaveMetadata {
+        manifest,
+        global,
+        index,
+    })
+}
+
 pub fn load_state(root: &Path) -> io::Result<LoadedState> {
     let manifest = load_manifest(root)?;
     let global: GlobalPayload = read_payload_file(root.join(&manifest.global_file), GLOBAL_MAGIC)?;
     let players: PlayersPayload =
         read_payload_file(root.join(&manifest.players_file), PLAYERS_MAGIC)?;
     let index = read_index_file(root.join(&manifest.index_file))?;
-
-    let mut world = VoxelWorld::new_with_base(global.base_world_kind.to_runtime());
-    materialize_world_from_index(root, &index, &mut world)?;
+    let world_chunk_payloads =
+        materialize_world_chunk_payloads_from_index_filtered(root, &index, None, true)?;
 
     let mut entities = materialize_entities_from_index(root, &index)?;
     entities.sort_unstable_by_key(|entity| entity.entity_id);
-
-    world.clear_dirty();
-    let _ = world.drain_pending_chunk_updates();
 
     Ok(LoadedState {
         manifest,
         global,
         players,
         index,
-        world,
+        world_chunk_payloads,
         entities,
     })
 }
 
-pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResult> {
+fn save_state_from_world(root: &Path, request: SaveWorldRequest<'_>) -> io::Result<SaveResult> {
     let chunk_payloads: Vec<([i32; 4], FieldChunkPayload)> = request
         .world
         .chunks
@@ -497,23 +518,37 @@ fn save_state_internal(
     chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
     common: SaveStateCommon<'_>,
 ) -> io::Result<SaveResult> {
-    let loaded = load_or_init_state(root, base_world_kind, common.world_seed, common.now_ms)?;
-    let LoadedState {
+    let loaded =
+        load_or_init_save_metadata(root, base_world_kind, common.world_seed, common.now_ms)?;
+    let LoadedSaveMetadata {
         mut manifest,
         global: loaded_global,
         index: loaded_index,
-        world: loaded_world,
-        entities: loaded_entities,
-        ..
     } = loaded;
-    let mut reuse_index = build_blob_reuse_index(root, &loaded_index)?;
+    let mut reuse_index = build_blob_reuse_index(root, &manifest)?;
 
-    let effective_chunk_payloads = resolve_world_chunk_payloads_for_save(
-        &loaded_world,
-        chunk_payloads,
-        common.dirty_block_regions,
-        common.force_full_blocks,
-    );
+    let effective_chunk_payloads = if common.disable_block_persistence {
+        Vec::new()
+    } else {
+        let persisted_chunk_payloads = if common.force_full_blocks {
+            Vec::new()
+        } else if common.dirty_block_regions.is_empty() {
+            materialize_world_chunk_payloads_from_index_filtered(root, &loaded_index, None, true)?
+        } else {
+            materialize_world_chunk_payloads_from_index_filtered(
+                root,
+                &loaded_index,
+                Some(common.dirty_block_regions),
+                false,
+            )?
+        };
+        resolve_world_chunk_payloads_for_save(
+            persisted_chunk_payloads,
+            chunk_payloads,
+            common.dirty_block_regions,
+            common.force_full_blocks,
+        )
+    };
 
     let world_leaves = if common.disable_block_persistence {
         Vec::new()
@@ -526,8 +561,20 @@ fn save_state_internal(
         )?
     };
 
+    let persisted_entities = if common.force_full_entities {
+        Vec::new()
+    } else if common.dirty_entity_regions.is_empty() {
+        materialize_entities_from_index_filtered(root, &loaded_index, None, true)?
+    } else {
+        materialize_entities_from_index_filtered(
+            root,
+            &loaded_index,
+            Some(common.dirty_entity_regions),
+            false,
+        )?
+    };
     let effective_entities = resolve_entities_for_save(
-        loaded_entities,
+        persisted_entities,
         common.entities,
         common.dirty_entity_regions,
         common.force_full_entities,
@@ -652,7 +699,7 @@ fn save_state_internal(
 }
 
 fn resolve_world_chunk_payloads_for_save(
-    loaded_world: &VoxelWorld,
+    persisted_chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
     chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
     dirty_block_regions: &HashSet<[i32; 4]>,
     force_full_blocks: bool,
@@ -663,11 +710,8 @@ fn resolve_world_chunk_payloads_for_save(
     }
 
     let mut merged = HashMap::<[i32; 4], FieldChunkPayload>::new();
-    for (&chunk_pos, chunk) in &loaded_world.chunks {
-        merged.insert(
-            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-            FieldChunkPayload::from_chunk_compact(chunk),
-        );
+    for (chunk_pos, payload) in persisted_chunk_payloads {
+        merged.insert(chunk_pos, payload);
     }
     if dirty_block_regions.is_empty() {
         let mut out: Vec<([i32; 4], FieldChunkPayload)> = merged.into_iter().collect();
@@ -965,9 +1009,9 @@ pub fn migrate_legacy_world_to_v4(
         .saturating_add(1);
     let empty_players: Vec<PlayerRecord> = Vec::new();
 
-    save_state(
+    save_state_from_world(
         output_root,
-        SaveRequest {
+        SaveWorldRequest {
             world: &world,
             entities: &entities,
             players: &empty_players,
@@ -1067,9 +1111,9 @@ pub fn migrate_v3_save_to_v4(
     let expected_custom_global_payload = global.custom_global_payload.clone();
     let expected_player_entity_hints = player_entity_hints.clone();
 
-    let save_result = save_state(
+    let save_result = save_state_from_world(
         output_root,
-        SaveRequest {
+        SaveWorldRequest {
             world: &world,
             entities: &entities,
             players: &players,
@@ -1102,7 +1146,7 @@ pub fn migrate_v3_save_to_v4(
 
 fn verify_v3_migration_equivalence(
     output_root: &Path,
-    expected_world: &VoxelWorld,
+    expected_world: &RegionChunkWorld,
     expected_entities: &[PersistedEntityRecord],
     expected_players: &[PlayerRecord],
     expected_world_seed: u64,
@@ -1144,7 +1188,7 @@ fn verify_v3_migration_equivalence(
     }
 
     let expected_world_chunks = canonical_world_chunk_payloads(expected_world);
-    let loaded_world_chunks = canonical_world_chunk_payloads(&loaded.world);
+    let loaded_world_chunks = canonical_chunk_payloads(loaded.world_chunk_payloads);
     if expected_world_chunks != loaded_world_chunks {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1189,7 +1233,7 @@ fn verify_v3_migration_equivalence(
     Ok(())
 }
 
-fn canonical_world_chunk_payloads(world: &VoxelWorld) -> Vec<([i32; 4], FieldChunkPayload)> {
+fn canonical_world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], FieldChunkPayload)> {
     let mut out: Vec<([i32; 4], FieldChunkPayload)> = world
         .chunks
         .iter()
@@ -1202,6 +1246,33 @@ fn canonical_world_chunk_payloads(world: &VoxelWorld) -> Vec<([i32; 4], FieldChu
         .collect();
     out.sort_unstable_by_key(|(pos, _)| *pos);
     out
+}
+
+fn canonical_chunk_payloads(
+    mut chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
+) -> Vec<([i32; 4], FieldChunkPayload)> {
+    chunk_payloads.sort_unstable_by_key(|(pos, _)| *pos);
+    chunk_payloads
+}
+
+#[cfg(test)]
+fn chunk_payloads_to_voxel_world(
+    base_world_kind: BaseWorldKind,
+    chunk_payloads: &[([i32; 4], FieldChunkPayload)],
+) -> io::Result<RegionChunkWorld> {
+    let mut world = RegionChunkWorld::new_with_base(base_world_kind);
+    for (chunk_pos, payload) in chunk_payloads {
+        let chunk = payload
+            .to_voxel_chunk()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        world.insert_chunk(
+            ChunkPos::new(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]),
+            chunk,
+        );
+    }
+    world.clear_dirty();
+    let _ = world.drain_pending_chunk_updates();
+    Ok(world)
 }
 
 fn init_empty_save_root(
@@ -1277,15 +1348,6 @@ fn init_empty_save_root(
     Ok(())
 }
 
-fn materialize_world_from_index(
-    root: &Path,
-    index: &IndexPayload,
-    world: &mut VoxelWorld,
-) -> io::Result<()> {
-    let node_by_id = build_node_lookup(index);
-    apply_world_node(root, &node_by_id, index.root_node_id, world)
-}
-
 fn materialize_entities_from_index(
     root: &Path,
     index: &IndexPayload,
@@ -1302,19 +1364,64 @@ fn materialize_entities_from_index(
     Ok(entities)
 }
 
-fn build_node_lookup(index: &IndexPayload) -> HashMap<u32, &IndexNode> {
-    index
-        .nodes
-        .iter()
-        .map(|node| (node.node_id, node))
-        .collect()
+fn include_region_for_filter(
+    region: [i32; 4],
+    region_filter: Option<&HashSet<[i32; 4]>>,
+    include_matches: bool,
+) -> bool {
+    match region_filter {
+        Some(filter) => filter.contains(&region) == include_matches,
+        None => true,
+    }
 }
 
-fn apply_world_node(
+fn include_chunk_for_filter(
+    chunk_pos: [i32; 4],
+    region_filter: Option<&HashSet<[i32; 4]>>,
+    include_matches: bool,
+) -> bool {
+    include_region_for_filter(
+        region_from_chunk(chunk_pos, DEFAULT_REGION_CHUNK_EDGE),
+        region_filter,
+        include_matches,
+    )
+}
+
+fn load_chunk_payload_from_ref(
+    root: &Path,
+    blob_ref: &BlobRef,
+    payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
+) -> io::Result<FieldChunkPayload> {
+    if blob_ref.blob_type != BLOB_KIND_CHUNK_PAYLOAD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "chunk payload ref has invalid blob type {}, expected {}",
+                blob_ref.blob_type, BLOB_KIND_CHUNK_PAYLOAD
+            ),
+        ));
+    }
+
+    let key = blob_ref_identity(blob_ref);
+    if let Some(payload) = payload_cache.get(&key) {
+        return Ok(payload.clone());
+    }
+
+    let payload = read_blob_payload(root, blob_ref)?;
+    let payload_blob: ChunkPayloadBlob = postcard::from_bytes(&payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    payload_cache.insert(key, payload_blob.payload.clone());
+    Ok(payload_blob.payload)
+}
+
+fn collect_world_chunk_payloads_from_node_filtered(
     root: &Path,
     node_by_id: &HashMap<u32, &IndexNode>,
     node_id: u32,
-    world: &mut VoxelWorld,
+    region_filter: Option<&HashSet<[i32; 4]>>,
+    include_matches: bool,
+    payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
+    out: &mut Vec<([i32; 4], FieldChunkPayload)>,
 ) -> io::Result<()> {
     let Some(node) = node_by_id.get(&node_id).copied() else {
         return Err(io::Error::new(
@@ -1326,25 +1433,230 @@ fn apply_world_node(
     match &node.kind {
         IndexNodeKind::Branch { child_node_ids } => {
             for child_id in child_node_ids {
-                apply_world_node(root, node_by_id, *child_id, world)?;
+                collect_world_chunk_payloads_from_node_filtered(
+                    root,
+                    node_by_id,
+                    *child_id,
+                    region_filter,
+                    include_matches,
+                    payload_cache,
+                    out,
+                )?;
             }
         }
         IndexNodeKind::LeafEmpty => {
             for_each_chunk_in_bounds(node.bounds_min_chunk, node.bounds_max_chunk, |chunk_pos| {
-                world.insert_chunk(chunk_pos, Chunk::new());
+                let chunk = [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w];
+                if include_chunk_for_filter(chunk, region_filter, include_matches) {
+                    out.push((chunk, FieldChunkPayload::Empty));
+                }
             });
         }
         IndexNodeKind::LeafUniform { material } => {
-            let chunk = build_uniform_chunk(*material);
             for_each_chunk_in_bounds(node.bounds_min_chunk, node.bounds_max_chunk, |chunk_pos| {
-                world.insert_chunk(chunk_pos, chunk.clone());
+                let chunk = [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w];
+                if include_chunk_for_filter(chunk, region_filter, include_matches) {
+                    out.push((chunk, FieldChunkPayload::Uniform(*material)));
+                }
             });
         }
         IndexNodeKind::LeafChunkArray { chunk_array_ref } => {
-            apply_chunk_array_ref_to_world(root, chunk_array_ref, world)?;
+            if chunk_array_ref.blob_type != BLOB_KIND_CHUNK_ARRAY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "world subtree leaf references non-chunk-array blob type {}",
+                        chunk_array_ref.blob_type
+                    ),
+                ));
+            }
+            let payload = read_blob_payload(root, chunk_array_ref)?;
+            let blob: ChunkArrayBlob = postcard::from_bytes(&payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let bounds = Aabb4i::new(blob.volume_min_chunk, blob.volume_max_chunk);
+            if !bounds.is_valid() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid chunk array bounds",
+                ));
+            }
+
+            let palette_len = blob.payload_palette.len().max(1);
+            let dummy_palette = vec![FieldChunkPayload::Empty; palette_len];
+            let chunk_array_data = ChunkArrayData {
+                bounds,
+                chunk_palette: dummy_palette,
+                index_codec: blob.index_codec,
+                index_data: blob.index_data.clone(),
+                default_chunk_idx: blob.default_palette_index,
+            };
+            let indices = chunk_array_data
+                .decode_dense_indices()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            let extents = bounds.chunk_extents().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid chunk array extents during decode",
+                )
+            })?;
+
+            let mut palette = Vec::<FieldChunkPayload>::with_capacity(blob.payload_palette.len());
+            for payload_ref in &blob.payload_palette {
+                palette.push(load_chunk_payload_from_ref(
+                    root,
+                    payload_ref,
+                    payload_cache,
+                )?);
+            }
+
+            for w in bounds.min[3]..=bounds.max[3] {
+                for z in bounds.min[2]..=bounds.max[2] {
+                    for y in bounds.min[1]..=bounds.max[1] {
+                        for x in bounds.min[0]..=bounds.max[0] {
+                            let chunk = [x, y, z, w];
+                            if !include_chunk_for_filter(chunk, region_filter, include_matches) {
+                                continue;
+                            }
+                            let local = [
+                                (x - bounds.min[0]) as usize,
+                                (y - bounds.min[1]) as usize,
+                                (z - bounds.min[2]) as usize,
+                                (w - bounds.min[3]) as usize,
+                            ];
+                            let linear = linear_cell_index(local, extents);
+                            let palette_idx = indices.get(linear).copied().ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "chunk array decoded index out of bounds",
+                                )
+                            })?;
+                            let payload =
+                                palette.get(palette_idx as usize).cloned().ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "chunk array palette index out of bounds",
+                                    )
+                                })?;
+                            out.push((chunk, payload));
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn materialize_world_chunk_payloads_from_index_filtered(
+    root: &Path,
+    index: &IndexPayload,
+    region_filter: Option<&HashSet<[i32; 4]>>,
+    include_matches: bool,
+) -> io::Result<Vec<([i32; 4], FieldChunkPayload)>> {
+    let node_by_id = build_node_lookup(index);
+    let mut out = Vec::<([i32; 4], FieldChunkPayload)>::new();
+    let mut payload_cache = HashMap::<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>::new();
+    collect_world_chunk_payloads_from_node_filtered(
+        root,
+        &node_by_id,
+        index.root_node_id,
+        region_filter,
+        include_matches,
+        &mut payload_cache,
+        &mut out,
+    )?;
+    out.sort_unstable_by_key(|(pos, _)| *pos);
+    Ok(out)
+}
+
+fn collect_entities_from_node_filtered(
+    root: &Path,
+    node_by_id: &HashMap<u32, &IndexNode>,
+    node_id: u32,
+    region_filter: Option<&HashSet<[i32; 4]>>,
+    include_matches: bool,
+    entities_by_id: &mut HashMap<u64, PersistedEntityRecord>,
+) -> io::Result<()> {
+    let Some(node) = node_by_id.get(&node_id).copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("index references missing entity node id {node_id}"),
+        ));
+    };
+
+    match &node.kind {
+        IndexNodeKind::Branch { child_node_ids } => {
+            for child_id in child_node_ids {
+                collect_entities_from_node_filtered(
+                    root,
+                    node_by_id,
+                    *child_id,
+                    region_filter,
+                    include_matches,
+                    entities_by_id,
+                )?;
+            }
+        }
+        IndexNodeKind::LeafChunkArray { chunk_array_ref } => {
+            if chunk_array_ref.blob_type != BLOB_KIND_ENTITY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "entity subtree leaf references non-entity blob type {}",
+                        chunk_array_ref.blob_type
+                    ),
+                ));
+            }
+            let payload = read_blob_payload(root, chunk_array_ref)?;
+            let blob: EntityBlob = postcard::from_bytes(&payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            for entity in blob.entities {
+                let region = region_from_chunk(
+                    chunk_from_world_position(entity.position),
+                    DEFAULT_REGION_CHUNK_EDGE,
+                );
+                if include_region_for_filter(region, region_filter, include_matches) {
+                    entities_by_id.insert(entity.entity_id, entity);
+                }
+            }
+        }
+        IndexNodeKind::LeafEmpty | IndexNodeKind::LeafUniform { .. } => {}
+    }
+
+    Ok(())
+}
+
+fn materialize_entities_from_index_filtered(
+    root: &Path,
+    index: &IndexPayload,
+    region_filter: Option<&HashSet<[i32; 4]>>,
+    include_matches: bool,
+) -> io::Result<Vec<PersistedEntityRecord>> {
+    let Some(entity_root) = index.entity_root_node_id else {
+        return Ok(Vec::new());
+    };
+    let node_by_id = build_node_lookup(index);
+    let mut entities_by_id = HashMap::<u64, PersistedEntityRecord>::new();
+    collect_entities_from_node_filtered(
+        root,
+        &node_by_id,
+        entity_root,
+        region_filter,
+        include_matches,
+        &mut entities_by_id,
+    )?;
+
+    let mut entities: Vec<PersistedEntityRecord> = entities_by_id.into_values().collect();
+    entities.sort_unstable_by_key(|entity| entity.entity_id);
+    Ok(entities)
+}
+
+fn build_node_lookup(index: &IndexPayload) -> HashMap<u32, &IndexNode> {
+    index
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node))
+        .collect()
 }
 
 fn apply_entity_node(
@@ -1387,132 +1699,6 @@ fn apply_entity_node(
     }
 
     Ok(())
-}
-
-fn apply_chunk_array_ref_to_world(
-    root: &Path,
-    chunk_array_ref: &BlobRef,
-    world: &mut VoxelWorld,
-) -> io::Result<()> {
-    let payload = read_blob_payload(root, chunk_array_ref)?;
-    match chunk_array_ref.blob_type {
-        BLOB_KIND_CHUNK_ARRAY => {
-            let blob: ChunkArrayBlob = postcard::from_bytes(&payload)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            apply_chunk_array_blob_to_world(root, &blob, world)
-        }
-        BLOB_KIND_CHUNK_PAYLOAD => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "world index leaf must reference chunk-array blob, not chunk-payload blob",
-        )),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported block blob type {other}"),
-        )),
-    }
-}
-
-fn apply_chunk_array_blob_to_world(
-    root: &Path,
-    blob: &ChunkArrayBlob,
-    world: &mut VoxelWorld,
-) -> io::Result<()> {
-    let bounds = Aabb4i::new(blob.volume_min_chunk, blob.volume_max_chunk);
-    if !bounds.is_valid() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid chunk array bounds",
-        ));
-    }
-
-    let palette_len = blob.payload_palette.len().max(1);
-    let dummy_palette = vec![FieldChunkPayload::Empty; palette_len];
-    let chunk_array_data = ChunkArrayData {
-        bounds,
-        chunk_palette: dummy_palette,
-        index_codec: blob.index_codec,
-        index_data: blob.index_data.clone(),
-        default_chunk_idx: blob.default_palette_index,
-    };
-    let indices = chunk_array_data
-        .decode_dense_indices()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-
-    let mut palette_chunks = Vec::<Chunk>::new();
-    for payload_ref in &blob.payload_palette {
-        if payload_ref.blob_type != BLOB_KIND_CHUNK_PAYLOAD {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "chunk array palette contains non-chunk-payload blob type {}",
-                    payload_ref.blob_type
-                ),
-            ));
-        }
-        let payload = read_blob_payload(root, payload_ref)?;
-        let payload_blob: ChunkPayloadBlob = postcard::from_bytes(&payload)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        palette_chunks.push(payload_blob_to_chunk(&payload_blob)?);
-    }
-
-    let extents = bounds.chunk_extents().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid chunk array extents during decode",
-        )
-    })?;
-
-    for w in bounds.min[3]..=bounds.max[3] {
-        for z in bounds.min[2]..=bounds.max[2] {
-            for y in bounds.min[1]..=bounds.max[1] {
-                for x in bounds.min[0]..=bounds.max[0] {
-                    let local = [
-                        (x - bounds.min[0]) as usize,
-                        (y - bounds.min[1]) as usize,
-                        (z - bounds.min[2]) as usize,
-                        (w - bounds.min[3]) as usize,
-                    ];
-                    let linear = linear_cell_index(local, extents);
-                    let Some(&palette_idx) = indices.get(linear) else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "chunk array decoded index out of bounds",
-                        ));
-                    };
-                    let Some(chunk) = palette_chunks.get(palette_idx as usize) else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "chunk array palette index out of bounds",
-                        ));
-                    };
-                    world.insert_chunk(ChunkPos::new(x, y, z, w), chunk.clone());
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn payload_blob_to_chunk(blob: &ChunkPayloadBlob) -> io::Result<Chunk> {
-    blob.payload
-        .to_voxel_chunk()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
-}
-
-fn build_uniform_chunk(material: u16) -> Chunk {
-    let voxel = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
-    let mut chunk = Chunk::new();
-    if voxel.is_air() {
-        chunk.dirty = false;
-        return chunk;
-    }
-    for entry in chunk.voxels.iter_mut() {
-        *entry = voxel;
-    }
-    chunk.solid_count = CHUNK_VOLUME as u32;
-    chunk.dirty = true;
-    chunk
 }
 
 fn for_each_chunk_in_bounds<F>(min: [i32; 4], max: [i32; 4], mut f: F)
@@ -1772,6 +1958,7 @@ fn payload_to_reuse_key(
     })
 }
 
+#[cfg(test)]
 fn collect_leaf_chunk_array_refs_recursive(
     node_id: u32,
     node_by_id: &HashMap<u32, &IndexNode>,
@@ -1798,45 +1985,92 @@ fn collect_leaf_chunk_array_refs_recursive(
     Ok(())
 }
 
-fn build_blob_reuse_index(root: &Path, index: &IndexPayload) -> io::Result<BlobReuseIndex> {
+fn build_blob_reuse_index(root: &Path, manifest: &Manifest) -> io::Result<BlobReuseIndex> {
     let mut out = BlobReuseIndex::default();
-    let mut seen = HashSet::<(u32, u64, u32, u32, u8, u16)>::new();
-    let node_by_id = build_node_lookup(index);
-
-    let mut refs = Vec::<BlobRef>::new();
-    collect_leaf_chunk_array_refs_recursive(index.root_node_id, &node_by_id, &mut refs)?;
-    if let Some(entity_root) = index.entity_root_node_id {
-        collect_leaf_chunk_array_refs_recursive(entity_root, &node_by_id, &mut refs)?;
+    let max_data_file_id = manifest.data_file_count.max(manifest.active_data_file_id);
+    if max_data_file_id == 0 {
+        return Ok(out);
     }
 
-    for blob_ref in refs {
-        if seen.insert(blob_ref_identity(&blob_ref)) {
-            let key = blob_ref_to_reuse_key(&blob_ref)?;
-            out.refs_by_key
-                .entry(key)
-                .or_default()
-                .push(blob_ref.clone());
+    for data_file_id in 1..=max_data_file_id {
+        let path = data_file_path(root, data_file_id);
+        if !path.exists() {
+            continue;
         }
 
-        if blob_ref.blob_type == BLOB_KIND_CHUNK_ARRAY {
-            let payload = read_blob_payload(root, &blob_ref)?;
-            let chunk_array_blob: ChunkArrayBlob = postcard::from_bytes(&payload)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            for payload_ref in chunk_array_blob.payload_palette {
-                if payload_ref.blob_type != BLOB_KIND_CHUNK_PAYLOAD {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "chunk-array palette ref has invalid blob type {}",
-                            payload_ref.blob_type
-                        ),
-                    ));
-                }
-                if seen.insert(blob_ref_identity(&payload_ref)) {
-                    let key = blob_ref_to_reuse_key(&payload_ref)?;
-                    out.refs_by_key.entry(key).or_default().push(payload_ref);
-                }
+        let mut reader = BufReader::new(File::open(path)?);
+        let mut header = [0u8; 12];
+        reader.read_exact(&mut header)?;
+        if &header[0..4] != DATA_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid data file magic while building reuse index",
+            ));
+        }
+        let data_version = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        if data_version != DATA_FILE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported data file version {data_version}"),
+            ));
+        }
+        let header_file_id = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        if header_file_id != data_file_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "data file id mismatch while building reuse index: header={} path={}",
+                    header_file_id, data_file_id
+                ),
+            ));
+        }
+
+        loop {
+            let record_offset = reader.stream_position()?;
+            let mut record_magic = [0u8; 4];
+            match reader.read_exact(&mut record_magic) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error),
             }
+            if &record_magic != RECORD_MAGIC {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid record magic at offset {}", record_offset),
+                ));
+            }
+
+            let mut record_rest = [0u8; 11];
+            reader.read_exact(&mut record_rest)?;
+            let blob_type = record_rest[0];
+            let blob_version = u16::from_le_bytes([record_rest[1], record_rest[2]]);
+            let payload_len = u32::from_le_bytes([
+                record_rest[3],
+                record_rest[4],
+                record_rest[5],
+                record_rest[6],
+            ]);
+            let payload_crc32 = u32::from_le_bytes([
+                record_rest[7],
+                record_rest[8],
+                record_rest[9],
+                record_rest[10],
+            ]);
+            reader.seek(SeekFrom::Current(i64::from(payload_len)))?;
+
+            let record_len = RECORD_HEADER_LEN.checked_add(payload_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "blob record length overflow")
+            })?;
+            let blob_ref = BlobRef {
+                data_file_id,
+                record_offset,
+                record_len,
+                record_crc32: payload_crc32,
+                blob_type,
+                blob_version,
+            };
+            let key = blob_ref_to_reuse_key(&blob_ref)?;
+            out.refs_by_key.entry(key).or_default().push(blob_ref);
         }
     }
 
@@ -1854,9 +2088,10 @@ fn append_or_reuse_blob_record(
     let key = payload_to_reuse_key(blob_type, blob_version, payload)?;
     if let Some(candidates) = reuse_index.refs_by_key.get(&key) {
         for candidate in candidates {
-            let existing_payload = read_blob_payload(root, candidate)?;
-            if existing_payload == payload {
-                return Ok(candidate.clone());
+            if let Ok(existing_payload) = read_blob_payload(root, candidate) {
+                if existing_payload == payload {
+                    return Ok(candidate.clone());
+                }
             }
         }
     }
@@ -2526,12 +2761,20 @@ mod tests {
         }
     }
 
+    fn materialize_loaded_world(loaded: &LoadedState) -> RegionChunkWorld {
+        chunk_payloads_to_voxel_world(
+            loaded.global.base_world_kind.to_runtime(),
+            &loaded.world_chunk_payloads,
+        )
+        .expect("materialize loaded world")
+    }
+
     #[test]
     fn save_and_load_roundtrip_preserves_world_entities_players() {
         let root = test_root("roundtrip");
         let now_ms = now_unix_ms();
 
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world.set_voxel(1, 1, 1, 1, VoxelType(3));
@@ -2561,9 +2804,9 @@ mod tests {
         }];
         let empty_regions = HashSet::new();
 
-        let save_result = save_state(
+        let save_result = save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &entities,
                 players: &players,
@@ -2588,8 +2831,9 @@ mod tests {
         assert_eq!(loaded.global.next_entity_id, 1000);
         assert_eq!(loaded.players.players.len(), 1);
         assert_eq!(loaded.entities.len(), 1);
-        assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), VoxelType(3));
-        assert_eq!(loaded.world.get_voxel(40, 2, -5, 17), VoxelType(7));
+        let loaded_world = materialize_loaded_world(&loaded);
+        assert_eq!(loaded_world.get_voxel(1, 1, 1, 1), VoxelType(3));
+        assert_eq!(loaded_world.get_voxel(40, 2, -5, 17), VoxelType(7));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2601,13 +2845,13 @@ mod tests {
         let chunk_size = CHUNK_SIZE as i32;
         let empty_regions = HashSet::new();
 
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(1, 1, 1, 1, VoxelType(2));
         world.set_voxel(chunk_size * 10 + 1, 1, 1, 1, VoxelType(3));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -2630,9 +2874,9 @@ mod tests {
 
         let mut dirty_blocks = HashSet::new();
         dirty_blocks.insert(region_from_chunk([0, 0, 0, 0], DEFAULT_REGION_CHUNK_EDGE));
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -2651,9 +2895,10 @@ mod tests {
         .expect("incremental save");
 
         let loaded = load_state(&root).expect("load state");
-        assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), VoxelType(4));
+        let loaded_world = materialize_loaded_world(&loaded);
+        assert_eq!(loaded_world.get_voxel(1, 1, 1, 1), VoxelType(4));
         assert_eq!(
-            loaded.world.get_voxel(chunk_size * 10 + 1, 1, 1, 1),
+            loaded_world.get_voxel(chunk_size * 10 + 1, 1, 1, 1),
             VoxelType(3)
         );
 
@@ -2666,7 +2911,7 @@ mod tests {
         let now_ms = now_unix_ms();
         let chunk_size = CHUNK_SIZE as f32;
         let empty_regions = HashSet::new();
-        let world = VoxelWorld::new();
+        let world = RegionChunkWorld::new();
 
         let entity_a_chunk = [0, 0, 0, 0];
         let entity_b_chunk = [20, 0, 0, 0];
@@ -2677,9 +2922,9 @@ mod tests {
             test_entity(2, entity_b_pos, vec![2]),
         ];
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &entities_initial,
                 players: &[],
@@ -2703,9 +2948,9 @@ mod tests {
         ];
         let mut dirty_entities = HashSet::new();
         dirty_entities.insert(region_from_chunk(entity_a_chunk, DEFAULT_REGION_CHUNK_EDGE));
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &entities_next,
                 players: &[],
@@ -2776,11 +3021,80 @@ mod tests {
         assert_eq!(save_result.generation, 1);
 
         let loaded = load_state(&root).expect("load state");
+        let loaded_world = materialize_loaded_world(&loaded);
         assert_eq!(
-            loaded
-                .world
-                .get_voxel(chunk_pos[0] * chunk_size + 1, 1, 1, 1),
+            loaded_world.get_voxel(chunk_pos[0] * chunk_size + 1, 1, 1, 1),
             VoxelType(9)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_state_from_chunk_payloads_merges_dirty_region_without_full_snapshot() {
+        let root = test_root("chunk-payload-dirty-region-merge");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let chunk_a = [0, 0, 0, 0];
+        let chunk_b = [DEFAULT_REGION_CHUNK_EDGE, 0, 0, 0];
+        let mut dirty_regions = HashSet::new();
+        dirty_regions.insert(region_from_chunk(chunk_a, DEFAULT_REGION_CHUNK_EDGE));
+        let chunk_size = CHUNK_SIZE as i32;
+
+        save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: vec![
+                    (chunk_a, FieldChunkPayload::Uniform(3)),
+                    (chunk_b, FieldChunkPayload::Uniform(7)),
+                ],
+                entities: &[],
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 2,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("initial full save");
+
+        save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: vec![(chunk_a, FieldChunkPayload::Uniform(9))],
+                entities: &[],
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 2,
+                dirty_block_regions: &dirty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: false,
+                force_full_entities: false,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms: now_ms.saturating_add(1),
+            },
+        )
+        .expect("dirty region save");
+
+        let loaded = load_state(&root).expect("load state");
+        let loaded_world = materialize_loaded_world(&loaded);
+        assert_eq!(
+            loaded_world.get_voxel(chunk_a[0] * chunk_size + 1, 1, 1, 1),
+            VoxelType(9)
+        );
+        assert_eq!(
+            loaded_world.get_voxel(chunk_b[0] * chunk_size + 1, 1, 1, 1),
+            VoxelType(7)
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -2792,7 +3106,7 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world.set_voxel(1, 1, 1, 1, VoxelType(3));
@@ -2833,8 +3147,9 @@ mod tests {
 
         let loaded = load_state(&root).expect("load state");
         assert_eq!(loaded.global.world_seed, 4242);
-        assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), VoxelType(3));
-        assert_eq!(loaded.world.get_voxel(40, 2, -5, 17), VoxelType(7));
+        let loaded_world = materialize_loaded_world(&loaded);
+        assert_eq!(loaded_world.get_voxel(1, 1, 1, 1), VoxelType(3));
+        assert_eq!(loaded_world.get_voxel(40, 2, -5, 17), VoxelType(7));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2845,11 +3160,11 @@ mod tests {
         let legacy_world = root.join("legacy.v4dw");
         let output_root = root.join("migrated-v4");
 
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(2, 2, 2, 2, VoxelType(9));
         {
             let mut writer = BufWriter::new(File::create(&legacy_world).expect("create legacy"));
-            crate::shared::voxel::save_world(&world, &mut writer).expect("save legacy");
+            crate::shared::legacy_world_io::save_world(&world, &mut writer).expect("save legacy");
             writer.flush().expect("flush legacy");
         }
 
@@ -2860,7 +3175,8 @@ mod tests {
 
         let loaded = load_state(&output_root).expect("load migrated");
         assert_eq!(loaded.global.world_seed, 777);
-        assert_eq!(loaded.world.get_voxel(2, 2, 2, 2), VoxelType(9));
+        let loaded_world = materialize_loaded_world(&loaded);
+        assert_eq!(loaded_world.get_voxel(2, 2, 2, 2), VoxelType(9));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2873,7 +3189,7 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world.set_voxel(4, 1, 2, -3, VoxelType(8));
@@ -2931,7 +3247,8 @@ mod tests {
         assert_eq!(loaded.global.world_seed, 2026);
         assert_eq!(loaded.global.next_entity_id, 1000);
         assert_eq!(loaded.global.custom_global_payload, custom_payload);
-        assert_eq!(loaded.world.get_voxel(4, 1, 2, -3), VoxelType(8));
+        let loaded_world = materialize_loaded_world(&loaded);
+        assert_eq!(loaded_world.get_voxel(4, 1, 2, -3), VoxelType(8));
         assert_eq!(loaded.entities.len(), 1);
         assert_eq!(loaded.players.players.len(), 1);
 
@@ -3040,23 +3357,23 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
-        let mut world_a = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world_a = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world_a.set_voxel(1, 2, 3, 4, VoxelType(5));
         world_a.set_voxel(-8, 0, 1, -3, VoxelType(9));
         world_a.set_voxel(33, 7, -2, 12, VoxelType(4));
 
-        let mut world_b = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world_b = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world_b.set_voxel(33, 7, -2, 12, VoxelType(4));
         world_b.set_voxel(1, 2, 3, 4, VoxelType(5));
         world_b.set_voxel(-8, 0, 1, -3, VoxelType(9));
 
-        save_state(
+        save_state_from_world(
             &root_a,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world_a,
                 entities: &[],
                 players: &[],
@@ -3073,9 +3390,9 @@ mod tests {
             },
         )
         .expect("save root a");
-        save_state(
+        save_state_from_world(
             &root_b,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world_b,
                 entities: &[],
                 players: &[],
@@ -3109,13 +3426,13 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(1, 1, 1, 1, VoxelType(7));
         world.set_voxel(17, 1, 1, 1, VoxelType(7));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3159,14 +3476,14 @@ mod tests {
         let empty_regions = HashSet::new();
         let chunk_size = CHUNK_SIZE as i32;
 
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(1, 1, 1, 1, VoxelType(7));
         world.set_voxel(chunk_size + 1, 1, 1, 1, VoxelType(9));
         world.set_voxel(chunk_size * 2 + 1, 1, 1, 1, VoxelType(7));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3222,15 +3539,15 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world.set_voxel(3, 2, 1, 0, VoxelType(5));
         world.set_voxel(-13, 4, -2, 7, VoxelType(9));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3252,9 +3569,9 @@ mod tests {
         let refs_a = collect_world_chunk_array_refs(&index_a);
         let data_bytes_a = total_data_bytes(&root);
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3287,12 +3604,12 @@ mod tests {
         let root = test_root("corrupt-index-checksum");
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(1, 1, 1, 1, VoxelType(7));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3336,12 +3653,12 @@ mod tests {
         let root = test_root("corrupt-blob-checksum");
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(1, 1, 1, 1, VoxelType(7));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3391,12 +3708,12 @@ mod tests {
         let root = test_root("corrupt-data-header");
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(1, 1, 1, 1, VoxelType(7));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3444,14 +3761,14 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world.set_voxel(8, 8, 8, 8, VoxelType(3));
 
-        save_state(
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &world,
                 entities: &[],
                 players: &[],
@@ -3470,10 +3787,10 @@ mod tests {
         .expect("initial save");
 
         let payload = vec![7, 6, 5, 4, 3, 2, 1];
-        let empty_world = VoxelWorld::new_with_base(world.base_kind());
-        save_state(
+        let empty_world = RegionChunkWorld::new_with_base(world.base_kind());
+        save_state_from_world(
             &root,
-            SaveRequest {
+            SaveWorldRequest {
                 world: &empty_world,
                 entities: &[],
                 players: &[],
@@ -3493,7 +3810,8 @@ mod tests {
 
         let loaded = load_state(&root).expect("load state");
         assert_eq!(loaded.global.custom_global_payload, payload);
-        assert_eq!(loaded.world.get_voxel(8, 8, 8, 8), VoxelType(0));
+        let loaded_world = materialize_loaded_world(&loaded);
+        assert_eq!(loaded_world.get_voxel(8, 8, 8, 8), VoxelType(0));
 
         let _ = std::fs::remove_dir_all(root);
     }

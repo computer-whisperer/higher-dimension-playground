@@ -128,7 +128,10 @@ mod tests {
         let _ = working.refresh_from_core(left_bounds, &left_core);
         let shifted = working.refresh_from_core(right_bounds, &right_core);
 
-        assert_eq!(shifted.changed_bounds, Some(Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0])));
+        assert_eq!(
+            shifted.changed_bounds,
+            Some(Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]))
+        );
         assert!(!working.contains_chunk(ChunkPos::new(0, 0, 0, 0)));
         assert!(working.contains_chunk(ChunkPos::new(1, 0, 0, 0)));
     }

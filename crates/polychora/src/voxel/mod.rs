@@ -1,7 +1,6 @@
 pub mod chunk;
 pub mod cull;
 pub mod world;
-pub mod worldgen;
 
 pub use polychora::shared::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 

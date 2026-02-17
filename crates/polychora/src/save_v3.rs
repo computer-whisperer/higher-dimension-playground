@@ -1,6 +1,7 @@
+use crate::shared::legacy_world_io::load_world;
 use crate::shared::protocol::{EntityClass, EntityKind};
 use crate::shared::voxel::{
-    load_world, BaseWorldKind, Chunk, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE, CHUNK_VOLUME,
+    BaseWorldKind, Chunk, ChunkPos, RegionChunkWorld, VoxelType, CHUNK_SIZE, CHUNK_VOLUME,
 };
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
@@ -206,12 +207,12 @@ pub struct LoadedState {
     pub global: GlobalPayload,
     pub players: PlayersPayload,
     pub index: IndexPayload,
-    pub world: VoxelWorld,
+    pub world: RegionChunkWorld,
     pub entities: Vec<PersistedEntityRecord>,
 }
 
 pub struct SaveRequest<'a> {
-    pub world: &'a VoxelWorld,
+    pub world: &'a RegionChunkWorld,
     pub entities: &'a [PersistedEntityRecord],
     pub players: &'a [PlayerRecord],
     pub world_seed: u64,
@@ -286,7 +287,7 @@ pub fn region_from_chunk_pos(chunk: ChunkPos, region_chunk_edge: i32) -> [i32; 4
     region_from_chunk([chunk.x, chunk.y, chunk.z, chunk.w], region_chunk_edge)
 }
 
-pub fn all_block_regions(world: &VoxelWorld, region_chunk_edge: i32) -> HashSet<[i32; 4]> {
+pub fn all_block_regions(world: &RegionChunkWorld, region_chunk_edge: i32) -> HashSet<[i32; 4]> {
     world
         .chunks
         .keys()
@@ -329,7 +330,7 @@ pub fn load_state(root: &Path) -> io::Result<LoadedState> {
         read_payload_file(root.join(&manifest.players_file), PLAYERS_MAGIC)?;
     let index: IndexPayload = read_payload_file(root.join(&manifest.index_file), INDEX_MAGIC)?;
 
-    let mut world = VoxelWorld::new_with_base(global.base_world_kind.to_runtime());
+    let mut world = RegionChunkWorld::new_with_base(global.base_world_kind.to_runtime());
     let mut entities_by_id = HashMap::<u64, PersistedEntityRecord>::new();
 
     for leaf in &index.leaves {
@@ -387,7 +388,7 @@ fn load_state_without_blocks(root: &Path) -> io::Result<LoadedState> {
     let mut entities: Vec<PersistedEntityRecord> = entities_by_id.into_values().collect();
     entities.sort_unstable_by_key(|entity| entity.entity_id);
 
-    let mut world = VoxelWorld::new_with_base(global.base_world_kind.to_runtime());
+    let mut world = RegionChunkWorld::new_with_base(global.base_world_kind.to_runtime());
     world.clear_dirty();
     let _ = world.drain_pending_chunk_updates();
 
@@ -468,8 +469,11 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
         sorted_block_regions.sort_unstable();
 
         for region in sorted_block_regions {
-            let maybe_blob =
-                build_block_blob_for_region(request.world, region, manifest.limits.region_chunk_edge);
+            let maybe_blob = build_block_blob_for_region(
+                request.world,
+                region,
+                manifest.limits.region_chunk_edge,
+            );
             match maybe_blob {
                 Some(blob) => {
                     let payload = postcard::to_stdvec(&blob)
@@ -787,7 +791,7 @@ fn init_empty_save_root(
     Ok(())
 }
 
-fn apply_block_blob_to_world(blob: &BlockBlob, world: &mut VoxelWorld) -> io::Result<()> {
+fn apply_block_blob_to_world(blob: &BlockBlob, world: &mut RegionChunkWorld) -> io::Result<()> {
     let edge = blob.region_chunk_edge.max(1);
     let region_min = [
         blob.region[0].saturating_mul(edge),
@@ -827,7 +831,7 @@ fn apply_block_blob_to_world(blob: &BlockBlob, world: &mut VoxelWorld) -> io::Re
 }
 
 fn build_block_blob_for_region(
-    world: &VoxelWorld,
+    world: &RegionChunkWorld,
     region: [i32; 4],
     region_chunk_edge: i32,
 ) -> Option<BlockBlob> {
@@ -1184,7 +1188,7 @@ mod tests {
         let root = test_root("roundtrip");
         let now_ms = now_unix_ms();
 
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world.set_voxel(1, 1, 1, 1, VoxelType(3));
@@ -1252,11 +1256,11 @@ mod tests {
         let legacy_world = root.join("legacy.v4dw");
         let output_root = root.join("migrated-v3");
 
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         world.set_voxel(2, 2, 2, 2, VoxelType(9));
         {
             let mut writer = BufWriter::new(File::create(&legacy_world).expect("create legacy"));
-            crate::shared::voxel::save_world(&world, &mut writer).expect("save legacy");
+            crate::shared::legacy_world_io::save_world(&world, &mut writer).expect("save legacy");
             writer.flush().expect("flush legacy");
         }
 
@@ -1278,7 +1282,7 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
         world.set_voxel(8, 8, 8, 8, VoxelType(3));
@@ -1303,7 +1307,7 @@ mod tests {
         .expect("initial save");
 
         let payload = vec![7, 6, 5, 4, 3, 2, 1];
-        let empty_world = VoxelWorld::new_with_base(world.base_kind());
+        let empty_world = RegionChunkWorld::new_with_base(world.base_kind());
         save_state(
             &root,
             SaveRequest {

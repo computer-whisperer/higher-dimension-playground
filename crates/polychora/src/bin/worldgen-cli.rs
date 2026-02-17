@@ -2,8 +2,9 @@ use clap::{Parser, Subcommand};
 use polychora::legacy_migration;
 use polychora::save_v3;
 use polychora::save_v4;
+use polychora::shared::legacy_world_io::{load_world, save_world};
 use polychora::shared::protocol::{EntityClass, EntityKind};
-use polychora::shared::voxel::{load_world, save_world, BaseWorldKind, VoxelType, VoxelWorld};
+use polychora::shared::voxel::{BaseWorldKind, RegionChunkWorld, VoxelType};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -141,7 +142,12 @@ struct WorldStats {
     bounds_max: Option<[i32; 4]>,
 }
 
-fn fill_hypercube(world: &mut VoxelWorld, min: [i32; 4], size: [i32; 4], material: VoxelType) {
+fn fill_hypercube(
+    world: &mut RegionChunkWorld,
+    min: [i32; 4],
+    size: [i32; 4],
+    material: VoxelType,
+) {
     for x in min[0]..(min[0] + size[0]) {
         for y in min[1]..(min[1] + size[1]) {
             for z in min[2]..(min[2] + size[2]) {
@@ -153,8 +159,8 @@ fn fill_hypercube(world: &mut VoxelWorld, min: [i32; 4], size: [i32; 4], materia
     }
 }
 
-fn generate_demo_cube_layout_world() -> VoxelWorld {
-    let mut world = VoxelWorld::new();
+fn generate_demo_cube_layout_world() -> RegionChunkWorld {
+    let mut world = RegionChunkWorld::new();
     let mut texture_rot = 0u8;
 
     for x in 0..2 {
@@ -175,7 +181,7 @@ fn generate_demo_cube_layout_world() -> VoxelWorld {
     world
 }
 
-fn save_world_to_file(world: &VoxelWorld, path: &Path) -> io::Result<()> {
+fn save_world_to_file(world: &RegionChunkWorld, path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -188,14 +194,14 @@ fn save_world_to_file(world: &VoxelWorld, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn save_world_in_place(world: &VoxelWorld, input_path: &Path) -> io::Result<()> {
+fn save_world_in_place(world: &RegionChunkWorld, input_path: &Path) -> io::Result<()> {
     let tmp_path = PathBuf::from(format!("{}.tmp", input_path.to_string_lossy()));
     save_world_to_file(world, &tmp_path)?;
     std::fs::rename(&tmp_path, input_path)?;
     Ok(())
 }
 
-fn load_world_from_file(path: &Path) -> io::Result<VoxelWorld> {
+fn load_world_from_file(path: &Path) -> io::Result<RegionChunkWorld> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     load_world(&mut reader)
@@ -213,7 +219,7 @@ fn detect_v4dw_version(path: &Path) -> io::Result<Option<u32>> {
     ])))
 }
 
-fn compute_world_stats(world: &VoxelWorld, file_version: Option<u32>) -> WorldStats {
+fn compute_world_stats(world: &RegionChunkWorld, file_version: Option<u32>) -> WorldStats {
     let mut bounds_min = [i32::MAX; 4];
     let mut bounds_max = [i32::MIN; 4];
     let mut have_bounds = false;
@@ -576,7 +582,7 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let players = loaded.players.players;
     let entities = loaded.entities;
     let index = loaded.index;
-    let world = loaded.world;
+    let world_chunk_payloads = loaded.world_chunk_payloads;
 
     let index_path = input.join(&manifest.index_file);
     let global_path = input.join(&manifest.global_file);
@@ -711,8 +717,8 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     }
     println!(
         "world: override_chunks={} non_empty_override_chunks={}",
-        world.chunks.len(),
-        world.non_empty_chunk_count(),
+        world_chunk_payloads.len(),
+        world_chunk_payloads.len(),
     );
     println!(
         "entities: total={} class_counts(player={}, accent={}, mob={}) payload_bytes={} tag_count={}",
@@ -740,7 +746,7 @@ fn main() {
 
     let result = match cli.command {
         Command::Flat { material, output } => {
-            let world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
                 material: VoxelType(material),
             });
             save_world_to_file(&world, &output).map(|_| {
@@ -761,11 +767,11 @@ fn main() {
             base_material,
             output,
         } => {
-            let world_result: io::Result<VoxelWorld> = match base.as_str() {
-                "flat" => Ok(VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            let world_result: io::Result<RegionChunkWorld> = match base.as_str() {
+                "flat" => Ok(RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
                     material: VoxelType(base_material),
                 })),
-                "empty" => Ok(VoxelWorld::new()),
+                "empty" => Ok(RegionChunkWorld::new()),
                 other => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("unknown base type '{other}'. Use 'flat' or 'empty'."),

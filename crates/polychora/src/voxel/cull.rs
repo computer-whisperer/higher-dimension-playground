@@ -1,7 +1,13 @@
 use common::MatN;
+use std::collections::HashMap;
 
-use super::world::VoxelWorld;
-use super::{Face4D, CHUNK_SIZE};
+use super::chunk::Chunk;
+use super::world::BaseWorldKind;
+use super::{ChunkPos, Face4D, VoxelType, CHUNK_SIZE};
+use polychora::shared::voxel::world_to_chunk;
+use polychora::shared::worldfield::RegionChunkTree;
+
+const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 
 /// Compact per-voxel surface data (18 bytes).
 pub struct SurfaceVoxel {
@@ -28,12 +34,62 @@ pub struct SurfaceData {
     pub voxels: Vec<SurfaceVoxel>,
 }
 
-/// Scan the world and extract surface voxels + chunk metadata.
-pub fn extract_surfaces(world: &VoxelWorld) -> SurfaceData {
+fn base_chunk_for_pos(
+    base_kind: BaseWorldKind,
+    flat_floor_chunk: &Chunk,
+    pos: ChunkPos,
+) -> Option<&Chunk> {
+    match base_kind {
+        BaseWorldKind::Empty => None,
+        BaseWorldKind::FlatFloor { .. } if pos.y == FLAT_FLOOR_CHUNK_Y => Some(flat_floor_chunk),
+        BaseWorldKind::FlatFloor { .. } => None,
+    }
+}
+
+fn world_voxel_at(
+    explicit_chunks: &HashMap<ChunkPos, Chunk>,
+    base_kind: BaseWorldKind,
+    flat_floor_chunk: &Chunk,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    ww: i32,
+) -> VoxelType {
+    let (chunk_pos, idx) = world_to_chunk(wx, wy, wz, ww);
+    if let Some(chunk) = explicit_chunks.get(&chunk_pos) {
+        return chunk.voxels[idx];
+    }
+    base_chunk_for_pos(base_kind, flat_floor_chunk, chunk_pos)
+        .map(|chunk| chunk.voxels[idx])
+        .unwrap_or(VoxelType::AIR)
+}
+
+/// Scan the chunk tree and extract surface voxels + chunk metadata.
+pub fn extract_surfaces(
+    world_tree: &RegionChunkTree,
+    base_kind: BaseWorldKind,
+    flat_floor_chunk: &Chunk,
+) -> SurfaceData {
     let mut chunks = Vec::new();
     let mut voxels = Vec::new();
+    let mut explicit_chunks = HashMap::<ChunkPos, Chunk>::new();
 
-    for (&chunk_pos, chunk) in &world.chunks {
+    for (key, payload) in world_tree.collect_chunks() {
+        let chunk_pos = key.to_chunk_pos();
+        match payload.to_voxel_chunk() {
+            Ok(chunk) => {
+                explicit_chunks.insert(chunk_pos, chunk);
+            }
+            Err(error) => {
+                eprintln!(
+                    "Skipping malformed chunk payload during surface extraction at ({}, {}, {}, {}): {}",
+                    chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w, error
+                );
+            }
+        }
+    }
+
+    for (&chunk_pos, chunk) in &explicit_chunks {
         if chunk.is_empty() {
             continue;
         }
@@ -65,7 +121,15 @@ pub fn extract_surfaces(world: &VoxelWorld) -> SurfaceData {
                         let mut exposed: u8 = 0;
                         for face in Face4D::ALL {
                             let [dx, dy, dz, dw] = face.neighbor_offset();
-                            let neighbor = world.get_voxel(wx + dx, wy + dy, wz + dz, ww + dw);
+                            let neighbor = world_voxel_at(
+                                &explicit_chunks,
+                                base_kind,
+                                flat_floor_chunk,
+                                wx + dx,
+                                wy + dy,
+                                wz + dz,
+                                ww + dw,
+                            );
                             if neighbor.is_air() {
                                 exposed |= 1 << face.cell_id();
                             }

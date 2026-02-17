@@ -470,6 +470,18 @@ fn mark_block_region_dirty(state: &mut ServerState, chunk_pos: ChunkPos) {
     state.dirty_block_regions.insert(region);
 }
 
+fn chunk_bounds_for_region(region: [i32; 4], region_chunk_edge: i32) -> Aabb4i {
+    let edge = region_chunk_edge.max(1);
+    let mut min = [0i32; 4];
+    let mut max = [0i32; 4];
+    for axis in 0..4 {
+        let start = region[axis].saturating_mul(edge);
+        min[axis] = start;
+        max[axis] = start.saturating_add(edge.saturating_sub(1));
+    }
+    Aabb4i::new(min, max)
+}
+
 fn advance_world_revision(state: &mut ServerState) -> u64 {
     state.world_revision = state.world_revision.wrapping_add(1);
     state.world_revision
@@ -3409,7 +3421,11 @@ fn start_autosave_thread(
         now_ms: u64,
         base_world_kind: BaseWorldKind,
         persisted_chunk_payloads: Vec<([i32; 4], ChunkPayload)>,
+        dirty_block_regions: HashSet<[i32; 4]>,
+        force_full_blocks: bool,
         persisted_entities: Vec<PersistedEntityRecord>,
+        dirty_entity_regions: HashSet<[i32; 4]>,
+        force_full_entities: bool,
         players: Vec<PlayerRecord>,
         world_seed: u64,
         next_entity_id: u64,
@@ -3453,17 +3469,59 @@ fn start_autosave_thread(
                 if !should_save {
                     None
                 } else {
+                    let mut dirty_block_regions = guard.dirty_block_regions.clone();
+                    let (persisted_chunk_payloads, force_full_blocks) = if guard.world.any_dirty() {
+                        if dirty_block_regions.is_empty() {
+                            (
+                                guard
+                                    .world
+                                    .chunk_tree()
+                                    .collect_chunks()
+                                    .into_iter()
+                                    .map(|(key, payload)| (key.pos, payload))
+                                    .collect(),
+                                true,
+                            )
+                        } else {
+                            let mut dirty_chunks = HashMap::<[i32; 4], ChunkPayload>::new();
+                            for region in &dirty_block_regions {
+                                let bounds =
+                                    chunk_bounds_for_region(*region, guard.region_chunk_edge);
+                                for (key, payload) in
+                                    guard.world.chunk_tree().collect_chunks_in_bounds(bounds)
+                                {
+                                    dirty_chunks.insert(key.pos, payload);
+                                }
+                            }
+                            let mut chunk_payloads: Vec<([i32; 4], ChunkPayload)> =
+                                dirty_chunks.into_iter().collect();
+                            chunk_payloads.sort_unstable_by_key(|(pos, _)| *pos);
+                            (chunk_payloads, false)
+                        }
+                    } else {
+                        dirty_block_regions.clear();
+                        (Vec::new(), false)
+                    };
+
+                    let (persisted_entities, dirty_entity_regions, force_full_entities) =
+                        if guard.entities_dirty {
+                            let entities = collect_persisted_entities(&guard, now_ms);
+                            let dirty_regions =
+                                save_v4::all_entity_regions(&entities, guard.region_chunk_edge);
+                            (entities, dirty_regions, true)
+                        } else {
+                            (Vec::new(), HashSet::new(), false)
+                        };
+
                     Some(PendingAutosave {
                         now_ms,
                         base_world_kind: guard.world.base_kind(),
-                        persisted_chunk_payloads: guard
-                            .world
-                            .chunk_tree()
-                            .collect_chunks()
-                            .into_iter()
-                            .map(|(key, payload)| (key.pos, payload))
-                            .collect(),
-                        persisted_entities: collect_persisted_entities(&guard, now_ms),
+                        persisted_chunk_payloads,
+                        dirty_block_regions,
+                        force_full_blocks,
+                        persisted_entities,
+                        dirty_entity_regions,
+                        force_full_entities,
                         players,
                         world_seed: guard.world.world_seed(),
                         next_entity_id: guard.next_object_id,
@@ -3482,7 +3540,11 @@ fn start_autosave_thread(
                 now_ms,
                 base_world_kind,
                 persisted_chunk_payloads,
+                dirty_block_regions,
+                force_full_blocks,
                 persisted_entities,
+                dirty_entity_regions,
+                force_full_entities,
                 players,
                 world_seed,
                 next_entity_id,
@@ -3493,7 +3555,6 @@ fn start_autosave_thread(
             let entity_count = persisted_entities.len();
             let player_count = players.len();
             let save_start = Instant::now();
-            let empty_regions = HashSet::new();
             let save_result = save_v4::save_state_from_chunk_payloads(
                 &world_file,
                 SaveChunkPayloadRequest {
@@ -3503,10 +3564,10 @@ fn start_autosave_thread(
                     players: &players,
                     world_seed,
                     next_entity_id,
-                    dirty_block_regions: &empty_regions,
-                    dirty_entity_regions: &empty_regions,
-                    force_full_blocks: true,
-                    force_full_entities: true,
+                    dirty_block_regions: &dirty_block_regions,
+                    dirty_entity_regions: &dirty_entity_regions,
+                    force_full_blocks,
+                    force_full_entities,
                     player_entity_hints: None,
                     custom_global_payload: None,
                     disable_block_persistence: false,
@@ -4318,10 +4379,12 @@ fn initialize_state(
     let last_persisted_ms = loaded.manifest.last_modified_ms;
     let region_chunk_edge = save_v4::DEFAULT_REGION_CHUNK_EDGE.max(1);
     let runtime_world_seed = loaded.global.world_seed;
+    let base_world_kind = loaded.global.base_world_kind.to_runtime();
     let persisted_entities = loaded.entities;
     let persisted_players = loaded.players.players;
-    let mut initial_world = ServerWorldField::from_legacy_world(
-        loaded.world,
+    let mut initial_world = ServerWorldField::from_chunk_payloads(
+        base_world_kind,
+        loaded.world_chunk_payloads,
         runtime_world_seed,
         config.procgen_structures,
         HashSet::new(),

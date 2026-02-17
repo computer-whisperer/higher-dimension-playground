@@ -443,7 +443,7 @@ impl App {
                         .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
                         .hit_voxel
                     {
-                        let material = self.scene.world.get_voxel(x, y, z, w).0;
+                        let material = self.scene.get_voxel(x, y, z, w).0;
                         let clamped = material
                             .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
                         self.place_material = clamped;
@@ -582,7 +582,7 @@ impl App {
                 self.scene
                     .block_edit_targets(self.camera.position, look_dir, edit_reach);
             if let Some([x, y, z, w]) = waila_targets.hit_voxel {
-                let voxel = self.scene.world.get_voxel(x, y, z, w);
+                let voxel = self.scene.get_voxel(x, y, z, w);
                 if voxel.0 != 0 {
                     Some(materials::material_name(voxel.0).to_string())
                 } else {

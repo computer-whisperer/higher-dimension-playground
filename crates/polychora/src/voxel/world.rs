@@ -1,1 +1,1 @@
-pub use polychora::shared::voxel::{BaseWorldKind, VoxelWorld};
+pub use polychora::shared::voxel::BaseWorldKind;

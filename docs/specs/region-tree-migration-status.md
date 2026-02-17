@@ -17,12 +17,13 @@ This reflects current runtime code paths, not target intent.
 2. Multiplayer world transport is patch-only (`WorldRegionPatch` + `WorldRegionResyncRequest`) (`crates/polychora/src/shared/protocol.rs`).
 3. Per-player streamed cache is tree-based (`RegionTreeWorkingSet`) (`crates/polychora/src/server/region_tree_cache.rs`).
 4. Server stream planner queries `WorldField` and builds bounded tree patches (no legacy snapshot/chunk-batch protocol path).
+5. Client scene runtime world cache is tree-authoritative (`Scene.world_tree` + explicit chunk payload cache), not `RegionChunkWorld`-based (`crates/polychora/src/scene.rs`).
+6. Runtime v4 persistence path is chunk-payload/tree-based (`LoadedState.world_chunk_payloads`, `save_state_from_chunk_payloads`) (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
 
 ### Still hybrid (must be removed)
-1. `save_v4::load_state` materializes a `VoxelWorld` and returns it in `LoadedState.world` (`crates/polychora/src/save_v4.rs`).
-2. Server bootstrap still bridges through `ServerWorldField::from_legacy_world(loaded.world, ...)` (`crates/polychora/src/server/mod.rs`).
-3. `save_v4` public API still exposes `VoxelWorld` contracts (`SaveRequest { world: &VoxelWorld }`, `all_block_regions(world: &VoxelWorld, ...)`) (`crates/polychora/src/save_v4.rs`).
-4. Client applies region patches by writing chunk payloads into `scene.world` chunk storage; tree is not yet the sole client-side authority (`crates/polychora/src/app_multiplayer.rs`).
+1. `save_v4` still contains migration/testing helpers that accept `RegionChunkWorld`; they are now internal but still colocated with runtime persistence (`crates/polychora/src/save_v4.rs`).
+2. Client scene still stores both tree metadata and materialized explicit chunk payloads (`world_tree` + `world_chunks`) rather than a stricter single-structure cache contract (`crates/polychora/src/scene.rs`).
+3. v4 load path still materializes full world payload sets eagerly; save path still resolves full dirty-region payload vectors before write (not true streaming yet) (`crates/polychora/src/save_v4.rs`).
 
 ## What is explicitly disallowed going forward
 1. Adding any new `to_legacy_*` / `from_legacy_*` runtime bridge for world state.
@@ -68,9 +69,9 @@ Acceptance gate:
 1. Runtime world startup path has no v1/v2/v3 world-file dependency.
 
 ## Immediate blockers to resolve next
-1. Replace `save_v4::LoadedState.world: VoxelWorld` with tree-native loaded world representation.
-2. Remove server bootstrap bridge from loaded `VoxelWorld` into `ServerWorldField`.
-3. Move any remaining server autosave/world-region operations to tree-native persistence interfaces only.
+1. Split `save_v4` into clear runtime persistence vs migration-only entrypoints/modules so runtime cannot accidentally depend on legacy world helpers.
+2. Implement streaming-oriented world payload IO (avoid full eager materialization for load/save where possible).
+3. Decide and enforce client-side cache contract (`world_tree` sole authority with derivable chunk cache semantics).
 
 ## Verification checklist for “migration complete”
 1. `rg "from_legacy_world|to_legacy_world|SaveRequest \\{\\s*world: &'a VoxelWorld"` returns no runtime-path hits.

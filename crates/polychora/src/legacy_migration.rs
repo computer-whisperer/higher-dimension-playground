@@ -1,4 +1,5 @@
-use crate::shared::voxel::{load_world, save_world, ChunkPos, VoxelWorld};
+use crate::shared::legacy_world_io::{load_world, save_world};
+use crate::shared::voxel::{ChunkPos, RegionChunkWorld};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -22,7 +23,7 @@ pub fn validate_chunk_bounds(min_chunk: [i32; 4], max_chunk: [i32; 4]) -> Result
 }
 
 pub fn drop_overrides_outside_chunk_bounds(
-    world: &mut VoxelWorld,
+    world: &mut RegionChunkWorld,
     min_chunk: [i32; 4],
     max_chunk: [i32; 4],
 ) -> usize {

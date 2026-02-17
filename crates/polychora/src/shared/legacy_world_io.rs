@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
-use super::chunk::Chunk;
-use super::world::{BaseWorldKind, VoxelWorld};
-use super::{ChunkPos, VoxelType, CHUNK_VOLUME};
+use crate::shared::voxel::chunk::Chunk;
+use crate::shared::voxel::world::{BaseWorldKind, RegionChunkWorld};
+use crate::shared::voxel::{ChunkPos, VoxelType, CHUNK_VOLUME};
 
 const MAGIC: &[u8; 4] = b"V4DW";
 const VERSION_V1: u32 = 1;
@@ -17,7 +17,7 @@ const ENCODING_RAW: u8 = 2;
 const BASE_KIND_EMPTY: u8 = 0;
 const BASE_KIND_FLAT_FLOOR: u8 = 1;
 
-pub fn save_world<W: Write>(world: &VoxelWorld, writer: &mut W) -> io::Result<()> {
+pub fn save_world<W: Write>(world: &RegionChunkWorld, writer: &mut W) -> io::Result<()> {
     writer.write_all(MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
 
@@ -174,7 +174,7 @@ fn rle_encode(voxels: &[VoxelType; CHUNK_VOLUME]) -> Vec<(VoxelType, usize)> {
     runs
 }
 
-pub fn load_world<R: Read>(reader: &mut R) -> io::Result<VoxelWorld> {
+pub fn load_world<R: Read>(reader: &mut R) -> io::Result<RegionChunkWorld> {
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic)?;
     if &magic != MAGIC {
@@ -195,12 +195,12 @@ pub fn load_world<R: Read>(reader: &mut R) -> io::Result<VoxelWorld> {
     }
 }
 
-fn load_world_v1<R: Read>(reader: &mut R) -> io::Result<VoxelWorld> {
+fn load_world_v1<R: Read>(reader: &mut R) -> io::Result<RegionChunkWorld> {
     let mut buf4 = [0u8; 4];
     reader.read_exact(&mut buf4)?;
     let chunk_count = u32::from_le_bytes(buf4) as usize;
 
-    let mut world = VoxelWorld::new();
+    let mut world = RegionChunkWorld::new();
 
     for _ in 0..chunk_count {
         reader.read_exact(&mut buf4)?;
@@ -219,7 +219,7 @@ fn load_world_v1<R: Read>(reader: &mut R) -> io::Result<VoxelWorld> {
     Ok(world)
 }
 
-fn load_world_v2<R: Read>(reader: &mut R) -> io::Result<VoxelWorld> {
+fn load_world_v2<R: Read>(reader: &mut R) -> io::Result<RegionChunkWorld> {
     let base_kind = read_base_kind(reader)?;
 
     let mut buf4 = [0u8; 4];
@@ -234,7 +234,7 @@ fn load_world_v2<R: Read>(reader: &mut R) -> io::Result<VoxelWorld> {
         payloads.push(read_chunk(reader)?);
     }
 
-    let mut world = VoxelWorld::new_with_base(base_kind);
+    let mut world = RegionChunkWorld::new_with_base(base_kind);
     for _ in 0..override_count {
         reader.read_exact(&mut buf4)?;
         let x = i32::from_le_bytes(buf4);
@@ -340,7 +340,7 @@ fn read_chunk<R: Read>(reader: &mut R) -> io::Result<Chunk> {
 mod tests {
     use super::*;
 
-    fn save_world_v1_legacy<W: Write>(world: &VoxelWorld, writer: &mut W) -> io::Result<()> {
+    fn save_world_v1_legacy<W: Write>(world: &RegionChunkWorld, writer: &mut W) -> io::Result<()> {
         writer.write_all(MAGIC)?;
         writer.write_all(&VERSION_V1.to_le_bytes())?;
 
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn round_trip_empty_world() {
-        let world = VoxelWorld::new();
+        let world = RegionChunkWorld::new();
         let mut buf = Vec::new();
         save_world(&world, &mut buf).unwrap();
         let loaded = load_world(&mut &buf[..]).unwrap();
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn round_trip_uniform_chunk() {
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         let chunk = Chunk::new_filled(VoxelType(3));
         world.insert_chunk(ChunkPos::new(1, -2, 3, 0), chunk);
 
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn round_trip_mixed_chunk() {
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         let mut chunk = Chunk::new();
         chunk.set(0, 0, 0, 0, VoxelType(1));
         chunk.set(7, 7, 7, 7, VoxelType(5));
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn round_trip_flat_floor_base_with_overrides() {
-        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+        let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         });
 
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn load_v1_legacy_world() {
-        let mut world = VoxelWorld::new();
+        let mut world = RegionChunkWorld::new();
         let mut chunk = Chunk::new();
         chunk.set(1, 2, 3, 4, VoxelType(9));
         world.insert_chunk(ChunkPos::new(-1, 0, 2, 0), chunk);

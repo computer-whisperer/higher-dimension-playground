@@ -330,8 +330,7 @@ impl Scene {
         ];
 
         let mut required_chunks = Vec::new();
-        self.world
-            .gather_non_empty_chunks_in_bounds(min_chunk, max_chunk, &mut required_chunks);
+        self.world_gather_non_empty_chunks_in_bounds(min_chunk, max_chunk, &mut required_chunks);
         let mut required_keys: Vec<RuntimeChunkKey> = required_chunks
             .into_iter()
             .map(|chunk_pos| RuntimeChunkKey {
@@ -369,7 +368,7 @@ impl Scene {
                 || !self.voxel_chunk_payload_cache.contains_key(&key)
             {
                 if key.lod_level == VOXEL_LOD_LEVEL_NEAR {
-                    self.world.queue_chunk_refresh(key.chunk_pos);
+                    self.world_queue_chunk_update(key.chunk_pos);
                 } else {
                     self.queue_lod_chunk_update(key);
                 }
@@ -379,8 +378,7 @@ impl Scene {
 
     fn process_queued_voxel_payload_updates(&mut self) {
         let mut updated_chunks: Vec<RuntimeChunkKey> = self
-            .world
-            .drain_pending_chunk_updates()
+            .world_drain_pending_chunk_updates()
             .into_iter()
             .map(|chunk_pos| RuntimeChunkKey {
                 lod_level: VOXEL_LOD_LEVEL_NEAR,
@@ -400,7 +398,7 @@ impl Scene {
             }
 
             let chunk = if key.lod_level == VOXEL_LOD_LEVEL_NEAR {
-                self.world.chunk_at(key.chunk_pos)
+                self.world_chunk_at(key.chunk_pos)
             } else {
                 self.voxel_lod_chunks.get(&key)
             };
@@ -780,7 +778,7 @@ impl Scene {
             self.process_queued_voxel_payload_updates();
 
             // Check if there are still pending chunk updates
-            if self.world.drain_pending_chunk_updates().is_empty()
+            if self.world_drain_pending_chunk_updates().is_empty()
                 && self.voxel_pending_lod_chunk_updates.is_empty()
             {
                 break;

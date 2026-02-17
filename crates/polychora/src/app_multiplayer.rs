@@ -842,7 +842,7 @@ impl App {
             return;
         }
         let key = ChunkKey::from_chunk_pos(chunk_pos);
-        if let Some(chunk) = self.scene.world.chunks.get(&chunk_pos) {
+        if let Some(chunk) = self.scene.explicit_chunk(chunk_pos) {
             if chunk.is_empty() {
                 let _ = self.multiplayer_stream_tree_diag.remove_chunk(key);
             } else {
@@ -967,14 +967,7 @@ impl App {
             .saturating_add(1);
         let sample_cap = self.multiplayer_stream_tree_compare_diag_max_chunks.max(1);
 
-        let mut world_positions: Vec<[i32; 4]> = self
-            .scene
-            .world
-            .chunks
-            .iter()
-            .filter(|(_, chunk)| !chunk.is_empty())
-            .map(|(&chunk_pos, _)| [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w])
-            .collect();
+        let mut world_positions = self.scene.collect_non_empty_explicit_chunk_positions();
         world_positions.sort_unstable();
         let world_set: HashSet<[i32; 4]> = world_positions.iter().copied().collect();
 
@@ -1168,7 +1161,7 @@ impl App {
                 .collect();
 
         let mut current_chunks = Vec::new();
-        self.scene.world.gather_non_empty_chunks_in_bounds(
+        self.scene.gather_non_empty_chunks_in_bounds(
             patch.bounds.min,
             patch.bounds.max,
             &mut current_chunks,
@@ -1400,10 +1393,7 @@ impl App {
         }
 
         if let Some(client) = self.multiplayer.as_ref() {
-            client.send(MultiplayerClientMessage::SetVoxel {
-                position,
-                material,
-            });
+            client.send(MultiplayerClientMessage::SetVoxel { position, material });
         }
     }
 
