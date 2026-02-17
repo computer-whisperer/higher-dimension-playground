@@ -101,7 +101,7 @@ impl PersistedBaseWorldKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerEntityHint {
     pub player_id: u64,
     pub entity_id: Option<u64>,
@@ -125,7 +125,7 @@ pub struct PlayersPayload {
     pub players: Vec<PlayerRecord>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlayerRecord {
     pub player_id: u64,
     pub position: [f32; 4],
@@ -189,7 +189,7 @@ pub struct ChunkArrayBlob {
     pub default_palette_index: Option<u16>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PersistedEntityRecord {
     pub entity_id: u64,
     pub class: EntityClass,
@@ -260,6 +260,10 @@ struct SaveStateCommon<'a> {
     players: &'a [PlayerRecord],
     world_seed: u64,
     next_entity_id: u64,
+    dirty_block_regions: &'a HashSet<[i32; 4]>,
+    dirty_entity_regions: &'a HashSet<[i32; 4]>,
+    force_full_blocks: bool,
+    force_full_entities: bool,
     player_entity_hints: Option<Vec<PlayerEntityHint>>,
     custom_global_payload: Option<Vec<u8>>,
     disable_block_persistence: bool,
@@ -429,11 +433,6 @@ pub fn load_state(root: &Path) -> io::Result<LoadedState> {
 }
 
 pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResult> {
-    let _ = request.dirty_block_regions;
-    let _ = request.dirty_entity_regions;
-    let _ = request.force_full_blocks;
-    let _ = request.force_full_entities;
-
     let chunk_payloads: Vec<([i32; 4], FieldChunkPayload)> = request
         .world
         .chunks
@@ -455,6 +454,10 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
             players: request.players,
             world_seed: request.world_seed,
             next_entity_id: request.next_entity_id,
+            dirty_block_regions: request.dirty_block_regions,
+            dirty_entity_regions: request.dirty_entity_regions,
+            force_full_blocks: request.force_full_blocks,
+            force_full_entities: request.force_full_entities,
             player_entity_hints: request.player_entity_hints,
             custom_global_payload: request.custom_global_payload,
             disable_block_persistence: request.disable_block_persistence,
@@ -467,11 +470,6 @@ pub fn save_state_from_chunk_payloads(
     root: &Path,
     request: SaveChunkPayloadRequest<'_>,
 ) -> io::Result<SaveResult> {
-    let _ = request.dirty_block_regions;
-    let _ = request.dirty_entity_regions;
-    let _ = request.force_full_blocks;
-    let _ = request.force_full_entities;
-
     save_state_internal(
         root,
         request.base_world_kind,
@@ -481,6 +479,10 @@ pub fn save_state_from_chunk_payloads(
             players: request.players,
             world_seed: request.world_seed,
             next_entity_id: request.next_entity_id,
+            dirty_block_regions: request.dirty_block_regions,
+            dirty_entity_regions: request.dirty_entity_regions,
+            force_full_blocks: request.force_full_blocks,
+            force_full_entities: request.force_full_entities,
             player_entity_hints: request.player_entity_hints,
             custom_global_payload: request.custom_global_payload,
             disable_block_persistence: request.disable_block_persistence,
@@ -500,9 +502,18 @@ fn save_state_internal(
         mut manifest,
         global: loaded_global,
         index: loaded_index,
+        world: loaded_world,
+        entities: loaded_entities,
         ..
     } = loaded;
     let mut reuse_index = build_blob_reuse_index(root, &loaded_index)?;
+
+    let effective_chunk_payloads = resolve_world_chunk_payloads_for_save(
+        &loaded_world,
+        chunk_payloads,
+        common.dirty_block_regions,
+        common.force_full_blocks,
+    );
 
     let world_leaves = if common.disable_block_persistence {
         Vec::new()
@@ -511,17 +522,21 @@ fn save_state_internal(
             root,
             &mut manifest,
             &mut reuse_index,
-            chunk_payloads,
+            effective_chunk_payloads,
         )?
     };
 
+    let effective_entities = resolve_entities_for_save(
+        loaded_entities,
+        common.entities,
+        common.dirty_entity_regions,
+        common.force_full_entities,
+    );
+
     let mut entities_by_chunk = HashMap::<[i32; 4], Vec<PersistedEntityRecord>>::new();
-    for entity in common.entities {
+    for entity in effective_entities {
         let chunk = chunk_from_world_position(entity.position);
-        entities_by_chunk
-            .entry(chunk)
-            .or_default()
-            .push(entity.clone());
+        entities_by_chunk.entry(chunk).or_default().push(entity);
     }
     for entities in entities_by_chunk.values_mut() {
         entities.sort_unstable_by_key(|entity| entity.entity_id);
@@ -634,6 +649,120 @@ fn save_state_internal(
         saved_block_regions: world_leaves.len(),
         saved_entity_regions: entity_leaves.len(),
     })
+}
+
+fn resolve_world_chunk_payloads_for_save(
+    loaded_world: &VoxelWorld,
+    chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
+    dirty_block_regions: &HashSet<[i32; 4]>,
+    force_full_blocks: bool,
+) -> Vec<([i32; 4], FieldChunkPayload)> {
+    let normalized_current = normalize_chunk_payloads_latest_wins(chunk_payloads);
+    if force_full_blocks {
+        return normalized_current;
+    }
+
+    let mut merged = HashMap::<[i32; 4], FieldChunkPayload>::new();
+    for (&chunk_pos, chunk) in &loaded_world.chunks {
+        merged.insert(
+            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+            FieldChunkPayload::from_chunk_compact(chunk),
+        );
+    }
+    if dirty_block_regions.is_empty() {
+        let mut out: Vec<([i32; 4], FieldChunkPayload)> = merged.into_iter().collect();
+        out.sort_unstable_by_key(|(pos, _)| *pos);
+        return out;
+    }
+
+    merged.retain(|chunk_pos, _| {
+        !dirty_block_regions.contains(&region_from_chunk(*chunk_pos, DEFAULT_REGION_CHUNK_EDGE))
+    });
+    for (chunk_pos, payload) in normalized_current {
+        if dirty_block_regions.contains(&region_from_chunk(chunk_pos, DEFAULT_REGION_CHUNK_EDGE)) {
+            merged.insert(chunk_pos, payload);
+        }
+    }
+
+    let mut out: Vec<([i32; 4], FieldChunkPayload)> = merged.into_iter().collect();
+    out.sort_unstable_by_key(|(pos, _)| *pos);
+    out
+}
+
+fn normalize_chunk_payloads_latest_wins(
+    chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
+) -> Vec<([i32; 4], FieldChunkPayload)> {
+    let mut by_pos = HashMap::<[i32; 4], (u64, FieldChunkPayload)>::new();
+    for (idx, (chunk_pos, payload)) in chunk_payloads.into_iter().enumerate() {
+        let epoch = idx as u64;
+        match by_pos.entry(chunk_pos) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((epoch, payload));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let (current_epoch, current_payload) = entry.get_mut();
+                let incoming_wins = if epoch > *current_epoch {
+                    true
+                } else if epoch < *current_epoch {
+                    false
+                } else {
+                    // Equal epoch ties are broken by canonical payload bytes.
+                    let incoming_key = postcard::to_stdvec(&payload).unwrap_or_default();
+                    let current_key = postcard::to_stdvec(current_payload).unwrap_or_default();
+                    incoming_key >= current_key
+                };
+                if incoming_wins {
+                    *current_epoch = epoch;
+                    *current_payload = payload;
+                }
+            }
+        }
+    }
+    let mut out: Vec<([i32; 4], FieldChunkPayload)> = by_pos
+        .into_iter()
+        .map(|(chunk_pos, (_, payload))| (chunk_pos, payload))
+        .collect();
+    out.sort_unstable_by_key(|(pos, _)| *pos);
+    out
+}
+
+fn resolve_entities_for_save(
+    loaded_entities: Vec<PersistedEntityRecord>,
+    current_entities: &[PersistedEntityRecord],
+    dirty_entity_regions: &HashSet<[i32; 4]>,
+    force_full_entities: bool,
+) -> Vec<PersistedEntityRecord> {
+    if force_full_entities {
+        let mut out = current_entities.to_vec();
+        out.sort_unstable_by_key(|entity| entity.entity_id);
+        return out;
+    }
+
+    if dirty_entity_regions.is_empty() {
+        let mut out = loaded_entities;
+        out.sort_unstable_by_key(|entity| entity.entity_id);
+        return out;
+    }
+
+    let mut merged = HashMap::<u64, PersistedEntityRecord>::new();
+    for entity in loaded_entities {
+        let chunk = chunk_from_world_position(entity.position);
+        let region = region_from_chunk(chunk, DEFAULT_REGION_CHUNK_EDGE);
+        if !dirty_entity_regions.contains(&region) {
+            merged.insert(entity.entity_id, entity);
+        }
+    }
+    for entity in current_entities {
+        let chunk = chunk_from_world_position(entity.position);
+        let region = region_from_chunk(chunk, DEFAULT_REGION_CHUNK_EDGE);
+        if dirty_entity_regions.contains(&region) {
+            merged.insert(entity.entity_id, entity.clone());
+        }
+    }
+
+    let mut out: Vec<PersistedEntityRecord> = merged.into_values().collect();
+    out.sort_unstable_by_key(|entity| entity.entity_id);
+    out
 }
 
 fn build_world_leaf_descriptors_from_payloads(
@@ -933,8 +1062,12 @@ pub fn migrate_v3_save_to_v4(
     let region_chunk_edge = manifest.limits.region_chunk_edge.max(1);
     let block_regions = all_block_regions(&world, region_chunk_edge);
     let entity_regions = all_entity_regions(&entities, region_chunk_edge);
+    let expected_world_seed = global.world_seed;
+    let expected_next_entity_id = global.next_entity_id;
+    let expected_custom_global_payload = global.custom_global_payload.clone();
+    let expected_player_entity_hints = player_entity_hints.clone();
 
-    save_state(
+    let save_result = save_state(
         output_root,
         SaveRequest {
             world: &world,
@@ -951,7 +1084,124 @@ pub fn migrate_v3_save_to_v4(
             disable_block_persistence: false,
             now_ms,
         },
-    )
+    )?;
+
+    verify_v3_migration_equivalence(
+        output_root,
+        &world,
+        &entities,
+        &players,
+        expected_world_seed,
+        expected_next_entity_id,
+        &expected_player_entity_hints,
+        &expected_custom_global_payload,
+    )?;
+
+    Ok(save_result)
+}
+
+fn verify_v3_migration_equivalence(
+    output_root: &Path,
+    expected_world: &VoxelWorld,
+    expected_entities: &[PersistedEntityRecord],
+    expected_players: &[PlayerRecord],
+    expected_world_seed: u64,
+    expected_next_entity_id: u64,
+    expected_player_entity_hints: &[PlayerEntityHint],
+    expected_custom_global_payload: &[u8],
+) -> io::Result<()> {
+    let loaded = load_state(output_root)?;
+
+    if loaded.global.world_seed != expected_world_seed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "v3->v4 migration mismatch: world_seed expected={} got={}",
+                expected_world_seed, loaded.global.world_seed
+            ),
+        ));
+    }
+    if loaded.global.next_entity_id != expected_next_entity_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "v3->v4 migration mismatch: next_entity_id expected={} got={}",
+                expected_next_entity_id, loaded.global.next_entity_id
+            ),
+        ));
+    }
+    if loaded.global.player_entity_hints != expected_player_entity_hints {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "v3->v4 migration mismatch: player_entity_hints differ",
+        ));
+    }
+    if loaded.global.custom_global_payload != expected_custom_global_payload {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "v3->v4 migration mismatch: custom_global_payload differs",
+        ));
+    }
+
+    let expected_world_chunks = canonical_world_chunk_payloads(expected_world);
+    let loaded_world_chunks = canonical_world_chunk_payloads(&loaded.world);
+    if expected_world_chunks != loaded_world_chunks {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "v3->v4 migration mismatch: world chunk payloads differ (expected={} got={})",
+                expected_world_chunks.len(),
+                loaded_world_chunks.len()
+            ),
+        ));
+    }
+
+    let mut expected_entities_sorted = expected_entities.to_vec();
+    expected_entities_sorted.sort_unstable_by_key(|entity| entity.entity_id);
+    let mut loaded_entities_sorted = loaded.entities.clone();
+    loaded_entities_sorted.sort_unstable_by_key(|entity| entity.entity_id);
+    if expected_entities_sorted != loaded_entities_sorted {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "v3->v4 migration mismatch: entities differ (expected={} got={})",
+                expected_entities_sorted.len(),
+                loaded_entities_sorted.len()
+            ),
+        ));
+    }
+
+    let mut expected_players_sorted = expected_players.to_vec();
+    expected_players_sorted.sort_unstable_by_key(|player| player.player_id);
+    let mut loaded_players_sorted = loaded.players.players;
+    loaded_players_sorted.sort_unstable_by_key(|player| player.player_id);
+    if expected_players_sorted != loaded_players_sorted {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "v3->v4 migration mismatch: players differ (expected={} got={})",
+                expected_players_sorted.len(),
+                loaded_players_sorted.len()
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn canonical_world_chunk_payloads(world: &VoxelWorld) -> Vec<([i32; 4], FieldChunkPayload)> {
+    let mut out: Vec<([i32; 4], FieldChunkPayload)> = world
+        .chunks
+        .iter()
+        .map(|(&chunk_pos, chunk)| {
+            (
+                [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+                FieldChunkPayload::from_chunk_compact(chunk),
+            )
+        })
+        .collect();
+    out.sort_unstable_by_key(|(pos, _)| *pos);
+    out
 }
 
 fn init_empty_save_root(
@@ -1675,6 +1925,23 @@ fn read_blob_payload(root: &Path, blob: &BlobRef) -> io::Result<Vec<u8>> {
             "invalid data file magic",
         ));
     }
+    let data_version = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    if data_version != DATA_FILE_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported data file version {data_version}"),
+        ));
+    }
+    let header_file_id = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    if header_file_id != blob.data_file_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "data file id mismatch: header={} blob_ref={}",
+                header_file_id, blob.data_file_id
+            ),
+        ));
+    }
 
     file.seek(SeekFrom::Start(blob.record_offset))?;
     let mut record_header = [0u8; 15];
@@ -1704,6 +1971,19 @@ fn read_blob_payload(root: &Path, blob: &BlobRef) -> io::Result<Vec<u8>> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "blob type/version mismatch",
+        ));
+    }
+    let expected_record_len = u32::try_from(payload_len)
+        .ok()
+        .and_then(|len| RECORD_HEADER_LEN.checked_add(len))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blob record length overflow"))?;
+    if expected_record_len != blob.record_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "blob record length mismatch: expected {} got {}",
+                blob.record_len, expected_record_len
+            ),
         ));
     }
 
@@ -2229,6 +2509,23 @@ mod tests {
             .sum()
     }
 
+    fn test_entity(entity_id: u64, position: [f32; 4], payload: Vec<u8>) -> PersistedEntityRecord {
+        PersistedEntityRecord {
+            entity_id,
+            class: EntityClass::Accent,
+            kind: EntityKind::TestRotor,
+            position,
+            orientation: [0.0, 0.0, 1.0, 0.0],
+            velocity: [0.0, 0.0, 0.0, 0.0],
+            scale: 1.0,
+            material: 7,
+            display_name: None,
+            tags: vec!["persist".to_string()],
+            payload,
+            last_saved_ms: now_unix_ms(),
+        }
+    }
+
     #[test]
     fn save_and_load_roundtrip_preserves_world_entities_players() {
         let root = test_root("roundtrip");
@@ -2293,6 +2590,198 @@ mod tests {
         assert_eq!(loaded.entities.len(), 1);
         assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), VoxelType(3));
         assert_eq!(loaded.world.get_voxel(40, 2, -5, 17), VoxelType(7));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_state_respects_dirty_block_regions_when_not_forced() {
+        let root = test_root("dirty-block-regions");
+        let now_ms = now_unix_ms();
+        let chunk_size = CHUNK_SIZE as i32;
+        let empty_regions = HashSet::new();
+
+        let mut world = VoxelWorld::new();
+        world.set_voxel(1, 1, 1, 1, VoxelType(2));
+        world.set_voxel(chunk_size * 10 + 1, 1, 1, 1, VoxelType(3));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("initial save");
+
+        world.set_voxel(1, 1, 1, 1, VoxelType(4));
+        world.set_voxel(chunk_size * 10 + 1, 1, 1, 1, VoxelType(9));
+
+        let mut dirty_blocks = HashSet::new();
+        dirty_blocks.insert(region_from_chunk([0, 0, 0, 0], DEFAULT_REGION_CHUNK_EDGE));
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 1,
+                dirty_block_regions: &dirty_blocks,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: false,
+                force_full_entities: false,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms: now_ms.saturating_add(1),
+            },
+        )
+        .expect("incremental save");
+
+        let loaded = load_state(&root).expect("load state");
+        assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), VoxelType(4));
+        assert_eq!(
+            loaded.world.get_voxel(chunk_size * 10 + 1, 1, 1, 1),
+            VoxelType(3)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_state_respects_dirty_entity_regions_when_not_forced() {
+        let root = test_root("dirty-entity-regions");
+        let now_ms = now_unix_ms();
+        let chunk_size = CHUNK_SIZE as f32;
+        let empty_regions = HashSet::new();
+        let world = VoxelWorld::new();
+
+        let entity_a_chunk = [0, 0, 0, 0];
+        let entity_b_chunk = [20, 0, 0, 0];
+        let entity_a_pos = [1.0, 1.0, 1.0, 1.0];
+        let entity_b_pos = [chunk_size * 20.0 + 1.0, 1.0, 1.0, 1.0];
+        let entities_initial = vec![
+            test_entity(1, entity_a_pos, vec![1]),
+            test_entity(2, entity_b_pos, vec![2]),
+        ];
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &entities_initial,
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 3,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("initial save");
+
+        let entities_next = vec![
+            test_entity(1, entity_a_pos, vec![9]),
+            test_entity(2, entity_b_pos, vec![8]),
+        ];
+        let mut dirty_entities = HashSet::new();
+        dirty_entities.insert(region_from_chunk(entity_a_chunk, DEFAULT_REGION_CHUNK_EDGE));
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &entities_next,
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 3,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &dirty_entities,
+                force_full_blocks: false,
+                force_full_entities: false,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms: now_ms.saturating_add(1),
+            },
+        )
+        .expect("incremental save");
+
+        let loaded = load_state(&root).expect("load state");
+        let mut loaded_entities = loaded.entities;
+        loaded_entities.sort_unstable_by_key(|entity| entity.entity_id);
+        assert_eq!(loaded_entities.len(), 2);
+        assert_eq!(loaded_entities[0].entity_id, 1);
+        assert_eq!(loaded_entities[0].payload, vec![9]);
+        assert_eq!(loaded_entities[1].entity_id, 2);
+        assert_eq!(loaded_entities[1].payload, vec![2]);
+        assert_eq!(
+            region_from_chunk(
+                chunk_from_world_position(loaded_entities[1].position),
+                DEFAULT_REGION_CHUNK_EDGE,
+            ),
+            region_from_chunk(entity_b_chunk, DEFAULT_REGION_CHUNK_EDGE)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_state_from_chunk_payloads_duplicate_chunk_latest_wins() {
+        let root = test_root("chunk-payload-latest-wins");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let chunk_pos = [2, 0, 0, 0];
+        let chunk_size = CHUNK_SIZE as i32;
+
+        let save_result = save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: vec![
+                    (chunk_pos, FieldChunkPayload::Uniform(3)),
+                    (chunk_pos, FieldChunkPayload::Uniform(9)),
+                ],
+                entities: &[],
+                players: &[],
+                world_seed: 99,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+        assert_eq!(save_result.generation, 1);
+
+        let loaded = load_state(&root).expect("load state");
+        assert_eq!(
+            loaded
+                .world
+                .get_voxel(chunk_pos[0] * chunk_size + 1, 1, 1, 1),
+            VoxelType(9)
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2891,6 +3380,58 @@ mod tests {
         let err = load_state(&root).expect_err("corrupt blob should fail load");
         assert!(
             err.to_string().contains("blob payload checksum mismatch"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_state_rejects_corrupt_data_file_header() {
+        let root = test_root("corrupt-data-header");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let mut world = VoxelWorld::new();
+        world.set_voxel(1, 1, 1, 1, VoxelType(7));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 7,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+
+        let manifest = load_manifest(&root).expect("manifest");
+        let index = read_index_file(root.join(&manifest.index_file)).expect("index");
+        let chunk_array_refs = collect_world_chunk_array_refs(&index);
+        assert!(!chunk_array_refs.is_empty(), "expected chunk-array refs");
+        let target = &chunk_array_refs[0];
+
+        let data_path = data_file_path(&root, target.data_file_id);
+        let mut bytes = std::fs::read(&data_path).expect("read data file");
+        assert!(
+            bytes.len() >= 8,
+            "data header should contain version bytes at offset 4..8"
+        );
+        bytes[4] ^= 0x01;
+        std::fs::write(&data_path, bytes).expect("rewrite tampered data file header");
+
+        let err = load_state(&root).expect_err("corrupt data header should fail load");
+        assert!(
+            err.to_string().contains("unsupported data file version"),
             "unexpected error: {err}"
         );
 
