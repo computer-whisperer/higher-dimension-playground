@@ -21,12 +21,6 @@ impl App {
                     if ui.button("Resume").clicked() {
                         *close_menu = true;
                     }
-                    if ui.button("Save World").clicked() {
-                        self.save_world();
-                    }
-                    if ui.button("Load World").clicked() {
-                        self.load_world();
-                    }
                     if ui.button("Controls").clicked() {
                         self.controls_dialog_open = !self.controls_dialog_open;
                     }
@@ -676,24 +670,6 @@ impl App {
 
                         ui.label(egui::RichText::new("`").strong());
                         ui.label("Toggle developer console");
-                        ui.end_row();
-                    });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                ui.heading("World");
-                egui::Grid::new("controls_world")
-                    .num_columns(2)
-                    .spacing([20.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("F5").strong());
-                        ui.label("Save world");
-                        ui.end_row();
-
-                        ui.label(egui::RichText::new("F9").strong());
-                        ui.label("Load world");
                         ui.end_row();
                     });
             });

@@ -86,13 +86,6 @@ impl App {
                 self.toggle_vte_integral_log_merge();
             }
 
-            if self.input.take_save_world() {
-                self.save_world();
-            }
-            if self.input.take_load_world() {
-                self.load_world();
-            }
-
             // Scroll wheel
             let scroll_steps = self.input.take_scroll_steps();
             if scroll_steps != 0 {

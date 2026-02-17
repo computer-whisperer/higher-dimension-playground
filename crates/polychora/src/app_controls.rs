@@ -106,34 +106,6 @@ impl App {
         }
     }
 
-    pub(super) fn save_world(&mut self) {
-        match self.scene.save_world_to_path(&self.world_file) {
-            Ok(chunks) => eprintln!(
-                "Saved world to {} ({} non-empty chunks)",
-                self.world_file.display(),
-                chunks
-            ),
-            Err(err) => eprintln!(
-                "Failed to save world to {}: {err}",
-                self.world_file.display()
-            ),
-        }
-    }
-
-    pub(super) fn load_world(&mut self) {
-        match self.scene.load_world_from_path(&self.world_file) {
-            Ok(chunks) => eprintln!(
-                "Loaded world from {} ({} non-empty chunks)",
-                self.world_file.display(),
-                chunks
-            ),
-            Err(err) => eprintln!(
-                "Failed to load world from {}: {err}",
-                self.world_file.display()
-            ),
-        }
-    }
-
     pub(super) fn toggle_vte_non_voxel_instances(&mut self) {
         if let Some(state) = self.vte_sweep_state {
             eprintln!(
@@ -218,8 +190,6 @@ impl App {
         self.input.take_vte_y_slice_lookup_cache_toggle();
         self.input.take_vte_integral_sky_emissive_toggle();
         self.input.take_vte_integral_log_merge_toggle();
-        self.input.take_save_world();
-        self.input.take_load_world();
         self.input.take_scroll_steps();
         self.input.take_fly_toggle();
         self.input.take_sprint_toggle();
@@ -258,22 +228,6 @@ impl App {
             KeyCode::Digit7 => self.hotbar_selected_index = 6,
             KeyCode::Digit8 => self.hotbar_selected_index = 7,
             KeyCode::Digit9 => self.hotbar_selected_index = 8,
-            KeyCode::F5 => {
-                // Save world
-                if let Err(e) = self.scene.save_world_to_path(&self.world_file) {
-                    eprintln!("Failed to save world: {}", e);
-                } else {
-                    eprintln!("Saved world to {}", self.world_file.display());
-                }
-            }
-            KeyCode::F9 => {
-                // Load world
-                if let Err(e) = self.scene.load_world_from_path(&self.world_file) {
-                    eprintln!("Failed to load world: {}", e);
-                } else {
-                    eprintln!("Loaded world from {}", self.world_file.display());
-                }
-            }
             KeyCode::F12 => {
                 // Screenshot will be handled by setting the flag
             }

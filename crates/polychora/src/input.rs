@@ -120,8 +120,6 @@ pub struct InputState {
     place_material_prev_requested: bool,
     place_material_next_requested: bool,
     place_material_digit_requested: Option<u8>,
-    save_world_requested: bool,
-    load_world_requested: bool,
     mouse_back_held: bool,
     mouse_forward_held: bool,
     scroll_accumulated: f32,
@@ -170,8 +168,6 @@ impl InputState {
             place_material_prev_requested: false,
             place_material_next_requested: false,
             place_material_digit_requested: None,
-            save_world_requested: false,
-            load_world_requested: false,
             mouse_back_held: false,
             mouse_forward_held: false,
             scroll_accumulated: 0.0,
@@ -232,16 +228,6 @@ impl InputState {
                 KeyCode::F12 => {
                     if pressed {
                         self.screenshot_requested = true;
-                    }
-                }
-                KeyCode::F5 => {
-                    if pressed {
-                        self.save_world_requested = true;
-                    }
-                }
-                KeyCode::F9 => {
-                    if pressed {
-                        self.load_world_requested = true;
                     }
                 }
                 KeyCode::BracketLeft => {
@@ -543,18 +529,6 @@ impl InputState {
 
     pub fn take_place_material_digit(&mut self) -> Option<u8> {
         self.place_material_digit_requested.take()
-    }
-
-    pub fn take_save_world(&mut self) -> bool {
-        let v = self.save_world_requested;
-        self.save_world_requested = false;
-        v
-    }
-
-    pub fn take_load_world(&mut self) -> bool {
-        let v = self.load_world_requested;
-        self.load_world_requested = false;
-        v
     }
 
     pub fn take_scroll_steps(&mut self) -> i32 {

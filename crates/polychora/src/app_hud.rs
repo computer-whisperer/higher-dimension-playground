@@ -194,7 +194,6 @@ impl App {
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
-                 world:F5 save, F9 load\n\
                  vte:F6 nonvox:{} F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 self.control_scheme.label(),
@@ -240,7 +239,6 @@ impl App {
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
-                 world:F5 save, F9 load\n\
                  vte:F6 nonvox:{} F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 pair.label(),

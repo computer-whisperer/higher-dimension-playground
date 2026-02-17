@@ -5,10 +5,7 @@ use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VTE_MAX_CHUNKS,
 };
-use polychora::save_v3;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io;
-use std::path::Path;
 
 mod voxel_runtime;
 
@@ -215,123 +212,6 @@ impl Scene {
             total_voxels
         );
         scene
-    }
-
-    pub fn replace_world(&mut self, world: crate::voxel::world::VoxelWorld) {
-        self.world = world;
-        self.voxel_lod_chunks.clear();
-        self.voxel_pending_lod_chunk_updates.clear();
-        self.voxel_pending_lod_chunk_update_set.clear();
-        self.voxel_chunk_payload_cache.clear();
-        self.voxel_chunk_payloads.clear();
-        self.voxel_chunk_payload_free_ids.clear();
-        self.voxel_chunk_payload_hash_buckets.clear();
-        self.voxel_payload_slot_to_payload.clear();
-        self.voxel_payload_free_slots.clear();
-        self.voxel_pending_payload_uploads.clear();
-        self.voxel_pending_payload_upload_set.clear();
-        self.voxel_active_chunks.clear();
-        self.voxel_active_chunk_indices.clear();
-        self.voxel_world_revision = 0;
-        self.voxel_visibility_generation = 0;
-        self.voxel_cached_visibility_camera_chunk = None;
-        self.voxel_cached_visibility_world_revision = 0;
-        self.voxel_payload_slot_overflow_logged = false;
-        self.voxel_frame_data.metadata_generation = 0;
-        self.voxel_frame_data.chunk_headers.clear();
-        self.voxel_frame_data.payload_update_slots.clear();
-        self.voxel_frame_data.occupancy_words.clear();
-        self.voxel_frame_data.material_words.clear();
-        self.voxel_frame_data.macro_words.clear();
-        self.voxel_frame_data.visible_chunk_indices.clear();
-        self.voxel_frame_data.y_slice_bounds.clear();
-        self.voxel_frame_data.y_slice_lookup_entries.clear();
-        self.rebuild_surface("Voxel surface (loaded)");
-    }
-
-    pub fn save_world_to_path(&self, path: &Path) -> io::Result<usize> {
-        if path.exists() && path.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "legacy .v4dw world file '{}' is unsupported; migrate to a v3 save root directory",
-                    path.display()
-                ),
-            ));
-        }
-
-        if path.exists() && path.is_dir() && !save_v3::is_v3_save_root(path) {
-            let mut entries = std::fs::read_dir(path)?;
-            if entries.next().is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "directory '{}' is not a v3 save root (missing manifest.json)",
-                        path.display()
-                    ),
-                ));
-            }
-        }
-
-        let mut persisted_entities = Vec::new();
-        let mut persisted_players = Vec::new();
-        let mut world_seed = 1337u64;
-        let mut next_entity_id = 1u64;
-        if save_v3::is_v3_save_root(path) {
-            let loaded = save_v3::load_state(path)?;
-            world_seed = loaded.global.world_seed;
-            next_entity_id = loaded.global.next_entity_id;
-            persisted_entities = loaded.entities;
-            persisted_players = loaded.players.players;
-        }
-
-        let empty_regions = HashSet::new();
-        let _ = save_v3::save_state(
-            path,
-            save_v3::SaveRequest {
-                world: &self.world,
-                entities: &persisted_entities,
-                players: &persisted_players,
-                world_seed,
-                next_entity_id,
-                dirty_block_regions: &empty_regions,
-                dirty_entity_regions: &empty_regions,
-                force_full_blocks: true,
-                force_full_entities: true,
-                custom_global_payload: None,
-                disable_block_persistence: false,
-                now_ms: save_v3::now_unix_ms(),
-            },
-        )?;
-
-        Ok(self
-            .world
-            .chunks
-            .values()
-            .filter(|chunk| !chunk.is_empty())
-            .count())
-    }
-
-    pub fn load_world_from_path(&mut self, path: &Path) -> io::Result<usize> {
-        if path.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "legacy .v4dw world file '{}' is unsupported; migrate to a v3 save root directory",
-                    path.display()
-                ),
-            ));
-        }
-
-        let loaded = save_v3::load_state(path)?;
-        let world = loaded.world;
-        let non_empty_chunks = world
-            .chunks
-            .values()
-            .filter(|chunk| !chunk.is_empty())
-            .count();
-        self.replace_world(world);
-        Ok(non_empty_chunks)
     }
 
     fn queue_lod_chunk_update(&mut self, key: RuntimeChunkKey) {

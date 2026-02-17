@@ -798,16 +798,11 @@ fn main() {
     } else {
         args.scene.to_scene_preset()
     };
-    let mut scene = Scene::new(scene_preset);
+    let scene = Scene::new(scene_preset);
     if args.load_world && !start_with_integrated_singleplayer {
-        match scene.load_world_from_path(&world_file) {
-            Ok(chunks) => eprintln!(
-                "Loaded world from {} ({} non-empty chunks)",
-                world_file.display(),
-                chunks
-            ),
-            Err(err) => eprintln!("Failed to load world from {}: {err}", world_file.display()),
-        }
+        eprintln!(
+            "--load-world is only supported through the integrated server path; skipping client-side world file load."
+        );
     }
 
     let multiplayer = if let Some(server) = args.server.as_ref() {

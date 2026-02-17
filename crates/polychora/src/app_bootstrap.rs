@@ -26,8 +26,6 @@ fn parse_keycode(key: &str) -> Option<KeyCode> {
         "8" => Some(KeyCode::Digit8),
         "9" => Some(KeyCode::Digit9),
         "0" => Some(KeyCode::Digit0),
-        "f5" => Some(KeyCode::F5),
-        "f9" => Some(KeyCode::F9),
         "f12" => Some(KeyCode::F12),
         "enter" => Some(KeyCode::Enter),
         "up" => Some(KeyCode::ArrowUp),
@@ -81,12 +79,9 @@ pub(super) fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
 
     let mut scene = Scene::new(scene_preset);
     if args.load_world {
-        if let Err(err) = scene.load_world_from_path(&args.world_file) {
-            eprintln!(
-                "Failed to load world from {}: {err}",
-                args.world_file.display()
-            );
-        }
+        eprintln!(
+            "--load-world is ignored for client-side CPU render; run the integrated server to load world data."
+        );
     }
     let mut camera = Camera4D::new();
 
