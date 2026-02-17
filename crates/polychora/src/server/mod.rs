@@ -2443,6 +2443,37 @@ fn collect_region_clocks_in_chunk_bounds(
     out
 }
 
+fn region_clock_map_changed_in_chunk_bounds(
+    current_region_clocks: &RegionClockMap,
+    previous_region_clocks: &RegionClockMap,
+    chunk_bounds: Aabb4i,
+) -> bool {
+    if !chunk_bounds.is_valid() {
+        return false;
+    }
+    let region_bounds = region_bounds_for_chunk_bounds(chunk_bounds);
+    for rw in region_bounds.min[3]..=region_bounds.max[3] {
+        for rz in region_bounds.min[2]..=region_bounds.max[2] {
+            for ry in region_bounds.min[1]..=region_bounds.max[1] {
+                for rx in region_bounds.min[0]..=region_bounds.max[0] {
+                    let region_id = RegionId {
+                        x: rx,
+                        y: ry,
+                        z: rz,
+                        w: rw,
+                    };
+                    let current_clock = *current_region_clocks.get(&region_id).unwrap_or(&0);
+                    let previous_clock = *previous_region_clocks.get(&region_id).unwrap_or(&0);
+                    if current_clock != previous_clock {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn region_clock_payloads_from_map(clocks: &RegionClockMap) -> Vec<RegionClockPayload> {
     let mut out: Vec<RegionClockPayload> = clocks
         .iter()
@@ -2977,79 +3008,92 @@ fn sync_streamed_chunks_for_client(
     let update = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
-        let current_region_clocks =
-            collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
-        let mut should_emit_stream_patch = false;
-        let should_sync = match guard.players.get_mut(&client_id) {
+        let should_sync = match guard.players.get(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
-                let world_changed = player.last_stream_region_clocks != current_region_clocks;
-                if force || changed || world_changed {
-                    should_emit_stream_patch = emit_region_patch;
-                    player.last_stream_center_chunk = Some(center_chunk);
-                    player.last_stream_region_clocks = current_region_clocks.clone();
-                    true
-                } else {
-                    false
-                }
+                let world_changed = region_clock_map_changed_in_chunk_bounds(
+                    &guard.region_clocks,
+                    &player.last_stream_region_clocks,
+                    near_bounds,
+                );
+                force || changed || world_changed
             }
             None => false,
         };
 
         if should_sync {
-            let update = plan_stream_window_update(
-                &mut guard,
-                client_id,
-                center_chunk,
-                near_chunk_radius,
-                mid_chunk_radius,
-                far_chunk_radius,
-            );
-            update.map(|(revision, loads, unloads)| {
-                let mut region_patches = Vec::new();
-                let mut patch_fallback_to_chunks = false;
-                let patch_bounds = chunk_bounds_for_stream_delta(&loads, &unloads);
+            let current_region_clocks =
+                collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
+            let should_emit_stream_patch = emit_region_patch;
+            let tracked = if let Some(player) = guard.players.get_mut(&client_id) {
+                player.last_stream_center_chunk = Some(center_chunk);
+                player.last_stream_region_clocks = current_region_clocks.clone();
+                true
+            } else {
+                false
+            };
 
-                if should_emit_stream_patch {
-                    let (known_before, mut next_patch_seq) = {
-                        let Some(player) = guard.players.get(&client_id) else {
-                            return (
-                                revision,
-                                loads,
-                                unloads,
-                                region_clock_payloads_from_map(&current_region_clocks),
-                                region_patches,
-                                true,
-                            );
+            if !tracked {
+                None
+            } else {
+                let update = plan_stream_window_update(
+                    &mut guard,
+                    client_id,
+                    center_chunk,
+                    near_chunk_radius,
+                    mid_chunk_radius,
+                    far_chunk_radius,
+                );
+                update.map(|(revision, loads, unloads)| {
+                    let mut region_patches = Vec::new();
+                    let mut patch_fallback_to_chunks = false;
+                    let patch_bounds = chunk_bounds_for_stream_delta(&loads, &unloads);
+
+                    if should_emit_stream_patch {
+                        let (known_before, mut next_patch_seq) = {
+                            let Some(player) = guard.players.get(&client_id) else {
+                                return (
+                                    revision,
+                                    loads,
+                                    unloads,
+                                    region_clock_payloads_from_map(&current_region_clocks),
+                                    region_patches,
+                                    true,
+                                );
+                            };
+                            (
+                                player.known_region_clocks.clone(),
+                                player.next_stream_patch_seq,
+                            )
                         };
-                        (
-                            player.known_region_clocks.clone(),
-                            player.next_stream_patch_seq,
-                        )
-                    };
 
-                    if let Some(patch_bounds) = patch_bounds {
-                        match build_region_patches_for_bounds(
-                            &guard.world,
-                            patch_bounds,
-                            &current_region_clocks,
-                            &known_before,
-                            &mut next_patch_seq,
-                        ) {
-                            Some((patches, known_after)) => {
-                                region_patches = patches;
-                                if let Some(player) = guard.players.get_mut(&client_id) {
-                                    player.known_region_clocks = known_after;
-                                    player.next_stream_patch_seq = next_patch_seq;
-                                }
-                            }
-                            None => {
-                                patch_fallback_to_chunks = true;
-                                if let Some(player) = guard.players.get_mut(&client_id) {
-                                    for (region_id, clock) in &current_region_clocks {
-                                        player.known_region_clocks.insert(*region_id, *clock);
+                        if let Some(patch_bounds) = patch_bounds {
+                            match build_region_patches_for_bounds(
+                                &guard.world,
+                                patch_bounds,
+                                &current_region_clocks,
+                                &known_before,
+                                &mut next_patch_seq,
+                            ) {
+                                Some((patches, known_after)) => {
+                                    region_patches = patches;
+                                    if let Some(player) = guard.players.get_mut(&client_id) {
+                                        player.known_region_clocks = known_after;
+                                        player.next_stream_patch_seq = next_patch_seq;
                                     }
                                 }
+                                None => {
+                                    patch_fallback_to_chunks = true;
+                                    if let Some(player) = guard.players.get_mut(&client_id) {
+                                        for (region_id, clock) in &current_region_clocks {
+                                            player.known_region_clocks.insert(*region_id, *clock);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let Some(player) = guard.players.get_mut(&client_id) {
+                            for (region_id, clock) in &current_region_clocks {
+                                player.known_region_clocks.insert(*region_id, *clock);
                             }
                         }
                     } else if let Some(player) = guard.players.get_mut(&client_id) {
@@ -3057,20 +3101,16 @@ fn sync_streamed_chunks_for_client(
                             player.known_region_clocks.insert(*region_id, *clock);
                         }
                     }
-                } else if let Some(player) = guard.players.get_mut(&client_id) {
-                    for (region_id, clock) in &current_region_clocks {
-                        player.known_region_clocks.insert(*region_id, *clock);
-                    }
-                }
-                (
-                    revision,
-                    loads,
-                    unloads,
-                    region_clock_payloads_from_map(&current_region_clocks),
-                    region_patches,
-                    patch_fallback_to_chunks,
-                )
-            })
+                    (
+                        revision,
+                        loads,
+                        unloads,
+                        region_clock_payloads_from_map(&current_region_clocks),
+                        region_patches,
+                        patch_fallback_to_chunks,
+                    )
+                })
+            }
         } else {
             None
         }
@@ -4827,6 +4867,58 @@ mod tests {
             }),
             Some(&3)
         );
+    }
+
+    #[test]
+    fn region_clock_map_changed_in_bounds_detects_matching_maps_as_stable() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [3, 3, 3, 3]);
+        let region = RegionId {
+            x: 0,
+            y: 0,
+            z: 0,
+            w: 0,
+        };
+        let mut current = RegionClockMap::new();
+        let mut previous = RegionClockMap::new();
+        current.insert(region, 7);
+        previous.insert(region, 7);
+        current.insert(
+            RegionId {
+                x: 2,
+                y: 0,
+                z: 0,
+                w: 0,
+            },
+            99,
+        );
+
+        assert!(!region_clock_map_changed_in_chunk_bounds(
+            &current, &previous, bounds
+        ));
+    }
+
+    #[test]
+    fn region_clock_map_changed_in_bounds_detects_deltas_and_clears() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [3, 3, 3, 3]);
+        let region = RegionId {
+            x: 0,
+            y: 0,
+            z: 0,
+            w: 0,
+        };
+        let mut current = RegionClockMap::new();
+        let mut previous = RegionClockMap::new();
+        current.insert(region, 8);
+        previous.insert(region, 7);
+
+        assert!(region_clock_map_changed_in_chunk_bounds(
+            &current, &previous, bounds
+        ));
+
+        current.clear();
+        assert!(region_clock_map_changed_in_chunk_bounds(
+            &current, &previous, bounds
+        ));
     }
 
     #[test]

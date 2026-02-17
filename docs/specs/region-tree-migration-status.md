@@ -25,6 +25,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
 - Optional bridge mode: `R4D_STREAM_REGION_PATCH=1` emits `WorldRegionPatch` (`RegionSubtreePatch`) alongside chunk batches for live patch-path exercise.
 - Optional bridge-only mode: `R4D_STREAM_REGION_PATCH_ONLY=1` emits/syncs via `WorldRegionPatch` without chunk load/unload batches.
 - Stream patch planning now uses changed chunk delta bounds (load/unload union) instead of always patching full near-bounds, reducing patch size/frequency and aligning patch transport with minimal local edits.
+- Stream sync now avoids building near-bounds region-clock snapshots on no-op player updates by using bounded clock-delta checks first, reducing per-message overhead when no refresh is needed.
 - Bridge patch payloads now include region clock preconditions derived from each client's prior streamed region clock snapshot.
 - Bridge patch `patch_seq` is now per-client monotonic (`PlayerState.next_stream_patch_seq`), decoupled from global `world_revision`.
 - Client now applies `WorldRegionPatch` by validating preconditions, enforcing monotonic patch sequence, grafting bounded near-chunk payloads, and applying patch clock updates.
