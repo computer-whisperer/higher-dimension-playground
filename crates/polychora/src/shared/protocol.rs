@@ -48,7 +48,6 @@ pub struct EntityTransform {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldSummary {
     pub non_empty_chunks: usize,
-    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

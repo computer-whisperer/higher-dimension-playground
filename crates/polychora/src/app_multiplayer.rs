@@ -1245,8 +1245,8 @@ impl App {
                 self.pending_player_movement_modifiers.clear();
                 self.player_modifier_external_velocity = [0.0; 4];
                 eprintln!(
-                    "Multiplayer connected: client_id={} world_rev={} chunks={} server_tick_hz={:.2}",
-                    client_id, world.revision, world.non_empty_chunks, tick_hz
+                    "Multiplayer connected: client_id={} chunks={} server_tick_hz={:.2}",
+                    client_id, world.non_empty_chunks, tick_hz
                 );
             }
             multiplayer::ServerMessage::Error { message } => {

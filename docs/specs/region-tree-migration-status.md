@@ -35,6 +35,7 @@ Track migration from legacy chunk-first runtime to tree-native world/query/mutat
   - removed `ServerMessage::WorldVoxelSet`
   - removed `client_edit_id` from `ClientMessage::SetVoxel`
   - server now forces bounded `WorldRegionPatch` sync for clients streaming changed chunks
+- `Welcome.world` no longer carries `world_revision`; client bootstrap metadata is now chunk-count only.
 - Autosave now snapshots save inputs under lock and performs `save_v3::save_state` I/O outside the server-state lock, with revision-guarded dirty-flag clearing to avoid dropping concurrent edits.
 - Incremental autosave now materializes legacy-world chunk data only for dirty block regions (full-world realization only on full-block saves), reducing conversion overhead for localized edits.
 - Autosave logging now reports `snapshot_ms` (lock-held capture), `save_ms` (disk/serialize), and `finalize_ms` (post-save state reconcile) to support hitch diagnosis.
