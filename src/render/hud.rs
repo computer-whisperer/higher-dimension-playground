@@ -20,10 +20,6 @@ pub(super) struct LineVertex {
 }
 
 impl LineVertex {
-    pub(super) fn new(position: Vec2, color: Vec4) -> Self {
-        Self::new_with_style(position, color, 0.0)
-    }
-
     pub(super) fn new_with_style(position: Vec2, color: Vec4, style: f32) -> Self {
         Self {
             position,

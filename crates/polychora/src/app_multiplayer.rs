@@ -1,47 +1,348 @@
 use super::*;
+use higher_dimension_playground::render::{
+    OVERLAY_EDGE_TAG_PLACE, OVERLAY_EDGE_TAG_REGION_BRANCH, OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
+    OVERLAY_EDGE_TAG_REGION_EMPTY, OVERLAY_EDGE_TAG_REGION_PROCEDURAL,
+    OVERLAY_EDGE_TAG_REGION_UNIFORM, OVERLAY_EDGE_TAG_TARGET,
+};
 use polychora::shared::worldfield::{
-    collect_non_empty_chunks_from_core_in_bounds, Aabb4i, ChunkKey, ChunkPayload,
+    collect_non_empty_chunks_from_core_in_bounds, Aabb4i, ChunkArrayData, ChunkKey, ChunkPayload,
     RegionClockPrecondition, RegionClockUpdate, RegionId, RegionNodeKind, RegionResyncEntry,
     RegionResyncRequest, RegionSubtreePatch, RegionTreeCore, REGION_TILE_EDGE_CHUNKS,
 };
+use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 
 const MULTIPLAYER_REGION_RESYNC_MAX_REGIONS: usize = 512;
-const REGION_TREE_BOUNDS_DIAG_DEPTH_COLORS: [[f32; 4]; 8] = [
-    [1.00, 0.35, 0.35, 0.95],
-    [0.98, 0.63, 0.26, 0.90],
-    [0.92, 0.86, 0.24, 0.85],
-    [0.52, 0.90, 0.32, 0.80],
-    [0.28, 0.86, 0.82, 0.75],
-    [0.34, 0.68, 0.98, 0.70],
-    [0.60, 0.54, 0.96, 0.65],
-    [0.90, 0.40, 0.86, 0.60],
-];
+
+#[derive(Copy, Clone, Debug)]
+enum RegionTreeDiagKind {
+    Branch,
+    Empty,
+    Uniform(u16),
+    ChunkArray,
+    ProceduralRef,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct RegionTreeDiagNode {
+    bounds: Aabb4i,
+    depth: usize,
+    kind: RegionTreeDiagKind,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct RegionTreeDiagStyle {
+    edge_tag: u32,
+    short_code: &'static str,
+    text_color: [f32; 4],
+    border_color: [f32; 4],
+    connector_color: [f32; 4],
+}
+
+#[derive(Copy, Clone, Debug)]
+struct ProjectedRegionBounds {
+    anchor_ndc: [f32; 2],
+    rect_ndc: [f32; 4],
+    depth: f32,
+    area_ndc: f32,
+}
+
+fn region_tree_diag_kind(kind: &RegionNodeKind) -> RegionTreeDiagKind {
+    match kind {
+        RegionNodeKind::Branch(_) => RegionTreeDiagKind::Branch,
+        RegionNodeKind::Empty => RegionTreeDiagKind::Empty,
+        RegionNodeKind::Uniform(material) => RegionTreeDiagKind::Uniform(*material),
+        RegionNodeKind::ChunkArray(_) => RegionTreeDiagKind::ChunkArray,
+        RegionNodeKind::ProceduralRef(_) => RegionTreeDiagKind::ProceduralRef,
+    }
+}
+
+fn region_tree_diag_style(kind: RegionTreeDiagKind) -> RegionTreeDiagStyle {
+    match kind {
+        RegionTreeDiagKind::Branch => RegionTreeDiagStyle {
+            edge_tag: OVERLAY_EDGE_TAG_REGION_BRANCH,
+            short_code: "BR",
+            text_color: [1.00, 0.86, 0.56, 1.00],
+            border_color: [0.96, 0.66, 0.18, 0.90],
+            connector_color: [0.96, 0.66, 0.18, 0.70],
+        },
+        RegionTreeDiagKind::Empty => RegionTreeDiagStyle {
+            edge_tag: OVERLAY_EDGE_TAG_REGION_EMPTY,
+            short_code: "EM",
+            text_color: [0.92, 0.93, 0.96, 0.96],
+            border_color: [0.62, 0.66, 0.76, 0.72],
+            connector_color: [0.62, 0.66, 0.76, 0.52],
+        },
+        RegionTreeDiagKind::Uniform(_) => RegionTreeDiagStyle {
+            edge_tag: OVERLAY_EDGE_TAG_REGION_UNIFORM,
+            short_code: "UF",
+            text_color: [0.80, 0.98, 0.78, 1.00],
+            border_color: [0.36, 0.84, 0.34, 0.88],
+            connector_color: [0.36, 0.84, 0.34, 0.70],
+        },
+        RegionTreeDiagKind::ChunkArray => RegionTreeDiagStyle {
+            edge_tag: OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
+            short_code: "CA",
+            text_color: [0.78, 0.96, 1.00, 1.00],
+            border_color: [0.22, 0.80, 0.90, 0.90],
+            connector_color: [0.22, 0.80, 0.90, 0.72],
+        },
+        RegionTreeDiagKind::ProceduralRef => RegionTreeDiagStyle {
+            edge_tag: OVERLAY_EDGE_TAG_REGION_PROCEDURAL,
+            short_code: "PR",
+            text_color: [0.96, 0.84, 1.00, 1.00],
+            border_color: [0.72, 0.44, 0.96, 0.88],
+            connector_color: [0.72, 0.44, 0.96, 0.70],
+        },
+    }
+}
+
+fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
+    let style = region_tree_diag_style(node.kind);
+    let span = [
+        node.bounds.max[0]
+            .saturating_sub(node.bounds.min[0])
+            .saturating_add(1),
+        node.bounds.max[1]
+            .saturating_sub(node.bounds.min[1])
+            .saturating_add(1),
+        node.bounds.max[2]
+            .saturating_sub(node.bounds.min[2])
+            .saturating_add(1),
+        node.bounds.max[3]
+            .saturating_sub(node.bounds.min[3])
+            .saturating_add(1),
+    ];
+    let kind_suffix = match node.kind {
+        RegionTreeDiagKind::Uniform(material) => format!(" m{material}"),
+        _ => String::new(),
+    };
+    format!(
+        "{} d{} {}x{}x{}x{}{}",
+        style.short_code, node.depth, span[0], span[1], span[2], span[3], kind_suffix
+    )
+}
+
+fn project_chunk_bounds_to_ndc(
+    bounds: Aabb4i,
+    view_matrix: &ndarray::Array2<f32>,
+    focal_length_xy: f32,
+    aspect: f32,
+) -> Option<ProjectedRegionBounds> {
+    if !bounds.is_valid() {
+        return None;
+    }
+
+    let chunk_size = voxel::CHUNK_SIZE as i32;
+    let min_world = [
+        bounds.min[0].saturating_mul(chunk_size) as f32,
+        bounds.min[1].saturating_mul(chunk_size) as f32,
+        bounds.min[2].saturating_mul(chunk_size) as f32,
+        bounds.min[3].saturating_mul(chunk_size) as f32,
+    ];
+    let max_world = [
+        bounds.max[0].saturating_add(1).saturating_mul(chunk_size) as f32,
+        bounds.max[1].saturating_add(1).saturating_mul(chunk_size) as f32,
+        bounds.max[2].saturating_add(1).saturating_mul(chunk_size) as f32,
+        bounds.max[3].saturating_add(1).saturating_mul(chunk_size) as f32,
+    ];
+
+    let mut min_ndc = [f32::INFINITY; 2];
+    let mut max_ndc = [f32::NEG_INFINITY; 2];
+    let mut nearest_depth = f32::INFINITY;
+    let mut projected_count = 0usize;
+
+    for mask in 0..16u32 {
+        let mut corner = [0.0f32; 4];
+        for axis in 0..4 {
+            corner[axis] = if (mask >> axis) & 1 == 0 {
+                min_world[axis]
+            } else {
+                max_world[axis]
+            };
+        }
+        let Some((ndc, depth)) =
+            project_world_point_to_ndc_with_depth(view_matrix, corner, focal_length_xy, aspect)
+        else {
+            continue;
+        };
+        min_ndc[0] = min_ndc[0].min(ndc[0]);
+        min_ndc[1] = min_ndc[1].min(ndc[1]);
+        max_ndc[0] = max_ndc[0].max(ndc[0]);
+        max_ndc[1] = max_ndc[1].max(ndc[1]);
+        nearest_depth = nearest_depth.min(depth);
+        projected_count = projected_count.saturating_add(1);
+    }
+
+    if projected_count == 0 {
+        return None;
+    }
+
+    let center_world = [
+        0.5 * (min_world[0] + max_world[0]),
+        0.5 * (min_world[1] + max_world[1]),
+        0.5 * (min_world[2] + max_world[2]),
+        0.5 * (min_world[3] + max_world[3]),
+    ];
+    let anchor_ndc =
+        project_world_point_to_ndc_with_depth(view_matrix, center_world, focal_length_xy, aspect)
+            .map(|(ndc, _)| ndc)
+            .unwrap_or([
+                0.5 * (min_ndc[0] + max_ndc[0]),
+                0.5 * (min_ndc[1] + max_ndc[1]),
+            ]);
+
+    if max_ndc[0] < -1.35 || min_ndc[0] > 1.35 || max_ndc[1] < -1.35 || min_ndc[1] > 1.35 {
+        return None;
+    }
+
+    let width = (max_ndc[0] - min_ndc[0]).max(0.0);
+    let height = (max_ndc[1] - min_ndc[1]).max(0.0);
+    Some(ProjectedRegionBounds {
+        anchor_ndc,
+        rect_ndc: [min_ndc[0], min_ndc[1], max_ndc[0], max_ndc[1]],
+        depth: nearest_depth,
+        area_ndc: width * height,
+    })
+}
 
 fn collect_region_tree_bounds_hierarchy(
     node: &RegionTreeCore,
-    depth: usize,
     max_nodes: usize,
-    out: &mut Vec<(Aabb4i, usize)>,
+    non_empty_only: bool,
+    out: &mut Vec<RegionTreeDiagNode>,
 ) {
-    if out.len() >= max_nodes {
+    if max_nodes == 0 || out.len() >= max_nodes {
         return;
     }
-    out.push((node.bounds, depth));
-    if out.len() >= max_nodes {
-        return;
-    }
-    if let RegionNodeKind::Branch(children) = &node.kind {
-        for child in children {
-            if out.len() >= max_nodes {
-                return;
+
+    // Breadth-first sampling avoids DFS bias when max_nodes truncates the hierarchy.
+    let mut queue: VecDeque<(&RegionTreeCore, usize)> = VecDeque::new();
+    queue.push_back((node, 0));
+    while let Some((current, depth)) = queue.pop_front() {
+        if non_empty_only && !region_tree_node_has_non_empty_content(current) {
+            continue;
+        }
+        out.push(RegionTreeDiagNode {
+            bounds: current.bounds,
+            depth,
+            kind: region_tree_diag_kind(&current.kind),
+        });
+        if out.len() >= max_nodes {
+            return;
+        }
+
+        if let RegionNodeKind::Branch(children) = &current.kind {
+            for child in children {
+                queue.push_back((child, depth.saturating_add(1)));
             }
-            collect_region_tree_bounds_hierarchy(child, depth.saturating_add(1), max_nodes, out);
         }
     }
 }
 
-fn region_tree_bounds_diag_color_for_depth(depth: usize) -> [f32; 4] {
-    REGION_TREE_BOUNDS_DIAG_DEPTH_COLORS[depth % REGION_TREE_BOUNDS_DIAG_DEPTH_COLORS.len()]
+fn chunk_payload_has_non_empty_material(payload: &ChunkPayload) -> bool {
+    match payload {
+        ChunkPayload::Empty => false,
+        ChunkPayload::Uniform(material) => *material != 0,
+        ChunkPayload::Dense16 { materials } => materials.iter().any(|material| *material != 0),
+        ChunkPayload::PalettePacked { .. } => payload
+            .dense_materials()
+            .map(|materials| materials.into_iter().any(|material| material != 0))
+            .unwrap_or(true),
+    }
+}
+
+fn chunk_array_has_non_empty_content(chunk_array: &ChunkArrayData) -> bool {
+    if let Some(default_chunk_idx) = chunk_array.default_chunk_idx {
+        if let Some(default_payload) = chunk_array.chunk_palette.get(default_chunk_idx as usize) {
+            if chunk_payload_has_non_empty_material(default_payload) {
+                return true;
+            }
+        } else {
+            // Conservatively keep malformed payloads visible in diagnostics.
+            return true;
+        }
+    }
+
+    let Ok(indices) = chunk_array.decode_dense_indices() else {
+        return true;
+    };
+    indices.into_iter().any(|palette_idx| {
+        chunk_array
+            .chunk_palette
+            .get(palette_idx as usize)
+            .map(chunk_payload_has_non_empty_material)
+            .unwrap_or(true)
+    })
+}
+
+fn region_tree_node_has_non_empty_content(node: &RegionTreeCore) -> bool {
+    match &node.kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => false,
+        RegionNodeKind::Uniform(material) => *material != 0,
+        RegionNodeKind::ChunkArray(chunk_array) => chunk_array_has_non_empty_content(chunk_array),
+        RegionNodeKind::Branch(children) => {
+            children.iter().any(region_tree_node_has_non_empty_content)
+        }
+    }
+}
+
+#[derive(Default)]
+struct RegionTreeNodeStats {
+    node_count: usize,
+    branch_count: usize,
+    empty_count: usize,
+    uniform_count: usize,
+    chunk_array_count: usize,
+    procedural_ref_count: usize,
+    max_depth: usize,
+}
+
+fn collect_region_tree_node_stats(node: &RegionTreeCore) -> RegionTreeNodeStats {
+    fn recurse(node: &RegionTreeCore, depth: usize, stats: &mut RegionTreeNodeStats) {
+        stats.node_count = stats.node_count.saturating_add(1);
+        stats.max_depth = stats.max_depth.max(depth);
+        match &node.kind {
+            RegionNodeKind::Empty => {
+                stats.empty_count = stats.empty_count.saturating_add(1);
+            }
+            RegionNodeKind::Uniform(_) => {
+                stats.uniform_count = stats.uniform_count.saturating_add(1);
+            }
+            RegionNodeKind::ChunkArray(_) => {
+                stats.chunk_array_count = stats.chunk_array_count.saturating_add(1);
+            }
+            RegionNodeKind::ProceduralRef(_) => {
+                stats.procedural_ref_count = stats.procedural_ref_count.saturating_add(1);
+            }
+            RegionNodeKind::Branch(children) => {
+                stats.branch_count = stats.branch_count.saturating_add(1);
+                for child in children {
+                    recurse(child, depth.saturating_add(1), stats);
+                }
+            }
+        }
+    }
+
+    let mut stats = RegionTreeNodeStats::default();
+    recurse(node, 0, &mut stats);
+    stats
+}
+
+fn tight_bounds_from_chunk_positions(
+    positions: impl IntoIterator<Item = [i32; 4]>,
+) -> Option<Aabb4i> {
+    let mut iter = positions.into_iter();
+    let first = iter.next()?;
+    let mut min = first;
+    let mut max = first;
+    for pos in iter {
+        for axis in 0..4 {
+            min[axis] = min[axis].min(pos[axis]);
+            max[axis] = max[axis].max(pos[axis]);
+        }
+    }
+    Some(Aabb4i::new(min, max))
 }
 
 fn region_id_to_clock_key(region_id: RegionId) -> [i32; 4] {
@@ -195,6 +496,11 @@ fn sanitize_remote_scale(scale: f32, fallback: f32) -> f32 {
 }
 
 impl App {
+    fn multiplayer_stream_tree_debug_enabled(&self) -> bool {
+        self.multiplayer_stream_tree_diag_enabled
+            || self.multiplayer_stream_tree_compare_diag_enabled
+    }
+
     pub(super) fn poll_multiplayer_events(&mut self) {
         loop {
             let event = match self
@@ -659,7 +965,7 @@ impl App {
     }
 
     fn rebuild_multiplayer_stream_tree_diag_from_scene_world(&mut self) {
-        if !self.multiplayer_stream_tree_diag_enabled {
+        if !self.multiplayer_stream_tree_debug_enabled() {
             return;
         }
         self.multiplayer_stream_tree_diag =
@@ -679,7 +985,7 @@ impl App {
     }
 
     fn sync_multiplayer_stream_tree_diag_chunk(&mut self, chunk_pos: voxel::ChunkPos) {
-        if !self.multiplayer_stream_tree_diag_enabled {
+        if !self.multiplayer_stream_tree_debug_enabled() {
             return;
         }
         let key = ChunkKey::from_chunk_pos(chunk_pos);
@@ -697,12 +1003,9 @@ impl App {
         }
     }
 
-    pub(super) fn append_multiplayer_stream_tree_diag_overlay_lines(
+    pub(super) fn append_multiplayer_stream_tree_diag_overlay_instances(
         &self,
-        overlay_lines: &mut Vec<CustomOverlayLine>,
-        view_matrix: &ndarray::Array2<f32>,
-        focal_length_xy: f32,
-        aspect: f32,
+        overlay_edge_instances: &mut Vec<common::ModelInstance>,
     ) {
         if !self.multiplayer_stream_tree_diag_enabled {
             return;
@@ -714,20 +1017,243 @@ impl App {
         let mut bounds_hierarchy = Vec::new();
         collect_region_tree_bounds_hierarchy(
             root,
-            0,
             self.multiplayer_stream_tree_diag_max_nodes.max(1),
+            self.multiplayer_stream_tree_diag_non_empty_only,
             &mut bounds_hierarchy,
         );
-        for (bounds, depth) in bounds_hierarchy {
-            append_chunk_bounds_outline_lines(
-                overlay_lines,
-                view_matrix,
-                bounds.min,
-                bounds.max,
-                focal_length_xy,
-                aspect,
-                region_tree_bounds_diag_color_for_depth(depth),
+        for node in bounds_hierarchy {
+            let style = region_tree_diag_style(node.kind);
+            append_chunk_bounds_outline_edge_instance(
+                overlay_edge_instances,
+                node.bounds.min,
+                node.bounds.max,
+                style.edge_tag,
             );
+        }
+    }
+
+    pub(super) fn append_multiplayer_stream_tree_diag_hud_tags(
+        &self,
+        hud_tags: &mut Vec<HudPlayerTag>,
+        view_matrix: &ndarray::Array2<f32>,
+        focal_length_xy: f32,
+        aspect: f32,
+    ) {
+        if !self.multiplayer_stream_tree_diag_enabled
+            || !self.multiplayer_stream_tree_diag_labels_enabled
+        {
+            return;
+        }
+        let Some(root) = self.multiplayer_stream_tree_diag.root() else {
+            return;
+        };
+
+        let mut nodes = Vec::new();
+        collect_region_tree_bounds_hierarchy(
+            root,
+            self.multiplayer_stream_tree_diag_max_nodes.max(1),
+            self.multiplayer_stream_tree_diag_non_empty_only,
+            &mut nodes,
+        );
+
+        let mut projected = Vec::<(RegionTreeDiagNode, ProjectedRegionBounds)>::new();
+        projected.reserve(nodes.len());
+        for node in nodes {
+            let Some(projection) =
+                project_chunk_bounds_to_ndc(node.bounds, view_matrix, focal_length_xy, aspect)
+            else {
+                continue;
+            };
+            projected.push((node, projection));
+        }
+
+        projected.sort_by(|left, right| {
+            right
+                .1
+                .area_ndc
+                .partial_cmp(&left.1.area_ndc)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left.1
+                        .depth
+                        .partial_cmp(&right.1.depth)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| left.0.depth.cmp(&right.0.depth))
+        });
+
+        for (node, projection) in projected
+            .into_iter()
+            .take(self.multiplayer_stream_tree_diag_max_labels.max(1))
+        {
+            let style = region_tree_diag_style(node.kind);
+            let scale = (1.30 - (node.depth as f32) * 0.06).clamp(0.58, 1.28);
+            hud_tags.push(HudPlayerTag {
+                text: region_tree_diag_label_text(node),
+                anchor_ndc: projection.anchor_ndc,
+                scale,
+                bg_alpha: 0.58,
+                text_color: style.text_color,
+                border_color: style.border_color,
+                connector_color: style.connector_color,
+                target_rect_ndc: Some(projection.rect_ndc),
+            });
+        }
+    }
+
+    pub(super) fn append_multiplayer_stream_tree_compare_overlay_instances(
+        &mut self,
+        overlay_edge_instances: &mut Vec<common::ModelInstance>,
+    ) {
+        if !self.multiplayer_stream_tree_compare_diag_enabled {
+            return;
+        }
+
+        self.multiplayer_stream_tree_compare_diag_frame_counter = self
+            .multiplayer_stream_tree_compare_diag_frame_counter
+            .saturating_add(1);
+        let sample_cap = self.multiplayer_stream_tree_compare_diag_max_chunks.max(1);
+
+        let mut world_positions: Vec<[i32; 4]> = self
+            .scene
+            .world
+            .chunks
+            .iter()
+            .filter(|(_, chunk)| !chunk.is_empty())
+            .map(|(&chunk_pos, _)| [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w])
+            .collect();
+        world_positions.sort_unstable();
+        let world_set: HashSet<[i32; 4]> = world_positions.iter().copied().collect();
+
+        let mut tree_positions: Vec<[i32; 4]> = self
+            .multiplayer_stream_tree_diag
+            .collect_chunks()
+            .into_iter()
+            .map(|(key, _)| key.pos)
+            .collect();
+        tree_positions.sort_unstable();
+        let tree_set: HashSet<[i32; 4]> = tree_positions.iter().copied().collect();
+
+        let missing_count = world_set
+            .iter()
+            .filter(|pos| !tree_set.contains(*pos))
+            .count();
+        let extra_count = tree_set
+            .iter()
+            .filter(|pos| !world_set.contains(*pos))
+            .count();
+
+        let mut missing_samples = Vec::new();
+        for pos in world_positions.iter().copied() {
+            if tree_set.contains(&pos) {
+                continue;
+            }
+            missing_samples.push(pos);
+            if missing_samples.len() >= sample_cap {
+                break;
+            }
+        }
+
+        let mut extra_samples = Vec::new();
+        for pos in tree_positions.iter().copied() {
+            if world_set.contains(&pos) {
+                continue;
+            }
+            extra_samples.push(pos);
+            if extra_samples.len() >= sample_cap {
+                break;
+            }
+        }
+
+        for pos in missing_samples.iter().copied() {
+            append_chunk_bounds_outline_edge_instance(
+                overlay_edge_instances,
+                pos,
+                pos,
+                OVERLAY_EDGE_TAG_TARGET,
+            );
+        }
+        for pos in extra_samples.iter().copied() {
+            append_chunk_bounds_outline_edge_instance(
+                overlay_edge_instances,
+                pos,
+                pos,
+                OVERLAY_EDGE_TAG_PLACE,
+            );
+        }
+
+        let world_bounds = tight_bounds_from_chunk_positions(world_positions.iter().copied());
+        let tree_bounds = tight_bounds_from_chunk_positions(tree_positions.iter().copied());
+        let root_bounds = self
+            .multiplayer_stream_tree_diag
+            .root()
+            .map(|root| (root.bounds.min, root.bounds.max));
+        let node_stats = self
+            .multiplayer_stream_tree_diag
+            .root()
+            .map(collect_region_tree_node_stats)
+            .unwrap_or_default();
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.multiplayer_stream_tree_diag_enabled.hash(&mut hasher);
+        self.multiplayer_stream_tree_compare_diag_enabled
+            .hash(&mut hasher);
+        world_positions.len().hash(&mut hasher);
+        tree_positions.len().hash(&mut hasher);
+        missing_count.hash(&mut hasher);
+        extra_count.hash(&mut hasher);
+        for pos in missing_samples.iter().take(8) {
+            pos.hash(&mut hasher);
+        }
+        for pos in extra_samples.iter().take(8) {
+            pos.hash(&mut hasher);
+        }
+        world_bounds.hash(&mut hasher);
+        tree_bounds.hash(&mut hasher);
+        root_bounds.hash(&mut hasher);
+        node_stats.node_count.hash(&mut hasher);
+        node_stats.max_depth.hash(&mut hasher);
+        let summary_hash = hasher.finish();
+
+        let interval = self
+            .multiplayer_stream_tree_compare_diag_log_interval
+            .max(1) as u64;
+        let interval_due = self.multiplayer_stream_tree_compare_diag_frame_counter % interval == 0;
+        if self.multiplayer_stream_tree_compare_diag_last_hash != Some(summary_hash) || interval_due
+        {
+            eprintln!(
+                "[client-region-tree-compare] frame={} world_chunks={} tree_chunks={} missing={} extra={} world_bounds={:?} tree_bounds={:?} root_bounds={:?} nodes={} branches={} uniform={} chunk_array={} empty={} procedural={} max_depth={} overlays(missing={},extra={})",
+                self.multiplayer_stream_tree_compare_diag_frame_counter,
+                world_positions.len(),
+                tree_positions.len(),
+                missing_count,
+                extra_count,
+                world_bounds,
+                tree_bounds,
+                root_bounds,
+                node_stats.node_count,
+                node_stats.branch_count,
+                node_stats.uniform_count,
+                node_stats.chunk_array_count,
+                node_stats.empty_count,
+                node_stats.procedural_ref_count,
+                node_stats.max_depth,
+                missing_samples.len(),
+                extra_samples.len(),
+            );
+            if !missing_samples.is_empty() {
+                eprintln!(
+                    "[client-region-tree-compare] missing_samples={:?}",
+                    missing_samples
+                );
+            }
+            if !extra_samples.is_empty() {
+                eprintln!(
+                    "[client-region-tree-compare] extra_samples={:?}",
+                    extra_samples
+                );
+            }
+            self.multiplayer_stream_tree_compare_diag_last_hash = Some(summary_hash);
         }
     }
 
@@ -1479,6 +2005,10 @@ impl App {
                 anchor_ndc: ndc,
                 scale,
                 bg_alpha,
+                text_color: [0.96, 0.97, 1.00, 1.0],
+                border_color: [0.0, 0.0, 0.0, 0.0],
+                connector_color: [0.0, 0.0, 0.0, 0.0],
+                target_rect_ndc: None,
             });
         }
 

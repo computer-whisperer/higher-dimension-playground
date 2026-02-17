@@ -1,4 +1,6 @@
 mod buffers;
+#[cfg(test)]
+mod bvh_topology_tests;
 mod capture;
 mod context_init;
 mod geometry;
@@ -8,8 +10,6 @@ mod pipelines;
 mod profiler;
 mod types;
 mod vte;
-#[cfg(test)]
-mod bvh_topology_tests;
 
 use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers};
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
@@ -362,9 +362,7 @@ fn summarize_bvh_topology(
     if num_tetrahedrons == 0 {
         return None;
     }
-    let total_nodes = num_tetrahedrons
-        .checked_mul(2)?
-        .checked_sub(1)?;
+    let total_nodes = num_tetrahedrons.checked_mul(2)?.checked_sub(1)?;
     if total_nodes == 0 || total_nodes > bvh_nodes.len() {
         return None;
     }
@@ -928,11 +926,36 @@ impl RenderContext {
             filtered_overlay_instances.as_slice()
         };
 
-        if dropped_model_instance_count > 0 || dropped_overlay_instance_count > 0 {
+        let mut filtered_custom_overlay_edge_instances: Vec<common::ModelInstance> = Vec::new();
+        let mut dropped_custom_overlay_edge_instance_count = 0usize;
+        let custom_overlay_edge_instances: &[common::ModelInstance] = if render_options
+            .custom_overlay_edge_instances
+            .iter()
+            .all(model_instance_is_finite)
+        {
+            &render_options.custom_overlay_edge_instances
+        } else {
+            filtered_custom_overlay_edge_instances
+                .reserve(render_options.custom_overlay_edge_instances.len());
+            for instance in render_options.custom_overlay_edge_instances.iter().copied() {
+                if model_instance_is_finite(&instance) {
+                    filtered_custom_overlay_edge_instances.push(instance);
+                } else {
+                    dropped_custom_overlay_edge_instance_count += 1;
+                }
+            }
+            filtered_custom_overlay_edge_instances.as_slice()
+        };
+
+        if dropped_model_instance_count > 0
+            || dropped_overlay_instance_count > 0
+            || dropped_custom_overlay_edge_instance_count > 0
+        {
             eprintln!(
-                "Dropped non-finite model instances before render: non-voxel {} overlay {} (frame {}).",
+                "Dropped non-finite model instances before render: non-voxel {} overlay {} edge_overlay {} (frame {}).",
                 dropped_model_instance_count,
                 dropped_overlay_instance_count,
+                dropped_custom_overlay_edge_instance_count,
                 self.frames_rendered
             );
         }
@@ -1062,6 +1085,12 @@ impl RenderContext {
             0
         };
         let used_instance_count = non_voxel_used_instance_count + overlay_used_instance_count;
+        let custom_overlay_edge_instance_base = used_instance_count;
+        let custom_overlay_edge_instance_capacity =
+            model_instance_capacity.saturating_sub(custom_overlay_edge_instance_base);
+        let custom_overlay_edge_used_instance_count = custom_overlay_edge_instances
+            .len()
+            .min(custom_overlay_edge_instance_capacity);
 
         let requested_tetrahedron_count =
             self.one_time_buffers.model_tetrahedron_count * non_voxel_used_instance_count;
@@ -1151,6 +1180,13 @@ impl RenderContext {
                     "BVH: {} internal nodes, {} total nodes",
                     total_tetrahedron_count.saturating_sub(1),
                     2 * total_tetrahedron_count.saturating_sub(1) + 1
+                );
+            }
+            if custom_overlay_edge_instances.len() > custom_overlay_edge_used_instance_count {
+                eprintln!(
+                    "Custom edge-overlay instances truncated to buffer capacity: {} -> {}",
+                    custom_overlay_edge_instances.len(),
+                    custom_overlay_edge_used_instance_count
                 );
             }
         }
@@ -1270,6 +1306,9 @@ impl RenderContext {
             }
             for i in 0..overlay_used_instance_count {
                 writer[non_voxel_used_instance_count + i] = raster_overlay_instances[i];
+            }
+            for i in 0..custom_overlay_edge_used_instance_count {
+                writer[custom_overlay_edge_instance_base + i] = custom_overlay_edge_instances[i];
             }
         }
 
@@ -2050,10 +2089,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe {
-                                    builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
-                                }
-                                .unwrap();
+                                unsafe { builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1]) }
+                                    .unwrap();
                             }
                             builder
                                 .bind_pipeline_compute(
@@ -2361,16 +2398,77 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 }
             }
 
-            if do_edges {
-                // Tetrahedron edge pre-raster
+            if do_edges || custom_overlay_edge_used_instance_count > 0 {
+                // Edge pre-raster supports dedicated instance ranges (for debug edges and
+                // GPU-only custom overlay boxes) and appends into the shared line buffer.
+                let model_edge_count = self.one_time_buffers.model_edge_count;
+                let max_lines = LINE_VERTEX_CAPACITY / 2;
+                let mut dispatched_any_edges = false;
+
                 builder
                     .bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone())
                     .unwrap();
-                let total_edge_count =
-                    self.one_time_buffers.model_edge_count * model_instances.len();
-                unsafe { builder.dispatch([(total_edge_count as u32 + 63) / 64u32, 1, 1]) }
-                    .unwrap();
-                {
+
+                if model_edge_count > 0 {
+                    if do_edges {
+                        let available_lines = max_lines.saturating_sub(line_render_count);
+                        let max_instances = available_lines / model_edge_count;
+                        let edge_instance_count = used_instance_count.min(max_instances);
+                        if edge_instance_count > 0 {
+                            let edge_line_count = edge_instance_count * model_edge_count;
+                            let edge_push_data: [u32; 4] = [
+                                0,
+                                edge_instance_count.min(u32::MAX as usize) as u32,
+                                line_render_count.min(u32::MAX as usize) as u32,
+                                0,
+                            ];
+                            builder
+                                .push_constants(
+                                    self.compute_pipeline.pipeline_layout.clone(),
+                                    0,
+                                    edge_push_data,
+                                )
+                                .unwrap();
+                            unsafe {
+                                builder.dispatch([((edge_line_count as u32) + 63) / 64u32, 1, 1])
+                            }
+                            .unwrap();
+                            line_render_count += edge_line_count;
+                            dispatched_any_edges = true;
+                        }
+                    }
+
+                    if custom_overlay_edge_used_instance_count > 0 {
+                        let available_lines = max_lines.saturating_sub(line_render_count);
+                        let max_instances = available_lines / model_edge_count;
+                        let edge_overlay_instance_count =
+                            custom_overlay_edge_used_instance_count.min(max_instances);
+                        if edge_overlay_instance_count > 0 {
+                            let edge_line_count = edge_overlay_instance_count * model_edge_count;
+                            let edge_push_data: [u32; 4] = [
+                                custom_overlay_edge_instance_base.min(u32::MAX as usize) as u32,
+                                edge_overlay_instance_count.min(u32::MAX as usize) as u32,
+                                line_render_count.min(u32::MAX as usize) as u32,
+                                0,
+                            ];
+                            builder
+                                .push_constants(
+                                    self.compute_pipeline.pipeline_layout.clone(),
+                                    0,
+                                    edge_push_data,
+                                )
+                                .unwrap();
+                            unsafe {
+                                builder.dispatch([((edge_line_count as u32) + 63) / 64u32, 1, 1])
+                            }
+                            .unwrap();
+                            line_render_count += edge_line_count;
+                            dispatched_any_edges = true;
+                        }
+                    }
+                }
+
+                if dispatched_any_edges {
                     let q = self.profiler.next_query_index("edges");
                     unsafe {
                         builder.write_timestamp(
@@ -2381,8 +2479,6 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     }
                     .unwrap();
                 }
-
-                line_render_count = total_edge_count;
             }
 
             if do_raytrace {
@@ -3187,7 +3283,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     }
                                 }
                             }
-                        } else if let Ok(root_data) = self.sized_buffers.cpu_bvh_root_buffer.read() {
+                        } else if let Ok(root_data) = self.sized_buffers.cpu_bvh_root_buffer.read()
+                        {
                             if let Some(root) = root_data.get(0) {
                                 let finite = root.min_bounds.x.is_finite()
                                     && root.min_bounds.y.is_finite()

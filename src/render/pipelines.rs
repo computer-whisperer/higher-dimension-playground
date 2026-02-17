@@ -70,11 +70,14 @@ impl PresentPipelineContext {
                     // The default value does not perform any multisampling.
                     multisample_state: Some(MultisampleState::default()),
                     // How pixel values are combined with the values already present in the
-                    // framebuffer. The default value overwrites the old value with the new one,
-                    // without any blending.
+                    // framebuffer. Line overlays intentionally use alpha blending so depth-layer
+                    // diagnostics and translucent guides can stack correctly.
                     color_blend_state: Some(ColorBlendState::with_attachment_states(
                         subpass.num_color_attachments(),
-                        ColorBlendAttachmentState::default(),
+                        ColorBlendAttachmentState {
+                            blend: Some(AttachmentBlend::alpha()),
+                            ..Default::default()
+                        },
                     )),
                     // Dynamic states allows us to specify parts of the pipeline settings when
                     // recording the command buffer, before we perform drawing. Here, we specify

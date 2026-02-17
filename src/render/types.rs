@@ -66,11 +66,24 @@ impl RenderBackend {
     }
 }
 
+pub const OVERLAY_EDGE_TAG_MASK: u32 = 0x4000_0000;
+pub const OVERLAY_EDGE_TAG_TARGET: u32 = 1;
+pub const OVERLAY_EDGE_TAG_PLACE: u32 = 2;
+pub const OVERLAY_EDGE_TAG_DIAG_BASE: u32 = 16;
+pub const OVERLAY_EDGE_DIAG_TAG_COUNT: u32 = 8;
+pub const OVERLAY_EDGE_TAG_REGION_BRANCH: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 0;
+pub const OVERLAY_EDGE_TAG_REGION_EMPTY: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 1;
+pub const OVERLAY_EDGE_TAG_REGION_UNIFORM: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 2;
+pub const OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 3;
+pub const OVERLAY_EDGE_TAG_REGION_PROCEDURAL: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 4;
+
 #[derive(Clone, Debug)]
 pub struct CustomOverlayLine {
     pub start_ndc: [f32; 2],
     pub end_ndc: [f32; 2],
     pub color: [f32; 4],
+    /// Optional style id consumed by present line shader (`>0.5` enables adaptive mode).
+    pub style: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +92,10 @@ pub struct HudPlayerTag {
     pub anchor_ndc: [f32; 2],
     pub scale: f32,
     pub bg_alpha: f32,
+    pub text_color: [f32; 4],
+    pub border_color: [f32; 4],
+    pub connector_color: [f32; 4],
+    pub target_rect_ndc: Option<[f32; 4]>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -157,6 +174,7 @@ pub struct RenderOptions {
     pub do_tetrahedron_edges: bool,
     pub do_navigation_hud: bool,
     pub custom_overlay_lines: Vec<CustomOverlayLine>,
+    pub custom_overlay_edge_instances: Vec<common::ModelInstance>,
     pub take_framebuffer_screenshot: bool,
     pub prepare_render_screenshot: bool,
     pub hud_readout_mode: HudReadoutMode,
@@ -199,6 +217,7 @@ impl Default for RenderOptions {
             do_tetrahedron_edges: false,
             do_navigation_hud: false,
             custom_overlay_lines: Vec::new(),
+            custom_overlay_edge_instances: Vec::new(),
             take_framebuffer_screenshot: false,
             prepare_render_screenshot: false,
             hud_readout_mode: HudReadoutMode::Full,

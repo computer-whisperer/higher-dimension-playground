@@ -130,7 +130,10 @@ fn assert_topology_invariants(num_leaves: usize, children: &[(u32, u32)]) {
 
     let mut parent_counts = vec![0u32; total_nodes];
     for &(left, right) in children {
-        assert!(left != right, "internal node references the same child twice");
+        assert!(
+            left != right,
+            "internal node references the same child twice"
+        );
         assert!(
             (left as usize) < total_nodes,
             "left child index out of range: {left} >= {total_nodes}"

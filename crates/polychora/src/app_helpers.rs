@@ -1,4 +1,5 @@
 use super::*;
+use higher_dimension_playground::render::OVERLAY_EDGE_TAG_MASK;
 
 pub(super) fn latest_framebuffer_screenshot_path() -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -216,65 +217,75 @@ pub(super) fn project_world_point_to_ndc_with_depth(
     }
 }
 
-pub(super) fn project_world_point_to_ndc(
-    view_matrix: &ndarray::Array2<f32>,
-    world_point: [f32; 4],
-    focal_length_xy: f32,
-    aspect: f32,
-) -> Option<[f32; 2]> {
-    project_world_point_to_ndc_with_depth(view_matrix, world_point, focal_length_xy, aspect)
-        .map(|(ndc, _)| ndc)
+fn overlay_edge_material_ids(tag: u32) -> [u32; 8] {
+    let encoded_tag = OVERLAY_EDGE_TAG_MASK | (tag & !OVERLAY_EDGE_TAG_MASK);
+    [encoded_tag; 8]
 }
 
-pub(super) fn append_voxel_outline_lines(
-    overlay_lines: &mut Vec<CustomOverlayLine>,
-    view_matrix: &ndarray::Array2<f32>,
-    voxel: [i32; 4],
-    focal_length_xy: f32,
-    aspect: f32,
-    color: [f32; 4],
+fn append_axis_aligned_outline_edge_instance(
+    overlay_edge_instances: &mut Vec<common::ModelInstance>,
+    min_world: [f32; 4],
+    max_world: [f32; 4],
+    edge_tag: u32,
 ) {
-    let mut projected_vertices: [Option<[f32; 2]>; 16] = [None; 16];
-    for vertex_mask in 0..16usize {
-        let world_point = [
-            voxel[0] as f32 + (vertex_mask & 1) as f32,
-            voxel[1] as f32 + ((vertex_mask >> 1) & 1) as f32,
-            voxel[2] as f32 + ((vertex_mask >> 2) & 1) as f32,
-            voxel[3] as f32 + ((vertex_mask >> 3) & 1) as f32,
-        ];
-        projected_vertices[vertex_mask] =
-            project_world_point_to_ndc(view_matrix, world_point, focal_length_xy, aspect);
+    let mut axis_scale = [0.0f32; 4];
+    let mut center = [0.0f32; 4];
+    for axis in 0..4 {
+        if !min_world[axis].is_finite() || !max_world[axis].is_finite() {
+            return;
+        }
+        let extent = max_world[axis] - min_world[axis];
+        if extent <= 0.0 || !extent.is_finite() {
+            return;
+        }
+        axis_scale[axis] = extent;
+        center[axis] = 0.5 * (min_world[axis] + max_world[axis]);
     }
 
-    for vertex_mask in 0..16usize {
-        for axis in 0..4usize {
-            if ((vertex_mask >> axis) & 1) != 0 {
-                continue;
-            }
-            let next_mask = vertex_mask | (1usize << axis);
-            let Some(start_ndc) = projected_vertices[vertex_mask] else {
-                continue;
-            };
-            let Some(end_ndc) = projected_vertices[next_mask] else {
-                continue;
-            };
-            overlay_lines.push(CustomOverlayLine {
-                start_ndc,
-                end_ndc,
-                color,
-            });
-        }
-    }
+    let basis = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    overlay_edge_instances.push(build_centered_model_instance(
+        center,
+        &basis,
+        axis_scale,
+        overlay_edge_material_ids(edge_tag),
+    ));
 }
 
-pub(super) fn append_chunk_bounds_outline_lines(
-    overlay_lines: &mut Vec<CustomOverlayLine>,
-    view_matrix: &ndarray::Array2<f32>,
+pub(super) fn append_voxel_outline_edge_instance(
+    overlay_edge_instances: &mut Vec<common::ModelInstance>,
+    voxel: [i32; 4],
+    edge_tag: u32,
+) {
+    let min_world = [
+        voxel[0] as f32,
+        voxel[1] as f32,
+        voxel[2] as f32,
+        voxel[3] as f32,
+    ];
+    let max_world = [
+        (voxel[0] as f32) + 1.0,
+        (voxel[1] as f32) + 1.0,
+        (voxel[2] as f32) + 1.0,
+        (voxel[3] as f32) + 1.0,
+    ];
+    append_axis_aligned_outline_edge_instance(
+        overlay_edge_instances,
+        min_world,
+        max_world,
+        edge_tag,
+    );
+}
+
+pub(super) fn append_chunk_bounds_outline_edge_instance(
+    overlay_edge_instances: &mut Vec<common::ModelInstance>,
     min_chunk: [i32; 4],
     max_chunk: [i32; 4],
-    focal_length_xy: f32,
-    aspect: f32,
-    color: [f32; 4],
+    edge_tag: u32,
 ) {
     if min_chunk
         .iter()
@@ -285,66 +296,37 @@ pub(super) fn append_chunk_bounds_outline_lines(
     }
 
     let chunk_size = voxel::CHUNK_SIZE as i32;
-    let min_world = [
+    let min_world_i32 = [
         min_chunk[0].saturating_mul(chunk_size),
         min_chunk[1].saturating_mul(chunk_size),
         min_chunk[2].saturating_mul(chunk_size),
         min_chunk[3].saturating_mul(chunk_size),
     ];
-    let max_world = [
+    let max_world_i32 = [
         max_chunk[0].saturating_add(1).saturating_mul(chunk_size),
         max_chunk[1].saturating_add(1).saturating_mul(chunk_size),
         max_chunk[2].saturating_add(1).saturating_mul(chunk_size),
         max_chunk[3].saturating_add(1).saturating_mul(chunk_size),
     ];
 
-    let mut projected_vertices: [Option<[f32; 2]>; 16] = [None; 16];
-    for vertex_mask in 0..16usize {
-        let world_point = [
-            if (vertex_mask & 1) != 0 {
-                max_world[0] as f32
-            } else {
-                min_world[0] as f32
-            },
-            if ((vertex_mask >> 1) & 1) != 0 {
-                max_world[1] as f32
-            } else {
-                min_world[1] as f32
-            },
-            if ((vertex_mask >> 2) & 1) != 0 {
-                max_world[2] as f32
-            } else {
-                min_world[2] as f32
-            },
-            if ((vertex_mask >> 3) & 1) != 0 {
-                max_world[3] as f32
-            } else {
-                min_world[3] as f32
-            },
-        ];
-        projected_vertices[vertex_mask] =
-            project_world_point_to_ndc(view_matrix, world_point, focal_length_xy, aspect);
-    }
-
-    for vertex_mask in 0..16usize {
-        for axis in 0..4usize {
-            if ((vertex_mask >> axis) & 1) != 0 {
-                continue;
-            }
-            let next_mask = vertex_mask | (1usize << axis);
-            let Some(start_ndc) = projected_vertices[vertex_mask] else {
-                continue;
-            };
-            let Some(end_ndc) = projected_vertices[next_mask] else {
-                continue;
-            };
-            overlay_lines.push(CustomOverlayLine {
-                start_ndc,
-                end_ndc,
-                color,
-            });
-        }
-    }
+    let min_world = [
+        min_world_i32[0] as f32,
+        min_world_i32[1] as f32,
+        min_world_i32[2] as f32,
+        min_world_i32[3] as f32,
+    ];
+    let max_world = [
+        max_world_i32[0] as f32,
+        max_world_i32[1] as f32,
+        max_world_i32[2] as f32,
+        max_world_i32[3] as f32,
+    ];
+    append_axis_aligned_outline_edge_instance(
+        overlay_edge_instances,
+        min_world,
+        max_world,
+        edge_tag,
+    );
 }
 
 pub(super) fn normalize4(v: [f32; 4]) -> [f32; 4] {

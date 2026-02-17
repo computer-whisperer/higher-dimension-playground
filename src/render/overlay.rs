@@ -1345,14 +1345,76 @@ impl RenderContext {
 
         if let Some(hud_res) = self.hud_resources.as_ref() {
             if !player_tags.is_empty() {
+                #[derive(Clone)]
+                struct TagLayoutEntry<'a> {
+                    tag: &'a HudPlayerTag,
+                    text: &'a str,
+                    text_size: f32,
+                    pad_px: f32,
+                    half_size_ndc: Vec2,
+                    anchor_ndc: Vec2,
+                    target_rect_ndc: Option<(Vec2, Vec2)>,
+                    desired_center_ndc: Vec2,
+                    center_ndc: Vec2,
+                    priority: f32,
+                }
+
+                let margin_ndc = px_delta_to_ndc(Vec2::splat(8.0 * hud_scale));
+                let edge_gap_ndc = px_delta_to_ndc(Vec2::splat(14.0 * hud_scale));
+                let border_thickness_ndc =
+                    px_delta_to_ndc(Vec2::splat((1.25 * hud_scale).max(1.0)));
+
+                let clamp_center = |center: Vec2, half: Vec2| -> Vec2 {
+                    Vec2::new(
+                        center
+                            .x
+                            .clamp(-1.0 + half.x + margin_ndc.x, 1.0 - half.x - margin_ndc.x),
+                        center
+                            .y
+                            .clamp(-1.0 + half.y + margin_ndc.y, 1.0 - half.y - margin_ndc.y),
+                    )
+                };
+
+                let nearest_point_on_rect_edge =
+                    |rect_min: Vec2, rect_max: Vec2, p: Vec2| -> Vec2 {
+                        let clamped = Vec2::new(
+                            p.x.clamp(rect_min.x, rect_max.x),
+                            p.y.clamp(rect_min.y, rect_max.y),
+                        );
+                        let d_left = (clamped.x - rect_min.x).abs();
+                        let d_right = (rect_max.x - clamped.x).abs();
+                        let d_bottom = (clamped.y - rect_min.y).abs();
+                        let d_top = (rect_max.y - clamped.y).abs();
+
+                        let mut edge = clamped;
+                        let mut best = d_left;
+                        edge.x = rect_min.x;
+                        if d_right < best {
+                            best = d_right;
+                            edge = clamped;
+                            edge.x = rect_max.x;
+                        }
+                        if d_bottom < best {
+                            best = d_bottom;
+                            edge = clamped;
+                            edge.y = rect_min.y;
+                        }
+                        if d_top < best {
+                            edge = clamped;
+                            edge.y = rect_max.y;
+                        }
+                        edge
+                    };
+
                 let mut sorted_tags: Vec<&HudPlayerTag> = player_tags.iter().collect();
                 sorted_tags.sort_by(|a, b| {
-                    a.scale
-                        .partial_cmp(&b.scale)
+                    b.scale
+                        .partial_cmp(&a.scale)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
-                for tag in sorted_tags.into_iter().take(48) {
+                let mut layout_entries: Vec<TagLayoutEntry<'_>> = Vec::new();
+                for tag in sorted_tags.into_iter().take(64) {
                     let text = tag.text.trim();
                     if text.is_empty() {
                         continue;
@@ -1370,41 +1432,214 @@ impl RenderContext {
                     let panel_height_px =
                         (text_size * 1.25 + pad_px * 2.0).clamp(16.0 * dpi_scale, 88.0 * hud_scale);
 
-                    let width_ndc = (panel_width_px / present_w) * 2.0;
-                    let height_ndc = (panel_height_px / present_h) * 2.0;
-                    let offset_ndc_y = (16.0 * hud_scale * scale / present_h) * 2.0;
-                    let margin_ndc = px_delta_to_ndc(Vec2::splat(8.0 * hud_scale));
+                    let half_size_ndc =
+                        Vec2::new(panel_width_px / present_w, panel_height_px / present_h);
+                    let anchor_ndc = Vec2::new(tag.anchor_ndc[0], tag.anchor_ndc[1]);
 
-                    let center_x = tag.anchor_ndc[0].clamp(
-                        -1.0 + width_ndc * 0.5 + margin_ndc.x,
-                        1.0 - width_ndc * 0.5 - margin_ndc.x,
-                    );
-                    let top_y = (tag.anchor_ndc[1] - offset_ndc_y)
-                        .clamp(-1.0 + height_ndc + margin_ndc.y, 1.0 - margin_ndc.y);
+                    let mut target_rect_ndc = None;
+                    if let Some([raw_min_x, raw_min_y, raw_max_x, raw_max_y]) = tag.target_rect_ndc
+                    {
+                        let min_x = raw_min_x.min(raw_max_x);
+                        let max_x = raw_min_x.max(raw_max_x);
+                        let min_y = raw_min_y.min(raw_max_y);
+                        let max_y = raw_min_y.max(raw_max_y);
+                        if min_x.is_finite()
+                            && max_x.is_finite()
+                            && min_y.is_finite()
+                            && max_y.is_finite()
+                        {
+                            target_rect_ndc =
+                                Some((Vec2::new(min_x, min_y), Vec2::new(max_x, max_y)));
+                        }
+                    }
 
-                    let bg_min = Vec2::new(center_x - width_ndc * 0.5, top_y - height_ndc);
-                    let bg_max = Vec2::new(center_x + width_ndc * 0.5, top_y);
+                    let desired_center_ndc = if let Some((rect_min, rect_max)) = target_rect_ndc {
+                        let rect_center = (rect_min + rect_max) * 0.5;
+                        let mut dir = anchor_ndc - rect_center;
+                        if dir.length_squared() <= 1e-6 {
+                            dir = Vec2::new(0.0, -1.0);
+                        }
+                        let edge_anchor = if dir.x.abs() > dir.y.abs() {
+                            if dir.x >= 0.0 {
+                                Vec2::new(rect_max.x, anchor_ndc.y.clamp(rect_min.y, rect_max.y))
+                            } else {
+                                Vec2::new(rect_min.x, anchor_ndc.y.clamp(rect_min.y, rect_max.y))
+                            }
+                        } else if dir.y >= 0.0 {
+                            Vec2::new(anchor_ndc.x.clamp(rect_min.x, rect_max.x), rect_max.y)
+                        } else {
+                            Vec2::new(anchor_ndc.x.clamp(rect_min.x, rect_max.x), rect_min.y)
+                        };
+
+                        let outward = if dir.length_squared() > 1e-6 {
+                            dir.normalize()
+                        } else {
+                            Vec2::new(0.0, -1.0)
+                        };
+                        edge_anchor
+                            + Vec2::new(
+                                outward.x * (half_size_ndc.x + edge_gap_ndc.x),
+                                outward.y * (half_size_ndc.y + edge_gap_ndc.y),
+                            )
+                    } else {
+                        let lift_ndc = (18.0 * hud_scale * scale / present_h) * 2.0;
+                        anchor_ndc + Vec2::new(0.0, -(lift_ndc + half_size_ndc.y))
+                    };
+
+                    let desired_center_ndc = clamp_center(desired_center_ndc, half_size_ndc);
+                    layout_entries.push(TagLayoutEntry {
+                        tag,
+                        text,
+                        text_size,
+                        pad_px,
+                        half_size_ndc,
+                        anchor_ndc,
+                        target_rect_ndc,
+                        desired_center_ndc,
+                        center_ndc: desired_center_ndc,
+                        priority: scale.max(0.1),
+                    });
+                }
+
+                for _ in 0..10 {
+                    for entry in &mut layout_entries {
+                        entry.center_ndc += (entry.desired_center_ndc - entry.center_ndc) * 0.30;
+                        if let Some((rect_min, rect_max)) = entry.target_rect_ndc {
+                            let edge =
+                                nearest_point_on_rect_edge(rect_min, rect_max, entry.center_ndc);
+                            entry.center_ndc += (edge - entry.center_ndc) * 0.08;
+                        }
+                    }
+
+                    for i in 0..layout_entries.len() {
+                        let (head, tail) = layout_entries.split_at_mut(i + 1);
+                        let a = &mut head[i];
+                        for b in tail {
+                            let delta = a.center_ndc - b.center_ndc;
+                            let overlap_x = (a.half_size_ndc.x + b.half_size_ndc.x) - delta.x.abs();
+                            let overlap_y = (a.half_size_ndc.y + b.half_size_ndc.y) - delta.y.abs();
+                            if overlap_x <= 0.0 || overlap_y <= 0.0 {
+                                continue;
+                            }
+
+                            let sum_priority = (a.priority + b.priority).max(1e-3);
+                            let a_share = (a.priority / sum_priority).clamp(0.15, 0.85);
+                            let b_share = 1.0 - a_share;
+                            if overlap_x < overlap_y {
+                                let dir = if delta.x >= 0.0 { 1.0 } else { -1.0 };
+                                let push = Vec2::new((overlap_x + 0.002) * 0.5 * dir, 0.0);
+                                a.center_ndc += push * b_share;
+                                b.center_ndc -= push * a_share;
+                            } else {
+                                let dir = if delta.y >= 0.0 { 1.0 } else { -1.0 };
+                                let push = Vec2::new(0.0, (overlap_y + 0.002) * 0.5 * dir);
+                                a.center_ndc += push * b_share;
+                                b.center_ndc -= push * a_share;
+                            }
+                        }
+                    }
+
+                    for entry in &mut layout_entries {
+                        let max_displacement = 0.85;
+                        let delta = entry.center_ndc - entry.desired_center_ndc;
+                        let len = delta.length();
+                        if len > max_displacement && len > 1e-6 {
+                            entry.center_ndc =
+                                entry.desired_center_ndc + delta * (max_displacement / len);
+                        }
+                        entry.center_ndc = clamp_center(entry.center_ndc, entry.half_size_ndc);
+                    }
+                }
+
+                for entry in layout_entries {
+                    let bg_min = entry.center_ndc - entry.half_size_ndc;
+                    let bg_max = entry.center_ndc + entry.half_size_ndc;
 
                     push_filled_rect_quads(
                         &mut hud_quads,
                         &hud_res.font_atlas,
                         bg_min,
                         bg_max,
-                        Vec4::new(0.0, 0.0, 0.0, tag.bg_alpha.clamp(0.25, 0.90)),
+                        Vec4::new(0.0, 0.0, 0.0, entry.tag.bg_alpha.clamp(0.25, 0.92)),
                     );
 
+                    let border = Vec4::new(
+                        entry.tag.border_color[0],
+                        entry.tag.border_color[1],
+                        entry.tag.border_color[2],
+                        entry.tag.border_color[3],
+                    );
+                    if border.w > 0.01 {
+                        let t = border_thickness_ndc;
+                        push_filled_rect_quads(
+                            &mut hud_quads,
+                            &hud_res.font_atlas,
+                            Vec2::new(bg_min.x - t.x, bg_max.y),
+                            Vec2::new(bg_max.x + t.x, bg_max.y + t.y),
+                            border,
+                        );
+                        push_filled_rect_quads(
+                            &mut hud_quads,
+                            &hud_res.font_atlas,
+                            Vec2::new(bg_min.x - t.x, bg_min.y - t.y),
+                            Vec2::new(bg_max.x + t.x, bg_min.y),
+                            border,
+                        );
+                        push_filled_rect_quads(
+                            &mut hud_quads,
+                            &hud_res.font_atlas,
+                            Vec2::new(bg_min.x - t.x, bg_min.y),
+                            Vec2::new(bg_min.x, bg_max.y),
+                            border,
+                        );
+                        push_filled_rect_quads(
+                            &mut hud_quads,
+                            &hud_res.font_atlas,
+                            Vec2::new(bg_max.x, bg_min.y),
+                            Vec2::new(bg_max.x + t.x, bg_max.y),
+                            border,
+                        );
+                    }
+
+                    let connector = Vec4::new(
+                        entry.tag.connector_color[0],
+                        entry.tag.connector_color[1],
+                        entry.tag.connector_color[2],
+                        entry.tag.connector_color[3],
+                    );
+                    if connector.w > 0.01 {
+                        let source = if let Some((rect_min, rect_max)) = entry.target_rect_ndc {
+                            nearest_point_on_rect_edge(rect_min, rect_max, entry.center_ndc)
+                        } else {
+                            entry.anchor_ndc
+                        };
+                        let target = Vec2::new(
+                            source.x.clamp(bg_min.x, bg_max.x),
+                            source.y.clamp(bg_min.y, bg_max.y),
+                        );
+                        if (target - source).length_squared() > 1e-6 {
+                            push_line(&mut lines, source, target, connector);
+                        }
+                    }
+
                     let text_anchor_ndc = Vec2::new(
-                        bg_min.x + (pad_px / present_w) * 2.0,
-                        bg_min.y + (pad_px / present_h) * 2.0,
+                        bg_min.x + (entry.pad_px / present_w) * 2.0,
+                        bg_min.y + (entry.pad_px / present_h) * 2.0,
                     );
                     let text_anchor_px = ndc_to_pixels(text_anchor_ndc, present_size);
+                    let text_color = Vec4::new(
+                        entry.tag.text_color[0],
+                        entry.tag.text_color[1],
+                        entry.tag.text_color[2],
+                        entry.tag.text_color[3],
+                    );
                     push_text_quads(
                         &mut hud_quads,
                         &hud_res.font_atlas,
-                        text,
+                        entry.text,
                         text_anchor_px,
-                        text_size,
-                        Vec4::new(0.96, 0.97, 1.00, 1.0),
+                        entry.text_size,
+                        text_color,
                         present_size,
                     );
                 }
@@ -1427,7 +1662,12 @@ impl RenderContext {
                     text,
                     label_px,
                     text_size,
-                    Vec4::new(0.96, 0.97, 1.00, 1.0),
+                    Vec4::new(
+                        tag.text_color[0],
+                        tag.text_color[1],
+                        tag.text_color[2],
+                        tag.text_color[3],
+                    ),
                     present_size,
                 );
             }
@@ -1548,8 +1788,8 @@ impl RenderContext {
             let start = Vec2::from_array(line.start_ndc);
             let end = Vec2::from_array(line.end_ndc);
             let color = Vec4::from_array(line.color);
-            writer[vertex_id] = LineVertex::new(start, color);
-            writer[vertex_id + 1] = LineVertex::new(end, color);
+            writer[vertex_id] = LineVertex::new_with_style(start, color, line.style);
+            writer[vertex_id + 1] = LineVertex::new_with_style(end, color, line.style);
         }
 
         lines_to_write

@@ -1,4 +1,5 @@
 use super::*;
+use higher_dimension_playground::render::{OVERLAY_EDGE_TAG_PLACE, OVERLAY_EDGE_TAG_TARGET};
 
 impl App {
     pub(super) fn update_and_render(&mut self) {
@@ -546,8 +547,14 @@ impl App {
         let backend = self.args.backend.to_render_backend();
         let disable_remote_non_voxel = env_flag_enabled("R4D_DISABLE_REMOTE_NON_VOXEL");
         let highlight_mode = self.args.edit_highlight_mode;
-        let hud_player_tags =
+        let mut hud_player_tags =
             self.remote_player_tags(&view_matrix, look_dir, self.focal_length_xy, aspect);
+        self.append_multiplayer_stream_tree_diag_hud_tags(
+            &mut hud_player_tags,
+            &view_matrix,
+            self.focal_length_xy,
+            aspect,
+        );
         let targets = if !self.menu_open
             && self.mouse_grabbed
             && (highlight_mode.uses_faces() || highlight_mode.uses_edges())
@@ -596,48 +603,45 @@ impl App {
             None
         };
 
-        let overlay_line_capacity = if self.multiplayer_stream_tree_diag_enabled {
-            64usize.saturating_add(
-                self.multiplayer_stream_tree_diag_max_nodes
-                    .saturating_mul(32)
-                    .min(8192),
-            )
-        } else {
-            64
-        };
-        let mut custom_overlay_lines = Vec::with_capacity(overlay_line_capacity);
+        let overlay_edge_capacity = 2usize
+            .saturating_add(if self.multiplayer_stream_tree_diag_enabled {
+                self.multiplayer_stream_tree_diag_max_nodes.max(1)
+            } else {
+                0
+            })
+            .saturating_add(if self.multiplayer_stream_tree_compare_diag_enabled {
+                self.multiplayer_stream_tree_compare_diag_max_chunks
+                    .saturating_mul(2)
+            } else {
+                0
+            });
+        let mut custom_overlay_edge_instances = Vec::with_capacity(overlay_edge_capacity);
         if highlight_mode.uses_edges() {
             if let Some(targets) = targets {
                 if let Some(hit_voxel) = targets.hit_voxel {
-                    append_voxel_outline_lines(
-                        &mut custom_overlay_lines,
-                        &view_matrix,
+                    append_voxel_outline_edge_instance(
+                        &mut custom_overlay_edge_instances,
                         hit_voxel,
-                        1.0,
-                        aspect,
-                        TARGET_OUTLINE_COLOR,
+                        OVERLAY_EDGE_TAG_TARGET,
                     );
                 }
                 if let Some(place_voxel) = targets.place_voxel {
-                    append_voxel_outline_lines(
-                        &mut custom_overlay_lines,
-                        &view_matrix,
+                    append_voxel_outline_edge_instance(
+                        &mut custom_overlay_edge_instances,
                         place_voxel,
-                        1.0,
-                        aspect,
-                        PLACE_OUTLINE_COLOR,
+                        OVERLAY_EDGE_TAG_PLACE,
                     );
                 }
             }
         }
-        self.append_multiplayer_stream_tree_diag_overlay_lines(
-            &mut custom_overlay_lines,
-            &view_matrix,
-            1.0,
-            aspect,
+        self.append_multiplayer_stream_tree_diag_overlay_instances(
+            &mut custom_overlay_edge_instances,
+        );
+        self.append_multiplayer_stream_tree_compare_overlay_instances(
+            &mut custom_overlay_edge_instances,
         );
         if self.args.no_hud {
-            custom_overlay_lines.clear();
+            custom_overlay_edge_instances.clear();
         }
 
         let mut vte_highlight_hit_voxel = None;
@@ -756,7 +760,8 @@ impl App {
                 vte_highlight_place_voxel
             },
             do_navigation_hud,
-            custom_overlay_lines,
+            custom_overlay_lines: Vec::new(),
+            custom_overlay_edge_instances,
             take_framebuffer_screenshot: take_screenshot,
             prepare_render_screenshot: auto_screenshot,
             hud_readout_mode,

@@ -24,9 +24,9 @@ mod voxel;
 use clap::{ArgAction, Parser, ValueEnum};
 use egui::RichText;
 use higher_dimension_playground::render::{
-    CustomOverlayLine, EguiPaintData, EguiPaintMesh, EguiPaintVertex, EguiTextureSlot,
-    EguiTextureUpdate, FrameParams, HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext,
-    RenderOptions, TetraFrameInput, VteDisplayMode,
+    EguiPaintData, EguiPaintMesh, EguiPaintVertex, EguiTextureSlot, EguiTextureUpdate, FrameParams,
+    HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
+    VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::collections::{HashMap, VecDeque};
@@ -68,8 +68,6 @@ const REMOTE_FOOTSTEP_MIN_XZW_SPEED: f32 = 0.40;
 const REMOTE_FOOTSTEP_MAX_VERTICAL_SPEED: f32 = 2.4;
 const REMOTE_FOOTSTEP_MAX_NETWORK_AGE_S: f32 = 0.35;
 const REMOTE_FOOTSTEP_MAX_PER_FRAME: usize = 6;
-const TARGET_OUTLINE_COLOR: [f32; 4] = [0.14, 0.70, 0.70, 1.00];
-const PLACE_OUTLINE_COLOR: [f32; 4] = [0.70, 0.42, 0.14, 1.00];
 const WORLD_FILE_DEFAULT: &str = "saves/world";
 const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
 const VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_NON_VOXEL_INSTANCES";
@@ -78,6 +76,16 @@ const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
 const CLIENT_REGION_TREE_BOUNDS_DIAG_ENV: &str = "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG";
 const CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES_ENV: &str =
     "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES";
+const CLIENT_REGION_TREE_BOUNDS_DIAG_NON_EMPTY_ONLY_ENV: &str =
+    "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG_NON_EMPTY_ONLY";
+const CLIENT_REGION_TREE_BOUNDS_DIAG_LABELS_ENV: &str = "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG_LABELS";
+const CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_LABELS_ENV: &str =
+    "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_LABELS";
+const CLIENT_REGION_TREE_COMPARE_DIAG_ENV: &str = "R4D_CLIENT_REGION_TREE_COMPARE_DIAG";
+const CLIENT_REGION_TREE_COMPARE_DIAG_MAX_CHUNKS_ENV: &str =
+    "R4D_CLIENT_REGION_TREE_COMPARE_DIAG_MAX_CHUNKS";
+const CLIENT_REGION_TREE_COMPARE_DIAG_LOG_INTERVAL_ENV: &str =
+    "R4D_CLIENT_REGION_TREE_COMPARE_DIAG_LOG_INTERVAL";
 // Tags held-block preview instances so shaders can apply preview-only shading boosts.
 const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
@@ -989,6 +997,34 @@ fn main() {
             CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES_ENV,
             192,
         ),
+        multiplayer_stream_tree_diag_non_empty_only: env_flag_enabled_or(
+            CLIENT_REGION_TREE_BOUNDS_DIAG_NON_EMPTY_ONLY_ENV,
+            true,
+        ),
+        multiplayer_stream_tree_diag_labels_enabled: env_flag_enabled_or(
+            CLIENT_REGION_TREE_BOUNDS_DIAG_LABELS_ENV,
+            true,
+        ),
+        multiplayer_stream_tree_diag_max_labels: env_usize_or(
+            CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_LABELS_ENV,
+            28,
+        )
+        .clamp(1, 256),
+        multiplayer_stream_tree_compare_diag_enabled: env_flag_enabled(
+            CLIENT_REGION_TREE_COMPARE_DIAG_ENV,
+        ),
+        multiplayer_stream_tree_compare_diag_max_chunks: env_usize_or(
+            CLIENT_REGION_TREE_COMPARE_DIAG_MAX_CHUNKS_ENV,
+            64,
+        )
+        .clamp(1, 2048),
+        multiplayer_stream_tree_compare_diag_log_interval: env_usize_or(
+            CLIENT_REGION_TREE_COMPARE_DIAG_LOG_INTERVAL_ENV,
+            120,
+        )
+        .max(1),
+        multiplayer_stream_tree_compare_diag_last_hash: None,
+        multiplayer_stream_tree_compare_diag_frame_counter: 0,
         multiplayer_last_region_resync_request: Instant::now(),
         next_multiplayer_edit_id: 1,
         pending_voxel_edits: Vec::new(),
@@ -1114,8 +1150,23 @@ fn main() {
     }
     if app.multiplayer_stream_tree_diag_enabled {
         eprintln!(
-            "Client region-tree bounds diagnostics enabled via {} (max nodes {}).",
-            CLIENT_REGION_TREE_BOUNDS_DIAG_ENV, app.multiplayer_stream_tree_diag_max_nodes
+            "Client region-tree bounds diagnostics enabled via {} (max nodes {}, non_empty_only={} via {}, labels={} via {}, max_labels={} via {}).",
+            CLIENT_REGION_TREE_BOUNDS_DIAG_ENV,
+            app.multiplayer_stream_tree_diag_max_nodes,
+            app.multiplayer_stream_tree_diag_non_empty_only,
+            CLIENT_REGION_TREE_BOUNDS_DIAG_NON_EMPTY_ONLY_ENV,
+            app.multiplayer_stream_tree_diag_labels_enabled,
+            CLIENT_REGION_TREE_BOUNDS_DIAG_LABELS_ENV,
+            app.multiplayer_stream_tree_diag_max_labels,
+            CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_LABELS_ENV
+        );
+    }
+    if app.multiplayer_stream_tree_compare_diag_enabled {
+        eprintln!(
+            "Client region-tree compare diagnostics enabled via {} (max mismatch chunks {}, log interval {}f).",
+            CLIENT_REGION_TREE_COMPARE_DIAG_ENV,
+            app.multiplayer_stream_tree_compare_diag_max_chunks,
+            app.multiplayer_stream_tree_compare_diag_log_interval
         );
     }
     if app.perf_suite_active() {
@@ -1250,6 +1301,14 @@ struct App {
     multiplayer_stream_tree_diag: polychora::shared::worldfield::RegionChunkTree,
     multiplayer_stream_tree_diag_enabled: bool,
     multiplayer_stream_tree_diag_max_nodes: usize,
+    multiplayer_stream_tree_diag_non_empty_only: bool,
+    multiplayer_stream_tree_diag_labels_enabled: bool,
+    multiplayer_stream_tree_diag_max_labels: usize,
+    multiplayer_stream_tree_compare_diag_enabled: bool,
+    multiplayer_stream_tree_compare_diag_max_chunks: usize,
+    multiplayer_stream_tree_compare_diag_log_interval: usize,
+    multiplayer_stream_tree_compare_diag_last_hash: Option<u64>,
+    multiplayer_stream_tree_compare_diag_frame_counter: u64,
     multiplayer_last_region_resync_request: Instant,
     next_multiplayer_edit_id: u64,
     pending_voxel_edits: Vec<PendingVoxelEdit>,

@@ -382,6 +382,91 @@ void mainTetrahedronCS(uint3 globalId : SV_DispatchThreadID)
     }
 }
 
+static const uint OVERLAY_EDGE_TAG_MASK = 0x40000000u;
+static const uint OVERLAY_EDGE_TAG_TARGET = 1u;
+static const uint OVERLAY_EDGE_TAG_PLACE = 2u;
+static const uint OVERLAY_EDGE_TAG_DIAG_BASE = 16u;
+static const uint OVERLAY_EDGE_DIAG_TAG_COUNT = 8u;
+static const uint OVERLAY_EDGE_TAG_REGION_BRANCH = OVERLAY_EDGE_TAG_DIAG_BASE + 0u;
+static const uint OVERLAY_EDGE_TAG_REGION_EMPTY = OVERLAY_EDGE_TAG_DIAG_BASE + 1u;
+static const uint OVERLAY_EDGE_TAG_REGION_UNIFORM = OVERLAY_EDGE_TAG_DIAG_BASE + 2u;
+static const uint OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY = OVERLAY_EDGE_TAG_DIAG_BASE + 3u;
+static const uint OVERLAY_EDGE_TAG_REGION_PROCEDURAL = OVERLAY_EDGE_TAG_DIAG_BASE + 4u;
+
+float4 overlayEdgeColor(uint encodedTag)
+{
+    float4 color = float4(0.30, 0.70, 1.00, 1.0);
+    if ((encodedTag & OVERLAY_EDGE_TAG_MASK) == 0u)
+        return color;
+
+    uint tag = encodedTag & (~OVERLAY_EDGE_TAG_MASK);
+    if (tag == OVERLAY_EDGE_TAG_TARGET)
+        return float4(0.14, 0.70, 0.70, 1.00);
+    if (tag == OVERLAY_EDGE_TAG_PLACE)
+        return float4(0.70, 0.42, 0.14, 1.00);
+    if (tag == OVERLAY_EDGE_TAG_REGION_BRANCH)
+        return float4(0.98, 0.66, 0.20, 0.92);
+    if (tag == OVERLAY_EDGE_TAG_REGION_EMPTY)
+        return float4(0.62, 0.66, 0.76, 0.72);
+    if (tag == OVERLAY_EDGE_TAG_REGION_UNIFORM)
+        return float4(0.36, 0.84, 0.34, 0.90);
+    if (tag == OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY)
+        return float4(0.22, 0.80, 0.90, 0.90);
+    if (tag == OVERLAY_EDGE_TAG_REGION_PROCEDURAL)
+        return float4(0.72, 0.44, 0.96, 0.90);
+
+    if (tag >= OVERLAY_EDGE_TAG_DIAG_BASE
+        && tag < (OVERLAY_EDGE_TAG_DIAG_BASE + OVERLAY_EDGE_DIAG_TAG_COUNT))
+    {
+        uint diagIndex = tag - OVERLAY_EDGE_TAG_DIAG_BASE;
+        switch (diagIndex)
+        {
+        case 0u: return float4(1.00, 0.35, 0.35, 0.95);
+        case 1u: return float4(0.98, 0.63, 0.26, 0.90);
+        case 2u: return float4(0.92, 0.86, 0.24, 0.85);
+        case 3u: return float4(0.52, 0.90, 0.32, 0.80);
+        case 4u: return float4(0.28, 0.86, 0.82, 0.75);
+        case 5u: return float4(0.34, 0.68, 0.98, 0.70);
+        case 6u: return float4(0.60, 0.54, 0.96, 0.65);
+        case 7u: return float4(0.90, 0.40, 0.86, 0.60);
+        default: break;
+        }
+    }
+
+    return float4(0.78, 0.78, 0.78, 0.90);
+}
+
+bool clipLineBySignedDistance(
+    inout VecN<5> a,
+    inout VecN<5> b,
+    float da,
+    float db,
+    bool fixDepth,
+    float focalLengthXY)
+{
+    if (da >= 0.0 && db >= 0.0)
+        return true;
+
+    if (da < 0.0 && db < 0.0)
+        return false;
+
+    float t = da / (da - db);
+    VecN<5> intersection = a * (1.0 - t) + b * t;
+    if (fixDepth)
+    {
+        intersection[4] = sqrt(
+            intersection[2] * intersection[2] + intersection[3] * intersection[3]
+        ) / focalLengthXY;
+    }
+
+    if (da < 0.0)
+        a = intersection;
+    else
+        b = intersection;
+
+    return true;
+}
+
 // Edge processing with 4D frustum clipping
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -389,14 +474,50 @@ void mainEdgeCS(uint3 globalId : SV_DispatchThreadID)
 {
     WorkingData workingData = workingDataBuffer[0];
 
-    uint outputIndex = globalId.x;
+    uint localEdgeIndex = globalId.x;
+    uint instanceBase = dispatchParams.instanceBase;
+    uint instanceCount = dispatchParams.tetrahedronCount;
+    uint outputBase = dispatchParams.outputBase;
+
     uint modelCount, modelStride;
     modelEdges.GetDimensions(modelCount, modelStride);
-    uint modelIndex = outputIndex % modelCount;
-    uint instanceIndex = outputIndex / modelCount;
+    if (modelCount == 0u)
+        return;
+
+    uint modelIndex;
+    uint instanceIndex;
+    uint outputIndex;
+    if (instanceCount == 0u)
+    {
+        // Legacy fallback: global index already spans all instances.
+        modelIndex = localEdgeIndex % modelCount;
+        instanceIndex = localEdgeIndex / modelCount;
+        outputIndex = localEdgeIndex;
+    }
+    else
+    {
+        uint totalEdgeCount = instanceCount * modelCount;
+        if (localEdgeIndex >= totalEdgeCount)
+            return;
+        modelIndex = localEdgeIndex % modelCount;
+        instanceIndex = instanceBase + (localEdgeIndex / modelCount);
+        outputIndex = outputBase + localEdgeIndex;
+    }
+
+    uint instanceBufferCount, instanceStride;
+    instances.GetDimensions(instanceBufferCount, instanceStride);
+    if (instanceIndex >= instanceBufferCount)
+        return;
+
+    uint lineVertexCount, lineVertexStride;
+    outputLineVertices.GetDimensions(lineVertexCount, lineVertexStride);
+    uint lineCapacity = lineVertexCount / 2u;
+    if (outputIndex >= lineCapacity)
+        return;
 
     ModelInstance instance = instances[instanceIndex];
     ModelEdge inputEdge = modelEdges[modelIndex];
+    float4 lineColor = overlayEdgeColor(instance.cellMaterialIds[0]);
 
     VecN<5> vertexPositions[2];
 
@@ -411,70 +532,90 @@ void mainEdgeCS(uint3 globalId : SV_DispatchThreadID)
         vertexPositions[i] = result.vertexPosition;
     }
 
-    // 4D frustum clipping using hyperplanes (operates in view space before perspective division)
-    // Near plane: prevents depth ≈ 0 (div-by-zero in perspective)
-    HyperPlane4D nearPlane = HyperPlane4D.from4Points(
-        float4(1.0, 1.0, 0.1, 0.1),
-        float4(1.0, -1.0, 0.1, 0.1),
-        float4(-1.0, 1.0, 0.1, 0.1),
-        float4(1.0, 1.0, 1.1, -0.9)
-    );
-    nearPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
+    bool culled = false;
 
-    // Top plane
-    HyperPlane4D topPlane = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(1.0, 1.0, 1.0, 1.0),
-        float4(-1.0, 1.0, 1.0, 1.0),
-        float4(0.0, 0.0, -1.0, 1.0)
-    );
-    topPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
+    // Match tetra clipping exactly:
+    // 1-2) ZW viewing cone clip in 4D view space
+    // 3)   Near-depth clip on projection divisor
+    // No XY frustum clip here; tetra path also relies on later screen bounds handling.
+    float fxy = workingData.focalLengthXY;
+    // Edge overlays should follow the scene manifold used by VTE Stage A.
+    // Do not apply the legacy overlay-raster ZW narrowing here.
+    float effectiveFocalLengthZW = workingData.focalLengthZW;
+    float zwViewAngle = (3.14159265 / 2.0) / effectiveFocalLengthZW;
+    float thetaMin = 3.14159265 / 4.0 - zwViewAngle / 2.0;
+    float thetaMax = 3.14159265 / 4.0 + zwViewAngle / 2.0;
+    float sinMin = sin(thetaMin), cosMin = cos(thetaMin);
+    float sinMax = sin(thetaMax), cosMax = cos(thetaMax);
 
-    // Bottom plane
-    HyperPlane4D bottomPlane = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(1.0, -1.0, 1.0, 1.0),
-        float4(-1.0, -1.0, 1.0, 1.0),
-        float4(0.0, 0.0, 1.0, -1.0)
-    );
-    bottomPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
-
-    // Left plane
-    HyperPlane4D leftPlane = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(1.0, 1.0, 1.0, 1.0),
-        float4(1.0, -1.0, 1.0, 1.0),
-        float4(0.0, 0.0, 1.0, -1.0)
-    );
-    leftPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
-
-    // Right plane
-    HyperPlane4D rightPlane = HyperPlane4D.from4Points(
-        float4(0.0, 0.0, 0.0, 0.0),
-        float4(-1.0, 1.0, 1.0, 1.0),
-        float4(-1.0, -1.0, 1.0, 1.0),
-        float4(0.0, 0.0, -1.0, 1.0)
-    );
-    rightPlane.clipLineWithData(vertexPositions[0], vertexPositions[1]);
-
-    // Project clipped vertices
-    float2 projected[2];
-    [ForceUnroll]
-    for (int i = 0; i < 2; i++)
+    // Pass 1: lower ZW cone boundary
     {
-        projected[i] = float2(vertexPositions[i][0] / vertexPositions[i][4],
-                              vertexPositions[i][1] / vertexPositions[i][4]);
+        float d0 = -sinMin * vertexPositions[0][2] + cosMin * vertexPositions[0][3];
+        float d1 = -sinMin * vertexPositions[1][2] + cosMin * vertexPositions[1][3];
+        if (!clipLineBySignedDistance(vertexPositions[0], vertexPositions[1], d0, d1, false, fxy))
+            culled = true;
+    }
+
+    // Pass 2: upper ZW cone boundary
+    if (!culled)
+    {
+        float d0 = sinMax * vertexPositions[0][2] - cosMax * vertexPositions[0][3];
+        float d1 = sinMax * vertexPositions[1][2] - cosMax * vertexPositions[1][3];
+        if (!clipLineBySignedDistance(vertexPositions[0], vertexPositions[1], d0, d1, false, fxy))
+            culled = true;
+    }
+
+    // Recompute projection divisor from clipped Z/W (same as tetra pass).
+    if (!culled)
+    {
+        [ForceUnroll]
+        for (int i = 0; i < 2; i++)
+        {
+            vertexPositions[i][4] = sqrt(
+                vertexPositions[i][2] * vertexPositions[i][2]
+                + vertexPositions[i][3] * vertexPositions[i][3]
+            ) / fxy;
+        }
+    }
+
+    // Pass 3: near-depth clip
+    if (!culled)
+    {
+        float d0 = vertexPositions[0][4] - MIN_DEPTH_DIVISOR;
+        float d1 = vertexPositions[1][4] - MIN_DEPTH_DIVISOR;
+        if (!clipLineBySignedDistance(vertexPositions[0], vertexPositions[1], d0, d1, true, fxy))
+            culled = true;
     }
 
     LineVertex v0;
-    v0.position = projected[0];
-    v0.padding = float2(0.0, 0.0);
-    v0.color = float4(0.30, 0.70, 1.00, 1.0);
-
     LineVertex v1;
-    v1.position = projected[1];
+    if (culled)
+    {
+        // Always write an entry to avoid stale line vertices persisting across frames.
+        v0.position = float2(2.0, 2.0);
+        v1.position = float2(2.0, 2.0);
+        lineColor.w = 0.0;
+    }
+    else
+    {
+        // Project clipped vertices
+        float2 projected[2];
+        [ForceUnroll]
+        for (int i = 0; i < 2; i++)
+        {
+            projected[i] = float2(
+                vertexPositions[i][0] / vertexPositions[i][4],
+                vertexPositions[i][1] / vertexPositions[i][4]
+            );
+        }
+        v0.position = projected[0];
+        v1.position = projected[1];
+    }
+    v0.padding = float2(0.0, 0.0);
+    v0.color = lineColor;
+
     v1.padding = float2(0.0, 0.0);
-    v1.color = float4(0.30, 0.70, 1.00, 1.0);
+    v1.color = lineColor;
 
     outputLineVertices[outputIndex * 2 + 0] = v0;
     outputLineVertices[outputIndex * 2 + 1] = v1;
