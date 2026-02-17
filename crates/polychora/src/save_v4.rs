@@ -424,6 +424,7 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
             .map(|(&pos, chunk)| (pos, chunk.clone()))
             .collect();
         sorted_chunks.sort_unstable_by_key(|(pos, _)| [pos.x, pos.y, pos.z, pos.w]);
+        let mut non_uniform_rows = HashMap::<(i32, i32, i32), Vec<(i32, FieldChunkPayload)>>::new();
 
         for (chunk_pos, chunk) in sorted_chunks {
             let min = [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w];
@@ -445,9 +446,57 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
                     });
                 }
                 other => {
-                    let payload_blob = ChunkPayloadBlob {
-                        payload: other.clone(),
+                    non_uniform_rows
+                        .entry((chunk_pos.y, chunk_pos.z, chunk_pos.w))
+                        .or_default()
+                        .push((chunk_pos.x, other));
+                }
+            }
+        }
+
+        let mut row_keys: Vec<(i32, i32, i32)> = non_uniform_rows.keys().copied().collect();
+        row_keys.sort_unstable();
+        for (row_y, row_z, row_w) in row_keys {
+            let Some(mut row_payloads) = non_uniform_rows.remove(&(row_y, row_z, row_w)) else {
+                continue;
+            };
+            row_payloads.sort_unstable_by_key(|(x, _)| *x);
+
+            let mut run_start = 0usize;
+            while run_start < row_payloads.len() {
+                let mut run_end = run_start + 1;
+                while run_end < row_payloads.len()
+                    && row_payloads[run_end].0 == row_payloads[run_end - 1].0 + 1
+                {
+                    run_end += 1;
+                }
+                let run = &row_payloads[run_start..run_end];
+                let min = [run[0].0, row_y, row_z, row_w];
+                let max = [run[run.len() - 1].0, row_y, row_z, row_w];
+
+                let mut palette = Vec::<FieldChunkPayload>::new();
+                let mut palette_lookup = HashMap::<FieldChunkPayload, u16>::new();
+                let mut dense_indices = Vec::<u16>::with_capacity(run.len());
+                for (_, payload) in run {
+                    let palette_idx = if let Some(idx) = palette_lookup.get(payload).copied() {
+                        idx
+                    } else {
+                        let idx = u16::try_from(palette.len()).map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "chunk array payload palette exceeds DenseU16 capacity",
+                            )
+                        })?;
+                        palette.push(payload.clone());
+                        palette_lookup.insert(payload.clone(), idx);
+                        idx
                     };
+                    dense_indices.push(palette_idx);
+                }
+
+                let mut payload_palette = Vec::<BlobRef>::with_capacity(palette.len());
+                for payload in palette {
+                    let payload_blob = ChunkPayloadBlob { payload };
                     let payload_blob_bytes = postcard::to_stdvec(&payload_blob)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                     let payload_ref = append_or_reuse_blob_record(
@@ -458,32 +507,38 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
                         CHUNK_PAYLOAD_BLOB_VERSION,
                         &payload_blob_bytes,
                     )?;
-
-                    let chunk_array_blob = ChunkArrayBlob {
-                        volume_min_chunk: min,
-                        volume_max_chunk: max,
-                        payload_palette: vec![payload_ref],
-                        index_codec: ChunkArrayIndexCodec::DenseU16,
-                        index_data: vec![0, 0],
-                        default_palette_index: None,
-                    };
-                    let chunk_array_blob_bytes = postcard::to_stdvec(&chunk_array_blob)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                    let chunk_array_ref = append_or_reuse_blob_record(
-                        root,
-                        &mut manifest,
-                        &mut reuse_index,
-                        BLOB_KIND_CHUNK_ARRAY,
-                        CHUNK_ARRAY_BLOB_VERSION,
-                        &chunk_array_blob_bytes,
-                    )?;
-
-                    world_leaves.push(LeafDescriptor {
-                        min,
-                        max,
-                        kind: IndexNodeKind::LeafChunkArray { chunk_array_ref },
-                    });
+                    payload_palette.push(payload_ref);
                 }
+
+                let mut index_data = Vec::with_capacity(dense_indices.len() * 2);
+                for idx in dense_indices {
+                    index_data.extend_from_slice(&idx.to_le_bytes());
+                }
+                let chunk_array_blob = ChunkArrayBlob {
+                    volume_min_chunk: min,
+                    volume_max_chunk: max,
+                    payload_palette,
+                    index_codec: ChunkArrayIndexCodec::DenseU16,
+                    index_data,
+                    default_palette_index: None,
+                };
+                let chunk_array_blob_bytes = postcard::to_stdvec(&chunk_array_blob)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                let chunk_array_ref = append_or_reuse_blob_record(
+                    root,
+                    &mut manifest,
+                    &mut reuse_index,
+                    BLOB_KIND_CHUNK_ARRAY,
+                    CHUNK_ARRAY_BLOB_VERSION,
+                    &chunk_array_blob_bytes,
+                )?;
+
+                world_leaves.push(LeafDescriptor {
+                    min,
+                    max,
+                    kind: IndexNodeKind::LeafChunkArray { chunk_array_ref },
+                });
+                run_start = run_end;
             }
         }
     }
@@ -2460,6 +2515,70 @@ mod tests {
     }
 
     #[test]
+    fn save_state_packs_contiguous_non_uniform_row_into_single_chunk_array() {
+        let root = test_root("pack-contiguous-row");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let chunk_size = CHUNK_SIZE as i32;
+
+        let mut world = VoxelWorld::new();
+        world.set_voxel(1, 1, 1, 1, VoxelType(7));
+        world.set_voxel(chunk_size + 1, 1, 1, 1, VoxelType(9));
+        world.set_voxel(chunk_size * 2 + 1, 1, 1, 1, VoxelType(7));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+
+        let manifest = load_manifest(&root).expect("load manifest");
+        let index = read_index_file(root.join(&manifest.index_file)).expect("load index");
+        let chunk_array_refs = collect_world_chunk_array_refs(&index);
+        assert_eq!(chunk_array_refs.len(), 1);
+
+        let payload =
+            read_blob_payload(&root, &chunk_array_refs[0]).expect("read chunk array blob");
+        let chunk_array_blob: ChunkArrayBlob =
+            postcard::from_bytes(&payload).expect("decode chunk array blob");
+        assert_eq!(chunk_array_blob.volume_min_chunk, [0, 0, 0, 0]);
+        assert_eq!(chunk_array_blob.volume_max_chunk, [2, 0, 0, 0]);
+        assert_eq!(chunk_array_blob.payload_palette.len(), 2);
+        assert_eq!(chunk_array_blob.index_codec, ChunkArrayIndexCodec::DenseU16);
+
+        let chunk_array_data = ChunkArrayData {
+            bounds: Aabb4i::new(
+                chunk_array_blob.volume_min_chunk,
+                chunk_array_blob.volume_max_chunk,
+            ),
+            chunk_palette: vec![FieldChunkPayload::Empty; chunk_array_blob.payload_palette.len()],
+            index_codec: chunk_array_blob.index_codec,
+            index_data: chunk_array_blob.index_data,
+            default_chunk_idx: chunk_array_blob.default_palette_index,
+        };
+        let dense = chunk_array_data
+            .decode_dense_indices()
+            .expect("decode dense indices");
+        assert_eq!(dense, vec![0, 1, 0]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn save_state_identical_resave_does_not_append_data_blobs() {
         let root = test_root("no-thrash-resave");
         let now_ms = now_unix_ms();
@@ -2521,6 +2640,110 @@ mod tests {
 
         assert_eq!(refs_a, refs_b);
         assert_eq!(data_bytes_a, data_bytes_b);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_state_rejects_corrupt_index_payload_checksum() {
+        let root = test_root("corrupt-index-checksum");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let mut world = VoxelWorld::new();
+        world.set_voxel(1, 1, 1, 1, VoxelType(7));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 7,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+
+        let manifest = load_manifest(&root).expect("manifest");
+        let index_path = root.join(&manifest.index_file);
+        let mut bytes = std::fs::read(&index_path).expect("read index");
+        assert!(
+            bytes.len() > 32,
+            "index payload should contain at least one node"
+        );
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&index_path, bytes).expect("rewrite tampered index");
+
+        let err = load_state(&root).expect_err("corrupt index should fail load");
+        assert!(
+            err.to_string()
+                .contains("index file payload checksum mismatch"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_state_rejects_corrupt_blob_payload_checksum() {
+        let root = test_root("corrupt-blob-checksum");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let mut world = VoxelWorld::new();
+        world.set_voxel(1, 1, 1, 1, VoxelType(7));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 7,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+
+        let manifest = load_manifest(&root).expect("manifest");
+        let index = read_index_file(root.join(&manifest.index_file)).expect("index");
+        let chunk_array_refs = collect_world_chunk_array_refs(&index);
+        assert!(!chunk_array_refs.is_empty(), "expected chunk-array refs");
+        let target = &chunk_array_refs[0];
+
+        let data_path = data_file_path(&root, target.data_file_id);
+        let mut bytes = std::fs::read(&data_path).expect("read data file");
+        let payload_offset = target
+            .record_offset
+            .saturating_add(RECORD_HEADER_LEN as u64) as usize;
+        assert!(
+            payload_offset < bytes.len(),
+            "blob payload offset should be in range"
+        );
+        bytes[payload_offset] ^= 0x01;
+        std::fs::write(&data_path, bytes).expect("rewrite tampered data file");
+
+        let err = load_state(&root).expect_err("corrupt blob should fail load");
+        assert!(
+            err.to_string().contains("blob payload checksum mismatch"),
+            "unexpected error: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
