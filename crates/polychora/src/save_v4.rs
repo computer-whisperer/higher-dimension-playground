@@ -20,6 +20,7 @@ const PLAYERS_MAGIC: &[u8; 4] = b"V4P0";
 const INDEX_MAGIC: &[u8; 4] = b"V4IX";
 const DATA_MAGIC: &[u8; 4] = b"V4DT";
 const RECORD_MAGIC: &[u8; 4] = b"RECD";
+const RECORD_HEADER_LEN: u32 = 4 + 1 + 2 + 4 + 4;
 const INDEX_FILE_VERSION: u32 = 1;
 const INDEX_ENTITY_ROOT_NONE: u32 = u32::MAX;
 
@@ -282,6 +283,19 @@ struct TempNode {
     kind: TempNodeKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BlobReuseKey {
+    blob_type: u8,
+    blob_version: u16,
+    payload_len: u32,
+    payload_crc32: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BlobReuseIndex {
+    refs_by_key: HashMap<BlobReuseKey, Vec<BlobRef>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IndexSubtreeKind {
     World,
@@ -399,6 +413,7 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
         request.now_ms,
     )?;
     let mut manifest = loaded.manifest;
+    let mut reuse_index = build_blob_reuse_index(root, &loaded.index)?;
 
     let mut world_leaves = Vec::<LeafDescriptor>::new();
     if !request.disable_block_persistence {
@@ -435,9 +450,10 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
                     };
                     let payload_blob_bytes = postcard::to_stdvec(&payload_blob)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                    let payload_ref = append_blob_record(
+                    let payload_ref = append_or_reuse_blob_record(
                         root,
                         &mut manifest,
+                        &mut reuse_index,
                         BLOB_KIND_CHUNK_PAYLOAD,
                         CHUNK_PAYLOAD_BLOB_VERSION,
                         &payload_blob_bytes,
@@ -453,9 +469,10 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
                     };
                     let chunk_array_blob_bytes = postcard::to_stdvec(&chunk_array_blob)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                    let chunk_array_ref = append_blob_record(
+                    let chunk_array_ref = append_or_reuse_blob_record(
                         root,
                         &mut manifest,
+                        &mut reuse_index,
                         BLOB_KIND_CHUNK_ARRAY,
                         CHUNK_ARRAY_BLOB_VERSION,
                         &chunk_array_blob_bytes,
@@ -500,9 +517,10 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
         };
         let entity_blob_bytes = postcard::to_stdvec(&entity_blob)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let entity_ref = append_blob_record(
+        let entity_ref = append_or_reuse_blob_record(
             root,
             &mut manifest,
+            &mut reuse_index,
             BLOB_KIND_ENTITY,
             ENTITY_BLOB_VERSION,
             &entity_blob_bytes,
@@ -1305,6 +1323,152 @@ fn ensure_data_file(root: &Path, data_file_id: u32) -> io::Result<()> {
     Ok(())
 }
 
+fn blob_ref_identity(blob_ref: &BlobRef) -> (u32, u64, u32, u32, u8, u16) {
+    (
+        blob_ref.data_file_id,
+        blob_ref.record_offset,
+        blob_ref.record_len,
+        blob_ref.record_crc32,
+        blob_ref.blob_type,
+        blob_ref.blob_version,
+    )
+}
+
+fn blob_ref_to_reuse_key(blob_ref: &BlobRef) -> io::Result<BlobReuseKey> {
+    if blob_ref.record_len < RECORD_HEADER_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "blob record_len {} too small for header {}",
+                blob_ref.record_len, RECORD_HEADER_LEN
+            ),
+        ));
+    }
+    Ok(BlobReuseKey {
+        blob_type: blob_ref.blob_type,
+        blob_version: blob_ref.blob_version,
+        payload_len: blob_ref.record_len.saturating_sub(RECORD_HEADER_LEN),
+        payload_crc32: blob_ref.record_crc32,
+    })
+}
+
+fn payload_to_reuse_key(
+    blob_type: u8,
+    blob_version: u16,
+    payload: &[u8],
+) -> io::Result<BlobReuseKey> {
+    let payload_len = u32::try_from(payload.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("payload too large for blob record: {} bytes", payload.len()),
+        )
+    })?;
+    Ok(BlobReuseKey {
+        blob_type,
+        blob_version,
+        payload_len,
+        payload_crc32: crc32(payload),
+    })
+}
+
+fn collect_leaf_chunk_array_refs_recursive(
+    node_id: u32,
+    node_by_id: &HashMap<u32, &IndexNode>,
+    out: &mut Vec<BlobRef>,
+) -> io::Result<()> {
+    let Some(node) = node_by_id.get(&node_id).copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("missing node {} while collecting blob refs", node_id),
+        ));
+    };
+
+    match &node.kind {
+        IndexNodeKind::Branch { child_node_ids } => {
+            for child_id in child_node_ids {
+                collect_leaf_chunk_array_refs_recursive(*child_id, node_by_id, out)?;
+            }
+        }
+        IndexNodeKind::LeafChunkArray { chunk_array_ref } => {
+            out.push(chunk_array_ref.clone());
+        }
+        IndexNodeKind::LeafEmpty | IndexNodeKind::LeafUniform { .. } => {}
+    }
+    Ok(())
+}
+
+fn build_blob_reuse_index(root: &Path, index: &IndexPayload) -> io::Result<BlobReuseIndex> {
+    let mut out = BlobReuseIndex::default();
+    let mut seen = HashSet::<(u32, u64, u32, u32, u8, u16)>::new();
+    let node_by_id = build_node_lookup(index);
+
+    let mut refs = Vec::<BlobRef>::new();
+    collect_leaf_chunk_array_refs_recursive(index.root_node_id, &node_by_id, &mut refs)?;
+    if let Some(entity_root) = index.entity_root_node_id {
+        collect_leaf_chunk_array_refs_recursive(entity_root, &node_by_id, &mut refs)?;
+    }
+
+    for blob_ref in refs {
+        if seen.insert(blob_ref_identity(&blob_ref)) {
+            let key = blob_ref_to_reuse_key(&blob_ref)?;
+            out.refs_by_key
+                .entry(key)
+                .or_default()
+                .push(blob_ref.clone());
+        }
+
+        if blob_ref.blob_type == BLOB_KIND_CHUNK_ARRAY {
+            let payload = read_blob_payload(root, &blob_ref)?;
+            let chunk_array_blob: ChunkArrayBlob = postcard::from_bytes(&payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            for payload_ref in chunk_array_blob.payload_palette {
+                if payload_ref.blob_type != BLOB_KIND_CHUNK_PAYLOAD {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "chunk-array palette ref has invalid blob type {}",
+                            payload_ref.blob_type
+                        ),
+                    ));
+                }
+                if seen.insert(blob_ref_identity(&payload_ref)) {
+                    let key = blob_ref_to_reuse_key(&payload_ref)?;
+                    out.refs_by_key.entry(key).or_default().push(payload_ref);
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn append_or_reuse_blob_record(
+    root: &Path,
+    manifest: &mut Manifest,
+    reuse_index: &mut BlobReuseIndex,
+    blob_type: u8,
+    blob_version: u16,
+    payload: &[u8],
+) -> io::Result<BlobRef> {
+    let key = payload_to_reuse_key(blob_type, blob_version, payload)?;
+    if let Some(candidates) = reuse_index.refs_by_key.get(&key) {
+        for candidate in candidates {
+            let existing_payload = read_blob_payload(root, candidate)?;
+            if existing_payload == payload {
+                return Ok(candidate.clone());
+            }
+        }
+    }
+
+    let blob_ref = append_blob_record(root, manifest, blob_type, blob_version, payload)?;
+    reuse_index
+        .refs_by_key
+        .entry(key)
+        .or_default()
+        .push(blob_ref.clone());
+    Ok(blob_ref)
+}
+
 fn append_blob_record(
     root: &Path,
     manifest: &mut Manifest,
@@ -1312,8 +1476,7 @@ fn append_blob_record(
     blob_version: u16,
     payload: &[u8],
 ) -> io::Result<BlobRef> {
-    let record_header_len = 4 + 1 + 2 + 4 + 4;
-    let record_len = (record_header_len + payload.len()) as u64;
+    let record_len = (RECORD_HEADER_LEN as usize + payload.len()) as u64;
     let payload_crc = crc32(payload);
 
     loop {
@@ -1893,6 +2056,28 @@ mod tests {
         path
     }
 
+    fn collect_world_chunk_array_refs(index: &IndexPayload) -> Vec<BlobRef> {
+        let node_by_id = build_node_lookup(index);
+        let mut refs = Vec::new();
+        collect_leaf_chunk_array_refs_recursive(index.root_node_id, &node_by_id, &mut refs)
+            .expect("collect world refs");
+        refs.sort_unstable_by_key(blob_ref_identity);
+        refs
+    }
+
+    fn total_data_bytes(root: &Path) -> u64 {
+        let data_root = root.join(DATA_DIR);
+        let Ok(entries) = std::fs::read_dir(&data_root) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .sum()
+    }
+
     #[test]
     fn save_and_load_roundtrip_preserves_world_entities_players() {
         let root = test_root("roundtrip");
@@ -2223,6 +2408,121 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root_a);
         let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn save_state_reuses_identical_chunk_payload_within_single_save() {
+        let root = test_root("reuse-within-save");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+
+        let mut world = VoxelWorld::new();
+        world.set_voxel(1, 1, 1, 1, VoxelType(7));
+        world.set_voxel(17, 1, 1, 1, VoxelType(7));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+
+        let manifest = load_manifest(&root).expect("load manifest");
+        let index = read_index_file(root.join(&manifest.index_file)).expect("load index");
+        let chunk_array_refs = collect_world_chunk_array_refs(&index);
+        assert_eq!(chunk_array_refs.len(), 2);
+
+        let mut payload_refs = Vec::<BlobRef>::new();
+        for chunk_array_ref in chunk_array_refs {
+            let payload =
+                read_blob_payload(&root, &chunk_array_ref).expect("read chunk array blob");
+            let chunk_array_blob: ChunkArrayBlob =
+                postcard::from_bytes(&payload).expect("decode chunk array blob");
+            assert_eq!(chunk_array_blob.payload_palette.len(), 1);
+            payload_refs.push(chunk_array_blob.payload_palette[0].clone());
+        }
+
+        assert_eq!(payload_refs[0], payload_refs[1]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_state_identical_resave_does_not_append_data_blobs() {
+        let root = test_root("no-thrash-resave");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+
+        let mut world = VoxelWorld::new_with_base(BaseWorldKind::FlatFloor {
+            material: VoxelType(11),
+        });
+        world.set_voxel(3, 2, 1, 0, VoxelType(5));
+        world.set_voxel(-13, 4, -2, 7, VoxelType(9));
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 123,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("initial save");
+        let manifest_a = load_manifest(&root).expect("manifest a");
+        let index_a = read_index_file(root.join(&manifest_a.index_file)).expect("index a");
+        let refs_a = collect_world_chunk_array_refs(&index_a);
+        let data_bytes_a = total_data_bytes(&root);
+
+        save_state(
+            &root,
+            SaveRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 123,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms: now_ms.saturating_add(1),
+            },
+        )
+        .expect("second save");
+        let manifest_b = load_manifest(&root).expect("manifest b");
+        let index_b = read_index_file(root.join(&manifest_b.index_file)).expect("index b");
+        let refs_b = collect_world_chunk_array_refs(&index_b);
+        let data_bytes_b = total_data_bytes(&root);
+
+        assert_eq!(refs_a, refs_b);
+        assert_eq!(data_bytes_a, data_bytes_b);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
