@@ -7,7 +7,7 @@ use self::entities::{EntityId, EntityStore};
 use self::region_tree_cache::RegionTreeWorkingSet;
 use self::world_field::ServerWorldField;
 use crate::materials;
-use crate::save_v3::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
+use crate::save_v4::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
     WorldSummary,
@@ -472,7 +472,7 @@ fn mark_entities_dirty(state: &mut ServerState) {
 }
 
 fn mark_block_region_dirty(state: &mut ServerState, chunk_pos: ChunkPos) {
-    let region = save_v3::region_from_chunk_pos(chunk_pos, state.region_chunk_edge.max(1));
+    let region = save_v4::region_from_chunk_pos(chunk_pos, state.region_chunk_edge.max(1));
     state.dirty_block_regions.insert(region);
 }
 
@@ -3252,35 +3252,35 @@ fn encode_world_override_payload(world: &ServerWorldField) -> io::Result<Vec<u8>
 fn load_or_init_world_state(
     root: &std::path::Path,
     world_seed: u64,
-) -> io::Result<save_v3::LoadedState> {
+) -> io::Result<save_v4::LoadedState> {
     if root.exists() {
         if root.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "legacy .v4dw world file '{}' is unsupported; use worldgen-cli migration to v3",
+                    "legacy .v4dw world file '{}' is unsupported; use worldgen-cli migration to v4",
                     root.display()
                 ),
             ));
         }
-        if !save_v3::is_v3_save_root(root) && !directory_is_empty(root)? {
+        if !save_v4::is_v4_save_root(root) && !directory_is_empty(root)? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "save root '{}' is not a v3 world directory (missing manifest.json)",
+                    "save root '{}' is not a v4 world directory; migrate with worldgen-cli migrate-v3-to-v4 or the main-menu migration tool",
                     root.display()
                 ),
             ));
         }
     }
 
-    save_v3::load_or_init_state(
+    save_v4::load_or_init_state(
         root,
         BaseWorldKind::FlatFloor {
             material: VoxelType(11),
         },
         world_seed,
-        save_v3::now_unix_ms(),
+        save_v4::now_unix_ms(),
     )
 }
 
@@ -3479,7 +3479,7 @@ fn start_autosave_thread(
             let snapshot_start = Instant::now();
             let pending = {
                 let guard = state.lock().expect("server state lock poisoned");
-                let now_ms = save_v3::now_unix_ms();
+                let now_ms = save_v4::now_unix_ms();
                 let players = collect_player_records(&guard, now_ms);
                 let should_persist_players = !players.is_empty()
                     && now_ms.saturating_sub(guard.last_players_persisted_ms)
@@ -3523,7 +3523,7 @@ fn start_autosave_thread(
             let save_start = Instant::now();
             let empty_block_regions = HashSet::new();
             let save_world = VoxelWorld::new_with_base(pending.base_world_kind);
-            let save_result = save_v3::save_state(
+            let save_result = save_v4::save_state(
                 &world_file,
                 SaveRequest {
                     world: &save_world,
@@ -3535,6 +3535,7 @@ fn start_autosave_thread(
                     dirty_entity_regions: &pending.dirty_entity_regions,
                     force_full_blocks: false,
                     force_full_entities: pending.force_full_entities,
+                    player_entity_hints: None,
                     custom_global_payload: Some(pending.world_override_payload),
                     disable_block_persistence: true,
                     now_ms: pending.now_ms,
@@ -4402,7 +4403,7 @@ fn initialize_state(
     initial_world.clear_dirty();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
-        "loaded v3 world {} (generation {}, {} non-empty chunks, {} persisted entities, {} player records)",
+        "loaded v4 world {} (generation {}, {} non-empty chunks, {} persisted entities, {} player records)",
         config.world_file.display(),
         save_generation,
         initial_chunks,

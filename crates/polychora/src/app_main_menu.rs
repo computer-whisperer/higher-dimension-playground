@@ -53,13 +53,17 @@ fn run_legacy_trim_migration(
     Ok((result.dropped_overrides, result.non_empty_chunks))
 }
 
-fn run_legacy_to_v3_migration(
+fn run_v3_to_v4_migration(
     input: &Path,
-    sidecar: Option<&Path>,
     output: &Path,
-    world_seed: u64,
     overwrite: bool,
-) -> Result<polychora::save_v3::SaveResult, String> {
+) -> Result<polychora::save_v4::SaveResult, String> {
+    if !polychora::save_v3::is_v3_save_root(input) {
+        return Err(format!(
+            "input {} is not a v3 save root (missing v3 manifest)",
+            input.display()
+        ));
+    }
     if output.exists() {
         if !overwrite {
             return Err(format!(
@@ -80,14 +84,13 @@ fn run_legacy_to_v3_migration(
             )
         })?;
     }
-    polychora::save_v3::migrate_legacy_world_to_v3(
+    polychora::save_v4::migrate_v3_save_to_v4(
         input,
-        sidecar,
         output,
-        world_seed,
-        polychora::save_v3::now_unix_ms(),
+        overwrite,
+        polychora::save_v4::now_unix_ms(),
     )
-    .map_err(|error| format!("v3 migration failed: {error}"))
+    .map_err(|error| format!("v4 migration failed: {error}"))
 }
 
 impl App {
@@ -100,7 +103,7 @@ impl App {
         } else {
             vec![]
         };
-        // Also scan current directory for v3 save roots.
+        // Also scan current directory for v4 save roots.
         let cwd = Path::new(".");
         let all_dirs: Vec<&Path> = {
             let mut v = vec![cwd];
@@ -115,7 +118,7 @@ impl App {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_dir() || !polychora::save_v3::is_v3_save_root(&path) {
+                if !path.is_dir() || !polychora::save_v4::is_v4_save_root(&path) {
                     continue;
                 }
                 let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -244,7 +247,7 @@ impl App {
         }
     }
 
-    fn run_main_menu_migration_legacy_to_v3(&mut self) {
+    fn run_main_menu_migration_v3_to_v4(&mut self) {
         let input = PathBuf::from(self.main_menu_migrate_v3_input.trim());
         let output = PathBuf::from(self.main_menu_migrate_v3_output.trim());
         if input.as_os_str().is_empty() || output.as_os_str().is_empty() {
@@ -252,30 +255,10 @@ impl App {
                 Some("Error: input and output paths are required".to_string());
             return;
         }
-        let sidecar = self.main_menu_migrate_v3_sidecar.trim();
-        let sidecar_path = if sidecar.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(sidecar))
-        };
-        let world_seed = match self.main_menu_migrate_v3_world_seed.trim().parse::<u64>() {
-            Ok(v) => v,
-            Err(error) => {
-                self.main_menu_migration_status =
-                    Some(format!("Error: world seed is invalid: {error}"));
-                return;
-            }
-        };
-        match run_legacy_to_v3_migration(
-            &input,
-            sidecar_path.as_deref(),
-            &output,
-            world_seed,
-            self.main_menu_migrate_v3_overwrite,
-        ) {
+        match run_v3_to_v4_migration(&input, &output, self.main_menu_migrate_v3_overwrite) {
             Ok(save_result) => {
                 self.main_menu_migration_status = Some(format!(
-                    "Legacy -> v3 migration complete: generation {} (block regions {}, entity regions {}) at {}",
+                    "v3 -> v4 migration complete: generation {} (block regions {}, entity regions {}) at {}",
                     save_result.generation,
                     save_result.saved_block_regions,
                     save_result.saved_entity_regions,
@@ -502,8 +485,8 @@ impl App {
             MainMenuPage::SingleplayerMigrationLegacyTrim => {
                 self.draw_egui_main_menu_singleplayer_migrate_legacy_trim(ctx, transition);
             }
-            MainMenuPage::SingleplayerMigrationLegacyToV3 => {
-                self.draw_egui_main_menu_singleplayer_migrate_legacy_to_v3(ctx, transition);
+            MainMenuPage::SingleplayerMigrationV3ToV4 => {
+                self.draw_egui_main_menu_singleplayer_migrate_v3_to_v4(ctx, transition);
             }
             MainMenuPage::Multiplayer => {
                 self.draw_egui_main_menu_multiplayer(ctx, transition);
@@ -591,7 +574,7 @@ impl App {
                 ui.add_space(4.0);
 
                 if self.main_menu_world_files.is_empty() {
-                    ui.label("No v3 world save directories found in saves/ or current directory.");
+                    ui.label("No v4 world save directories found in saves/ or current directory.");
                 } else {
                     let selected = self.main_menu_selected_world;
                     egui::ScrollArea::vertical()
@@ -688,10 +671,10 @@ impl App {
                 );
                 ui.add_space(10.0);
 
-                if ui.button("Legacy .v4dw -> v3 Save Root").clicked() {
-                    self.main_menu_page = MainMenuPage::SingleplayerMigrationLegacyToV3;
+                if ui.button("v3 Save Root -> v4 Save Root").clicked() {
+                    self.main_menu_page = MainMenuPage::SingleplayerMigrationV3ToV4;
                 }
-                ui.small("Converts a legacy .v4dw (plus optional .entities.json) into a v3 save directory.");
+                ui.small("Upgrades a v3 save root directory into a v4 save root directory.");
 
                 ui.add_space(12.0);
                 self.draw_main_menu_migration_status(ui);
@@ -752,41 +735,33 @@ impl App {
             });
     }
 
-    pub(super) fn draw_egui_main_menu_singleplayer_migrate_legacy_to_v3(
+    pub(super) fn draw_egui_main_menu_singleplayer_migrate_v3_to_v4(
         &mut self,
         ctx: &egui::Context,
         _transition: &mut Option<MainMenuTransition>,
     ) {
-        egui::Window::new("main_menu_singleplayer_migrate_legacy_to_v3")
+        egui::Window::new("main_menu_singleplayer_migrate_v3_to_v4")
             .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .resizable(false)
             .collapsible(false)
-            .fixed_size([640.0, 410.0])
+            .fixed_size([640.0, 360.0])
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading(RichText::new("Legacy .v4dw -> v3").size(22.0).strong());
+                    ui.heading(RichText::new("v3 Save Root -> v4").size(22.0).strong());
                 });
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);
 
-                ui.label("Input .v4dw:");
+                ui.label("Input v3 save root directory:");
                 ui.text_edit_singleline(&mut self.main_menu_migrate_v3_input);
                 ui.add_space(4.0);
 
-                ui.label("Input sidecar (.entities.json, optional):");
-                ui.text_edit_singleline(&mut self.main_menu_migrate_v3_sidecar);
-                ui.add_space(4.0);
-
-                ui.label("Output v3 save root directory:");
+                ui.label("Output v4 save root directory:");
                 ui.text_edit_singleline(&mut self.main_menu_migrate_v3_output);
                 ui.add_space(4.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("World seed:");
-                    ui.text_edit_singleline(&mut self.main_menu_migrate_v3_world_seed);
-                });
                 ui.checkbox(
                     &mut self.main_menu_migrate_v3_overwrite,
                     "Overwrite output directory if it exists",
@@ -798,7 +773,7 @@ impl App {
 
                 ui.horizontal(|ui| {
                     if ui.button("Run Migration").clicked() {
-                        self.run_main_menu_migration_legacy_to_v3();
+                        self.run_main_menu_migration_v3_to_v4();
                     }
                     if ui.button("Back").clicked() {
                         self.main_menu_page = MainMenuPage::SingleplayerMigrations;

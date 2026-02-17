@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use polychora::legacy_migration;
 use polychora::save_v3;
+use polychora::save_v4;
 use polychora::shared::protocol::{EntityClass, EntityKind};
 use polychora::shared::voxel::{load_world, save_world, BaseWorldKind, VoxelType, VoxelWorld};
 use std::collections::BTreeMap;
@@ -92,27 +93,39 @@ enum Command {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
-    /// Migrate legacy .v4dw (+ optional entity sidecar) into a v3 save root directory
-    MigrateV3 {
+    /// Migrate legacy .v4dw (+ optional entity sidecar) into a v4 save root directory
+    MigrateV4 {
         /// Input legacy .v4dw file path
         #[arg(long, short)]
         input: PathBuf,
         /// Optional legacy JSON sidecar path (<input>.entities.json)
         #[arg(long)]
         sidecar: Option<PathBuf>,
-        /// Output v3 save root directory path
+        /// Output v4 save root directory path
         #[arg(long, short)]
         output: PathBuf,
-        /// World seed written to v3 global metadata
+        /// World seed written to v4 global metadata
         #[arg(long, default_value_t = 1337)]
         world_seed: u64,
         /// Overwrite output directory if it already exists
         #[arg(long, default_value_t = false)]
         overwrite: bool,
     },
-    /// Inspect v3 save root metadata and summary counts
-    InspectV3 {
+    /// Upgrade an existing v3 save root directory into v4
+    MigrateV3ToV4 {
         /// Input v3 save root directory path
+        #[arg(long, short)]
+        input: PathBuf,
+        /// Output v4 save root directory path
+        #[arg(long, short)]
+        output: PathBuf,
+        /// Overwrite output directory if it already exists
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    /// Inspect v4 save root metadata and summary counts
+    InspectV4 {
+        /// Input v4 save root directory path
         #[arg(long, short)]
         input: PathBuf,
     },
@@ -459,7 +472,7 @@ fn run_migrate(
     Ok(())
 }
 
-fn run_migrate_v3(
+fn run_migrate_v4(
     input: PathBuf,
     sidecar: Option<PathBuf>,
     output: PathBuf,
@@ -485,15 +498,37 @@ fn run_migrate_v3(
         std::fs::remove_dir_all(&output)?;
     }
 
-    let save_result = save_v3::migrate_legacy_world_to_v3(
+    let save_result = save_v4::migrate_legacy_world_to_v4(
         &input,
         sidecar.as_deref(),
         &output,
         world_seed,
-        save_v3::now_unix_ms(),
+        save_v4::now_unix_ms(),
     )?;
     println!(
-        "Migrated legacy world -> v3: generation={} saved_block_regions={} saved_entity_regions={} output={}",
+        "Migrated legacy world -> v4: generation={} saved_block_regions={} saved_entity_regions={} output={}",
+        save_result.generation,
+        save_result.saved_block_regions,
+        save_result.saved_entity_regions,
+        output.display()
+    );
+    Ok(())
+}
+
+fn run_migrate_v3_to_v4(input: PathBuf, output: PathBuf, overwrite: bool) -> io::Result<()> {
+    if !save_v3::is_v3_save_root(&input) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "input path '{}' is not a v3 save root directory",
+                input.display()
+            ),
+        ));
+    }
+    let save_result =
+        save_v4::migrate_v3_save_to_v4(&input, &output, overwrite, save_v4::now_unix_ms())?;
+    println!(
+        "Migrated v3 save root -> v4: generation={} saved_block_regions={} saved_entity_regions={} output={}",
         save_result.generation,
         save_result.saved_block_regions,
         save_result.saved_entity_regions,
@@ -534,8 +569,8 @@ fn count_named_files(root: &Path, prefix: &str, suffix: &str) -> usize {
         .count()
 }
 
-fn run_inspect_v3(input: PathBuf) -> io::Result<()> {
-    let loaded = save_v3::load_state(&input)?;
+fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
+    let loaded = save_v4::load_state(&input)?;
     let manifest = loaded.manifest;
     let global = loaded.global;
     let players = loaded.players.players;
@@ -597,7 +632,7 @@ fn run_inspect_v3(input: PathBuf) -> io::Result<()> {
     let mut player_ids: Vec<u64> = players.iter().map(|p| p.player_id).collect();
     player_ids.sort_unstable();
 
-    println!("v3 save root: {}", input.display());
+    println!("v4 save root: {}", input.display());
     println!(
         "manifest: format={} version={} generation={}",
         manifest.format, manifest.version, manifest.current_generation
@@ -766,14 +801,19 @@ fn main() {
             drop_outside_keep_bounds,
             dry_run,
         ),
-        Command::MigrateV3 {
+        Command::MigrateV4 {
             input,
             sidecar,
             output,
             world_seed,
             overwrite,
-        } => run_migrate_v3(input, sidecar, output, world_seed, overwrite),
-        Command::InspectV3 { input } => run_inspect_v3(input),
+        } => run_migrate_v4(input, sidecar, output, world_seed, overwrite),
+        Command::MigrateV3ToV4 {
+            input,
+            output,
+            overwrite,
+        } => run_migrate_v3_to_v4(input, output, overwrite),
+        Command::InspectV4 { input } => run_inspect_v4(input),
     };
 
     if let Err(err) = result {
