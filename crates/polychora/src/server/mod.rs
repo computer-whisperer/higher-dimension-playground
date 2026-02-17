@@ -7,12 +7,13 @@ use self::entities::{EntityId, EntityStore};
 use self::region_tree_cache::RegionTreeWorkingSet;
 use self::world_field::ServerWorldField;
 use crate::materials;
-use crate::save_v4::{self, PersistedEntityRecord, PlayerRecord, SaveRequest};
+use crate::save_v4::{self, PersistedEntityRecord, PlayerRecord, SaveChunkPayloadRequest};
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
     WorldSummary,
 };
-use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, VoxelWorld, CHUNK_SIZE};
+use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
+use crate::shared::worldfield::ChunkPayload;
 use crate::shared::worldfield::{
     Aabb4i, QueryDetail, QueryVolume, RegionClockMap, RegionClockPrecondition, RegionClockUpdate,
     RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch, WorldField,
@@ -3406,7 +3407,8 @@ fn start_autosave_thread(
 ) {
     struct PendingAutosave {
         now_ms: u64,
-        persisted_world: VoxelWorld,
+        base_world_kind: BaseWorldKind,
+        persisted_chunk_payloads: Vec<([i32; 4], ChunkPayload)>,
         persisted_entities: Vec<PersistedEntityRecord>,
         players: Vec<PlayerRecord>,
         world_seed: u64,
@@ -3453,7 +3455,14 @@ fn start_autosave_thread(
                 } else {
                     Some(PendingAutosave {
                         now_ms,
-                        persisted_world: guard.world.to_legacy_world(),
+                        base_world_kind: guard.world.base_kind(),
+                        persisted_chunk_payloads: guard
+                            .world
+                            .chunk_tree()
+                            .collect_chunks()
+                            .into_iter()
+                            .map(|(key, payload)| (key.pos, payload))
+                            .collect(),
                         persisted_entities: collect_persisted_entities(&guard, now_ms),
                         players,
                         world_seed: guard.world.world_seed(),
@@ -3469,35 +3478,39 @@ fn start_autosave_thread(
             let Some(pending) = pending else {
                 continue;
             };
-            let entity_count = pending.persisted_entities.len();
-            let player_count = pending.players.len();
-            let saved_world_revision = pending.world_revision;
-            let saved_entity_revision = pending.entity_revision;
+            let PendingAutosave {
+                now_ms,
+                base_world_kind,
+                persisted_chunk_payloads,
+                persisted_entities,
+                players,
+                world_seed,
+                next_entity_id,
+                chunk_count,
+                world_revision: saved_world_revision,
+                entity_revision: saved_entity_revision,
+            } = pending;
+            let entity_count = persisted_entities.len();
+            let player_count = players.len();
             let save_start = Instant::now();
-            let full_block_regions = save_v4::all_block_regions(
-                &pending.persisted_world,
-                save_v4::DEFAULT_REGION_CHUNK_EDGE,
-            );
-            let full_entity_regions = save_v4::all_entity_regions(
-                &pending.persisted_entities,
-                save_v4::DEFAULT_REGION_CHUNK_EDGE,
-            );
-            let save_result = save_v4::save_state(
+            let empty_regions = HashSet::new();
+            let save_result = save_v4::save_state_from_chunk_payloads(
                 &world_file,
-                SaveRequest {
-                    world: &pending.persisted_world,
-                    entities: &pending.persisted_entities,
-                    players: &pending.players,
-                    world_seed: pending.world_seed,
-                    next_entity_id: pending.next_entity_id,
-                    dirty_block_regions: &full_block_regions,
-                    dirty_entity_regions: &full_entity_regions,
+                SaveChunkPayloadRequest {
+                    base_world_kind,
+                    chunk_payloads: persisted_chunk_payloads,
+                    entities: &persisted_entities,
+                    players: &players,
+                    world_seed,
+                    next_entity_id,
+                    dirty_block_regions: &empty_regions,
+                    dirty_entity_regions: &empty_regions,
                     force_full_blocks: true,
                     force_full_entities: true,
                     player_entity_hints: None,
                     custom_global_payload: None,
                     disable_block_persistence: false,
-                    now_ms: pending.now_ms,
+                    now_ms,
                 },
             );
             let save_elapsed = save_start.elapsed();
@@ -3519,8 +3532,8 @@ fn start_autosave_thread(
                         }
                         if clear_entities {
                             guard.entities_dirty = false;
-                            if !pending.players.is_empty() {
-                                guard.last_players_persisted_ms = pending.now_ms;
+                            if !players.is_empty() {
+                                guard.last_players_persisted_ms = now_ms;
                             }
                         }
                         (guard.world_revision, guard.entity_revision)
@@ -3533,7 +3546,7 @@ fn start_autosave_thread(
                         entity_revision,
                         save_result.saved_block_regions,
                         save_result.saved_entity_regions,
-                        pending.chunk_count,
+                        chunk_count,
                         entity_count,
                         player_count,
                         snapshot_elapsed.as_secs_f64() * 1000.0,
