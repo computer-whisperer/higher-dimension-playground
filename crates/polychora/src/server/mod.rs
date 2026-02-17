@@ -2572,6 +2572,59 @@ fn chunk_bounds_for_resync_entries(entries: &[RegionResyncEntry]) -> Option<Aabb
     Some(bounds)
 }
 
+fn extend_chunk_bounds(
+    min_bounds: &mut [i32; 4],
+    max_bounds: &mut [i32; 4],
+    any: &mut bool,
+    chunk_pos: [i32; 4],
+) {
+    if !*any {
+        *min_bounds = chunk_pos;
+        *max_bounds = chunk_pos;
+        *any = true;
+        return;
+    }
+    for axis in 0..4 {
+        min_bounds[axis] = min_bounds[axis].min(chunk_pos[axis]);
+        max_bounds[axis] = max_bounds[axis].max(chunk_pos[axis]);
+    }
+}
+
+fn chunk_bounds_for_stream_delta(
+    chunk_loads: &[WorldChunkPayload],
+    chunk_unloads: &[WorldChunkCoordPayload],
+) -> Option<Aabb4i> {
+    let mut min_bounds = [0i32; 4];
+    let mut max_bounds = [0i32; 4];
+    let mut any = false;
+
+    for payload in chunk_loads {
+        if payload.lod_level != WORLD_CHUNK_LOD_NEAR {
+            continue;
+        }
+        extend_chunk_bounds(
+            &mut min_bounds,
+            &mut max_bounds,
+            &mut any,
+            payload.chunk_pos,
+        );
+    }
+
+    for payload in chunk_unloads {
+        if payload.lod_level != WORLD_CHUNK_LOD_NEAR {
+            continue;
+        }
+        extend_chunk_bounds(
+            &mut min_bounds,
+            &mut max_bounds,
+            &mut any,
+            payload.chunk_pos,
+        );
+    }
+
+    any.then(|| Aabb4i::new(min_bounds, max_bounds))
+}
+
 fn region_patch_wire_size_bytes(patch: &RegionSubtreePatch) -> Option<usize> {
     postcard::to_stdvec(&ServerMessage::WorldRegionPatch {
         patch: patch.clone(),
@@ -2955,6 +3008,7 @@ fn sync_streamed_chunks_for_client(
             update.map(|(revision, loads, unloads)| {
                 let mut region_patches = Vec::new();
                 let mut patch_fallback_to_chunks = false;
+                let patch_bounds = chunk_bounds_for_stream_delta(&loads, &unloads);
 
                 if should_emit_stream_patch {
                     let (known_before, mut next_patch_seq) = {
@@ -2974,27 +3028,33 @@ fn sync_streamed_chunks_for_client(
                         )
                     };
 
-                    match build_region_patches_for_bounds(
-                        &guard.world,
-                        near_bounds,
-                        &current_region_clocks,
-                        &known_before,
-                        &mut next_patch_seq,
-                    ) {
-                        Some((patches, known_after)) => {
-                            region_patches = patches;
-                            if let Some(player) = guard.players.get_mut(&client_id) {
-                                player.known_region_clocks = known_after;
-                                player.next_stream_patch_seq = next_patch_seq;
-                            }
-                        }
-                        None => {
-                            patch_fallback_to_chunks = true;
-                            if let Some(player) = guard.players.get_mut(&client_id) {
-                                for (region_id, clock) in &current_region_clocks {
-                                    player.known_region_clocks.insert(*region_id, *clock);
+                    if let Some(patch_bounds) = patch_bounds {
+                        match build_region_patches_for_bounds(
+                            &guard.world,
+                            patch_bounds,
+                            &current_region_clocks,
+                            &known_before,
+                            &mut next_patch_seq,
+                        ) {
+                            Some((patches, known_after)) => {
+                                region_patches = patches;
+                                if let Some(player) = guard.players.get_mut(&client_id) {
+                                    player.known_region_clocks = known_after;
+                                    player.next_stream_patch_seq = next_patch_seq;
                                 }
                             }
+                            None => {
+                                patch_fallback_to_chunks = true;
+                                if let Some(player) = guard.players.get_mut(&client_id) {
+                                    for (region_id, clock) in &current_region_clocks {
+                                        player.known_region_clocks.insert(*region_id, *clock);
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(player) = guard.players.get_mut(&client_id) {
+                        for (region_id, clock) in &current_region_clocks {
+                            player.known_region_clocks.insert(*region_id, *clock);
                         }
                     }
                 } else if let Some(player) = guard.players.get_mut(&client_id) {
@@ -4900,5 +4960,45 @@ mod tests {
         let size = region_patch_wire_size_bytes(&patch).expect("serialized size");
         assert!(size > 0);
         assert!(size <= MAX_PATCH_BYTES);
+    }
+
+    #[test]
+    fn chunk_bounds_for_stream_delta_unions_loads_and_unloads() {
+        let loads = vec![
+            WorldChunkPayload {
+                lod_level: WORLD_CHUNK_LOD_NEAR,
+                chunk_pos: [2, 1, -3, 0],
+                voxels: Vec::new(),
+            },
+            WorldChunkPayload {
+                lod_level: WORLD_CHUNK_LOD_NEAR,
+                chunk_pos: [5, 4, 2, 1],
+                voxels: Vec::new(),
+            },
+        ];
+        let unloads = vec![WorldChunkCoordPayload {
+            lod_level: WORLD_CHUNK_LOD_NEAR,
+            chunk_pos: [-1, 3, 0, -2],
+        }];
+
+        let bounds =
+            chunk_bounds_for_stream_delta(&loads, &unloads).expect("delta bounds should exist");
+        assert_eq!(bounds.min, [-1, 1, -3, -2]);
+        assert_eq!(bounds.max, [5, 4, 2, 1]);
+    }
+
+    #[test]
+    fn chunk_bounds_for_stream_delta_ignores_non_near_lod() {
+        let loads = vec![WorldChunkPayload {
+            lod_level: WORLD_CHUNK_LOD_NEAR.saturating_add(1),
+            chunk_pos: [7, 7, 7, 7],
+            voxels: Vec::new(),
+        }];
+        let unloads = vec![WorldChunkCoordPayload {
+            lod_level: WORLD_CHUNK_LOD_NEAR.saturating_add(2),
+            chunk_pos: [-7, -7, -7, -7],
+        }];
+
+        assert!(chunk_bounds_for_stream_delta(&loads, &unloads).is_none());
     }
 }
