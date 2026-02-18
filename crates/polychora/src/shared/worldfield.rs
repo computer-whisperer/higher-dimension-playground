@@ -576,945 +576,11 @@ pub trait WorldField {
     fn realize_chunk(&mut self, key: ChunkKey, profile: RealizeProfile) -> ChunkPayload;
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct RegionChunkTree {
-    root: Option<Box<RegionTreeCore>>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RegionChunkDiff {
-    pub removals: Vec<ChunkKey>,
-    pub upserts: Vec<(ChunkKey, ChunkPayload)>,
-}
-
-impl RegionChunkDiff {
-    pub fn is_empty(&self) -> bool {
-        self.removals.is_empty() && self.upserts.is_empty()
-    }
-
-    pub fn changed_bounds(&self) -> Option<Aabb4i> {
-        let mut min_bounds = [0i32; 4];
-        let mut max_bounds = [0i32; 4];
-        let mut any = false;
-        let mut extend = |pos: [i32; 4]| {
-            if !any {
-                min_bounds = pos;
-                max_bounds = pos;
-                any = true;
-                return;
-            }
-            for axis in 0..4 {
-                min_bounds[axis] = min_bounds[axis].min(pos[axis]);
-                max_bounds[axis] = max_bounds[axis].max(pos[axis]);
-            }
-        };
-
-        for key in &self.removals {
-            extend(key.pos);
-        }
-        for (key, _) in &self.upserts {
-            extend(key.pos);
-        }
-
-        any.then(|| Aabb4i::new(min_bounds, max_bounds))
-    }
-}
-
-impl RegionChunkTree {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn from_chunks<I>(chunks: I) -> Self
-    where
-        I: IntoIterator<Item = (ChunkKey, ChunkPayload)>,
-    {
-        let mut tree = Self::new();
-        for (key, payload) in chunks {
-            let _ = tree.set_chunk(key, Some(payload));
-        }
-        tree
-    }
-
-    pub fn root(&self) -> Option<&RegionTreeCore> {
-        self.root.as_deref()
-    }
-
-    pub fn has_chunk(&self, key: ChunkKey) -> bool {
-        self.chunk_payload(key).is_some()
-    }
-
-    pub fn chunk_payload(&self, key: ChunkKey) -> Option<ChunkPayload> {
-        self.root
-            .as_ref()
-            .and_then(|node| query_chunk_payload_in_node(node, key.pos))
-    }
-
-    pub fn set_chunk(&mut self, key: ChunkKey, payload: Option<ChunkPayload>) -> bool {
-        let payload = payload.map(canonicalize_chunk_payload);
-        if self.root.is_none() {
-            let Some(payload) = payload else {
-                return false;
-            };
-            let bounds = Aabb4i::new(key.pos, key.pos);
-            self.root = Some(Box::new(RegionTreeCore {
-                bounds,
-                kind: kind_from_chunk_value(bounds, Some(payload)),
-                generator_version_hash: 0,
-            }));
-            return true;
-        }
-
-        while self
-            .root
-            .as_ref()
-            .map(|root| !root.bounds.contains_chunk(key.pos))
-            .unwrap_or(false)
-        {
-            let Some(root) = self.root.take() else {
-                break;
-            };
-            self.root = Some(expand_root_once(root, key.pos));
-        }
-
-        let changed = if let Some(root) = self.root.as_mut() {
-            set_chunk_recursive(root, key.pos, payload)
-        } else {
-            false
-        };
-
-        if changed
-            && self
-                .root
-                .as_ref()
-                .map(|root| matches!(root.kind, RegionNodeKind::Empty))
-                .unwrap_or(false)
-        {
-            self.root = None;
-        }
-
-        changed
-    }
-
-    pub fn remove_chunk(&mut self, key: ChunkKey) -> bool {
-        self.set_chunk(key, None)
-    }
-
-    pub fn any_non_empty_chunk_in_bounds(&self, bounds: Aabb4i) -> bool {
-        if !bounds.is_valid() {
-            return false;
-        }
-        self.root
-            .as_ref()
-            .map(|node| kind_has_non_empty_chunk_intersection(&node.kind, node.bounds, bounds))
-            .unwrap_or(false)
-    }
-
-    pub fn non_empty_chunk_count(&self) -> usize {
-        self.root
-            .as_ref()
-            .map(|node| count_non_empty_chunks(&node.kind, node.bounds))
-            .unwrap_or(0)
-    }
-
-    pub fn collect_chunks(&self) -> Vec<(ChunkKey, ChunkPayload)> {
-        let mut out = Vec::new();
-        if let Some(root) = self.root.as_ref() {
-            collect_chunks_from_kind(&root.kind, root.bounds, &mut out);
-        }
-        out
-    }
-
-    pub fn collect_chunks_in_bounds(&self, bounds: Aabb4i) -> Vec<(ChunkKey, ChunkPayload)> {
-        if !bounds.is_valid() {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        if let Some(root) = self.root.as_ref() {
-            collect_chunks_from_kind_in_bounds(&root.kind, root.bounds, bounds, &mut out);
-        }
-        out
-    }
-
-    pub fn diff_chunks_in_bounds<I>(&self, bounds: Aabb4i, desired: I) -> RegionChunkDiff
-    where
-        I: IntoIterator<Item = (ChunkKey, ChunkPayload)>,
-    {
-        if !bounds.is_valid() {
-            return RegionChunkDiff::default();
-        }
-
-        let current_map: HashMap<ChunkKey, ChunkPayload> =
-            self.collect_chunks_in_bounds(bounds).into_iter().collect();
-
-        let mut desired_map = HashMap::<ChunkKey, ChunkPayload>::new();
-        for (key, payload) in desired {
-            if !bounds.contains_chunk(key.pos) {
-                continue;
-            }
-            desired_map.insert(key, canonicalize_chunk_payload(payload));
-        }
-
-        let mut removals = Vec::new();
-        for key in current_map.keys() {
-            if !desired_map.contains_key(key) {
-                removals.push(*key);
-            }
-        }
-        removals.sort_unstable_by_key(|key| key.pos);
-
-        let mut upserts = Vec::new();
-        for (key, payload) in desired_map {
-            if current_map.get(&key) == Some(&payload) {
-                continue;
-            }
-            upserts.push((key, payload));
-        }
-        upserts.sort_unstable_by_key(|(key, _)| key.pos);
-
-        RegionChunkDiff { removals, upserts }
-    }
-
-    pub fn diff_non_empty_core_in_bounds(
-        &self,
-        bounds: Aabb4i,
-        core: &RegionTreeCore,
-    ) -> RegionChunkDiff {
-        self.diff_chunks_in_bounds(
-            bounds,
-            collect_non_empty_chunks_from_core_in_bounds(core, bounds),
-        )
-    }
-
-    pub fn apply_chunk_diff(&mut self, diff: &RegionChunkDiff) {
-        for key in &diff.removals {
-            let _ = self.remove_chunk(*key);
-        }
-        for (key, payload) in &diff.upserts {
-            let _ = self.set_chunk(*key, Some(payload.clone()));
-        }
-    }
-
-    pub fn apply_non_empty_core_in_bounds(
-        &mut self,
-        bounds: Aabb4i,
-        core: &RegionTreeCore,
-    ) -> RegionChunkDiff {
-        let diff = self.diff_non_empty_core_in_bounds(bounds, core);
-        self.apply_chunk_diff(&diff);
-        diff
-    }
-}
-
-pub fn collect_non_empty_chunks_from_core_in_bounds(
-    core: &RegionTreeCore,
-    bounds: Aabb4i,
-) -> Vec<(ChunkKey, ChunkPayload)> {
-    if !bounds.is_valid() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    collect_non_empty_chunks_from_kind_in_bounds(&core.kind, core.bounds, bounds, &mut out);
-    out.sort_unstable_by_key(|(key, _)| key.pos);
-    out
-}
-
-fn collect_non_empty_chunks_from_kind_in_bounds(
-    kind: &RegionNodeKind,
-    bounds: Aabb4i,
-    query_bounds: Aabb4i,
-    out: &mut Vec<(ChunkKey, ChunkPayload)>,
-) {
-    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
-        return;
-    };
-
-    match kind {
-        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            if *material == 0 {
-                return;
-            }
-            let payload = ChunkPayload::Uniform(*material);
-            for w in intersection.min[3]..=intersection.max[3] {
-                for z in intersection.min[2]..=intersection.max[2] {
-                    for y in intersection.min[1]..=intersection.max[1] {
-                        for x in intersection.min[0]..=intersection.max[0] {
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            let Some(chunk_array_intersection) = intersect_aabb(chunk_array.bounds, query_bounds)
-            else {
-                return;
-            };
-            let Ok(indices) = chunk_array.decode_dense_indices() else {
-                return;
-            };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
-                return;
-            };
-            for w in chunk_array_intersection.min[3]..=chunk_array_intersection.max[3] {
-                for z in chunk_array_intersection.min[2]..=chunk_array_intersection.max[2] {
-                    for y in chunk_array_intersection.min[1]..=chunk_array_intersection.max[1] {
-                        for x in chunk_array_intersection.min[0]..=chunk_array_intersection.max[0] {
-                            let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
-                            ];
-                            let linear = linear_cell_index(local, extents);
-                            let Some(palette_idx) = indices.get(linear) else {
-                                continue;
-                            };
-                            let Some(payload) =
-                                chunk_array.chunk_palette.get(*palette_idx as usize)
-                            else {
-                                continue;
-                            };
-                            if !payload_has_solid_material(payload) {
-                                continue;
-                            }
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::Branch(children) => {
-            for child in children {
-                collect_non_empty_chunks_from_kind_in_bounds(
-                    &child.kind,
-                    child.bounds,
-                    query_bounds,
-                    out,
-                );
-            }
-        }
-    }
-}
-
-fn set_chunk_recursive(
-    node: &mut RegionTreeCore,
-    key_pos: [i32; 4],
-    payload: Option<ChunkPayload>,
-) -> bool {
-    if !node.bounds.contains_chunk(key_pos) {
-        return false;
-    }
-
-    if is_single_chunk_bounds(node.bounds) {
-        let new_kind = kind_from_chunk_value(node.bounds, payload);
-        if node.kind == new_kind {
-            return false;
-        }
-        node.kind = new_kind;
-        return true;
-    }
-
-    ensure_binary_children(node);
-    let RegionNodeKind::Branch(children) = &mut node.kind else {
-        return false;
-    };
-    let target_idx = children
-        .iter()
-        .position(|child| child.bounds.contains_chunk(key_pos));
-    let Some(target_idx) = target_idx else {
-        return false;
-    };
-
-    let changed = set_chunk_recursive(&mut children[target_idx], key_pos, payload);
-    if changed {
-        normalize_chunk_node(node);
-    }
-    changed
-}
-
-fn ensure_binary_children(node: &mut RegionTreeCore) {
-    if is_single_chunk_bounds(node.bounds) {
-        return;
-    }
-
-    if let RegionNodeKind::Branch(children) = &mut node.kind {
-        if branch_matches_split(node.bounds, children) {
-            sort_children_canonical(children);
-            return;
-        }
-    }
-
-    let Some((left_bounds, right_bounds)) = split_bounds_longest_axis(node.bounds) else {
-        return;
-    };
-
-    let generator_version_hash = node.generator_version_hash;
-    let old_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
-    let left = project_node_to_bounds(&old_kind, node.bounds, left_bounds, generator_version_hash);
-    let right =
-        project_node_to_bounds(&old_kind, node.bounds, right_bounds, generator_version_hash);
-    let mut children = vec![left, right];
-    sort_children_canonical(&mut children);
-    node.kind = RegionNodeKind::Branch(children);
-}
-
-fn normalize_chunk_node(node: &mut RegionTreeCore) {
-    let RegionNodeKind::Branch(children) = &mut node.kind else {
-        return;
-    };
-    if children.len() != 2 {
-        sort_children_canonical(children);
-        return;
-    }
-    sort_children_canonical(children);
-    let left_kind = children[0].kind.clone();
-    let right_kind = children[1].kind.clone();
-    match (left_kind, right_kind) {
-        (RegionNodeKind::Empty, RegionNodeKind::Empty) => {
-            node.kind = RegionNodeKind::Empty;
-        }
-        (RegionNodeKind::Uniform(a), RegionNodeKind::Uniform(b)) if a == b => {
-            node.kind = RegionNodeKind::Uniform(a);
-        }
-        (RegionNodeKind::ProceduralRef(a), RegionNodeKind::ProceduralRef(b)) if a == b => {
-            node.kind = RegionNodeKind::ProceduralRef(a);
-        }
-        _ => {}
-    }
-}
-
-fn project_node_to_bounds(
-    source_kind: &RegionNodeKind,
-    source_bounds: Aabb4i,
-    target_bounds: Aabb4i,
-    generator_version_hash: u64,
-) -> RegionTreeCore {
-    if !target_bounds.is_valid() || !source_bounds.intersects(&target_bounds) {
-        return RegionTreeCore {
-            bounds: target_bounds,
-            kind: RegionNodeKind::Empty,
-            generator_version_hash,
-        };
-    }
-
-    let kind = match source_kind {
-        RegionNodeKind::Empty => RegionNodeKind::Empty,
-        RegionNodeKind::Uniform(material) => RegionNodeKind::Uniform(*material),
-        RegionNodeKind::ProceduralRef(generator_ref) => {
-            RegionNodeKind::ProceduralRef(generator_ref.clone())
-        }
-        RegionNodeKind::ChunkArray(_) | RegionNodeKind::Branch(_) => {
-            if let Some(uniform_value) =
-                sampled_uniform_chunk_value(source_kind, source_bounds, target_bounds)
-            {
-                kind_from_chunk_value(target_bounds, uniform_value)
-            } else if let Some((left_bounds, right_bounds)) =
-                split_bounds_longest_axis(target_bounds)
-            {
-                let left = project_node_to_bounds(
-                    source_kind,
-                    source_bounds,
-                    left_bounds,
-                    generator_version_hash,
-                );
-                let right = project_node_to_bounds(
-                    source_kind,
-                    source_bounds,
-                    right_bounds,
-                    generator_version_hash,
-                );
-                let mut parent = RegionTreeCore {
-                    bounds: target_bounds,
-                    kind: RegionNodeKind::Branch(vec![left, right]),
-                    generator_version_hash,
-                };
-                normalize_chunk_node(&mut parent);
-                return parent;
-            } else {
-                let value =
-                    query_chunk_payload_in_kind(source_kind, source_bounds, target_bounds.min);
-                kind_from_chunk_value(target_bounds, value)
-            }
-        }
-    };
-
-    RegionTreeCore {
-        bounds: target_bounds,
-        kind,
-        generator_version_hash,
-    }
-}
-
-fn sampled_uniform_chunk_value(
-    kind: &RegionNodeKind,
-    kind_bounds: Aabb4i,
-    bounds: Aabb4i,
-) -> Option<Option<ChunkPayload>> {
-    let mut first = None::<Option<ChunkPayload>>;
-    for w in bounds.min[3]..=bounds.max[3] {
-        for z in bounds.min[2]..=bounds.max[2] {
-            for y in bounds.min[1]..=bounds.max[1] {
-                for x in bounds.min[0]..=bounds.max[0] {
-                    let value = query_chunk_payload_in_kind(kind, kind_bounds, [x, y, z, w]);
-                    if let Some(ref expected) = first {
-                        if *expected != value {
-                            return None;
-                        }
-                    } else {
-                        first = Some(value);
-                    }
-                }
-            }
-        }
-    }
-    first
-}
-
-fn query_chunk_payload_in_node(node: &RegionTreeCore, key_pos: [i32; 4]) -> Option<ChunkPayload> {
-    query_chunk_payload_in_kind(&node.kind, node.bounds, key_pos)
-}
-
-fn query_chunk_payload_in_kind(
-    kind: &RegionNodeKind,
-    bounds: Aabb4i,
-    key_pos: [i32; 4],
-) -> Option<ChunkPayload> {
-    if !bounds.contains_chunk(key_pos) {
-        return None;
-    }
-    match kind {
-        RegionNodeKind::Empty => None,
-        RegionNodeKind::Uniform(material) => Some(ChunkPayload::Uniform(*material)),
-        RegionNodeKind::ProceduralRef(_) => None,
-        RegionNodeKind::ChunkArray(chunk_array) => chunk_array_payload_at(chunk_array, key_pos),
-        RegionNodeKind::Branch(children) => {
-            for child in children {
-                if child.bounds.contains_chunk(key_pos) {
-                    return query_chunk_payload_in_kind(&child.kind, child.bounds, key_pos);
-                }
-            }
-            None
-        }
-    }
-}
-
-fn kind_has_non_empty_chunk_intersection(
-    kind: &RegionNodeKind,
-    kind_bounds: Aabb4i,
-    query_bounds: Aabb4i,
-) -> bool {
-    if !kind_bounds.intersects(&query_bounds) {
-        return false;
-    }
-    match kind {
-        RegionNodeKind::Empty => false,
-        RegionNodeKind::Uniform(material) => *material != 0,
-        RegionNodeKind::ProceduralRef(_) => false,
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            chunk_array_has_non_empty_intersection(chunk_array, query_bounds)
-        }
-        RegionNodeKind::Branch(children) => children.iter().any(|child| {
-            kind_has_non_empty_chunk_intersection(&child.kind, child.bounds, query_bounds)
-        }),
-    }
-}
-
-fn count_non_empty_chunks(kind: &RegionNodeKind, bounds: Aabb4i) -> usize {
-    match kind {
-        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => 0,
-        RegionNodeKind::Uniform(material) => {
-            if *material == 0 {
-                0
-            } else {
-                bounds.chunk_cell_count().unwrap_or(0)
-            }
-        }
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            let Ok(indices) = chunk_array.decode_dense_indices() else {
-                return 0;
-            };
-            indices
-                .into_iter()
-                .filter_map(|idx| chunk_array.chunk_palette.get(idx as usize))
-                .filter(|payload| payload_has_solid_material(payload))
-                .count()
-        }
-        RegionNodeKind::Branch(children) => children
-            .iter()
-            .map(|child| count_non_empty_chunks(&child.kind, child.bounds))
-            .sum(),
-    }
-}
-
-fn collect_chunks_from_kind(
-    kind: &RegionNodeKind,
-    bounds: Aabb4i,
-    out: &mut Vec<(ChunkKey, ChunkPayload)>,
-) {
-    match kind {
-        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            let payload = ChunkPayload::Uniform(*material);
-            for w in bounds.min[3]..=bounds.max[3] {
-                for z in bounds.min[2]..=bounds.max[2] {
-                    for y in bounds.min[1]..=bounds.max[1] {
-                        for x in bounds.min[0]..=bounds.max[0] {
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            let Ok(indices) = chunk_array.decode_dense_indices() else {
-                return;
-            };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
-                return;
-            };
-            for w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
-                for z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
-                    for y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
-                        for x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
-                            let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
-                            ];
-                            let linear = linear_cell_index(local, extents);
-                            let Some(palette_idx) = indices.get(linear) else {
-                                continue;
-                            };
-                            let Some(payload) =
-                                chunk_array.chunk_palette.get(*palette_idx as usize)
-                            else {
-                                continue;
-                            };
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::Branch(children) => {
-            for child in children {
-                collect_chunks_from_kind(&child.kind, child.bounds, out);
-            }
-        }
-    }
-}
-
-fn collect_chunks_from_kind_in_bounds(
-    kind: &RegionNodeKind,
-    bounds: Aabb4i,
-    query_bounds: Aabb4i,
-    out: &mut Vec<(ChunkKey, ChunkPayload)>,
-) {
-    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
-        return;
-    };
-
-    match kind {
-        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            let payload = ChunkPayload::Uniform(*material);
-            for w in intersection.min[3]..=intersection.max[3] {
-                for z in intersection.min[2]..=intersection.max[2] {
-                    for y in intersection.min[1]..=intersection.max[1] {
-                        for x in intersection.min[0]..=intersection.max[0] {
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            let Some(chunk_array_intersection) = intersect_aabb(chunk_array.bounds, query_bounds)
-            else {
-                return;
-            };
-            let Ok(indices) = chunk_array.decode_dense_indices() else {
-                return;
-            };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
-                return;
-            };
-            for w in chunk_array_intersection.min[3]..=chunk_array_intersection.max[3] {
-                for z in chunk_array_intersection.min[2]..=chunk_array_intersection.max[2] {
-                    for y in chunk_array_intersection.min[1]..=chunk_array_intersection.max[1] {
-                        for x in chunk_array_intersection.min[0]..=chunk_array_intersection.max[0] {
-                            let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
-                            ];
-                            let linear = linear_cell_index(local, extents);
-                            let Some(palette_idx) = indices.get(linear) else {
-                                continue;
-                            };
-                            let Some(payload) =
-                                chunk_array.chunk_palette.get(*palette_idx as usize)
-                            else {
-                                continue;
-                            };
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        RegionNodeKind::Branch(children) => {
-            for child in children {
-                collect_chunks_from_kind_in_bounds(&child.kind, child.bounds, query_bounds, out);
-            }
-        }
-    }
-}
-
-fn chunk_array_has_non_empty_intersection(
-    chunk_array: &ChunkArrayData,
-    query_bounds: Aabb4i,
-) -> bool {
-    let Some(intersection) = intersect_aabb(chunk_array.bounds, query_bounds) else {
-        return false;
-    };
-    let Ok(indices) = chunk_array.decode_dense_indices() else {
-        // Conservatively treat malformed payload as potentially non-empty.
-        return true;
-    };
-    let Some(extents) = chunk_array.bounds.chunk_extents() else {
-        return true;
-    };
-
-    for w in intersection.min[3]..=intersection.max[3] {
-        for z in intersection.min[2]..=intersection.max[2] {
-            for y in intersection.min[1]..=intersection.max[1] {
-                for x in intersection.min[0]..=intersection.max[0] {
-                    let local = [
-                        (x - chunk_array.bounds.min[0]) as usize,
-                        (y - chunk_array.bounds.min[1]) as usize,
-                        (z - chunk_array.bounds.min[2]) as usize,
-                        (w - chunk_array.bounds.min[3]) as usize,
-                    ];
-                    let linear = linear_cell_index(local, extents);
-                    let Some(palette_idx) = indices.get(linear) else {
-                        return true;
-                    };
-                    let Some(payload) = chunk_array.chunk_palette.get(*palette_idx as usize) else {
-                        return true;
-                    };
-                    if payload_has_solid_material(payload) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn payload_has_solid_material(payload: &ChunkPayload) -> bool {
-    match payload {
-        ChunkPayload::Empty => false,
-        ChunkPayload::Uniform(material) => *material != 0,
-        ChunkPayload::Dense16 { materials } => materials.iter().any(|m| *m != 0),
-        ChunkPayload::PalettePacked { .. } => payload
-            .dense_materials()
-            .map(|dense| dense.into_iter().any(|m| m != 0))
-            .unwrap_or(true),
-    }
-}
-
-fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: [i32; 4]) -> Option<ChunkPayload> {
-    if !chunk_array.bounds.contains_chunk(key_pos) {
-        return None;
-    }
-    let dense_indices = chunk_array.decode_dense_indices().ok()?;
-    let extents = chunk_array.bounds.chunk_extents()?;
-    let local = [
-        (key_pos[0] - chunk_array.bounds.min[0]) as usize,
-        (key_pos[1] - chunk_array.bounds.min[1]) as usize,
-        (key_pos[2] - chunk_array.bounds.min[2]) as usize,
-        (key_pos[3] - chunk_array.bounds.min[3]) as usize,
-    ];
-    let linear = linear_cell_index(local, extents);
-    let palette_idx = *dense_indices.get(linear)? as usize;
-    chunk_array.chunk_palette.get(palette_idx).cloned()
-}
-
-fn canonicalize_chunk_payload(payload: ChunkPayload) -> ChunkPayload {
-    let payload = match payload {
-        ChunkPayload::Empty => ChunkPayload::Uniform(0),
-        other => other,
-    };
-    let Ok(dense) = payload.dense_materials() else {
-        return payload;
-    };
-    if dense.is_empty() {
-        return payload;
-    }
-    let first = dense[0];
-    if dense.iter().all(|m| *m == first) {
-        ChunkPayload::Uniform(first)
-    } else {
-        payload
-    }
-}
-
-fn kind_from_chunk_value(bounds: Aabb4i, value: Option<ChunkPayload>) -> RegionNodeKind {
-    let Some(payload) = value else {
-        return RegionNodeKind::Empty;
-    };
-    match canonicalize_chunk_payload(payload) {
-        ChunkPayload::Uniform(material) => RegionNodeKind::Uniform(material),
-        other => repeated_payload_kind(bounds, other),
-    }
-}
-
-fn repeated_payload_kind(bounds: Aabb4i, payload: ChunkPayload) -> RegionNodeKind {
-    let Some(cell_count) = bounds.chunk_cell_count() else {
-        return RegionNodeKind::Empty;
-    };
-    let indices = vec![0u16; cell_count];
-    match ChunkArrayData::from_dense_indices(bounds, vec![payload], indices, Some(0)) {
-        Ok(chunk_array) => RegionNodeKind::ChunkArray(chunk_array),
-        Err(_) => RegionNodeKind::Empty,
-    }
-}
-
-fn is_single_chunk_bounds(bounds: Aabb4i) -> bool {
-    bounds.min == bounds.max
-}
-
-fn branch_matches_split(bounds: Aabb4i, children: &[RegionTreeCore]) -> bool {
-    if children.len() != 2 {
-        return false;
-    }
-    let Some((left, right)) = split_bounds_longest_axis(bounds) else {
-        return false;
-    };
-    (children[0].bounds == left && children[1].bounds == right)
-        || (children[0].bounds == right && children[1].bounds == left)
-}
-
-fn split_bounds_longest_axis(bounds: Aabb4i) -> Option<(Aabb4i, Aabb4i)> {
-    if !bounds.is_valid() {
-        return None;
-    }
-
-    let spans = [
-        bounds.max[0] - bounds.min[0] + 1,
-        bounds.max[1] - bounds.min[1] + 1,
-        bounds.max[2] - bounds.min[2] + 1,
-        bounds.max[3] - bounds.min[3] + 1,
-    ];
-    let mut axis = 0usize;
-    for idx in 1..4 {
-        if spans[idx] > spans[axis] {
-            axis = idx;
-        }
-    }
-    if spans[axis] <= 1 {
-        return None;
-    }
-
-    let left_len = spans[axis] / 2;
-    let left_max_axis = bounds.min[axis] + left_len - 1;
-    let mut left_max = bounds.max;
-    left_max[axis] = left_max_axis;
-
-    let mut right_min = bounds.min;
-    right_min[axis] = left_max_axis + 1;
-
-    Some((
-        Aabb4i::new(bounds.min, left_max),
-        Aabb4i::new(right_min, bounds.max),
-    ))
-}
-
-fn sort_children_canonical(children: &mut [RegionTreeCore]) {
-    children.sort_unstable_by_key(|child| {
-        (
-            child.bounds.min[0],
-            child.bounds.min[1],
-            child.bounds.min[2],
-            child.bounds.min[3],
-            child.bounds.max[0],
-            child.bounds.max[1],
-            child.bounds.max[2],
-            child.bounds.max[3],
-        )
-    });
-}
-
-fn expand_root_once(root: Box<RegionTreeCore>, key_pos: [i32; 4]) -> Box<RegionTreeCore> {
-    if root.bounds.contains_chunk(key_pos) {
-        return root;
-    }
-
-    let old_root = *root;
-    let old_bounds = old_root.bounds;
-    let axis = (0..4)
-        .find(|axis| {
-            key_pos[*axis] < old_bounds.min[*axis] || key_pos[*axis] > old_bounds.max[*axis]
-        })
-        .unwrap_or(0);
-    let span = (old_bounds.max[axis] - old_bounds.min[axis] + 1).max(1);
-
-    let mut new_bounds = old_bounds;
-    let mut sibling_bounds = old_bounds;
-    if key_pos[axis] < old_bounds.min[axis] {
-        let mut expanded = old_bounds.min[axis].saturating_sub(span);
-        if expanded >= old_bounds.min[axis] {
-            expanded = key_pos[axis];
-        }
-        new_bounds.min[axis] = expanded;
-        sibling_bounds.min[axis] = expanded;
-        sibling_bounds.max[axis] = old_bounds.min[axis] - 1;
-    } else {
-        let mut expanded = old_bounds.max[axis].saturating_add(span);
-        if expanded <= old_bounds.max[axis] {
-            expanded = key_pos[axis];
-        }
-        new_bounds.max[axis] = expanded;
-        sibling_bounds.min[axis] = old_bounds.max[axis] + 1;
-        sibling_bounds.max[axis] = expanded;
-    }
-
-    let sibling = RegionTreeCore {
-        bounds: sibling_bounds,
-        kind: RegionNodeKind::Empty,
-        generator_version_hash: old_root.generator_version_hash,
-    };
-    let mut children = vec![old_root, sibling];
-    sort_children_canonical(&mut children);
-    Box::new(RegionTreeCore {
-        bounds: new_bounds,
-        kind: RegionNodeKind::Branch(children),
-        generator_version_hash: 0,
-    })
-}
-
-fn intersect_aabb(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
-    let min = [
-        a.min[0].max(b.min[0]),
-        a.min[1].max(b.min[1]),
-        a.min[2].max(b.min[2]),
-        a.min[3].max(b.min[3]),
-    ];
-    let max = [
-        a.max[0].min(b.max[0]),
-        a.max[1].min(b.max[1]),
-        a.max[2].min(b.max[2]),
-        a.max[3].min(b.max[3]),
-    ];
-    (min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2] && min[3] <= max[3])
-        .then_some(Aabb4i::new(min, max))
-}
+mod region_tree;
+pub use region_tree::{
+    collect_non_empty_chunks_from_core_in_bounds, slice_non_empty_region_core_in_bounds,
+    slice_region_core_in_bounds, RegionChunkTree,
+};
 
 fn minimal_bit_width(palette_len: usize) -> u8 {
     if palette_len <= 1 {
@@ -1968,8 +1034,8 @@ mod tests {
     use super::*;
     use crate::shared::voxel::{Chunk, VoxelType, CHUNK_SIZE};
     use crate::shared::worldfield_testkit::{
-        assert_tree_matches_reference, expand_bounds, random_chunk_key_in_bounds,
-        random_chunk_payload, random_sub_bounds, DeterministicRng, ReferenceChunkStore,
+        assert_tree_matches_reference, random_chunk_key_in_bounds, random_chunk_payload,
+        random_sub_bounds, DeterministicRng, ReferenceChunkStore,
     };
 
     fn key(x: i32, y: i32, z: i32, w: i32) -> ChunkKey {
@@ -2232,41 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn region_chunk_tree_diff_and_apply_updates_bounds_minimally() {
-        let mut tree = RegionChunkTree::new();
-        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
-        assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(3))));
-        assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
-
-        let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
-        let diff = tree.diff_chunks_in_bounds(
-            bounds,
-            vec![
-                (key(1, 0, 0, 0), ChunkPayload::Uniform(3)),
-                (key(2, 0, 0, 0), ChunkPayload::Uniform(9)),
-                (key(3, 0, 0, 0), ChunkPayload::Uniform(7)),
-            ],
-        );
-
-        assert_eq!(diff.removals, vec![key(0, 0, 0, 0)]);
-        assert_eq!(diff.upserts.len(), 1);
-        assert_eq!(diff.upserts[0], (key(2, 0, 0, 0), ChunkPayload::Uniform(9)));
-
-        tree.apply_chunk_diff(&diff);
-        assert!(!tree.has_chunk(key(0, 0, 0, 0)));
-        assert_eq!(
-            tree.chunk_payload(key(1, 0, 0, 0)),
-            Some(ChunkPayload::Uniform(3))
-        );
-        assert_eq!(
-            tree.chunk_payload(key(2, 0, 0, 0)),
-            Some(ChunkPayload::Uniform(9))
-        );
-        assert!(!tree.has_chunk(key(3, 0, 0, 0)));
-    }
-
-    #[test]
-    fn region_chunk_tree_apply_non_empty_core_in_bounds_replaces_window_contents() {
+    fn region_chunk_tree_splice_non_empty_core_in_bounds_replaces_window_contents() {
         let mut tree = RegionChunkTree::new();
         assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
         assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
@@ -2285,19 +1317,150 @@ mod tests {
             generator_version_hash: 0,
         };
 
-        let diff = tree.apply_non_empty_core_in_bounds(bounds, &core);
-        assert_eq!(diff.removals, vec![key(0, 0, 0, 0), key(2, 0, 0, 0)]);
+        let changed_bounds = tree.splice_non_empty_core_in_bounds(bounds, &core);
+        assert_eq!(changed_bounds, Some(bounds));
+
+        let mut non_empty = collect_non_empty_chunks_from_core_in_bounds(
+            &tree.slice_non_empty_core_in_bounds(bounds),
+            bounds,
+        );
+        non_empty.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
+        assert_eq!(non_empty, vec![(key(1, 0, 0, 0), ChunkPayload::Uniform(9))]);
+    }
+
+    #[test]
+    fn region_chunk_tree_slice_core_in_bounds_preserves_query_bounds() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
+        assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+
+        let bounds = Aabb4i::new([1, 0, 0, 0], [3, 0, 0, 0]);
+        let slice = tree.slice_core_in_bounds(bounds);
+        assert_eq!(slice.bounds, bounds);
+
+        let mut collected = collect_non_empty_chunks_from_core_in_bounds(&slice, bounds);
+        collected.sort_unstable_by_key(|(key, _)| key.pos);
+        assert_eq!(collected, vec![(key(2, 0, 0, 0), ChunkPayload::Uniform(4))]);
+    }
+
+    #[test]
+    fn region_chunk_tree_slice_non_empty_core_in_bounds_prunes_empty_coverage() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(9))));
+
+        let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+        let slice = tree.slice_non_empty_core_in_bounds(bounds);
+        let mut collected = collect_non_empty_chunks_from_core_in_bounds(&slice, bounds);
+        collected.sort_unstable_by_key(|(key, _)| key.pos);
+        assert_eq!(collected, vec![(key(1, 0, 0, 0), ChunkPayload::Uniform(9))]);
+    }
+
+    #[test]
+    fn region_chunk_tree_take_non_empty_core_in_bounds_extracts_and_clears() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
+        assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(3))));
+        assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+
+        let bounds = Aabb4i::new([1, 0, 0, 0], [2, 0, 0, 0]);
+        let extracted = tree.take_non_empty_core_in_bounds(bounds);
+        let mut extracted_chunks = collect_non_empty_chunks_from_core_in_bounds(&extracted, bounds);
+        extracted_chunks.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
         assert_eq!(
-            diff.upserts,
-            vec![(key(1, 0, 0, 0), ChunkPayload::Uniform(9))]
+            extracted_chunks,
+            vec![
+                (key(1, 0, 0, 0), ChunkPayload::Uniform(3)),
+                (key(2, 0, 0, 0), ChunkPayload::Uniform(4))
+            ]
         );
 
-        assert!(!tree.has_chunk(key(0, 0, 0, 0)));
         assert_eq!(
-            tree.chunk_payload(key(1, 0, 0, 0)),
-            Some(ChunkPayload::Uniform(9))
+            tree.chunk_payload(key(0, 0, 0, 0)),
+            Some(ChunkPayload::Uniform(2))
         );
+        assert!(!tree.has_chunk(key(1, 0, 0, 0)));
         assert!(!tree.has_chunk(key(2, 0, 0, 0)));
+    }
+
+    #[test]
+    fn region_chunk_tree_lazy_drop_outside_bounds_respects_budget() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(-8, 0, 0, 0), Some(ChunkPayload::Uniform(6))));
+        assert!(tree.set_chunk(key(8, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
+        assert_eq!(tree.non_empty_chunk_count(), 2);
+
+        let keep = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        assert!(tree.lazy_drop_outside_bounds(keep, 0).is_none());
+        assert_eq!(tree.non_empty_chunk_count(), 2);
+
+        let first_drop = tree.lazy_drop_outside_bounds(keep, 1);
+        assert!(first_drop.is_some());
+        assert_eq!(tree.non_empty_chunk_count(), 1);
+
+        for _ in 0..32 {
+            if tree.non_empty_chunk_count() == 0 {
+                break;
+            }
+            let _ = tree.lazy_drop_outside_bounds(keep, 4);
+        }
+        assert_eq!(tree.non_empty_chunk_count(), 0);
+    }
+
+    #[test]
+    fn region_chunk_tree_randomized_splice_matches_reference_model() {
+        let domain = Aabb4i::new([-10, -4, -10, -10], [10, 4, 10, 10]);
+        for seed in [0x534c_4943_455f_31_u64, 0x534c_4943_455f_32] {
+            let mut rng = DeterministicRng::new(seed);
+            let mut baseline = RegionChunkTree::new();
+
+            for _ in 0..200 {
+                let key = random_chunk_key_in_bounds(&mut rng, domain);
+                let payload = if rng.chance(1, 5) {
+                    None
+                } else {
+                    Some(random_chunk_payload(&mut rng))
+                };
+                let _ = baseline.set_chunk(key, payload);
+            }
+
+            let mut splice_tree = baseline.clone();
+            let mut reference = ReferenceChunkStore::from_tree(&baseline);
+
+            for step in 0..120 {
+                let bounds = random_sub_bounds(&mut rng, domain);
+                let desired_count = rng.range_usize(0, 24);
+                let mut desired = Vec::with_capacity(desired_count);
+                for _ in 0..desired_count {
+                    desired.push((
+                        random_chunk_key_in_bounds(&mut rng, bounds),
+                        random_chunk_payload(&mut rng),
+                    ));
+                }
+
+                let desired_tree = RegionChunkTree::from_chunks(desired);
+                let core = desired_tree.slice_core_in_bounds(bounds);
+                let desired_non_empty = collect_non_empty_chunks_from_core_in_bounds(&core, bounds);
+                let mut before_in_bounds = splice_tree.collect_chunks_in_bounds(bounds);
+                before_in_bounds.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
+                let mut desired_in_bounds = desired_non_empty.clone();
+                desired_in_bounds.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
+                let expected_changed = before_in_bounds != desired_in_bounds;
+
+                let changed_bounds = splice_tree.splice_non_empty_core_in_bounds(bounds, &core);
+                reference.replace_non_empty_chunks_in_bounds(bounds, desired_non_empty);
+
+                let mut expected = reference.collect_chunks_sorted();
+                expected.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
+                let mut actual = splice_tree.collect_chunks();
+                actual.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
+                assert_eq!(actual, expected, "splice mismatch seed={seed} step={step}");
+                assert_eq!(
+                    changed_bounds.is_some(),
+                    expected_changed,
+                    "splice changed_bounds mismatch seed={seed} step={step}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2444,59 +1607,6 @@ mod tests {
                         reference.any_non_empty_chunk_in_bounds(probe_bounds),
                         "non-empty mismatch seed={seed} step={step}"
                     );
-                }
-            }
-
-            assert_tree_matches_reference(&tree, &reference);
-        }
-    }
-
-    #[test]
-    fn region_chunk_tree_randomized_diff_apply_matches_reference_model() {
-        let domain = Aabb4i::new([-10, -3, -10, -10], [10, 3, 10, 10]);
-        for seed in [0x91_u64, 0x4449_4646_4d4f_4445] {
-            let mut rng = DeterministicRng::new(seed);
-            let mut tree = RegionChunkTree::new();
-            let mut reference = ReferenceChunkStore::new();
-
-            for _ in 0..120 {
-                let key = random_chunk_key_in_bounds(&mut rng, domain);
-                let payload = if rng.chance(1, 5) {
-                    None
-                } else {
-                    Some(random_chunk_payload(&mut rng))
-                };
-                let _ = tree.set_chunk(key, payload.clone());
-                let _ = reference.set_chunk(key, payload);
-            }
-            assert_tree_matches_reference(&tree, &reference);
-
-            for step in 0..96 {
-                let bounds = random_sub_bounds(&mut rng, domain);
-                let desired_count = rng.range_usize(0, 24);
-                let mut desired = Vec::with_capacity(desired_count);
-                let expanded = expand_bounds(domain, 3);
-                for _ in 0..desired_count {
-                    let key = if rng.chance(1, 5) {
-                        random_chunk_key_in_bounds(&mut rng, expanded)
-                    } else {
-                        random_chunk_key_in_bounds(&mut rng, bounds)
-                    };
-                    desired.push((key, random_chunk_payload(&mut rng)));
-                }
-
-                let tree_diff = tree.diff_chunks_in_bounds(bounds, desired.clone());
-                let reference_diff = reference.diff_chunks_in_bounds(bounds, desired);
-                assert_eq!(
-                    tree_diff, reference_diff,
-                    "diff mismatch seed={seed} step={step}"
-                );
-
-                tree.apply_chunk_diff(&tree_diff);
-                reference.apply_chunk_diff(&reference_diff);
-
-                if step % 24 == 0 {
-                    assert_tree_matches_reference(&tree, &reference);
                 }
             }
 

@@ -1,5 +1,5 @@
 use crate::shared::voxel::{Chunk, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
-use crate::shared::worldfield::{Aabb4i, ChunkKey, ChunkPayload, RegionChunkDiff, RegionChunkTree};
+use crate::shared::worldfield::{Aabb4i, ChunkKey, ChunkPayload, RegionChunkTree};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -126,54 +126,32 @@ impl ReferenceChunkStore {
             .count()
     }
 
-    pub fn diff_chunks_in_bounds<I>(&self, bounds: Aabb4i, desired: I) -> RegionChunkDiff
+    pub fn replace_non_empty_chunks_in_bounds<I>(&mut self, bounds: Aabb4i, desired: I)
     where
         I: IntoIterator<Item = (ChunkKey, ChunkPayload)>,
     {
         if !bounds.is_valid() {
-            return RegionChunkDiff::default();
+            return;
         }
 
-        let current_map: HashMap<ChunkKey, ChunkPayload> = self
-            .collect_chunks_in_bounds_sorted(bounds)
-            .into_iter()
+        let to_remove: Vec<ChunkKey> = self
+            .chunks
+            .keys()
+            .filter(|key| bounds.contains_chunk(key.pos))
+            .copied()
             .collect();
+        for key in to_remove {
+            self.chunks.remove(&key);
+        }
 
-        let mut desired_map = HashMap::<ChunkKey, ChunkPayload>::new();
         for (key, payload) in desired {
             if !bounds.contains_chunk(key.pos) {
                 continue;
             }
-            desired_map.insert(key, canonicalize_payload(payload));
-        }
-
-        let mut removals = Vec::new();
-        for key in current_map.keys() {
-            if !desired_map.contains_key(key) {
-                removals.push(*key);
+            let canonical = canonicalize_payload(payload);
+            if payload_has_solid_material(&canonical) {
+                self.chunks.insert(key, canonical);
             }
-        }
-        removals.sort_unstable_by_key(|key| key.pos);
-
-        let mut upserts = Vec::new();
-        for (key, payload) in desired_map {
-            if current_map.get(&key) == Some(&payload) {
-                continue;
-            }
-            upserts.push((key, payload));
-        }
-        upserts.sort_unstable_by_key(|(key, _)| key.pos);
-
-        RegionChunkDiff { removals, upserts }
-    }
-
-    pub fn apply_chunk_diff(&mut self, diff: &RegionChunkDiff) {
-        for key in &diff.removals {
-            self.chunks.remove(key);
-        }
-        for (key, payload) in &diff.upserts {
-            self.chunks
-                .insert(*key, canonicalize_payload(payload.clone()));
         }
     }
 }

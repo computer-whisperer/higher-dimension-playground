@@ -505,19 +505,6 @@ impl Scene {
         self.world_get_voxel(wx, wy, wz, ww)
     }
 
-    pub fn gather_non_empty_chunks_in_bounds(
-        &self,
-        min_chunk: [i32; 4],
-        max_chunk: [i32; 4],
-        out: &mut Vec<ChunkPos>,
-    ) {
-        self.world_gather_non_empty_chunks_in_bounds(min_chunk, max_chunk, out);
-    }
-
-    pub fn explicit_chunk(&self, chunk_pos: ChunkPos) -> Option<&crate::voxel::chunk::Chunk> {
-        self.world_chunks.get(&chunk_pos)
-    }
-
     pub fn collect_non_empty_explicit_chunk_positions(&self) -> Vec<[i32; 4]> {
         let mut out: Vec<[i32; 4]> = self
             .world_chunks

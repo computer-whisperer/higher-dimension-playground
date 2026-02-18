@@ -15,9 +15,9 @@ use crate::shared::protocol::{
 use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
 use crate::shared::worldfield::ChunkPayload;
 use crate::shared::worldfield::{
-    Aabb4i, QueryDetail, QueryVolume, RegionClockMap, RegionClockPrecondition, RegionClockUpdate,
-    RegionId, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch, WorldField,
-    MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
+    slice_non_empty_region_core_in_bounds, Aabb4i, QueryDetail, QueryVolume, RegionClockMap,
+    RegionClockPrecondition, RegionClockUpdate, RegionId, RegionResyncEntry, RegionResyncRequest,
+    RegionSubtreePatch, WorldField, MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -415,6 +415,7 @@ impl ServerCpuProfile {
 
 #[derive(Debug)]
 struct ServerState {
+    world_file: PathBuf,
     next_object_id: u64,
     entity_store: EntityStore,
     entity_records: HashMap<u64, EntityRecord>,
@@ -422,6 +423,9 @@ struct ServerState {
     entity_revision: u64,
     dirty_block_regions: HashSet<[i32; 4]>,
     region_chunk_edge: i32,
+    loaded_block_regions: HashSet<[i32; 4]>,
+    procgen_keepout_from_existing_world: bool,
+    procgen_keepout_padding_chunks: i32,
     world: ServerWorldField,
     world_revision: u64,
     region_clocks: RegionClockMap,
@@ -480,6 +484,88 @@ fn chunk_bounds_for_region(region: [i32; 4], region_chunk_edge: i32) -> Aabb4i {
         max[axis] = start.saturating_add(edge.saturating_sub(1));
     }
     Aabb4i::new(min, max)
+}
+
+fn collect_regions_in_chunk_bounds(bounds: Aabb4i, region_chunk_edge: i32) -> HashSet<[i32; 4]> {
+    if !bounds.is_valid() {
+        return HashSet::new();
+    }
+    let edge = region_chunk_edge.max(1);
+    let min = [
+        bounds.min[0].div_euclid(edge),
+        bounds.min[1].div_euclid(edge),
+        bounds.min[2].div_euclid(edge),
+        bounds.min[3].div_euclid(edge),
+    ];
+    let max = [
+        bounds.max[0].div_euclid(edge),
+        bounds.max[1].div_euclid(edge),
+        bounds.max[2].div_euclid(edge),
+        bounds.max[3].div_euclid(edge),
+    ];
+
+    let mut regions = HashSet::new();
+    for rw in min[3]..=max[3] {
+        for rz in min[2]..=max[2] {
+            for ry in min[1]..=max[1] {
+                for rx in min[0]..=max[0] {
+                    regions.insert([rx, ry, rz, rw]);
+                }
+            }
+        }
+    }
+    regions
+}
+
+fn ensure_persisted_world_regions_loaded(
+    state: &mut ServerState,
+    chunk_bounds: Aabb4i,
+) -> io::Result<bool> {
+    if !chunk_bounds.is_valid() {
+        return Ok(false);
+    }
+
+    let target_regions = collect_regions_in_chunk_bounds(chunk_bounds, state.region_chunk_edge);
+    let mut missing_regions = HashSet::new();
+    for region in target_regions {
+        if !state.loaded_block_regions.contains(&region) {
+            missing_regions.insert(region);
+        }
+    }
+
+    if missing_regions.is_empty() {
+        return Ok(false);
+    }
+
+    let chunk_payloads =
+        save_v4::load_world_chunk_payloads_for_regions(&state.world_file, &missing_regions)?;
+    let loaded_chunks = state.world.apply_chunk_payloads(chunk_payloads);
+    state.loaded_block_regions.extend(missing_regions);
+
+    if state.procgen_keepout_from_existing_world && loaded_chunks > 0 {
+        let _ = state
+            .world
+            .rebuild_procgen_keepout_from_chunks(state.procgen_keepout_padding_chunks);
+    }
+
+    Ok(true)
+}
+
+fn collect_bootstrap_block_regions(
+    players: &[PlayerRecord],
+    entities: &[PersistedEntityRecord],
+    region_chunk_edge: i32,
+) -> HashSet<[i32; 4]> {
+    let mut regions = HashSet::new();
+    for player in players {
+        let chunk = save_v4::chunk_from_world_position(player.position);
+        regions.insert(save_v4::region_from_chunk(chunk, region_chunk_edge));
+    }
+    for entity in entities {
+        let chunk = save_v4::chunk_from_world_position(entity.position);
+        regions.insert(save_v4::region_from_chunk(chunk, region_chunk_edge));
+    }
+    regions
 }
 
 fn advance_world_revision(state: &mut ServerState) -> u64 {
@@ -2586,8 +2672,8 @@ fn split_chunk_bounds_longest_axis(bounds: Aabb4i) -> Option<(Aabb4i, Aabb4i)> {
     ))
 }
 
-fn build_region_patches_recursive<W: WorldField + ?Sized>(
-    world: &W,
+fn build_region_patches_recursive(
+    query_core: &crate::shared::worldfield::RegionTreeCore,
     bounds: Aabb4i,
     full_region_clocks: &RegionClockMap,
     working_known_clocks: &mut RegionClockMap,
@@ -2602,10 +2688,7 @@ fn build_region_patches_recursive<W: WorldField + ?Sized>(
     let preconditions =
         region_clock_preconditions_for_patch(working_known_clocks, &current_region_clocks);
     let clock_updates = region_clock_updates_from_map(&current_region_clocks);
-    let subtree = world
-        .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
-        .as_ref()
-        .clone();
+    let subtree = slice_non_empty_region_core_in_bounds(query_core, bounds);
     let estimated_patch = RegionSubtreePatch {
         patch_seq: 1,
         bounds,
@@ -2624,14 +2707,14 @@ fn build_region_patches_recursive<W: WorldField + ?Sized>(
             return false;
         };
         return build_region_patches_recursive(
-            world,
+            query_core,
             left_bounds,
             full_region_clocks,
             working_known_clocks,
             next_patch_seq,
             out,
         ) && build_region_patches_recursive(
-            world,
+            query_core,
             right_bounds,
             full_region_clocks,
             working_known_clocks,
@@ -2670,10 +2753,14 @@ fn build_region_patches_for_bounds<W: WorldField + ?Sized>(
     initial_known_clocks: &RegionClockMap,
     next_patch_seq: &mut u64,
 ) -> Option<(Vec<RegionSubtreePatch>, RegionClockMap)> {
+    let query_core = world
+        .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
+        .as_ref()
+        .clone();
     let mut working_known_clocks = initial_known_clocks.clone();
     let mut patches = Vec::new();
     if !build_region_patches_recursive(
-        world,
+        &query_core,
         bounds,
         full_region_clocks,
         &mut working_known_clocks,
@@ -2831,9 +2918,29 @@ fn sync_streamed_chunks_for_client(
     far_chunk_radius: i32,
     force: bool,
 ) {
+    let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
+    let loaded_new_regions = match {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        ensure_persisted_world_regions_loaded(&mut guard, near_bounds)
+    } {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            send_to_client(
+                state,
+                client_id,
+                ServerMessage::Error {
+                    message: format!(
+                        "failed to load persisted world regions for stream bounds {:?}->{:?}: {}",
+                        near_bounds.min, near_bounds.max, error
+                    ),
+                },
+            );
+            return;
+        }
+    };
+
     let update = {
         let mut guard = state.lock().expect("server state lock poisoned");
-        let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
         let should_sync = match guard.players.get(&client_id) {
             Some(player) => {
                 let changed = player.last_stream_center_chunk != Some(center_chunk);
@@ -2842,7 +2949,7 @@ fn sync_streamed_chunks_for_client(
                     &player.last_stream_region_clocks,
                     near_bounds,
                 );
-                force || changed || world_changed
+                force || changed || world_changed || loaded_new_regions
             }
             None => false,
         };
@@ -2941,41 +3048,48 @@ fn send_region_resync_patch_to_client(
                 return;
             };
 
-            let (known_before, mut next_patch_seq) = {
-                let Some(player) = guard.players.get_mut(&client_id) else {
-                    return;
-                };
-                for entry in &entries {
-                    player
-                        .known_region_clocks
-                        .insert(entry.region_id, entry.client_clock);
-                }
-                (
-                    player.known_region_clocks.clone(),
-                    player.next_stream_patch_seq,
-                )
-            };
-
-            let current_region_clocks =
-                collect_region_clocks_in_chunk_bounds(&guard.region_clocks, bounds);
-            match build_region_patches_for_bounds(
-                &guard.world,
-                bounds,
-                &current_region_clocks,
-                &known_before,
-                &mut next_patch_seq,
-            ) {
-                Some((patches, known_after)) => {
-                    if let Some(player) = guard.players.get_mut(&client_id) {
-                        player.known_region_clocks = known_after;
-                        player.next_stream_patch_seq = next_patch_seq;
+            if let Err(error) = ensure_persisted_world_regions_loaded(&mut guard, bounds) {
+                Some(Err(format!(
+                    "failed to load persisted world regions for resync bounds {:?}->{:?}: {}",
+                    bounds.min, bounds.max, error
+                )))
+            } else {
+                let (known_before, mut next_patch_seq) = {
+                    let Some(player) = guard.players.get_mut(&client_id) else {
+                        return;
+                    };
+                    for entry in &entries {
+                        player
+                            .known_region_clocks
+                            .insert(entry.region_id, entry.client_clock);
                     }
-                    Some(Ok(patches))
+                    (
+                        player.known_region_clocks.clone(),
+                        player.next_stream_patch_seq,
+                    )
+                };
+
+                let current_region_clocks =
+                    collect_region_clocks_in_chunk_bounds(&guard.region_clocks, bounds);
+                match build_region_patches_for_bounds(
+                    &guard.world,
+                    bounds,
+                    &current_region_clocks,
+                    &known_before,
+                    &mut next_patch_seq,
+                ) {
+                    Some((patches, known_after)) => {
+                        if let Some(player) = guard.players.get_mut(&client_id) {
+                            player.known_region_clocks = known_after;
+                            player.next_stream_patch_seq = next_patch_seq;
+                        }
+                        Some(Ok(patches))
+                    }
+                    None => Some(Err(format!(
+                        "region resync patch exceeded wire budget after spatial splitting in bounds {:?}->{:?}",
+                        bounds.min, bounds.max
+                    ))),
                 }
-                None => Some(Err(format!(
-                    "region resync patch exceeded wire budget after spatial splitting in bounds {:?}->{:?}",
-                    bounds.min, bounds.max
-                ))),
             }
         }
     };
@@ -2998,6 +3112,19 @@ fn apply_authoritative_voxel_edit(
     position: [i32; 4],
     material: VoxelType,
 ) -> Option<ChunkPos> {
+    let (chunk_pos, _) = voxel::world_to_chunk(position[0], position[1], position[2], position[3]);
+    let chunk_bounds = Aabb4i::new(
+        [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+        [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+    );
+    if let Err(error) = ensure_persisted_world_regions_loaded(state, chunk_bounds) {
+        eprintln!(
+            "failed to load persisted world region for voxel edit at {:?}: {}",
+            position, error
+        );
+        return None;
+    }
+
     let Some(chunk_pos) = state.world.apply_voxel_edit(position, material) else {
         return None;
     };
@@ -3230,7 +3357,7 @@ fn directory_is_empty(path: &std::path::Path) -> io::Result<bool> {
 fn load_or_init_world_state(
     root: &std::path::Path,
     world_seed: u64,
-) -> io::Result<save_v4::LoadedState> {
+) -> io::Result<save_v4::LoadedStateMetadata> {
     if root.exists() {
         if root.is_file() {
             return Err(io::Error::new(
@@ -3252,7 +3379,7 @@ fn load_or_init_world_state(
         }
     }
 
-    save_v4::load_or_init_state(
+    save_v4::load_or_init_state_metadata(
         root,
         BaseWorldKind::FlatFloor {
             material: VoxelType(11),
@@ -4380,16 +4507,26 @@ fn initialize_state(
     let region_chunk_edge = save_v4::DEFAULT_REGION_CHUNK_EDGE.max(1);
     let runtime_world_seed = loaded.global.world_seed;
     let base_world_kind = loaded.global.base_world_kind.to_runtime();
+    let next_object_id = loaded.global.next_entity_id.max(1);
     let persisted_entities = loaded.entities;
     let persisted_players = loaded.players.players;
+    let bootstrap_block_regions =
+        collect_bootstrap_block_regions(&persisted_players, &persisted_entities, region_chunk_edge);
+    let bootstrap_chunk_payloads = if bootstrap_block_regions.is_empty() {
+        Vec::new()
+    } else {
+        save_v4::load_world_chunk_payloads_for_regions(
+            &config.world_file,
+            &bootstrap_block_regions,
+        )?
+    };
     let mut initial_world = ServerWorldField::from_chunk_payloads(
         base_world_kind,
-        loaded.world_chunk_payloads,
+        bootstrap_chunk_payloads,
         runtime_world_seed,
         config.procgen_structures,
         HashSet::new(),
     );
-    let next_object_id = loaded.global.next_entity_id.max(1);
     let pruned = initial_world.prune_virgin_chunks();
     if pruned > 0 {
         eprintln!(
@@ -4414,10 +4551,11 @@ fn initialize_state(
     initial_world.clear_dirty();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
-        "loaded v4 world {} (generation {}, {} non-empty chunks, {} persisted entities, {} player records)",
+        "loaded v4 world {} (generation {}, {} non-empty chunks, {} hydrated save regions, {} persisted entities, {} player records)",
         config.world_file.display(),
         save_generation,
         initial_chunks,
+        bootstrap_block_regions.len(),
         persisted_entities.len(),
         persisted_players.len(),
     );
@@ -4431,6 +4569,7 @@ fn initialize_state(
     }
 
     let state = Arc::new(Mutex::new(ServerState {
+        world_file: config.world_file.clone(),
         next_object_id,
         entity_store: EntityStore::new(),
         entity_records: HashMap::new(),
@@ -4438,6 +4577,9 @@ fn initialize_state(
         entity_revision: 0,
         dirty_block_regions: HashSet::new(),
         region_chunk_edge,
+        loaded_block_regions: bootstrap_block_regions,
+        procgen_keepout_from_existing_world: config.procgen_keepout_from_existing_world,
+        procgen_keepout_padding_chunks: config.procgen_keepout_padding_chunks,
         world: initial_world,
         world_revision: 0,
         region_clocks: HashMap::new(),
@@ -4581,6 +4723,22 @@ mod tests {
         let region_bounds = region_bounds_for_chunk_bounds(bounds);
         assert_eq!(region_bounds.min, [-2, -1, 0, 1]);
         assert_eq!(region_bounds.max, [0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn collect_regions_in_chunk_bounds_includes_full_hypervolume() {
+        let bounds = Aabb4i::new([-5, -1, 0, 7], [3, 2, 0, 7]);
+        let regions = collect_regions_in_chunk_bounds(bounds, 4);
+        assert_eq!(regions.len(), 6);
+        assert!(regions.contains(&[-2, -1, 0, 1]));
+        assert!(regions.contains(&[0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn collect_regions_in_chunk_bounds_returns_empty_for_invalid_bounds() {
+        let bounds = Aabb4i::new([1, 0, 0, 0], [0, 0, 0, 0]);
+        let regions = collect_regions_in_chunk_bounds(bounds, 4);
+        assert!(regions.is_empty());
     }
 
     #[test]
@@ -4811,34 +4969,5 @@ mod tests {
         let size = region_patch_wire_size_bytes(&patch).expect("serialized size");
         assert!(size > 0);
         assert!(size <= MAX_PATCH_BYTES);
-    }
-
-    #[test]
-    fn region_chunk_diff_changed_bounds_unions_upserts_and_removals() {
-        let diff = crate::shared::worldfield::RegionChunkDiff {
-            removals: vec![crate::shared::worldfield::ChunkKey {
-                pos: [-1, 3, 0, -2],
-            }],
-            upserts: vec![
-                (
-                    crate::shared::worldfield::ChunkKey { pos: [2, 1, -3, 0] },
-                    crate::shared::worldfield::ChunkPayload::Uniform(1),
-                ),
-                (
-                    crate::shared::worldfield::ChunkKey { pos: [5, 4, 2, 1] },
-                    crate::shared::worldfield::ChunkPayload::Uniform(2),
-                ),
-            ],
-        };
-
-        let bounds = diff.changed_bounds().expect("delta bounds should exist");
-        assert_eq!(bounds.min, [-1, 1, -3, -2]);
-        assert_eq!(bounds.max, [5, 4, 2, 1]);
-    }
-
-    #[test]
-    fn region_chunk_diff_changed_bounds_returns_none_for_empty_delta() {
-        let diff = crate::shared::worldfield::RegionChunkDiff::default();
-        assert!(diff.changed_bounds().is_none());
     }
 }

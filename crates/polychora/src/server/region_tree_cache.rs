@@ -1,5 +1,7 @@
 use crate::shared::voxel::ChunkPos;
 use crate::shared::worldfield::{Aabb4i, ChunkKey, RegionChunkTree, RegionTreeCore};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 #[derive(Clone, Debug, Default)]
 pub struct RegionTreeWorkingSet {
@@ -34,13 +36,52 @@ impl RegionTreeWorkingSet {
             .interest_bounds
             .map(|old_bounds| union_aabb(old_bounds, bounds))
             .unwrap_or(bounds);
-        let patch = self.tree.apply_non_empty_core_in_bounds(patch_bounds, core);
+        let merge_start = Instant::now();
+        let changed_bounds = self
+            .tree
+            .splice_non_empty_core_in_bounds(patch_bounds, core);
+        if self.interest_bounds != Some(bounds) {
+            let _ = self
+                .tree
+                .lazy_drop_outside_bounds(bounds, region_tree_lazy_drop_budget());
+        }
+        let merge_elapsed = merge_start.elapsed();
+        let merge_elapsed_ms = merge_elapsed.as_secs_f64() * 1000.0;
+        if region_tree_merge_diag_enabled() || merge_elapsed_ms >= 100.0 {
+            eprintln!(
+                "[region-tree-merge] elapsed_ms={:.3} query={:?}->{:?} patch={:?}->{:?} keep={:?}->{:?} core={:?}->{:?} patch_cells={} changed={} changed_bounds={:?} lazy_drop_budget={}",
+                merge_elapsed_ms,
+                bounds.min,
+                bounds.max,
+                patch_bounds.min,
+                patch_bounds.max,
+                bounds.min,
+                bounds.max,
+                core.bounds.min,
+                core.bounds.max,
+                patch_bounds.chunk_cell_count().unwrap_or(0),
+                changed_bounds.is_some(),
+                changed_bounds,
+                region_tree_lazy_drop_budget()
+            );
+        }
         self.interest_bounds = Some(bounds);
 
-        RegionTreeRefreshResult {
-            changed_bounds: patch.changed_bounds(),
-        }
+        RegionTreeRefreshResult { changed_bounds }
     }
+}
+
+fn region_tree_merge_diag_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("R4D_REGION_TREE_MERGE_DIAG")
+            .ok()
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn union_aabb(a: Aabb4i, b: Aabb4i) -> Aabb4i {
@@ -58,6 +99,16 @@ fn union_aabb(a: Aabb4i, b: Aabb4i) -> Aabb4i {
             a.max[3].max(b.max[3]),
         ],
     )
+}
+
+fn region_tree_lazy_drop_budget() -> usize {
+    static BUDGET: OnceLock<usize> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("R4D_REGION_TREE_LAZY_DROP_BUDGET")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(8)
+    })
 }
 
 #[cfg(test)]
