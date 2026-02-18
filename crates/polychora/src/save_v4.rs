@@ -1,17 +1,17 @@
 use crate::shared::protocol::{EntityClass, EntityKind};
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
-use crate::shared::worldfield::{
-    Aabb4i, ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload,
+#[cfg(test)]
+use crate::migration::legacy_voxel::RegionChunkWorld;
+use crate::shared::chunk_payload::{
+    ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload,
 };
+use crate::shared::spatial::Aabb4i;
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-
-#[cfg(test)]
-use crate::shared::voxel::RegionChunkWorld;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const INDEX_DIR: &str = "index";
@@ -2940,7 +2940,8 @@ mod tests {
         world.set_voxel(2, 2, 2, 2, VoxelType(9));
         {
             let mut writer = BufWriter::new(File::create(&legacy_world).expect("create legacy"));
-            crate::shared::legacy_world_io::save_world(&world, &mut writer).expect("save legacy");
+            crate::migration::legacy_world_io::save_world(&world, &mut writer)
+                .expect("save legacy");
             writer.flush().expect("flush legacy");
         }
 
@@ -2975,7 +2976,7 @@ mod tests {
         });
         world.set_voxel(4, 1, 2, -3, VoxelType(8));
 
-        let entities = vec![crate::save_v3::PersistedEntityRecord {
+        let entities = vec![crate::migration::save_v3::PersistedEntityRecord {
             entity_id: 99,
             class: EntityClass::Accent,
             kind: EntityKind::TestCube,
@@ -2989,7 +2990,7 @@ mod tests {
             payload: vec![9, 8, 7],
             last_saved_ms: now_ms,
         }];
-        let players = vec![crate::save_v3::PlayerRecord {
+        let players = vec![crate::migration::save_v3::PlayerRecord {
             player_id: 123,
             position: [0.0, 1.0, 2.0, 3.0],
             orientation: [0.0, 0.0, 1.0, 0.0],
@@ -2999,9 +3000,9 @@ mod tests {
         }];
         let custom_payload = vec![42, 24, 7];
 
-        crate::save_v3::save_state(
+        crate::migration::save_v3::save_state(
             &v3_root,
-            crate::save_v3::SaveRequest {
+            crate::migration::save_v3::SaveRequest {
                 world: &world,
                 entities: &entities,
                 players: &players,

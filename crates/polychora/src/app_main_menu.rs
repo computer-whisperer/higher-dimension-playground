@@ -58,7 +58,7 @@ fn run_v3_to_v4_migration(
     output: &Path,
     overwrite: bool,
 ) -> Result<polychora::save_v4::SaveResult, String> {
-    if !polychora::save_v3::is_v3_save_root(input) {
+    if !polychora::migration::save_v3::is_v3_save_root(input) {
         return Err(format!(
             "input {} is not a v3 save root (missing v3 manifest)",
             input.display()
@@ -145,10 +145,8 @@ impl App {
     pub(super) fn reset_multiplayer_connection_state(&mut self) {
         self.multiplayer = None;
         self.multiplayer_self_id = None;
-        self.multiplayer_region_clocks.clear();
-        self.multiplayer_last_region_patch_seq = None;
-        self.multiplayer_stream_tree_diag = polychora::shared::worldfield::RegionChunkTree::new();
-        self.multiplayer_last_region_resync_request = Instant::now();
+        self.multiplayer_last_world_request_center_chunk = None;
+        self.multiplayer_stream_tree_diag = polychora::shared::region_tree::RegionChunkTree::new();
         self.pending_player_movement_modifiers.clear();
         self.player_modifier_external_velocity = [0.0; 4];
         self.remote_players.clear();

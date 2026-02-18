@@ -1,4 +1,5 @@
-use crate::shared::worldfield::{RegionResyncRequest, RegionSubtreePatch};
+use crate::shared::region_tree::RegionTreeCore;
+use crate::shared::spatial::Aabb4i;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -73,8 +74,8 @@ pub enum ClientMessage {
     ConsoleCommand {
         command: String,
     },
-    WorldRegionResyncRequest {
-        request: RegionResyncRequest,
+    WorldSubtreeRequest {
+        bounds: Aabb4i,
     },
     Ping {
         nonce: u64,
@@ -92,8 +93,8 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
-    WorldRegionPatch {
-        patch: RegionSubtreePatch,
+    WorldSubtreePatch {
+        subtree: RegionTreeCore,
     },
     Pong {
         nonce: u64,

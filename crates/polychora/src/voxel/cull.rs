@@ -1,13 +1,45 @@
 use common::MatN;
 use std::collections::HashMap;
 
-use super::chunk::Chunk;
 use super::world::BaseWorldKind;
-use super::{ChunkPos, Face4D, VoxelType, CHUNK_SIZE};
+use super::{ChunkPos, Face4D, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
+use polychora::shared::region_tree::{chunk_pos_from_chunk_key, RegionChunkTree};
 use polychora::shared::voxel::world_to_chunk;
-use polychora::shared::worldfield::RegionChunkTree;
 
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
+type DenseChunk = [VoxelType; CHUNK_VOLUME];
+
+#[inline]
+fn dense_chunk_is_empty(chunk: &DenseChunk) -> bool {
+    chunk.iter().all(|voxel| voxel.is_air())
+}
+
+#[inline]
+fn dense_chunk_get(chunk: &DenseChunk, x: usize, y: usize, z: usize, w: usize) -> VoxelType {
+    let idx =
+        w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE + y * CHUNK_SIZE + x;
+    chunk[idx]
+}
+
+fn dense_chunk_from_payload(
+    payload: &polychora::shared::chunk_payload::ChunkPayload,
+) -> Result<DenseChunk, String> {
+    let materials = payload
+        .dense_materials()
+        .map_err(|error| error.to_string())?;
+    if materials.len() != CHUNK_VOLUME {
+        return Err(format!(
+            "unexpected dense material length {}, expected {}",
+            materials.len(),
+            CHUNK_VOLUME
+        ));
+    }
+    let mut chunk = [VoxelType::AIR; CHUNK_VOLUME];
+    for (idx, material) in materials.into_iter().enumerate() {
+        chunk[idx] = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
+    }
+    Ok(chunk)
+}
 
 /// Compact per-voxel surface data (18 bytes).
 pub struct SurfaceVoxel {
@@ -36,9 +68,9 @@ pub struct SurfaceData {
 
 fn base_chunk_for_pos(
     base_kind: BaseWorldKind,
-    flat_floor_chunk: &Chunk,
+    flat_floor_chunk: &DenseChunk,
     pos: ChunkPos,
-) -> Option<&Chunk> {
+) -> Option<&DenseChunk> {
     match base_kind {
         BaseWorldKind::Empty => None,
         BaseWorldKind::FlatFloor { .. } if pos.y == FLAT_FLOOR_CHUNK_Y => Some(flat_floor_chunk),
@@ -47,9 +79,9 @@ fn base_chunk_for_pos(
 }
 
 fn world_voxel_at(
-    explicit_chunks: &HashMap<ChunkPos, Chunk>,
+    explicit_chunks: &HashMap<ChunkPos, DenseChunk>,
     base_kind: BaseWorldKind,
-    flat_floor_chunk: &Chunk,
+    flat_floor_chunk: &DenseChunk,
     wx: i32,
     wy: i32,
     wz: i32,
@@ -57,10 +89,10 @@ fn world_voxel_at(
 ) -> VoxelType {
     let (chunk_pos, idx) = world_to_chunk(wx, wy, wz, ww);
     if let Some(chunk) = explicit_chunks.get(&chunk_pos) {
-        return chunk.voxels[idx];
+        return chunk[idx];
     }
     base_chunk_for_pos(base_kind, flat_floor_chunk, chunk_pos)
-        .map(|chunk| chunk.voxels[idx])
+        .map(|chunk| chunk[idx])
         .unwrap_or(VoxelType::AIR)
 }
 
@@ -68,15 +100,15 @@ fn world_voxel_at(
 pub fn extract_surfaces(
     world_tree: &RegionChunkTree,
     base_kind: BaseWorldKind,
-    flat_floor_chunk: &Chunk,
+    flat_floor_chunk: &DenseChunk,
 ) -> SurfaceData {
     let mut chunks = Vec::new();
     let mut voxels = Vec::new();
-    let mut explicit_chunks = HashMap::<ChunkPos, Chunk>::new();
+    let mut explicit_chunks = HashMap::<ChunkPos, DenseChunk>::new();
 
     for (key, payload) in world_tree.collect_chunks() {
-        let chunk_pos = key.to_chunk_pos();
-        match payload.to_voxel_chunk() {
+        let chunk_pos = chunk_pos_from_chunk_key(key);
+        match dense_chunk_from_payload(&payload) {
             Ok(chunk) => {
                 explicit_chunks.insert(chunk_pos, chunk);
             }
@@ -90,7 +122,7 @@ pub fn extract_surfaces(
     }
 
     for (&chunk_pos, chunk) in &explicit_chunks {
-        if chunk.is_empty() {
+        if dense_chunk_is_empty(chunk) {
             continue;
         }
 
@@ -108,7 +140,7 @@ pub fn extract_surfaces(
             for lz in 0..CHUNK_SIZE {
                 for ly in 0..CHUNK_SIZE {
                     for lx in 0..CHUNK_SIZE {
-                        let voxel = chunk.get(lx, ly, lz, lw);
+                        let voxel = dense_chunk_get(chunk, lx, ly, lz, lw);
                         if voxel.is_air() {
                             continue;
                         }

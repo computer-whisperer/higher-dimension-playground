@@ -1,8 +1,7 @@
-use crate::shared::legacy_world_io::load_world;
+use crate::migration::legacy_world_io::load_world;
+use crate::migration::legacy_voxel::{Chunk, RegionChunkWorld};
 use crate::shared::protocol::{EntityClass, EntityKind};
-use crate::shared::voxel::{
-    BaseWorldKind, Chunk, ChunkPos, RegionChunkWorld, VoxelType, CHUNK_SIZE, CHUNK_VOLUME,
-};
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1260,7 +1259,8 @@ mod tests {
         world.set_voxel(2, 2, 2, 2, VoxelType(9));
         {
             let mut writer = BufWriter::new(File::create(&legacy_world).expect("create legacy"));
-            crate::shared::legacy_world_io::save_world(&world, &mut writer).expect("save legacy");
+            crate::migration::legacy_world_io::save_world(&world, &mut writer)
+                .expect("save legacy");
             writer.flush().expect("flush legacy");
         }
 

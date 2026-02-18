@@ -21,9 +21,9 @@ Target shape:
 Phase 1 scope:
 
 - Partition-BVH `RegionTree` as the shared spatial topology.
-- Region-scoped replication/versioning.
+- Bounds-native subtree replication/versioning.
 - Local patch propagation for singular edits.
-- Canonical persistence from semantic tree + region clocks.
+- Canonical persistence from semantic tree state.
 
 Out of scope in Phase 1:
 
@@ -37,32 +37,24 @@ Normative invariants:
 - Runtime lopsided trees are valid; optimization is asynchronous.
 - Protocol compatibility is exact-version at handshake; mismatch disconnects.
 - Server/tree/wire authoritative state is single-resolution chunk space (no server-side LOD lattice).
-- Patch applicability is region-scoped using region clocks.
-- Every accepted patch atomically applies subtree graft + clock updates.
-- Edits bump clocks for intersecting regions in the single-resolution lattice.
-- Region clocks are the only authoritative version counters for replication and persistence contracts.
-- Singular block edits must produce local region patches; full-tree resend is recovery-only.
-- Network transport unit is `RegionSubtreePatch` (tree-native, not chunk-list batches).
-- Canonical persisted state is semantic tree + region clocks only.
+- Patch applicability is bounds-scoped.
+- Every accepted patch atomically applies subtree graft for its bounds.
+- Singular block edits must produce local subtree patches; full-tree resend is recovery-only.
+- Network transport unit is bounds-native subtree patching (tree-native, not chunk-list batches).
+- Canonical persisted state is semantic tree only (runtime request metadata is ephemeral).
 
 ## 3. Data Model
 
 ### 3.1 Identifiers
 
 - `ChunkKey { pos: [i32; 4] }`
-- `RegionId` from fixed replication lattice in chunk space.
-- `RegionClockMap: RegionId -> u64`.
+- `WorldRequestSeq: u64` (client-issued request id)
 - `NodeHandle` (opaque, snapshot-local runtime handle; never serialized).
-
-Defaults:
-
-- `REGION_TILE_EDGE_CHUNKS = 4`
 
 Rules:
 
-- Every chunk maps to exactly one `RegionId`.
-- Region clocks are monotonic per `RegionId`.
-- `RegionId` mapping is `floor_div(chunk_pos_axis, REGION_TILE_EDGE_CHUNKS)` for each axis.
+- Streaming/fetch contracts are bounds-native (`Aabb4i`) and must not depend on fixed-size region tiles.
+- Any chunk-space subdivision strategy is an internal optimization only, never a protocol primitive.
 
 ### 3.2 Semantic Tree (`RegionTreeCore`)
 
@@ -193,27 +185,15 @@ pub trait WorldField {
         query: QueryVolume,
         detail: QueryDetail,
     ) -> Arc<RegionTreeCore>;
-
-    fn query_content_bounds(
-        &self,
-        query: QueryVolume,
-    ) -> Option<Aabb4i>;
-
-    fn realize_chunk(
-        &mut self,
-        key: ChunkKey,
-        profile: RealizeProfile,
-    ) -> ChunkPayload;
 }
 ```
 
 Semantics:
 
-- `query_region_core` is the planning/trim source of truth.
-- `query_content_bounds` returns a conservative bounding box for non-empty content inside `query`; it may over-approximate but must never under-approximate.
-- `query_content_bounds` should avoid forced realization where possible.
-- If exact bounds exceed budget, implementation should return a conservative coarse bounds quickly (including full `query` if needed).
-- `realize_chunk` uses sidecar cache key from section 3.4.
+- `query_region_core` is the sole world-seed generator interface.
+- Generator implementations hide base topology/procgen details entirely behind this query.
+- Overlay systems may interpose generated world queries for runtime composition.
+- For the current migration phase, `WorldOverlay` is intentionally a passthrough read-only stub with no cache semantics.
 
 ## 5. Topology and Mutation Rules
 
@@ -238,7 +218,7 @@ Optimization passes may rebalance/refit/repartition snapshot-local subtrees, but
 
 Primary message:
 
-- `RegionSubtreePatch { patch_seq, bounds, preconditions, clock_updates, subtree }`
+- `WorldSubtreePatch { request_seq, bounds, subtree }`
 
 Transport defaults:
 
@@ -246,25 +226,15 @@ Transport defaults:
 - `MAX_PATCHES_PER_TICK_PER_CLIENT = 16`
 - `MAX_CHUNKARRAY_CELLS_PER_NODE = 256`
 
-Preconditions:
+Request message:
 
-- `RegionClockPrecondition { region_id, expected_clock }`
-
-Clock updates:
-
-- `RegionClockUpdate { region_id, new_clock }`
-
-Resync request:
-
-- `RegionResyncRequest { regions: Vec<RegionResyncEntry> }`
-- `RegionResyncEntry { region_id, client_clock }`
+- `WorldSubtreeRequest { request_seq, bounds }`
 
 Ordering rules:
 
-- `patch_seq` is per-client and strictly monotonic (`+1` for each sent patch).
-- Client applies patches in `patch_seq` order only.
-- If client detects a gap or duplicate `patch_seq`, it rejects out-of-order patch and requests bounded resync for covered regions.
-- Server must spatially split patches until each serialized patch is within `MAX_PATCH_BYTES`.
+- `request_seq` is client-assigned and echoed by server in `WorldSubtreePatch`.
+- Client can accept out-of-order responses by matching on `request_seq` and bounds.
+- Server must spatially split oversized responses until each serialized patch is within `MAX_PATCH_BYTES`.
 - When a subtree is split into multiple patches, emission order is canonical by patch bounds min corner (x, y, z, w).
 
 ### 6.2 Server Obligations per Edit
@@ -274,17 +244,16 @@ For `SetVoxelIntent { pos, material, client_edit_id }`, server MUST:
 1. Deduplicate by `(client_id, client_edit_id)`.
 2. Apply copy-on-write mutation in the minimal touched chunk-sized region.
 3. Stop if effective value is unchanged.
-4. Bump clocks for intersecting regions.
-5. Invalidate overlapping sidecar realized entries for relevant profiles only.
-6. Emit minimal per-client `RegionSubtreePatch` intersected with client interest.
-7. Persist only dirty regions touched by payload changes.
+4. Invalidate overlapping sidecar realized entries for relevant profiles only.
+5. Emit minimal per-client subtree patch intersected with client interest.
+6. Persist only dirty regions touched by payload changes.
 
 ### 6.3 Client Apply Contract
 
-1. Validate all region clock preconditions.
-2. If valid: atomically `graft_replace(bounds, subtree)` and apply `clock_updates`.
-3. If invalid: reject and request bounded region resync (`RegionResyncRequest { regions }` with current `client_clock` values).
-4. Coalesce and throttle repeated resync failures for same regions.
+1. Validate incoming bounds are chunk-aligned and valid.
+2. Atomically `graft_replace(bounds, subtree)`.
+3. If request/response tracking is enabled, ignore stale duplicate responses by `request_seq`.
+4. Coalesce repeated demand for identical bounds windows.
 
 ### 6.4 Procedural Edit Locality
 
@@ -294,13 +263,13 @@ When edits target space currently represented by `ProceduralRef`, server MUST:
 2. Materialize touched chunks only.
 3. Write explicit chunk payloads at touched leaves.
 4. Keep untouched surrounding space symbolic `ProceduralRef`.
-5. Emit region-scoped patches only for affected regions.
+5. Emit bounds-scoped patches only for affected space.
 
 When edits target space represented by `ChunkArray`, server MUST:
 
 1. Materialize/mutate touched chunk payload only.
 2. Preserve unaffected chunk palette entries and index cells.
-3. Emit region-scoped patches only for affected regions.
+3. Emit bounds-scoped patches only for affected space.
 
 ### 6.5 Symbolic `ProceduralRef` Transport Rule
 
@@ -357,7 +326,6 @@ Persistence:
 Persist only:
 
 - Canonical `RegionTreeCore` semantic snapshot.
-- `RegionClockMap`.
 - Referenced generator descriptors/version hashes.
 
 Do not persist:
@@ -392,16 +360,16 @@ Recovery rule:
 - Introduce `RegionTreeCore` + `RegionRuntimeSidecar`.
 - Remove runtime metadata and semantic `local_revision` from nodes.
 
-### Phase B: Region Clock Lattice
+### Phase B: Bounds-Native Request/Response
 
-- Introduce fixed `RegionId` mapping and `RegionClockMap`.
-- Replace root-scoped checks with region-scoped preconditions.
+- Introduce bounds-native world subtree request/patch transport.
+- Remove fixed region-id lattices from replication protocol.
 
 ### Phase C: Tree-Native Replication
 
-- Replace chunk-list protocol with `RegionSubtreePatch`.
-- Implement trim/serialize/deserialize/graft and bounded region resync.
-- Add `patch_seq`, patch size splitting, and handshake capability exchange (`protocol_version`, `generator_manifest_hash`, `feature_bits`).
+- Replace chunk-list protocol with `WorldSubtreeRequest`/`WorldSubtreePatch`.
+- Implement trim/serialize/deserialize/graft and bounded subtree fetch.
+- Add request correlation (`request_seq`), patch size splitting, and handshake capability exchange (`protocol_version`, `generator_manifest_hash`, `feature_bits`).
 
 ### Phase D: Payload + Realization Profiles
 
@@ -417,10 +385,10 @@ Recovery rule:
 
 ## 10. Tuning Knobs and Risks
 
-- Region tile edge default (`REGION_TILE_EDGE_CHUNKS = 4`) may require retuning for very dense edit workloads.
+- Demand-window sizing (requested bounds extents) may require retuning for dense edit workloads.
 - Sustained local edits can fragment trees and require rebuild triggers.
 - Over-culling can violate simulation correctness if simulation domain rules are weak.
-- Resync storms require region-level coalescing/throttling.
+- Repeated subtree demand can cause request storms without bounds coalescing/throttling.
 - Sidecar cache defaults may need retuning under high-entity multiplayer load.
 - Platform generator layering policy (`Uniform` first vs mixed symbolic) remains to tune.
 - Patch/ChunkArray size defaults may need telemetry-driven adjustment.

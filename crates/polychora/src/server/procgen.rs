@@ -1,4 +1,4 @@
-use crate::shared::voxel::{Chunk, ChunkPos, VoxelType, CHUNK_SIZE};
+use crate::shared::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -73,6 +73,31 @@ const MAZE_CEILING_MATERIAL: u8 = 60;
 const MAZE_WALL_MATERIAL: u8 = 62;
 const MAZE_GATE_FRAME_MATERIAL: u8 = 51;
 const MAZE_BEACON_MATERIAL: u8 = 67;
+type DenseChunk = [VoxelType; CHUNK_VOLUME];
+
+#[inline]
+fn dense_chunk_new() -> DenseChunk {
+    [VoxelType::AIR; CHUNK_VOLUME]
+}
+
+#[inline]
+fn dense_chunk_set(
+    chunk: &mut DenseChunk,
+    x: usize,
+    y: usize,
+    z: usize,
+    w: usize,
+    voxel: VoxelType,
+) {
+    let idx =
+        w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE + y * CHUNK_SIZE + x;
+    chunk[idx] = voxel;
+}
+
+#[inline]
+fn dense_chunk_is_empty(chunk: &DenseChunk) -> bool {
+    chunk.iter().all(|voxel| voxel.is_air())
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -350,7 +375,7 @@ impl StructureBlueprint {
         origin: [i32; 4],
         orientation: u8,
         chunk_min: [i32; 4],
-        chunk: &mut Chunk,
+        chunk: &mut DenseChunk,
     ) {
         for fill in &self.fills {
             if fill.material == VoxelType::AIR.0 {
@@ -402,7 +427,7 @@ impl StructureBlueprint {
                             let ly = (wy - chunk_min[1]) as usize;
                             let lz = (wz - chunk_min[2]) as usize;
                             let lw = (ww - chunk_min[3]) as usize;
-                            chunk.set(lx, ly, lz, lw, voxel);
+                            dense_chunk_set(chunk, lx, ly, lz, lw, voxel);
                         }
                     }
                 }
@@ -436,7 +461,7 @@ impl StructureBlueprint {
             let ly = (wy - chunk_min[1]) as usize;
             let lz = (wz - chunk_min[2]) as usize;
             let lw = (ww - chunk_min[3]) as usize;
-            chunk.set(lx, ly, lz, lw, VoxelType(voxel.material));
+            dense_chunk_set(chunk, lx, ly, lz, lw, VoxelType(voxel.material));
         }
     }
 
@@ -1529,7 +1554,7 @@ fn collect_maze_placements_for_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Ve
     placements
 }
 
-fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &mut Chunk) {
+fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &mut DenseChunk) {
     let chunk_max = [
         chunk_min[0] + CHUNK_SIZE as i32 - 1,
         chunk_min[1] + CHUNK_SIZE as i32 - 1,
@@ -1753,7 +1778,7 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                     let ly = (wy - chunk_min[1]) as usize;
                     let lz = (wz - chunk_min[2]) as usize;
                     let lw = (ww - chunk_min[3]) as usize;
-                    chunk.set(lx, ly, lz, lw, VoxelType(material));
+                    dense_chunk_set(chunk, lx, ly, lz, lw, VoxelType(material));
                 }
             }
         }
@@ -1764,13 +1789,13 @@ pub fn generate_structure_chunk_with_keepout(
     world_seed: u64,
     chunk_pos: ChunkPos,
     blocked_cells: Option<&HashSet<StructureCell>>,
-) -> Option<Chunk> {
+) -> Option<DenseChunk> {
     let set = structure_set();
     let (chunk_min, _) = chunk_bounds(chunk_pos);
     let structure_placements = collect_structure_placements_for_chunk(world_seed, chunk_pos);
     let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_pos);
 
-    let mut chunk = Chunk::new();
+    let mut chunk = dense_chunk_new();
     for placement in structure_placements {
         if !placement_allowed(&placement, blocked_cells) {
             continue;
@@ -1787,7 +1812,7 @@ pub fn generate_structure_chunk_with_keepout(
         place_maze_into_chunk(placement, chunk_min, &mut chunk);
     }
 
-    if chunk.is_empty() {
+    if dense_chunk_is_empty(&chunk) {
         None
     } else {
         Some(chunk)
@@ -1795,7 +1820,7 @@ pub fn generate_structure_chunk_with_keepout(
 }
 
 #[cfg(test)]
-pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<Chunk> {
+pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<DenseChunk> {
     generate_structure_chunk_with_keepout(world_seed, chunk_pos, None)
 }
 
@@ -2082,8 +2107,7 @@ mod tests {
 
         assert_eq!(chunk_a.is_some(), chunk_b.is_some());
         if let (Some(a), Some(b)) = (chunk_a, chunk_b) {
-            assert_eq!(a.solid_count, b.solid_count);
-            assert_eq!(a.voxels[..], b.voxels[..]);
+            assert_eq!(a[..], b[..]);
         }
     }
 
@@ -2133,7 +2157,7 @@ mod tests {
             find_chunk_with_maze(seed).expect("expected to find at least one maze chunk");
         let chunk = generate_structure_chunk(seed, chunk_pos)
             .expect("maze placement should generate chunk");
-        let has_maze_material = chunk.voxels.iter().any(|voxel| {
+        let has_maze_material = chunk.iter().any(|voxel| {
             matches!(
                 voxel.0,
                 MAZE_CEILING_MATERIAL
@@ -2157,8 +2181,7 @@ mod tests {
             .expect("maze placement should generate chunk");
         let chunk_b = generate_structure_chunk(seed, chunk_pos)
             .expect("maze placement should generate chunk");
-        assert_eq!(chunk_a.solid_count, chunk_b.solid_count);
-        assert_eq!(chunk_a.voxels[..], chunk_b.voxels[..]);
+        assert_eq!(chunk_a[..], chunk_b[..]);
     }
 
     #[test]
@@ -2180,8 +2203,8 @@ mod tests {
                 -blueprint.min_offset[3],
             ];
 
-            let mut left_chunk = Chunk::new();
-            let mut right_chunk = Chunk::new();
+            let mut left_chunk = dense_chunk_new();
+            let mut right_chunk = dense_chunk_new();
             blueprint.place_into_chunk_oriented(origin, 0, [0, 0, 0, 0], &mut left_chunk);
             blueprint.place_into_chunk_oriented(
                 origin,
@@ -2190,7 +2213,7 @@ mod tests {
                 &mut right_chunk,
             );
 
-            if !left_chunk.is_empty() && !right_chunk.is_empty() {
+            if !dense_chunk_is_empty(&left_chunk) && !dense_chunk_is_empty(&right_chunk) {
                 found_spanning = true;
                 break;
             }

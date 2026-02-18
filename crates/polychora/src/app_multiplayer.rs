@@ -4,15 +4,12 @@ use higher_dimension_playground::render::{
     OVERLAY_EDGE_TAG_REGION_EMPTY, OVERLAY_EDGE_TAG_REGION_PROCEDURAL,
     OVERLAY_EDGE_TAG_REGION_UNIFORM, OVERLAY_EDGE_TAG_TARGET,
 };
-use polychora::shared::worldfield::{
-    Aabb4i, ChunkArrayData, ChunkPayload, RegionClockPrecondition, RegionClockUpdate, RegionId,
-    RegionNodeKind, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch, RegionTreeCore,
-    REGION_TILE_EDGE_CHUNKS,
-};
-use std::collections::{HashMap, HashSet, VecDeque};
+use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
+use polychora::shared::region_tree::{RegionNodeKind, RegionTreeCore};
+use polychora::shared::spatial::Aabb4i;
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-
-const MULTIPLAYER_REGION_RESYNC_MAX_REGIONS: usize = 512;
+const MULTIPLAYER_WORLD_REQUEST_RADIUS_CHUNKS: i32 = 6;
 
 #[derive(Copy, Clone, Debug)]
 enum RegionTreeDiagKind {
@@ -345,116 +342,32 @@ fn tight_bounds_from_chunk_positions(
     Some(Aabb4i::new(min, max))
 }
 
-fn region_id_to_clock_key(region_id: RegionId) -> [i32; 4] {
-    [region_id.x, region_id.y, region_id.z, region_id.w]
+fn world_chunk_from_position(position: [f32; 4]) -> [i32; 4] {
+    let chunk_size = voxel::CHUNK_SIZE as i32;
+    [
+        (position[0].floor() as i32).div_euclid(chunk_size),
+        (position[1].floor() as i32).div_euclid(chunk_size),
+        (position[2].floor() as i32).div_euclid(chunk_size),
+        (position[3].floor() as i32).div_euclid(chunk_size),
+    ]
 }
 
-fn apply_region_clock_updates<I>(clocks: &mut HashMap<[i32; 4], u64>, updates: I) -> usize
-where
-    I: IntoIterator<Item = ([i32; 4], u64)>,
-{
-    let mut regressed = 0usize;
-    for (region_id, clock) in updates {
-        match clocks.get_mut(&region_id) {
-            Some(existing) if clock < *existing => {
-                regressed = regressed.saturating_add(1);
-            }
-            Some(existing) => {
-                *existing = clock;
-            }
-            None => {
-                clocks.insert(region_id, clock);
-            }
-        }
-    }
-    regressed
-}
-
-fn region_clock_precondition_mismatch_count(
-    clocks: &HashMap<[i32; 4], u64>,
-    preconditions: &[RegionClockPrecondition],
-) -> usize {
-    preconditions
-        .iter()
-        .filter(|precondition| {
-            let key = region_id_to_clock_key(precondition.region_id);
-            clocks.get(&key).copied().unwrap_or(0) != precondition.expected_clock
-        })
-        .count()
-}
-
-fn region_resync_entries_for_bounds(
-    clocks: &HashMap<[i32; 4], u64>,
-    bounds: Aabb4i,
-    max_regions: usize,
-) -> Vec<RegionResyncEntry> {
-    if !bounds.is_valid() || max_regions == 0 {
-        return Vec::new();
-    }
-
-    let region_min = [
-        bounds.min[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        bounds.min[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        bounds.min[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        bounds.min[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
-    ];
-    let region_max = [
-        bounds.max[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        bounds.max[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        bounds.max[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        bounds.max[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
-    ];
-
-    let mut entries = Vec::new();
-    for rw in region_min[3]..=region_max[3] {
-        for rz in region_min[2]..=region_max[2] {
-            for ry in region_min[1]..=region_max[1] {
-                for rx in region_min[0]..=region_max[0] {
-                    if entries.len() >= max_regions {
-                        return entries;
-                    }
-                    let key = [rx, ry, rz, rw];
-                    let clock = clocks.get(&key).copied().unwrap_or(0);
-                    entries.push(RegionResyncEntry {
-                        region_id: RegionId {
-                            x: rx,
-                            y: ry,
-                            z: rz,
-                            w: rw,
-                        },
-                        client_clock: clock,
-                    });
-                }
-            }
-        }
-    }
-    entries
-}
-
-fn region_resync_entries_for_mismatched_preconditions(
-    clocks: &HashMap<[i32; 4], u64>,
-    preconditions: &[RegionClockPrecondition],
-    max_regions: usize,
-) -> Vec<RegionResyncEntry> {
-    if max_regions == 0 {
-        return Vec::new();
-    }
-    let mut entries = Vec::new();
-    for precondition in preconditions {
-        if entries.len() >= max_regions {
-            break;
-        }
-        let key = region_id_to_clock_key(precondition.region_id);
-        let local_clock = clocks.get(&key).copied().unwrap_or(0);
-        if local_clock == precondition.expected_clock {
-            continue;
-        }
-        entries.push(RegionResyncEntry {
-            region_id: precondition.region_id,
-            client_clock: local_clock,
-        });
-    }
-    entries
+fn world_request_bounds_for_center_chunk(center_chunk: [i32; 4], radius_chunks: i32) -> Aabb4i {
+    let radius = radius_chunks.max(0);
+    Aabb4i::new(
+        [
+            center_chunk[0] - radius,
+            center_chunk[1] - radius,
+            center_chunk[2] - radius,
+            center_chunk[3] - radius,
+        ],
+        [
+            center_chunk[0] + radius,
+            center_chunk[1] + radius,
+            center_chunk[2] + radius,
+            center_chunk[3] + radius,
+        ],
+    )
 }
 
 fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
@@ -784,52 +697,30 @@ impl App {
         }
     }
 
-    fn request_multiplayer_region_resync(
-        &mut self,
-        mut regions: Vec<RegionResyncEntry>,
-        reason: &str,
-    ) {
-        if regions.is_empty() {
+    fn request_multiplayer_world_subtree(&mut self, bounds: Aabb4i, reason: &str) {
+        if !bounds.is_valid() {
             return;
         }
-        let now = Instant::now();
-        if now.duration_since(self.multiplayer_last_region_resync_request)
-            < MULTIPLAYER_REGION_RESYNC_MIN_INTERVAL
-        {
-            return;
-        }
-        regions.sort_unstable_by_key(|entry| {
-            (
-                entry.region_id.w,
-                entry.region_id.z,
-                entry.region_id.y,
-                entry.region_id.x,
-            )
-        });
-        regions.dedup_by_key(|entry| entry.region_id);
-        if regions.len() > MULTIPLAYER_REGION_RESYNC_MAX_REGIONS {
-            regions.truncate(MULTIPLAYER_REGION_RESYNC_MAX_REGIONS);
-        }
-        let region_count = regions.len();
-
         if let Some(client) = self.multiplayer.as_ref() {
-            self.multiplayer_last_region_resync_request = now;
-            client.send(MultiplayerClientMessage::WorldRegionResyncRequest {
-                request: RegionResyncRequest { regions },
-            });
+            client.send(MultiplayerClientMessage::WorldSubtreeRequest { bounds });
             eprintln!(
-                "Requested multiplayer region resync: reason={reason} regions={region_count}"
+                "Requested multiplayer world subtree: reason={reason} bounds={:?}->{:?}",
+                bounds.min, bounds.max
             );
         }
     }
 
-    fn request_multiplayer_region_resync_for_bounds(&mut self, bounds: Aabb4i, reason: &str) {
-        let regions = region_resync_entries_for_bounds(
-            &self.multiplayer_region_clocks,
-            bounds,
-            MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
+    fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
+        let center_chunk = world_chunk_from_position(position);
+        if self.multiplayer_last_world_request_center_chunk == Some(center_chunk) {
+            return;
+        }
+        self.multiplayer_last_world_request_center_chunk = Some(center_chunk);
+        let bounds = world_request_bounds_for_center_chunk(
+            center_chunk,
+            MULTIPLAYER_WORLD_REQUEST_RADIUS_CHUNKS,
         );
-        self.request_multiplayer_region_resync(regions, reason);
+        self.request_multiplayer_world_subtree(bounds, reason);
     }
 
     pub(super) fn append_multiplayer_stream_tree_diag_overlay_instances(
@@ -951,7 +842,7 @@ impl App {
             .multiplayer_stream_tree_diag
             .collect_chunks()
             .into_iter()
-            .map(|(key, _)| key.pos)
+            .map(|(key, _)| key)
             .collect();
         tree_positions.sort_unstable();
         let tree_set: HashSet<[i32; 4]> = tree_positions.iter().copied().collect();
@@ -1079,112 +970,42 @@ impl App {
         }
     }
 
-    pub(super) fn apply_multiplayer_region_patch(
+    pub(super) fn apply_multiplayer_world_patch(
         &mut self,
-        patch: RegionSubtreePatch,
+        patch: RegionTreeCore,
     ) -> Option<(usize, usize)> {
+        let patch_bounds = patch.bounds;
         let patch_apply_start = Instant::now();
-        if let Some(last_seq) = self.multiplayer_last_region_patch_seq {
-            if patch.patch_seq <= last_seq {
-                eprintln!(
-                    "Ignoring stale multiplayer region patch seq={} last_seq={}",
-                    patch.patch_seq, last_seq
-                );
-                return None;
-            }
-            let expected_next = last_seq.wrapping_add(1).max(1);
-            if patch.patch_seq != expected_next {
-                eprintln!(
-                    "Rejecting out-of-order multiplayer region patch seq={} expected_next={}",
-                    patch.patch_seq, expected_next
-                );
-                self.request_multiplayer_region_resync_for_bounds(
-                    patch.bounds,
-                    "out_of_order_patch_seq",
-                );
-                return None;
-            }
-        }
-
-        let mismatches = region_clock_precondition_mismatch_count(
-            &self.multiplayer_region_clocks,
-            &patch.preconditions,
-        );
-        if mismatches > 0 {
-            eprintln!(
-                "Rejecting multiplayer region patch seq={} due to {} clock precondition mismatches",
-                patch.patch_seq, mismatches
-            );
-            let mut regions = region_resync_entries_for_mismatched_preconditions(
-                &self.multiplayer_region_clocks,
-                &patch.preconditions,
-                MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
-            );
-            if regions.is_empty() {
-                regions = region_resync_entries_for_bounds(
-                    &self.multiplayer_region_clocks,
-                    patch.bounds,
-                    MULTIPLAYER_REGION_RESYNC_MAX_REGIONS,
-                );
-            }
-            self.request_multiplayer_region_resync(regions, "clock_precondition_mismatch");
-            return None;
-        }
 
         let scene_patch_start = Instant::now();
-        let scene_patch_stats = self
-            .scene
-            .apply_near_lod_region_patch(patch.bounds, &patch.subtree);
+        let scene_patch_stats = self.scene.apply_near_lod_region_patch(patch_bounds, &patch);
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
         let diag_splice_start = Instant::now();
         let _ = self
             .multiplayer_stream_tree_diag
-            .splice_non_empty_core_in_bounds(patch.bounds, &patch.subtree);
+            .splice_non_empty_core_in_bounds(patch_bounds, &patch);
         let diag_splice_elapsed_ms = diag_splice_start.elapsed().as_secs_f64() * 1000.0;
-
-        let clock_update_start = Instant::now();
-        let regressed = apply_region_clock_updates(
-            &mut self.multiplayer_region_clocks,
-            patch
-                .clock_updates
-                .iter()
-                .map(|update: &RegionClockUpdate| {
-                    (region_id_to_clock_key(update.region_id), update.new_clock)
-                }),
-        );
-        if regressed > 0 {
-            eprintln!(
-                "Ignored {} regressed multiplayer region clock updates from region patch",
-                regressed
-            );
-        }
-        let clock_update_elapsed_ms = clock_update_start.elapsed().as_secs_f64() * 1000.0;
-
-        self.multiplayer_last_region_patch_seq = Some(patch.patch_seq);
         let patch_apply_elapsed_ms = patch_apply_start.elapsed().as_secs_f64() * 1000.0;
         if patch_apply_elapsed_ms >= 50.0 {
             eprintln!(
-                "[client-region-patch] elapsed_ms={:.3} seq={} bounds={:?}->{:?} patch_cells={} previous_non_empty={} desired_non_empty={} upserts={} removals={}",
+                "[client-world-patch] elapsed_ms={:.3} bounds={:?}->{:?} patch_cells={} previous_non_empty={} desired_non_empty={} upserts={} removals={}",
                 patch_apply_elapsed_ms,
-                patch.patch_seq,
-                patch.bounds.min,
-                patch.bounds.max,
-                patch.bounds.chunk_cell_count().unwrap_or(0),
+                patch_bounds.min,
+                patch_bounds.max,
+                patch_bounds.chunk_cell_count().unwrap_or(0),
                 scene_patch_stats.previous_non_empty,
                 scene_patch_stats.desired_non_empty,
                 scene_patch_stats.upserts,
                 scene_patch_stats.removals
             );
             eprintln!(
-                "[client-region-patch-breakdown] seq={} scene_apply_ms={:.3} scene_collect_previous_ms={:.3} scene_splice_ms={:.3} scene_collect_desired_ms={:.3} scene_diff_ms={:.3} diag_splice_ms={:.3} clock_update_ms={:.3} previous_total={} desired_total={} changed_chunks={} invalidated_cached_chunks={} queued_updates={}",
-                patch.patch_seq,
+                "[client-world-patch-breakdown] scene_apply_ms={:.3} scene_collect_previous_ms={:.3} scene_splice_ms={:.3} scene_collect_desired_ms={:.3} scene_diff_ms={:.3} diag_splice_ms={:.3} previous_total={} desired_total={} changed_chunks={} invalidated_cached_chunks={} queued_updates={}",
                 scene_patch_elapsed_ms,
                 scene_patch_stats.collect_previous_ms,
                 scene_patch_stats.splice_ms,
                 scene_patch_stats.collect_desired_ms,
                 scene_patch_stats.diff_ms,
                 diag_splice_elapsed_ms,
-                clock_update_elapsed_ms,
                 scene_patch_stats.previous_total_chunks,
                 scene_patch_stats.desired_total_chunks,
                 scene_patch_stats.changed_chunks,
@@ -1193,10 +1014,9 @@ impl App {
             );
         }
         eprintln!(
-            "Applied multiplayer region patch seq={} bounds={:?}->{:?} upserts={} removals={}",
-            patch.patch_seq,
-            patch.bounds.min,
-            patch.bounds.max,
+            "Applied multiplayer world patch bounds={:?}->{:?} upserts={} removals={}",
+            patch_bounds.min,
+            patch_bounds.max,
             scene_patch_stats.upserts,
             scene_patch_stats.removals
         );
@@ -1213,12 +1033,12 @@ impl App {
                 ..
             } => {
                 self.multiplayer_self_id = Some(client_id);
-                self.multiplayer_region_clocks.clear();
-                self.multiplayer_last_region_patch_seq = None;
+                self.multiplayer_last_world_request_center_chunk = None;
                 self.multiplayer_stream_tree_diag =
-                    polychora::shared::worldfield::RegionChunkTree::new();
+                    polychora::shared::region_tree::RegionChunkTree::new();
                 self.pending_player_movement_modifiers.clear();
                 self.player_modifier_external_velocity = [0.0; 4];
+                self.maybe_request_multiplayer_world_for_position(self.camera.position, "welcome");
                 eprintln!(
                     "Multiplayer connected: client_id={} chunks={} server_tick_hz={:.2}",
                     client_id, world.non_empty_chunks, tick_hz
@@ -1228,10 +1048,10 @@ impl App {
                 eprintln!("Multiplayer server error: {message}");
                 self.append_dev_console_log_line(format!("[server] {message}"));
             }
-            multiplayer::ServerMessage::WorldRegionPatch { patch } => {
-                if self.apply_multiplayer_region_patch(patch).is_some() && !self.world_ready {
+            multiplayer::ServerMessage::WorldSubtreePatch { subtree } => {
+                if self.apply_multiplayer_world_patch(subtree).is_some() && !self.world_ready {
                     self.world_ready = true;
-                    eprintln!("World ready: region patch applied");
+                    eprintln!("World ready: subtree patch applied");
                 }
             }
             multiplayer::ServerMessage::Pong { .. } => {}
@@ -1362,6 +1182,7 @@ impl App {
                 look: look_dir,
             });
         }
+        self.maybe_request_multiplayer_world_for_position(self.camera.position, "player_update");
     }
 
     pub(super) fn send_multiplayer_voxel_update(
@@ -1737,135 +1558,5 @@ impl App {
         }
 
         tags
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_region_clock_updates_ignores_regressions() {
-        let mut clocks = HashMap::new();
-        clocks.insert([0, 0, 0, 0], 5);
-
-        let regressed = apply_region_clock_updates(
-            &mut clocks,
-            vec![([0, 0, 0, 0], 4), ([0, 0, 0, 0], 6), ([1, 0, 0, 0], 2)],
-        );
-
-        assert_eq!(regressed, 1);
-        assert_eq!(clocks.get(&[0, 0, 0, 0]), Some(&6));
-        assert_eq!(clocks.get(&[1, 0, 0, 0]), Some(&2));
-    }
-
-    #[test]
-    fn region_clock_precondition_mismatch_count_treats_missing_as_zero() {
-        let mut clocks = HashMap::new();
-        clocks.insert([0, 0, 0, 0], 3);
-
-        let preconditions = vec![
-            RegionClockPrecondition {
-                region_id: RegionId {
-                    x: 0,
-                    y: 0,
-                    z: 0,
-                    w: 0,
-                },
-                expected_clock: 3,
-            },
-            RegionClockPrecondition {
-                region_id: RegionId {
-                    x: 1,
-                    y: 0,
-                    z: 0,
-                    w: 0,
-                },
-                expected_clock: 0,
-            },
-            RegionClockPrecondition {
-                region_id: RegionId {
-                    x: 2,
-                    y: 0,
-                    z: 0,
-                    w: 0,
-                },
-                expected_clock: 9,
-            },
-        ];
-
-        let mismatches = region_clock_precondition_mismatch_count(&clocks, &preconditions);
-        assert_eq!(mismatches, 1);
-    }
-
-    #[test]
-    fn region_resync_entries_for_bounds_reads_existing_and_default_clocks() {
-        let mut clocks = HashMap::new();
-        clocks.insert([0, 0, 0, 0], 9);
-        let bounds = Aabb4i::new([0, 0, 0, 0], [7, 3, 3, 3]);
-
-        let entries = region_resync_entries_for_bounds(&clocks, bounds, 16);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(
-            entries[0].region_id,
-            RegionId {
-                x: 0,
-                y: 0,
-                z: 0,
-                w: 0
-            }
-        );
-        assert_eq!(entries[0].client_clock, 9);
-        assert_eq!(
-            entries[1].region_id,
-            RegionId {
-                x: 1,
-                y: 0,
-                z: 0,
-                w: 0
-            }
-        );
-        assert_eq!(entries[1].client_clock, 0);
-    }
-
-    #[test]
-    fn region_resync_entries_for_mismatched_preconditions_filters_equal_clocks() {
-        let mut clocks = HashMap::new();
-        clocks.insert([0, 0, 0, 0], 3);
-
-        let preconditions = vec![
-            RegionClockPrecondition {
-                region_id: RegionId {
-                    x: 0,
-                    y: 0,
-                    z: 0,
-                    w: 0,
-                },
-                expected_clock: 3,
-            },
-            RegionClockPrecondition {
-                region_id: RegionId {
-                    x: 1,
-                    y: 0,
-                    z: 0,
-                    w: 0,
-                },
-                expected_clock: 8,
-            },
-        ];
-
-        let entries =
-            region_resync_entries_for_mismatched_preconditions(&clocks, &preconditions, 16);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].region_id,
-            RegionId {
-                x: 1,
-                y: 0,
-                z: 0,
-                w: 0
-            }
-        );
-        assert_eq!(entries[0].client_clock, 0);
     }
 }

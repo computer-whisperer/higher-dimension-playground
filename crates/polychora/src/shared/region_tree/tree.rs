@@ -32,7 +32,7 @@ impl RegionChunkTree {
     pub fn chunk_payload(&self, key: ChunkKey) -> Option<ChunkPayload> {
         self.root
             .as_ref()
-            .and_then(|node| query_chunk_payload_in_node(node, key.pos))
+            .and_then(|node| query_chunk_payload_in_node(node, key))
     }
 
     pub fn set_chunk(&mut self, key: ChunkKey, payload: Option<ChunkPayload>) -> bool {
@@ -41,7 +41,7 @@ impl RegionChunkTree {
             let Some(payload) = payload else {
                 return false;
             };
-            let bounds = Aabb4i::new(key.pos, key.pos);
+            let bounds = Aabb4i::new(key, key);
             self.root = Some(Box::new(RegionTreeCore {
                 bounds,
                 kind: kind_from_chunk_value(bounds, Some(payload)),
@@ -54,7 +54,7 @@ impl RegionChunkTree {
             && self
                 .root
                 .as_ref()
-                .map(|root| !root.bounds.contains_chunk(key.pos))
+                .map(|root| !root.bounds.contains_chunk(key))
                 .unwrap_or(false)
         {
             // Deleting outside the represented bounds cannot change tree contents.
@@ -64,17 +64,17 @@ impl RegionChunkTree {
         while self
             .root
             .as_ref()
-            .map(|root| !root.bounds.contains_chunk(key.pos))
+            .map(|root| !root.bounds.contains_chunk(key))
             .unwrap_or(false)
         {
             let Some(root) = self.root.take() else {
                 break;
             };
-            self.root = Some(expand_root_once(root, key.pos));
+            self.root = Some(expand_root_once(root, key));
         }
 
         let changed = if let Some(root) = self.root.as_mut() {
-            set_chunk_recursive(root, key.pos, payload)
+            set_chunk_recursive(root, key, payload)
         } else {
             false
         };
@@ -145,7 +145,7 @@ impl RegionChunkTree {
                 &mut out,
             );
         }
-        out.sort_unstable_by_key(|key| key.pos);
+        out.sort_unstable_by_key(|key| *key);
         out
     }
 
@@ -298,7 +298,7 @@ pub fn collect_non_empty_chunks_from_core_in_bounds(
     }
     let mut out = Vec::new();
     collect_non_empty_chunks_from_kind_in_bounds(&core.kind, core.bounds, bounds, &mut out);
-    out.sort_unstable_by_key(|(key, _)| key.pos);
+    out.sort_unstable_by_key(|(key, _)| *key);
     out
 }
 
@@ -718,7 +718,7 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
                 for z in intersection.min[2]..=intersection.max[2] {
                     for y in intersection.min[1]..=intersection.max[1] {
                         for x in intersection.min[0]..=intersection.max[0] {
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
+                            out.push(([x, y, z, w], payload.clone()));
                         }
                     }
                 }
@@ -757,7 +757,7 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
                             if !payload_has_solid_material(payload) {
                                 continue;
                             }
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
+                            out.push(([x, y, z, w], payload.clone()));
                         }
                     }
                 }
@@ -796,7 +796,7 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
                 for z in intersection.min[2]..=intersection.max[2] {
                     for y in intersection.min[1]..=intersection.max[1] {
                         for x in intersection.min[0]..=intersection.max[0] {
-                            out.push(ChunkKey { pos: [x, y, z, w] });
+                            out.push([x, y, z, w]);
                         }
                     }
                 }
@@ -835,7 +835,7 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
                             if !payload_has_solid_material(payload) {
                                 continue;
                             }
-                            out.push(ChunkKey { pos: [x, y, z, w] });
+                            out.push([x, y, z, w]);
                         }
                     }
                 }
@@ -1102,7 +1102,7 @@ fn collect_chunks_from_kind(
                 for z in bounds.min[2]..=bounds.max[2] {
                     for y in bounds.min[1]..=bounds.max[1] {
                         for x in bounds.min[0]..=bounds.max[0] {
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
+                            out.push(([x, y, z, w], payload.clone()));
                         }
                     }
                 }
@@ -1134,7 +1134,7 @@ fn collect_chunks_from_kind(
                             else {
                                 continue;
                             };
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
+                            out.push(([x, y, z, w], payload.clone()));
                         }
                     }
                 }
@@ -1166,7 +1166,7 @@ fn collect_chunks_from_kind_in_bounds(
                 for z in intersection.min[2]..=intersection.max[2] {
                     for y in intersection.min[1]..=intersection.max[1] {
                         for x in intersection.min[0]..=intersection.max[0] {
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
+                            out.push(([x, y, z, w], payload.clone()));
                         }
                     }
                 }
@@ -1202,7 +1202,7 @@ fn collect_chunks_from_kind_in_bounds(
                             else {
                                 continue;
                             };
-                            out.push((ChunkKey { pos: [x, y, z, w] }, payload.clone()));
+                            out.push(([x, y, z, w], payload.clone()));
                         }
                     }
                 }
@@ -1329,6 +1329,10 @@ fn repeated_payload_kind(bounds: Aabb4i, payload: ChunkPayload) -> RegionNodeKin
 
 fn is_single_chunk_bounds(bounds: Aabb4i) -> bool {
     bounds.min == bounds.max
+}
+
+fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
+    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
 fn branch_matches_split(bounds: Aabb4i, children: &[RegionTreeCore]) -> bool {

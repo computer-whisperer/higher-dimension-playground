@@ -1,12 +1,13 @@
-use crate::save_v3;
+use crate::migration::legacy_voxel::RegionChunkWorld;
+use crate::migration::save_v3;
 use crate::save_v4::{
     self, PersistedEntityRecord, PlayerEntityHint, PlayerRecord, SaveChunkPayloadRequest,
     SaveResult, DEFAULT_REGION_CHUNK_EDGE,
 };
-use crate::shared::legacy_world_io::load_world;
+use crate::migration::legacy_world_io::load_world;
+use crate::migration::legacy_voxel::Chunk as LegacyChunk;
 use crate::shared::protocol::{EntityClass, EntityKind};
-use crate::shared::voxel::RegionChunkWorld;
-use crate::shared::worldfield::ChunkPayload as FieldChunkPayload;
+use crate::shared::chunk_payload::ChunkPayload as FieldChunkPayload;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
@@ -32,13 +33,26 @@ struct LegacySidecarEntity {
 }
 
 fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], FieldChunkPayload)> {
+    fn payload_from_legacy_chunk(chunk: &LegacyChunk) -> FieldChunkPayload {
+        if chunk.is_empty() {
+            return FieldChunkPayload::Empty;
+        }
+        let first = u16::from(chunk.voxels[0].0);
+        if chunk.voxels.iter().all(|voxel| u16::from(voxel.0) == first) {
+            return FieldChunkPayload::Uniform(first);
+        }
+        FieldChunkPayload::Dense16 {
+            materials: chunk.voxels.iter().map(|voxel| u16::from(voxel.0)).collect(),
+        }
+    }
+
     let mut chunk_payloads: Vec<([i32; 4], FieldChunkPayload)> = world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
                 [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                FieldChunkPayload::from_chunk_compact(chunk),
+                payload_from_legacy_chunk(chunk),
             )
         })
         .collect();

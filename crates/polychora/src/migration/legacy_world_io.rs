@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
-use crate::shared::voxel::chunk::Chunk;
-use crate::shared::voxel::world::{BaseWorldKind, RegionChunkWorld};
-use crate::shared::voxel::{ChunkPos, VoxelType, CHUNK_VOLUME};
+use crate::migration::legacy_voxel::{Chunk, RegionChunkWorld};
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_VOLUME};
 
 const MAGIC: &[u8; 4] = b"V4DW";
 const VERSION_V1: u32 = 1;

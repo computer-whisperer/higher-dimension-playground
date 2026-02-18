@@ -105,7 +105,6 @@ const VTE_TRACE_STEPS_MIN: u32 = 16;
 const VTE_TRACE_STEPS_MAX: u32 = 4096;
 const MULTIPLAYER_DEFAULT_PORT: u16 = 4000;
 const MULTIPLAYER_PLAYER_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
-const MULTIPLAYER_REGION_RESYNC_MIN_INTERVAL: Duration = Duration::from_millis(150);
 const MULTIPLAYER_PENDING_PLAYER_MODIFIER_MAX: usize = 128;
 const MULTIPLAYER_PLAYER_MODIFIER_MAX_TRANSLATION: f32 = 12.0;
 const MULTIPLAYER_PLAYER_MODIFIER_MAX_VELOCITY_Y_DELTA: f32 = 16.0;
@@ -977,9 +976,8 @@ fn main() {
         material_icons_texture_id: None,
         multiplayer,
         multiplayer_self_id: None,
-        multiplayer_region_clocks: HashMap::new(),
-        multiplayer_last_region_patch_seq: None,
-        multiplayer_stream_tree_diag: polychora::shared::worldfield::RegionChunkTree::new(),
+        multiplayer_last_world_request_center_chunk: None,
+        multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree::new(),
         multiplayer_stream_tree_diag_enabled: env_flag_enabled(CLIENT_REGION_TREE_BOUNDS_DIAG_ENV),
         multiplayer_stream_tree_diag_max_nodes: env_usize_or(
             CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES_ENV,
@@ -1013,7 +1011,6 @@ fn main() {
         .max(1),
         multiplayer_stream_tree_compare_diag_last_hash: None,
         multiplayer_stream_tree_compare_diag_frame_counter: 0,
-        multiplayer_last_region_resync_request: Instant::now(),
         pending_player_movement_modifiers: VecDeque::new(),
         player_modifier_external_velocity: [0.0; 4],
         remote_players: HashMap::new(),
@@ -1280,9 +1277,8 @@ struct App {
     material_icons_texture_id: Option<egui::TextureId>,
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
-    multiplayer_region_clocks: HashMap<[i32; 4], u64>,
-    multiplayer_last_region_patch_seq: Option<u64>,
-    multiplayer_stream_tree_diag: polychora::shared::worldfield::RegionChunkTree,
+    multiplayer_last_world_request_center_chunk: Option<[i32; 4]>,
+    multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree,
     multiplayer_stream_tree_diag_enabled: bool,
     multiplayer_stream_tree_diag_max_nodes: usize,
     multiplayer_stream_tree_diag_non_empty_only: bool,
@@ -1293,7 +1289,6 @@ struct App {
     multiplayer_stream_tree_compare_diag_log_interval: usize,
     multiplayer_stream_tree_compare_diag_last_hash: Option<u64>,
     multiplayer_stream_tree_compare_diag_frame_counter: u64,
-    multiplayer_last_region_resync_request: Instant,
     pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,
     player_modifier_external_velocity: [f32; 4],
     remote_players: HashMap<u64, RemotePlayerState>,

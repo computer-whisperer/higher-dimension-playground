@@ -13,7 +13,7 @@ fn chunk_payload_hash(voxels: &[VoxelType; CHUNK_VOLUME], solid_count: u32) -> u
 }
 
 fn pack_chunk_payload_words(
-    chunk: &crate::voxel::chunk::Chunk,
+    chunk: &DenseChunk,
     occupancy_words: &mut [u32],
     material_words: &mut [u32],
     macro_words: &mut [u32],
@@ -24,7 +24,7 @@ fn pack_chunk_payload_words(
     let mut chunk_solid_local_min = [i32::MAX; 4];
     let mut chunk_solid_local_max = [i32::MIN; 4];
 
-    for (voxel_idx, voxel) in chunk.voxels.iter().enumerate() {
+    for (voxel_idx, voxel) in chunk.iter().enumerate() {
         let mat_word_idx = voxel_idx / 4;
         let mat_shift = ((voxel_idx & 3) * 8) as u32;
         material_words[mat_word_idx] |= (voxel.0 as u32) << mat_shift;
@@ -70,7 +70,9 @@ fn pack_chunk_payload_words(
     )
 }
 
-fn build_cached_chunk_payload(chunk: &crate::voxel::chunk::Chunk) -> CachedChunkPayload {
+fn build_cached_chunk_payload(chunk: &DenseChunk) -> CachedChunkPayload {
+    let solid_count = chunk.iter().filter(|voxel| voxel.is_solid()).count() as u32;
+    let is_full = solid_count == CHUNK_VOLUME as u32;
     let mut occupancy_words = Box::new([0u32; OCCUPANCY_WORDS_PER_CHUNK]);
     let mut material_words = Box::new([0u32; MATERIAL_WORDS_PER_CHUNK]);
     let mut macro_words = Box::new([0u32; MACRO_WORDS_PER_CHUNK]);
@@ -82,9 +84,9 @@ fn build_cached_chunk_payload(chunk: &crate::voxel::chunk::Chunk) -> CachedChunk
     );
 
     CachedChunkPayload {
-        hash: chunk_payload_hash(chunk.voxels.as_ref(), chunk.solid_count),
-        solid_count: chunk.solid_count,
-        is_full: chunk.is_full(),
+        hash: chunk_payload_hash(chunk, solid_count),
+        solid_count,
+        is_full,
         ref_count: 0,
         gpu_slot: u32::MAX,
         occupancy_words,

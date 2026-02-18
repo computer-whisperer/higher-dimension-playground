@@ -1,24 +1,18 @@
 mod entities;
 mod procgen;
-pub mod region_tree_cache;
 pub mod world_field;
 
 use self::entities::{EntityId, EntityStore};
-use self::region_tree_cache::RegionTreeWorkingSet;
-use self::world_field::ServerWorldField;
+use self::world_field::{QueryDetail, QueryVolume, ServerWorldField};
 use crate::materials;
 use crate::save_v4::{self, PersistedEntityRecord, PlayerRecord, SaveChunkPayloadRequest};
+use crate::shared::chunk_payload::ChunkPayload;
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
     WorldSummary,
 };
-use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
-use crate::shared::worldfield::ChunkPayload;
-use crate::shared::worldfield::{
-    slice_non_empty_region_core_in_bounds, Aabb4i, QueryDetail, QueryVolume, RegionClockMap,
-    RegionClockPrecondition, RegionClockUpdate, RegionId, RegionResyncEntry, RegionResyncRequest,
-    RegionSubtreePatch, WorldField, MAX_PATCH_BYTES, REGION_TILE_EDGE_CHUNKS,
-};
+use crate::shared::spatial::Aabb4i;
+use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet};
@@ -107,11 +101,6 @@ pub struct LocalConnection {
 #[derive(Clone, Debug)]
 struct PlayerState {
     entity_id: u64,
-    working_set: RegionTreeWorkingSet,
-    last_stream_center_chunk: Option<[i32; 4]>,
-    last_stream_region_clocks: RegionClockMap,
-    known_region_clocks: RegionClockMap,
-    next_stream_patch_seq: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,7 +417,6 @@ struct ServerState {
     procgen_keepout_padding_chunks: i32,
     world: ServerWorldField,
     world_revision: u64,
-    region_clocks: RegionClockMap,
     players: HashMap<u64, PlayerState>,
     last_players_persisted_ms: u64,
     mobs: HashMap<u64, MobState>,
@@ -571,20 +559,6 @@ fn collect_bootstrap_block_regions(
 fn advance_world_revision(state: &mut ServerState) -> u64 {
     state.world_revision = state.world_revision.wrapping_add(1);
     state.world_revision
-}
-
-fn bump_region_clocks_for_chunks<I>(state: &mut ServerState, chunks: I)
-where
-    I: IntoIterator<Item = ChunkPos>,
-{
-    let mut touched_regions = HashSet::<RegionId>::new();
-    for chunk_pos in chunks {
-        touched_regions.insert(RegionId::from_chunk_pos(chunk_pos));
-    }
-    for region_id in touched_regions {
-        let clock = state.region_clocks.entry(region_id).or_insert(0);
-        *clock = clock.wrapping_add(1);
-    }
 }
 
 fn upsert_entity_record(
@@ -1074,9 +1048,9 @@ fn mob_collision_radius_for_scale(scale: f32) -> f32 {
 
 #[derive(Clone, Debug)]
 enum CollisionChunkCacheEntry {
-    Explicit(voxel::Chunk),
+    Explicit([VoxelType; CHUNK_VOLUME]),
     ExplicitEmpty,
-    Effective(Option<voxel::Chunk>),
+    Effective(Option<[VoxelType; CHUNK_VOLUME]>),
 }
 
 fn sample_effective_voxel_for_collision(
@@ -1090,21 +1064,21 @@ fn sample_effective_voxel_for_collision(
     let (chunk_pos, voxel_index) = voxel::world_to_chunk(wx, wy, wz, ww);
     if let Some(entry) = cache.get(&chunk_pos) {
         return match entry {
-            CollisionChunkCacheEntry::Explicit(chunk) => chunk.voxels[voxel_index],
+            CollisionChunkCacheEntry::Explicit(chunk) => chunk[voxel_index],
             CollisionChunkCacheEntry::ExplicitEmpty => VoxelType::AIR,
             CollisionChunkCacheEntry::Effective(chunk) => chunk
                 .as_ref()
-                .map(|chunk| chunk.voxels[voxel_index])
+                .map(|chunk| chunk[voxel_index])
                 .unwrap_or(VoxelType::AIR),
         };
     }
 
     if let Some(chunk_data) = state.world.chunk_at(chunk_pos) {
-        if chunk_data.is_empty() {
+        if chunk_data.iter().all(|voxel| voxel.is_air()) {
             cache.insert(chunk_pos, CollisionChunkCacheEntry::ExplicitEmpty);
             return VoxelType::AIR;
         }
-        let voxel = chunk_data.voxels[voxel_index];
+        let voxel = chunk_data[voxel_index];
         cache.insert(chunk_pos, CollisionChunkCacheEntry::Explicit(chunk_data));
         return voxel;
     }
@@ -1112,7 +1086,7 @@ fn sample_effective_voxel_for_collision(
     let effective_chunk = state.world.effective_chunk(chunk_pos, false);
     let voxel = effective_chunk
         .as_ref()
-        .map(|chunk| chunk.voxels[voxel_index])
+        .map(|chunk| chunk[voxel_index])
         .unwrap_or(VoxelType::AIR);
     cache.insert(
         chunk_pos,
@@ -2440,365 +2414,6 @@ fn stream_near_bounds(center_chunk: [i32; 4], near_chunk_radius: i32) -> Aabb4i 
     Aabb4i::new(min_chunk, max_chunk)
 }
 
-fn region_bounds_for_chunk_bounds(bounds: Aabb4i) -> Aabb4i {
-    Aabb4i::new(
-        [
-            bounds.min[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
-            bounds.min[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
-            bounds.min[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
-            bounds.min[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        ],
-        [
-            bounds.max[0].div_euclid(REGION_TILE_EDGE_CHUNKS),
-            bounds.max[1].div_euclid(REGION_TILE_EDGE_CHUNKS),
-            bounds.max[2].div_euclid(REGION_TILE_EDGE_CHUNKS),
-            bounds.max[3].div_euclid(REGION_TILE_EDGE_CHUNKS),
-        ],
-    )
-}
-
-fn collect_region_clocks_in_chunk_bounds(
-    region_clocks: &RegionClockMap,
-    chunk_bounds: Aabb4i,
-) -> RegionClockMap {
-    if !chunk_bounds.is_valid() {
-        return HashMap::new();
-    }
-    let region_bounds = region_bounds_for_chunk_bounds(chunk_bounds);
-    let mut out = HashMap::new();
-    for rw in region_bounds.min[3]..=region_bounds.max[3] {
-        for rz in region_bounds.min[2]..=region_bounds.max[2] {
-            for ry in region_bounds.min[1]..=region_bounds.max[1] {
-                for rx in region_bounds.min[0]..=region_bounds.max[0] {
-                    let region_id = RegionId {
-                        x: rx,
-                        y: ry,
-                        z: rz,
-                        w: rw,
-                    };
-                    let clock = *region_clocks.get(&region_id).unwrap_or(&0);
-                    if clock != 0 {
-                        out.insert(region_id, clock);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn region_clock_map_changed_in_chunk_bounds(
-    current_region_clocks: &RegionClockMap,
-    previous_region_clocks: &RegionClockMap,
-    chunk_bounds: Aabb4i,
-) -> bool {
-    if !chunk_bounds.is_valid() {
-        return false;
-    }
-    let region_bounds = region_bounds_for_chunk_bounds(chunk_bounds);
-    for rw in region_bounds.min[3]..=region_bounds.max[3] {
-        for rz in region_bounds.min[2]..=region_bounds.max[2] {
-            for ry in region_bounds.min[1]..=region_bounds.max[1] {
-                for rx in region_bounds.min[0]..=region_bounds.max[0] {
-                    let region_id = RegionId {
-                        x: rx,
-                        y: ry,
-                        z: rz,
-                        w: rw,
-                    };
-                    let current_clock = *current_region_clocks.get(&region_id).unwrap_or(&0);
-                    let previous_clock = *previous_region_clocks.get(&region_id).unwrap_or(&0);
-                    if current_clock != previous_clock {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn region_clock_updates_from_map(clocks: &RegionClockMap) -> Vec<RegionClockUpdate> {
-    let mut out: Vec<RegionClockUpdate> = clocks
-        .iter()
-        .map(|(region_id, clock)| RegionClockUpdate {
-            region_id: *region_id,
-            new_clock: *clock,
-        })
-        .collect();
-    out.sort_unstable_by_key(|update| {
-        (
-            update.region_id.w,
-            update.region_id.z,
-            update.region_id.y,
-            update.region_id.x,
-        )
-    });
-    out
-}
-
-fn region_clock_preconditions_for_patch(
-    previous_clocks: &RegionClockMap,
-    current_clocks: &RegionClockMap,
-) -> Vec<RegionClockPrecondition> {
-    let mut out: Vec<RegionClockPrecondition> = current_clocks
-        .keys()
-        .map(|region_id| RegionClockPrecondition {
-            region_id: *region_id,
-            expected_clock: *previous_clocks.get(region_id).unwrap_or(&0),
-        })
-        .collect();
-    out.sort_unstable_by_key(|precondition| {
-        (
-            precondition.region_id.w,
-            precondition.region_id.z,
-            precondition.region_id.y,
-            precondition.region_id.x,
-        )
-    });
-    out
-}
-
-fn next_stream_patch_seq(next_seq: &mut u64) -> u64 {
-    let seq = (*next_seq).max(1);
-    *next_seq = seq.wrapping_add(1);
-    if *next_seq == 0 {
-        *next_seq = 1;
-    }
-    seq
-}
-
-fn sanitize_region_resync_entries(mut entries: Vec<RegionResyncEntry>) -> Vec<RegionResyncEntry> {
-    const MAX_REGION_RESYNC_ENTRIES: usize = 512;
-    entries.sort_unstable_by_key(|entry| {
-        (
-            entry.region_id.w,
-            entry.region_id.z,
-            entry.region_id.y,
-            entry.region_id.x,
-        )
-    });
-    entries.dedup_by_key(|entry| entry.region_id);
-    if entries.len() > MAX_REGION_RESYNC_ENTRIES {
-        entries.truncate(MAX_REGION_RESYNC_ENTRIES);
-    }
-    entries
-}
-
-fn chunk_bounds_for_region_id(region_id: RegionId) -> Aabb4i {
-    let min = [
-        region_id.x.saturating_mul(REGION_TILE_EDGE_CHUNKS),
-        region_id.y.saturating_mul(REGION_TILE_EDGE_CHUNKS),
-        region_id.z.saturating_mul(REGION_TILE_EDGE_CHUNKS),
-        region_id.w.saturating_mul(REGION_TILE_EDGE_CHUNKS),
-    ];
-    let max = [
-        min[0].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
-        min[1].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
-        min[2].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
-        min[3].saturating_add(REGION_TILE_EDGE_CHUNKS.saturating_sub(1)),
-    ];
-    Aabb4i::new(min, max)
-}
-
-fn merge_aabb(a: Aabb4i, b: Aabb4i) -> Aabb4i {
-    Aabb4i::new(
-        [
-            a.min[0].min(b.min[0]),
-            a.min[1].min(b.min[1]),
-            a.min[2].min(b.min[2]),
-            a.min[3].min(b.min[3]),
-        ],
-        [
-            a.max[0].max(b.max[0]),
-            a.max[1].max(b.max[1]),
-            a.max[2].max(b.max[2]),
-            a.max[3].max(b.max[3]),
-        ],
-    )
-}
-
-fn chunk_bounds_for_resync_entries(entries: &[RegionResyncEntry]) -> Option<Aabb4i> {
-    let mut iter = entries.iter();
-    let first = iter.next()?;
-    let mut bounds = chunk_bounds_for_region_id(first.region_id);
-    for entry in iter {
-        bounds = merge_aabb(bounds, chunk_bounds_for_region_id(entry.region_id));
-    }
-    Some(bounds)
-}
-
-fn region_patch_wire_size_bytes(patch: &RegionSubtreePatch) -> Option<usize> {
-    postcard::to_stdvec(&ServerMessage::WorldRegionPatch {
-        patch: patch.clone(),
-    })
-    .ok()
-    .map(|bytes| bytes.len())
-}
-
-fn split_chunk_bounds_longest_axis(bounds: Aabb4i) -> Option<(Aabb4i, Aabb4i)> {
-    if !bounds.is_valid() {
-        return None;
-    }
-    let spans = [
-        i64::from(bounds.max[0]) - i64::from(bounds.min[0]) + 1,
-        i64::from(bounds.max[1]) - i64::from(bounds.min[1]) + 1,
-        i64::from(bounds.max[2]) - i64::from(bounds.min[2]) + 1,
-        i64::from(bounds.max[3]) - i64::from(bounds.min[3]) + 1,
-    ];
-    let mut axis = 0usize;
-    for candidate in 1..4 {
-        if spans[candidate] > spans[axis] {
-            axis = candidate;
-        }
-    }
-    if spans[axis] <= 1 {
-        return None;
-    }
-
-    let left_len = spans[axis] / 2;
-    let left_max_axis = i64::from(bounds.min[axis]) + left_len - 1;
-    let right_min_axis = left_max_axis + 1;
-    let left_max_axis = i32::try_from(left_max_axis).ok()?;
-    let right_min_axis = i32::try_from(right_min_axis).ok()?;
-
-    let mut left_max = bounds.max;
-    left_max[axis] = left_max_axis;
-    let mut right_min = bounds.min;
-    right_min[axis] = right_min_axis;
-    Some((
-        Aabb4i::new(bounds.min, left_max),
-        Aabb4i::new(right_min, bounds.max),
-    ))
-}
-
-fn build_region_patches_recursive(
-    query_core: &crate::shared::worldfield::RegionTreeCore,
-    bounds: Aabb4i,
-    full_region_clocks: &RegionClockMap,
-    working_known_clocks: &mut RegionClockMap,
-    next_patch_seq: &mut u64,
-    out: &mut Vec<RegionSubtreePatch>,
-) -> bool {
-    if !bounds.is_valid() {
-        return true;
-    }
-
-    let current_region_clocks = collect_region_clocks_in_chunk_bounds(full_region_clocks, bounds);
-    let preconditions =
-        region_clock_preconditions_for_patch(working_known_clocks, &current_region_clocks);
-    let clock_updates = region_clock_updates_from_map(&current_region_clocks);
-    let subtree = slice_non_empty_region_core_in_bounds(query_core, bounds);
-    let estimated_patch = RegionSubtreePatch {
-        patch_seq: 1,
-        bounds,
-        preconditions: preconditions.clone(),
-        clock_updates: clock_updates.clone(),
-        subtree: subtree.clone(),
-    };
-    let estimated_size = region_patch_wire_size_bytes(&estimated_patch).unwrap_or(usize::MAX);
-
-    if estimated_size > MAX_PATCH_BYTES {
-        let Some((left_bounds, right_bounds)) = split_chunk_bounds_longest_axis(bounds) else {
-            eprintln!(
-                "Unable to split oversized region patch bounds={:?}->{:?} bytes={} limit={}",
-                bounds.min, bounds.max, estimated_size, MAX_PATCH_BYTES
-            );
-            return false;
-        };
-        return build_region_patches_recursive(
-            query_core,
-            left_bounds,
-            full_region_clocks,
-            working_known_clocks,
-            next_patch_seq,
-            out,
-        ) && build_region_patches_recursive(
-            query_core,
-            right_bounds,
-            full_region_clocks,
-            working_known_clocks,
-            next_patch_seq,
-            out,
-        );
-    }
-
-    let patch = RegionSubtreePatch {
-        patch_seq: next_stream_patch_seq(next_patch_seq),
-        bounds,
-        preconditions,
-        clock_updates,
-        subtree,
-    };
-    let wire_size = region_patch_wire_size_bytes(&patch).unwrap_or(usize::MAX);
-    if wire_size > MAX_PATCH_BYTES {
-        eprintln!(
-            "Region patch became oversized after sequencing bounds={:?}->{:?} bytes={} limit={}",
-            bounds.min, bounds.max, wire_size, MAX_PATCH_BYTES
-        );
-        return false;
-    }
-
-    for update in &patch.clock_updates {
-        working_known_clocks.insert(update.region_id, update.new_clock);
-    }
-    out.push(patch);
-    true
-}
-
-fn build_region_patches_for_bounds<W: WorldField + ?Sized>(
-    world: &W,
-    bounds: Aabb4i,
-    full_region_clocks: &RegionClockMap,
-    initial_known_clocks: &RegionClockMap,
-    next_patch_seq: &mut u64,
-) -> Option<(Vec<RegionSubtreePatch>, RegionClockMap)> {
-    let query_core = world
-        .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
-        .as_ref()
-        .clone();
-    let mut working_known_clocks = initial_known_clocks.clone();
-    let mut patches = Vec::new();
-    if !build_region_patches_recursive(
-        &query_core,
-        bounds,
-        full_region_clocks,
-        &mut working_known_clocks,
-        next_patch_seq,
-        &mut patches,
-    ) {
-        return None;
-    }
-    Some((patches, working_known_clocks))
-}
-
-fn plan_stream_window_update(
-    state: &mut ServerState,
-    client_id: u64,
-    center_chunk: [i32; 4],
-    near_chunk_radius: i32,
-    _mid_chunk_radius: i32,
-    _far_chunk_radius: i32,
-) -> Option<Option<Aabb4i>> {
-    let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
-    let query_core = state.world.query_region_core(
-        QueryVolume {
-            bounds: near_bounds,
-        },
-        QueryDetail::Exact,
-    );
-
-    let changed_bounds = {
-        let player = state.players.get_mut(&client_id)?;
-        let refresh = player
-            .working_set
-            .refresh_from_core(near_bounds, query_core.as_ref());
-        refresh.changed_bounds
-    };
-
-    Some(changed_bounds)
-}
-
 fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
     let sender = {
         let guard = state.lock().expect("server state lock poisoned");
@@ -2861,52 +2476,16 @@ fn force_sync_streamed_clients_for_changed_chunks(
     mid_chunk_radius: i32,
     far_chunk_radius: i32,
 ) {
-    if changed_chunks.is_empty() {
-        return;
-    }
-
-    let targets: Vec<(u64, [i32; 4])> = {
-        let guard = state.lock().expect("server state lock poisoned");
-        guard
-            .players
-            .iter()
-            .filter_map(|(&client_id, player)| {
-                if !guard.clients.contains_key(&client_id) {
-                    return None;
-                }
-                let is_source = source_client_id == Some(client_id);
-                let in_stream = changed_chunks
-                    .iter()
-                    .copied()
-                    .any(|chunk_pos| player.working_set.contains_chunk(chunk_pos));
-                if !is_source && !in_stream {
-                    return None;
-                }
-                let center_chunk = player
-                    .last_stream_center_chunk
-                    .or_else(|| {
-                        guard
-                            .entity_store
-                            .snapshot(player.entity_id)
-                            .map(|snapshot| world_chunk_from_position(snapshot.position))
-                    })
-                    .unwrap_or([0, 0, 0, 0]);
-                Some((client_id, center_chunk))
-            })
-            .collect()
-    };
-
-    for (client_id, center_chunk) in targets {
-        sync_streamed_chunks_for_client(
-            state,
-            client_id,
-            center_chunk,
-            near_chunk_radius,
-            mid_chunk_radius,
-            far_chunk_radius,
-            true,
-        );
-    }
+    // TODO(region-tree-streaming): Replace this temporary no-op with true per-client
+    // region-tree delta planning and patch emission.
+    let _ = (
+        state,
+        changed_chunks,
+        source_client_id,
+        near_chunk_radius,
+        mid_chunk_radius,
+        far_chunk_radius,
+    );
 }
 
 fn sync_streamed_chunks_for_client(
@@ -2918,193 +2497,69 @@ fn sync_streamed_chunks_for_client(
     far_chunk_radius: i32,
     force: bool,
 ) {
+    // TODO(region-tree-streaming): This temporary path only keeps persisted regions
+    // hydrated near the player while world patch transport is rebuilt.
+    let _ = (mid_chunk_radius, far_chunk_radius, force);
     let near_bounds = stream_near_bounds(center_chunk, near_chunk_radius);
-    let loaded_new_regions = match {
+    if let Err(error) = {
         let mut guard = state.lock().expect("server state lock poisoned");
         ensure_persisted_world_regions_loaded(&mut guard, near_bounds)
     } {
-        Ok(loaded) => loaded,
-        Err(error) => {
+        send_to_client(
+            state,
+            client_id,
+            ServerMessage::Error {
+                message: format!(
+                    "failed to load persisted world regions for stream bounds {:?}->{:?}: {}",
+                    near_bounds.min, near_bounds.max, error
+                ),
+            },
+        );
+    }
+}
+
+fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bounds: Aabb4i) {
+    if !bounds.is_valid() {
+        send_to_client(
+            state,
+            client_id,
+            ServerMessage::Error {
+                message: format!(
+                    "invalid world subtree request bounds {:?}->{:?}",
+                    bounds.min, bounds.max
+                ),
+            },
+        );
+        return;
+    }
+
+    let subtree = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        if let Err(error) = ensure_persisted_world_regions_loaded(&mut guard, bounds) {
             send_to_client(
                 state,
                 client_id,
                 ServerMessage::Error {
                     message: format!(
-                        "failed to load persisted world regions for stream bounds {:?}->{:?}: {}",
-                        near_bounds.min, near_bounds.max, error
+                        "failed to load persisted world regions for requested bounds {:?}->{:?}: {}",
+                        bounds.min, bounds.max, error
                     ),
                 },
             );
             return;
         }
+        guard
+            .world
+            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
     };
 
-    let update = {
-        let mut guard = state.lock().expect("server state lock poisoned");
-        let should_sync = match guard.players.get(&client_id) {
-            Some(player) => {
-                let changed = player.last_stream_center_chunk != Some(center_chunk);
-                let world_changed = region_clock_map_changed_in_chunk_bounds(
-                    &guard.region_clocks,
-                    &player.last_stream_region_clocks,
-                    near_bounds,
-                );
-                force || changed || world_changed || loaded_new_regions
-            }
-            None => false,
-        };
-
-        if should_sync {
-            let update = plan_stream_window_update(
-                &mut guard,
-                client_id,
-                center_chunk,
-                near_chunk_radius,
-                mid_chunk_radius,
-                far_chunk_radius,
-            );
-            match update {
-                Some(changed_bounds) => {
-                    let current_region_clocks =
-                        collect_region_clocks_in_chunk_bounds(&guard.region_clocks, near_bounds);
-                    let patch_bounds = changed_bounds.unwrap_or(near_bounds);
-                    let (known_before, mut next_patch_seq) = {
-                        let Some(player) = guard.players.get(&client_id) else {
-                            return;
-                        };
-                        (
-                            player.known_region_clocks.clone(),
-                            player.next_stream_patch_seq,
-                        )
-                    };
-
-                    match build_region_patches_for_bounds(
-                        &guard.world,
-                        patch_bounds,
-                        &current_region_clocks,
-                        &known_before,
-                        &mut next_patch_seq,
-                    ) {
-                        Some((patches, known_after)) => {
-                            if let Some(player) = guard.players.get_mut(&client_id) {
-                                player.last_stream_center_chunk = Some(center_chunk);
-                                player.last_stream_region_clocks = current_region_clocks;
-                                player.known_region_clocks = known_after;
-                                player.next_stream_patch_seq = next_patch_seq;
-                                Some(Ok(patches))
-                            } else {
-                                None
-                            }
-                        }
-                        None => Some(Err(format!(
-                            "region stream patch exceeded wire budget after spatial splitting in bounds {:?}->{:?}",
-                            patch_bounds.min, patch_bounds.max
-                        ))),
-                    }
-                }
-                None => None,
-            }
-        } else {
-            None
-        }
-    };
-
-    let Some(update) = update else {
-        return;
-    };
-
-    let sender = {
-        let guard = state.lock().expect("server state lock poisoned");
-        guard.clients.get(&client_id).cloned()
-    };
-    let Some(sender) = sender else {
-        return;
-    };
-
-    match update {
-        Ok(region_patches) => {
-            for patch in region_patches {
-                let _ = sender.send(ServerMessage::WorldRegionPatch { patch });
-            }
-        }
-        Err(message) => {
-            let _ = sender.send(ServerMessage::Error { message });
-        }
-    }
-}
-
-fn send_region_resync_patch_to_client(
-    state: &SharedState,
-    client_id: u64,
-    request: RegionResyncRequest,
-) {
-    let response = {
-        let mut guard = state.lock().expect("server state lock poisoned");
-        if !guard.players.contains_key(&client_id) {
-            None
-        } else {
-            let entries = sanitize_region_resync_entries(request.regions);
-            let Some(bounds) = chunk_bounds_for_resync_entries(&entries) else {
-                return;
-            };
-
-            if let Err(error) = ensure_persisted_world_regions_loaded(&mut guard, bounds) {
-                Some(Err(format!(
-                    "failed to load persisted world regions for resync bounds {:?}->{:?}: {}",
-                    bounds.min, bounds.max, error
-                )))
-            } else {
-                let (known_before, mut next_patch_seq) = {
-                    let Some(player) = guard.players.get_mut(&client_id) else {
-                        return;
-                    };
-                    for entry in &entries {
-                        player
-                            .known_region_clocks
-                            .insert(entry.region_id, entry.client_clock);
-                    }
-                    (
-                        player.known_region_clocks.clone(),
-                        player.next_stream_patch_seq,
-                    )
-                };
-
-                let current_region_clocks =
-                    collect_region_clocks_in_chunk_bounds(&guard.region_clocks, bounds);
-                match build_region_patches_for_bounds(
-                    &guard.world,
-                    bounds,
-                    &current_region_clocks,
-                    &known_before,
-                    &mut next_patch_seq,
-                ) {
-                    Some((patches, known_after)) => {
-                        if let Some(player) = guard.players.get_mut(&client_id) {
-                            player.known_region_clocks = known_after;
-                            player.next_stream_patch_seq = next_patch_seq;
-                        }
-                        Some(Ok(patches))
-                    }
-                    None => Some(Err(format!(
-                        "region resync patch exceeded wire budget after spatial splitting in bounds {:?}->{:?}",
-                        bounds.min, bounds.max
-                    ))),
-                }
-            }
-        }
-    };
-
-    match response {
-        Some(Ok(patches)) => {
-            for patch in patches {
-                send_to_client(state, client_id, ServerMessage::WorldRegionPatch { patch });
-            }
-        }
-        Some(Err(message)) => {
-            send_to_client(state, client_id, ServerMessage::Error { message });
-        }
-        None => {}
-    }
+    send_to_client(
+        state,
+        client_id,
+        ServerMessage::WorldSubtreePatch {
+            subtree: (*subtree).clone(),
+        },
+    );
 }
 
 fn apply_authoritative_voxel_edit(
@@ -3185,7 +2640,6 @@ fn apply_creeper_explosion(
 
     let mut world_updates = Vec::new();
     if !changed_chunks.is_empty() {
-        bump_region_clocks_for_chunks(state, changed_chunks.iter().copied());
         advance_world_revision(state);
         let mut changed_chunks: Vec<ChunkPos> = changed_chunks.into_iter().collect();
         changed_chunks.sort_unstable_by_key(|chunk| (chunk.w, chunk.z, chunk.y, chunk.x));
@@ -3605,7 +3059,7 @@ fn start_autosave_thread(
                                     .chunk_tree()
                                     .collect_chunks()
                                     .into_iter()
-                                    .map(|(key, payload)| (key.pos, payload))
+                                    .map(|(key, payload)| (key, payload))
                                     .collect(),
                                 true,
                             )
@@ -3617,7 +3071,7 @@ fn start_autosave_thread(
                                 for (key, payload) in
                                     guard.world.chunk_tree().collect_chunks_in_bounds(bounds)
                                 {
-                                    dirty_chunks.insert(key.pos, payload);
+                                    dirty_chunks.insert(key, payload);
                                 }
                             }
                             let mut chunk_payloads: Vec<([i32; 4], ChunkPayload)> =
@@ -3798,14 +3252,7 @@ fn install_or_update_player(
         Entry::Vacant(entry) => {
             spawned_now = true;
             let entity_id = client_id;
-            entry.insert(PlayerState {
-                entity_id,
-                working_set: RegionTreeWorkingSet::new(),
-                last_stream_center_chunk: None,
-                last_stream_region_clocks: HashMap::new(),
-                known_region_clocks: HashMap::new(),
-                next_stream_patch_seq: 1,
-            });
+            entry.insert(PlayerState { entity_id });
             guard.entity_store.spawn(
                 entity_id,
                 EntityClass::Player,
@@ -4138,7 +3585,6 @@ fn handle_message(
                 if let Some(chunk_pos) =
                     apply_authoritative_voxel_edit(&mut guard, position, requested_voxel)
                 {
-                    bump_region_clocks_for_chunks(&mut guard, std::iter::once(chunk_pos));
                     advance_world_revision(&mut guard);
                     Some(chunk_pos)
                 } else {
@@ -4181,8 +3627,8 @@ fn handle_message(
                 send_to_client(state, client_id, ServerMessage::Error { message });
             }
         }
-        ClientMessage::WorldRegionResyncRequest { request } => {
-            send_region_resync_patch_to_client(state, client_id, request);
+        ClientMessage::WorldSubtreeRequest { bounds } => {
+            send_world_subtree_patch_to_client(state, client_id, bounds);
         }
         ClientMessage::Ping { nonce } => {
             send_to_client(state, client_id, ServerMessage::Pong { nonce });
@@ -4582,7 +4028,6 @@ fn initialize_state(
         procgen_keepout_padding_chunks: config.procgen_keepout_padding_chunks,
         world: initial_world,
         world_revision: 0,
-        region_clocks: HashMap::new(),
         players: HashMap::new(),
         last_players_persisted_ms: last_persisted_ms,
         mobs: HashMap::new(),
@@ -4718,14 +4163,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn region_bounds_use_floor_division_for_negative_chunks() {
-        let bounds = Aabb4i::new([-5, -1, 0, 7], [3, 2, 0, 7]);
-        let region_bounds = region_bounds_for_chunk_bounds(bounds);
-        assert_eq!(region_bounds.min, [-2, -1, 0, 1]);
-        assert_eq!(region_bounds.max, [0, 0, 0, 1]);
-    }
-
-    #[test]
     fn collect_regions_in_chunk_bounds_includes_full_hypervolume() {
         let bounds = Aabb4i::new([-5, -1, 0, 7], [3, 2, 0, 7]);
         let regions = collect_regions_in_chunk_bounds(bounds, 4);
@@ -4742,103 +4179,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_region_clocks_only_returns_intersecting_regions() {
-        let mut clocks = RegionClockMap::new();
-        clocks.insert(
-            RegionId {
-                x: -1,
-                y: 0,
-                z: 0,
-                w: 0,
-            },
-            5,
-        );
-        clocks.insert(
-            RegionId {
-                x: 0,
-                y: 0,
-                z: 0,
-                w: 0,
-            },
-            3,
-        );
-        clocks.insert(
-            RegionId {
-                x: 2,
-                y: 0,
-                z: 0,
-                w: 0,
-            },
-            9,
-        );
-
-        let bounds = Aabb4i::new([0, 0, 0, 0], [3, 0, 0, 0]);
-        let collected = collect_region_clocks_in_chunk_bounds(&clocks, bounds);
-        assert_eq!(collected.len(), 1);
-        assert_eq!(
-            collected.get(&RegionId {
-                x: 0,
-                y: 0,
-                z: 0,
-                w: 0,
-            }),
-            Some(&3)
-        );
-    }
-
-    #[test]
-    fn region_clock_map_changed_in_bounds_detects_matching_maps_as_stable() {
-        let bounds = Aabb4i::new([0, 0, 0, 0], [3, 3, 3, 3]);
-        let region = RegionId {
-            x: 0,
-            y: 0,
-            z: 0,
-            w: 0,
-        };
-        let mut current = RegionClockMap::new();
-        let mut previous = RegionClockMap::new();
-        current.insert(region, 7);
-        previous.insert(region, 7);
-        current.insert(
-            RegionId {
-                x: 2,
-                y: 0,
-                z: 0,
-                w: 0,
-            },
-            99,
-        );
-
-        assert!(!region_clock_map_changed_in_chunk_bounds(
-            &current, &previous, bounds
-        ));
-    }
-
-    #[test]
-    fn region_clock_map_changed_in_bounds_detects_deltas_and_clears() {
-        let bounds = Aabb4i::new([0, 0, 0, 0], [3, 3, 3, 3]);
-        let region = RegionId {
-            x: 0,
-            y: 0,
-            z: 0,
-            w: 0,
-        };
-        let mut current = RegionClockMap::new();
-        let mut previous = RegionClockMap::new();
-        current.insert(region, 8);
-        previous.insert(region, 7);
-
-        assert!(region_clock_map_changed_in_chunk_bounds(
-            &current, &previous, bounds
-        ));
-
-        current.clear();
-        assert!(region_clock_map_changed_in_chunk_bounds(
-            &current, &previous, bounds
-        ));
-    }
-
-    #[test]
     fn stream_near_bounds_expands_symmetrically() {
         let center = [10, -2, 7, 1];
         let bounds = stream_near_bounds(center, 3);
@@ -4847,127 +4187,10 @@ mod tests {
     }
 
     #[test]
-    fn split_chunk_bounds_longest_axis_prefers_widest_axis() {
-        let bounds = Aabb4i::new([0, 0, 0, 0], [7, 1, 1, 1]);
-        let (left, right) = split_chunk_bounds_longest_axis(bounds).expect("split bounds");
-        assert_eq!(left.min, [0, 0, 0, 0]);
-        assert_eq!(left.max, [3, 1, 1, 1]);
-        assert_eq!(right.min, [4, 0, 0, 0]);
-        assert_eq!(right.max, [7, 1, 1, 1]);
-    }
-
-    #[test]
-    fn split_chunk_bounds_longest_axis_rejects_single_cell_bounds() {
-        let bounds = Aabb4i::new([2, -1, 5, 0], [2, -1, 5, 0]);
-        assert!(split_chunk_bounds_longest_axis(bounds).is_none());
-    }
-
-    #[test]
-    fn region_clock_preconditions_default_to_zero_for_new_regions() {
-        let mut previous = RegionClockMap::new();
-        previous.insert(
-            RegionId {
-                x: -1,
-                y: 0,
-                z: 0,
-                w: 0,
-            },
-            2,
-        );
-
-        let mut current = previous.clone();
-        current.insert(
-            RegionId {
-                x: 0,
-                y: 0,
-                z: 0,
-                w: 0,
-            },
-            7,
-        );
-
-        let preconditions = region_clock_preconditions_for_patch(&previous, &current);
-        assert_eq!(preconditions.len(), 2);
-        assert_eq!(
-            preconditions[0],
-            RegionClockPrecondition {
-                region_id: RegionId {
-                    x: -1,
-                    y: 0,
-                    z: 0,
-                    w: 0
-                },
-                expected_clock: 2,
-            }
-        );
-        assert_eq!(
-            preconditions[1],
-            RegionClockPrecondition {
-                region_id: RegionId {
-                    x: 0,
-                    y: 0,
-                    z: 0,
-                    w: 0
-                },
-                expected_clock: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn next_stream_patch_seq_is_monotonic_and_non_zero() {
-        let mut next = 1u64;
-        assert_eq!(next_stream_patch_seq(&mut next), 1);
-        assert_eq!(next_stream_patch_seq(&mut next), 2);
-
-        next = u64::MAX;
-        assert_eq!(next_stream_patch_seq(&mut next), u64::MAX);
-        assert_eq!(next, 1);
-    }
-
-    #[test]
-    fn chunk_bounds_for_resync_entries_unions_region_bounds() {
-        let entries = vec![
-            RegionResyncEntry {
-                region_id: RegionId {
-                    x: -1,
-                    y: 0,
-                    z: 0,
-                    w: 0,
-                },
-                client_clock: 0,
-            },
-            RegionResyncEntry {
-                region_id: RegionId {
-                    x: 1,
-                    y: 0,
-                    z: 0,
-                    w: 0,
-                },
-                client_clock: 2,
-            },
-        ];
-        let bounds = chunk_bounds_for_resync_entries(&entries).expect("bounds");
-        assert_eq!(bounds.min, [-4, 0, 0, 0]);
-        assert_eq!(bounds.max, [7, 3, 3, 3]);
-    }
-
-    #[test]
-    fn region_patch_wire_size_bytes_serializes_patch_message() {
-        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
-        let patch = RegionSubtreePatch {
-            patch_seq: 1,
-            bounds,
-            preconditions: Vec::new(),
-            clock_updates: Vec::new(),
-            subtree: crate::shared::worldfield::RegionTreeCore {
-                bounds,
-                kind: crate::shared::worldfield::RegionNodeKind::Uniform(3),
-                generator_version_hash: 0,
-            },
-        };
-        let size = region_patch_wire_size_bytes(&patch).expect("serialized size");
-        assert!(size > 0);
-        assert!(size <= MAX_PATCH_BYTES);
+    fn stream_near_bounds_clamps_negative_radius() {
+        let center = [3, 4, 5, 6];
+        let bounds = stream_near_bounds(center, -10);
+        assert_eq!(bounds.min, center);
+        assert_eq!(bounds.max, center);
     }
 }

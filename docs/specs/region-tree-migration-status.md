@@ -1,7 +1,7 @@
 # Region Tree Migration Status
 
-Status: Active migration (hard-cut mode)  
-Updated: 2026-02-17
+Status: Active migration (hard-cut mode)
+Updated: 2026-02-18
 
 ## Core mandate (non-negotiable)
 1. Runtime world authority must be tree-native end-to-end.
@@ -13,18 +13,22 @@ Updated: 2026-02-17
 This reflects current runtime code paths, not target intent.
 
 ### Already in place
-1. Server runtime world state is held in `ServerWorldField` with `RegionChunkTree` (`crates/polychora/src/server/world_field.rs`).
-2. Multiplayer world transport is patch-only (`WorldRegionPatch` + `WorldRegionResyncRequest`) (`crates/polychora/src/shared/protocol.rs`).
-3. Per-player streamed cache is tree-based (`RegionTreeWorkingSet`) (`crates/polychora/src/server/region_tree_cache.rs`).
-4. Server stream planner queries `WorldField` and builds bounded tree patches (no legacy snapshot/chunk-batch protocol path).
-5. Client scene runtime world cache is tree-authoritative (`Scene.world_tree` + explicit chunk payload cache), not `RegionChunkWorld`-based (`crates/polychora/src/scene.rs`).
-6. Runtime v4 persistence path is chunk-payload/tree-based (`LoadedState.world_chunk_payloads`, `save_state_from_chunk_payloads`) (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
-7. Server startup now loads v4 metadata (global/players/entities/index) without eagerly materializing all world chunks; persisted block regions are hydrated on demand for stream/resync/edit bounds (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
+1. Server runtime world state is held in `ServerWorldField` with `RegionChunkTree` (`crates/polychora/src/server/world_field/legacy_generator.rs`).
+2. Runtime v4 persistence path is chunk-payload/tree-based (`LoadedState.world_chunk_payloads`, `save_state_from_chunk_payloads`) (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
+3. Server startup loads v4 metadata without eagerly materializing all chunks; persisted block regions hydrate on demand for local bounds (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
+4. Legacy per-player `RegionTreeWorkingSet` runtime path has been removed from the server (`crates/polychora/src/server/region_tree_cache.rs` deleted).
+5. Client scene runtime world cache remains tree-authoritative (`Scene.world_tree` with derived chunk payload cache), not `RegionChunkWorld`-based (`crates/polychora/src/scene.rs`).
+6. `WorldField` API is now query-only (`query_region_core`), and `WorldOverlay` is currently a passthrough read-only interposer boundary (`crates/polychora/src/server/world_field/mod.rs`).
 
 ### Still hybrid (must be removed)
-1. Migration logic is split into `save_v4_migration` (`crates/polychora/src/save_v4_migration.rs`); runtime `save_v4` no longer owns migration entrypoints.
-2. Client scene still stores both tree metadata and materialized explicit chunk payloads (`world_tree` + `world_chunks`) rather than a stricter single-structure cache contract (`crates/polychora/src/scene.rs`).
-3. Runtime still eagerly materializes full persisted entity lists at startup, and region hydration currently performs direct file IO on the server lock path; this needs a dedicated streaming/cache scheduler (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
+1. Multiplayer world streaming is currently stubbed server-side:
+   - `sync_streamed_chunks_for_client` only hydrates persisted regions and does not plan per-client deltas.
+   - `force_sync_streamed_clients_for_changed_chunks` is a no-op.
+   - per-client delta planning is not implemented yet.
+2. Protocol now uses bounds-based request/response transport (`WorldSubtreeRequest`, `WorldSubtreePatch`), but it is not yet optimized into minimal deltas (`crates/polychora/src/shared/protocol.rs`, `crates/polychora/src/server/mod.rs`).
+3. Client now requests subtree bounds directly and applies returned subtree patches, but still needs smarter demand planning and caching policy (`crates/polychora/src/app_multiplayer.rs`).
+4. Runtime still eagerly materializes full persisted entity lists at startup, and region hydration currently performs direct file I/O under the server lock (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
+5. Migration logic remains split into `save_v4_migration` and `legacy_migration` (acceptable as tooling boundary, but still needs strict runtime isolation checks).
 
 ## What is explicitly disallowed going forward
 1. Adding any new `to_legacy_*` / `from_legacy_*` runtime bridge for world state.
@@ -34,29 +38,29 @@ This reflects current runtime code paths, not target intent.
 
 ## Migration plan (hard cut, ordered)
 
-### Step 1: Save API cutover (server-facing)
-1. Add tree-native load/save surfaces in `save_v4`:
-   - load returns base-world metadata + region tree payloads + entities/players.
-   - save accepts base-world metadata + chunk/tree payload deltas + entities/players.
-2. Keep `VoxelWorld`-based helpers only in explicit migration tooling paths (CLI/menu migration), not runtime server load/save.
-3. Remove server runtime dependency on `LoadedState.world: VoxelWorld`.
+### Step 1: Rebuild multiplayer world streaming around tree primitives
+1. Server must compute client-visible subtree deltas against server-side per-client tree state using efficient region-tree splice/trim operations.
+2. Server must only send true deltas (`added/changed/removed` via bounded patch cores), not full-window retransmits.
+3. Resync/fill flow must be explicit and bounded: request/response bounds fetch for bootstrap, delta stream for steady state.
+4. Keep protocol versioning strict; no hidden compatibility path.
 
 Acceptance gate:
-1. `server/mod.rs` does not call `ServerWorldField::from_legacy_world`.
-2. Server load/save path uses only tree payload APIs.
+1. `sync_streamed_chunks_for_client` is not a stub.
+2. `force_sync_streamed_clients_for_changed_chunks` targets only impacted clients/regions.
+3. Multiplayer movement/edit traffic no longer causes no-op patch churn.
 
-### Step 2: Runtime world authority cleanup
-1. Remove `ServerWorldField::{from_legacy_world,to_legacy_world}` from runtime flow.
-2. Keep a single in-memory world authority: base/procgen + override tree in `ServerWorldField`.
-3. Keep dirty tracking region-scoped and tree-native.
+### Step 2: Save/runtime storage contract cleanup
+1. Keep runtime world authority exclusively in tree-native structures.
+2. Keep `VoxelWorld` and legacy readers/writers migration-only.
+3. Keep dirty tracking region-scoped and tree-native, with no duplicate world authority caches.
 
 Acceptance gate:
 1. No runtime world conversion into `VoxelWorld` during tick, stream, or autosave.
 
-### Step 3: Client authority cleanup
+### Step 3: Client authority and cache cleanup
 1. Make multiplayer world cache tree-authoritative on client.
 2. Materialize render/sim chunks from tree cache as needed; do not treat chunk hash map as authoritative state.
-3. Keep protocol unchanged (already patch-only) while replacing internal representation.
+3. Keep patch-apply cost proportional to changed tree region, not window size.
 
 Acceptance gate:
 1. Patch apply path mutates client tree authority first; render cache is derived.
@@ -70,13 +74,16 @@ Acceptance gate:
 1. Runtime world startup path has no v1/v2/v3 world-file dependency.
 
 ## Immediate blockers to resolve next
-1. Move on-demand world region hydration off the server lock path and introduce bounded prefetch/worker scheduling.
-2. Decide and enforce client-side cache contract (`world_tree` sole authority with derivable chunk cache semantics).
-3. Add true streaming entity-region load/unload (runtime currently loads all persisted entities at startup).
-4. Keep trimming remaining runtime/test helper overlap inside `save_v4` where it no longer serves runtime behavior.
+1. Replace current streaming stubs with real tree-delta planner and sender.
+2. Add server-side per-client world-tree state (or equivalent) to avoid full-window recomputation.
+3. Add targeted integration tests for stream delta correctness under:
+   - player movement,
+   - voxel edits,
+   - out-of-order patch/reconnect recovery.
+4. Move region hydration I/O off lock path into bounded worker/prefetch scheduling.
 
 ## Verification checklist for “migration complete”
 1. `rg "from_legacy_world|to_legacy_world|SaveRequest \\{\\s*world: &'a VoxelWorld"` returns no runtime-path hits.
 2. Multiplayer server load/save world path compiles and runs without constructing `VoxelWorld`.
-3. Protocol remains patch-only and all patch/resync tests pass.
+3. Protocol remains patch-only and all patch/resync tests pass with non-stub server handlers.
 4. Single-player and multiplayer smoke tests pass with equivalent world behavior.

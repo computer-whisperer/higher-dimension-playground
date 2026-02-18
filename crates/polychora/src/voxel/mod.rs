@@ -1,4 +1,3 @@
-pub mod chunk;
 pub mod cull;
 pub mod world;
 

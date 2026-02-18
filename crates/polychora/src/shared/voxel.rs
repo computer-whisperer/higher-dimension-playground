@@ -1,13 +1,9 @@
-pub mod chunk;
-pub mod world;
-
-pub use chunk::Chunk;
-pub use world::{BaseWorldKind, RegionChunkWorld};
+use serde::{Deserialize, Serialize};
 
 pub const CHUNK_SIZE: usize = 8;
-pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
+pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct VoxelType(pub u8);
 
 impl VoxelType {
@@ -24,7 +20,7 @@ impl VoxelType {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkPos {
     pub x: i32,
     pub y: i32,
@@ -33,12 +29,19 @@ pub struct ChunkPos {
 }
 
 impl ChunkPos {
-    pub fn new(x: i32, y: i32, z: i32, w: i32) -> Self {
+    #[inline]
+    pub const fn new(x: i32, y: i32, z: i32, w: i32) -> Self {
         Self { x, y, z, w }
     }
 }
 
-/// Convert world coords to (chunk_pos, local_index).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BaseWorldKind {
+    Empty,
+    FlatFloor { material: VoxelType },
+}
+
+#[inline]
 pub fn world_to_chunk(wx: i32, wy: i32, wz: i32, ww: i32) -> (ChunkPos, usize) {
     let cs = CHUNK_SIZE as i32;
     let chunk = ChunkPos::new(
