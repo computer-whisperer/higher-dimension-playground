@@ -54,47 +54,6 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
     prune_stale_clients(state, stale, true);
 }
 
-fn force_sync_streamed_clients_for_changed_chunks(
-    state: &SharedState,
-    changed_chunks: &[ChunkPos],
-    source_client_id: Option<u64>,
-    near_chunk_radius: i32,
-    mid_chunk_radius: i32,
-    far_chunk_radius: i32,
-) {
-    // TODO(region-tree-streaming): Replace this temporary no-op with true per-client
-    // region-tree delta planning and patch emission.
-    let _ = (
-        state,
-        changed_chunks,
-        source_client_id,
-        near_chunk_radius,
-        mid_chunk_radius,
-        far_chunk_radius,
-    );
-}
-
-fn sync_streamed_chunks_for_client(
-    state: &SharedState,
-    client_id: u64,
-    center_chunk: [i32; 4],
-    near_chunk_radius: i32,
-    mid_chunk_radius: i32,
-    far_chunk_radius: i32,
-    force: bool,
-) {
-    // TODO(region-tree-streaming): Replace this with a true client/server demand stream.
-    let _ = (
-        state,
-        client_id,
-        center_chunk,
-        near_chunk_radius,
-        mid_chunk_radius,
-        far_chunk_radius,
-        force,
-    );
-}
-
 fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bounds: Aabb4i) {
     if !bounds.is_valid() {
         send_to_client(
@@ -355,9 +314,6 @@ pub(super) fn start_broadcast_thread(
     tick_hz: f32,
     entity_sim_hz: f32,
     entity_interest_radius_chunks: i32,
-    near_chunk_radius: i32,
-    mid_chunk_radius: i32,
-    far_chunk_radius: i32,
     start: Instant,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -399,7 +355,10 @@ pub(super) fn start_broadcast_thread(
                 .iter()
                 .map(|batch| batch.transforms.len())
                 .sum();
-            let world_chunk_update_count = world_chunk_updates.len();
+            let world_chunk_update_count: usize = world_chunk_updates
+                .iter()
+                .map(|update| update.changed_chunks.len())
+                .sum();
             let explosion_count = explosion_events.len();
             let player_modifier_count = player_movement_modifiers.len();
             let did_broadcast = entity_batches.iter().any(|batch| {
@@ -410,16 +369,7 @@ pub(super) fn start_broadcast_thread(
                 || explosion_count > 0
                 || player_modifier_count > 0;
 
-            for update in world_chunk_updates {
-                force_sync_streamed_clients_for_changed_chunks(
-                    &state,
-                    &update.changed_chunks,
-                    None,
-                    near_chunk_radius,
-                    mid_chunk_radius,
-                    far_chunk_radius,
-                );
-            }
+            for _update in world_chunk_updates {}
             for explosion in explosion_events {
                 broadcast(
                     &state,
@@ -796,15 +746,12 @@ pub(super) fn handle_message(
     client_id: u64,
     message: ClientMessage,
     tick_hz: f32,
-    near_chunk_radius: i32,
-    mid_chunk_radius: i32,
-    far_chunk_radius: i32,
     start: Instant,
 ) {
     let message_cpu_start = Instant::now();
     match message {
         ClientMessage::Hello { name } => {
-            let (snapshot, _spawned_now) =
+            let (_snapshot, _spawned_now) =
                 install_or_update_player(state, client_id, Some(name), None, None, start);
             send_to_client(
                 state,
@@ -820,16 +767,6 @@ pub(super) fn handle_message(
                         }
                     },
                 },
-            );
-            let center_chunk = world_chunk_from_position(snapshot.position);
-            sync_streamed_chunks_for_client(
-                state,
-                client_id,
-                center_chunk,
-                near_chunk_radius,
-                mid_chunk_radius,
-                far_chunk_radius,
-                true,
             );
         }
         ClientMessage::UpdatePlayer { position, look } => {
@@ -855,34 +792,13 @@ pub(super) fn handle_message(
                 Some(safe_look),
                 start,
             );
-            let center_chunk = world_chunk_from_position(safe_position);
-            sync_streamed_chunks_for_client(
-                state,
-                client_id,
-                center_chunk,
-                near_chunk_radius,
-                mid_chunk_radius,
-                far_chunk_radius,
-                false,
-            );
         }
         ClientMessage::SetVoxel { position, material } => {
             let requested_voxel = VoxelType(material);
-            let maybe_update = {
+            let _maybe_update = {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 apply_authoritative_voxel_edit(&mut guard, position, requested_voxel)
             };
-
-            if let Some(changed_chunk) = maybe_update {
-                force_sync_streamed_clients_for_changed_chunks(
-                    state,
-                    &[changed_chunk],
-                    Some(client_id),
-                    near_chunk_radius,
-                    mid_chunk_radius,
-                    far_chunk_radius,
-                );
-            }
         }
         ClientMessage::SpawnEntity {
             kind,
@@ -922,9 +838,6 @@ pub(super) fn spawn_client_thread(
     stream: TcpStream,
     state: SharedState,
     tick_hz: f32,
-    near_chunk_radius: i32,
-    mid_chunk_radius: i32,
-    far_chunk_radius: i32,
     start: Instant,
 ) {
     let peer_label = stream
@@ -1011,9 +924,6 @@ pub(super) fn spawn_client_thread(
                         client_id,
                         message,
                         tick_hz,
-                        near_chunk_radius,
-                        mid_chunk_radius,
-                        far_chunk_radius,
                         start,
                     );
                 }

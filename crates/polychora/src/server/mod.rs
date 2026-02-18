@@ -294,24 +294,6 @@ fn build_entity_replication_batches(
     batches
 }
 
-#[cfg(test)]
-fn stream_near_bounds(center_chunk: [i32; 4], near_chunk_radius: i32) -> Aabb4i {
-    let near_radius = near_chunk_radius.max(0);
-    let min_chunk = [
-        center_chunk[0] - near_radius,
-        center_chunk[1] - near_radius,
-        center_chunk[2] - near_radius,
-        center_chunk[3] - near_radius,
-    ];
-    let max_chunk = [
-        center_chunk[0] + near_radius,
-        center_chunk[1] + near_radius,
-        center_chunk[2] + near_radius,
-        center_chunk[3] + near_radius,
-    ];
-    Aabb4i::new(min_chunk, max_chunk)
-}
-
 fn initialize_state(
     config: &RuntimeConfig,
     shutdown: Arc<AtomicBool>,
@@ -393,9 +375,6 @@ fn initialize_state(
         config.tick_hz,
         config.entity_sim_hz,
         entity_interest_radius_chunks,
-        config.procgen_near_chunk_radius.max(0),
-        config.procgen_mid_chunk_radius.max(1),
-        config.procgen_far_chunk_radius.max(1),
         start,
         shutdown.clone(),
     );
@@ -425,9 +404,6 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
                 client_id,
                 message,
                 cfg.tick_hz.max(0.1),
-                cfg.procgen_near_chunk_radius.max(0),
-                cfg.procgen_mid_chunk_radius.max(1),
-                cfg.procgen_far_chunk_radius.max(1),
                 start,
             );
         }
@@ -472,9 +448,6 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
                     stream,
                     state.clone(),
                     config.tick_hz.max(0.1),
-                    config.procgen_near_chunk_radius.max(0),
-                    config.procgen_mid_chunk_radius.max(1),
-                    config.procgen_far_chunk_radius.max(1),
                     start,
                 );
             }
@@ -489,21 +462,5 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn stream_near_bounds_expands_symmetrically() {
-        let center = [10, -2, 7, 1];
-        let bounds = stream_near_bounds(center, 3);
-        assert_eq!(bounds.min, [7, -5, 4, -2]);
-        assert_eq!(bounds.max, [13, 1, 10, 4]);
-    }
-
-    #[test]
-    fn stream_near_bounds_clamps_negative_radius() {
-        let center = [3, 4, 5, 6];
-        let bounds = stream_near_bounds(center, -10);
-        assert_eq!(bounds.min, center);
-        assert_eq!(bounds.max, center);
-    }
+    // Intentionally empty for now.
 }
