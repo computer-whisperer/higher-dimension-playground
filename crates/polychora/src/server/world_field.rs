@@ -180,6 +180,25 @@ impl ServerWorldField {
         changed
     }
 
+    pub fn apply_chunk_payloads<I>(&mut self, chunk_payloads: I) -> usize
+    where
+        I: IntoIterator<Item = ([i32; 4], ChunkPayload)>,
+    {
+        let mut changed = 0usize;
+        for (chunk_pos, payload) in chunk_payloads {
+            if self
+                .chunk_tree
+                .set_chunk(ChunkKey { pos: chunk_pos }, Some(payload))
+            {
+                changed = changed.saturating_add(1);
+            }
+        }
+        if changed > 0 {
+            self.realize_cache.clear();
+        }
+        changed
+    }
+
     pub fn any_non_empty_chunk_in_bounds(&self, bounds: Aabb4i) -> bool {
         self.chunk_tree.any_non_empty_chunk_in_bounds(bounds)
     }
@@ -749,6 +768,23 @@ mod tests {
             [center.x - r, center.y - r, center.z - r, center.w - r],
             [center.x + r, center.y + r, center.z + r, center.w + r],
         )
+    }
+
+    #[test]
+    fn apply_chunk_payloads_sets_chunks_without_marking_world_dirty() {
+        let mut field = ServerWorldField::from_chunk_payloads(
+            BaseWorldKind::Empty,
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            1337,
+            false,
+            HashSet::new(),
+        );
+        assert!(!field.any_dirty());
+
+        let changed = field.apply_chunk_payloads(vec![([4, -2, 9, 0], ChunkPayload::Uniform(7))]);
+        assert_eq!(changed, 1);
+        assert!(field.has_chunk(ChunkPos::new(4, -2, 9, 0)));
+        assert!(!field.any_dirty());
     }
 
     #[test]

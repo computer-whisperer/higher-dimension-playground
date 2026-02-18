@@ -19,11 +19,12 @@ This reflects current runtime code paths, not target intent.
 4. Server stream planner queries `WorldField` and builds bounded tree patches (no legacy snapshot/chunk-batch protocol path).
 5. Client scene runtime world cache is tree-authoritative (`Scene.world_tree` + explicit chunk payload cache), not `RegionChunkWorld`-based (`crates/polychora/src/scene.rs`).
 6. Runtime v4 persistence path is chunk-payload/tree-based (`LoadedState.world_chunk_payloads`, `save_state_from_chunk_payloads`) (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
+7. Server startup now loads v4 metadata (global/players/entities/index) without eagerly materializing all world chunks; persisted block regions are hydrated on demand for stream/resync/edit bounds (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
 
 ### Still hybrid (must be removed)
-1. `save_v4` still contains migration/testing helpers that accept `RegionChunkWorld`; they are now internal but still colocated with runtime persistence (`crates/polychora/src/save_v4.rs`).
+1. Migration logic is split into `save_v4_migration` (`crates/polychora/src/save_v4_migration.rs`); runtime `save_v4` no longer owns migration entrypoints.
 2. Client scene still stores both tree metadata and materialized explicit chunk payloads (`world_tree` + `world_chunks`) rather than a stricter single-structure cache contract (`crates/polychora/src/scene.rs`).
-3. v4 load path still materializes full world payload sets eagerly; save path still resolves full dirty-region payload vectors before write (not true streaming yet) (`crates/polychora/src/save_v4.rs`).
+3. Runtime still eagerly materializes full persisted entity lists at startup, and region hydration currently performs direct file IO on the server lock path; this needs a dedicated streaming/cache scheduler (`crates/polychora/src/save_v4.rs`, `crates/polychora/src/server/mod.rs`).
 
 ## What is explicitly disallowed going forward
 1. Adding any new `to_legacy_*` / `from_legacy_*` runtime bridge for world state.
@@ -69,9 +70,10 @@ Acceptance gate:
 1. Runtime world startup path has no v1/v2/v3 world-file dependency.
 
 ## Immediate blockers to resolve next
-1. Split `save_v4` into clear runtime persistence vs migration-only entrypoints/modules so runtime cannot accidentally depend on legacy world helpers.
-2. Implement streaming-oriented world payload IO (avoid full eager materialization for load/save where possible).
-3. Decide and enforce client-side cache contract (`world_tree` sole authority with derivable chunk cache semantics).
+1. Move on-demand world region hydration off the server lock path and introduce bounded prefetch/worker scheduling.
+2. Decide and enforce client-side cache contract (`world_tree` sole authority with derivable chunk cache semantics).
+3. Add true streaming entity-region load/unload (runtime currently loads all persisted entities at startup).
+4. Keep trimming remaining runtime/test helper overlap inside `save_v4` where it no longer serves runtime behavior.
 
 ## Verification checklist for “migration complete”
 1. `rg "from_legacy_world|to_legacy_world|SaveRequest \\{\\s*world: &'a VoxelWorld"` returns no runtime-path hits.

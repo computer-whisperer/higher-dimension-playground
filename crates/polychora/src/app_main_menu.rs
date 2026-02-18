@@ -84,7 +84,7 @@ fn run_v3_to_v4_migration(
             )
         })?;
     }
-    polychora::save_v4::migrate_v3_save_to_v4(
+    polychora::save_v4_migration::migrate_v3_save_to_v4(
         input,
         output,
         overwrite,

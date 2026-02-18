@@ -1,6 +1,5 @@
-use crate::shared::legacy_world_io::load_world;
 use crate::shared::protocol::{EntityClass, EntityKind};
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, RegionChunkWorld, VoxelType, CHUNK_SIZE};
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
 use crate::shared::worldfield::{
     Aabb4i, ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload,
 };
@@ -10,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use crate::shared::voxel::RegionChunkWorld;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const INDEX_DIR: &str = "index";
@@ -222,12 +224,22 @@ pub struct LoadedState {
 }
 
 #[derive(Debug)]
+pub struct LoadedStateMetadata {
+    pub manifest: Manifest,
+    pub global: GlobalPayload,
+    pub players: PlayersPayload,
+    pub index: IndexPayload,
+    pub entities: Vec<PersistedEntityRecord>,
+}
+
+#[derive(Debug)]
 struct LoadedSaveMetadata {
     manifest: Manifest,
     global: GlobalPayload,
     index: IndexPayload,
 }
 
+#[cfg(test)]
 struct SaveWorldRequest<'a> {
     pub world: &'a RegionChunkWorld,
     pub entities: &'a [PersistedEntityRecord],
@@ -281,24 +293,6 @@ pub struct SaveResult {
     pub generation: u64,
     pub saved_block_regions: usize,
     pub saved_entity_regions: usize,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct LegacySidecarBlob {
-    version: u32,
-    entities: Vec<LegacySidecarEntity>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct LegacySidecarEntity {
-    class: EntityClass,
-    kind: EntityKind,
-    position: [f32; 4],
-    orientation: [f32; 4],
-    scale: f32,
-    material: u8,
-    display_name: Option<String>,
-    mob: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -376,15 +370,6 @@ pub fn region_from_chunk_pos(chunk: ChunkPos, region_chunk_edge: i32) -> [i32; 4
     region_from_chunk([chunk.x, chunk.y, chunk.z, chunk.w], region_chunk_edge)
 }
 
-fn all_block_regions(world: &RegionChunkWorld, region_chunk_edge: i32) -> HashSet<[i32; 4]> {
-    world
-        .chunks
-        .keys()
-        .copied()
-        .map(|pos| region_from_chunk_pos(pos, region_chunk_edge))
-        .collect()
-}
-
 pub fn all_entity_regions(
     entities: &[PersistedEntityRecord],
     region_chunk_edge: i32,
@@ -406,10 +391,29 @@ pub fn load_or_init_state(
     world_seed: u64,
     now_ms: u64,
 ) -> io::Result<LoadedState> {
+    let metadata = load_or_init_state_metadata(root, default_base, world_seed, now_ms)?;
+    let world_chunk_payloads =
+        materialize_world_chunk_payloads_from_index_filtered(root, &metadata.index, None, true)?;
+    Ok(LoadedState {
+        manifest: metadata.manifest,
+        global: metadata.global,
+        players: metadata.players,
+        index: metadata.index,
+        world_chunk_payloads,
+        entities: metadata.entities,
+    })
+}
+
+pub fn load_or_init_state_metadata(
+    root: &Path,
+    default_base: BaseWorldKind,
+    world_seed: u64,
+    now_ms: u64,
+) -> io::Result<LoadedStateMetadata> {
     if !is_v4_save_root(root) {
         init_empty_save_root(root, default_base, world_seed, now_ms)?;
     }
-    load_state(root)
+    load_state_metadata(root)
 }
 
 fn load_or_init_save_metadata(
@@ -432,27 +436,56 @@ fn load_or_init_save_metadata(
 }
 
 pub fn load_state(root: &Path) -> io::Result<LoadedState> {
+    let metadata = load_state_metadata(root)?;
+    let world_chunk_payloads =
+        materialize_world_chunk_payloads_from_index_filtered(root, &metadata.index, None, true)?;
+    Ok(LoadedState {
+        manifest: metadata.manifest,
+        global: metadata.global,
+        players: metadata.players,
+        index: metadata.index,
+        world_chunk_payloads,
+        entities: metadata.entities,
+    })
+}
+
+pub fn load_state_metadata(root: &Path) -> io::Result<LoadedStateMetadata> {
     let manifest = load_manifest(root)?;
     let global: GlobalPayload = read_payload_file(root.join(&manifest.global_file), GLOBAL_MAGIC)?;
     let players: PlayersPayload =
         read_payload_file(root.join(&manifest.players_file), PLAYERS_MAGIC)?;
     let index = read_index_file(root.join(&manifest.index_file))?;
-    let world_chunk_payloads =
-        materialize_world_chunk_payloads_from_index_filtered(root, &index, None, true)?;
-
     let mut entities = materialize_entities_from_index(root, &index)?;
     entities.sort_unstable_by_key(|entity| entity.entity_id);
 
-    Ok(LoadedState {
+    Ok(LoadedStateMetadata {
         manifest,
         global,
         players,
         index,
-        world_chunk_payloads,
         entities,
     })
 }
 
+pub fn load_world_chunk_payloads_for_regions(
+    root: &Path,
+    regions: &HashSet<[i32; 4]>,
+) -> io::Result<Vec<([i32; 4], FieldChunkPayload)>> {
+    let manifest = load_manifest(root)?;
+    let index = read_index_file(root.join(&manifest.index_file))?;
+    materialize_world_chunk_payloads_from_index_filtered(root, &index, Some(regions), true)
+}
+
+pub fn load_entities_for_regions(
+    root: &Path,
+    regions: &HashSet<[i32; 4]>,
+) -> io::Result<Vec<PersistedEntityRecord>> {
+    let manifest = load_manifest(root)?;
+    let index = read_index_file(root.join(&manifest.index_file))?;
+    materialize_entities_from_index_filtered(root, &index, Some(regions), true)
+}
+
+#[cfg(test)]
 fn save_state_from_world(root: &Path, request: SaveWorldRequest<'_>) -> io::Result<SaveResult> {
     let chunk_payloads: Vec<([i32; 4], FieldChunkPayload)> = request
         .world
@@ -933,326 +966,6 @@ fn build_world_leaf_descriptors_from_payloads(
         }
     }
     Ok(world_leaves)
-}
-
-pub fn load_legacy_sidecar_entities(
-    path: &Path,
-    now_ms: u64,
-) -> io::Result<Vec<PersistedEntityRecord>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let parsed: LegacySidecarBlob = serde_json::from_reader(reader)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if parsed.version == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid legacy sidecar version 0",
-        ));
-    }
-
-    let mut next_entity_id = 1u64;
-    let mut out = Vec::with_capacity(parsed.entities.len());
-    for entity in parsed.entities {
-        let payload = if let Some(mob) = entity.mob {
-            serde_json::to_vec(&mob)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
-        } else {
-            Vec::new()
-        };
-        out.push(PersistedEntityRecord {
-            entity_id: next_entity_id,
-            class: entity.class,
-            kind: entity.kind,
-            position: entity.position,
-            orientation: entity.orientation,
-            velocity: [0.0, 0.0, 0.0, 0.0],
-            scale: entity.scale,
-            material: entity.material,
-            display_name: entity.display_name,
-            tags: Vec::new(),
-            payload,
-            last_saved_ms: now_ms,
-        });
-        next_entity_id = next_entity_id.saturating_add(1);
-    }
-    Ok(out)
-}
-
-pub fn migrate_legacy_world_to_v4(
-    legacy_world: &Path,
-    legacy_sidecar: Option<&Path>,
-    output_root: &Path,
-    world_seed: u64,
-    now_ms: u64,
-) -> io::Result<SaveResult> {
-    let file = File::open(legacy_world)?;
-    let mut reader = BufReader::new(file);
-    let world = load_world(&mut reader)?;
-
-    let entities = if let Some(sidecar_path) = legacy_sidecar {
-        load_legacy_sidecar_entities(sidecar_path, now_ms)?
-    } else {
-        Vec::new()
-    };
-
-    let block_regions = all_block_regions(&world, DEFAULT_REGION_CHUNK_EDGE);
-    let entity_regions = all_entity_regions(&entities, DEFAULT_REGION_CHUNK_EDGE);
-    let next_entity_id = entities
-        .iter()
-        .map(|entity| entity.entity_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let empty_players: Vec<PlayerRecord> = Vec::new();
-
-    save_state_from_world(
-        output_root,
-        SaveWorldRequest {
-            world: &world,
-            entities: &entities,
-            players: &empty_players,
-            world_seed,
-            next_entity_id,
-            dirty_block_regions: &block_regions,
-            dirty_entity_regions: &entity_regions,
-            force_full_blocks: true,
-            force_full_entities: true,
-            player_entity_hints: None,
-            custom_global_payload: None,
-            disable_block_persistence: false,
-            now_ms,
-        },
-    )
-}
-
-pub fn migrate_v3_save_to_v4(
-    v3_root: &Path,
-    output_root: &Path,
-    overwrite: bool,
-    now_ms: u64,
-) -> io::Result<SaveResult> {
-    if output_root.exists() {
-        if !overwrite {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "output path '{}' already exists (use overwrite to replace)",
-                    output_root.display()
-                ),
-            ));
-        }
-        if output_root.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("output path '{}' is a file", output_root.display()),
-            ));
-        }
-        std::fs::remove_dir_all(output_root)?;
-    }
-
-    let loaded = crate::save_v3::load_state(v3_root)?;
-    let crate::save_v3::LoadedState {
-        global,
-        players,
-        world,
-        entities,
-        manifest,
-        ..
-    } = loaded;
-
-    let entities: Vec<PersistedEntityRecord> = entities
-        .into_iter()
-        .map(|entity| PersistedEntityRecord {
-            entity_id: entity.entity_id,
-            class: entity.class,
-            kind: entity.kind,
-            position: entity.position,
-            orientation: entity.orientation,
-            velocity: entity.velocity,
-            scale: entity.scale,
-            material: entity.material,
-            display_name: entity.display_name,
-            tags: entity.tags,
-            payload: entity.payload,
-            last_saved_ms: entity.last_saved_ms,
-        })
-        .collect();
-    let players: Vec<PlayerRecord> = players
-        .players
-        .into_iter()
-        .map(|player| PlayerRecord {
-            player_id: player.player_id,
-            position: player.position,
-            orientation: player.orientation,
-            tags: player.tags,
-            inventory_payload: player.inventory_payload,
-            last_saved_ms: player.last_saved_ms,
-        })
-        .collect();
-    let player_entity_hints: Vec<PlayerEntityHint> = global
-        .player_entity_hints
-        .into_iter()
-        .map(|hint| PlayerEntityHint {
-            player_id: hint.player_id,
-            entity_id: hint.entity_id,
-            last_region_hint: hint.last_region_hint,
-        })
-        .collect();
-
-    let region_chunk_edge = manifest.limits.region_chunk_edge.max(1);
-    let block_regions = all_block_regions(&world, region_chunk_edge);
-    let entity_regions = all_entity_regions(&entities, region_chunk_edge);
-    let expected_world_seed = global.world_seed;
-    let expected_next_entity_id = global.next_entity_id;
-    let expected_custom_global_payload = global.custom_global_payload.clone();
-    let expected_player_entity_hints = player_entity_hints.clone();
-
-    let save_result = save_state_from_world(
-        output_root,
-        SaveWorldRequest {
-            world: &world,
-            entities: &entities,
-            players: &players,
-            world_seed: global.world_seed,
-            next_entity_id: global.next_entity_id,
-            dirty_block_regions: &block_regions,
-            dirty_entity_regions: &entity_regions,
-            force_full_blocks: true,
-            force_full_entities: true,
-            player_entity_hints: Some(player_entity_hints),
-            custom_global_payload: Some(global.custom_global_payload),
-            disable_block_persistence: false,
-            now_ms,
-        },
-    )?;
-
-    verify_v3_migration_equivalence(
-        output_root,
-        &world,
-        &entities,
-        &players,
-        expected_world_seed,
-        expected_next_entity_id,
-        &expected_player_entity_hints,
-        &expected_custom_global_payload,
-    )?;
-
-    Ok(save_result)
-}
-
-fn verify_v3_migration_equivalence(
-    output_root: &Path,
-    expected_world: &RegionChunkWorld,
-    expected_entities: &[PersistedEntityRecord],
-    expected_players: &[PlayerRecord],
-    expected_world_seed: u64,
-    expected_next_entity_id: u64,
-    expected_player_entity_hints: &[PlayerEntityHint],
-    expected_custom_global_payload: &[u8],
-) -> io::Result<()> {
-    let loaded = load_state(output_root)?;
-
-    if loaded.global.world_seed != expected_world_seed {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "v3->v4 migration mismatch: world_seed expected={} got={}",
-                expected_world_seed, loaded.global.world_seed
-            ),
-        ));
-    }
-    if loaded.global.next_entity_id != expected_next_entity_id {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "v3->v4 migration mismatch: next_entity_id expected={} got={}",
-                expected_next_entity_id, loaded.global.next_entity_id
-            ),
-        ));
-    }
-    if loaded.global.player_entity_hints != expected_player_entity_hints {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "v3->v4 migration mismatch: player_entity_hints differ",
-        ));
-    }
-    if loaded.global.custom_global_payload != expected_custom_global_payload {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "v3->v4 migration mismatch: custom_global_payload differs",
-        ));
-    }
-
-    let expected_world_chunks = canonical_world_chunk_payloads(expected_world);
-    let loaded_world_chunks = canonical_chunk_payloads(loaded.world_chunk_payloads);
-    if expected_world_chunks != loaded_world_chunks {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "v3->v4 migration mismatch: world chunk payloads differ (expected={} got={})",
-                expected_world_chunks.len(),
-                loaded_world_chunks.len()
-            ),
-        ));
-    }
-
-    let mut expected_entities_sorted = expected_entities.to_vec();
-    expected_entities_sorted.sort_unstable_by_key(|entity| entity.entity_id);
-    let mut loaded_entities_sorted = loaded.entities.clone();
-    loaded_entities_sorted.sort_unstable_by_key(|entity| entity.entity_id);
-    if expected_entities_sorted != loaded_entities_sorted {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "v3->v4 migration mismatch: entities differ (expected={} got={})",
-                expected_entities_sorted.len(),
-                loaded_entities_sorted.len()
-            ),
-        ));
-    }
-
-    let mut expected_players_sorted = expected_players.to_vec();
-    expected_players_sorted.sort_unstable_by_key(|player| player.player_id);
-    let mut loaded_players_sorted = loaded.players.players;
-    loaded_players_sorted.sort_unstable_by_key(|player| player.player_id);
-    if expected_players_sorted != loaded_players_sorted {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "v3->v4 migration mismatch: players differ (expected={} got={})",
-                expected_players_sorted.len(),
-                loaded_players_sorted.len()
-            ),
-        ));
-    }
-
-    Ok(())
-}
-
-fn canonical_world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], FieldChunkPayload)> {
-    let mut out: Vec<([i32; 4], FieldChunkPayload)> = world
-        .chunks
-        .iter()
-        .map(|(&chunk_pos, chunk)| {
-            (
-                [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                FieldChunkPayload::from_chunk_compact(chunk),
-            )
-        })
-        .collect();
-    out.sort_unstable_by_key(|(pos, _)| *pos);
-    out
-}
-
-fn canonical_chunk_payloads(
-    mut chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
-) -> Vec<([i32; 4], FieldChunkPayload)> {
-    chunk_payloads.sort_unstable_by_key(|(pos, _)| *pos);
-    chunk_payloads
 }
 
 #[cfg(test)]
@@ -2988,6 +2701,69 @@ mod tests {
     }
 
     #[test]
+    fn load_region_filtered_world_and_entities() {
+        let root = test_root("region-filtered-load");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let chunk_size_i32 = CHUNK_SIZE as i32;
+        let chunk_size_f32 = CHUNK_SIZE as f32;
+        let chunk_a = [0, 0, 0, 0];
+        let chunk_b = [DEFAULT_REGION_CHUNK_EDGE, 0, 0, 0];
+
+        let mut world = RegionChunkWorld::new();
+        world.set_voxel(chunk_a[0] * chunk_size_i32 + 1, 1, 1, 1, VoxelType(2));
+        world.set_voxel(chunk_b[0] * chunk_size_i32 + 1, 1, 1, 1, VoxelType(5));
+
+        let entities = vec![
+            test_entity(1, [1.0, 2.0, 3.0, 4.0], vec![1]),
+            test_entity(
+                2,
+                [chunk_b[0] as f32 * chunk_size_f32 + 1.0, 2.0, 3.0, 4.0],
+                vec![2],
+            ),
+        ];
+
+        save_state_from_world(
+            &root,
+            SaveWorldRequest {
+                world: &world,
+                entities: &entities,
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 3,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+
+        let mut region_filter = HashSet::new();
+        region_filter.insert(region_from_chunk(chunk_a, DEFAULT_REGION_CHUNK_EDGE));
+
+        let loaded_chunk_payloads =
+            load_world_chunk_payloads_for_regions(&root, &region_filter).expect("load chunks");
+        assert_eq!(loaded_chunk_payloads.len(), 1);
+        assert_eq!(loaded_chunk_payloads[0].0, chunk_a);
+        let chunk = loaded_chunk_payloads[0]
+            .1
+            .to_voxel_chunk()
+            .expect("decode chunk payload");
+        assert_eq!(chunk.get(1, 1, 1, 1), VoxelType(2));
+
+        let loaded_entities = load_entities_for_regions(&root, &region_filter).expect("load ents");
+        assert_eq!(loaded_entities.len(), 1);
+        assert_eq!(loaded_entities[0].entity_id, 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn save_state_from_chunk_payloads_duplicate_chunk_latest_wins() {
         let root = test_root("chunk-payload-latest-wins");
         let now_ms = now_unix_ms();
@@ -3168,9 +2944,14 @@ mod tests {
             writer.flush().expect("flush legacy");
         }
 
-        let save_result =
-            migrate_legacy_world_to_v4(&legacy_world, None, &output_root, 777, now_unix_ms())
-                .expect("migrate legacy to v4");
+        let save_result = crate::save_v4_migration::migrate_legacy_world_to_v4(
+            &legacy_world,
+            None,
+            &output_root,
+            777,
+            now_unix_ms(),
+        )
+        .expect("migrate legacy to v4");
         assert_eq!(save_result.generation, 1);
 
         let loaded = load_state(&output_root).expect("load migrated");
@@ -3237,9 +3018,13 @@ mod tests {
         )
         .expect("create v3 input");
 
-        let save_result =
-            migrate_v3_save_to_v4(&v3_root, &output_root, false, now_ms.saturating_add(1))
-                .expect("migrate v3 -> v4");
+        let save_result = crate::save_v4_migration::migrate_v3_save_to_v4(
+            &v3_root,
+            &output_root,
+            false,
+            now_ms.saturating_add(1),
+        )
+        .expect("migrate v3 -> v4");
         assert_eq!(save_result.generation, 1);
 
         let loaded = load_state(&output_root).expect("load v4 output");

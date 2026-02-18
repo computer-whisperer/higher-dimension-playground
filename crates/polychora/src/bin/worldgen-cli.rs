@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use polychora::legacy_migration;
 use polychora::save_v3;
 use polychora::save_v4;
+use polychora::save_v4_migration;
 use polychora::shared::legacy_world_io::{load_world, save_world};
 use polychora::shared::protocol::{EntityClass, EntityKind};
 use polychora::shared::voxel::{BaseWorldKind, RegionChunkWorld, VoxelType};
@@ -504,7 +505,7 @@ fn run_migrate_v4(
         std::fs::remove_dir_all(&output)?;
     }
 
-    let save_result = save_v4::migrate_legacy_world_to_v4(
+    let save_result = save_v4_migration::migrate_legacy_world_to_v4(
         &input,
         sidecar.as_deref(),
         &output,
@@ -531,8 +532,12 @@ fn run_migrate_v3_to_v4(input: PathBuf, output: PathBuf, overwrite: bool) -> io:
             ),
         ));
     }
-    let save_result =
-        save_v4::migrate_v3_save_to_v4(&input, &output, overwrite, save_v4::now_unix_ms())?;
+    let save_result = save_v4_migration::migrate_v3_save_to_v4(
+        &input,
+        &output,
+        overwrite,
+        save_v4::now_unix_ms(),
+    )?;
     println!(
         "Migrated v3 save root -> v4: generation={} saved_block_regions={} saved_entity_regions={} output={}",
         save_result.generation,
