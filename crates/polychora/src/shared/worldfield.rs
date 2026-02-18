@@ -1049,6 +1049,59 @@ mod tests {
         }
     }
 
+    fn assert_branch_children_non_overlapping(
+        parent_bounds: Aabb4i,
+        children: &[RegionTreeCore],
+        context: &str,
+    ) {
+        for i in 0..children.len() {
+            for j in (i + 1)..children.len() {
+                assert!(
+                    !children[i].bounds.intersects(&children[j].bounds),
+                    "{context}: branch children overlap: parent={:?}->{:?} left={:?}->{:?} right={:?}->{:?}",
+                    parent_bounds.min,
+                    parent_bounds.max,
+                    children[i].bounds.min,
+                    children[i].bounds.max,
+                    children[j].bounds.min,
+                    children[j].bounds.max
+                );
+            }
+        }
+    }
+
+    fn assert_tree_shape_invariants(node: &RegionTreeCore, context: &str) {
+        if let RegionNodeKind::Branch(children) = &node.kind {
+            assert!(
+                !children.is_empty(),
+                "{context}: branch node has no children at bounds {:?}->{:?}",
+                node.bounds.min,
+                node.bounds.max
+            );
+            assert_branch_children_non_overlapping(node.bounds, children, context);
+            for child in children {
+                assert!(
+                    node.bounds.contains_chunk(child.bounds.min)
+                        && node.bounds.contains_chunk(child.bounds.max),
+                    "{context}: child bounds outside parent: parent={:?}->{:?} child={:?}->{:?}",
+                    node.bounds.min,
+                    node.bounds.max,
+                    child.bounds.min,
+                    child.bounds.max
+                );
+                assert!(
+                    !matches!(child.kind, RegionNodeKind::Empty),
+                    "{context}: empty child leaked into branch: parent={:?}->{:?} child={:?}->{:?}",
+                    node.bounds.min,
+                    node.bounds.max,
+                    child.bounds.min,
+                    child.bounds.max
+                );
+                assert_tree_shape_invariants(child, context);
+            }
+        }
+    }
+
     fn assert_no_empty_branch_children(node: &RegionTreeCore) {
         let RegionNodeKind::Branch(children) = &node.kind else {
             return;
@@ -1061,6 +1114,16 @@ mod tests {
                 child.bounds.max
             );
             assert_no_empty_branch_children(child);
+        }
+    }
+
+    fn payload_kind_name(payload: Option<&ChunkPayload>) -> &'static str {
+        match payload {
+            None => "none",
+            Some(ChunkPayload::Empty) => "empty",
+            Some(ChunkPayload::Uniform(_)) => "uniform",
+            Some(ChunkPayload::Dense16 { .. }) => "dense16",
+            Some(ChunkPayload::PalettePacked { .. }) => "palette",
         }
     }
 
@@ -1459,6 +1522,10 @@ mod tests {
 
             let mut splice_tree = baseline.clone();
             let mut reference = ReferenceChunkStore::from_tree(&baseline);
+            if let Some(root) = splice_tree.root() {
+                let context = format!("seed={seed} baseline");
+                assert_tree_shape_invariants(root, &context);
+            }
 
             for step in 0..120 {
                 let bounds = random_sub_bounds(&mut rng, domain);
@@ -1488,11 +1555,42 @@ mod tests {
                 let mut actual = splice_tree.collect_chunks();
                 actual.sort_unstable_by_key(|(chunk_key, _)| chunk_key.pos);
                 assert_eq!(actual, expected, "splice mismatch seed={seed} step={step}");
+                if let Some(root) = splice_tree.root() {
+                    let context = format!("seed={seed} step={step}");
+                    assert_tree_shape_invariants(root, &context);
+                }
                 assert_eq!(
                     changed_bounds.is_some(),
                     expected_changed,
                     "splice changed_bounds mismatch seed={seed} step={step}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn region_chunk_tree_randomized_set_preserves_shape_invariants() {
+        let domain = Aabb4i::new([-10, -4, -10, -10], [10, 4, 10, 10]);
+        for seed in [0x534c_4943_455f_31_u64, 0x534c_4943_455f_32] {
+            let mut rng = DeterministicRng::new(seed);
+            let mut tree = RegionChunkTree::new();
+
+            for op in 0..240 {
+                let key = random_chunk_key_in_bounds(&mut rng, domain);
+                let payload = if rng.chance(1, 5) {
+                    None
+                } else {
+                    Some(random_chunk_payload(&mut rng))
+                };
+                let _ = tree.set_chunk(key, payload.clone());
+                if let Some(root) = tree.root() {
+                    let context = format!(
+                        "seed={seed} op={op} key={:?} payload_kind={}",
+                        key.pos,
+                        payload_kind_name(payload.as_ref())
+                    );
+                    assert_tree_shape_invariants(root, &context);
+                }
             }
         }
     }

@@ -50,6 +50,17 @@ impl RegionChunkTree {
             return true;
         }
 
+        if payload.is_none()
+            && self
+                .root
+                .as_ref()
+                .map(|root| !root.bounds.contains_chunk(key.pos))
+                .unwrap_or(false)
+        {
+            // Deleting outside the represented bounds cannot change tree contents.
+            return false;
+        }
+
         while self
             .root
             .as_ref()
@@ -541,15 +552,26 @@ fn insert_replacement_slice_into_node(
     }
 
     let old_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
-    let mut children = match old_kind {
-        RegionNodeKind::Empty => Vec::new(),
-        RegionNodeKind::Branch(children) => children,
+    let old_kind_snapshot = old_kind.clone();
+    let mut children = Vec::new();
+    match old_kind {
+        RegionNodeKind::Empty => {}
+        RegionNodeKind::Branch(existing_children) => {
+            for child in existing_children {
+                for piece_bounds in subtract_aabb(child.bounds, replacement_slice.bounds) {
+                    let projected = project_node_to_bounds(
+                        &child.kind,
+                        child.bounds,
+                        piece_bounds,
+                        node.generator_version_hash,
+                    );
+                    if !matches!(projected.kind, RegionNodeKind::Empty) {
+                        children.push(projected);
+                    }
+                }
+            }
+        }
         other_kind => {
-            debug_assert!(
-                false,
-                "insert_replacement_slice_into_node expected empty/branch after clear_node_region"
-            );
-            let mut preserved = Vec::new();
             for piece_bounds in subtract_aabb(node.bounds, replacement_slice.bounds) {
                 let projected = project_node_to_bounds(
                     &other_kind,
@@ -558,15 +580,15 @@ fn insert_replacement_slice_into_node(
                     node.generator_version_hash,
                 );
                 if !matches!(projected.kind, RegionNodeKind::Empty) {
-                    preserved.push(projected);
+                    children.push(projected);
                 }
             }
-            preserved
         }
-    };
+    }
     children.push(replacement_slice);
     node.kind = RegionNodeKind::Branch(children);
-    true
+    normalize_chunk_node(node);
+    node.kind != old_kind_snapshot
 }
 
 fn lazy_drop_outside_node(
@@ -608,9 +630,7 @@ fn lazy_drop_outside_node(
         }
     }
 
-    if changed.is_some() {
-        normalize_chunk_node(node);
-    }
+    normalize_chunk_node(node);
     changed
 }
 
@@ -864,9 +884,7 @@ fn set_chunk_recursive(
     };
 
     let changed = set_chunk_recursive(&mut children[target_idx], key_pos, payload);
-    if changed {
-        normalize_chunk_node(node);
-    }
+    normalize_chunk_node(node);
     changed
 }
 
@@ -900,6 +918,9 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
         return;
     };
+    for child in children.iter_mut() {
+        normalize_chunk_node(child);
+    }
     children.retain(|child| !matches!(child.kind, RegionNodeKind::Empty));
     if children.is_empty() {
         node.kind = RegionNodeKind::Empty;
@@ -1376,7 +1397,11 @@ fn expand_root_once(root: Box<RegionTreeCore>, key_pos: [i32; 4]) -> Box<RegionT
         return root;
     }
 
-    let old_root = *root;
+    let mut old_root = *root;
+    // Root expansion introduces an empty sibling placeholder for the out-of-bounds side.
+    // Normalize the carried subtree first so placeholder empties from prior expansions
+    // do not accumulate off-path.
+    normalize_chunk_node(&mut old_root);
     let old_bounds = old_root.bounds;
     let axis = (0..4)
         .find(|axis| {
