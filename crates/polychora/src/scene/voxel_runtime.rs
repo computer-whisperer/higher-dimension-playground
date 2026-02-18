@@ -400,13 +400,13 @@ impl Scene {
             let chunk = if key.lod_level == VOXEL_LOD_LEVEL_NEAR {
                 self.world_chunk_at(key.chunk_pos)
             } else {
-                self.voxel_lod_chunks.get(&key)
+                self.voxel_lod_chunks.get(&key).cloned()
             };
 
             match chunk {
                 Some(chunk) => {
                     if let Some(payload_id) =
-                        self.intern_cached_chunk_payload(build_cached_chunk_payload(chunk))
+                        self.intern_cached_chunk_payload(build_cached_chunk_payload(&chunk))
                     {
                         self.voxel_chunk_payload_cache
                             .insert(key, ChunkPayloadCacheEntry { payload_id });

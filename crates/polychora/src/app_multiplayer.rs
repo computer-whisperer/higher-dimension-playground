@@ -5,9 +5,9 @@ use higher_dimension_playground::render::{
     OVERLAY_EDGE_TAG_REGION_UNIFORM, OVERLAY_EDGE_TAG_TARGET,
 };
 use polychora::shared::worldfield::{
-    collect_non_empty_chunks_from_core_in_bounds, Aabb4i, ChunkArrayData, ChunkKey, ChunkPayload,
-    RegionClockPrecondition, RegionClockUpdate, RegionId, RegionNodeKind, RegionResyncEntry,
-    RegionResyncRequest, RegionSubtreePatch, RegionTreeCore, REGION_TILE_EDGE_CHUNKS,
+    Aabb4i, ChunkArrayData, ChunkPayload, RegionClockPrecondition, RegionClockUpdate, RegionId,
+    RegionNodeKind, RegionResyncEntry, RegionResyncRequest, RegionSubtreePatch, RegionTreeCore,
+    REGION_TILE_EDGE_CHUNKS,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -1131,68 +1131,18 @@ impl App {
             return None;
         }
 
-        let previous_core = self
-            .multiplayer_stream_tree_diag
-            .take_non_empty_core_in_bounds(patch.bounds);
-        let previous_chunks: HashMap<voxel::ChunkPos, ChunkPayload> =
-            collect_non_empty_chunks_from_core_in_bounds(&previous_core, patch.bounds)
-                .into_iter()
-                .map(|(key, payload)| (key.to_chunk_pos(), payload))
-                .collect();
-
+        let scene_patch_start = Instant::now();
+        let scene_patch_stats = self
+            .scene
+            .apply_near_lod_region_patch(patch.bounds, &patch.subtree);
+        let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
+        let diag_splice_start = Instant::now();
         let _ = self
             .multiplayer_stream_tree_diag
             .splice_non_empty_core_in_bounds(patch.bounds, &patch.subtree);
+        let diag_splice_elapsed_ms = diag_splice_start.elapsed().as_secs_f64() * 1000.0;
 
-        let desired_core = self
-            .multiplayer_stream_tree_diag
-            .slice_non_empty_core_in_bounds(patch.bounds);
-        let desired_chunks: HashMap<voxel::ChunkPos, ChunkPayload> =
-            collect_non_empty_chunks_from_core_in_bounds(&desired_core, patch.bounds)
-                .into_iter()
-                .map(|(key, payload)| (key.to_chunk_pos(), payload))
-                .collect();
-        let desired_chunk_count = desired_chunks.len();
-
-        let mut removed_chunks = 0usize;
-        for chunk_pos in previous_chunks.keys().copied() {
-            if !desired_chunks.contains_key(&chunk_pos)
-                && self
-                    .scene
-                    .remove_lod_chunk(scene::VOXEL_LOD_LEVEL_NEAR, chunk_pos)
-            {
-                removed_chunks += 1;
-            }
-        }
-
-        let mut applied_chunks = 0usize;
-        for (chunk_pos, payload) in desired_chunks {
-            if previous_chunks.get(&chunk_pos) == Some(&payload) {
-                continue;
-            }
-            let chunk = match payload.to_voxel_chunk() {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    eprintln!(
-                        "Ignoring malformed region patch payload at ({}, {}, {}, {}): {}",
-                        chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w, error
-                    );
-                    let key = ChunkKey::from_chunk_pos(chunk_pos);
-                    let _ = self.multiplayer_stream_tree_diag.remove_chunk(key);
-                    if self
-                        .scene
-                        .remove_lod_chunk(scene::VOXEL_LOD_LEVEL_NEAR, chunk_pos)
-                    {
-                        removed_chunks += 1;
-                    }
-                    continue;
-                }
-            };
-            self.scene
-                .insert_lod_chunk(scene::VOXEL_LOD_LEVEL_NEAR, chunk_pos, chunk);
-            applied_chunks += 1;
-        }
-
+        let clock_update_start = Instant::now();
         let regressed = apply_region_clock_updates(
             &mut self.multiplayer_region_clocks,
             patch
@@ -1208,6 +1158,7 @@ impl App {
                 regressed
             );
         }
+        let clock_update_elapsed_ms = clock_update_start.elapsed().as_secs_f64() * 1000.0;
 
         self.multiplayer_last_region_patch_seq = Some(patch.patch_seq);
         let patch_apply_elapsed_ms = patch_apply_start.elapsed().as_secs_f64() * 1000.0;
@@ -1219,17 +1170,37 @@ impl App {
                 patch.bounds.min,
                 patch.bounds.max,
                 patch.bounds.chunk_cell_count().unwrap_or(0),
-                previous_chunks.len(),
-                desired_chunk_count,
-                applied_chunks,
-                removed_chunks
+                scene_patch_stats.previous_non_empty,
+                scene_patch_stats.desired_non_empty,
+                scene_patch_stats.upserts,
+                scene_patch_stats.removals
+            );
+            eprintln!(
+                "[client-region-patch-breakdown] seq={} scene_apply_ms={:.3} scene_collect_previous_ms={:.3} scene_splice_ms={:.3} scene_collect_desired_ms={:.3} scene_diff_ms={:.3} diag_splice_ms={:.3} clock_update_ms={:.3} previous_total={} desired_total={} changed_chunks={} invalidated_cached_chunks={} queued_updates={}",
+                patch.patch_seq,
+                scene_patch_elapsed_ms,
+                scene_patch_stats.collect_previous_ms,
+                scene_patch_stats.splice_ms,
+                scene_patch_stats.collect_desired_ms,
+                scene_patch_stats.diff_ms,
+                diag_splice_elapsed_ms,
+                clock_update_elapsed_ms,
+                scene_patch_stats.previous_total_chunks,
+                scene_patch_stats.desired_total_chunks,
+                scene_patch_stats.changed_chunks,
+                scene_patch_stats.invalidated_cached_chunks,
+                scene_patch_stats.queued_updates
             );
         }
         eprintln!(
             "Applied multiplayer region patch seq={} bounds={:?}->{:?} upserts={} removals={}",
-            patch.patch_seq, patch.bounds.min, patch.bounds.max, applied_chunks, removed_chunks
+            patch.patch_seq,
+            patch.bounds.min,
+            patch.bounds.max,
+            scene_patch_stats.upserts,
+            scene_patch_stats.removals
         );
-        Some((applied_chunks, removed_chunks))
+        Some((scene_patch_stats.upserts, scene_patch_stats.removals))
     }
 
     pub(super) fn handle_multiplayer_message(&mut self, message: multiplayer::ServerMessage) {

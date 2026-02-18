@@ -6,8 +6,11 @@ use higher_dimension_playground::render::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VTE_MAX_CHUNKS,
 };
 use polychora::shared::voxel::world_to_chunk;
-use polychora::shared::worldfield::{ChunkKey, ChunkPayload, RegionChunkTree};
+use polychora::shared::worldfield::{
+    Aabb4i, ChunkKey, ChunkPayload, RegionChunkTree, RegionTreeCore,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Instant;
 
 mod voxel_runtime;
 
@@ -165,7 +168,84 @@ pub struct BlockEditTargets {
     pub place_voxel: Option<[i32; 4]>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NearRegionPatchStats {
+    pub previous_non_empty: usize,
+    pub desired_non_empty: usize,
+    pub upserts: usize,
+    pub removals: usize,
+    pub changed_chunks: usize,
+    pub previous_total_chunks: usize,
+    pub desired_total_chunks: usize,
+    pub invalidated_cached_chunks: usize,
+    pub queued_updates: usize,
+    pub collect_previous_ms: f64,
+    pub splice_ms: f64,
+    pub collect_desired_ms: f64,
+    pub diff_ms: f64,
+}
+
 impl Scene {
+    fn chunk_payload_material_at(payload: &ChunkPayload, idx: usize) -> Option<u16> {
+        if idx >= CHUNK_VOLUME {
+            return None;
+        }
+        match payload {
+            ChunkPayload::Empty => Some(0),
+            ChunkPayload::Uniform(material) => Some(*material),
+            ChunkPayload::Dense16 { materials } => materials.get(idx).copied(),
+            ChunkPayload::PalettePacked {
+                palette,
+                bit_width,
+                packed_indices,
+            } => {
+                if palette.is_empty() {
+                    return None;
+                }
+                let palette_idx = if *bit_width == 0 {
+                    0usize
+                } else {
+                    let bit_width = usize::from(*bit_width);
+                    let bit_index = idx.checked_mul(bit_width)?;
+                    let word_index = bit_index / 64;
+                    let bit_offset = bit_index % 64;
+                    let first = *packed_indices.get(word_index).unwrap_or(&0);
+                    let raw = if bit_offset + bit_width <= 64 {
+                        first >> bit_offset
+                    } else {
+                        let second = *packed_indices.get(word_index + 1).unwrap_or(&0);
+                        (first >> bit_offset) | (second << (64 - bit_offset))
+                    };
+                    let mask = if bit_width >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << bit_width) - 1
+                    };
+                    (raw & mask) as usize
+                };
+                palette.get(palette_idx).copied()
+            }
+        }
+    }
+
+    fn chunk_payload_has_solid_material(payload: &ChunkPayload) -> bool {
+        match payload {
+            ChunkPayload::Empty => false,
+            ChunkPayload::Uniform(material) => *material != 0,
+            ChunkPayload::Dense16 { materials } => materials.iter().any(|material| *material != 0),
+            ChunkPayload::PalettePacked { .. } => (0..CHUNK_VOLUME).any(|idx| {
+                Self::chunk_payload_material_at(payload, idx)
+                    .map(|material| material != 0)
+                    .unwrap_or(false)
+            }),
+        }
+    }
+
+    fn chunk_payload_to_voxel_type(payload: &ChunkPayload, idx: usize) -> VoxelType {
+        let material = Self::chunk_payload_material_at(payload, idx).unwrap_or(0);
+        VoxelType(u8::try_from(material).unwrap_or(u8::MAX))
+    }
+
     fn set_chunk_map_voxel(
         chunks: &mut HashMap<ChunkPos, crate::voxel::chunk::Chunk>,
         wx: i32,
@@ -339,9 +419,12 @@ impl Scene {
         }
     }
 
-    fn world_queue_chunk_update(&mut self, pos: ChunkPos) {
+    fn world_queue_chunk_update(&mut self, pos: ChunkPos) -> bool {
         if self.world_pending_chunk_update_set.insert(pos) {
             self.world_pending_chunk_updates.push(pos);
+            true
+        } else {
+            false
         }
     }
 
@@ -357,7 +440,11 @@ impl Scene {
                     self.world_chunks.remove(&pos);
                     None
                 } else {
-                    self.world_chunks.insert(pos, chunk.clone());
+                    if chunk.is_empty() {
+                        self.world_chunks.remove(&pos);
+                    } else {
+                        self.world_chunks.insert(pos, chunk.clone());
+                    }
                     Some(ChunkPayload::from_chunk_compact(&chunk))
                 }
             }
@@ -369,7 +456,7 @@ impl Scene {
         let changed = self.world_tree.set_chunk(key, payload);
         if changed {
             self.world_dirty = true;
-            self.world_queue_chunk_update(pos);
+            let _ = self.world_queue_chunk_update(pos);
         }
         changed
     }
@@ -378,15 +465,35 @@ impl Scene {
         self.world_tree.has_chunk(ChunkKey::from_chunk_pos(pos))
     }
 
-    fn world_chunk_at(&self, pos: ChunkPos) -> Option<&crate::voxel::chunk::Chunk> {
+    fn world_chunk_at(&mut self, pos: ChunkPos) -> Option<crate::voxel::chunk::Chunk> {
         if let Some(chunk) = self.world_chunks.get(&pos) {
-            return (!chunk.is_empty()).then_some(chunk);
+            return (!chunk.is_empty()).then_some(chunk.clone());
         }
-        if self.world_has_explicit_chunk(pos) {
-            return None;
+
+        if let Some(payload) = self.world_tree.chunk_payload(ChunkKey::from_chunk_pos(pos)) {
+            if !Self::chunk_payload_has_solid_material(&payload) {
+                return None;
+            }
+            match payload.to_voxel_chunk() {
+                Ok(chunk) => {
+                    if chunk.is_empty() {
+                        return None;
+                    }
+                    self.world_chunks.insert(pos, chunk.clone());
+                    return Some(chunk);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Ignoring malformed world chunk payload at ({}, {}, {}, {}): {}",
+                        pos.x, pos.y, pos.z, pos.w, error
+                    );
+                    return None;
+                }
+            }
         }
         self.world_base_chunk_for_pos(pos)
             .filter(|chunk| !chunk.is_empty())
+            .cloned()
     }
 
     fn world_get_voxel(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> VoxelType {
@@ -394,8 +501,8 @@ impl Scene {
         if let Some(chunk) = self.world_chunks.get(&cp) {
             return chunk.voxels[idx];
         }
-        if self.world_has_explicit_chunk(cp) {
-            return VoxelType::AIR;
+        if let Some(payload) = self.world_tree.chunk_payload(ChunkKey::from_chunk_pos(cp)) {
+            return Self::chunk_payload_to_voxel_type(&payload, idx);
         }
         self.world_base_voxel_at(cp, idx)
     }
@@ -408,24 +515,13 @@ impl Scene {
         }
 
         let mut chunk = if self.world_has_explicit_chunk(cp) {
-            self.world_chunks
-                .get(&cp)
-                .cloned()
+            self.world_chunk_at(cp)
                 .unwrap_or_else(crate::voxel::chunk::Chunk::new)
         } else {
             self.world_clone_base_chunk_or_empty(cp)
         };
         set_chunk_voxel_by_index(&mut chunk, idx, v);
         let _ = self.world_set_chunk_override(cp, Some(chunk));
-    }
-
-    fn world_insert_chunk(&mut self, pos: ChunkPos, mut chunk: crate::voxel::chunk::Chunk) {
-        chunk.dirty = true;
-        let _ = self.world_set_chunk_override(pos, Some(chunk));
-    }
-
-    fn world_remove_chunk_override(&mut self, pos: ChunkPos) -> bool {
-        self.world_set_chunk_override(pos, None)
     }
 
     fn world_gather_non_empty_chunks_in_bounds(
@@ -443,6 +539,14 @@ impl Scene {
             return;
         }
 
+        let bounds = Aabb4i::new(min_chunk, max_chunk);
+        out.extend(
+            self.world_tree
+                .collect_non_empty_chunk_keys_in_bounds(bounds)
+                .into_iter()
+                .map(|key| key.to_chunk_pos()),
+        );
+
         if let BaseWorldKind::FlatFloor { .. } = self.world_base_kind {
             let y = FLAT_FLOOR_CHUNK_Y;
             if y >= min_chunk[1] && y <= max_chunk[1] {
@@ -450,38 +554,17 @@ impl Scene {
                     for z in min_chunk[2]..=max_chunk[2] {
                         for w in min_chunk[3]..=max_chunk[3] {
                             let pos = ChunkPos::new(x, y, z, w);
-                            if let Some(override_chunk) = self.world_chunks.get(&pos) {
-                                if !override_chunk.is_empty() {
-                                    out.push(pos);
-                                }
-                            } else if !self.world_has_explicit_chunk(pos) {
+                            if self
+                                .world_tree
+                                .chunk_payload(ChunkKey::from_chunk_pos(pos))
+                                .is_none()
+                            {
                                 out.push(pos);
                             }
                         }
                     }
                 }
             }
-        }
-
-        for (&pos, chunk) in &self.world_chunks {
-            if pos.x < min_chunk[0]
-                || pos.x > max_chunk[0]
-                || pos.y < min_chunk[1]
-                || pos.y > max_chunk[1]
-                || pos.z < min_chunk[2]
-                || pos.z > max_chunk[2]
-                || pos.w < min_chunk[3]
-                || pos.w > max_chunk[3]
-                || chunk.is_empty()
-            {
-                continue;
-            }
-            if matches!(self.world_base_kind, BaseWorldKind::FlatFloor { .. })
-                && pos.y == FLAT_FLOOR_CHUNK_Y
-            {
-                continue;
-            }
-            out.push(pos);
         }
     }
 
@@ -506,14 +589,133 @@ impl Scene {
     }
 
     pub fn collect_non_empty_explicit_chunk_positions(&self) -> Vec<[i32; 4]> {
+        let Some(root) = self.world_tree.root() else {
+            return Vec::new();
+        };
         let mut out: Vec<[i32; 4]> = self
-            .world_chunks
-            .iter()
-            .filter(|(_, chunk)| !chunk.is_empty())
-            .map(|(&chunk_pos, _)| [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w])
+            .world_tree
+            .collect_non_empty_chunk_keys_in_bounds(root.bounds)
+            .into_iter()
+            .map(|key| key.pos)
             .collect();
         out.sort_unstable();
         out
+    }
+
+    pub fn apply_near_lod_region_patch(
+        &mut self,
+        bounds: Aabb4i,
+        subtree: &RegionTreeCore,
+    ) -> NearRegionPatchStats {
+        if !bounds.is_valid() {
+            return NearRegionPatchStats::default();
+        }
+
+        let collect_previous_start = Instant::now();
+        let previous_chunks = self.world_tree.collect_chunks_in_bounds(bounds);
+        let collect_previous_ms = collect_previous_start.elapsed().as_secs_f64() * 1000.0;
+        let mut previous_by_pos =
+            HashMap::<ChunkPos, ChunkPayload>::with_capacity(previous_chunks.len());
+        let mut previous_non_empty = 0usize;
+        for (key, payload) in previous_chunks {
+            if Self::chunk_payload_has_solid_material(&payload) {
+                previous_non_empty = previous_non_empty.saturating_add(1);
+            }
+            previous_by_pos.insert(key.to_chunk_pos(), payload);
+        }
+        let previous_total_chunks = previous_by_pos.len();
+
+        let splice_start = Instant::now();
+        let _ = self
+            .world_tree
+            .splice_non_empty_core_in_bounds(bounds, subtree);
+        let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
+
+        let collect_desired_start = Instant::now();
+        let desired_chunks = self.world_tree.collect_chunks_in_bounds(bounds);
+        let collect_desired_ms = collect_desired_start.elapsed().as_secs_f64() * 1000.0;
+        let mut desired_by_pos =
+            HashMap::<ChunkPos, ChunkPayload>::with_capacity(desired_chunks.len());
+        let mut desired_non_empty = 0usize;
+        for (key, payload) in desired_chunks {
+            if Self::chunk_payload_has_solid_material(&payload) {
+                desired_non_empty = desired_non_empty.saturating_add(1);
+            }
+            desired_by_pos.insert(key.to_chunk_pos(), payload);
+        }
+        let desired_total_chunks = desired_by_pos.len();
+
+        let diff_start = Instant::now();
+        let mut changed_chunks = 0usize;
+        let mut upserts = 0usize;
+        let mut removals = 0usize;
+        let mut invalidated_cached_chunks = 0usize;
+        let mut queued_updates = 0usize;
+
+        for (&pos, previous_payload) in &previous_by_pos {
+            let desired_payload = desired_by_pos.get(&pos);
+            if desired_payload == Some(previous_payload) {
+                continue;
+            }
+
+            changed_chunks = changed_chunks.saturating_add(1);
+            let previous_non_empty_chunk = Self::chunk_payload_has_solid_material(previous_payload);
+            let desired_non_empty_chunk = desired_payload
+                .map(Self::chunk_payload_has_solid_material)
+                .unwrap_or(false);
+            if desired_non_empty_chunk {
+                upserts = upserts.saturating_add(1);
+            }
+            if previous_non_empty_chunk && !desired_non_empty_chunk {
+                removals = removals.saturating_add(1);
+            }
+
+            if self.world_chunks.remove(&pos).is_some() {
+                invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
+            }
+            if self.world_queue_chunk_update(pos) {
+                queued_updates = queued_updates.saturating_add(1);
+            }
+        }
+
+        for (&pos, desired_payload) in &desired_by_pos {
+            if previous_by_pos.contains_key(&pos) {
+                continue;
+            }
+
+            changed_chunks = changed_chunks.saturating_add(1);
+            if Self::chunk_payload_has_solid_material(desired_payload) {
+                upserts = upserts.saturating_add(1);
+            }
+
+            if self.world_chunks.remove(&pos).is_some() {
+                invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
+            }
+            if self.world_queue_chunk_update(pos) {
+                queued_updates = queued_updates.saturating_add(1);
+            }
+        }
+        let diff_ms = diff_start.elapsed().as_secs_f64() * 1000.0;
+
+        if changed_chunks > 0 {
+            self.world_dirty = true;
+        }
+
+        NearRegionPatchStats {
+            previous_non_empty,
+            desired_non_empty,
+            upserts,
+            removals,
+            changed_chunks,
+            previous_total_chunks,
+            desired_total_chunks,
+            invalidated_cached_chunks,
+            queued_updates,
+            collect_previous_ms,
+            splice_ms,
+            collect_desired_ms,
+            diff_ms,
+        }
     }
 
     fn surface_voxel_count(surface: &SurfaceData) -> u32 {
@@ -601,46 +803,6 @@ impl Scene {
         if self.voxel_pending_lod_chunk_update_set.insert(key) {
             self.voxel_pending_lod_chunk_updates.push(key);
         }
-    }
-
-    pub fn insert_lod_chunk(
-        &mut self,
-        lod_level: u8,
-        chunk_pos: ChunkPos,
-        mut chunk: crate::voxel::chunk::Chunk,
-    ) {
-        if lod_level == VOXEL_LOD_LEVEL_NEAR {
-            self.world_insert_chunk(chunk_pos, chunk);
-            return;
-        }
-
-        let key = RuntimeChunkKey {
-            lod_level,
-            chunk_pos,
-        };
-        chunk.dirty = true;
-        if chunk.is_empty() {
-            self.voxel_lod_chunks.remove(&key);
-        } else {
-            self.voxel_lod_chunks.insert(key, chunk);
-        }
-        self.queue_lod_chunk_update(key);
-    }
-
-    pub fn remove_lod_chunk(&mut self, lod_level: u8, chunk_pos: ChunkPos) -> bool {
-        if lod_level == VOXEL_LOD_LEVEL_NEAR {
-            return self.world_remove_chunk_override(chunk_pos);
-        }
-
-        let key = RuntimeChunkKey {
-            lod_level,
-            chunk_pos,
-        };
-        let removed = self.voxel_lod_chunks.remove(&key).is_some();
-        if removed {
-            self.queue_lod_chunk_update(key);
-        }
-        removed
     }
 
     /// Rebuild surface data if any chunk is dirty.
@@ -1099,5 +1261,77 @@ mod tests {
         scene.world_set_voxel(0, 0, 0, 0, VoxelType::AIR);
         scene.update_surfaces_if_dirty();
         assert!(scene.surface.chunks.is_empty());
+    }
+
+    #[test]
+    fn apply_near_lod_region_patch_splices_chunk_and_queues_update() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let mut patch_tree = RegionChunkTree::new();
+        let changed = patch_tree.set_chunk(
+            ChunkKey { pos: [0, 0, 0, 0] },
+            Some(ChunkPayload::Uniform(7)),
+        );
+        assert!(changed);
+        let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
+
+        let stats = scene.apply_near_lod_region_patch(bounds, &patch_core);
+
+        assert_eq!(stats.previous_non_empty, 0);
+        assert_eq!(stats.desired_non_empty, 1);
+        assert_eq!(stats.upserts, 1);
+        assert_eq!(stats.removals, 0);
+        assert_eq!(stats.changed_chunks, 1);
+        assert_eq!(stats.previous_total_chunks, 0);
+        assert_eq!(stats.desired_total_chunks, 1);
+        assert_eq!(stats.queued_updates, 1);
+        assert!(stats.collect_previous_ms >= 0.0);
+        assert!(stats.splice_ms >= 0.0);
+        assert!(stats.collect_desired_ms >= 0.0);
+        assert!(stats.diff_ms >= 0.0);
+        assert_eq!(scene.get_voxel(0, 0, 0, 0), VoxelType(7));
+        assert_eq!(
+            scene.world_drain_pending_chunk_updates(),
+            vec![ChunkPos::new(0, 0, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn apply_near_lod_region_patch_removes_chunk_and_queues_update() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let mut seed_tree = RegionChunkTree::new();
+        let _ = seed_tree.set_chunk(
+            ChunkKey { pos: [0, 0, 0, 0] },
+            Some(ChunkPayload::Uniform(5)),
+        );
+        let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
+        let _ = scene.apply_near_lod_region_patch(bounds, &seed_core);
+        let _ = scene.world_drain_pending_chunk_updates();
+
+        let empty_core = RegionTreeCore {
+            bounds,
+            kind: polychora::shared::worldfield::RegionNodeKind::Empty,
+            generator_version_hash: 0,
+        };
+        let stats = scene.apply_near_lod_region_patch(bounds, &empty_core);
+
+        assert_eq!(stats.previous_non_empty, 1);
+        assert_eq!(stats.desired_non_empty, 0);
+        assert_eq!(stats.upserts, 0);
+        assert_eq!(stats.removals, 1);
+        assert_eq!(stats.changed_chunks, 1);
+        assert_eq!(stats.previous_total_chunks, 1);
+        assert_eq!(stats.desired_total_chunks, 0);
+        assert_eq!(stats.queued_updates, 1);
+        assert!(stats.collect_previous_ms >= 0.0);
+        assert!(stats.splice_ms >= 0.0);
+        assert!(stats.collect_desired_ms >= 0.0);
+        assert!(stats.diff_ms >= 0.0);
+        assert!(scene.get_voxel(0, 0, 0, 0).is_air());
+        assert_eq!(
+            scene.world_drain_pending_chunk_updates(),
+            vec![ChunkPos::new(0, 0, 0, 0)]
+        );
     }
 }

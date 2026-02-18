@@ -1042,6 +1042,28 @@ mod tests {
         ChunkKey { pos: [x, y, z, w] }
     }
 
+    fn count_nodes(node: &RegionTreeCore) -> usize {
+        match &node.kind {
+            RegionNodeKind::Branch(children) => 1 + children.iter().map(count_nodes).sum::<usize>(),
+            _ => 1,
+        }
+    }
+
+    fn assert_no_empty_branch_children(node: &RegionTreeCore) {
+        let RegionNodeKind::Branch(children) = &node.kind else {
+            return;
+        };
+        for child in children {
+            assert!(
+                !matches!(child.kind, RegionNodeKind::Empty),
+                "empty child leaked into branch at bounds {:?}->{:?}",
+                child.bounds.min,
+                child.bounds.max
+            );
+            assert_no_empty_branch_children(child);
+        }
+    }
+
     #[test]
     fn region_id_mapping_uses_floor_division_for_negatives() {
         let id = RegionId::from_chunk_coords([-1, -4, -5, 7]);
@@ -1233,6 +1255,18 @@ mod tests {
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].0.pos, [0, 0, 0, 0]);
         assert_eq!(collected[0].1, ChunkPayload::Uniform(4));
+    }
+
+    #[test]
+    fn region_chunk_tree_collect_non_empty_chunk_keys_in_bounds_filters_air() {
+        let mut tree = RegionChunkTree::new();
+        assert!(tree.set_chunk(key(-1, 0, 0, 0), Some(ChunkPayload::Uniform(0))));
+        assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+        assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(6))));
+
+        let bounds = Aabb4i::new([-1, -1, -1, -1], [1, 1, 1, 1]);
+        let keys = tree.collect_non_empty_chunk_keys_in_bounds(bounds);
+        assert_eq!(keys, vec![key(0, 0, 0, 0)]);
     }
 
     #[test]
@@ -1458,6 +1492,41 @@ mod tests {
                     changed_bounds.is_some(),
                     expected_changed,
                     "splice changed_bounds mismatch seed={seed} step={step}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn region_chunk_tree_splice_sliding_windows_avoids_branch_bloat() {
+        let base_bounds = Aabb4i::new([-2, -3, -6, -7], [11, -1, 6, 5]);
+        let mut tree = RegionChunkTree::new();
+
+        for step in 0..96 {
+            let shift = if step % 2 == 0 { 0 } else { 1 };
+            let bounds = Aabb4i::new(
+                [base_bounds.min[0] + shift, -3, -6, -7],
+                [base_bounds.max[0] + shift, -1, 6, 5],
+            );
+
+            let mut patch_tree = RegionChunkTree::new();
+            assert!(patch_tree.set_chunk(key(shift, -2, 0, 0), Some(ChunkPayload::Uniform(11))));
+            assert!(patch_tree.set_chunk(key(shift + 1, -2, 1, 0), Some(ChunkPayload::Uniform(12))));
+            if step % 3 == 0 {
+                assert!(
+                    patch_tree.set_chunk(key(shift + 2, -2, 2, 0), Some(ChunkPayload::Uniform(13)))
+                );
+            }
+
+            let patch_core = patch_tree.slice_core_in_bounds(bounds);
+            let _ = tree.splice_non_empty_core_in_bounds(bounds, &patch_core);
+
+            if let Some(root) = tree.root() {
+                assert_no_empty_branch_children(root);
+                let node_count = count_nodes(root);
+                assert!(
+                    node_count < 8192,
+                    "branch bloat detected step={step} node_count={node_count}"
                 );
             }
         }
