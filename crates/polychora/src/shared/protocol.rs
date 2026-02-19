@@ -74,7 +74,7 @@ pub enum ClientMessage {
     ConsoleCommand {
         command: String,
     },
-    WorldSubtreeRequest {
+    WorldInterestUpdate {
         bounds: Aabb4i,
     },
     Ping {

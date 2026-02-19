@@ -12,6 +12,7 @@ pub(super) struct ServerState {
     pub(super) mob_nav_debug: bool,
     pub(super) mob_nav_simple_steer: bool,
     pub(super) clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
+    pub(super) client_world_interest_bounds: HashMap<u64, Aabb4i>,
     pub(super) client_visible_entities: HashMap<u64, HashSet<u64>>,
     pub(super) cpu_profile: ServerCpuProfile,
 }
@@ -34,6 +35,7 @@ impl ServerState {
             mob_nav_debug,
             mob_nav_simple_steer,
             clients: HashMap::new(),
+            client_world_interest_bounds: HashMap::new(),
             client_visible_entities: HashMap::new(),
             cpu_profile: ServerCpuProfile::new(start),
         }
@@ -75,6 +77,14 @@ impl ServerState {
 
     pub(super) fn world_take_dirty_chunks(&mut self) -> Vec<ChunkPos> {
         self.world.take_dirty_chunk_positions()
+    }
+
+    pub(super) fn set_client_world_interest_bounds(
+        &mut self,
+        client_id: u64,
+        bounds: Aabb4i,
+    ) -> Option<Aabb4i> {
+        self.client_world_interest_bounds.insert(client_id, bounds)
     }
 }
 

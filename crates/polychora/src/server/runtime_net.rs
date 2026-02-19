@@ -19,6 +19,7 @@ fn prune_stale_clients(state: &SharedState, stale: Vec<u64>, notify_entity_destr
         let mut guard = state.lock().expect("server state lock poisoned");
         for client_id in stale {
             guard.clients.remove(&client_id);
+            guard.client_world_interest_bounds.remove(&client_id);
             guard.client_visible_entities.remove(&client_id);
             if let Some(player) = guard.players.remove(&client_id) {
                 mark_entity_record_despawned(&mut guard, player.entity_id, None);
@@ -87,6 +88,62 @@ fn chunk_bounds(chunk: ChunkPos) -> Aabb4i {
     Aabb4i::new([chunk.x, chunk.y, chunk.z, chunk.w], [chunk.x, chunk.y, chunk.z, chunk.w])
 }
 
+fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
+    if !a.intersects(&b) {
+        return None;
+    }
+    let intersection = Aabb4i::new(
+        [
+            a.min[0].max(b.min[0]),
+            a.min[1].max(b.min[1]),
+            a.min[2].max(b.min[2]),
+            a.min[3].max(b.min[3]),
+        ],
+        [
+            a.max[0].min(b.max[0]),
+            a.max[1].min(b.max[1]),
+            a.max[2].min(b.max[2]),
+            a.max[3].min(b.max[3]),
+        ],
+    );
+    if intersection.is_valid() {
+        Some(intersection)
+    } else {
+        None
+    }
+}
+
+fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
+    let Some(inner) = intersect_bounds(outer, inner) else {
+        return vec![outer];
+    };
+    if inner == outer {
+        return Vec::new();
+    }
+
+    let mut pieces = Vec::with_capacity(8);
+    let mut core = outer;
+    for axis in 0..4 {
+        if core.min[axis] < inner.min[axis] {
+            let mut piece = core;
+            piece.max[axis] = inner.min[axis] - 1;
+            if piece.is_valid() {
+                pieces.push(piece);
+            }
+            core.min[axis] = inner.min[axis];
+        }
+        if core.max[axis] > inner.max[axis] {
+            let mut piece = core;
+            piece.min[axis] = inner.max[axis] + 1;
+            if piece.is_valid() {
+                pieces.push(piece);
+            }
+            core.max[axis] = inner.max[axis];
+        }
+    }
+    pieces
+}
+
 fn broadcast_world_subtree_patch(state: &SharedState, bounds: Aabb4i) {
     if !bounds.is_valid() {
         return;
@@ -111,12 +168,93 @@ fn broadcast_world_chunk_updates(state: &SharedState, changed_chunks: &[ChunkPos
     unique.sort_unstable_by_key(|chunk| (chunk.x, chunk.y, chunk.z, chunk.w));
     unique.dedup_by_key(|chunk| (chunk.x, chunk.y, chunk.z, chunk.w));
 
+    let recipients_by_client = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard
+            .client_world_interest_bounds
+            .iter()
+            .map(|(&client_id, &interest)| (client_id, interest))
+            .collect::<Vec<_>>()
+    };
+
     let mut sent = 0usize;
     for chunk in unique {
-        broadcast_world_subtree_patch(state, chunk_bounds(chunk));
-        sent = sent.saturating_add(1);
+        let bounds = chunk_bounds(chunk);
+        let subtree = {
+            let guard = state.lock().expect("server state lock poisoned");
+            guard.query_world_subtree(bounds)
+        };
+        for (client_id, interest) in &recipients_by_client {
+            if interest.intersects(&bounds) {
+                send_to_client(
+                    state,
+                    *client_id,
+                    ServerMessage::WorldSubtreePatch {
+                        subtree: (*subtree).clone(),
+                    },
+                );
+                sent = sent.saturating_add(1);
+            }
+        }
     }
     sent
+}
+
+fn send_empty_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bounds: Aabb4i) {
+    if !bounds.is_valid() {
+        return;
+    }
+    send_to_client(
+        state,
+        client_id,
+        ServerMessage::WorldSubtreePatch {
+            subtree: crate::shared::region_tree::RegionTreeCore {
+                bounds,
+                kind: crate::shared::region_tree::RegionNodeKind::Empty,
+                generator_version_hash: 0,
+            },
+        },
+    );
+}
+
+fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aabb4i) {
+    if !bounds.is_valid() {
+        send_to_client(
+            state,
+            client_id,
+            ServerMessage::Error {
+                message: format!(
+                    "invalid world interest bounds {:?}->{:?}",
+                    bounds.min, bounds.max
+                ),
+            },
+        );
+        return;
+    }
+
+    let previous = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        guard.set_client_world_interest_bounds(client_id, bounds)
+    };
+    if previous == Some(bounds) {
+        return;
+    }
+
+    let added_bounds = match previous {
+        Some(prev) => subtract_bounds(bounds, prev),
+        None => vec![bounds],
+    };
+    let removed_bounds = match previous {
+        Some(prev) => subtract_bounds(prev, bounds),
+        None => Vec::new(),
+    };
+
+    for remove_bounds in removed_bounds {
+        send_empty_world_subtree_patch_to_client(state, client_id, remove_bounds);
+    }
+    for add_bounds in added_bounds {
+        send_world_subtree_patch_to_client(state, client_id, add_bounds);
+    }
 }
 
 fn apply_authoritative_voxel_edit(
@@ -483,6 +621,7 @@ pub(super) fn remove_client(state: &SharedState, client_id: u64) {
     let removed_entity_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let _ = guard.clients.remove(&client_id);
+        guard.client_world_interest_bounds.remove(&client_id);
         guard.client_visible_entities.remove(&client_id);
         match guard.players.remove(&client_id) {
             Some(player) => {
@@ -854,8 +993,8 @@ pub(super) fn handle_message(
                 send_to_client(state, client_id, ServerMessage::Error { message });
             }
         }
-        ClientMessage::WorldSubtreeRequest { bounds } => {
-            send_world_subtree_patch_to_client(state, client_id, bounds);
+        ClientMessage::WorldInterestUpdate { bounds } => {
+            handle_world_interest_update(state, client_id, bounds);
         }
         ClientMessage::Ping { nonce } => {
             send_to_client(state, client_id, ServerMessage::Pong { nonce });

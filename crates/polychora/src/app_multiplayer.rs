@@ -370,56 +370,6 @@ fn world_request_bounds_for_center_chunk(center_chunk: [i32; 4], radius_chunks: 
     )
 }
 
-fn subtract_chunk_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
-    let inner = {
-        if !outer.intersects(&inner) {
-            return vec![outer];
-        }
-        Aabb4i::new(
-            [
-                outer.min[0].max(inner.min[0]),
-                outer.min[1].max(inner.min[1]),
-                outer.min[2].max(inner.min[2]),
-                outer.min[3].max(inner.min[3]),
-            ],
-            [
-                outer.max[0].min(inner.max[0]),
-                outer.max[1].min(inner.max[1]),
-                outer.max[2].min(inner.max[2]),
-                outer.max[3].min(inner.max[3]),
-            ],
-        )
-    };
-    if !inner.is_valid() {
-        return vec![outer];
-    }
-    if inner == outer {
-        return Vec::new();
-    }
-
-    let mut pieces = Vec::with_capacity(8);
-    let mut core = outer;
-    for axis in 0..4 {
-        if core.min[axis] < inner.min[axis] {
-            let mut piece = core;
-            piece.max[axis] = inner.min[axis] - 1;
-            if piece.is_valid() {
-                pieces.push(piece);
-            }
-            core.min[axis] = inner.min[axis];
-        }
-        if core.max[axis] > inner.max[axis] {
-            let mut piece = core;
-            piece.min[axis] = inner.max[axis] + 1;
-            if piece.is_valid() {
-                pieces.push(piece);
-            }
-            core.max[axis] = inner.max[axis];
-        }
-    }
-    pieces
-}
-
 fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
     if velocity.iter().any(|v| !v.is_finite()) {
         return [0.0; 4];
@@ -747,14 +697,14 @@ impl App {
         }
     }
 
-    fn request_multiplayer_world_subtree(&mut self, bounds: Aabb4i, reason: &str) {
+    fn send_multiplayer_world_interest_update(&mut self, bounds: Aabb4i, reason: &str) {
         if !bounds.is_valid() {
             return;
         }
         if let Some(client) = self.multiplayer.as_ref() {
-            client.send(MultiplayerClientMessage::WorldSubtreeRequest { bounds });
+            client.send(MultiplayerClientMessage::WorldInterestUpdate { bounds });
             eprintln!(
-                "Requested multiplayer world subtree: reason={reason} bounds={:?}->{:?}",
+                "Sent multiplayer world interest update: reason={reason} bounds={:?}->{:?}",
                 bounds.min, bounds.max
             );
         }
@@ -766,14 +716,10 @@ impl App {
             center_chunk,
             MULTIPLAYER_WORLD_REQUEST_RADIUS_CHUNKS,
         );
-        let request_bounds = match self.multiplayer_last_world_request_bounds {
-            Some(previous_bounds) => subtract_chunk_bounds(desired_bounds, previous_bounds),
-            None => vec![desired_bounds],
-        };
-
-        for bounds in request_bounds {
-            self.request_multiplayer_world_subtree(bounds, reason);
+        if self.multiplayer_last_world_request_bounds == Some(desired_bounds) {
+            return;
         }
+        self.send_multiplayer_world_interest_update(desired_bounds, reason);
         self.multiplayer_last_world_request_center_chunk = Some(center_chunk);
         self.multiplayer_last_world_request_bounds = Some(desired_bounds);
     }
