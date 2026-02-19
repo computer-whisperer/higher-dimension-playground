@@ -4,7 +4,7 @@ pub(super) struct ServerState {
     pub(super) next_object_id: u64,
     pub(super) entity_store: EntityStore,
     pub(super) entity_records: HashMap<u64, EntityRecord>,
-    pub(super) world: ServerWorldField,
+    pub(super) world: ServerWorldOverlay,
     pub(super) players: HashMap<u64, PlayerState>,
     pub(super) mobs: HashMap<u64, MobState>,
     pub(super) mob_nav_debug: bool,

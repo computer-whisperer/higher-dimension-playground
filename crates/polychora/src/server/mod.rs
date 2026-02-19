@@ -33,7 +33,7 @@ use self::types::{
     QueuedPlayerMovementModifier, QueuedWorldChunkUpdate, SpawnableEntitySpec,
     SPAWNABLE_ENTITY_SPECS,
 };
-use self::world_field::{QueryDetail, QueryVolume, ServerWorldField};
+use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
 use crate::materials;
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
@@ -305,7 +305,7 @@ fn initialize_state(
         material: VoxelType(11),
     };
     let next_object_id = 1;
-    let mut initial_world = ServerWorldField::from_chunk_payloads(
+    let mut initial_world = ServerWorldOverlay::from_chunk_payloads(
         base_world_kind,
         Vec::new(),
         runtime_world_seed,
