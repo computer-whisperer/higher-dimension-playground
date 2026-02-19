@@ -981,11 +981,18 @@ impl App {
         let scene_patch_start = Instant::now();
         let scene_patch_stats = self.scene.apply_near_lod_region_patch(patch_bounds, &patch);
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
-        let diag_splice_start = Instant::now();
-        let _ = self
-            .multiplayer_stream_tree_diag
-            .splice_non_empty_core_in_bounds(patch_bounds, &patch);
-        let diag_splice_elapsed_ms = diag_splice_start.elapsed().as_secs_f64() * 1000.0;
+        let diag_splice_elapsed_ms = if self.multiplayer_stream_tree_diag_enabled
+            || self.multiplayer_stream_tree_compare_diag_enabled
+            || self.multiplayer_stream_tree_diag_labels_enabled
+        {
+            let diag_splice_start = Instant::now();
+            let _ = self
+                .multiplayer_stream_tree_diag
+                .splice_non_empty_core_in_bounds(patch_bounds, &patch);
+            diag_splice_start.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
         let patch_apply_elapsed_ms = patch_apply_start.elapsed().as_secs_f64() * 1000.0;
         if patch_apply_elapsed_ms >= 50.0 {
             eprintln!(

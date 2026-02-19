@@ -74,7 +74,10 @@ pub(super) fn spawnable_entity_spec_for_kind(kind: EntityKind) -> Option<Spawnab
         .find(|spec| spec.kind == kind)
 }
 
-pub(super) fn default_spawn_pose_for_client(state: &ServerState, client_id: u64) -> ([f32; 4], [f32; 4]) {
+pub(super) fn default_spawn_pose_for_client(
+    state: &ServerState,
+    client_id: u64,
+) -> ([f32; 4], [f32; 4]) {
     let Some(player) = state.players.get(&client_id) else {
         return ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]);
     };
@@ -99,7 +102,11 @@ pub(super) fn mob_archetype_defaults(archetype: MobArchetype) -> (f32, f32, f32)
     }
 }
 
-pub(super) fn phase_spider_next_phase_deadline(now_ms: u64, phase_offset: f32, phase_ticks: u32) -> u64 {
+pub(super) fn phase_spider_next_phase_deadline(
+    now_ms: u64,
+    phase_offset: f32,
+    phase_ticks: u32,
+) -> u64 {
     let span = PHASE_SPIDER_PHASE_MAX_INTERVAL_MS
         .saturating_sub(PHASE_SPIDER_PHASE_MIN_INTERVAL_MS)
         .max(1);

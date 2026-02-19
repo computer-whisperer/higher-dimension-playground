@@ -55,7 +55,12 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
     prune_stale_clients(state, stale, true);
 }
 
-fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bounds: Aabb4i) {
+fn send_world_subtree_patch_to_client(
+    state: &SharedState,
+    client_id: u64,
+    bounds: Aabb4i,
+    allow_empty: bool,
+) {
     if !bounds.is_valid() {
         send_to_client(
             state,
@@ -74,6 +79,14 @@ fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bound
         let mut guard = state.lock().expect("server state lock poisoned");
         guard.query_world_subtree(bounds)
     };
+    if !allow_empty
+        && matches!(
+            subtree.kind,
+            crate::shared::region_tree::RegionNodeKind::Empty
+        )
+    {
+        return;
+    }
 
     send_to_client(
         state,
@@ -82,13 +95,6 @@ fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bound
             subtree: (*subtree).clone(),
         },
     );
-}
-
-fn chunk_bounds(chunk: ChunkPos) -> Aabb4i {
-    Aabb4i::new(
-        [chunk.x, chunk.y, chunk.z, chunk.w],
-        [chunk.x, chunk.y, chunk.z, chunk.w],
-    )
 }
 
 fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
@@ -147,29 +153,24 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
     pieces
 }
 
-fn broadcast_world_subtree_patch(state: &SharedState, bounds: Aabb4i) {
-    if !bounds.is_valid() {
-        return;
-    }
-    let subtree = {
-        let mut guard = state.lock().expect("server state lock poisoned");
-        guard.query_world_subtree(bounds)
-    };
-    broadcast(
-        state,
-        ServerMessage::WorldSubtreePatch {
-            subtree: (*subtree).clone(),
-        },
-    );
-}
-
-fn broadcast_world_chunk_updates(state: &SharedState, changed_chunks: &[ChunkPos]) -> usize {
-    if changed_chunks.is_empty() {
+fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aabb4i]) -> usize {
+    if dirty_bounds.is_empty() {
         return 0;
     }
-    let mut unique = changed_chunks.to_vec();
-    unique.sort_unstable_by_key(|chunk| (chunk.x, chunk.y, chunk.z, chunk.w));
-    unique.dedup_by_key(|chunk| (chunk.x, chunk.y, chunk.z, chunk.w));
+    let mut unique = dirty_bounds.to_vec();
+    unique.sort_unstable_by_key(|bounds| {
+        (
+            bounds.min[0],
+            bounds.min[1],
+            bounds.min[2],
+            bounds.min[3],
+            bounds.max[0],
+            bounds.max[1],
+            bounds.max[2],
+            bounds.max[3],
+        )
+    });
+    unique.dedup();
 
     let recipients_by_client = {
         let guard = state.lock().expect("server state lock poisoned");
@@ -181,17 +182,30 @@ fn broadcast_world_chunk_updates(state: &SharedState, changed_chunks: &[ChunkPos
     };
 
     let mut sent = 0usize;
-    for chunk in unique {
-        let bounds = chunk_bounds(chunk);
-        let subtree = {
-            let mut guard = state.lock().expect("server state lock poisoned");
-            guard.query_world_subtree(bounds)
-        };
+    for bounds in unique {
+        let mut recipients_by_clip = HashMap::<Aabb4i, Vec<u64>>::new();
         for (client_id, interest) in &recipients_by_client {
-            if interest.intersects(&bounds) {
+            let Some(clipped) = intersect_bounds(bounds, *interest) else {
+                continue;
+            };
+            recipients_by_clip
+                .entry(clipped)
+                .or_default()
+                .push(*client_id);
+        }
+        if recipients_by_clip.is_empty() {
+            continue;
+        }
+
+        for (clip_bounds, client_ids) in recipients_by_clip {
+            let subtree = {
+                let mut guard = state.lock().expect("server state lock poisoned");
+                guard.query_world_subtree(clip_bounds)
+            };
+            for client_id in client_ids {
                 send_to_client(
                     state,
-                    *client_id,
+                    client_id,
                     ServerMessage::WorldSubtreePatch {
                         subtree: (*subtree).clone(),
                     },
@@ -256,7 +270,7 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
         send_empty_world_subtree_patch_to_client(state, client_id, remove_bounds);
     }
     for add_bounds in added_bounds {
-        send_world_subtree_patch_to_client(state, client_id, add_bounds);
+        send_world_subtree_patch_to_client(state, client_id, add_bounds, false);
     }
 }
 
@@ -268,12 +282,12 @@ fn apply_authoritative_voxel_edit(
     state.apply_world_voxel_edit(position, material)
 }
 
-fn flush_world_dirty_chunk_updates(state: &SharedState) -> usize {
-    let dirty_chunks = {
+fn flush_world_dirty_updates(state: &SharedState) -> usize {
+    let dirty_bounds = {
         let mut guard = state.lock().expect("server state lock poisoned");
-        guard.world_take_dirty_chunks()
+        guard.world_take_dirty_bounds()
     };
-    broadcast_world_chunk_updates(state, &dirty_chunks)
+    broadcast_world_dirty_bounds_updates(state, &dirty_bounds)
 }
 
 pub(super) fn apply_creeper_explosion(
@@ -528,7 +542,7 @@ pub(super) fn start_broadcast_thread(
                 .iter()
                 .map(|batch| batch.transforms.len())
                 .sum();
-            let world_chunk_update_count = flush_world_dirty_chunk_updates(&state);
+            let world_chunk_update_count = flush_world_dirty_updates(&state);
             let explosion_count = explosion_events.len();
             let player_modifier_count = player_movement_modifiers.len();
             let did_broadcast = entity_batches.iter().any(|batch| {

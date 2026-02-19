@@ -386,6 +386,32 @@ impl LegacyWorldGenerator {
         let cell_count = x_extent.checked_mul(z_extent)?.checked_mul(w_extent)?;
 
         let default_payload = self.base_default_payload_for_chunk_y(chunk_y);
+        let explicit_payloads = self.chunk_tree.collect_chunks_in_bounds(slice_bounds);
+        if !self.procgen_structures && explicit_payloads.is_empty() {
+            if payload_is_effectively_empty(&default_payload) {
+                return None;
+            }
+            let chunk_array = ChunkArrayData::from_dense_indices(
+                slice_bounds,
+                vec![default_payload],
+                vec![0u16; cell_count],
+                Some(0),
+            )
+            .expect("query_region_core default slice encoding should be valid");
+            return Some(RegionTreeCore {
+                bounds: slice_bounds,
+                kind: RegionNodeKind::ChunkArray(chunk_array),
+                generator_version_hash: 0,
+            });
+        }
+        if !self.procgen_structures && payload_is_effectively_empty(&default_payload) {
+            let explicit_core = self.chunk_tree.slice_non_empty_core_in_bounds(slice_bounds);
+            if matches!(explicit_core.kind, RegionNodeKind::Empty) {
+                return None;
+            }
+            return Some(explicit_core);
+        }
+
         let mut found_non_empty = false;
         let mut min_non_empty = [i32::MAX; 3];
         let mut max_non_empty = [i32::MIN; 3];
@@ -498,6 +524,20 @@ impl LegacyWorldGenerator {
                 generator_version_hash: 0,
             });
         }
+        if bounds.min == bounds.max {
+            let chunk_pos =
+                ChunkPos::new(bounds.min[0], bounds.min[1], bounds.min[2], bounds.min[3]);
+            let kind = self
+                .effective_chunk(chunk_pos, false)
+                .map(|chunk| payload_from_chunk_compact(&chunk))
+                .map(|payload| single_chunk_kind(bounds, payload))
+                .unwrap_or(RegionNodeKind::Empty);
+            return Arc::new(RegionTreeCore {
+                bounds,
+                kind,
+                generator_version_hash: 0,
+            });
+        }
 
         let mut children = Vec::new();
         for y in self.query_candidate_chunk_ys(bounds) {
@@ -535,6 +575,34 @@ impl WorldField for LegacyWorldGenerator {
 fn payload_from_chunk_dense(chunk: &DenseChunk) -> ChunkPayload {
     let materials: Vec<u16> = chunk.iter().map(|voxel| u16::from(voxel.0)).collect();
     ChunkPayload::Dense16 { materials }
+}
+
+fn payload_is_effectively_empty(payload: &ChunkPayload) -> bool {
+    match payload {
+        ChunkPayload::Empty => true,
+        ChunkPayload::Uniform(material) => *material == 0,
+        ChunkPayload::Dense16 { materials } => materials.iter().all(|material| *material == 0),
+        ChunkPayload::PalettePacked { .. } => payload
+            .dense_materials()
+            .map(|materials| materials.into_iter().all(|material| material == 0))
+            .unwrap_or(false),
+    }
+}
+
+fn single_chunk_kind(bounds: Aabb4i, payload: ChunkPayload) -> RegionNodeKind {
+    match payload {
+        ChunkPayload::Uniform(material) => {
+            if material == 0 {
+                RegionNodeKind::Empty
+            } else {
+                RegionNodeKind::Uniform(material)
+            }
+        }
+        ChunkPayload::Empty => RegionNodeKind::Empty,
+        other => ChunkArrayData::from_dense_indices(bounds, vec![other], vec![0u16], Some(0))
+            .map(RegionNodeKind::ChunkArray)
+            .unwrap_or(RegionNodeKind::Empty),
+    }
 }
 
 fn payload_from_chunk_compact(chunk: &DenseChunk) -> ChunkPayload {

@@ -7,7 +7,9 @@ use higher_dimension_playground::render::{
 };
 use polychora::shared::chunk_payload::ChunkPayload;
 use polychora::shared::region_tree::{
-    chunk_key_from_chunk_pos, chunk_pos_from_chunk_key, RegionChunkTree, RegionTreeCore,
+    chunk_key_from_chunk_pos, chunk_pos_from_chunk_key,
+    collect_non_empty_chunks_from_core_in_bounds, slice_non_empty_region_core_in_bounds,
+    RegionChunkTree, RegionTreeCore,
 };
 use polychora::shared::spatial::Aabb4i;
 use polychora::shared::voxel::world_to_chunk;
@@ -637,38 +639,52 @@ impl Scene {
         }
 
         let collect_previous_start = Instant::now();
-        let previous_chunks = self.world_tree.collect_chunks_in_bounds(bounds);
+        let previous_core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
+        let previous_chunks = collect_non_empty_chunks_from_core_in_bounds(&previous_core, bounds);
         let collect_previous_ms = collect_previous_start.elapsed().as_secs_f64() * 1000.0;
         let mut previous_by_pos =
             HashMap::<ChunkPos, ChunkPayload>::with_capacity(previous_chunks.len());
-        let mut previous_non_empty = 0usize;
         for (key, payload) in previous_chunks {
-            if Self::chunk_payload_has_solid_material(&payload) {
-                previous_non_empty = previous_non_empty.saturating_add(1);
-            }
             previous_by_pos.insert(chunk_pos_from_chunk_key(key), payload);
         }
+        let previous_non_empty = previous_by_pos.len();
         let previous_total_chunks = previous_by_pos.len();
+
+        let collect_desired_start = Instant::now();
+        let desired_core = slice_non_empty_region_core_in_bounds(subtree, bounds);
+        let desired_chunks = collect_non_empty_chunks_from_core_in_bounds(&desired_core, bounds);
+        let collect_desired_ms = collect_desired_start.elapsed().as_secs_f64() * 1000.0;
+        let mut desired_by_pos =
+            HashMap::<ChunkPos, ChunkPayload>::with_capacity(desired_chunks.len());
+        for (key, payload) in desired_chunks {
+            desired_by_pos.insert(chunk_pos_from_chunk_key(key), payload);
+        }
+        let desired_non_empty = desired_by_pos.len();
+        let desired_total_chunks = desired_by_pos.len();
+
+        if previous_by_pos == desired_by_pos {
+            return NearRegionPatchStats {
+                previous_non_empty,
+                desired_non_empty,
+                upserts: 0,
+                removals: 0,
+                changed_chunks: 0,
+                previous_total_chunks,
+                desired_total_chunks,
+                invalidated_cached_chunks: 0,
+                queued_updates: 0,
+                collect_previous_ms,
+                splice_ms: 0.0,
+                collect_desired_ms,
+                diff_ms: 0.0,
+            };
+        }
 
         let splice_start = Instant::now();
         let _ = self
             .world_tree
-            .splice_non_empty_core_in_bounds(bounds, subtree);
+            .splice_non_empty_core_in_bounds(bounds, &desired_core);
         let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
-
-        let collect_desired_start = Instant::now();
-        let desired_chunks = self.world_tree.collect_chunks_in_bounds(bounds);
-        let collect_desired_ms = collect_desired_start.elapsed().as_secs_f64() * 1000.0;
-        let mut desired_by_pos =
-            HashMap::<ChunkPos, ChunkPayload>::with_capacity(desired_chunks.len());
-        let mut desired_non_empty = 0usize;
-        for (key, payload) in desired_chunks {
-            if Self::chunk_payload_has_solid_material(&payload) {
-                desired_non_empty = desired_non_empty.saturating_add(1);
-            }
-            desired_by_pos.insert(chunk_pos_from_chunk_key(key), payload);
-        }
-        let desired_total_chunks = desired_by_pos.len();
 
         let diff_start = Instant::now();
         let mut changed_chunks = 0usize;
@@ -684,14 +700,9 @@ impl Scene {
             }
 
             changed_chunks = changed_chunks.saturating_add(1);
-            let previous_non_empty_chunk = Self::chunk_payload_has_solid_material(previous_payload);
-            let desired_non_empty_chunk = desired_payload
-                .map(Self::chunk_payload_has_solid_material)
-                .unwrap_or(false);
-            if desired_non_empty_chunk {
+            if desired_payload.is_some() {
                 upserts = upserts.saturating_add(1);
-            }
-            if previous_non_empty_chunk && !desired_non_empty_chunk {
+            } else {
                 removals = removals.saturating_add(1);
             }
 
@@ -703,15 +714,13 @@ impl Scene {
             }
         }
 
-        for (&pos, desired_payload) in &desired_by_pos {
+        for &pos in desired_by_pos.keys() {
             if previous_by_pos.contains_key(&pos) {
                 continue;
             }
 
             changed_chunks = changed_chunks.saturating_add(1);
-            if Self::chunk_payload_has_solid_material(desired_payload) {
-                upserts = upserts.saturating_add(1);
-            }
+            upserts = upserts.saturating_add(1);
 
             if self.world_chunks.remove(&pos).is_some() {
                 invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
@@ -1351,6 +1360,33 @@ mod tests {
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
             vec![ChunkPos::new(0, 0, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn apply_near_lod_region_patch_identical_patch_is_noop() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let mut patch_tree = RegionChunkTree::new();
+        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(7)));
+        let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
+
+        let _ = scene.apply_near_lod_region_patch(bounds, &patch_core);
+        let _ = scene.world_drain_pending_chunk_updates();
+
+        let stats = scene.apply_near_lod_region_patch(bounds, &patch_core);
+        assert_eq!(stats.previous_non_empty, 1);
+        assert_eq!(stats.desired_non_empty, 1);
+        assert_eq!(stats.upserts, 0);
+        assert_eq!(stats.removals, 0);
+        assert_eq!(stats.changed_chunks, 0);
+        assert_eq!(stats.previous_total_chunks, 1);
+        assert_eq!(stats.desired_total_chunks, 1);
+        assert_eq!(stats.invalidated_cached_chunks, 0);
+        assert_eq!(stats.queued_updates, 0);
+        assert_eq!(
+            scene.world_drain_pending_chunk_updates(),
+            Vec::<ChunkPos>::new()
         );
     }
 }

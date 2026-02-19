@@ -1,11 +1,13 @@
 #[cfg(test)]
-use crate::migration::legacy_voxel::RegionChunkWorld;
+use crate::migration::legacy_voxel::{Chunk as LegacyChunk, RegionChunkWorld};
 use crate::shared::chunk_payload::{
     ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload,
 };
 use crate::shared::protocol::{EntityClass, EntityKind};
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
+#[cfg(test)]
+use crate::shared::voxel::CHUNK_VOLUME;
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -273,6 +275,16 @@ pub struct SaveChunkPayloadRequest<'a> {
     pub now_ms: u64,
 }
 
+pub struct SaveChunkPayloadPatchRequest {
+    pub base_world_kind: BaseWorldKind,
+    pub dirty_chunk_payloads: Vec<([i32; 4], Option<FieldChunkPayload>)>,
+    pub world_seed: u64,
+    pub next_entity_id: u64,
+    pub player_entity_hints: Option<Vec<PlayerEntityHint>>,
+    pub custom_global_payload: Option<Vec<u8>>,
+    pub now_ms: u64,
+}
+
 struct SaveStateCommon<'a> {
     entities: &'a [PersistedEntityRecord],
     players: &'a [PlayerRecord],
@@ -516,6 +528,49 @@ pub fn load_entities_for_regions(
 }
 
 #[cfg(test)]
+fn field_chunk_payload_from_legacy_chunk(chunk: &LegacyChunk) -> FieldChunkPayload {
+    let materials: Vec<u16> = chunk
+        .voxels
+        .iter()
+        .map(|voxel| u16::from(voxel.0))
+        .collect();
+    FieldChunkPayload::from_dense_materials_compact(&materials)
+        .unwrap_or(FieldChunkPayload::Dense16 { materials })
+}
+
+#[cfg(test)]
+fn legacy_chunk_from_field_chunk_payload(payload: &FieldChunkPayload) -> io::Result<LegacyChunk> {
+    let materials = payload
+        .dense_materials()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    if materials.len() != CHUNK_VOLUME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "chunk payload decoded to {} materials; expected {}",
+                materials.len(),
+                CHUNK_VOLUME
+            ),
+        ));
+    }
+
+    let mut voxels = Box::new([VoxelType::AIR; CHUNK_VOLUME]);
+    let mut solid_count = 0u32;
+    for (idx, material) in materials.into_iter().enumerate() {
+        let voxel = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
+        if voxel.is_solid() {
+            solid_count = solid_count.saturating_add(1);
+        }
+        voxels[idx] = voxel;
+    }
+    Ok(LegacyChunk {
+        voxels,
+        solid_count,
+        dirty: false,
+    })
+}
+
+#[cfg(test)]
 fn save_state_from_world(root: &Path, request: SaveWorldRequest<'_>) -> io::Result<SaveResult> {
     let chunk_payloads: Vec<([i32; 4], FieldChunkPayload)> = request
         .world
@@ -524,7 +579,7 @@ fn save_state_from_world(root: &Path, request: SaveWorldRequest<'_>) -> io::Resu
         .map(|(&chunk_pos, chunk)| {
             (
                 [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                FieldChunkPayload::from_chunk_compact(chunk),
+                field_chunk_payload_from_legacy_chunk(chunk),
             )
         })
         .collect();
@@ -573,6 +628,130 @@ pub fn save_state_from_chunk_payloads(
             now_ms: request.now_ms,
         },
     )
+}
+
+pub fn save_state_from_chunk_payload_patch(
+    root: &Path,
+    request: SaveChunkPayloadPatchRequest,
+) -> io::Result<Option<SaveResult>> {
+    let loaded = load_or_init_save_metadata(
+        root,
+        request.base_world_kind,
+        request.world_seed,
+        request.now_ms,
+    )?;
+    let LoadedSaveMetadata {
+        mut manifest,
+        global: loaded_global,
+        index: loaded_index,
+    } = loaded;
+    let mut reuse_index = build_blob_reuse_index(root, &manifest)?;
+
+    let mut dirty_chunk_payloads = HashMap::<[i32; 4], Option<FieldChunkPayload>>::new();
+    for (chunk_pos, payload) in request.dirty_chunk_payloads {
+        dirty_chunk_payloads.insert(chunk_pos, payload);
+    }
+    if dirty_chunk_payloads.is_empty() {
+        return Ok(None);
+    }
+
+    let dirty_chunks: HashSet<[i32; 4]> = dirty_chunk_payloads.keys().copied().collect();
+    let node_by_id = build_node_lookup(&loaded_index);
+    let mut preserved_world_leaves = Vec::<LeafDescriptor>::new();
+    let mut reencode_chunk_payloads = Vec::<([i32; 4], FieldChunkPayload)>::new();
+    let mut payload_cache = HashMap::<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>::new();
+    collect_world_leaf_descriptors_with_chunk_patch(
+        root,
+        &node_by_id,
+        loaded_index.root_node_id,
+        &dirty_chunks,
+        &mut payload_cache,
+        &mut preserved_world_leaves,
+        &mut reencode_chunk_payloads,
+    )?;
+
+    let mut dirty_chunk_positions: Vec<[i32; 4]> = dirty_chunk_payloads.keys().copied().collect();
+    dirty_chunk_positions.sort_unstable();
+    for chunk_pos in dirty_chunk_positions {
+        if let Some(Some(payload)) = dirty_chunk_payloads.get(&chunk_pos) {
+            reencode_chunk_payloads.push((chunk_pos, payload.clone()));
+        }
+    }
+
+    let mut world_leaves = preserved_world_leaves;
+    world_leaves.extend(build_world_leaf_descriptors_from_payloads(
+        root,
+        &mut manifest,
+        &mut reuse_index,
+        reencode_chunk_payloads,
+    )?);
+
+    let mut world_temp = build_temp_tree_from_leaves(&world_leaves)
+        .unwrap_or_else(|| make_empty_branch_root([0, 0, 0, 0], [0, 0, 0, 0]));
+    canonicalize_temp_tree(&mut world_temp);
+
+    let mut entity_temp = match loaded_index.entity_root_node_id {
+        Some(entity_root) => Some(build_temp_tree_from_index_subtree(
+            &node_by_id,
+            entity_root,
+        )?),
+        None => None,
+    };
+    if let Some(node) = entity_temp.as_mut() {
+        canonicalize_temp_tree(node);
+    }
+
+    let mut nodes = Vec::<IndexNode>::new();
+    let root_node_id = flatten_temp_tree(&world_temp, &mut nodes);
+    let entity_root_node_id = entity_temp
+        .as_ref()
+        .map(|node| flatten_temp_tree(node, &mut nodes));
+
+    let next_generation = manifest.current_generation.saturating_add(1);
+    let next_index_file = index_generation_path(next_generation);
+    let next_global_file = global_generation_path(next_generation);
+
+    let next_index = IndexPayload {
+        generation: next_generation,
+        root_node_id,
+        entity_root_node_id,
+        nodes,
+    };
+    validate_index_payload(&next_index)?;
+    write_index_file(root.join(&next_index_file), &next_index)?;
+
+    let next_global = GlobalPayload {
+        base_world_kind: PersistedBaseWorldKind::from_runtime(request.base_world_kind),
+        world_seed: request.world_seed,
+        procgen_manifest_hash: loaded_global.procgen_manifest_hash,
+        next_entity_id: request.next_entity_id.max(1),
+        next_data_file_id: manifest.active_data_file_id.saturating_add(1),
+        last_modified_ms: request.now_ms,
+        player_entity_hints: request
+            .player_entity_hints
+            .unwrap_or(loaded_global.player_entity_hints),
+        custom_global_payload: request
+            .custom_global_payload
+            .unwrap_or(loaded_global.custom_global_payload),
+    };
+    write_payload_file(
+        root.join(&next_global_file),
+        GLOBAL_MAGIC,
+        PAYLOAD_FILE_VERSION,
+        &next_global,
+    )?;
+
+    manifest.current_generation = next_generation;
+    manifest.last_modified_ms = request.now_ms;
+    manifest.index_file = next_index_file;
+    manifest.global_file = next_global_file;
+    save_manifest_atomic(root, &manifest)?;
+
+    Ok(Some(SaveResult {
+        generation: next_generation,
+        saved_block_regions: world_leaves.len(),
+        saved_entity_regions: 0,
+    }))
 }
 
 fn save_state_internal(
@@ -1012,9 +1191,7 @@ fn chunk_payloads_to_voxel_world(
 ) -> io::Result<RegionChunkWorld> {
     let mut world = RegionChunkWorld::new_with_base(base_world_kind);
     for (chunk_pos, payload) in chunk_payloads {
-        let chunk = payload
-            .to_voxel_chunk()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let chunk = legacy_chunk_from_field_chunk_payload(payload)?;
         world.insert_chunk(
             ChunkPos::new(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]),
             chunk,
@@ -1423,12 +1600,266 @@ fn materialize_entities_from_index_filtered(
     Ok(entities)
 }
 
+fn subtract_aabb(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
+    if !outer.intersects(&inner) {
+        return vec![outer];
+    }
+    let intersection = Aabb4i::new(
+        [
+            outer.min[0].max(inner.min[0]),
+            outer.min[1].max(inner.min[1]),
+            outer.min[2].max(inner.min[2]),
+            outer.min[3].max(inner.min[3]),
+        ],
+        [
+            outer.max[0].min(inner.max[0]),
+            outer.max[1].min(inner.max[1]),
+            outer.max[2].min(inner.max[2]),
+            outer.max[3].min(inner.max[3]),
+        ],
+    );
+    if !intersection.is_valid() {
+        return vec![outer];
+    }
+    if intersection == outer {
+        return Vec::new();
+    }
+
+    let mut pieces = Vec::with_capacity(8);
+    let mut core = outer;
+    for axis in 0..4 {
+        if core.min[axis] < intersection.min[axis] {
+            let mut piece = core;
+            piece.max[axis] = intersection.min[axis] - 1;
+            if piece.is_valid() {
+                pieces.push(piece);
+            }
+            core.min[axis] = intersection.min[axis];
+        }
+        if core.max[axis] > intersection.max[axis] {
+            let mut piece = core;
+            piece.min[axis] = intersection.max[axis] + 1;
+            if piece.is_valid() {
+                pieces.push(piece);
+            }
+            core.max[axis] = intersection.max[axis];
+        }
+    }
+    pieces
+}
+
+fn carve_bounds_excluding_dirty_chunks(
+    bounds: Aabb4i,
+    dirty_chunks: &HashSet<[i32; 4]>,
+) -> Vec<Aabb4i> {
+    let mut dirty_in_bounds: Vec<[i32; 4]> = dirty_chunks
+        .iter()
+        .copied()
+        .filter(|chunk| bounds.contains_chunk(*chunk))
+        .collect();
+    if dirty_in_bounds.is_empty() {
+        return vec![bounds];
+    }
+    dirty_in_bounds.sort_unstable();
+
+    let mut pieces = vec![bounds];
+    for chunk in dirty_in_bounds {
+        let chunk_bounds = Aabb4i::new(chunk, chunk);
+        let mut next = Vec::new();
+        for piece in pieces {
+            next.extend(subtract_aabb(piece, chunk_bounds));
+        }
+        pieces = next;
+        if pieces.is_empty() {
+            break;
+        }
+    }
+    pieces
+}
+
+fn collect_world_leaf_descriptors_with_chunk_patch(
+    root: &Path,
+    node_by_id: &HashMap<u32, &IndexNode>,
+    node_id: u32,
+    dirty_chunks: &HashSet<[i32; 4]>,
+    payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
+    preserved_out: &mut Vec<LeafDescriptor>,
+    reencode_payloads_out: &mut Vec<([i32; 4], FieldChunkPayload)>,
+) -> io::Result<()> {
+    let Some(node) = node_by_id.get(&node_id).copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("index references missing world node id {node_id}"),
+        ));
+    };
+    let bounds = Aabb4i::new(node.bounds_min_chunk, node.bounds_max_chunk);
+    if !bounds.is_valid() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid world node bounds while collecting patch leaves",
+        ));
+    }
+
+    let has_dirty = dirty_chunks
+        .iter()
+        .any(|chunk| bounds.contains_chunk(*chunk));
+    match &node.kind {
+        IndexNodeKind::Branch { child_node_ids } => {
+            for child_id in child_node_ids {
+                collect_world_leaf_descriptors_with_chunk_patch(
+                    root,
+                    node_by_id,
+                    *child_id,
+                    dirty_chunks,
+                    payload_cache,
+                    preserved_out,
+                    reencode_payloads_out,
+                )?;
+            }
+        }
+        IndexNodeKind::LeafEmpty | IndexNodeKind::LeafUniform { .. } if !has_dirty => {
+            preserved_out.push(LeafDescriptor {
+                min: node.bounds_min_chunk,
+                max: node.bounds_max_chunk,
+                kind: node.kind.clone(),
+            });
+        }
+        IndexNodeKind::LeafEmpty | IndexNodeKind::LeafUniform { .. } => {
+            let pieces = carve_bounds_excluding_dirty_chunks(bounds, dirty_chunks);
+            for piece in pieces {
+                preserved_out.push(LeafDescriptor {
+                    min: piece.min,
+                    max: piece.max,
+                    kind: node.kind.clone(),
+                });
+            }
+        }
+        IndexNodeKind::LeafChunkArray { .. } if !has_dirty => {
+            preserved_out.push(LeafDescriptor {
+                min: node.bounds_min_chunk,
+                max: node.bounds_max_chunk,
+                kind: node.kind.clone(),
+            });
+        }
+        IndexNodeKind::LeafChunkArray { chunk_array_ref } => {
+            if chunk_array_ref.blob_type != BLOB_KIND_CHUNK_ARRAY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "world subtree leaf references non-chunk-array blob type {}",
+                        chunk_array_ref.blob_type
+                    ),
+                ));
+            }
+            let payload = read_blob_payload(root, chunk_array_ref)?;
+            let blob: ChunkArrayBlob = postcard::from_bytes(&payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let chunk_array_bounds = Aabb4i::new(blob.volume_min_chunk, blob.volume_max_chunk);
+            if !chunk_array_bounds.is_valid() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid chunk array bounds while collecting patch leaves",
+                ));
+            }
+
+            let palette_len = blob.payload_palette.len().max(1);
+            let chunk_array_data = ChunkArrayData {
+                bounds: chunk_array_bounds,
+                chunk_palette: vec![FieldChunkPayload::Empty; palette_len],
+                index_codec: blob.index_codec,
+                index_data: blob.index_data.clone(),
+                default_chunk_idx: blob.default_palette_index,
+            };
+            let indices = chunk_array_data
+                .decode_dense_indices()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            let extents = chunk_array_bounds.chunk_extents().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid chunk array extents during patch decode",
+                )
+            })?;
+
+            let mut palette = Vec::<FieldChunkPayload>::with_capacity(blob.payload_palette.len());
+            for payload_ref in &blob.payload_palette {
+                palette.push(load_chunk_payload_from_ref(
+                    root,
+                    payload_ref,
+                    payload_cache,
+                )?);
+            }
+
+            for w in chunk_array_bounds.min[3]..=chunk_array_bounds.max[3] {
+                for z in chunk_array_bounds.min[2]..=chunk_array_bounds.max[2] {
+                    for y in chunk_array_bounds.min[1]..=chunk_array_bounds.max[1] {
+                        for x in chunk_array_bounds.min[0]..=chunk_array_bounds.max[0] {
+                            let chunk = [x, y, z, w];
+                            if dirty_chunks.contains(&chunk) {
+                                continue;
+                            }
+                            let local = [
+                                (x - chunk_array_bounds.min[0]) as usize,
+                                (y - chunk_array_bounds.min[1]) as usize,
+                                (z - chunk_array_bounds.min[2]) as usize,
+                                (w - chunk_array_bounds.min[3]) as usize,
+                            ];
+                            let linear = linear_cell_index(local, extents);
+                            let palette_idx = indices.get(linear).copied().ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "chunk array decoded index out of bounds during patch decode",
+                                )
+                            })?;
+                            let payload =
+                                palette.get(palette_idx as usize).cloned().ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "chunk array palette index out of bounds during patch decode",
+                                    )
+                                })?;
+                            reencode_payloads_out.push((chunk, payload));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build_node_lookup(index: &IndexPayload) -> HashMap<u32, &IndexNode> {
     index
         .nodes
         .iter()
         .map(|node| (node.node_id, node))
         .collect()
+}
+
+fn build_temp_tree_from_index_subtree(
+    node_by_id: &HashMap<u32, &IndexNode>,
+    node_id: u32,
+) -> io::Result<TempNode> {
+    let Some(node) = node_by_id.get(&node_id).copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("index references missing node id {node_id}"),
+        ));
+    };
+    let kind = match &node.kind {
+        IndexNodeKind::Branch { child_node_ids } => {
+            let mut children = Vec::with_capacity(child_node_ids.len());
+            for child_id in child_node_ids {
+                children.push(build_temp_tree_from_index_subtree(node_by_id, *child_id)?);
+            }
+            TempNodeKind::Branch(children)
+        }
+        leaf_kind => TempNodeKind::Leaf(leaf_kind.clone()),
+    };
+    Ok(TempNode {
+        min: node.bounds_min_chunk,
+        max: node.bounds_max_chunk,
+        kind,
+    })
 }
 
 fn apply_entity_node(
@@ -2809,9 +3240,7 @@ mod tests {
             load_world_chunk_payloads_for_regions(&root, &region_filter).expect("load chunks");
         assert_eq!(loaded_chunk_payloads.len(), 1);
         assert_eq!(loaded_chunk_payloads[0].0, chunk_a);
-        let chunk = loaded_chunk_payloads[0]
-            .1
-            .to_voxel_chunk()
+        let chunk = legacy_chunk_from_field_chunk_payload(&loaded_chunk_payloads[0].1)
             .expect("decode chunk payload");
         assert_eq!(chunk.get(1, 1, 1, 1), VoxelType(2));
 
@@ -3008,7 +3437,7 @@ mod tests {
             .map(|(&chunk_pos, chunk)| {
                 (
                     [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                    FieldChunkPayload::from_chunk_compact(chunk),
+                    field_chunk_payload_from_legacy_chunk(chunk),
                 )
             })
             .collect();

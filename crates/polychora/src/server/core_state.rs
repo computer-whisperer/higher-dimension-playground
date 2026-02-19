@@ -81,8 +81,8 @@ impl ServerState {
         self.world.apply_voxel_edit(position, material)
     }
 
-    pub(super) fn world_take_dirty_chunks(&mut self) -> Vec<ChunkPos> {
-        self.world.take_dirty_chunk_positions()
+    pub(super) fn world_take_dirty_bounds(&mut self) -> Vec<Aabb4i> {
+        self.world.take_dirty_bounds()
     }
 
     pub(super) fn persist_world_if_dirty(

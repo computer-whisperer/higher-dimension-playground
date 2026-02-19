@@ -86,7 +86,7 @@ fn take_non_empty_core_extracts_and_clears_region() {
     let bounds = Aabb4i::new([1, 0, 0, 0], [2, 0, 0, 0]);
     let extracted = tree.take_non_empty_core_in_bounds(bounds);
     let mut extracted_chunks = collect_non_empty_chunks_from_core_in_bounds(&extracted, bounds);
-    extracted_chunks.sort_unstable_by_key(|(key, _)| key);
+    extracted_chunks.sort_unstable_by_key(|(key, _)| *key);
     assert_eq!(
         extracted_chunks,
         vec![
@@ -127,6 +127,6 @@ fn slice_preserves_query_bounds() {
     let slice = tree.slice_core_in_bounds(bounds);
     assert_eq!(slice.bounds, bounds);
     let mut chunks = collect_non_empty_chunks_from_core_in_bounds(&slice, bounds);
-    chunks.sort_unstable_by_key(|(key, _)| key);
+    chunks.sort_unstable_by_key(|(key, _)| *key);
     assert_eq!(chunks, vec![(key(2, 0, 0, 0), ChunkPayload::Uniform(4))]);
 }

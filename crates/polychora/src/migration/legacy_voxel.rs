@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::shared::voxel::{world_to_chunk, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::voxel::{
+    world_to_chunk, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME,
+};
 
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 

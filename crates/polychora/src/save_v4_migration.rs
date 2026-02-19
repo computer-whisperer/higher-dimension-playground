@@ -1,13 +1,13 @@
+use crate::migration::legacy_voxel::Chunk as LegacyChunk;
 use crate::migration::legacy_voxel::RegionChunkWorld;
+use crate::migration::legacy_world_io::load_world;
 use crate::migration::save_v3;
 use crate::save_v4::{
     self, PersistedEntityRecord, PlayerEntityHint, PlayerRecord, SaveChunkPayloadRequest,
     SaveResult, DEFAULT_REGION_CHUNK_EDGE,
 };
-use crate::migration::legacy_world_io::load_world;
-use crate::migration::legacy_voxel::Chunk as LegacyChunk;
-use crate::shared::protocol::{EntityClass, EntityKind};
 use crate::shared::chunk_payload::ChunkPayload as FieldChunkPayload;
+use crate::shared::protocol::{EntityClass, EntityKind};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
@@ -42,7 +42,11 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], FieldChunkPa
             return FieldChunkPayload::Uniform(first);
         }
         FieldChunkPayload::Dense16 {
-            materials: chunk.voxels.iter().map(|voxel| u16::from(voxel.0)).collect(),
+            materials: chunk
+                .voxels
+                .iter()
+                .map(|voxel| u16::from(voxel.0))
+                .collect(),
         }
     }
 

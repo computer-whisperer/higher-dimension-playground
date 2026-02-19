@@ -1,5 +1,5 @@
-use crate::migration::legacy_world_io::load_world;
 use crate::migration::legacy_voxel::{Chunk, RegionChunkWorld};
+use crate::migration::legacy_world_io::load_world;
 use crate::shared::protocol::{EntityClass, EntityKind};
 use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use crc32fast::Hasher;

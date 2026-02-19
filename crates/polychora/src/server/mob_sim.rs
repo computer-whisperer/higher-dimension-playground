@@ -1,5 +1,5 @@
-use super::*;
 use super::runtime_net::{apply_creeper_explosion, apply_explosion_impulse};
+use super::*;
 
 fn mob_collision_radius_for_scale(scale: f32) -> f32 {
     let clamped_scale = if scale.is_finite() { scale } else { 0.5 };
@@ -955,10 +955,7 @@ fn attempt_phase_spider_blink(
 fn simulate_mobs(
     state: &mut ServerState,
     now_ms: u64,
-) -> (
-    Vec<QueuedExplosionEvent>,
-    Vec<QueuedPlayerMovementModifier>,
-) {
+) -> (Vec<QueuedExplosionEvent>, Vec<QueuedPlayerMovementModifier>) {
     let player_positions: Vec<[f32; 4]> = state
         .players
         .values()
@@ -1185,10 +1182,7 @@ pub(super) fn tick_entity_simulation_window(
     now_ms: u64,
     next_sim_ms: &mut u64,
     sim_step_ms: u64,
-) -> (
-    Vec<QueuedExplosionEvent>,
-    Vec<QueuedPlayerMovementModifier>,
-) {
+) -> (Vec<QueuedExplosionEvent>, Vec<QueuedPlayerMovementModifier>) {
     let mut queued_explosions = Vec::new();
     let mut queued_player_modifiers = Vec::new();
     let mut sim_steps = 0usize;
@@ -1205,8 +1199,7 @@ pub(super) fn tick_entity_simulation_window(
                 })
                 .unwrap_or(false)
         });
-        let (mut step_explosions, mut step_player_modifiers) =
-            simulate_mobs(state, *next_sim_ms);
+        let (mut step_explosions, mut step_player_modifiers) = simulate_mobs(state, *next_sim_ms);
         queued_explosions.append(&mut step_explosions);
         queued_player_modifiers.append(&mut step_player_modifiers);
         *next_sim_ms = (*next_sim_ms).saturating_add(sim_step_ms);

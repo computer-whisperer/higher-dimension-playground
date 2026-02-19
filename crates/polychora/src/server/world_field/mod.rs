@@ -1,8 +1,7 @@
-use crate::save_v4::{self, SaveChunkPayloadRequest};
+use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
 use crate::shared::chunk_payload::ChunkPayload;
 use crate::shared::region_tree::{
-    chunk_key_from_chunk_pos, chunk_pos_from_chunk_key,
-    collect_non_empty_chunks_from_core_in_bounds, RegionChunkTree, RegionTreeCore,
+    chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{world_to_chunk, BaseWorldKind, ChunkPos, VoxelType, CHUNK_VOLUME};
@@ -36,8 +35,6 @@ pub trait WorldOverlay: WorldField {}
 struct SaveStreamingState {
     root: PathBuf,
     index: save_v4::IndexPayload,
-    players: Vec<save_v4::PlayerRecord>,
-    entities: Vec<save_v4::PersistedEntityRecord>,
     loaded_bounds: Vec<Aabb4i>,
     next_entity_id: u64,
 }
@@ -46,7 +43,7 @@ struct SaveStreamingState {
 pub struct PassthroughWorldOverlay<F> {
     field: F,
     dirty_chunks: RegionChunkTree,
-    dirty_save_regions: HashSet<[i32; 4]>,
+    dirty_save_chunks: HashSet<[i32; 4]>,
     save_stream: Option<SaveStreamingState>,
 }
 
@@ -55,7 +52,7 @@ impl<F> PassthroughWorldOverlay<F> {
         Self {
             field,
             dirty_chunks: RegionChunkTree::new(),
-            dirty_save_regions: HashSet::new(),
+            dirty_save_chunks: HashSet::new(),
             save_stream: None,
         }
     }
@@ -83,15 +80,38 @@ impl<F> PassthroughWorldOverlay<F> {
         self.dirty_chunks = RegionChunkTree::new();
     }
 
-    pub fn take_dirty_chunk_positions(&mut self) -> Vec<ChunkPos> {
+    pub fn take_dirty_bounds(&mut self) -> Vec<Aabb4i> {
         let Some(bounds) = self.dirty_chunks.root().map(|root| root.bounds) else {
             return Vec::new();
         };
         let dirty_core = self.dirty_chunks.take_non_empty_core_in_bounds(bounds);
-        collect_non_empty_chunks_from_core_in_bounds(&dirty_core, dirty_core.bounds)
-            .into_iter()
-            .map(|(key, _)| chunk_pos_from_chunk_key(key))
-            .collect()
+        let mut out = Vec::new();
+        collect_non_empty_node_bounds(&dirty_core, &mut out);
+        out.sort_unstable_by_key(|bounds| {
+            (
+                bounds.min[0],
+                bounds.min[1],
+                bounds.min[2],
+                bounds.min[3],
+                bounds.max[0],
+                bounds.max[1],
+                bounds.max[2],
+                bounds.max[3],
+            )
+        });
+        out
+    }
+}
+
+fn collect_non_empty_node_bounds(core: &RegionTreeCore, out: &mut Vec<Aabb4i>) {
+    match &core.kind {
+        RegionNodeKind::Empty => {}
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                collect_non_empty_node_bounds(child, out);
+            }
+        }
+        _ => out.push(core.bounds),
     }
 }
 
@@ -214,12 +234,10 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         Ok(Self {
             field,
             dirty_chunks: RegionChunkTree::new(),
-            dirty_save_regions: HashSet::new(),
+            dirty_save_chunks: HashSet::new(),
             save_stream: Some(SaveStreamingState {
                 root: root.to_path_buf(),
                 index: metadata.index,
-                players: metadata.players.players,
-                entities: metadata.entities,
                 loaded_bounds: Vec::new(),
                 next_entity_id: metadata.global.next_entity_id.max(1),
             }),
@@ -276,7 +294,7 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
     pub fn clear_dirty(&mut self) {
         self.field.clear_dirty();
         self.clear_dirty_chunks();
-        self.dirty_save_regions.clear();
+        self.dirty_save_chunks.clear();
     }
 
     pub fn set_procgen_blocked_cells(
@@ -301,37 +319,22 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         material: VoxelType,
     ) -> Option<ChunkPos> {
         let (chunk_pos, _) = world_to_chunk(position[0], position[1], position[2], position[3]);
-        let region_edge = save_v4::DEFAULT_REGION_CHUNK_EDGE.max(1);
-        let region = save_v4::region_from_chunk_pos(chunk_pos, region_edge);
-        let region_bounds = Aabb4i::new(
-            [
-                region[0] * region_edge,
-                region[1] * region_edge,
-                region[2] * region_edge,
-                region[3] * region_edge,
-            ],
-            [
-                region[0] * region_edge + (region_edge - 1),
-                region[1] * region_edge + (region_edge - 1),
-                region[2] * region_edge + (region_edge - 1),
-                region[3] * region_edge + (region_edge - 1),
-            ],
+        let chunk_bounds = Aabb4i::new(
+            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
         );
-        if let Err(error) = self.ensure_persisted_bounds_loaded(region_bounds) {
+        if let Err(error) = self.ensure_persisted_bounds_loaded(chunk_bounds) {
             eprintln!(
-                "failed to hydrate persisted world region {:?} before edit chunk {} {} {} {}: {}",
-                region, chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w, error
+                "failed to hydrate persisted world chunk {} {} {} {} before edit: {}",
+                chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w, error
             );
         }
 
         let changed = self.field.apply_voxel_edit(position, material);
         if let Some(chunk_pos) = changed {
             self.mark_dirty_chunk(chunk_pos);
-            self.dirty_save_regions
-                .insert(save_v4::region_from_chunk_pos(
-                    chunk_pos,
-                    save_v4::DEFAULT_REGION_CHUNK_EDGE,
-                ));
+            self.dirty_save_chunks
+                .insert([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]);
         }
         changed
     }
@@ -344,46 +347,46 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         if self.save_stream.is_none() {
             return Ok(None);
         }
-        if self.dirty_save_regions.is_empty() {
+        if self.dirty_save_chunks.is_empty() {
             if let Some(stream) = self.save_stream.as_mut() {
                 stream.next_entity_id = stream.next_entity_id.max(next_entity_id).max(1);
             }
             return Ok(None);
         }
 
-        let chunk_payloads = self.field.chunk_tree().collect_chunks();
+        let mut dirty_chunk_positions: Vec<[i32; 4]> =
+            self.dirty_save_chunks.iter().copied().collect();
+        dirty_chunk_positions.sort_unstable();
+        let dirty_chunk_payloads = dirty_chunk_positions
+            .into_iter()
+            .map(|chunk_pos| (chunk_pos, self.field.chunk_tree().chunk_payload(chunk_pos)))
+            .collect::<Vec<_>>();
         let base_world_kind = self.field.base_kind();
         let world_seed = self.field.world_seed();
-        let dirty_block_regions = self.dirty_save_regions.clone();
-        let empty_dirty_entity_regions = HashSet::new();
 
         let result = {
             let stream = self
                 .save_stream
                 .as_ref()
                 .expect("save_stream should exist while persisting");
-            save_v4::save_state_from_chunk_payloads(
+            save_v4::save_state_from_chunk_payload_patch(
                 &stream.root,
-                SaveChunkPayloadRequest {
+                SaveChunkPayloadPatchRequest {
                     base_world_kind,
-                    chunk_payloads,
-                    entities: &stream.entities,
-                    players: &stream.players,
+                    dirty_chunk_payloads,
                     world_seed,
                     next_entity_id: next_entity_id.max(stream.next_entity_id).max(1),
-                    dirty_block_regions: &dirty_block_regions,
-                    dirty_entity_regions: &empty_dirty_entity_regions,
-                    force_full_blocks: false,
-                    force_full_entities: false,
                     player_entity_hints: None,
                     custom_global_payload: None,
-                    disable_block_persistence: false,
                     now_ms,
                 },
             )?
         };
 
-        self.dirty_save_regions.clear();
+        self.dirty_save_chunks.clear();
+        let Some(result) = result else {
+            return Ok(None);
+        };
 
         let root = self
             .save_stream
@@ -393,8 +396,6 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         let refreshed = save_v4::load_state_metadata(&root)?;
         if let Some(stream) = self.save_stream.as_mut() {
             stream.index = refreshed.index;
-            stream.players = refreshed.players.players;
-            stream.entities = refreshed.entities;
             stream.next_entity_id = refreshed.global.next_entity_id.max(1);
         }
         Ok(Some(result))
@@ -422,7 +423,7 @@ mod tests {
     use crate::shared::voxel::BaseWorldKind;
 
     #[test]
-    fn overlay_dirty_chunk_drain_returns_touched_chunk_once() {
+    fn overlay_dirty_bounds_drain_returns_touched_chunk_once() {
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::Empty,
             Vec::<([i32; 4], ChunkPayload)>::new(),
@@ -436,13 +437,13 @@ mod tests {
         assert_eq!(changed_a, Some(ChunkPos::new(0, 0, 0, 0)));
         assert_eq!(changed_b, Some(ChunkPos::new(0, 0, 0, 0)));
 
-        let dirty = overlay.take_dirty_chunk_positions();
-        assert_eq!(dirty, vec![ChunkPos::new(0, 0, 0, 0)]);
-        assert!(overlay.take_dirty_chunk_positions().is_empty());
+        let dirty = overlay.take_dirty_bounds();
+        assert_eq!(dirty, vec![Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0])]);
+        assert!(overlay.take_dirty_bounds().is_empty());
     }
 
     #[test]
-    fn overlay_dirty_chunk_drain_tracks_multiple_chunks_sorted() {
+    fn overlay_dirty_bounds_drain_tracks_multiple_chunks_sorted() {
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::Empty,
             Vec::<([i32; 4], ChunkPayload)>::new(),
@@ -455,13 +456,13 @@ mod tests {
         let _ = overlay.apply_voxel_edit([8, 0, 0, 0], VoxelType(1));
         let _ = overlay.apply_voxel_edit([0, 8, 0, 0], VoxelType(1));
 
-        let dirty = overlay.take_dirty_chunk_positions();
+        let dirty = overlay.take_dirty_bounds();
         assert_eq!(
             dirty,
             vec![
-                ChunkPos::new(0, 0, 0, 0),
-                ChunkPos::new(0, 1, 0, 0),
-                ChunkPos::new(1, 0, 0, 0),
+                Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]),
+                Aabb4i::new([0, 1, 0, 0], [0, 1, 0, 0]),
+                Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]),
             ]
         );
     }
@@ -478,6 +479,6 @@ mod tests {
 
         let _ = overlay.apply_voxel_edit([0, 0, 0, 0], VoxelType(5));
         overlay.clear_dirty();
-        assert!(overlay.take_dirty_chunk_positions().is_empty());
+        assert!(overlay.take_dirty_bounds().is_empty());
     }
 }
