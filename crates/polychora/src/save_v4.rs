@@ -1,9 +1,9 @@
-use crate::shared::protocol::{EntityClass, EntityKind};
 #[cfg(test)]
 use crate::migration::legacy_voxel::RegionChunkWorld;
 use crate::shared::chunk_payload::{
     ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload,
 };
+use crate::shared::protocol::{EntityClass, EntityKind};
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
 use crc32fast::Hasher;
@@ -392,8 +392,13 @@ pub fn load_or_init_state(
     now_ms: u64,
 ) -> io::Result<LoadedState> {
     let metadata = load_or_init_state_metadata(root, default_base, world_seed, now_ms)?;
-    let world_chunk_payloads =
-        materialize_world_chunk_payloads_from_index_filtered(root, &metadata.index, None, true)?;
+    let world_chunk_payloads = materialize_world_chunk_payloads_from_index_filtered(
+        root,
+        &metadata.index,
+        None,
+        true,
+        None,
+    )?;
     Ok(LoadedState {
         manifest: metadata.manifest,
         global: metadata.global,
@@ -437,8 +442,13 @@ fn load_or_init_save_metadata(
 
 pub fn load_state(root: &Path) -> io::Result<LoadedState> {
     let metadata = load_state_metadata(root)?;
-    let world_chunk_payloads =
-        materialize_world_chunk_payloads_from_index_filtered(root, &metadata.index, None, true)?;
+    let world_chunk_payloads = materialize_world_chunk_payloads_from_index_filtered(
+        root,
+        &metadata.index,
+        None,
+        true,
+        None,
+    )?;
     Ok(LoadedState {
         manifest: metadata.manifest,
         global: metadata.global,
@@ -473,7 +483,27 @@ pub fn load_world_chunk_payloads_for_regions(
 ) -> io::Result<Vec<([i32; 4], FieldChunkPayload)>> {
     let manifest = load_manifest(root)?;
     let index = read_index_file(root.join(&manifest.index_file))?;
-    materialize_world_chunk_payloads_from_index_filtered(root, &index, Some(regions), true)
+    materialize_world_chunk_payloads_from_index_filtered(root, &index, Some(regions), true, None)
+}
+
+pub fn load_world_chunk_payloads_for_bounds(
+    root: &Path,
+    bounds: Aabb4i,
+) -> io::Result<Vec<([i32; 4], FieldChunkPayload)>> {
+    let manifest = load_manifest(root)?;
+    let index = read_index_file(root.join(&manifest.index_file))?;
+    load_world_chunk_payloads_for_bounds_from_index(root, &index, bounds)
+}
+
+pub fn load_world_chunk_payloads_for_bounds_from_index(
+    root: &Path,
+    index: &IndexPayload,
+    bounds: Aabb4i,
+) -> io::Result<Vec<([i32; 4], FieldChunkPayload)>> {
+    if !bounds.is_valid() {
+        return Ok(Vec::new());
+    }
+    materialize_world_chunk_payloads_from_index_filtered(root, index, None, true, Some(bounds))
 }
 
 pub fn load_entities_for_regions(
@@ -566,13 +596,20 @@ fn save_state_internal(
         let persisted_chunk_payloads = if common.force_full_blocks {
             Vec::new()
         } else if common.dirty_block_regions.is_empty() {
-            materialize_world_chunk_payloads_from_index_filtered(root, &loaded_index, None, true)?
+            materialize_world_chunk_payloads_from_index_filtered(
+                root,
+                &loaded_index,
+                None,
+                true,
+                None,
+            )?
         } else {
             materialize_world_chunk_payloads_from_index_filtered(
                 root,
                 &loaded_index,
                 Some(common.dirty_block_regions),
                 false,
+                None,
             )?
         };
         resolve_world_chunk_payloads_for_save(
@@ -1133,6 +1170,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
     node_id: u32,
     region_filter: Option<&HashSet<[i32; 4]>>,
     include_matches: bool,
+    bounds_filter: Option<Aabb4i>,
     payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
     out: &mut Vec<([i32; 4], FieldChunkPayload)>,
 ) -> io::Result<()> {
@@ -1143,6 +1181,12 @@ fn collect_world_chunk_payloads_from_node_filtered(
         ));
     };
 
+    if let Some(filter_bounds) = bounds_filter {
+        if !Aabb4i::new(node.bounds_min_chunk, node.bounds_max_chunk).intersects(&filter_bounds) {
+            return Ok(());
+        }
+    }
+
     match &node.kind {
         IndexNodeKind::Branch { child_node_ids } => {
             for child_id in child_node_ids {
@@ -1152,6 +1196,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
                     *child_id,
                     region_filter,
                     include_matches,
+                    bounds_filter,
                     payload_cache,
                     out,
                 )?;
@@ -1160,7 +1205,10 @@ fn collect_world_chunk_payloads_from_node_filtered(
         IndexNodeKind::LeafEmpty => {
             for_each_chunk_in_bounds(node.bounds_min_chunk, node.bounds_max_chunk, |chunk_pos| {
                 let chunk = [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w];
-                if include_chunk_for_filter(chunk, region_filter, include_matches) {
+                let in_bounds = bounds_filter
+                    .map(|filter| filter.contains_chunk(chunk))
+                    .unwrap_or(true);
+                if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
                     out.push((chunk, FieldChunkPayload::Empty));
                 }
             });
@@ -1168,7 +1216,10 @@ fn collect_world_chunk_payloads_from_node_filtered(
         IndexNodeKind::LeafUniform { material } => {
             for_each_chunk_in_bounds(node.bounds_min_chunk, node.bounds_max_chunk, |chunk_pos| {
                 let chunk = [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w];
-                if include_chunk_for_filter(chunk, region_filter, include_matches) {
+                let in_bounds = bounds_filter
+                    .map(|filter| filter.contains_chunk(chunk))
+                    .unwrap_or(true);
+                if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
                     out.push((chunk, FieldChunkPayload::Uniform(*material)));
                 }
             });
@@ -1227,6 +1278,12 @@ fn collect_world_chunk_payloads_from_node_filtered(
                     for y in bounds.min[1]..=bounds.max[1] {
                         for x in bounds.min[0]..=bounds.max[0] {
                             let chunk = [x, y, z, w];
+                            if bounds_filter
+                                .map(|filter| !filter.contains_chunk(chunk))
+                                .unwrap_or(false)
+                            {
+                                continue;
+                            }
                             if !include_chunk_for_filter(chunk, region_filter, include_matches) {
                                 continue;
                             }
@@ -1265,6 +1322,7 @@ fn materialize_world_chunk_payloads_from_index_filtered(
     index: &IndexPayload,
     region_filter: Option<&HashSet<[i32; 4]>>,
     include_matches: bool,
+    bounds_filter: Option<Aabb4i>,
 ) -> io::Result<Vec<([i32; 4], FieldChunkPayload)>> {
     let node_by_id = build_node_lookup(index);
     let mut out = Vec::<([i32; 4], FieldChunkPayload)>::new();
@@ -1275,6 +1333,7 @@ fn materialize_world_chunk_payloads_from_index_filtered(
         index.root_node_id,
         region_filter,
         include_matches,
+        bounds_filter,
         &mut payload_cache,
         &mut out,
     )?;
@@ -2759,6 +2818,61 @@ mod tests {
         let loaded_entities = load_entities_for_regions(&root, &region_filter).expect("load ents");
         assert_eq!(loaded_entities.len(), 1);
         assert_eq!(loaded_entities[0].entity_id, 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_bounds_filtered_world_chunks() {
+        let root = test_root("bounds-filtered-load");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+        let chunk_size_i32 = CHUNK_SIZE as i32;
+        let chunk_a = [0, 0, 0, 0];
+        let chunk_b = [3, 0, 0, 0];
+
+        let mut world = RegionChunkWorld::new();
+        world.set_voxel(chunk_a[0] * chunk_size_i32 + 1, 1, 1, 1, VoxelType(2));
+        world.set_voxel(chunk_b[0] * chunk_size_i32 + 1, 1, 1, 1, VoxelType(5));
+
+        save_state_from_world(
+            &root,
+            SaveWorldRequest {
+                world: &world,
+                entities: &[],
+                players: &[],
+                world_seed: 1,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save state");
+
+        let only_chunk_a = Aabb4i::new(
+            [chunk_a[0], chunk_a[1], chunk_a[2], chunk_a[3]],
+            [chunk_a[0], chunk_a[1], chunk_a[2], chunk_a[3]],
+        );
+        let loaded_a =
+            load_world_chunk_payloads_for_bounds(&root, only_chunk_a).expect("load chunk a");
+        assert_eq!(loaded_a.len(), 1);
+        assert_eq!(loaded_a[0].0, chunk_a);
+
+        let both_bounds = Aabb4i::new(
+            [chunk_a[0], chunk_a[1], chunk_a[2], chunk_a[3]],
+            [chunk_b[0], chunk_b[1], chunk_b[2], chunk_b[3]],
+        );
+        let loaded_both =
+            load_world_chunk_payloads_for_bounds(&root, both_bounds).expect("load both chunks");
+        assert_eq!(loaded_both.len(), 2);
+        assert_eq!(loaded_both[0].0, chunk_a);
+        assert_eq!(loaded_both[1].0, chunk_b);
 
         let _ = std::fs::remove_dir_all(root);
     }

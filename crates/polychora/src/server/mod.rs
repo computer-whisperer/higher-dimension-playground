@@ -12,7 +12,7 @@ pub mod world_field;
 pub use self::config::{LocalConnection, RuntimeConfig};
 use self::core_state::{
     allocate_or_reserve_server_object_id, allocate_server_object_id, mark_entity_record_despawned,
-    monotonic_ms, record_server_cpu_sample, ServerState, SharedState, upsert_entity_record,
+    monotonic_ms, record_server_cpu_sample, upsert_entity_record, ServerState, SharedState,
 };
 use self::cpu_profile::ServerCpuProfile;
 use self::entities::{EntityId, EntityStore};
@@ -21,17 +21,16 @@ use self::runtime_net::{
     handle_message, remove_client, spawn_client_thread, start_broadcast_thread,
 };
 use self::spawn_logic::{
-    default_spawn_pose_for_client, mob_archetype_defaults, parse_spawn_material_id,
-    parse_spawn_vec4, phase_spider_next_phase_deadline, sanitize_player_name,
-    spawn_usage_string, spawnable_entity_spec_for_kind, spawnable_entity_spec_for_token,
-    env_flag_enabled,
+    default_spawn_pose_for_client, env_flag_enabled, mob_archetype_defaults,
+    parse_spawn_material_id, parse_spawn_vec4, phase_spider_next_phase_deadline,
+    sanitize_player_name, spawn_usage_string, spawnable_entity_spec_for_kind,
+    spawnable_entity_spec_for_token,
 };
 use self::types::{
     ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityLifecycle, EntityRecord,
     EntityRecordSummary, LiveReplicationFrame, MobArchetype, MobNavCell, MobNavPathResult,
     MobNavigationState, MobState, PersistedMobEntry, PlayerState, QueuedExplosionEvent,
-    QueuedPlayerMovementModifier, SpawnableEntitySpec,
-    SPAWNABLE_ENTITY_SPECS,
+    QueuedPlayerMovementModifier, SpawnableEntitySpec, SPAWNABLE_ENTITY_SPECS,
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
 use crate::materials;
@@ -300,18 +299,20 @@ fn initialize_state(
 ) -> io::Result<(SharedState, Instant)> {
     let start = Instant::now();
     procgen::clear_runtime_maze_layout_cache();
-    let runtime_world_seed = config.world_seed;
+    let requested_world_seed = config.world_seed;
     let base_world_kind = BaseWorldKind::FlatFloor {
         material: VoxelType(11),
     };
-    let next_object_id = 1;
-    let mut initial_world = ServerWorldOverlay::from_chunk_payloads(
+    let mut initial_world = ServerWorldOverlay::from_save_root(
+        &config.world_file,
         base_world_kind,
-        Vec::new(),
-        runtime_world_seed,
+        requested_world_seed,
         config.procgen_structures,
         HashSet::new(),
-    );
+        crate::save_v4::now_unix_ms(),
+    )?;
+    let runtime_world_seed = initial_world.world_seed();
+    let next_object_id = initial_world.persisted_next_entity_id().max(1);
     let pruned = initial_world.prune_virgin_chunks();
     if pruned > 0 {
         eprintln!(
@@ -337,13 +338,9 @@ fn initialize_state(
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(
         "initialized runtime world (seed={}, {} non-empty chunks)",
-        runtime_world_seed,
-        initial_chunks,
+        runtime_world_seed, initial_chunks,
     );
-    eprintln!(
-        "server persistence is disabled in this rebuild path (world_file={} ignored at runtime)",
-        config.world_file.display(),
-    );
+    eprintln!("v4 save streaming root={}", config.world_file.display());
     let mob_nav_debug = env_flag_enabled("R4D_MOB_NAV_DEBUG");
     let mob_nav_simple_steer = env_flag_enabled("R4D_MOB_NAV_SIMPLE_STEER");
     if mob_nav_debug {
@@ -369,6 +366,7 @@ fn initialize_state(
         config.tick_hz,
         config.entity_sim_hz,
         entity_interest_radius_chunks,
+        config.save_interval_secs.max(1),
         start,
         shutdown.clone(),
     );
@@ -421,10 +419,11 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
 
     let listener = TcpListener::bind(&config.bind)?;
     eprintln!(
-        "polychora-server listening on {} (tick {:.2} Hz, entity_sim {:.2} Hz, save_io=disabled, procgen={}, seed={}, near_radius={} chunks, mid_radius={} chunks, far_radius={} chunks, keepout={}, keepout_padding={} chunks)",
+        "polychora-server listening on {} (tick {:.2} Hz, entity_sim {:.2} Hz, save_io=v4-streaming, save_interval={}s, procgen={}, seed={}, near_radius={} chunks, mid_radius={} chunks, far_radius={} chunks, keepout={}, keepout_padding={} chunks)",
         config.bind,
         config.tick_hz.max(0.1),
         config.entity_sim_hz.max(0.1),
+        config.save_interval_secs.max(1),
         config.procgen_structures,
         runtime_world_seed,
         config.procgen_near_chunk_radius.max(0),
@@ -438,12 +437,7 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
         match stream {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
-                spawn_client_thread(
-                    stream,
-                    state.clone(),
-                    config.tick_hz.max(0.1),
-                    start,
-                );
+                spawn_client_thread(stream, state.clone(), config.tick_hz.max(0.1), start);
             }
             Err(error) => {
                 eprintln!("accept failed: {}", error);

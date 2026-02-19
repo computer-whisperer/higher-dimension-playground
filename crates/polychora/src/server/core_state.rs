@@ -41,7 +41,13 @@ impl ServerState {
         }
     }
 
-    pub(super) fn query_world_subtree(&self, bounds: Aabb4i) -> Arc<RegionTreeCore> {
+    pub(super) fn query_world_subtree(&mut self, bounds: Aabb4i) -> Arc<RegionTreeCore> {
+        if let Err(error) = self.world.prepare_query_bounds(bounds) {
+            eprintln!(
+                "failed to hydrate persisted world bounds {:?}->{:?}: {}",
+                bounds.min, bounds.max, error
+            );
+        }
         self.world
             .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
     }
@@ -77,6 +83,14 @@ impl ServerState {
 
     pub(super) fn world_take_dirty_chunks(&mut self) -> Vec<ChunkPos> {
         self.world.take_dirty_chunk_positions()
+    }
+
+    pub(super) fn persist_world_if_dirty(
+        &mut self,
+        now_ms: u64,
+    ) -> io::Result<Option<crate::save_v4::SaveResult>> {
+        self.world
+            .persist_dirty_overrides(self.next_object_id, now_ms)
     }
 
     pub(super) fn set_client_world_interest_bounds(
@@ -149,7 +163,11 @@ pub(super) fn upsert_entity_record(
     }
 }
 
-pub(super) fn mark_entity_record_despawned(state: &mut ServerState, entity_id: u64, now_ms: Option<u64>) {
+pub(super) fn mark_entity_record_despawned(
+    state: &mut ServerState,
+    entity_id: u64,
+    now_ms: Option<u64>,
+) {
     let Some(record) = state.entity_records.get_mut(&entity_id) else {
         return;
     };

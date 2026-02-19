@@ -71,7 +71,7 @@ fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bound
     }
 
     let subtree = {
-        let guard = state.lock().expect("server state lock poisoned");
+        let mut guard = state.lock().expect("server state lock poisoned");
         guard.query_world_subtree(bounds)
     };
 
@@ -85,7 +85,10 @@ fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bound
 }
 
 fn chunk_bounds(chunk: ChunkPos) -> Aabb4i {
-    Aabb4i::new([chunk.x, chunk.y, chunk.z, chunk.w], [chunk.x, chunk.y, chunk.z, chunk.w])
+    Aabb4i::new(
+        [chunk.x, chunk.y, chunk.z, chunk.w],
+        [chunk.x, chunk.y, chunk.z, chunk.w],
+    )
 }
 
 fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
@@ -149,7 +152,7 @@ fn broadcast_world_subtree_patch(state: &SharedState, bounds: Aabb4i) {
         return;
     }
     let subtree = {
-        let guard = state.lock().expect("server state lock poisoned");
+        let mut guard = state.lock().expect("server state lock poisoned");
         guard.query_world_subtree(bounds)
     };
     broadcast(
@@ -181,7 +184,7 @@ fn broadcast_world_chunk_updates(state: &SharedState, changed_chunks: &[ChunkPos
     for chunk in unique {
         let bounds = chunk_bounds(chunk);
         let subtree = {
-            let guard = state.lock().expect("server state lock poisoned");
+            let mut guard = state.lock().expect("server state lock poisoned");
             guard.query_world_subtree(bounds)
         };
         for (client_id, interest) in &recipients_by_client {
@@ -487,16 +490,19 @@ pub(super) fn start_broadcast_thread(
     tick_hz: f32,
     entity_sim_hz: f32,
     entity_interest_radius_chunks: i32,
+    save_interval_secs: u64,
     start: Instant,
     shutdown: Arc<AtomicBool>,
 ) {
     let interval = Duration::from_secs_f64(1.0 / tick_hz.max(0.1) as f64);
+    let save_interval = Duration::from_secs(save_interval_secs.max(1));
     let entity_sim_step_ms = (1000.0 / entity_sim_hz.max(0.1) as f64).round().max(1.0) as u64;
     let entity_interest_radius_sq = {
         let radius = entity_interest_radius_chunks.max(0) as i64;
         radius * radius
     };
     let mut next_entity_sim_ms = 0u64;
+    let mut last_save_tick = Instant::now();
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             thread::sleep(interval);
@@ -507,20 +513,15 @@ pub(super) fn start_broadcast_thread(
             let now = monotonic_ms(start);
             let (entity_batches, explosion_events, player_movement_modifiers) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                let (explosion_events, player_movement_modifiers) =
-                    tick_entity_simulation_window(
-                        &mut guard,
-                        now,
-                        &mut next_entity_sim_ms,
-                        entity_sim_step_ms,
-                    );
+                let (explosion_events, player_movement_modifiers) = tick_entity_simulation_window(
+                    &mut guard,
+                    now,
+                    &mut next_entity_sim_ms,
+                    entity_sim_step_ms,
+                );
                 let entity_batches =
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
-                (
-                    entity_batches,
-                    explosion_events,
-                    player_movement_modifiers,
-                )
+                (entity_batches, explosion_events, player_movement_modifiers)
             };
             let spawned_count: usize = entity_batches.iter().map(|batch| batch.spawned.len()).sum();
             let transform_count: usize = entity_batches
@@ -612,6 +613,26 @@ pub(super) fn start_broadcast_thread(
                             .saturating_add(player_modifier_count),
                     )),
                 );
+            }
+
+            if last_save_tick.elapsed() >= save_interval {
+                let save_result = {
+                    let mut guard = state.lock().expect("server state lock poisoned");
+                    guard.persist_world_if_dirty(crate::save_v4::now_unix_ms())
+                };
+                match save_result {
+                    Ok(Some(result)) => {
+                        eprintln!(
+                            "persisted v4 world save generation={} block_regions={} entity_regions={}",
+                            result.generation, result.saved_block_regions, result.saved_entity_regions
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("failed to persist v4 world save: {}", error);
+                    }
+                }
+                last_save_tick = Instant::now();
             }
         }
     });
@@ -1088,13 +1109,7 @@ pub(super) fn spawn_client_thread(
             let parsed = postcard::from_bytes::<ClientMessage>(&msg_buf);
             match parsed {
                 Ok(message) => {
-                    handle_message(
-                        &state,
-                        client_id,
-                        message,
-                        tick_hz,
-                        start,
-                    );
+                    handle_message(&state, client_id, message, tick_hz, start);
                 }
                 Err(error) => {
                     send_to_client(
