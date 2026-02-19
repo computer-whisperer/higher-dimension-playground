@@ -370,6 +370,56 @@ fn world_request_bounds_for_center_chunk(center_chunk: [i32; 4], radius_chunks: 
     )
 }
 
+fn subtract_chunk_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
+    let inner = {
+        if !outer.intersects(&inner) {
+            return vec![outer];
+        }
+        Aabb4i::new(
+            [
+                outer.min[0].max(inner.min[0]),
+                outer.min[1].max(inner.min[1]),
+                outer.min[2].max(inner.min[2]),
+                outer.min[3].max(inner.min[3]),
+            ],
+            [
+                outer.max[0].min(inner.max[0]),
+                outer.max[1].min(inner.max[1]),
+                outer.max[2].min(inner.max[2]),
+                outer.max[3].min(inner.max[3]),
+            ],
+        )
+    };
+    if !inner.is_valid() {
+        return vec![outer];
+    }
+    if inner == outer {
+        return Vec::new();
+    }
+
+    let mut pieces = Vec::with_capacity(8);
+    let mut core = outer;
+    for axis in 0..4 {
+        if core.min[axis] < inner.min[axis] {
+            let mut piece = core;
+            piece.max[axis] = inner.min[axis] - 1;
+            if piece.is_valid() {
+                pieces.push(piece);
+            }
+            core.min[axis] = inner.min[axis];
+        }
+        if core.max[axis] > inner.max[axis] {
+            let mut piece = core;
+            piece.min[axis] = inner.max[axis] + 1;
+            if piece.is_valid() {
+                pieces.push(piece);
+            }
+            core.max[axis] = inner.max[axis];
+        }
+    }
+    pieces
+}
+
 fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
     if velocity.iter().any(|v| !v.is_finite()) {
         return [0.0; 4];
@@ -712,15 +762,20 @@ impl App {
 
     fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
         let center_chunk = world_chunk_from_position(position);
-        if self.multiplayer_last_world_request_center_chunk == Some(center_chunk) {
-            return;
-        }
-        self.multiplayer_last_world_request_center_chunk = Some(center_chunk);
-        let bounds = world_request_bounds_for_center_chunk(
+        let desired_bounds = world_request_bounds_for_center_chunk(
             center_chunk,
             MULTIPLAYER_WORLD_REQUEST_RADIUS_CHUNKS,
         );
-        self.request_multiplayer_world_subtree(bounds, reason);
+        let request_bounds = match self.multiplayer_last_world_request_bounds {
+            Some(previous_bounds) => subtract_chunk_bounds(desired_bounds, previous_bounds),
+            None => vec![desired_bounds],
+        };
+
+        for bounds in request_bounds {
+            self.request_multiplayer_world_subtree(bounds, reason);
+        }
+        self.multiplayer_last_world_request_center_chunk = Some(center_chunk);
+        self.multiplayer_last_world_request_bounds = Some(desired_bounds);
     }
 
     pub(super) fn append_multiplayer_stream_tree_diag_overlay_instances(
@@ -1034,6 +1089,7 @@ impl App {
             } => {
                 self.multiplayer_self_id = Some(client_id);
                 self.multiplayer_last_world_request_center_chunk = None;
+                self.multiplayer_last_world_request_bounds = None;
                 self.multiplayer_stream_tree_diag =
                     polychora::shared::region_tree::RegionChunkTree::new();
                 self.pending_player_movement_modifiers.clear();

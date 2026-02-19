@@ -71,9 +71,7 @@ fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bound
 
     let subtree = {
         let guard = state.lock().expect("server state lock poisoned");
-        guard
-            .world
-            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
+        guard.query_world_subtree(bounds)
     };
 
     send_to_client(
@@ -85,12 +83,56 @@ fn send_world_subtree_patch_to_client(state: &SharedState, client_id: u64, bound
     );
 }
 
+fn chunk_bounds(chunk: ChunkPos) -> Aabb4i {
+    Aabb4i::new([chunk.x, chunk.y, chunk.z, chunk.w], [chunk.x, chunk.y, chunk.z, chunk.w])
+}
+
+fn broadcast_world_subtree_patch(state: &SharedState, bounds: Aabb4i) {
+    if !bounds.is_valid() {
+        return;
+    }
+    let subtree = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard.query_world_subtree(bounds)
+    };
+    broadcast(
+        state,
+        ServerMessage::WorldSubtreePatch {
+            subtree: (*subtree).clone(),
+        },
+    );
+}
+
+fn broadcast_world_chunk_updates(state: &SharedState, changed_chunks: &[ChunkPos]) -> usize {
+    if changed_chunks.is_empty() {
+        return 0;
+    }
+    let mut unique = changed_chunks.to_vec();
+    unique.sort_unstable_by_key(|chunk| (chunk.x, chunk.y, chunk.z, chunk.w));
+    unique.dedup_by_key(|chunk| (chunk.x, chunk.y, chunk.z, chunk.w));
+
+    let mut sent = 0usize;
+    for chunk in unique {
+        broadcast_world_subtree_patch(state, chunk_bounds(chunk));
+        sent = sent.saturating_add(1);
+    }
+    sent
+}
+
 fn apply_authoritative_voxel_edit(
     state: &mut ServerState,
     position: [i32; 4],
     material: VoxelType,
 ) -> Option<ChunkPos> {
-    state.world.apply_voxel_edit(position, material)
+    state.apply_world_voxel_edit(position, material)
+}
+
+fn flush_world_dirty_chunk_updates(state: &SharedState) -> usize {
+    let dirty_chunks = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        guard.world_take_dirty_chunks()
+    };
+    broadcast_world_chunk_updates(state, &dirty_chunks)
 }
 
 pub(super) fn apply_creeper_explosion(
@@ -98,7 +140,7 @@ pub(super) fn apply_creeper_explosion(
     source_entity_id: u64,
     center: [f32; 4],
     radius_voxels: i32,
-) -> (Vec<QueuedWorldChunkUpdate>, QueuedExplosionEvent) {
+) -> (usize, QueuedExplosionEvent) {
     let radius = radius_voxels.max(1);
     let radius_sq = radius * radius;
     let center_voxel = [
@@ -144,15 +186,8 @@ pub(super) fn apply_creeper_explosion(
         }
     }
 
-    let mut world_updates = Vec::new();
-    if !changed_chunks.is_empty() {
-        let mut changed_chunks: Vec<ChunkPos> = changed_chunks.into_iter().collect();
-        changed_chunks.sort_unstable_by_key(|chunk| (chunk.w, chunk.z, chunk.y, chunk.x));
-        world_updates.push(QueuedWorldChunkUpdate { changed_chunks });
-    }
-
     (
-        world_updates,
+        changed_chunks.len(),
         QueuedExplosionEvent {
             position: center,
             radius: radius as f32,
@@ -332,9 +367,9 @@ pub(super) fn start_broadcast_thread(
             }
             let tick_cpu_start = Instant::now();
             let now = monotonic_ms(start);
-            let (entity_batches, world_chunk_updates, explosion_events, player_movement_modifiers) = {
+            let (entity_batches, explosion_events, player_movement_modifiers) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                let (world_chunk_updates, explosion_events, player_movement_modifiers) =
+                let (explosion_events, player_movement_modifiers) =
                     tick_entity_simulation_window(
                         &mut guard,
                         now,
@@ -345,7 +380,6 @@ pub(super) fn start_broadcast_thread(
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
                 (
                     entity_batches,
-                    world_chunk_updates,
                     explosion_events,
                     player_movement_modifiers,
                 )
@@ -355,10 +389,7 @@ pub(super) fn start_broadcast_thread(
                 .iter()
                 .map(|batch| batch.transforms.len())
                 .sum();
-            let world_chunk_update_count: usize = world_chunk_updates
-                .iter()
-                .map(|update| update.changed_chunks.len())
-                .sum();
+            let world_chunk_update_count = flush_world_dirty_chunk_updates(&state);
             let explosion_count = explosion_events.len();
             let player_modifier_count = player_movement_modifiers.len();
             let did_broadcast = entity_batches.iter().any(|batch| {
@@ -369,7 +400,6 @@ pub(super) fn start_broadcast_thread(
                 || explosion_count > 0
                 || player_modifier_count > 0;
 
-            for _update in world_chunk_updates {}
             for explosion in explosion_events {
                 broadcast(
                     &state,
@@ -763,7 +793,7 @@ pub(super) fn handle_message(
                     world: {
                         let guard = state.lock().expect("server state lock poisoned");
                         WorldSummary {
-                            non_empty_chunks: guard.world.non_empty_chunk_count(),
+                            non_empty_chunks: guard.world_non_empty_chunk_count(),
                         }
                     },
                 },
@@ -795,7 +825,7 @@ pub(super) fn handle_message(
         }
         ClientMessage::SetVoxel { position, material } => {
             let requested_voxel = VoxelType(material);
-            let _maybe_update = {
+            let _changed_chunk = {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 apply_authoritative_voxel_edit(&mut guard, position, requested_voxel)
             };

@@ -1,5 +1,5 @@
 use crate::shared::protocol::{EntityClass, EntityKind, EntitySnapshot, EntityTransform};
-use crate::shared::voxel::{ChunkPos, VoxelType, CHUNK_VOLUME};
+use crate::shared::voxel::{VoxelType, CHUNK_VOLUME};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -97,11 +97,6 @@ pub(super) struct ClientEntityReplicationBatch {
     pub(super) spawned: Vec<EntitySnapshot>,
     pub(super) despawned: Vec<u64>,
     pub(super) transforms: Vec<EntityTransform>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct QueuedWorldChunkUpdate {
-    pub(super) changed_chunks: Vec<ChunkPos>,
 }
 
 #[derive(Clone, Debug)]

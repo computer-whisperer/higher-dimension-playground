@@ -30,7 +30,7 @@ use self::types::{
     ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityLifecycle, EntityRecord,
     EntityRecordSummary, LiveReplicationFrame, MobArchetype, MobNavCell, MobNavPathResult,
     MobNavigationState, MobState, PersistedMobEntry, PlayerState, QueuedExplosionEvent,
-    QueuedPlayerMovementModifier, QueuedWorldChunkUpdate, SpawnableEntitySpec,
+    QueuedPlayerMovementModifier, SpawnableEntitySpec,
     SPAWNABLE_ENTITY_SPECS,
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
@@ -353,19 +353,13 @@ fn initialize_state(
         eprintln!("mob nav simple steering enabled (R4D_MOB_NAV_SIMPLE_STEER=1)");
     }
 
-    let state = Arc::new(Mutex::new(ServerState {
+    let state = Arc::new(Mutex::new(ServerState::new(
+        initial_world,
         next_object_id,
-        entity_store: EntityStore::new(),
-        entity_records: HashMap::new(),
-        world: initial_world,
-        players: HashMap::new(),
-        mobs: HashMap::new(),
         mob_nav_debug,
         mob_nav_simple_steer,
-        clients: HashMap::new(),
-        client_visible_entities: HashMap::new(),
-        cpu_profile: ServerCpuProfile::new(start),
-    }));
+        start,
+    )));
 
     let entity_interest_radius_chunks = config.procgen_far_chunk_radius.max(1)
         * STREAM_FAR_LOD_SCALE
@@ -422,7 +416,7 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
     let (state, start) = initialize_state(config, shutdown)?;
     let runtime_world_seed = {
         let guard = state.lock().expect("server state lock poisoned");
-        guard.world.world_seed()
+        guard.world_seed()
     };
 
     let listener = TcpListener::bind(&config.bind)?;

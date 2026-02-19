@@ -1,10 +1,12 @@
 use super::*;
+use crate::shared::region_tree::RegionTreeCore;
+use crate::shared::voxel::CHUNK_VOLUME;
 
 pub(super) struct ServerState {
     pub(super) next_object_id: u64,
     pub(super) entity_store: EntityStore,
     pub(super) entity_records: HashMap<u64, EntityRecord>,
-    pub(super) world: ServerWorldOverlay,
+    world: ServerWorldOverlay,
     pub(super) players: HashMap<u64, PlayerState>,
     pub(super) mobs: HashMap<u64, MobState>,
     pub(super) mob_nav_debug: bool,
@@ -12,6 +14,68 @@ pub(super) struct ServerState {
     pub(super) clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
     pub(super) client_visible_entities: HashMap<u64, HashSet<u64>>,
     pub(super) cpu_profile: ServerCpuProfile,
+}
+
+impl ServerState {
+    pub(super) fn new(
+        world: ServerWorldOverlay,
+        next_object_id: u64,
+        mob_nav_debug: bool,
+        mob_nav_simple_steer: bool,
+        start: Instant,
+    ) -> Self {
+        Self {
+            next_object_id,
+            entity_store: EntityStore::new(),
+            entity_records: HashMap::new(),
+            world,
+            players: HashMap::new(),
+            mobs: HashMap::new(),
+            mob_nav_debug,
+            mob_nav_simple_steer,
+            clients: HashMap::new(),
+            client_visible_entities: HashMap::new(),
+            cpu_profile: ServerCpuProfile::new(start),
+        }
+    }
+
+    pub(super) fn query_world_subtree(&self, bounds: Aabb4i) -> Arc<RegionTreeCore> {
+        self.world
+            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
+    }
+
+    pub(super) fn world_seed(&self) -> u64 {
+        self.world.world_seed()
+    }
+
+    pub(super) fn world_non_empty_chunk_count(&self) -> usize {
+        self.world.non_empty_chunk_count()
+    }
+
+    pub(super) fn world_chunk_at(&self, chunk_pos: ChunkPos) -> Option<[VoxelType; CHUNK_VOLUME]> {
+        self.world.chunk_at(chunk_pos)
+    }
+
+    pub(super) fn world_effective_chunk(
+        &self,
+        chunk_pos: ChunkPos,
+        preserve_explicit_empty_chunk: bool,
+    ) -> Option<[VoxelType; CHUNK_VOLUME]> {
+        self.world
+            .effective_chunk(chunk_pos, preserve_explicit_empty_chunk)
+    }
+
+    pub(super) fn apply_world_voxel_edit(
+        &mut self,
+        position: [i32; 4],
+        material: VoxelType,
+    ) -> Option<ChunkPos> {
+        self.world.apply_voxel_edit(position, material)
+    }
+
+    pub(super) fn world_take_dirty_chunks(&mut self) -> Vec<ChunkPos> {
+        self.world.take_dirty_chunk_positions()
+    }
 }
 
 pub(super) type SharedState = Arc<Mutex<ServerState>>;

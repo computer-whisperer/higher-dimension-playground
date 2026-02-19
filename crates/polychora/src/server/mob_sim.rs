@@ -27,7 +27,7 @@ fn sample_effective_voxel_for_collision(
         };
     }
 
-    if let Some(chunk_data) = state.world.chunk_at(chunk_pos) {
+    if let Some(chunk_data) = state.world_chunk_at(chunk_pos) {
         if chunk_data.iter().all(|voxel| voxel.is_air()) {
             cache.insert(chunk_pos, CollisionChunkCacheEntry::ExplicitEmpty);
             return VoxelType::AIR;
@@ -37,7 +37,7 @@ fn sample_effective_voxel_for_collision(
         return voxel;
     }
 
-    let effective_chunk = state.world.effective_chunk(chunk_pos, false);
+    let effective_chunk = state.world_effective_chunk(chunk_pos, false);
     let voxel = effective_chunk
         .as_ref()
         .map(|chunk| chunk[voxel_index])
@@ -956,7 +956,6 @@ fn simulate_mobs(
     state: &mut ServerState,
     now_ms: u64,
 ) -> (
-    Vec<QueuedWorldChunkUpdate>,
     Vec<QueuedExplosionEvent>,
     Vec<QueuedPlayerMovementModifier>,
 ) {
@@ -1131,17 +1130,14 @@ fn simulate_mobs(
         let _ = state.entity_store.despawn(entity_id);
     }
 
-    let mut queued_voxel_sets = Vec::new();
     let mut queued_explosions = Vec::new();
     let mut queued_player_modifiers = Vec::new();
     for (entity_id, center) in detonations {
         if !state.mobs.contains_key(&entity_id) {
             continue;
         }
-        let (mut voxel_sets, explosion) =
+        let (changed_chunk_count, explosion) =
             apply_creeper_explosion(state, entity_id, center, CREEPER_EXPLOSION_RADIUS_VOXELS);
-        let voxel_update_count = voxel_sets.len();
-        queued_voxel_sets.append(&mut voxel_sets);
         queued_explosions.push(explosion);
         let (_persistent_motion, mut player_modifiers) = apply_explosion_impulse(
             state,
@@ -1152,10 +1148,10 @@ fn simulate_mobs(
             now_ms,
         );
         eprintln!(
-            "[impulse-debug][server] creeper_explosion source_entity={} center={:?} voxel_updates={} player_modifiers={} persistent_motion={}",
+            "[impulse-debug][server] creeper_explosion source_entity={} center={:?} changed_chunks={} player_modifiers={} persistent_motion={}",
             entity_id,
             center,
-            voxel_update_count,
+            changed_chunk_count,
             player_modifiers.len(),
             _persistent_motion
         );
@@ -1181,11 +1177,7 @@ fn simulate_mobs(
         let _ = state.entity_store.despawn(entity_id);
     }
 
-    (
-        queued_voxel_sets,
-        queued_explosions,
-        queued_player_modifiers,
-    )
+    (queued_explosions, queued_player_modifiers)
 }
 
 pub(super) fn tick_entity_simulation_window(
@@ -1194,11 +1186,9 @@ pub(super) fn tick_entity_simulation_window(
     next_sim_ms: &mut u64,
     sim_step_ms: u64,
 ) -> (
-    Vec<QueuedWorldChunkUpdate>,
     Vec<QueuedExplosionEvent>,
     Vec<QueuedPlayerMovementModifier>,
 ) {
-    let mut queued_voxel_sets = Vec::new();
     let mut queued_explosions = Vec::new();
     let mut queued_player_modifiers = Vec::new();
     let mut sim_steps = 0usize;
@@ -1215,9 +1205,8 @@ pub(super) fn tick_entity_simulation_window(
                 })
                 .unwrap_or(false)
         });
-        let (mut step_voxel_sets, mut step_explosions, mut step_player_modifiers) =
+        let (mut step_explosions, mut step_player_modifiers) =
             simulate_mobs(state, *next_sim_ms);
-        queued_voxel_sets.append(&mut step_voxel_sets);
         queued_explosions.append(&mut step_explosions);
         queued_player_modifiers.append(&mut step_player_modifiers);
         *next_sim_ms = (*next_sim_ms).saturating_add(sim_step_ms);
@@ -1226,9 +1215,5 @@ pub(super) fn tick_entity_simulation_window(
     if sim_steps == ENTITY_SIM_STEP_MAX_PER_BROADCAST && *next_sim_ms <= now_ms {
         *next_sim_ms = now_ms.saturating_add(sim_step_ms);
     }
-    (
-        queued_voxel_sets,
-        queued_explosions,
-        queued_player_modifiers,
-    )
+    (queued_explosions, queued_player_modifiers)
 }

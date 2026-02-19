@@ -50,6 +50,7 @@ use audio::{AudioEngine, SoundEffect};
 use camera::{Camera4D, PLAYER_HEIGHT};
 use input::{ControlScheme, InputState, RotationPair};
 use multiplayer::{ClientMessage as MultiplayerClientMessage, MultiplayerClient, MultiplayerEvent};
+use polychora::shared::spatial::Aabb4i;
 use scene::{Scene, ScenePreset};
 
 const MOUSE_SENSITIVITY: f32 = 0.002;
@@ -977,6 +978,7 @@ fn main() {
         multiplayer,
         multiplayer_self_id: None,
         multiplayer_last_world_request_center_chunk: None,
+        multiplayer_last_world_request_bounds: None,
         multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree::new(),
         multiplayer_stream_tree_diag_enabled: env_flag_enabled(CLIENT_REGION_TREE_BOUNDS_DIAG_ENV),
         multiplayer_stream_tree_diag_max_nodes: env_usize_or(
@@ -1278,6 +1280,7 @@ struct App {
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
     multiplayer_last_world_request_center_chunk: Option<[i32; 4]>,
+    multiplayer_last_world_request_bounds: Option<Aabb4i>,
     multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree,
     multiplayer_stream_tree_diag_enabled: bool,
     multiplayer_stream_tree_diag_max_nodes: usize,

@@ -146,6 +146,7 @@ impl App {
         self.multiplayer = None;
         self.multiplayer_self_id = None;
         self.multiplayer_last_world_request_center_chunk = None;
+        self.multiplayer_last_world_request_bounds = None;
         self.multiplayer_stream_tree_diag = polychora::shared::region_tree::RegionChunkTree::new();
         self.pending_player_movement_modifiers.clear();
         self.player_modifier_external_velocity = [0.0; 4];
