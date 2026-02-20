@@ -1,70 +1,56 @@
 use bytemuck::{Pod, Zeroable};
-use std::collections::HashSet;
-use vulkano::buffer::Subbuffer;
 
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 #[repr(C)]
 pub struct GpuVoxelChunkHeader {
-    pub chunk_coord: [i32; 4],
-    pub lod_level: u32,
-    pub _lod_padding: [u32; 3],
     pub occupancy_word_offset: u32,
     pub material_word_offset: u32,
     pub flags: u32,
     pub macro_word_offset: u32,
     pub solid_local_min: [i32; 4],
     pub solid_local_max: [i32; 4],
+    pub _padding: [u32; 2],
 }
 
 impl GpuVoxelChunkHeader {
-    pub const FLAG_EMPTY: u32 = 1 << 0;
-    pub const FLAG_FULL: u32 = 1 << 1;
+    pub const FLAG_FULL: u32 = 1 << 0;
 }
 
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 #[repr(C)]
-pub struct GpuVoxelYSliceBounds {
-    pub chunk_y: i32,
-    pub lod_level: u32,
-    pub min_chunk_x: i32,
-    pub max_chunk_x: i32,
-    pub min_chunk_z: i32,
-    pub max_chunk_z: i32,
-    pub min_chunk_w: i32,
-    pub max_chunk_w: i32,
-    pub lookup_entry_offset: u32,
-    pub lookup_entry_count: u32,
-    pub lookup_dim_x: u32,
-    pub lookup_dim_z: u32,
-    pub lookup_dim_w: u32,
+pub struct GpuVoxelLeafHeader {
+    pub min_chunk_coord: [i32; 4],
+    pub max_chunk_coord: [i32; 4],
+    pub leaf_kind: u32,
+    pub uniform_material: u32,
+    pub chunk_entry_offset: u32,
     pub _padding: u32,
 }
 
 pub struct VoxelFrameInput<'a> {
     pub metadata_generation: u64,
     pub chunk_headers: &'a [GpuVoxelChunkHeader],
-    pub payload_update_slots: &'a [u32],
     pub occupancy_words: &'a [u32],
     pub material_words: &'a [u32],
     pub macro_words: &'a [u32],
-    pub visible_chunk_indices: &'a [u32],
-    pub y_slice_bounds: &'a [GpuVoxelYSliceBounds],
-    pub y_slice_lookup_entries: &'a [u32],
+    pub region_bvh_nodes: &'a [GpuVoxelChunkBvhNode],
+    pub leaf_headers: &'a [GpuVoxelLeafHeader],
+    pub leaf_chunk_entries: &'a [u32],
 }
 
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
 #[repr(C)]
 pub(super) struct GpuVoxelFrameMeta {
     pub(super) chunk_count: u32,
-    pub(super) visible_chunk_count: u32,
+    pub(super) leaf_count: u32,
     pub(super) occupancy_word_count: u32,
     pub(super) material_word_count: u32,
     pub(super) macro_word_count: u32,
     pub(super) max_trace_steps: u32,
     pub(super) max_trace_distance: f32,
-    pub(super) chunk_lookup_capacity: u32,
-    pub(super) y_slice_count: u32,
-    pub(super) y_slice_lookup_entry_count: u32,
+    pub(super) region_bvh_node_count: u32,
+    pub(super) _reserved0: u32,
+    pub(super) leaf_chunk_entry_count: u32,
     pub(super) stage_b_mode: u32,
     pub(super) stage_b_slice_layer: u32,
     pub(super) stage_b_thick_half_width: u32,
@@ -85,27 +71,29 @@ pub(super) struct GpuVoxelFrameMeta {
 
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 #[repr(C)]
-pub(super) struct GpuVoxelChunkLookupEntry {
-    pub(super) chunk_coord: [i32; 4],
-    pub(super) chunk_index: u32,
-    pub(super) lod_level: u32,
-    pub(super) _padding: [u32; 2],
+pub struct GpuVoxelChunkBvhNode {
+    pub min_chunk_coord: [i32; 4],
+    pub max_chunk_coord: [i32; 4],
+    pub left_child: u32,
+    pub right_child: u32,
+    pub leaf_index: u32,
+    pub flags: u32,
 }
 
-impl GpuVoxelChunkLookupEntry {
-    pub(super) const INVALID_INDEX: u32 = u32::MAX;
-
-    pub(super) fn empty() -> Self {
+impl GpuVoxelChunkBvhNode {
+    pub fn empty() -> Self {
         Self {
-            chunk_coord: [0; 4],
-            chunk_index: Self::INVALID_INDEX,
-            lod_level: 0,
-            _padding: [0; 2],
+            min_chunk_coord: [0; 4],
+            max_chunk_coord: [0; 4],
+            left_child: VTE_REGION_BVH_INVALID_NODE,
+            right_child: VTE_REGION_BVH_INVALID_NODE,
+            leaf_index: u32::MAX,
+            flags: 0,
         }
     }
 }
 
-impl Default for GpuVoxelChunkLookupEntry {
+impl Default for GpuVoxelChunkBvhNode {
     fn default() -> Self {
         Self::empty()
     }
@@ -187,20 +175,25 @@ pub(super) struct VteFirstMismatch {
     pub(super) last_chunk: [i32; 4],
 }
 
-pub const VTE_MAX_CHUNKS: usize = 12_288;
+pub const VTE_MAX_DENSE_CHUNKS: usize = 12_288;
 pub(super) const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
 pub(super) const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
 pub(super) const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
-pub(super) const VTE_MAX_Y_SLICES: usize = VTE_MAX_CHUNKS;
-pub(super) const VTE_MAX_Y_SLICE_LOOKUP_ENTRIES: usize = 131_072;
-pub(super) const VTE_CHUNK_LOOKUP_CAPACITY: usize = 32_768; // Must be power of two.
+pub const VTE_REGION_BVH_NODE_CAPACITY: usize = 32_768;
+pub const VTE_REGION_LEAF_CAPACITY: usize = 16_384;
+pub const VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY: usize = 262_144;
+pub const VTE_REGION_BVH_INVALID_NODE: u32 = u32::MAX;
+pub const VTE_REGION_BVH_NODE_FLAG_LEAF: u32 = 1 << 0;
+pub const VTE_LEAF_KIND_UNIFORM: u32 = 0;
+pub const VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY: u32 = 1;
+pub const VTE_LEAF_CHUNK_ENTRY_EMPTY: u32 = 0;
+pub const VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG: u32 = 1 << 31;
 pub(super) const VTE_DEBUG_FLAG_REFERENCE_COMPARE: u32 = 1 << 0;
 pub(super) const VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY: u32 = 1 << 1;
 pub(super) const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
-pub(super) const VTE_DEBUG_FLAG_YSLICE_LOOKUP_CACHE: u32 = 1 << 3;
-pub(super) const VTE_DEBUG_FLAG_LOD_TINT: u32 = 1 << 4;
-pub(super) const VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY: u32 = 1 << 5;
-pub(super) const VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE: u32 = 1 << 6;
+pub(super) const VTE_DEBUG_FLAG_LOD_TINT: u32 = 1 << 3;
+pub(super) const VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY: u32 = 1 << 4;
+pub(super) const VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE: u32 = 1 << 5;
 pub(super) const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
 pub(super) const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
 pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 40;
@@ -286,116 +279,4 @@ pub(super) fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
         ^ y.wrapping_mul(0xD816_3841)
         ^ z.wrapping_mul(0xCB1A_B31F)
         ^ w.wrapping_mul(0x1656_67B1)
-}
-
-#[inline]
-pub(super) fn vte_hash_chunk_coord_with_lod(chunk_coord: [i32; 4], lod_level: u32) -> u32 {
-    vte_hash_chunk_coord(chunk_coord) ^ lod_level.wrapping_mul(0x9E37_79B9)
-}
-
-pub(super) fn stage_voxel_payload_updates(
-    input: &VoxelFrameInput<'_>,
-    occupancy_cache: &mut [u32],
-    material_cache: &mut [u32],
-    macro_cache: &mut [u32],
-    touched_slots: &mut Vec<u32>,
-) -> usize {
-    let max_updates = input
-        .payload_update_slots
-        .len()
-        .min(input.occupancy_words.len() / VTE_OCCUPANCY_WORDS_PER_CHUNK)
-        .min(input.material_words.len() / VTE_MATERIAL_WORDS_PER_CHUNK)
-        .min(input.macro_words.len() / VTE_MACRO_WORDS_PER_CHUNK);
-
-    touched_slots.clear();
-    let mut touched_slot_set = HashSet::new();
-
-    for update_idx in 0..max_updates {
-        let slot = input.payload_update_slots[update_idx] as usize;
-        if slot >= VTE_MAX_CHUNKS {
-            continue;
-        }
-
-        let src_occ_base = update_idx * VTE_OCCUPANCY_WORDS_PER_CHUNK;
-        let src_mat_base = update_idx * VTE_MATERIAL_WORDS_PER_CHUNK;
-        let src_macro_base = update_idx * VTE_MACRO_WORDS_PER_CHUNK;
-        let dst_occ_base = slot * VTE_OCCUPANCY_WORDS_PER_CHUNK;
-        let dst_mat_base = slot * VTE_MATERIAL_WORDS_PER_CHUNK;
-        let dst_macro_base = slot * VTE_MACRO_WORDS_PER_CHUNK;
-
-        occupancy_cache[dst_occ_base..dst_occ_base + VTE_OCCUPANCY_WORDS_PER_CHUNK]
-            .copy_from_slice(
-                &input.occupancy_words[src_occ_base..src_occ_base + VTE_OCCUPANCY_WORDS_PER_CHUNK],
-            );
-        material_cache[dst_mat_base..dst_mat_base + VTE_MATERIAL_WORDS_PER_CHUNK].copy_from_slice(
-            &input.material_words[src_mat_base..src_mat_base + VTE_MATERIAL_WORDS_PER_CHUNK],
-        );
-        macro_cache[dst_macro_base..dst_macro_base + VTE_MACRO_WORDS_PER_CHUNK].copy_from_slice(
-            &input.macro_words[src_macro_base..src_macro_base + VTE_MACRO_WORDS_PER_CHUNK],
-        );
-
-        let slot_u32 = slot as u32;
-        if touched_slot_set.insert(slot_u32) {
-            touched_slots.push(slot_u32);
-        }
-    }
-
-    max_updates
-}
-
-pub(super) fn apply_pending_voxel_payload_updates_for_frame(
-    pending_slots: &mut Vec<u32>,
-    pending_slot_set: &mut HashSet<u32>,
-    voxel_occupancy_words_buffer: &Subbuffer<[u32]>,
-    voxel_material_words_buffer: &Subbuffer<[u32]>,
-    voxel_macro_words_buffer: &Subbuffer<[u32]>,
-    occupancy_cache: &[u32],
-    material_cache: &[u32],
-    macro_cache: &[u32],
-) -> usize {
-    let mut slots = std::mem::take(pending_slots);
-    pending_slot_set.clear();
-    if slots.is_empty() {
-        return 0;
-    }
-    slots.sort_unstable();
-
-    {
-        let mut writer = voxel_occupancy_words_buffer.write().unwrap();
-        for &slot_u32 in &slots {
-            let slot = slot_u32 as usize;
-            if slot >= VTE_MAX_CHUNKS {
-                continue;
-            }
-            let base = slot * VTE_OCCUPANCY_WORDS_PER_CHUNK;
-            writer[base..base + VTE_OCCUPANCY_WORDS_PER_CHUNK]
-                .copy_from_slice(&occupancy_cache[base..base + VTE_OCCUPANCY_WORDS_PER_CHUNK]);
-        }
-    }
-    {
-        let mut writer = voxel_material_words_buffer.write().unwrap();
-        for &slot_u32 in &slots {
-            let slot = slot_u32 as usize;
-            if slot >= VTE_MAX_CHUNKS {
-                continue;
-            }
-            let base = slot * VTE_MATERIAL_WORDS_PER_CHUNK;
-            writer[base..base + VTE_MATERIAL_WORDS_PER_CHUNK]
-                .copy_from_slice(&material_cache[base..base + VTE_MATERIAL_WORDS_PER_CHUNK]);
-        }
-    }
-    {
-        let mut writer = voxel_macro_words_buffer.write().unwrap();
-        for &slot_u32 in &slots {
-            let slot = slot_u32 as usize;
-            if slot >= VTE_MAX_CHUNKS {
-                continue;
-            }
-            let base = slot * VTE_MACRO_WORDS_PER_CHUNK;
-            writer[base..base + VTE_MACRO_WORDS_PER_CHUNK]
-                .copy_from_slice(&macro_cache[base..base + VTE_MACRO_WORDS_PER_CHUNK]);
-        }
-    }
-
-    slots.len()
 }

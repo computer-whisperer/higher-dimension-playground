@@ -558,8 +558,6 @@ impl RenderContext {
                 query_pool,
                 fence: None,
                 vte_compare_enabled: false,
-                pending_voxel_payload_slots: Vec::new(),
-                pending_voxel_payload_slot_set: HashSet::new(),
                 last_voxel_metadata_generation: None,
                 vte_entity_diag_copy_scheduled: false,
                 vte_entity_diag_non_voxel_tet_count: 0,
@@ -635,21 +633,6 @@ impl RenderContext {
             vte_entity_diag_prev_used_non_voxel: None,
             vte_entity_diag_prev_tets_non_voxel: None,
             drop_next_profile_sample: false,
-            voxel_payload_cache_occupancy_words: vec![
-                0u32;
-                vte::VTE_MAX_CHUNKS
-                    * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK
-            ],
-            voxel_payload_cache_material_words: vec![
-                0u32;
-                vte::VTE_MAX_CHUNKS
-                    * vte::VTE_MATERIAL_WORDS_PER_CHUNK
-            ],
-            voxel_payload_cache_macro_words: vec![
-                0u32;
-                vte::VTE_MAX_CHUNKS
-                    * vte::VTE_MACRO_WORDS_PER_CHUNK
-            ],
         }
     }
 }

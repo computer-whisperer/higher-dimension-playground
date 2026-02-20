@@ -3,7 +3,9 @@ use crate::voxel::cull::{self, SurfaceData};
 use crate::voxel::world::BaseWorldKind;
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
-    GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VTE_MAX_CHUNKS,
+    GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameInput,
+    VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_NODE_CAPACITY, VTE_REGION_LEAF_CAPACITY,
+    VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
 };
 use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 use polychora::shared::region_tree::{
@@ -14,7 +16,7 @@ use polychora::shared::region_tree::{
 use polychora::shared::render_tree::{self, RenderTreeCore};
 use polychora::shared::spatial::Aabb4i;
 use polychora::shared::voxel::world_to_chunk;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 mod voxel_runtime;
@@ -27,8 +29,6 @@ const MACRO_CELLS_PER_AXIS: usize = CHUNK_SIZE / 2; // 2x2x2x2 macro cells
 const MACRO_CELLS_PER_CHUNK: usize =
     MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS;
 const MACRO_WORDS_PER_CHUNK: usize = MACRO_CELLS_PER_CHUNK / 32;
-const Y_SLICE_LOOKUP_MAX_ENTRIES: usize = 131_072;
-const Y_SLICE_LOOKUP_MAX_ENTRIES_PER_SLICE: usize = 65_536;
 const EDIT_RAY_EPSILON: f32 = 1e-4;
 const EDIT_RAY_MAX_STEPS: usize = 4096;
 const COLLISION_PUSHUP_STEP: f32 = 0.05;
@@ -36,7 +36,6 @@ const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
 const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
-const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
 const FLAT_PRESET_FLOOR_MATERIAL: VoxelType = VoxelType(11);
 const SHOWCASE_MATERIALS: [u8; 37] = [
     15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50, 55,
@@ -100,29 +99,6 @@ fn dense_chunk_from_payload(payload: &ChunkPayload) -> Result<DenseChunk, String
     Ok(chunk)
 }
 
-struct CachedChunkPayload {
-    hash: u64,
-    solid_count: u32,
-    is_full: bool,
-    ref_count: u32,
-    gpu_slot: u32,
-    occupancy_words: Box<[u32; OCCUPANCY_WORDS_PER_CHUNK]>,
-    material_words: Box<[u32; MATERIAL_WORDS_PER_CHUNK]>,
-    macro_words: Box<[u32; MACRO_WORDS_PER_CHUNK]>,
-    solid_local_min: [i32; 4],
-    solid_local_max: [i32; 4],
-}
-
-#[derive(Copy, Clone)]
-struct ChunkPayloadCacheEntry {
-    payload_id: u32,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-struct RuntimeChunkKey {
-    chunk_pos: ChunkPos,
-}
-
 #[derive(Copy, Clone, Debug)]
 pub enum ScenePreset {
     Empty,
@@ -143,13 +119,12 @@ impl ScenePreset {
 pub struct VoxelFrameData {
     pub metadata_generation: u64,
     pub chunk_headers: Vec<GpuVoxelChunkHeader>,
-    pub payload_update_slots: Vec<u32>,
     pub occupancy_words: Vec<u32>,
     pub material_words: Vec<u32>,
     pub macro_words: Vec<u32>,
-    pub visible_chunk_indices: Vec<u32>,
-    pub y_slice_bounds: Vec<GpuVoxelYSliceBounds>,
-    pub y_slice_lookup_entries: Vec<u32>,
+    pub region_bvh_nodes: Vec<GpuVoxelChunkBvhNode>,
+    pub leaf_headers: Vec<GpuVoxelLeafHeader>,
+    pub leaf_chunk_entries: Vec<u32>,
 }
 
 impl VoxelFrameData {
@@ -157,19 +132,19 @@ impl VoxelFrameData {
         VoxelFrameInput {
             metadata_generation: self.metadata_generation,
             chunk_headers: &self.chunk_headers,
-            payload_update_slots: &self.payload_update_slots,
             occupancy_words: &self.occupancy_words,
             material_words: &self.material_words,
             macro_words: &self.macro_words,
-            visible_chunk_indices: &self.visible_chunk_indices,
-            y_slice_bounds: &self.y_slice_bounds,
-            y_slice_lookup_entries: &self.y_slice_lookup_entries,
+            region_bvh_nodes: &self.region_bvh_nodes,
+            leaf_headers: &self.leaf_headers,
+            leaf_chunk_entries: &self.leaf_chunk_entries,
         }
     }
 }
 
 pub struct Scene {
     world_tree: RegionChunkTree,
+    world_tree_revision: u64,
     world_chunks: HashMap<ChunkPos, DenseChunk>,
     world_base_kind: BaseWorldKind,
     world_flat_floor_chunk: DenseChunk,
@@ -179,21 +154,12 @@ pub struct Scene {
     surface: SurfaceData,
     culled_instances: Vec<common::ModelInstance>,
     cull_log_counter: u64,
-    voxel_chunk_payload_cache: HashMap<RuntimeChunkKey, ChunkPayloadCacheEntry>,
-    voxel_chunk_payloads: Vec<Option<CachedChunkPayload>>,
-    voxel_chunk_payload_free_ids: Vec<u32>,
-    voxel_chunk_payload_hash_buckets: HashMap<u64, Vec<u32>>,
-    voxel_payload_slot_to_payload: Vec<Option<u32>>,
-    voxel_payload_free_slots: Vec<u32>,
-    voxel_pending_payload_uploads: Vec<u32>,
-    voxel_pending_payload_upload_set: HashSet<u32>,
-    voxel_active_chunks: Vec<RuntimeChunkKey>,
-    voxel_active_chunk_indices: HashMap<RuntimeChunkKey, usize>,
-    voxel_world_revision: u64,
     voxel_visibility_generation: u64,
     voxel_cached_visibility_camera_chunk: Option<[i32; 12]>,
-    voxel_cached_visibility_world_revision: u64,
-    voxel_payload_slot_overflow_logged: bool,
+    voxel_cached_visibility_world_tree_revision: u64,
+    render_bvh_cache_bounds: Option<Aabb4i>,
+    render_bvh_cache_world_tree_revision: u64,
+    render_bvh_cache: Option<render_tree::RenderBvh>,
     voxel_frame_data: VoxelFrameData,
 }
 
@@ -485,6 +451,7 @@ impl Scene {
         };
         let changed = self.world_tree.set_chunk(key, payload);
         if changed {
+            self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
             self.world_dirty = true;
             let _ = self.world_queue_chunk_update(pos);
         }
@@ -622,14 +589,27 @@ impl Scene {
         render_tree::from_region_core(&composed_core)
     }
 
-    fn collect_render_non_empty_chunks_in_bounds(&self, bounds: Aabb4i) -> Vec<ChunkPos> {
+    fn ensure_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
+        if !bounds.is_valid() {
+            self.render_bvh_cache_bounds = None;
+            self.render_bvh_cache_world_tree_revision = 0;
+            self.render_bvh_cache = None;
+            return;
+        }
+
+        let cache_valid = self.render_bvh_cache_bounds == Some(bounds)
+            && self.render_bvh_cache_world_tree_revision == self.world_tree_revision;
+        if cache_valid {
+            return;
+        }
+
         let render_core = self.build_render_tree_core_in_bounds(bounds);
-        render_tree::collect_non_empty_chunk_keys_in_bounds(&render_core, bounds)
-            .into_iter()
-            .map(chunk_pos_from_chunk_key)
-            .collect()
+        self.render_bvh_cache = Some(render_tree::build_bvh_in_bounds(&render_core, bounds));
+        self.render_bvh_cache_bounds = Some(bounds);
+        self.render_bvh_cache_world_tree_revision = self.world_tree_revision;
     }
 
+    #[cfg(test)]
     fn world_drain_pending_chunk_updates(&mut self) -> Vec<ChunkPos> {
         self.world_pending_chunk_update_set.clear();
         std::mem::take(&mut self.world_pending_chunk_updates)
@@ -766,6 +746,7 @@ impl Scene {
             .world_tree
             .splice_non_empty_core_in_bounds(bounds, &desired_core);
         let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
+        self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
 
         let mut invalidated_cached_chunks = 0usize;
         let mut queued_updates = 0usize;
@@ -881,6 +862,7 @@ impl Scene {
         let surface = cull::extract_surfaces(&world_tree, world_base_kind, &world_flat_floor_chunk);
         let scene = Self {
             world_tree,
+            world_tree_revision: 1,
             world_chunks,
             world_base_kind,
             world_flat_floor_chunk,
@@ -890,31 +872,21 @@ impl Scene {
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,
-            voxel_chunk_payload_cache: HashMap::new(),
-            voxel_chunk_payloads: Vec::new(),
-            voxel_chunk_payload_free_ids: Vec::new(),
-            voxel_chunk_payload_hash_buckets: HashMap::new(),
-            voxel_payload_slot_to_payload: Vec::new(),
-            voxel_payload_free_slots: Vec::new(),
-            voxel_pending_payload_uploads: Vec::new(),
-            voxel_pending_payload_upload_set: HashSet::new(),
-            voxel_active_chunks: Vec::new(),
-            voxel_active_chunk_indices: HashMap::new(),
-            voxel_world_revision: 0,
             voxel_visibility_generation: 0,
             voxel_cached_visibility_camera_chunk: None,
-            voxel_cached_visibility_world_revision: 0,
-            voxel_payload_slot_overflow_logged: false,
+            voxel_cached_visibility_world_tree_revision: 0,
+            render_bvh_cache_bounds: None,
+            render_bvh_cache_world_tree_revision: 0,
+            render_bvh_cache: None,
             voxel_frame_data: VoxelFrameData {
                 metadata_generation: 0,
                 chunk_headers: Vec::new(),
-                payload_update_slots: Vec::new(),
                 occupancy_words: Vec::new(),
                 material_words: Vec::new(),
                 macro_words: Vec::new(),
-                visible_chunk_indices: Vec::new(),
-                y_slice_bounds: Vec::new(),
-                y_slice_lookup_entries: Vec::new(),
+                region_bvh_nodes: Vec::new(),
+                leaf_headers: Vec::new(),
+                leaf_chunk_entries: Vec::new(),
             },
         };
         let total_voxels = Self::surface_voxel_count(&scene.surface);

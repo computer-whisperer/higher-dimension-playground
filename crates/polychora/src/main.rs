@@ -266,16 +266,16 @@ const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 5] = [
 
 const VTE_SWEEP_PROFILES: [VteRuntimeProfile; 2] = [
     VteRuntimeProfile {
-        label: "A baseline",
+        label: "A bvh",
         y_slice_lookup_cache: true,
     },
     VteRuntimeProfile {
-        label: "B no-lookup-cache",
+        label: "B bvh",
         y_slice_lookup_cache: false,
     },
 ];
 
-const VTE_SWEEP_MODE_LABEL: &str = "lookup-cache";
+const VTE_SWEEP_MODE_LABEL: &str = "bvh";
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum EditHighlightModeArg {
@@ -1054,7 +1054,9 @@ fn main() {
         );
     }
     if !app.vte_y_slice_lookup_cache_enabled {
-        eprintln!("VTE y-slice lookup cache disabled via --vte-y-slice-lookup-cache=false");
+        eprintln!(
+            "Ignoring deprecated --vte-y-slice-lookup-cache=false; chunk lookup now always uses BVH."
+        );
     }
     if app.vte_integral_sky_emissive_enabled {
         eprintln!(

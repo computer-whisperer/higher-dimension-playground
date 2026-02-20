@@ -458,11 +458,10 @@ pub(super) struct LiveBuffers {
     pub(super) voxel_chunk_headers_buffer: Subbuffer<[GpuVoxelChunkHeader]>,
     pub(super) voxel_occupancy_words_buffer: Subbuffer<[u32]>,
     pub(super) voxel_material_words_buffer: Subbuffer<[u32]>,
+    pub(super) voxel_leaf_headers_buffer: Subbuffer<[vte::GpuVoxelLeafHeader]>,
+    pub(super) voxel_region_bvh_nodes_buffer: Subbuffer<[vte::GpuVoxelChunkBvhNode]>,
+    pub(super) voxel_leaf_chunk_entries_buffer: Subbuffer<[u32]>,
     pub(super) voxel_macro_words_buffer: Subbuffer<[u32]>,
-    pub(super) voxel_visible_chunk_indices_buffer: Subbuffer<[u32]>,
-    pub(super) voxel_chunk_lookup_buffer: Subbuffer<[vte::GpuVoxelChunkLookupEntry]>,
-    pub(super) voxel_y_slice_bounds_buffer: Subbuffer<[GpuVoxelYSliceBounds]>,
-    pub(super) voxel_y_slice_lookup_entries_buffer: Subbuffer<[u32]>,
     pub(super) vte_compare_stats_buffer: Subbuffer<[u32]>,
     pub(super) vte_first_mismatch_buffer: Subbuffer<[u32]>,
     pub(super) descriptor_set: Arc<DescriptorSet>,
@@ -530,7 +529,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![GpuVoxelChunkHeader::zeroed(); vte::VTE_MAX_CHUNKS],
+            vec![GpuVoxelChunkHeader::zeroed(); vte::VTE_MAX_DENSE_CHUNKS],
         )
         .unwrap();
 
@@ -545,7 +544,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; vte::VTE_MAX_CHUNKS * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK],
+            vec![0u32; vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK],
         )
         .unwrap();
 
@@ -560,7 +559,52 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; vte::VTE_MAX_CHUNKS * vte::VTE_MATERIAL_WORDS_PER_CHUNK],
+            vec![0u32; vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_MATERIAL_WORDS_PER_CHUNK],
+        )
+        .unwrap();
+
+        let voxel_leaf_headers_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![vte::GpuVoxelLeafHeader::zeroed(); vte::VTE_REGION_LEAF_CAPACITY],
+        )
+        .unwrap();
+
+        let voxel_region_bvh_nodes_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![vte::GpuVoxelChunkBvhNode::empty(); vte::VTE_REGION_BVH_NODE_CAPACITY],
+        )
+        .unwrap();
+
+        let voxel_leaf_chunk_entries_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; vte::VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY],
         )
         .unwrap();
 
@@ -575,67 +619,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; vte::VTE_MAX_CHUNKS * vte::VTE_MACRO_WORDS_PER_CHUNK],
-        )
-        .unwrap();
-
-        let voxel_visible_chunk_indices_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![0u32; vte::VTE_MAX_CHUNKS],
-        )
-        .unwrap();
-
-        let voxel_chunk_lookup_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![vte::GpuVoxelChunkLookupEntry::empty(); vte::VTE_CHUNK_LOOKUP_CAPACITY],
-        )
-        .unwrap();
-
-        let voxel_y_slice_bounds_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![GpuVoxelYSliceBounds::zeroed(); vte::VTE_MAX_Y_SLICES],
-        )
-        .unwrap();
-
-        let voxel_y_slice_lookup_entries_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![0u32; vte::VTE_MAX_Y_SLICE_LOOKUP_ENTRIES],
+            vec![0u32; vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_MACRO_WORDS_PER_CHUNK],
         )
         .unwrap();
 
@@ -679,13 +663,12 @@ impl LiveBuffers {
                 WriteDescriptorSet::buffer(3, voxel_chunk_headers_buffer.clone()),
                 WriteDescriptorSet::buffer(4, voxel_occupancy_words_buffer.clone()),
                 WriteDescriptorSet::buffer(5, voxel_material_words_buffer.clone()),
-                WriteDescriptorSet::buffer(6, voxel_visible_chunk_indices_buffer.clone()),
-                WriteDescriptorSet::buffer(7, voxel_chunk_lookup_buffer.clone()),
-                WriteDescriptorSet::buffer(8, voxel_y_slice_bounds_buffer.clone()),
+                WriteDescriptorSet::buffer(6, voxel_leaf_headers_buffer.clone()),
+                WriteDescriptorSet::buffer(7, voxel_region_bvh_nodes_buffer.clone()),
+                WriteDescriptorSet::buffer(8, voxel_leaf_chunk_entries_buffer.clone()),
                 WriteDescriptorSet::buffer(9, vte_compare_stats_buffer.clone()),
                 WriteDescriptorSet::buffer(10, vte_first_mismatch_buffer.clone()),
                 WriteDescriptorSet::buffer(11, voxel_macro_words_buffer.clone()),
-                WriteDescriptorSet::buffer(12, voxel_y_slice_lookup_entries_buffer.clone()),
             ],
             [],
         )
@@ -697,11 +680,10 @@ impl LiveBuffers {
             voxel_chunk_headers_buffer,
             voxel_occupancy_words_buffer,
             voxel_material_words_buffer,
+            voxel_leaf_headers_buffer,
+            voxel_region_bvh_nodes_buffer,
+            voxel_leaf_chunk_entries_buffer,
             voxel_macro_words_buffer,
-            voxel_visible_chunk_indices_buffer,
-            voxel_chunk_lookup_buffer,
-            voxel_y_slice_bounds_buffer,
-            voxel_y_slice_lookup_entries_buffer,
             vte_compare_stats_buffer,
             vte_first_mismatch_buffer,
             descriptor_set,
@@ -724,7 +706,7 @@ impl LiveBuffers {
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             },
         );
-        for binding in 2..=12u32 {
+        for binding in 2..=11u32 {
             bindings.insert(
                 binding,
                 DescriptorSetLayoutBinding {
