@@ -1,4 +1,22 @@
 use super::*;
+use std::sync::OnceLock;
+
+const VTE_FORWARD_HALFSPACE_CULL_ENV: &str = "R4D_VTE_FORWARD_HALFSPACE_CULL";
+
+fn env_flag_enabled_or(name: &str, default_value: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
+        }
+        Err(_) => default_value,
+    }
+}
+
+fn voxel_forward_halfspace_cull_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled_or(VTE_FORWARD_HALFSPACE_CULL_ENV, true))
+}
 
 fn chunk_payload_hash(voxels: &[VoxelType; CHUNK_VOLUME], solid_count: u32) -> u64 {
     // FNV-1a over voxel material IDs + solid count.
@@ -331,9 +349,8 @@ impl Scene {
             cam_chunk[3] + chunk_radius,
         ];
 
-        let mut required_chunks = Vec::new();
-        self.world_gather_non_empty_chunks_in_bounds(min_chunk, max_chunk, &mut required_chunks);
-        let mut required_keys: Vec<RuntimeChunkKey> = required_chunks
+        let mut required_keys: Vec<RuntimeChunkKey> = self
+            .collect_render_non_empty_chunks_in_bounds(Aabb4i::new(min_chunk, max_chunk))
             .into_iter()
             .map(|chunk_pos| RuntimeChunkKey {
                 lod_level: VOXEL_LOD_LEVEL_NEAR,
@@ -456,6 +473,7 @@ impl Scene {
         let mut visible_chunk_indices = Vec::new();
         let mut y_slice_build: BTreeMap<(u8, i32), YSliceBuildData> = BTreeMap::new();
         let mut y_slice_lookup_entries = Vec::new();
+        let use_forward_halfspace_cull = voxel_forward_halfspace_cull_enabled();
 
         let trace_max_distance = max_trace_distance.max(1.0);
         let near_max_distance = near_lod_max_distance.clamp(1.0, trace_max_distance);
@@ -497,7 +515,7 @@ impl Scene {
                     + view_forward[1].abs()
                     + view_forward[2].abs()
                     + view_forward[3].abs());
-            if forward_center + forward_radius < 0.0 {
+            if use_forward_halfspace_cull && forward_center + forward_radius < 0.0 {
                 continue;
             }
 

@@ -5,12 +5,13 @@ use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkHeader, GpuVoxelYSliceBounds, VoxelFrameInput, VTE_MAX_CHUNKS,
 };
-use polychora::shared::chunk_payload::ChunkPayload;
+use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 use polychora::shared::region_tree::{
     chunk_key_from_chunk_pos, chunk_pos_from_chunk_key,
     collect_non_empty_chunks_from_core_in_bounds, slice_non_empty_region_core_in_bounds,
-    RegionChunkTree, RegionTreeCore,
+    RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
+use polychora::shared::render_tree::{self, RenderTreeCore};
 use polychora::shared::spatial::Aabb4i;
 use polychora::shared::voxel::world_to_chunk;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -559,57 +560,81 @@ impl Scene {
         let _ = self.world_set_chunk_override(cp, Some(chunk));
     }
 
-    fn world_gather_non_empty_chunks_in_bounds(
-        &self,
-        min_chunk: [i32; 4],
-        max_chunk: [i32; 4],
-        out: &mut Vec<ChunkPos>,
-    ) {
-        out.clear();
-        if min_chunk[0] > max_chunk[0]
-            || min_chunk[1] > max_chunk[1]
-            || min_chunk[2] > max_chunk[2]
-            || min_chunk[3] > max_chunk[3]
-        {
-            return;
+    fn base_floor_region_core_in_bounds(&self, bounds: Aabb4i) -> Option<RegionTreeCore> {
+        if !bounds.is_valid() {
+            return None;
         }
-
-        let bounds = Aabb4i::new(min_chunk, max_chunk);
-        out.extend(
-            self.world_tree
-                .collect_non_empty_chunk_keys_in_bounds(bounds)
-                .into_iter()
-                .map(|key| chunk_pos_from_chunk_key(key)),
+        let floor_material = match self.world_base_kind {
+            BaseWorldKind::FlatFloor { material }
+            | BaseWorldKind::MassivePlatforms { material } => material,
+            BaseWorldKind::Empty => return None,
+        };
+        if floor_material.is_air() {
+            return None;
+        }
+        if FLAT_FLOOR_CHUNK_Y < bounds.min[1] || FLAT_FLOOR_CHUNK_Y > bounds.max[1] {
+            return None;
+        }
+        let floor_bounds = Aabb4i::new(
+            [
+                bounds.min[0],
+                FLAT_FLOOR_CHUNK_Y,
+                bounds.min[2],
+                bounds.min[3],
+            ],
+            [
+                bounds.max[0],
+                FLAT_FLOOR_CHUNK_Y,
+                bounds.max[2],
+                bounds.max[3],
+            ],
         );
-
-        if matches!(
-            self.world_base_kind,
-            BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. }
-        ) {
-            let y = FLAT_FLOOR_CHUNK_Y;
-            if y >= min_chunk[1] && y <= max_chunk[1] {
-                let floor_bounds = Aabb4i::new(
-                    [min_chunk[0], y, min_chunk[2], min_chunk[3]],
-                    [max_chunk[0], y, max_chunk[2], max_chunk[3]],
-                );
-                let explicit_floor_keys: HashSet<[i32; 4]> = self
-                    .world_tree
-                    .collect_chunk_keys_in_bounds(floor_bounds)
-                    .into_iter()
-                    .collect();
-                for x in min_chunk[0]..=max_chunk[0] {
-                    for z in min_chunk[2]..=max_chunk[2] {
-                        for w in min_chunk[3]..=max_chunk[3] {
-                            let key = [x, y, z, w];
-                            if explicit_floor_keys.contains(&key) {
-                                continue;
-                            }
-                            out.push(ChunkPos::new(x, y, z, w));
-                        }
-                    }
-                }
-            }
+        if !floor_bounds.is_valid() {
+            return None;
         }
+
+        let floor_payload = dense_chunk_to_payload_compact(&self.world_flat_floor_chunk);
+        let floor_kind = match floor_payload {
+            ChunkPayload::Empty => return None,
+            ChunkPayload::Uniform(material) => RegionNodeKind::Uniform(material),
+            payload => {
+                let cell_count = floor_bounds.chunk_cell_count()?;
+                let indices = vec![0u16; cell_count];
+                let chunk_array =
+                    ChunkArrayData::from_dense_indices(floor_bounds, vec![payload], indices, None)
+                        .ok()?;
+                RegionNodeKind::ChunkArray(chunk_array)
+            }
+        };
+
+        Some(RegionTreeCore {
+            bounds: floor_bounds,
+            kind: floor_kind,
+            generator_version_hash: 0,
+        })
+    }
+
+    fn build_render_tree_core_in_bounds(&self, bounds: Aabb4i) -> RenderTreeCore {
+        if !bounds.is_valid() {
+            return RenderTreeCore::empty(bounds);
+        }
+        let mut composed = RegionChunkTree::new();
+        if let Some(base_floor_core) = self.base_floor_region_core_in_bounds(bounds) {
+            let _ =
+                composed.splice_non_empty_core_in_bounds(base_floor_core.bounds, &base_floor_core);
+        }
+        let world_core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
+        let _ = composed.overlay_core_in_bounds(bounds, &world_core);
+        let composed_core = composed.slice_non_empty_core_in_bounds(bounds);
+        render_tree::from_region_core(&composed_core)
+    }
+
+    fn collect_render_non_empty_chunks_in_bounds(&self, bounds: Aabb4i) -> Vec<ChunkPos> {
+        let render_core = self.build_render_tree_core_in_bounds(bounds);
+        render_tree::collect_non_empty_chunk_keys_in_bounds(&render_core, bounds)
+            .into_iter()
+            .map(chunk_pos_from_chunk_key)
+            .collect()
     }
 
     fn world_drain_pending_chunk_updates(&mut self) -> Vec<ChunkPos> {
