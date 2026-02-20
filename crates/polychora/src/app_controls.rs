@@ -106,28 +106,6 @@ impl App {
         }
     }
 
-    pub(super) fn toggle_vte_non_voxel_instances(&mut self) {
-        if let Some(state) = self.vte_sweep_state {
-            eprintln!(
-                "[VTE sweep #{}] ignoring manual non-voxel toggle while sweep is active.",
-                state.run_id
-            );
-            return;
-        }
-        self.vte_non_voxel_instances_enabled = !self.vte_non_voxel_instances_enabled;
-        if let Some(rcx) = self.rcx.as_mut() {
-            rcx.reset_gpu_profile_window();
-        }
-        eprintln!(
-            "VTE runtime non-voxel instances: {}",
-            if self.vte_non_voxel_instances_enabled {
-                "on"
-            } else {
-                "off"
-            }
-        );
-    }
-
     pub(super) fn toggle_vte_y_slice_lookup_cache(&mut self) {
         if let Some(state) = self.vte_sweep_state {
             eprintln!(
@@ -186,7 +164,6 @@ impl App {
         // Do NOT drain take_look_at() - G key should work during gameplay
         self.input.take_scheme_cycle();
         self.input.take_vte_sweep();
-        self.input.take_vte_non_voxel_instances_toggle();
         self.input.take_vte_y_slice_lookup_cache_toggle();
         self.input.take_vte_integral_sky_emissive_toggle();
         self.input.take_vte_integral_log_merge_toggle();

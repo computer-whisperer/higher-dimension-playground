@@ -73,9 +73,6 @@ impl App {
             if self.input.take_vte_sweep() {
                 self.toggle_vte_runtime_sweep();
             }
-            if self.input.take_vte_non_voxel_instances_toggle() {
-                self.toggle_vte_non_voxel_instances();
-            }
             if self.input.take_vte_y_slice_lookup_cache_toggle() {
                 self.toggle_vte_y_slice_lookup_cache();
             }

@@ -71,8 +71,6 @@ const REMOTE_FOOTSTEP_MAX_NETWORK_AGE_S: f32 = 0.35;
 const REMOTE_FOOTSTEP_MAX_PER_FRAME: usize = 6;
 const WORLD_FILE_DEFAULT: &str = "saves/world";
 const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
-const VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV: &str = "R4D_VTE_SWEEP_INCLUDE_NO_NON_VOXEL_INSTANCES";
-const VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY: &str = "R4D_VTE_SWEEP_INCLUDE_NO_ENTITIES";
 const VTE_OVERLAY_RASTER_ENV: &str = "R4D_VTE_OVERLAY_RASTER";
 const CLIENT_REGION_TREE_BOUNDS_DIAG_ENV: &str = "R4D_CLIENT_REGION_TREE_BOUNDS_DIAG";
 const CLIENT_REGION_TREE_BOUNDS_DIAG_MAX_NODES_ENV: &str =
@@ -142,7 +140,6 @@ const MENU_ORBIT_TARGET_Y_OFFSET: f32 = 0.6;
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
     label: &'static str,
-    non_voxel_instances: bool,
     y_slice_lookup_cache: bool,
 }
 
@@ -267,41 +264,18 @@ const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 5] = [
     },
 ];
 
-const VTE_SWEEP_PROFILES_ENTITIES: [VteRuntimeProfile; 2] = [
+const VTE_SWEEP_PROFILES: [VteRuntimeProfile; 2] = [
     VteRuntimeProfile {
         label: "A baseline",
-        non_voxel_instances: true,
         y_slice_lookup_cache: true,
     },
     VteRuntimeProfile {
         label: "B no-lookup-cache",
-        non_voxel_instances: true,
         y_slice_lookup_cache: false,
     },
 ];
 
-const VTE_SWEEP_PROFILES_EXTENDED: [VteRuntimeProfile; 4] = [
-    VteRuntimeProfile {
-        label: "A baseline",
-        non_voxel_instances: true,
-        y_slice_lookup_cache: true,
-    },
-    VteRuntimeProfile {
-        label: "B no-nonvoxel",
-        non_voxel_instances: false,
-        y_slice_lookup_cache: true,
-    },
-    VteRuntimeProfile {
-        label: "C no-lookup-cache",
-        non_voxel_instances: true,
-        y_slice_lookup_cache: false,
-    },
-    VteRuntimeProfile {
-        label: "D no-nonvoxel-no-lookup-cache",
-        non_voxel_instances: false,
-        y_slice_lookup_cache: false,
-    },
-];
+const VTE_SWEEP_MODE_LABEL: &str = "lookup-cache";
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum EditHighlightModeArg {
@@ -439,16 +413,6 @@ struct Args {
     /// VTE thick-slice half-width in layer indices.
     #[arg(long, default_value_t = 2)]
     vte_thick_half_width: u32,
-
-    /// Enable non-voxel instance integration in VTE Stage A (test tesseract + non-voxel BVH).
-    /// Set to false to profile pure voxel traversal without the secondary tetra pipeline.
-    #[arg(
-        long = "vte-non-voxel-instances",
-        alias = "vte-entities",
-        action = ArgAction::Set,
-        default_value_t = true
-    )]
-    vte_non_voxel_instances: bool,
 
     /// Deprecated no-op: y-slice fastpath is now always enabled on normal VTE path.
     #[arg(long, action = ArgAction::Set, default_value_t = true, hide = true)]
@@ -766,9 +730,6 @@ fn main() {
     let vte_reference_compare_enabled = env_flag_enabled("R4D_VTE_REFERENCE_COMPARE")
         || vte_reference_mismatch_only_enabled
         || vte_compare_slice_only_enabled;
-    let vte_sweep_include_no_non_voxel = env_flag_enabled(VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV)
-        || env_flag_enabled(VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY);
-    let initial_vte_non_voxel_instances_enabled = args.vte_non_voxel_instances;
     let initial_vte_y_slice_lookup_cache_enabled = args.vte_y_slice_lookup_cache;
     let initial_vte_integral_sky_emissive_enabled = args.vte_integral_sky_emissive_tweak;
     let initial_vte_integral_log_merge_enabled = args.vte_integral_log_merge_tweak;
@@ -950,7 +911,6 @@ fn main() {
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
         vte_compare_slice_only_enabled,
-        vte_non_voxel_instances_enabled: initial_vte_non_voxel_instances_enabled,
         vte_y_slice_lookup_cache_enabled: initial_vte_y_slice_lookup_cache_enabled,
         vte_integral_sky_emissive_enabled: initial_vte_integral_sky_emissive_enabled,
         vte_integral_sky_scale: initial_vte_integral_sky_scale,
@@ -959,7 +919,6 @@ fn main() {
         vte_integral_log_merge_k: initial_vte_integral_log_merge_k,
         vte_max_trace_steps: initial_vte_max_trace_steps,
         vte_max_trace_distance: initial_vte_max_trace_distance,
-        vte_sweep_include_no_non_voxel,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
         hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
@@ -1084,11 +1043,6 @@ fn main() {
     if app.vte_compare_slice_only_enabled {
         eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
     }
-    if !app.vte_non_voxel_instances_enabled {
-        eprintln!(
-            "VTE non-voxel pipeline disabled via --vte-non-voxel-instances=false (alias: --vte-entities=false)"
-        );
-    }
     if !app.args.vte_y_slice_fastpath {
         eprintln!(
             "Ignoring deprecated --vte-y-slice-fastpath=false; y-slice fastpath is always enabled."
@@ -1121,14 +1075,7 @@ fn main() {
             app.zw_angle_color_shift_strength
         );
     }
-    if app.vte_sweep_include_no_non_voxel {
-        eprintln!(
-            "VTE sweep: extended mode enabled via {} or {} (includes no-nonvoxel profiles).",
-            VTE_SWEEP_INCLUDE_NO_NON_VOXEL_ENV, VTE_SWEEP_INCLUDE_NO_ENTITIES_ENV_LEGACY
-        );
-    } else {
-        eprintln!("VTE sweep: non-voxel mode (default, non-voxel instances stay enabled).");
-    }
+    eprintln!("VTE sweep mode: {}.", VTE_SWEEP_MODE_LABEL);
     if app.vte_overlay_raster_enabled {
         eprintln!(
             "VTE overlay raster enabled via {} (legacy held-block raster pass; higher GPU cost).",
@@ -1256,7 +1203,6 @@ struct App {
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
     vte_compare_slice_only_enabled: bool,
-    vte_non_voxel_instances_enabled: bool,
     vte_y_slice_lookup_cache_enabled: bool,
     vte_integral_sky_emissive_enabled: bool,
     vte_integral_sky_scale: f32,
@@ -1265,7 +1211,6 @@ struct App {
     vte_integral_log_merge_k: f32,
     vte_max_trace_steps: u32,
     vte_max_trace_distance: f32,
-    vte_sweep_include_no_non_voxel: bool,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
     hotbar_slots: [u8; 9],
@@ -1349,7 +1294,6 @@ struct VteSweepState {
     run_id: u32,
     profile_index: usize,
     frames_remaining: usize,
-    previous_non_voxel_instances: bool,
     previous_y_slice_lookup_cache: bool,
 }
 

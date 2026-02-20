@@ -180,13 +180,6 @@ impl App {
 
                 ui.separator();
 
-                let mut non_voxel_enabled = self.vte_non_voxel_instances_enabled;
-                if ui
-                    .checkbox(&mut non_voxel_enabled, "VTE Non-Voxel Instances")
-                    .changed()
-                {
-                    self.toggle_vte_non_voxel_instances();
-                }
                 let mut y_cache_enabled = self.vte_y_slice_lookup_cache_enabled;
                 if ui
                     .checkbox(&mut y_cache_enabled, "VTE Y-Slice Lookup Cache")

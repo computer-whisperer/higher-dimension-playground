@@ -126,7 +126,6 @@ pub struct InputState {
     scheme_cycle_requested: bool,
     reset_orientation_held: bool,
     pull_to_3d_held: bool,
-    vte_non_voxel_instances_toggle_requested: bool,
     vte_y_slice_lookup_cache_toggle_requested: bool,
     vte_sweep_requested: bool,
     vte_integral_sky_emissive_toggle_requested: bool,
@@ -174,7 +173,6 @@ impl InputState {
             scheme_cycle_requested: false,
             reset_orientation_held: false,
             pull_to_3d_held: false,
-            vte_non_voxel_instances_toggle_requested: false,
             vte_y_slice_lookup_cache_toggle_requested: false,
             vte_sweep_requested: false,
             vte_integral_sky_emissive_toggle_requested: false,
@@ -304,11 +302,6 @@ impl InputState {
                 KeyCode::KeyG => {
                     if pressed && !event.repeat {
                         self.look_at_requested = true;
-                    }
-                }
-                KeyCode::F6 => {
-                    if pressed {
-                        self.vte_non_voxel_instances_toggle_requested = true;
                     }
                 }
                 KeyCode::F7 => {
@@ -549,12 +542,6 @@ impl InputState {
 
     pub fn pull_to_3d_held(&self) -> bool {
         self.pull_to_3d_held
-    }
-
-    pub fn take_vte_non_voxel_instances_toggle(&mut self) -> bool {
-        let v = self.vte_non_voxel_instances_toggle_requested;
-        self.vte_non_voxel_instances_toggle_requested = false;
-        v
     }
 
     pub fn take_vte_y_slice_lookup_cache_toggle(&mut self) -> bool {

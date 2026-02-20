@@ -2,19 +2,11 @@ use super::*;
 
 impl App {
     pub(super) fn vte_sweep_profiles(&self) -> &'static [VteRuntimeProfile] {
-        if self.vte_sweep_include_no_non_voxel {
-            &VTE_SWEEP_PROFILES_EXTENDED
-        } else {
-            &VTE_SWEEP_PROFILES_ENTITIES
-        }
+        &VTE_SWEEP_PROFILES
     }
 
     pub(super) fn vte_sweep_mode_label(&self) -> &'static str {
-        if self.vte_sweep_include_no_non_voxel {
-            "extended"
-        } else {
-            "non-voxel"
-        }
+        VTE_SWEEP_MODE_LABEL
     }
 
     pub(super) fn perf_suite_active(&self) -> bool {

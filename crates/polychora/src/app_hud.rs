@@ -194,7 +194,7 @@ impl App {
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
-                 vte:F6 nonvox:{} F7 ycache:{} F8 sweep:{}\n\
+                 vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 self.control_scheme.label(),
                 self.move_speed,
@@ -210,11 +210,6 @@ impl App {
                 self.place_material,
                 edit_reach,
                 highlight_mode.label(),
-                if self.vte_non_voxel_instances_enabled {
-                    "on"
-                } else {
-                    "off"
-                },
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {
@@ -239,7 +234,7 @@ impl App {
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
-                 vte:F6 nonvox:{} F7 ycache:{} F8 sweep:{}\n\
+                 vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 pair.label(),
                 self.control_scheme.label(),
@@ -257,11 +252,6 @@ impl App {
                 self.place_material,
                 edit_reach,
                 highlight_mode.label(),
-                if self.vte_non_voxel_instances_enabled {
-                    "on"
-                } else {
-                    "off"
-                },
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {

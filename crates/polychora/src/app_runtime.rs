@@ -73,12 +73,7 @@ impl App {
         }
     }
 
-    pub(super) fn set_vte_runtime_flags(
-        &mut self,
-        non_voxel_instances: bool,
-        y_slice_lookup_cache: bool,
-    ) {
-        self.vte_non_voxel_instances_enabled = non_voxel_instances;
+    pub(super) fn set_vte_runtime_flags(&mut self, y_slice_lookup_cache: bool) {
         self.vte_y_slice_lookup_cache_enabled = y_slice_lookup_cache;
     }
 
@@ -92,18 +87,13 @@ impl App {
         }
 
         if let Some(state) = self.vte_sweep_state.take() {
-            self.set_vte_runtime_flags(
-                state.previous_non_voxel_instances,
-                state.previous_y_slice_lookup_cache,
-            );
+            self.set_vte_runtime_flags(state.previous_y_slice_lookup_cache);
             if let Some(rcx) = self.rcx.as_mut() {
                 rcx.reset_gpu_profile_window();
             }
             eprintln!(
-                "[VTE sweep #{}] cancelled; restored runtime flags (non_voxel_instances={}, y_slice_lookup_cache={}).",
-                state.run_id,
-                self.vte_non_voxel_instances_enabled,
-                self.vte_y_slice_lookup_cache_enabled
+                "[VTE sweep #{}] cancelled; restored runtime flags (y_slice_lookup_cache={}).",
+                state.run_id, self.vte_y_slice_lookup_cache_enabled
             );
             return;
         }
@@ -113,15 +103,11 @@ impl App {
             self.vte_sweep_run_id = 1;
         }
         let run_id = self.vte_sweep_run_id;
-        let previous_non_voxel_instances = self.vte_non_voxel_instances_enabled;
         let previous_y_slice_lookup_cache = self.vte_y_slice_lookup_cache_enabled;
         let profiles = self.vte_sweep_profiles();
         let profile_count = profiles.len();
         let first_profile = profiles[0];
-        self.set_vte_runtime_flags(
-            first_profile.non_voxel_instances,
-            first_profile.y_slice_lookup_cache,
-        );
+        self.set_vte_runtime_flags(first_profile.y_slice_lookup_cache);
         if let Some(rcx) = self.rcx.as_mut() {
             rcx.reset_gpu_profile_window();
         }
@@ -129,7 +115,6 @@ impl App {
             run_id,
             profile_index: 0,
             frames_remaining: VTE_SWEEP_SAMPLE_FRAMES,
-            previous_non_voxel_instances,
             previous_y_slice_lookup_cache,
         });
         eprintln!(
@@ -140,12 +125,8 @@ impl App {
             VTE_SWEEP_SAMPLE_FRAMES
         );
         eprintln!(
-            "[VTE sweep #{}] profile 1/{} '{}' (non_voxel_instances={}, y_slice_lookup_cache={}).",
-            run_id,
-            profile_count,
-            first_profile.label,
-            first_profile.non_voxel_instances,
-            first_profile.y_slice_lookup_cache
+            "[VTE sweep #{}] profile 1/{} '{}' (y_slice_lookup_cache={}).",
+            run_id, profile_count, first_profile.label, first_profile.y_slice_lookup_cache
         );
     }
 
@@ -176,38 +157,29 @@ impl App {
             state.profile_index += 1;
             state.frames_remaining = VTE_SWEEP_SAMPLE_FRAMES;
             let next_profile = profiles[state.profile_index];
-            self.set_vte_runtime_flags(
-                next_profile.non_voxel_instances,
-                next_profile.y_slice_lookup_cache,
-            );
+            self.set_vte_runtime_flags(next_profile.y_slice_lookup_cache);
             if let Some(rcx) = self.rcx.as_mut() {
                 rcx.reset_gpu_profile_window();
             }
             eprintln!(
-                "[VTE sweep #{}] profile {}/{} '{}' (non_voxel_instances={}, y_slice_lookup_cache={}).",
+                "[VTE sweep #{}] profile {}/{} '{}' (y_slice_lookup_cache={}).",
                 state.run_id,
                 state.profile_index + 1,
                 profile_count,
                 next_profile.label,
-                next_profile.non_voxel_instances,
                 next_profile.y_slice_lookup_cache
             );
             self.vte_sweep_state = Some(state);
             return;
         }
 
-        self.set_vte_runtime_flags(
-            state.previous_non_voxel_instances,
-            state.previous_y_slice_lookup_cache,
-        );
+        self.set_vte_runtime_flags(state.previous_y_slice_lookup_cache);
         if let Some(rcx) = self.rcx.as_mut() {
             rcx.reset_gpu_profile_window();
         }
         eprintln!(
-            "[VTE sweep #{}] completed; restored runtime flags (non_voxel_instances={}, y_slice_lookup_cache={}).",
-            state.run_id,
-            self.vte_non_voxel_instances_enabled,
-            self.vte_y_slice_lookup_cache_enabled
+            "[VTE sweep #{}] completed; restored runtime flags (y_slice_lookup_cache={}).",
+            state.run_id, self.vte_y_slice_lookup_cache_enabled
         );
         self.vte_sweep_state = None;
     }
