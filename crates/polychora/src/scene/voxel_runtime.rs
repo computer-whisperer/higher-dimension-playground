@@ -131,6 +131,7 @@ impl Scene {
         let mut leaf_chunk_entries = Vec::<u32>::new();
         let mut region_bvh_nodes =
             Vec::<GpuVoxelChunkBvhNode>::with_capacity(render_bvh.nodes.len());
+        let mut dense_payload_encoded_cache = std::collections::HashMap::<ChunkPayload, u32>::new();
 
         let mut overflowed = false;
         for leaf in &render_bvh.leaves {
@@ -168,6 +169,8 @@ impl Scene {
 
                     let src_indices = chunk_array.decode_dense_indices().ok();
                     let src_dims = chunk_array.bounds.chunk_extents();
+                    let mut palette_encoded_cache =
+                        vec![None::<u32>; chunk_array.chunk_palette.len()];
 
                     for w in 0..leaf_extents[3] {
                         for z in 0..leaf_extents[2] {
@@ -204,11 +207,15 @@ impl Scene {
                                                 + src_dims[0]
                                                     * (ly + src_dims[1] * (lz + src_dims[2] * lw));
                                             if let Some(&palette_index) = indices.get(linear) {
-                                                if let Some(payload) = chunk_array
-                                                    .chunk_palette
-                                                    .get(palette_index as usize)
+                                                let palette_index = palette_index as usize;
+                                                if let Some(Some(cached_encoded)) =
+                                                    palette_encoded_cache.get(palette_index)
                                                 {
-                                                    encoded = match payload {
+                                                    encoded = *cached_encoded;
+                                                } else if let Some(payload) =
+                                                    chunk_array.chunk_palette.get(palette_index)
+                                                {
+                                                    let resolved_encoded = match payload {
                                                         ChunkPayload::Empty => {
                                                             higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                                         }
@@ -220,7 +227,12 @@ impl Scene {
                                                                 | u32::from(*material)
                                                         }
                                                         _ => {
-                                                            if dense_chunk_headers.len()
+                                                            if let Some(&cached_dense_encoded) =
+                                                                dense_payload_encoded_cache
+                                                                    .get(payload)
+                                                            {
+                                                                cached_dense_encoded
+                                                            } else if dense_chunk_headers.len()
                                                                 >= VTE_MAX_DENSE_CHUNKS
                                                             {
                                                                 overflowed = true;
@@ -285,11 +297,24 @@ impl Scene {
                                                                             _padding: [0; 2],
                                                                         },
                                                                     );
-                                                                    chunk_index.saturating_add(1)
+                                                                    let encoded_dense =
+                                                                        chunk_index.saturating_add(1);
+                                                                    dense_payload_encoded_cache
+                                                                        .insert(
+                                                                            payload.clone(),
+                                                                            encoded_dense,
+                                                                        );
+                                                                    encoded_dense
                                                                 }
                                                             }
                                                         }
                                                     };
+                                                    if let Some(cached_slot) =
+                                                        palette_encoded_cache.get_mut(palette_index)
+                                                    {
+                                                        *cached_slot = Some(resolved_encoded);
+                                                    }
+                                                    encoded = resolved_encoded;
                                                 }
                                             }
                                         }
