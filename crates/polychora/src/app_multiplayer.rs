@@ -121,6 +121,48 @@ fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
     )
 }
 
+fn chunk_key_from_world_voxel(voxel: [i32; 4]) -> [i32; 4] {
+    let chunk_size = voxel::CHUNK_SIZE as i32;
+    [
+        voxel[0].div_euclid(chunk_size),
+        voxel[1].div_euclid(chunk_size),
+        voxel[2].div_euclid(chunk_size),
+        voxel[3].div_euclid(chunk_size),
+    ]
+}
+
+fn find_deepest_region_tree_node_for_chunk(
+    root: &RegionTreeCore,
+    chunk_key: [i32; 4],
+) -> Option<RegionTreeDiagNode> {
+    if !root.bounds.contains_chunk(chunk_key) {
+        return None;
+    }
+
+    let mut current = root;
+    let mut depth = 0usize;
+    loop {
+        match &current.kind {
+            RegionNodeKind::Branch(children) => {
+                if let Some(child) = children
+                    .iter()
+                    .find(|child| child.bounds.contains_chunk(chunk_key))
+                {
+                    current = child;
+                    depth = depth.saturating_add(1);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        return Some(RegionTreeDiagNode {
+            bounds: current.bounds,
+            depth,
+            kind: region_tree_diag_kind(&current.kind),
+        });
+    }
+}
+
 fn project_chunk_bounds_to_ndc(
     bounds: Aabb4i,
     view_matrix: &ndarray::Array2<f32>,
@@ -457,6 +499,70 @@ fn sanitize_remote_scale(scale: f32, fallback: f32) -> f32 {
 }
 
 impl App {
+    fn multiplayer_stream_tree_diag_kind_enabled(&self, kind: RegionTreeDiagKind) -> bool {
+        match kind {
+            RegionTreeDiagKind::Branch => self.multiplayer_stream_tree_diag_show_branch_bounds,
+            RegionTreeDiagKind::Empty => self.multiplayer_stream_tree_diag_show_empty_bounds,
+            RegionTreeDiagKind::Uniform(_) => self.multiplayer_stream_tree_diag_show_uniform_bounds,
+            RegionTreeDiagKind::ChunkArray => {
+                self.multiplayer_stream_tree_diag_show_chunk_array_bounds
+            }
+            RegionTreeDiagKind::ProceduralRef => {
+                self.multiplayer_stream_tree_diag_show_procedural_bounds
+            }
+        }
+    }
+
+    pub(super) fn multiplayer_stream_tree_diag_leaf_description_for_voxel(
+        &self,
+        voxel: [i32; 4],
+    ) -> Option<String> {
+        let root = self.multiplayer_stream_tree_diag.root()?;
+        let chunk_key = chunk_key_from_world_voxel(voxel);
+        let node = find_deepest_region_tree_node_for_chunk(root, chunk_key)?;
+        let style = region_tree_diag_style(node.kind);
+        let span = [
+            node.bounds.max[0]
+                .saturating_sub(node.bounds.min[0])
+                .saturating_add(1),
+            node.bounds.max[1]
+                .saturating_sub(node.bounds.min[1])
+                .saturating_add(1),
+            node.bounds.max[2]
+                .saturating_sub(node.bounds.min[2])
+                .saturating_add(1),
+            node.bounds.max[3]
+                .saturating_sub(node.bounds.min[3])
+                .saturating_add(1),
+        ];
+        let kind_suffix = match node.kind {
+            RegionTreeDiagKind::Uniform(material) => format!(" m{material}"),
+            _ => String::new(),
+        };
+        Some(format!(
+            "ch=({:+},{:+},{:+},{:+}) {} d{} b=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) s={}x{}x{}x{}{}",
+            chunk_key[0],
+            chunk_key[1],
+            chunk_key[2],
+            chunk_key[3],
+            style.short_code,
+            node.depth,
+            node.bounds.min[0],
+            node.bounds.min[1],
+            node.bounds.min[2],
+            node.bounds.min[3],
+            node.bounds.max[0],
+            node.bounds.max[1],
+            node.bounds.max[2],
+            node.bounds.max[3],
+            span[0],
+            span[1],
+            span[2],
+            span[3],
+            kind_suffix
+        ))
+    }
+
     pub(super) fn poll_multiplayer_events(&mut self) {
         loop {
             let event = match self
@@ -947,6 +1053,9 @@ impl App {
             &mut bounds_hierarchy,
         );
         for node in bounds_hierarchy {
+            if !self.multiplayer_stream_tree_diag_kind_enabled(node.kind) {
+                continue;
+            }
             let style = region_tree_diag_style(node.kind);
             append_chunk_bounds_outline_edge_instance(
                 overlay_edge_instances,
@@ -1011,6 +1120,9 @@ impl App {
             .into_iter()
             .take(self.multiplayer_stream_tree_diag_max_labels.max(1))
         {
+            if !self.multiplayer_stream_tree_diag_kind_enabled(node.kind) {
+                continue;
+            }
             let style = region_tree_diag_style(node.kind);
             let scale = (1.30 - (node.depth as f32) * 0.06).clamp(0.58, 1.28);
             hud_tags.push(HudPlayerTag {

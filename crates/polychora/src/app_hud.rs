@@ -25,6 +25,8 @@ impl App {
                 edit_reach,
                 highlight_mode,
                 vte_sweep_status,
+                target_hit_voxel,
+                target_hit_face,
             )),
         }
     }
@@ -184,9 +186,20 @@ impl App {
         edit_reach: f32,
         highlight_mode: EditHighlightModeArg,
         vte_sweep_status: &str,
+        target_hit_voxel: Option<[i32; 4]>,
+        target_hit_face: Option<[i32; 4]>,
     ) -> String {
         let inv = self.current_y_inverted();
         let inv = if inv { " Y-INV" } else { "" };
+        let target_text = target_hit_voxel
+            .map(|hit| format!("({:+},{:+},{:+},{:+})", hit[0], hit[1], hit[2], hit[3]))
+            .unwrap_or_else(|| "--".to_string());
+        let face_text = target_hit_face
+            .map(|face| format!("({:+},{:+},{:+},{:+})", face[0], face[1], face[2], face[3]))
+            .unwrap_or_else(|| "--".to_string());
+        let leaf_text = target_hit_voxel
+            .and_then(|voxel| self.multiplayer_stream_tree_diag_leaf_description_for_voxel(voxel))
+            .unwrap_or_else(|| "--".to_string());
         if self.control_scheme.uses_look_frame() {
             format!(
                 "LOOK-FRAME [{}]  spd:{:.1}{}\n\
@@ -194,6 +207,8 @@ impl App {
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
+                 target:{} face:{}\n\
+                 stream-leaf:{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 self.control_scheme.label(),
@@ -210,6 +225,9 @@ impl App {
                 self.place_material,
                 edit_reach,
                 highlight_mode.label(),
+                target_text,
+                face_text,
+                leaf_text,
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {
@@ -234,6 +252,8 @@ impl App {
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
+                 target:{} face:{}\n\
+                 stream-leaf:{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 pair.label(),
@@ -252,6 +272,9 @@ impl App {
                 self.place_material,
                 edit_reach,
                 highlight_mode.label(),
+                target_text,
+                face_text,
+                leaf_text,
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {

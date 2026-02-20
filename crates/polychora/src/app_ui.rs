@@ -224,6 +224,71 @@ impl App {
                 );
 
                 ui.separator();
+                ui.label("Region-Tree Bounds Debug");
+                ui.checkbox(
+                    &mut self.multiplayer_stream_tree_diag_enabled,
+                    "Render stream tree bounds",
+                );
+                ui.checkbox(
+                    &mut self.multiplayer_stream_tree_compare_diag_enabled,
+                    "Render stream/world mismatch bounds",
+                );
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.multiplayer_stream_tree_diag_labels_enabled,
+                        "Labels",
+                    );
+                    ui.checkbox(
+                        &mut self.multiplayer_stream_tree_diag_non_empty_only,
+                        "Non-empty only",
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(
+                        &mut self.multiplayer_stream_tree_diag_show_branch_bounds,
+                        "Branch",
+                    );
+                    ui.checkbox(
+                        &mut self.multiplayer_stream_tree_diag_show_uniform_bounds,
+                        "Uniform",
+                    );
+                    ui.checkbox(
+                        &mut self.multiplayer_stream_tree_diag_show_chunk_array_bounds,
+                        "ChunkArray",
+                    );
+                    ui.checkbox(
+                        &mut self.multiplayer_stream_tree_diag_show_procedural_bounds,
+                        "Procedural",
+                    );
+                    ui.checkbox(
+                        &mut self.multiplayer_stream_tree_diag_show_empty_bounds,
+                        "Empty",
+                    );
+                });
+                ui.add(
+                    egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_nodes, 1..=4096)
+                        .text("Bounds max nodes"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_labels, 1..=512)
+                        .text("Label max count"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.multiplayer_stream_tree_compare_diag_max_chunks,
+                        1..=4096,
+                    )
+                    .text("Mismatch sample cap"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.multiplayer_stream_tree_compare_diag_log_interval,
+                        1..=1200,
+                    )
+                    .text("Mismatch log interval (frames)"),
+                );
+
+                ui.separator();
                 ui.label("Press Esc to close this menu.");
             });
     }
