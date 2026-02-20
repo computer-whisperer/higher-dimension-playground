@@ -1,3 +1,4 @@
+use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
@@ -536,6 +537,35 @@ impl StructureBlueprint {
 
         false
     }
+
+    fn oriented_world_bounds(&self, origin: [i32; 4], orientation: u8) -> ([i32; 4], [i32; 4]) {
+        let x_vals = [self.min_offset[0], self.max_offset[0]];
+        let y_vals = [self.min_offset[1], self.max_offset[1]];
+        let z_vals = [self.min_offset[2], self.max_offset[2]];
+        let w_vals = [self.min_offset[3], self.max_offset[3]];
+        let mut min = [i32::MAX; 4];
+        let mut max = [i32::MIN; 4];
+        for x in x_vals {
+            for y in y_vals {
+                for z in z_vals {
+                    for w in w_vals {
+                        let rotated = rotate_offset_xzw([x, y, z, w], orientation);
+                        let point = [
+                            origin[0] + rotated[0],
+                            origin[1] + rotated[1],
+                            origin[2] + rotated[2],
+                            origin[3] + rotated[3],
+                        ];
+                        for axis in 0..4 {
+                            min[axis] = min[axis].min(point[axis]);
+                            max[axis] = max[axis].max(point[axis]);
+                        }
+                    }
+                }
+            }
+        }
+        (min, max)
+    }
 }
 
 impl StructureSet {
@@ -852,6 +882,286 @@ fn chunk_bounds(chunk_pos: ChunkPos) -> ([i32; 4], [i32; 4]) {
         chunk_min[3] + chunk_size - 1,
     ];
     (chunk_min, chunk_max)
+}
+
+fn world_bounds_from_chunk_bounds(bounds: Aabb4i) -> ([i32; 4], [i32; 4]) {
+    let chunk_size = CHUNK_SIZE as i32;
+    let min = [
+        bounds.min[0] * chunk_size,
+        bounds.min[1] * chunk_size,
+        bounds.min[2] * chunk_size,
+        bounds.min[3] * chunk_size,
+    ];
+    let max = [
+        bounds.max[0] * chunk_size + (chunk_size - 1),
+        bounds.max[1] * chunk_size + (chunk_size - 1),
+        bounds.max[2] * chunk_size + (chunk_size - 1),
+        bounds.max[3] * chunk_size + (chunk_size - 1),
+    ];
+    (min, max)
+}
+
+fn world_bounds_intersect(
+    a_min: [i32; 4],
+    a_max: [i32; 4],
+    b_min: [i32; 4],
+    b_max: [i32; 4],
+) -> bool {
+    for axis in 0..4 {
+        if a_max[axis] < b_min[axis] || a_min[axis] > b_max[axis] {
+            return false;
+        }
+    }
+    true
+}
+
+fn intersect_world_bounds_as_chunk_bounds(
+    world_min: [i32; 4],
+    world_max: [i32; 4],
+    query_chunk_bounds: Aabb4i,
+) -> Option<Aabb4i> {
+    let (query_world_min, query_world_max) = world_bounds_from_chunk_bounds(query_chunk_bounds);
+    let mut clipped_world_min = [0i32; 4];
+    let mut clipped_world_max = [0i32; 4];
+    for axis in 0..4 {
+        clipped_world_min[axis] = world_min[axis].max(query_world_min[axis]);
+        clipped_world_max[axis] = world_max[axis].min(query_world_max[axis]);
+        if clipped_world_min[axis] > clipped_world_max[axis] {
+            return None;
+        }
+    }
+
+    let chunk_min = [
+        clipped_world_min[0].div_euclid(CHUNK_SIZE as i32),
+        clipped_world_min[1].div_euclid(CHUNK_SIZE as i32),
+        clipped_world_min[2].div_euclid(CHUNK_SIZE as i32),
+        clipped_world_min[3].div_euclid(CHUNK_SIZE as i32),
+    ];
+    let chunk_max = [
+        clipped_world_max[0].div_euclid(CHUNK_SIZE as i32),
+        clipped_world_max[1].div_euclid(CHUNK_SIZE as i32),
+        clipped_world_max[2].div_euclid(CHUNK_SIZE as i32),
+        clipped_world_max[3].div_euclid(CHUNK_SIZE as i32),
+    ];
+
+    if chunk_min[0] > chunk_max[0]
+        || chunk_min[1] > chunk_max[1]
+        || chunk_min[2] > chunk_max[2]
+        || chunk_min[3] > chunk_max[3]
+    {
+        return None;
+    }
+    Some(Aabb4i::new(chunk_min, chunk_max))
+}
+
+fn collect_structure_placements_for_chunk_bounds(
+    world_seed: u64,
+    bounds: Aabb4i,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> Vec<StructurePlacement> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    let set = structure_set();
+    let (query_world_min, query_world_max) = world_bounds_from_chunk_bounds(bounds);
+    if query_world_max[1] < set.min_world_y || query_world_min[1] > set.max_world_y {
+        return Vec::new();
+    }
+
+    let search_margin = STRUCTURE_CELL_JITTER + set.max_abs_offset_xzw + CHUNK_SIZE as i32;
+    let cell_min_x = (query_world_min[0] - search_margin).div_euclid(STRUCTURE_CELL_SIZE) - 1;
+    let cell_max_x = (query_world_max[0] + search_margin).div_euclid(STRUCTURE_CELL_SIZE) + 1;
+    let cell_min_z = (query_world_min[2] - search_margin).div_euclid(STRUCTURE_CELL_SIZE) - 1;
+    let cell_max_z = (query_world_max[2] + search_margin).div_euclid(STRUCTURE_CELL_SIZE) + 1;
+    let cell_min_w = (query_world_min[3] - search_margin).div_euclid(STRUCTURE_CELL_SIZE) - 1;
+    let cell_max_w = (query_world_max[3] + search_margin).div_euclid(STRUCTURE_CELL_SIZE) + 1;
+
+    let mut placements = Vec::new();
+    for cell_x in cell_min_x..=cell_max_x {
+        for cell_z in cell_min_z..=cell_max_z {
+            for cell_w in cell_min_w..=cell_max_w {
+                let cell_hash =
+                    hash_structure_cell(world_seed, cell_x, cell_z, cell_w, STRUCTURE_HASH_SALT);
+                if cell_hash % STRUCTURE_SPAWN_DENOMINATOR >= STRUCTURE_SPAWN_NUMERATOR {
+                    continue;
+                }
+
+                let origin_x =
+                    cell_x * STRUCTURE_CELL_SIZE + jitter_from_hash(cell_hash ^ JITTER_X_SALT);
+                let origin_z =
+                    cell_z * STRUCTURE_CELL_SIZE + jitter_from_hash(cell_hash ^ JITTER_Z_SALT);
+                let origin_w =
+                    cell_w * STRUCTURE_CELL_SIZE + jitter_from_hash(cell_hash ^ JITTER_W_SALT);
+
+                if origin_x.abs() <= STRUCTURE_ORIGIN_EXCLUSION_RADIUS
+                    && origin_z.abs() <= STRUCTURE_ORIGIN_EXCLUSION_RADIUS
+                    && origin_w.abs() <= STRUCTURE_ORIGIN_EXCLUSION_RADIUS
+                {
+                    continue;
+                }
+
+                let pick_roll = splitmix64(cell_hash ^ STRUCTURE_PICK_SALT) % set.total_weight;
+                let blueprint_idx = set.pick_blueprint_index(pick_roll);
+                let blueprint = &set.blueprints[blueprint_idx];
+                let orientation =
+                    (splitmix64(cell_hash ^ STRUCTURE_ROTATION_SALT) % ROTATION_VARIANTS) as u8;
+                let origin = [origin_x, blueprint.ground_offset_y, origin_z, origin_w];
+                if !placement_allowed(
+                    &StructurePlacement {
+                        blueprint_idx,
+                        origin,
+                        orientation,
+                        cell: [cell_x, cell_z, cell_w],
+                    },
+                    blocked_cells,
+                ) {
+                    continue;
+                }
+                let (placement_min, placement_max) =
+                    blueprint.oriented_world_bounds(origin, orientation);
+                if !world_bounds_intersect(
+                    placement_min,
+                    placement_max,
+                    query_world_min,
+                    query_world_max,
+                ) {
+                    continue;
+                }
+                placements.push(StructurePlacement {
+                    blueprint_idx,
+                    origin,
+                    orientation,
+                    cell: [cell_x, cell_z, cell_w],
+                });
+            }
+        }
+    }
+    placements
+}
+
+fn collect_maze_placements_for_chunk_bounds(world_seed: u64, bounds: Aabb4i) -> Vec<MazePlacement> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    let (maze_world_min_y, maze_world_max_y) = maze_world_y_bounds();
+    let (query_world_min, query_world_max) = world_bounds_from_chunk_bounds(bounds);
+    if query_world_max[1] < maze_world_min_y || query_world_min[1] > maze_world_max_y {
+        return Vec::new();
+    }
+
+    let search_margin = MAZE_CELL_JITTER + MAZE_MAX_HALF_SPAN_XZW + CHUNK_SIZE as i32;
+    let cell_min_x = (query_world_min[0] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
+    let cell_max_x = (query_world_max[0] + search_margin).div_euclid(MAZE_CELL_SIZE) + 1;
+    let cell_min_z = (query_world_min[2] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
+    let cell_max_z = (query_world_max[2] + search_margin).div_euclid(MAZE_CELL_SIZE) + 1;
+    let cell_min_w = (query_world_min[3] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
+    let cell_max_w = (query_world_max[3] + search_margin).div_euclid(MAZE_CELL_SIZE) + 1;
+
+    let mut placements = Vec::new();
+    for cell_x in cell_min_x..=cell_max_x {
+        for cell_z in cell_min_z..=cell_max_z {
+            for cell_w in cell_min_w..=cell_max_w {
+                let cell_hash =
+                    hash_structure_cell(world_seed, cell_x, cell_z, cell_w, MAZE_HASH_SALT);
+                if cell_hash % MAZE_SPAWN_DENOMINATOR >= MAZE_SPAWN_NUMERATOR {
+                    continue;
+                }
+                let shape = maze_shape_from_cell_hash(cell_hash);
+                let origin_x = cell_x * MAZE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ MAZE_JITTER_X_SALT,
+                        MAZE_CELL_JITTER,
+                    );
+                let origin_z = cell_z * MAZE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ MAZE_JITTER_Z_SALT,
+                        MAZE_CELL_JITTER,
+                    );
+                let origin_w = cell_w * MAZE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ MAZE_JITTER_W_SALT,
+                        MAZE_CELL_JITTER,
+                    );
+                if origin_x.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                    && origin_z.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                    && origin_w.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
+                {
+                    continue;
+                }
+
+                let origin = [origin_x, shape.world_y_min, origin_z, origin_w];
+                let (maze_min, maze_max) = maze_bounds(origin, shape);
+                if !world_bounds_intersect(maze_min, maze_max, query_world_min, query_world_max) {
+                    continue;
+                }
+                placements.push(MazePlacement {
+                    origin,
+                    layout_seed: maze_layout_seed(world_seed, origin, shape),
+                    shape,
+                });
+            }
+        }
+    }
+    placements
+}
+
+pub fn structure_chunk_positions_for_bounds_with_keepout(
+    world_seed: u64,
+    bounds: Aabb4i,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> Vec<ChunkPos> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    let set = structure_set();
+    let mut chunk_positions = HashSet::<[i32; 4]>::new();
+
+    for placement in
+        collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells)
+    {
+        let blueprint = &set.blueprints[placement.blueprint_idx];
+        let (placement_min, placement_max) =
+            blueprint.oriented_world_bounds(placement.origin, placement.orientation);
+        let Some(covered_chunks) =
+            intersect_world_bounds_as_chunk_bounds(placement_min, placement_max, bounds)
+        else {
+            continue;
+        };
+        for w in covered_chunks.min[3]..=covered_chunks.max[3] {
+            for z in covered_chunks.min[2]..=covered_chunks.max[2] {
+                for y in covered_chunks.min[1]..=covered_chunks.max[1] {
+                    for x in covered_chunks.min[0]..=covered_chunks.max[0] {
+                        chunk_positions.insert([x, y, z, w]);
+                    }
+                }
+            }
+        }
+    }
+
+    for placement in collect_maze_placements_for_chunk_bounds(world_seed, bounds) {
+        let (maze_min, maze_max) = maze_bounds(placement.origin, placement.shape);
+        let Some(covered_chunks) =
+            intersect_world_bounds_as_chunk_bounds(maze_min, maze_max, bounds)
+        else {
+            continue;
+        };
+        for w in covered_chunks.min[3]..=covered_chunks.max[3] {
+            for z in covered_chunks.min[2]..=covered_chunks.max[2] {
+                for y in covered_chunks.min[1]..=covered_chunks.max[1] {
+                    for x in covered_chunks.min[0]..=covered_chunks.max[0] {
+                        chunk_positions.insert([x, y, z, w]);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<ChunkPos> = chunk_positions
+        .into_iter()
+        .map(|[x, y, z, w]| ChunkPos::new(x, y, z, w))
+        .collect();
+    out.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+    out
 }
 
 fn rotate_offset_xzw(offset: [i32; 4], orientation: u8) -> [i32; 4] {
@@ -2282,6 +2592,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn structure_chunk_positions_for_bounds_matches_bruteforce() {
+        let seed = 0x4e73_9ac1_2f07_118du64;
+        let bounds = Aabb4i::new([-3, -2, -3, -3], [3, 3, 3, 3]);
+
+        let mut brute = Vec::new();
+        for w in bounds.min[3]..=bounds.max[3] {
+            for z in bounds.min[2]..=bounds.max[2] {
+                for y in bounds.min[1]..=bounds.max[1] {
+                    for x in bounds.min[0]..=bounds.max[0] {
+                        let pos = ChunkPos::new(x, y, z, w);
+                        if structure_chunk_has_content_with_keepout(seed, pos, None) {
+                            brute.push(pos);
+                        }
+                    }
+                }
+            }
+        }
+        brute.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+
+        let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, None);
+        assert_eq!(fast, brute);
+    }
+
+    #[test]
+    fn structure_chunk_positions_for_bounds_respects_keepout_cells() {
+        let seed = 0x2a19_6e8d_0cb4_7fd1u64;
+        let (min_y, max_y) = structure_chunk_y_bounds();
+        let mut target = None::<(ChunkPos, StructureCell)>;
+        'search: for x in -10..=10 {
+            for z in -10..=10 {
+                for w in -10..=10 {
+                    for y in min_y..=max_y {
+                        let pos = ChunkPos::new(x, y, z, w);
+                        if generate_structure_chunk(seed, pos).is_none() {
+                            continue;
+                        }
+                        let cells = structure_cells_affecting_chunk(seed, pos);
+                        if let Some(cell) = cells.first().copied() {
+                            target = Some((pos, cell));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        let (target_pos, blocked_cell) = target.expect("expected target structure chunk");
+        let bounds = Aabb4i::new(
+            [
+                target_pos.x - 2,
+                target_pos.y - 2,
+                target_pos.z - 2,
+                target_pos.w - 2,
+            ],
+            [
+                target_pos.x + 2,
+                target_pos.y + 2,
+                target_pos.z + 2,
+                target_pos.w + 2,
+            ],
+        );
+        let mut blocked = HashSet::new();
+        blocked.insert(blocked_cell);
+
+        let mut brute = Vec::new();
+        for w in bounds.min[3]..=bounds.max[3] {
+            for z in bounds.min[2]..=bounds.max[2] {
+                for y in bounds.min[1]..=bounds.max[1] {
+                    for x in bounds.min[0]..=bounds.max[0] {
+                        let pos = ChunkPos::new(x, y, z, w);
+                        if structure_chunk_has_content_with_keepout(seed, pos, Some(&blocked)) {
+                            brute.push(pos);
+                        }
+                    }
+                }
+            }
+        }
+        brute.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+
+        let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, Some(&blocked));
+        assert_eq!(fast, brute);
     }
 
     #[test]

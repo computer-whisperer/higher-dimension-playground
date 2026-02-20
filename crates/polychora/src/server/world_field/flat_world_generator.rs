@@ -94,13 +94,6 @@ impl FlatWorldGenerator {
         if !self.procgen_structures {
             return None;
         }
-        if !procgen::structure_chunk_has_content_with_keepout(
-            self.world_seed,
-            chunk_pos,
-            self.procgen_keepout_cells(),
-        ) {
-            return None;
-        }
         let structure_chunk = procgen::generate_structure_chunk_with_keepout(
             self.world_seed,
             chunk_pos,
@@ -125,25 +118,16 @@ impl FlatWorldGenerator {
         if !self.procgen_structures || !bounds.is_valid() {
             return;
         }
-        let (procgen_min_y, procgen_max_y) = procgen::structure_chunk_y_bounds();
-        let min_y = bounds.min[1].max(procgen_min_y);
-        let max_y = bounds.max[1].min(procgen_max_y);
-        if min_y > max_y {
-            return;
-        }
-
-        for y in min_y..=max_y {
-            for w in bounds.min[3]..=bounds.max[3] {
-                for z in bounds.min[2]..=bounds.max[2] {
-                    for x in bounds.min[0]..=bounds.max[0] {
-                        let chunk_pos = ChunkPos::new(x, y, z, w);
-                        let Some(payload) = self.structure_chunk_payload(chunk_pos) else {
-                            continue;
-                        };
-                        let _ = tree.set_chunk(chunk_key_from_chunk_pos(chunk_pos), Some(payload));
-                    }
-                }
-            }
+        let candidates = procgen::structure_chunk_positions_for_bounds_with_keepout(
+            self.world_seed,
+            bounds,
+            self.procgen_keepout_cells(),
+        );
+        for chunk_pos in candidates {
+            let Some(payload) = self.structure_chunk_payload(chunk_pos) else {
+                continue;
+            };
+            let _ = tree.set_chunk(chunk_key_from_chunk_pos(chunk_pos), Some(payload));
         }
     }
 
