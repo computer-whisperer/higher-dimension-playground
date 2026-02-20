@@ -224,8 +224,6 @@ impl DemoScene {
                     y_slice_bounds: &[],
                     y_slice_lookup_entries: &[],
                 },
-                &[],
-                &[],
             );
         } else {
             rcx.render_tetra_frame(
@@ -438,8 +436,6 @@ impl DemoScene {
                     y_slice_bounds: &[],
                     y_slice_lookup_entries: &[],
                 },
-                &[],
-                &[],
             );
         } else {
             rcx.render_tetra_frame(

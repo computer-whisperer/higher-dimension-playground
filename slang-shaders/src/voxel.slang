@@ -2551,195 +2551,21 @@ bool traceVoxelRayDDAWithLodRings(
     out float outFinalT,
     out int4 outLastChunkCoord)
 {
-    hitMaterial = 0u;
-    hitPos = float4(0.0, 0.0, 0.0, 0.0);
-    hitChunkCoord = int4(0, 0, 0, 0);
-    hitLodLevel = 0u;
-    missReason = MISS_REASON_NONE;
-    debugFlags = 0u;
-    outChunkStepsTaken = 0u;
-    outRemainingVoxelSteps = 0u;
-    outFinalT = 0.0;
-    outLastChunkCoord = int4(0, 0, 0, 0);
-    float traceMaxDistance = max(1.0, meta.maxTraceDistance);
-    float nearMaxDistance = clamp(meta.lodNearMaxDistance, 1.0, traceMaxDistance);
-    float midMaxDistance = clamp(meta.lodMidMaxDistance, nearMaxDistance, traceMaxDistance);
-    VoxelFrameMeta nearMeta = meta;
-    nearMeta.maxTraceDistance = nearMaxDistance;
-
-    uint nearHitMaterial = 0u;
-    float4 nearHitPos = float4(0.0, 0.0, 0.0, 0.0);
-    int4 nearHitChunkCoord = int4(0, 0, 0, 0);
-    uint nearHitLodLevel = 0u;
-    uint nearMissReason = MISS_REASON_NONE;
-    uint nearDebugFlags = 0u;
-    uint nearChunkStepsTaken = 0u;
-    uint nearRemainingVoxelSteps = 0u;
-    float nearFinalT = 0.0;
-    int4 nearLastChunkCoord = int4(0, 0, 0, 0);
-    bool nearHit = traceVoxelRayDDA(
+    return traceVoxelRayDDA(
         rayOrigin,
         rayDir,
-        nearMeta,
+        meta,
         0u,
-        nearHitMaterial,
-        nearHitPos,
-        nearHitChunkCoord,
-        nearHitLodLevel,
-        nearMissReason,
-        nearDebugFlags,
-        nearChunkStepsTaken,
-        nearRemainingVoxelSteps,
-        nearFinalT,
-        nearLastChunkCoord);
-
-    hitMaterial = nearHitMaterial;
-    hitPos = nearHitPos;
-    hitChunkCoord = nearHitChunkCoord;
-    hitLodLevel = nearHitLodLevel;
-    missReason = nearMissReason;
-    debugFlags = nearDebugFlags;
-    outChunkStepsTaken = nearChunkStepsTaken;
-    outRemainingVoxelSteps = nearRemainingVoxelSteps;
-    outFinalT = nearFinalT;
-    outLastChunkCoord = nearLastChunkCoord;
-
-    if (nearHit)
-    {
-        return true;
-    }
-
-    bool allowCoarseLod = meta.stageBMode != STAGE_B_MODE_DEBUG_COMPARE
-        && meta.stageBMode != STAGE_B_MODE_DEBUG_INTEGRAL
-        && (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) == 0u;
-    if (!allowCoarseLod)
-    {
-        return false;
-    }
-
-    const float PASS_EPS = 1e-6;
-    float nearTraceEndDistance = clamp(nearFinalT, 0.0, nearMaxDistance);
-    uint totalChunkStepsTaken = nearChunkStepsTaken;
-    uint remainingVoxelSteps = nearRemainingVoxelSteps;
-    float tracedEndDistance = nearTraceEndDistance;
-    int4 lastChunkCoord = nearLastChunkCoord;
-    uint combinedDebugFlags = nearDebugFlags;
-    uint finalMissReason = nearMissReason;
-
-    if (midMaxDistance > nearTraceEndDistance + PASS_EPS)
-    {
-        float midBudget = max(0.0, midMaxDistance - nearTraceEndDistance);
-        float4 midOrigin = (rayOrigin + rayDir * nearTraceEndDistance) / LOD_MID_SCALE;
-        float4 midDir = rayDir / LOD_MID_SCALE;
-        VoxelFrameMeta midMeta = meta;
-        midMeta.maxTraceDistance = midBudget;
-        midMeta.debugFlags &= ~META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
-
-        uint midHitMaterial = 0u;
-        float4 midHitPosScaled = float4(0.0, 0.0, 0.0, 0.0);
-        int4 midHitChunkCoord = int4(0, 0, 0, 0);
-        uint midHitLodLevel = 1u;
-        uint midMissReason = MISS_REASON_NONE;
-        uint midDebugFlags = 0u;
-        uint midChunkStepsTaken = 0u;
-        uint midRemainingVoxelSteps = 0u;
-        float midFinalT = 0.0;
-        int4 midLastChunkCoord = int4(0, 0, 0, 0);
-        bool midHit = traceVoxelRayDDA(
-            midOrigin,
-            midDir,
-            midMeta,
-            1u,
-            midHitMaterial,
-            midHitPosScaled,
-            midHitChunkCoord,
-            midHitLodLevel,
-            midMissReason,
-            midDebugFlags,
-            midChunkStepsTaken,
-            midRemainingVoxelSteps,
-            midFinalT,
-            midLastChunkCoord);
-
-        totalChunkStepsTaken += midChunkStepsTaken;
-        remainingVoxelSteps = midRemainingVoxelSteps;
-        tracedEndDistance = nearTraceEndDistance + clamp(midFinalT, 0.0, midBudget);
-        lastChunkCoord = midLastChunkCoord;
-        combinedDebugFlags |= midDebugFlags;
-        finalMissReason = midMissReason;
-
-        outChunkStepsTaken = totalChunkStepsTaken;
-        outRemainingVoxelSteps = remainingVoxelSteps;
-        outFinalT = tracedEndDistance;
-        outLastChunkCoord = lastChunkCoord;
-        debugFlags = combinedDebugFlags;
-        missReason = finalMissReason;
-
-        if (midHit)
-        {
-            hitMaterial = midHitMaterial;
-            hitPos = midHitPosScaled * LOD_MID_SCALE;
-            hitChunkCoord = midHitChunkCoord;
-            hitLodLevel = midHitLodLevel;
-            return true;
-        }
-    }
-
-    float farBudget = max(0.0, traceMaxDistance - tracedEndDistance);
-    if (farBudget <= PASS_EPS)
-    {
-        return false;
-    }
-
-    float4 farOrigin = (rayOrigin + rayDir * tracedEndDistance) / LOD_FAR_SCALE;
-    float4 farDir = rayDir / LOD_FAR_SCALE;
-    VoxelFrameMeta farMeta = meta;
-    farMeta.maxTraceDistance = farBudget;
-    farMeta.debugFlags &= ~META_DEBUG_FLAG_YSLICE_LOOKUP_CACHE;
-
-    uint farHitMaterial = 0u;
-    float4 farHitPosScaled = float4(0.0, 0.0, 0.0, 0.0);
-    int4 farHitChunkCoord = int4(0, 0, 0, 0);
-    uint farHitLodLevel = 2u;
-    uint farMissReason = MISS_REASON_NONE;
-    uint farDebugFlags = 0u;
-    uint farChunkStepsTaken = 0u;
-    uint farRemainingVoxelSteps = 0u;
-    float farFinalT = 0.0;
-    int4 farLastChunkCoord = int4(0, 0, 0, 0);
-    bool farHit = traceVoxelRayDDA(
-        farOrigin,
-        farDir,
-        farMeta,
-        2u,
-        farHitMaterial,
-        farHitPosScaled,
-        farHitChunkCoord,
-        farHitLodLevel,
-        farMissReason,
-        farDebugFlags,
-        farChunkStepsTaken,
-        farRemainingVoxelSteps,
-        farFinalT,
-        farLastChunkCoord);
-
-    outChunkStepsTaken = totalChunkStepsTaken + farChunkStepsTaken;
-    outRemainingVoxelSteps = farRemainingVoxelSteps;
-    outFinalT = tracedEndDistance + clamp(farFinalT, 0.0, farBudget);
-    outLastChunkCoord = farLastChunkCoord;
-    debugFlags = combinedDebugFlags | farDebugFlags;
-    missReason = farMissReason;
-
-    if (!farHit)
-    {
-        return false;
-    }
-
-    hitMaterial = farHitMaterial;
-    hitPos = farHitPosScaled * LOD_FAR_SCALE;
-    hitChunkCoord = farHitChunkCoord;
-    hitLodLevel = farHitLodLevel;
-    return true;
+        hitMaterial,
+        hitPos,
+        hitChunkCoord,
+        hitLodLevel,
+        missReason,
+        debugFlags,
+        outChunkStepsTaken,
+        outRemainingVoxelSteps,
+        outFinalT,
+        outLastChunkCoord);
 }
 
 [shader("compute")]
@@ -2836,7 +2662,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         float3 skyAccumColor = float3(0.0, 0.0, 0.0);
         float skyAccumWeight = 0.0;
         float maxEntityDistance = max(1.0, meta.maxTraceDistance);
-        bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u;
+        bool evaluateEntityTetra = false;
         uint hitMaterial = 0u;
         float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
         int4 hitChunkCoord = int4(0, 0, 0, 0);
@@ -3254,9 +3080,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         finalT,
         lastChunkCoord);
 
-    bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u
-        && meta.stageBMode != STAGE_B_MODE_DEBUG_COMPARE
-        && meta.stageBMode != STAGE_B_MODE_DEBUG_INTEGRAL;
+    bool evaluateEntityTetra = false;
     EntityTetraHit entityHit = entityTetraHitNone();
     if (evaluateEntityTetra)
     {

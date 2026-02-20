@@ -447,8 +447,6 @@ impl App {
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
-                &[],
-                &[],
             );
         } else {
             self.scene.update_surfaces_if_dirty();

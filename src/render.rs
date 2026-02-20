@@ -821,18 +821,9 @@ impl RenderContext {
         queue: Arc<Queue>,
         mut frame_params: FrameParams,
         voxel_input: VoxelFrameInput<'_>,
-        tetra_entity_instances: &[common::ModelInstance],
-        tetra_overlay_instances: &[common::ModelInstance],
     ) {
         frame_params.render_options.render_backend = RenderBackend::VoxelTraversal;
-        self.render_internal(
-            device,
-            queue,
-            frame_params,
-            tetra_entity_instances,
-            tetra_overlay_instances,
-            Some(&voxel_input),
-        );
+        self.render_internal(device, queue, frame_params, &[], &[], Some(&voxel_input));
     }
 
     fn stage_voxel_payload_updates(&mut self, input: &VoxelFrameInput<'_>) -> usize {

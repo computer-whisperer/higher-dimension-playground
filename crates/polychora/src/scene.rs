@@ -38,8 +38,6 @@ const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
 pub const VOXEL_LOD_LEVEL_NEAR: u8 = 0;
-pub const VOXEL_LOD_LEVEL_MID: u8 = 1;
-pub const VOXEL_LOD_LEVEL_FAR: u8 = 2;
 const FLAT_PRESET_FLOOR_MATERIAL: VoxelType = VoxelType(11);
 const SHOWCASE_MATERIALS: [u8; 37] = [
     15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50, 55,
@@ -180,9 +178,6 @@ pub struct Scene {
     world_dirty: bool,
     world_pending_chunk_updates: Vec<ChunkPos>,
     world_pending_chunk_update_set: HashSet<ChunkPos>,
-    voxel_lod_chunks: HashMap<RuntimeChunkKey, DenseChunk>,
-    voxel_pending_lod_chunk_updates: Vec<RuntimeChunkKey>,
-    voxel_pending_lod_chunk_update_set: HashSet<RuntimeChunkKey>,
     surface: SurfaceData,
     culled_instances: Vec<common::ModelInstance>,
     cull_log_counter: u64,
@@ -198,7 +193,7 @@ pub struct Scene {
     voxel_active_chunk_indices: HashMap<RuntimeChunkKey, usize>,
     voxel_world_revision: u64,
     voxel_visibility_generation: u64,
-    voxel_cached_visibility_camera_chunk: Option<[i32; 16]>,
+    voxel_cached_visibility_camera_chunk: Option<[i32; 12]>,
     voxel_cached_visibility_world_revision: u64,
     voxel_payload_slot_overflow_logged: bool,
     voxel_frame_data: VoxelFrameData,
@@ -894,9 +889,6 @@ impl Scene {
             world_dirty,
             world_pending_chunk_updates: Vec::new(),
             world_pending_chunk_update_set: HashSet::new(),
-            voxel_lod_chunks: HashMap::new(),
-            voxel_pending_lod_chunk_updates: Vec::new(),
-            voxel_pending_lod_chunk_update_set: HashSet::new(),
             surface,
             culled_instances: Vec::new(),
             cull_log_counter: 0,
@@ -935,12 +927,6 @@ impl Scene {
             total_voxels
         );
         scene
-    }
-
-    fn queue_lod_chunk_update(&mut self, key: RuntimeChunkKey) {
-        if self.voxel_pending_lod_chunk_update_set.insert(key) {
-            self.voxel_pending_lod_chunk_updates.push(key);
-        }
     }
 
     /// Rebuild surface data if any chunk is dirty.
