@@ -313,27 +313,6 @@ fn initialize_state(
     )?;
     let runtime_world_seed = initial_world.world_seed();
     let next_object_id = initial_world.persisted_next_entity_id().max(1);
-    let pruned = initial_world.prune_virgin_chunks();
-    if pruned > 0 {
-        eprintln!(
-            "pruned {} virgin chunks from {}",
-            pruned,
-            config.world_file.display()
-        );
-    }
-    if config.procgen_structures && config.procgen_keepout_from_existing_world {
-        let blocked = initial_world
-            .rebuild_procgen_keepout_from_chunks(config.procgen_keepout_padding_chunks);
-        if blocked > 0 {
-            eprintln!(
-                "procgen keepout: {} blocked structure cells (padding={} chunks)",
-                blocked,
-                config.procgen_keepout_padding_chunks.max(0)
-            );
-        }
-    } else {
-        initial_world.set_procgen_blocked_cells(HashSet::new());
-    }
     initial_world.clear_dirty();
     let initial_chunks = initial_world.non_empty_chunk_count();
     eprintln!(

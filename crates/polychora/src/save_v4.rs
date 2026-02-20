@@ -5,9 +5,9 @@ use crate::shared::chunk_payload::{
 };
 use crate::shared::protocol::{EntityClass, EntityKind};
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
 #[cfg(test)]
 use crate::shared::voxel::CHUNK_VOLUME;
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

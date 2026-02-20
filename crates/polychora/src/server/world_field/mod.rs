@@ -1,5 +1,5 @@
 use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
-use crate::shared::chunk_payload::ChunkPayload;
+use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 use crate::shared::region_tree::{
     chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
@@ -42,18 +42,27 @@ struct SaveStreamingState {
 #[derive(Debug)]
 pub struct PassthroughWorldOverlay<F> {
     field: F,
+    // Authoritative runtime override tree: explicit deltas over virgin world queries.
+    override_chunks: RegionChunkTree,
+    // Dirty tracking for replication fanout.
     dirty_chunks: RegionChunkTree,
+    // Dirty tracking for save patch writes.
     dirty_save_chunks: HashSet<[i32; 4]>,
     save_stream: Option<SaveStreamingState>,
+    base_world_kind: BaseWorldKind,
+    world_seed: u64,
 }
 
 impl<F> PassthroughWorldOverlay<F> {
-    pub fn new(field: F) -> Self {
+    pub fn new(field: F, base_world_kind: BaseWorldKind, world_seed: u64) -> Self {
         Self {
             field,
+            override_chunks: RegionChunkTree::new(),
             dirty_chunks: RegionChunkTree::new(),
             dirty_save_chunks: HashSet::new(),
             save_stream: None,
+            base_world_kind,
+            world_seed,
         }
     }
 
@@ -120,7 +129,23 @@ where
     F: WorldField,
 {
     fn query_region_core(&self, query: QueryVolume, detail: QueryDetail) -> Arc<RegionTreeCore> {
-        self.field.query_region_core(query, detail)
+        let bounds = query.bounds;
+        if !bounds.is_valid() {
+            return Arc::new(RegionTreeCore {
+                bounds,
+                kind: RegionNodeKind::Empty,
+                generator_version_hash: 0,
+            });
+        }
+
+        // Compose authoritative runtime world as:
+        // virgin field query + explicit override chunks.
+        let base_core = self.field.query_region_core(query, detail);
+        let mut composed = RegionChunkTree::new();
+        let _ = composed.splice_non_empty_core_in_bounds(bounds, base_core.as_ref());
+        let override_core = self.override_chunks.slice_core_in_bounds(bounds);
+        let _ = composed.overlay_core_in_bounds(bounds, &override_core);
+        Arc::new(composed.slice_core_in_bounds(bounds))
     }
 }
 
@@ -205,13 +230,22 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
     ) -> Self {
-        Self::new(LegacyWorldGenerator::from_chunk_payloads(
+        let field = LegacyWorldGenerator::from_chunk_payloads(
             base_kind,
-            chunk_payloads,
+            Vec::<([i32; 4], ChunkPayload)>::new(),
             world_seed,
             procgen_structures,
             blocked_cells,
-        ))
+        );
+        Self {
+            field,
+            override_chunks: RegionChunkTree::from_chunks(chunk_payloads),
+            dirty_chunks: RegionChunkTree::new(),
+            dirty_save_chunks: HashSet::new(),
+            save_stream: None,
+            base_world_kind: base_kind,
+            world_seed,
+        }
     }
 
     pub fn from_save_root(
@@ -224,15 +258,18 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
     ) -> io::Result<Self> {
         let metadata =
             save_v4::load_or_init_state_metadata(root, default_base_kind, world_seed, now_ms)?;
+        let base_world_kind = metadata.global.base_world_kind.to_runtime();
+        let runtime_world_seed = metadata.global.world_seed;
         let field = LegacyWorldGenerator::from_chunk_payloads(
-            metadata.global.base_world_kind.to_runtime(),
+            base_world_kind,
             Vec::<([i32; 4], ChunkPayload)>::new(),
-            metadata.global.world_seed,
+            runtime_world_seed,
             procgen_structures,
             blocked_cells,
         );
         Ok(Self {
             field,
+            override_chunks: RegionChunkTree::new(),
             dirty_chunks: RegionChunkTree::new(),
             dirty_save_chunks: HashSet::new(),
             save_stream: Some(SaveStreamingState {
@@ -241,6 +278,8 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
                 loaded_bounds: Vec::new(),
                 next_entity_id: metadata.global.next_entity_id.max(1),
             }),
+            base_world_kind,
+            world_seed: runtime_world_seed,
         })
     }
 
@@ -265,11 +304,21 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
                 missing_bounds,
             )?;
             loaded_payloads = loaded_payloads.saturating_add(payloads.len());
-            let _ = self.field.apply_chunk_payloads(payloads);
+            for (chunk_key, payload) in payloads {
+                let _ = self.override_chunks.set_chunk(chunk_key, Some(payload));
+            }
             save_stream.loaded_bounds.push(missing_bounds);
         }
-        self.field.clear_dirty();
         Ok(loaded_payloads)
+    }
+
+    fn query_virgin_chunk_payload(&self, chunk_pos: ChunkPos) -> Option<ChunkPayload> {
+        let key = chunk_key_from_chunk_pos(chunk_pos);
+        let bounds = Aabb4i::new(key, key);
+        let core = self
+            .field
+            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        chunk_payload_from_core(core.as_ref(), key)
     }
 
     pub fn prepare_query_bounds(&mut self, bounds: Aabb4i) -> io::Result<usize> {
@@ -284,33 +333,16 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
     }
 
     pub fn world_seed(&self) -> u64 {
-        self.field.world_seed()
+        self.world_seed
     }
 
     pub fn non_empty_chunk_count(&self) -> usize {
-        self.field.non_empty_chunk_count()
+        self.override_chunks.non_empty_chunk_count()
     }
 
     pub fn clear_dirty(&mut self) {
-        self.field.clear_dirty();
         self.clear_dirty_chunks();
         self.dirty_save_chunks.clear();
-    }
-
-    pub fn set_procgen_blocked_cells(
-        &mut self,
-        blocked_cells: HashSet<crate::server::procgen::StructureCell>,
-    ) {
-        self.field.set_procgen_blocked_cells(blocked_cells);
-    }
-
-    pub fn rebuild_procgen_keepout_from_chunks(&mut self, padding_chunks: i32) -> usize {
-        self.field
-            .rebuild_procgen_keepout_from_chunks(padding_chunks)
-    }
-
-    pub fn prune_virgin_chunks(&mut self) -> usize {
-        self.field.prune_virgin_chunks()
     }
 
     pub fn apply_voxel_edit(
@@ -318,11 +350,10 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         position: [i32; 4],
         material: VoxelType,
     ) -> Option<ChunkPos> {
-        let (chunk_pos, _) = world_to_chunk(position[0], position[1], position[2], position[3]);
-        let chunk_bounds = Aabb4i::new(
-            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-            [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-        );
+        let (chunk_pos, voxel_index) =
+            world_to_chunk(position[0], position[1], position[2], position[3]);
+        let chunk_key = chunk_key_from_chunk_pos(chunk_pos);
+        let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
         if let Err(error) = self.ensure_persisted_bounds_loaded(chunk_bounds) {
             eprintln!(
                 "failed to hydrate persisted world chunk {} {} {} {} before edit: {}",
@@ -330,13 +361,40 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
             );
         }
 
-        let changed = self.field.apply_voxel_edit(position, material);
-        if let Some(chunk_pos) = changed {
-            self.mark_dirty_chunk(chunk_pos);
-            self.dirty_save_chunks
-                .insert([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]);
+        let override_payload = self.override_chunks.chunk_payload(chunk_key);
+        let virgin_payload = self.query_virgin_chunk_payload(chunk_pos);
+        let mut working_chunk = override_payload
+            .as_ref()
+            .and_then(chunk_from_payload)
+            .or_else(|| virgin_payload.as_ref().and_then(chunk_from_payload))
+            .unwrap_or_else(empty_dense_chunk);
+
+        if working_chunk[voxel_index] == material {
+            return None;
         }
-        changed
+
+        working_chunk[voxel_index] = material;
+        let should_remove_override =
+            if let Some(virgin_chunk) = virgin_payload.as_ref().and_then(chunk_from_payload) {
+                chunks_equal(&working_chunk, &virgin_chunk)
+            } else {
+                virgin_payload.is_none() && dense_chunk_is_empty(&working_chunk)
+            };
+
+        let changed = if should_remove_override {
+            self.override_chunks.remove_chunk(chunk_key)
+        } else {
+            let payload = payload_from_chunk_compact(&working_chunk);
+            self.override_chunks.set_chunk(chunk_key, Some(payload))
+        };
+
+        if !changed {
+            return None;
+        }
+
+        self.mark_dirty_chunk(chunk_pos);
+        self.dirty_save_chunks.insert(chunk_key);
+        Some(chunk_pos)
     }
 
     pub fn persist_dirty_overrides(
@@ -359,10 +417,8 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         dirty_chunk_positions.sort_unstable();
         let dirty_chunk_payloads = dirty_chunk_positions
             .into_iter()
-            .map(|chunk_pos| (chunk_pos, self.field.chunk_tree().chunk_payload(chunk_pos)))
+            .map(|chunk_pos| (chunk_pos, self.override_chunks.chunk_payload(chunk_pos)))
             .collect::<Vec<_>>();
-        let base_world_kind = self.field.base_kind();
-        let world_seed = self.field.world_seed();
 
         let result = {
             let stream = self
@@ -372,9 +428,9 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
             save_v4::save_state_from_chunk_payload_patch(
                 &stream.root,
                 SaveChunkPayloadPatchRequest {
-                    base_world_kind,
+                    base_world_kind: self.base_world_kind,
                     dirty_chunk_payloads,
-                    world_seed,
+                    world_seed: self.world_seed,
                     next_entity_id: next_entity_id.max(stream.next_entity_id).max(1),
                     player_entity_hints: None,
                     custom_global_payload: None,
@@ -398,11 +454,15 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
             stream.index = refreshed.index;
             stream.next_entity_id = refreshed.global.next_entity_id.max(1);
         }
+        self.base_world_kind = refreshed.global.base_world_kind.to_runtime();
+        self.world_seed = refreshed.global.world_seed;
         Ok(Some(result))
     }
 
     pub fn chunk_at(&self, chunk_pos: ChunkPos) -> Option<[VoxelType; CHUNK_VOLUME]> {
-        self.field.chunk_at(chunk_pos)
+        self.override_chunks
+            .chunk_payload(chunk_key_from_chunk_pos(chunk_pos))
+            .and_then(|payload| chunk_from_payload(&payload))
     }
 
     pub fn effective_chunk(
@@ -410,9 +470,95 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         chunk_pos: ChunkPos,
         preserve_explicit_empty_chunk: bool,
     ) -> Option<[VoxelType; CHUNK_VOLUME]> {
-        self.field
-            .effective_chunk(chunk_pos, preserve_explicit_empty_chunk)
+        if let Some(payload) = self
+            .override_chunks
+            .chunk_payload(chunk_key_from_chunk_pos(chunk_pos))
+        {
+            return payload_to_effective_chunk(payload, preserve_explicit_empty_chunk);
+        }
+        let virgin_payload = self.query_virgin_chunk_payload(chunk_pos)?;
+        payload_to_effective_chunk(virgin_payload, preserve_explicit_empty_chunk)
     }
+}
+
+fn chunk_payload_from_core(core: &RegionTreeCore, key_pos: [i32; 4]) -> Option<ChunkPayload> {
+    if !core.bounds.contains_chunk(key_pos) {
+        return None;
+    }
+
+    match &core.kind {
+        RegionNodeKind::Empty => None,
+        RegionNodeKind::Uniform(material) => Some(ChunkPayload::Uniform(*material)),
+        RegionNodeKind::ProceduralRef(_) => None,
+        RegionNodeKind::ChunkArray(chunk_array) => chunk_array_payload_at(chunk_array, key_pos),
+        RegionNodeKind::Branch(children) => children
+            .iter()
+            .find(|child| child.bounds.contains_chunk(key_pos))
+            .and_then(|child| chunk_payload_from_core(child, key_pos)),
+    }
+}
+
+fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: [i32; 4]) -> Option<ChunkPayload> {
+    if !chunk_array.bounds.contains_chunk(key_pos) {
+        return None;
+    }
+    let dense_indices = chunk_array.decode_dense_indices().ok()?;
+    let extents = chunk_array.bounds.chunk_extents()?;
+    let local = [
+        (key_pos[0] - chunk_array.bounds.min[0]) as usize,
+        (key_pos[1] - chunk_array.bounds.min[1]) as usize,
+        (key_pos[2] - chunk_array.bounds.min[2]) as usize,
+        (key_pos[3] - chunk_array.bounds.min[3]) as usize,
+    ];
+    let linear = linear_cell_index(local, extents);
+    let palette_idx = *dense_indices.get(linear)? as usize;
+    chunk_array.chunk_palette.get(palette_idx).cloned()
+}
+
+fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
+    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
+}
+
+fn payload_to_effective_chunk(
+    payload: ChunkPayload,
+    preserve_explicit_empty_chunk: bool,
+) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    let chunk = chunk_from_payload(&payload)?;
+    if preserve_explicit_empty_chunk || !dense_chunk_is_empty(&chunk) {
+        Some(chunk)
+    } else {
+        None
+    }
+}
+
+fn payload_from_chunk_compact(chunk: &[VoxelType; CHUNK_VOLUME]) -> ChunkPayload {
+    let materials: Vec<u16> = chunk.iter().map(|voxel| u16::from(voxel.0)).collect();
+    ChunkPayload::from_dense_materials_compact(&materials)
+        .unwrap_or(ChunkPayload::Dense16 { materials })
+}
+
+fn chunk_from_payload(payload: &ChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    let materials = payload.dense_materials().ok()?;
+    if materials.len() != CHUNK_VOLUME {
+        return None;
+    }
+    let mut chunk = empty_dense_chunk();
+    for (idx, material) in materials.into_iter().enumerate() {
+        chunk[idx] = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
+    }
+    Some(chunk)
+}
+
+fn empty_dense_chunk() -> [VoxelType; CHUNK_VOLUME] {
+    [VoxelType::AIR; CHUNK_VOLUME]
+}
+
+fn dense_chunk_is_empty(chunk: &[VoxelType; CHUNK_VOLUME]) -> bool {
+    chunk.iter().all(|voxel| voxel.is_air())
+}
+
+fn chunks_equal(a: &[VoxelType; CHUNK_VOLUME], b: &[VoxelType; CHUNK_VOLUME]) -> bool {
+    a[..] == b[..]
 }
 
 pub type ServerWorldOverlay = PassthroughWorldOverlay<LegacyWorldGenerator>;
@@ -421,6 +567,24 @@ pub type ServerWorldOverlay = PassthroughWorldOverlay<LegacyWorldGenerator>;
 mod tests {
     use super::*;
     use crate::shared::voxel::BaseWorldKind;
+
+    fn collect_chunk_keys(bounds_list: &[Aabb4i]) -> Vec<[i32; 4]> {
+        let mut keys = Vec::new();
+        for bounds in bounds_list {
+            for w in bounds.min[3]..=bounds.max[3] {
+                for z in bounds.min[2]..=bounds.max[2] {
+                    for y in bounds.min[1]..=bounds.max[1] {
+                        for x in bounds.min[0]..=bounds.max[0] {
+                            keys.push([x, y, z, w]);
+                        }
+                    }
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
 
     #[test]
     fn overlay_dirty_bounds_drain_returns_touched_chunk_once() {
@@ -458,12 +622,8 @@ mod tests {
 
         let dirty = overlay.take_dirty_bounds();
         assert_eq!(
-            dirty,
-            vec![
-                Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]),
-                Aabb4i::new([0, 1, 0, 0], [0, 1, 0, 0]),
-                Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]),
-            ]
+            collect_chunk_keys(&dirty),
+            vec![[0, 0, 0, 0], [0, 1, 0, 0], [1, 0, 0, 0]]
         );
     }
 
@@ -480,5 +640,78 @@ mod tests {
         let _ = overlay.apply_voxel_edit([0, 0, 0, 0], VoxelType(5));
         overlay.clear_dirty();
         assert!(overlay.take_dirty_bounds().is_empty());
+    }
+
+    #[test]
+    fn overlay_edit_does_not_mutate_virgin_field() {
+        let mut overlay = ServerWorldOverlay::from_chunk_payloads(
+            BaseWorldKind::FlatFloor {
+                material: VoxelType(11),
+            },
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            777,
+            false,
+            HashSet::new(),
+        );
+
+        let (chunk_pos, voxel_idx) = world_to_chunk(0, -1, 0, 0);
+        let chunk_key = chunk_key_from_chunk_pos(chunk_pos);
+        let bounds = Aabb4i::new(chunk_key, chunk_key);
+
+        let virgin_before = overlay
+            .field()
+            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        let virgin_payload_before =
+            chunk_payload_from_core(virgin_before.as_ref(), chunk_key).expect("virgin payload");
+        let virgin_chunk_before = chunk_from_payload(&virgin_payload_before).expect("virgin chunk");
+        assert!(virgin_chunk_before[voxel_idx].is_solid());
+
+        let changed = overlay.apply_voxel_edit([0, -1, 0, 0], VoxelType::AIR);
+        assert_eq!(changed, Some(chunk_pos));
+
+        let effective_after = overlay
+            .effective_chunk(chunk_pos, true)
+            .expect("effective override chunk");
+        assert_eq!(effective_after[voxel_idx], VoxelType::AIR);
+
+        let virgin_after = overlay
+            .field()
+            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        let virgin_payload_after =
+            chunk_payload_from_core(virgin_after.as_ref(), chunk_key).expect("virgin payload");
+        let virgin_chunk_after = chunk_from_payload(&virgin_payload_after).expect("virgin chunk");
+        assert!(virgin_chunk_after[voxel_idx].is_solid());
+    }
+
+    #[test]
+    fn query_region_core_applies_explicit_empty_override_over_virgin_content() {
+        let (chunk_pos, voxel_idx) = world_to_chunk(0, -1, 0, 0);
+        let chunk_key = chunk_key_from_chunk_pos(chunk_pos);
+        let bounds = Aabb4i::new(chunk_key, chunk_key);
+        let mut overlay = ServerWorldOverlay::from_chunk_payloads(
+            BaseWorldKind::FlatFloor {
+                material: VoxelType(11),
+            },
+            vec![(chunk_key, ChunkPayload::Uniform(0))],
+            991,
+            false,
+            HashSet::new(),
+        );
+
+        let composed = overlay.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        let composed_payload =
+            chunk_payload_from_core(composed.as_ref(), chunk_key).expect("composed payload");
+        let composed_chunk = chunk_from_payload(&composed_payload).expect("composed chunk");
+        assert!(composed_chunk[voxel_idx].is_air());
+
+        let virgin = overlay
+            .field()
+            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        let virgin_payload =
+            chunk_payload_from_core(virgin.as_ref(), chunk_key).expect("virgin payload");
+        let virgin_chunk = chunk_from_payload(&virgin_payload).expect("virgin chunk");
+        assert!(virgin_chunk[voxel_idx].is_solid());
+
+        overlay.clear_dirty();
     }
 }

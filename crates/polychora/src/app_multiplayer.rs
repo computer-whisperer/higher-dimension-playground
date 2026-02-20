@@ -981,9 +981,10 @@ impl App {
         let scene_patch_start = Instant::now();
         let scene_patch_stats = self.scene.apply_near_lod_region_patch(patch_bounds, &patch);
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
-        let diag_splice_elapsed_ms = if self.multiplayer_stream_tree_diag_enabled
+        let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
             || self.multiplayer_stream_tree_compare_diag_enabled
-            || self.multiplayer_stream_tree_diag_labels_enabled
+            || self.multiplayer_stream_tree_diag_labels_enabled)
+            && scene_patch_stats.changed_chunks > 0
         {
             let diag_splice_start = Instant::now();
             let _ = self

@@ -181,9 +181,8 @@ fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aab
             .collect::<Vec<_>>()
     };
 
-    let mut sent = 0usize;
+    let mut recipients_by_clip = HashMap::<Aabb4i, Vec<u64>>::new();
     for bounds in unique {
-        let mut recipients_by_clip = HashMap::<Aabb4i, Vec<u64>>::new();
         for (client_id, interest) in &recipients_by_client {
             let Some(clipped) = intersect_bounds(bounds, *interest) else {
                 continue;
@@ -193,25 +192,28 @@ fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aab
                 .or_default()
                 .push(*client_id);
         }
-        if recipients_by_clip.is_empty() {
-            continue;
-        }
+    }
+    if recipients_by_clip.is_empty() {
+        return 0;
+    }
 
-        for (clip_bounds, client_ids) in recipients_by_clip {
-            let subtree = {
-                let mut guard = state.lock().expect("server state lock poisoned");
-                guard.query_world_subtree(clip_bounds)
-            };
-            for client_id in client_ids {
-                send_to_client(
-                    state,
-                    client_id,
-                    ServerMessage::WorldSubtreePatch {
-                        subtree: (*subtree).clone(),
-                    },
-                );
-                sent = sent.saturating_add(1);
-            }
+    let mut sent = 0usize;
+    for (clip_bounds, mut client_ids) in recipients_by_clip {
+        client_ids.sort_unstable();
+        client_ids.dedup();
+        let subtree = {
+            let mut guard = state.lock().expect("server state lock poisoned");
+            guard.query_world_subtree(clip_bounds)
+        };
+        for client_id in client_ids {
+            send_to_client(
+                state,
+                client_id,
+                ServerMessage::WorldSubtreePatch {
+                    subtree: (*subtree).clone(),
+                },
+            );
+            sent = sent.saturating_add(1);
         }
     }
     sent
