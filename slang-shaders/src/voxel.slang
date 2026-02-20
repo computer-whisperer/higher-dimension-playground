@@ -46,6 +46,7 @@ static const uint META_DEBUG_FLAG_COMPARE_SLICE_ONLY = 1u << 2u;
 static const uint META_DEBUG_FLAG_LOD_TINT = 1u << 3u;
 static const uint META_DEBUG_FLAG_ENTITY_LINEAR_ONLY = 1u << 4u;
 static const uint META_DEBUG_FLAG_ENTITY_BVH_COMPARE = 1u << 5u;
+static const uint META_DEBUG_FLAG_WORLD_BVH_RAY_DIAG = 1u << 6u;
 static const float ENTITY_BVH_TOL_REL = 1e-3;
 static const float ENTITY_BVH_TOL_ABS = 1e-3;
 static const uint DEBUG_FLAG_CHUNK_TIE_STEPPED = 1u << 1u;
@@ -125,6 +126,28 @@ static const uint FIRST_MISMATCH_LAST_CHUNK_Y = 24u;
 static const uint FIRST_MISMATCH_LAST_CHUNK_Z = 25u;
 static const uint FIRST_MISMATCH_LAST_CHUNK_W = 26u;
 static const uint FIRST_MISMATCH_COUNT = 27u;
+static const uint WORLD_BVH_RAY_DIAG_CAPACITY = 128u;
+static const uint WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD = 16u;
+static const uint WORLD_BVH_RAY_DIAG_COUNT_WORD = 0u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_BASE_WORD = 1u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_PIXEL_X = 0u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_PIXEL_Y = 1u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_LAYER = 2u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_HIT_MASK = 3u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_MISS_REASON = 4u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_HIT_MATERIAL = 5u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_X = 6u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Y = 7u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Z = 8u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_W = 9u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_HIT_T_BITS = 10u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_CHUNK_STEPS = 11u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_REMAINING_VOXELS = 12u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_NODE_VISITS = 13u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_PATH_HASH = 14u;
+static const uint WORLD_BVH_RAY_DIAG_RECORD_FLAGS = 15u;
+static const uint WORLD_BVH_RAY_DIAG_WORD_COUNT =
+    WORLD_BVH_RAY_DIAG_RECORD_BASE_WORD + WORLD_BVH_RAY_DIAG_CAPACITY * WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD;
 
 struct VoxelFrameMeta
 {
@@ -142,6 +165,10 @@ struct VoxelFrameMeta
     uint stageBSliceLayer;
     uint stageBThickHalfWidth;
     uint debugFlags;
+    uint worldBvhDiagSeed;
+    uint worldBvhDiagSampleCount;
+    uint worldBvhDiagPadding0;
+    uint worldBvhDiagPadding1;
     int visibleChunkMinX;
     int visibleChunkMinY;
     int visibleChunkMinZ;
@@ -207,6 +234,7 @@ struct VoxelLeafHeader
 [[vk::binding(9, 2)]] RWStructuredBuffer<uint> vteCompareStats;
 [[vk::binding(10, 2)]] RWStructuredBuffer<uint> vteFirstMismatchRecord;
 [[vk::binding(11, 2)]] StructuredBuffer<uint> voxelMacroWords;
+[[vk::binding(12, 2)]] RWStructuredBuffer<uint> vteWorldBvhRayDiagBuffer;
 
 void incrementCompareStat(uint statIndex)
 {
@@ -304,6 +332,96 @@ void captureFirstMismatch(
     vteFirstMismatchRecord[FIRST_MISMATCH_LAST_CHUNK_Y] = asuint(lastChunkCoord.y);
     vteFirstMismatchRecord[FIRST_MISMATCH_LAST_CHUNK_Z] = asuint(lastChunkCoord.z);
     vteFirstMismatchRecord[FIRST_MISMATCH_LAST_CHUNK_W] = asuint(lastChunkCoord.w);
+}
+
+bool selectWorldBvhRayDiagSample(
+    uint3 globalId,
+    WorkingData wd,
+    VoxelFrameMeta meta,
+    out uint outSlot)
+{
+    outSlot = INVALID_INDEX;
+    if ((meta.debugFlags & META_DEBUG_FLAG_WORLD_BVH_RAY_DIAG) == 0u)
+    {
+        return false;
+    }
+
+    uint requested = min(meta.worldBvhDiagSampleCount, WORLD_BVH_RAY_DIAG_CAPACITY);
+    if (requested == 0u)
+    {
+        return false;
+    }
+
+    uint dispatchLayers = max(1u, wd.renderDimensions.z);
+    if (meta.stageBMode == STAGE_B_MODE_INTEGRAL && dispatchLayers > 1u)
+    {
+        dispatchLayers = 1u;
+    }
+    uint plane = wd.renderDimensions.x * wd.renderDimensions.y;
+    uint totalDispatchThreads = plane * dispatchLayers;
+    if (totalDispatchThreads == 0u)
+    {
+        return false;
+    }
+
+    uint stride = max(1u, totalDispatchThreads / requested);
+    uint offset = meta.worldBvhDiagSeed % stride;
+    uint linearDispatchIndex = globalId.z * plane + globalId.y * wd.renderDimensions.x + globalId.x;
+    if ((linearDispatchIndex % stride) != offset)
+    {
+        return false;
+    }
+
+    outSlot = linearDispatchIndex / stride;
+    return outSlot < WORLD_BVH_RAY_DIAG_CAPACITY;
+}
+
+void writeWorldBvhRayDiagRecord(
+    uint slot,
+    uint pixelX,
+    uint pixelY,
+    uint layer,
+    bool hit,
+    uint missReason,
+    uint hitMaterial,
+    int4 hitChunkCoord,
+    float hitT,
+    uint chunkStepsTaken,
+    uint remainingVoxelSteps,
+    uint nodeVisits,
+    uint pathHash,
+    uint flags)
+{
+    if (slot >= WORLD_BVH_RAY_DIAG_CAPACITY)
+    {
+        return;
+    }
+
+    uint baseWord = WORLD_BVH_RAY_DIAG_RECORD_BASE_WORD + slot * WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD;
+    if ((baseWord + WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD) > WORLD_BVH_RAY_DIAG_WORD_COUNT)
+    {
+        return;
+    }
+
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_PIXEL_X] = pixelX;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_PIXEL_Y] = pixelY;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_LAYER] = layer;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_HIT_MASK] = hit ? 1u : 0u;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_MISS_REASON] = missReason;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_HIT_MATERIAL] = hitMaterial;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_X] = asuint(hitChunkCoord.x);
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Y] = asuint(hitChunkCoord.y);
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Z] = asuint(hitChunkCoord.z);
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_W] = asuint(hitChunkCoord.w);
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_HIT_T_BITS] = asuint(hitT);
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_CHUNK_STEPS] = chunkStepsTaken;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_REMAINING_VOXELS] = remainingVoxelSteps;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_NODE_VISITS] = nodeVisits;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_PATH_HASH] = pathHash;
+    vteWorldBvhRayDiagBuffer[baseWord + WORLD_BVH_RAY_DIAG_RECORD_FLAGS] = flags;
+
+    uint priorCount = 0u;
+    InterlockedMax(vteWorldBvhRayDiagBuffer[WORLD_BVH_RAY_DIAG_COUNT_WORD], slot + 1u, priorCount);
 }
 
 int floorDiv(int a, int b)
@@ -1786,7 +1904,9 @@ bool traceVoxelRayReferenceVisible(
     VoxelFrameMeta meta,
     out uint hitMaterial,
     out float4 hitPos,
-    out int4 hitChunkCoord)
+    out int4 hitChunkCoord,
+    out uint nodeVisitCount,
+    out uint pathHash)
 {
     uint hitLod = 0u;
     uint missReason = MISS_REASON_NONE;
@@ -1809,7 +1929,9 @@ bool traceVoxelRayReferenceVisible(
         chunkSteps,
         remainingVoxelSteps,
         finalT,
-        lastChunk);
+        lastChunk,
+        nodeVisitCount,
+        pathHash);
 }
 
 bool traceVoxelRayDDA(
@@ -1826,7 +1948,9 @@ bool traceVoxelRayDDA(
     out uint outChunkStepsTaken,
     out uint outRemainingVoxelSteps,
     out float outFinalT,
-    out int4 outLastChunkCoord)
+    out int4 outLastChunkCoord,
+    out uint outNodeVisitCount,
+    out uint outPathHash)
 {
     hitMaterial = 0u;
     hitPos = float4(0.0, 0.0, 0.0, 0.0);
@@ -1838,6 +1962,8 @@ bool traceVoxelRayDDA(
     outRemainingVoxelSteps = 0u;
     outFinalT = 0.0;
     outLastChunkCoord = int4(0, 0, 0, 0);
+    outNodeVisitCount = 0u;
+    outPathHash = 2166136261u;
 
     if (targetLodLevel != 0u || meta.leafCount == 0u || meta.regionBvhNodeCount == 0u)
     {
@@ -1898,10 +2024,30 @@ bool traceVoxelRayDDA(
 
     while (stackCount > 0u && remainingVoxelSteps > 0u && chunkStepsTaken < maxChunkSteps)
     {
+        // Pop nearest node interval first. This keeps first-hit correctness even
+        // when sibling bounds overlap or become highly lopsided after updates.
+        uint bestSlot = 0u;
+        float bestEnter = enterStack[0];
+        for (uint i = 1u; i < stackCount; i++)
+        {
+            if (enterStack[i] < bestEnter)
+            {
+                bestEnter = enterStack[i];
+                bestSlot = i;
+            }
+        }
+        uint nodeIndex = nodeStack[bestSlot];
+        float nodeEnter = enterStack[bestSlot];
+        float nodeExit = exitStack[bestSlot];
         stackCount--;
-        uint nodeIndex = nodeStack[stackCount];
-        float nodeEnter = enterStack[stackCount];
-        float nodeExit = exitStack[stackCount];
+        if (bestSlot != stackCount)
+        {
+            nodeStack[bestSlot] = nodeStack[stackCount];
+            enterStack[bestSlot] = enterStack[stackCount];
+            exitStack[bestSlot] = exitStack[stackCount];
+        }
+        outNodeVisitCount++;
+        outPathHash = (outPathHash ^ (nodeIndex + 0x9E3779B9u)) * 16777619u;
 
         if (nodeIndex >= meta.regionBvhNodeCount)
         {
@@ -1971,39 +2117,25 @@ bool traceVoxelRayDDA(
 
             if (leftValid && rightValid)
             {
-                bool leftNear = leftEnter <= rightEnter;
-                if (leftNear)
+                if (stackCount + 2u <= BVH_STACK_CAPACITY)
                 {
-                    if (stackCount + 2u <= BVH_STACK_CAPACITY)
-                    {
-                        nodeStack[stackCount] = node.rightChild;
-                        enterStack[stackCount] = rightEnter;
-                        exitStack[stackCount] = rightExit;
-                        stackCount++;
-                        nodeStack[stackCount] = node.leftChild;
-                        enterStack[stackCount] = leftEnter;
-                        exitStack[stackCount] = leftExit;
-                        stackCount++;
-                    }
-                    else if (stackCount + 1u <= BVH_STACK_CAPACITY)
-                    {
-                        nodeStack[stackCount] = node.leftChild;
-                        enterStack[stackCount] = leftEnter;
-                        exitStack[stackCount] = leftExit;
-                        stackCount++;
-                    }
+                    nodeStack[stackCount] = node.leftChild;
+                    enterStack[stackCount] = leftEnter;
+                    exitStack[stackCount] = leftExit;
+                    stackCount++;
+                    nodeStack[stackCount] = node.rightChild;
+                    enterStack[stackCount] = rightEnter;
+                    exitStack[stackCount] = rightExit;
+                    stackCount++;
                 }
                 else
                 {
-                    if (stackCount + 2u <= BVH_STACK_CAPACITY)
+                    // Keep the nearer child if stack space is tight.
+                    if (leftEnter <= rightEnter)
                     {
                         nodeStack[stackCount] = node.leftChild;
                         enterStack[stackCount] = leftEnter;
                         exitStack[stackCount] = leftExit;
-                        stackCount++;
-                        nodeStack[stackCount] = node.rightChild;
-                        enterStack[stackCount] = rightEnter;
-                        exitStack[stackCount] = rightExit;
                         stackCount++;
                     }
                     else if (stackCount + 1u <= BVH_STACK_CAPACITY)
@@ -2290,7 +2422,9 @@ bool traceVoxelRayDDAWithLodRings(
     out uint outChunkStepsTaken,
     out uint outRemainingVoxelSteps,
     out float outFinalT,
-    out int4 outLastChunkCoord)
+    out int4 outLastChunkCoord,
+    out uint outNodeVisitCount,
+    out uint outPathHash)
 {
     return traceVoxelRayDDA(
         rayOrigin,
@@ -2306,7 +2440,9 @@ bool traceVoxelRayDDAWithLodRings(
         outChunkStepsTaken,
         outRemainingVoxelSteps,
         outFinalT,
-        outLastChunkCoord);
+        outLastChunkCoord,
+        outNodeVisitCount,
+        outPathHash);
 }
 
 [shader("compute")]
@@ -2364,6 +2500,10 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         return;
     }
 
+    uint worldBvhRayDiagSlot = INVALID_INDEX;
+    bool worldBvhRayDiagSelected = selectWorldBvhRayDiagSample(globalId, wd, meta, worldBvhRayDiagSlot);
+    bool worldBvhRayDiagWritten = false;
+
     // Integral mode fast path: collapse across all layers in Stage A and write
     // directly to layer 0, so Stage B can be skipped for this mode.
     if (meta.stageBMode == STAGE_B_MODE_INTEGRAL && globalId.z == 0u && layerCount > 1u)
@@ -2414,6 +2554,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         uint remainingVoxelSteps = 0u;
         float finalT = 0.0;
         int4 lastChunkCoord = int4(0, 0, 0, 0);
+        uint nodeVisitCount = 0u;
+        uint pathHash = 0u;
         for (uint sampleLayer = 0u; sampleLayer < layerCount; sampleLayer++)
         {
             float4 worldDirection = normalize(worldXY + worldDirZ * cosAngle + worldDirW * sinAngle);
@@ -2430,7 +2572,30 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 chunkStepsTaken,
                 remainingVoxelSteps,
                 finalT,
-                lastChunkCoord);
+                lastChunkCoord,
+                nodeVisitCount,
+                pathHash);
+
+            if (worldBvhRayDiagSelected && !worldBvhRayDiagWritten && sampleLayer == centerLayer)
+            {
+                float hitT = hit ? dot(hitPos - worldOrigin, worldDirection) : -1.0;
+                writeWorldBvhRayDiagRecord(
+                    worldBvhRayDiagSlot,
+                    globalId.x,
+                    globalId.y,
+                    sampleLayer,
+                    hit,
+                    missReason,
+                    hitMaterial,
+                    hitChunkCoord,
+                    hitT,
+                    chunkStepsTaken,
+                    remainingVoxelSteps,
+                    nodeVisitCount,
+                    pathHash,
+                    debugFlags);
+                worldBvhRayDiagWritten = true;
+            }
 
             EntityTetraHit entityHit = entityTetraHitNone();
             if (evaluateEntityTetra)
@@ -2806,6 +2971,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     uint remainingVoxelSteps = 0u;
     float finalT = 0.0;
     int4 lastChunkCoord = int4(0, 0, 0, 0);
+    uint nodeVisitCount = 0u;
+    uint pathHash = 0u;
     bool hit = traceVoxelRayDDAWithLodRings(
         worldOrigin,
         worldDirection,
@@ -2819,7 +2986,29 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         chunkStepsTaken,
         remainingVoxelSteps,
         finalT,
-        lastChunkCoord);
+        lastChunkCoord,
+        nodeVisitCount,
+        pathHash);
+
+    if (worldBvhRayDiagSelected)
+    {
+        float hitT = hit ? dot(hitPos - worldOrigin, worldDirection) : -1.0;
+        writeWorldBvhRayDiagRecord(
+            worldBvhRayDiagSlot,
+            globalId.x,
+            globalId.y,
+            globalId.z,
+            hit,
+            missReason,
+            hitMaterial,
+            hitChunkCoord,
+            hitT,
+            chunkStepsTaken,
+            remainingVoxelSteps,
+            nodeVisitCount,
+            pathHash,
+            debugFlags);
+    }
 
     bool evaluateEntityTetra = false;
     EntityTetraHit entityHit = entityTetraHitNone();
@@ -3050,13 +3239,17 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             uint refHitMaterial = 0;
             float4 refHitPos = float4(0.0, 0.0, 0.0, 0.0);
             int4 refHitChunkCoord = int4(0, 0, 0, 0);
+            uint refNodeVisitCount = 0u;
+            uint refPathHash = 0u;
             bool refHit = traceVoxelRayReferenceVisible(
                 worldOrigin,
                 worldDirection,
                 meta,
                 refHitMaterial,
                 refHitPos,
-                refHitChunkCoord);
+                refHitChunkCoord,
+                refNodeVisitCount,
+                refPathHash);
 
             bool hitStateMismatch = (hit != refHit);
             bool chunkMaterialMismatch = (!hitStateMismatch)

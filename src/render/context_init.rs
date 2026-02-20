@@ -558,7 +558,9 @@ impl RenderContext {
                 query_pool,
                 fence: None,
                 vte_compare_enabled: false,
+                vte_world_bvh_ray_diag_enabled: false,
                 last_voxel_metadata_generation: None,
+                vte_world_bvh_ray_diag_expected: Vec::new(),
                 vte_entity_diag_copy_scheduled: false,
                 vte_entity_diag_non_voxel_tet_count: 0,
             });
@@ -576,6 +578,18 @@ impl RenderContext {
             VTE_ENTITY_DIAG_BVH_INTERVAL_ENV,
             VTE_ENTITY_DIAG_DEFAULT_INTERVAL,
         );
+        let vte_world_bvh_ray_diag_enabled = vte_world_bvh_ray_diag_env_enabled();
+        let vte_world_bvh_ray_diag_samples = env_usize(
+            VTE_WORLD_BVH_RAY_DIAG_SAMPLES_ENV,
+            VTE_WORLD_BVH_RAY_DIAG_DEFAULT_SAMPLES,
+        )
+        .max(1)
+        .min(vte::VTE_WORLD_BVH_RAY_DIAG_CAPACITY);
+        let vte_world_bvh_ray_diag_interval = env_usize(
+            VTE_WORLD_BVH_RAY_DIAG_INTERVAL_ENV,
+            VTE_WORLD_BVH_RAY_DIAG_DEFAULT_INTERVAL,
+        )
+        .max(1);
         if vte_entity_diag_enabled {
             eprintln!(
                 "VTE entity diagnostics enabled (verbose={}, bvh_readback={}, bvh_topology={}, interval={} frames).",
@@ -583,6 +597,12 @@ impl RenderContext {
                 vte_entity_diag_bvh_readback,
                 vte_entity_diag_bvh_topology,
                 vte_entity_diag_interval
+            );
+        }
+        if vte_world_bvh_ray_diag_enabled {
+            eprintln!(
+                "VTE world BVH ray diagnostics enabled (samples={}, interval={} frames).",
+                vte_world_bvh_ray_diag_samples, vte_world_bvh_ray_diag_interval
             );
         }
 
@@ -630,6 +650,10 @@ impl RenderContext {
             vte_entity_diag_bvh_topology,
             vte_entity_diag_interval,
             vte_entity_diag_last_log_frame: None,
+            vte_world_bvh_ray_diag_enabled,
+            vte_world_bvh_ray_diag_samples,
+            vte_world_bvh_ray_diag_interval,
+            vte_world_bvh_ray_diag_last_log_frame: None,
             vte_entity_diag_prev_used_non_voxel: None,
             vte_entity_diag_prev_tets_non_voxel: None,
             drop_next_profile_sample: false,

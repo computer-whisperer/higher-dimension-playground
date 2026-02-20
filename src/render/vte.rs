@@ -55,6 +55,10 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) stage_b_slice_layer: u32,
     pub(super) stage_b_thick_half_width: u32,
     pub(super) debug_flags: u32,
+    pub(super) world_bvh_diag_seed: u32,
+    pub(super) world_bvh_diag_sample_count: u32,
+    pub(super) _world_bvh_diag_padding0: u32,
+    pub(super) _world_bvh_diag_padding1: u32,
     pub(super) visible_chunk_min_x: i32,
     pub(super) visible_chunk_min_y: i32,
     pub(super) visible_chunk_min_z: i32,
@@ -194,6 +198,7 @@ pub(super) const VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY: u32 = 1 << 2;
 pub(super) const VTE_DEBUG_FLAG_LOD_TINT: u32 = 1 << 3;
 pub(super) const VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY: u32 = 1 << 4;
 pub(super) const VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE: u32 = 1 << 5;
+pub(super) const VTE_DEBUG_FLAG_WORLD_BVH_RAY_DIAG: u32 = 1 << 6;
 pub(super) const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
 pub(super) const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
 pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 40;
@@ -265,6 +270,28 @@ pub(super) const VTE_FIRST_MISMATCH_LAST_CHUNK_X: usize = 23;
 pub(super) const VTE_FIRST_MISMATCH_LAST_CHUNK_Y: usize = 24;
 pub(super) const VTE_FIRST_MISMATCH_LAST_CHUNK_Z: usize = 25;
 pub(super) const VTE_FIRST_MISMATCH_LAST_CHUNK_W: usize = 26;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_CAPACITY: usize = 128;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD: usize = 16;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_WORD_COUNT: usize =
+    1 + VTE_WORLD_BVH_RAY_DIAG_CAPACITY * VTE_WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_COUNT_WORD: usize = 0;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_BASE_WORD: usize = 1;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_PIXEL_X: usize = 0;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_PIXEL_Y: usize = 1;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_LAYER: usize = 2;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_MASK: usize = 3;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_MISS_REASON: usize = 4;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_MATERIAL: usize = 5;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_X: usize = 6;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Y: usize = 7;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Z: usize = 8;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_W: usize = 9;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_T_BITS: usize = 10;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_CHUNK_STEPS: usize = 11;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_REMAINING_VOXELS: usize = 12;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_NODE_VISITS: usize = 13;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_PATH_HASH: usize = 14;
+pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_FLAGS: usize = 15;
 // Always build/use the entity BVH when entity tetrahedra are present.
 // This avoids costly per-ray linear tetra loops for small dynamic entity sets.
 pub(super) const VTE_ENTITY_LINEAR_THRESHOLD_TETS: usize = 0;
@@ -279,4 +306,21 @@ pub(super) fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
         ^ y.wrapping_mul(0xD816_3841)
         ^ z.wrapping_mul(0xCB1A_B31F)
         ^ w.wrapping_mul(0x1656_67B1)
+}
+
+#[derive(Copy, Clone, Default)]
+pub(super) struct VteWorldBvhRayDiagRecord {
+    pub(super) pixel_x: u32,
+    pub(super) pixel_y: u32,
+    pub(super) layer: u32,
+    pub(super) hit: bool,
+    pub(super) miss_reason: u32,
+    pub(super) hit_material: u32,
+    pub(super) hit_chunk: [i32; 4],
+    pub(super) hit_t: f32,
+    pub(super) chunk_steps: u32,
+    pub(super) remaining_voxels: u32,
+    pub(super) node_visits: u32,
+    pub(super) path_hash: u32,
+    pub(super) flags: u32,
 }

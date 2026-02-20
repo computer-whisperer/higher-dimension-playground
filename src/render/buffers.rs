@@ -464,6 +464,7 @@ pub(super) struct LiveBuffers {
     pub(super) voxel_macro_words_buffer: Subbuffer<[u32]>,
     pub(super) vte_compare_stats_buffer: Subbuffer<[u32]>,
     pub(super) vte_first_mismatch_buffer: Subbuffer<[u32]>,
+    pub(super) vte_world_bvh_ray_diag_buffer: Subbuffer<[u32]>,
     pub(super) descriptor_set: Arc<DescriptorSet>,
 }
 
@@ -653,6 +654,21 @@ impl LiveBuffers {
         )
         .unwrap();
 
+        let vte_world_bvh_ray_diag_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; vte::VTE_WORLD_BVH_RAY_DIAG_WORD_COUNT],
+        )
+        .unwrap();
+
         let descriptor_set = DescriptorSet::new(
             descriptor_set_allocator,
             descriptor_set_layout,
@@ -669,6 +685,7 @@ impl LiveBuffers {
                 WriteDescriptorSet::buffer(9, vte_compare_stats_buffer.clone()),
                 WriteDescriptorSet::buffer(10, vte_first_mismatch_buffer.clone()),
                 WriteDescriptorSet::buffer(11, voxel_macro_words_buffer.clone()),
+                WriteDescriptorSet::buffer(12, vte_world_bvh_ray_diag_buffer.clone()),
             ],
             [],
         )
@@ -686,6 +703,7 @@ impl LiveBuffers {
             voxel_macro_words_buffer,
             vte_compare_stats_buffer,
             vte_first_mismatch_buffer,
+            vte_world_bvh_ray_diag_buffer,
             descriptor_set,
         }
     }
@@ -706,7 +724,7 @@ impl LiveBuffers {
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             },
         );
-        for binding in 2..=11u32 {
+        for binding in 2..=12u32 {
             bindings.insert(
                 binding,
                 DescriptorSetLayoutBinding {

@@ -33,7 +33,7 @@ use ab_glyph::FontArc;
 use bytemuck::Zeroable;
 use common::ModelTetrahedron;
 use exr::prelude::WritableImage;
-use glam::{Vec2, Vec4, Vec4Swizzles};
+use glam::{Vec2, Vec4};
 use image::{ImageBuffer, Rgba};
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -98,13 +98,23 @@ const VTE_ENTITY_DIAG_VERBOSE_ENV: &str = "R4D_VTE_ENTITY_DIAG_VERBOSE";
 const VTE_ENTITY_DIAG_BVH_READBACK_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_READBACK";
 const VTE_ENTITY_DIAG_BVH_TOPOLOGY_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_TOPOLOGY";
 const VTE_ENTITY_DIAG_BVH_INTERVAL_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_INTERVAL";
+const VTE_WORLD_BVH_RAY_DIAG_ENV: &str = "R4D_VTE_WORLD_BVH_RAY_DIAG";
+const VTE_WORLD_BVH_RAY_DIAG_SAMPLES_ENV: &str = "R4D_VTE_WORLD_BVH_RAY_DIAG_SAMPLES";
+const VTE_WORLD_BVH_RAY_DIAG_INTERVAL_ENV: &str = "R4D_VTE_WORLD_BVH_RAY_DIAG_INTERVAL";
 const VTE_ENTITY_DIAG_DEFAULT_INTERVAL: usize = 120;
+const VTE_WORLD_BVH_RAY_DIAG_DEFAULT_SAMPLES: usize = 64;
+const VTE_WORLD_BVH_RAY_DIAG_DEFAULT_INTERVAL: usize = 60;
 const VTE_ENTITY_DIAG_TRANSFORM_ABS_WARN: f32 = 16_384.0;
 // Keep in sync with OVERLAY_RASTER_SCALE in `slang-shaders/src/rasterizer.slang`.
 const VTE_OVERLAY_RASTER_SCALE: u32 = 3;
 const WORKING_FLAG_VTE_COLLAPSED: u32 = 1u32 << 0u32;
 const WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT: u32 = 1u32 << 1u32;
 const WORKING_ZW_SHIFT_STRENGTH_SHIFT: u32 = 8u32;
+const VTE_CPU_MISS_REASON_NONE: u32 = 0;
+const VTE_CPU_MISS_REASON_TOUCHED_VISIBLE_CHUNK: u32 = 1;
+const VTE_CPU_MISS_REASON_VOXEL_BUDGET: u32 = 2;
+const VTE_CPU_MISS_REASON_CHUNK_BUDGET: u32 = 3;
+const VTE_CPU_MISS_REASON_MAX_DISTANCE: u32 = 4;
 
 fn env_flag_enabled(name: &str) -> bool {
     match std::env::var(name) {
@@ -129,6 +139,11 @@ fn vte_entity_linear_only_enabled() -> bool {
 fn vte_entity_bvh_compare_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled(VTE_ENTITY_BVH_COMPARE_ENV))
+}
+
+fn vte_world_bvh_ray_diag_env_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(VTE_WORLD_BVH_RAY_DIAG_ENV))
 }
 
 fn env_usize(name: &str, default_value: usize) -> usize {
@@ -194,7 +209,9 @@ struct FrameInFlight {
     query_pool: Arc<QueryPool>,
     fence: Option<Box<dyn GpuFuture>>,
     vte_compare_enabled: bool,
+    vte_world_bvh_ray_diag_enabled: bool,
     last_voxel_metadata_generation: Option<u64>,
+    vte_world_bvh_ray_diag_expected: Vec<VteWorldBvhRayDiagExpectedRecord>,
     vte_entity_diag_copy_scheduled: bool,
     vte_entity_diag_non_voxel_tet_count: usize,
 }
@@ -471,6 +488,833 @@ fn summarize_bvh_topology(
     })
 }
 
+#[derive(Clone, Copy, Default)]
+struct VteWorldBvhRayDiagExpectedRecord {
+    slot: u32,
+    pixel_x: u32,
+    pixel_y: u32,
+    layer: u32,
+    hit: bool,
+    hit_material: u32,
+    hit_chunk: [i32; 4],
+    hit_t: f32,
+    miss_reason: u32,
+    chunk_steps: u32,
+    remaining_voxels: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct VteCpuRayTraceResult {
+    hit: bool,
+    hit_material: u32,
+    hit_chunk: [i32; 4],
+    hit_t: f32,
+    miss_reason: u32,
+    chunk_steps: u32,
+    remaining_voxels: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VteCpuChunkPayload {
+    Empty,
+    Uniform(u32),
+    Dense(u32),
+}
+
+fn vte_cpu_entry_chunk_coord(position: f32, direction: f32) -> i32 {
+    let chunk_size = 8.0f32;
+    let q = position / chunk_size;
+    let q_floor = q.floor();
+    let mut chunk = q_floor as i32;
+    if direction < 0.0 {
+        let boundary = q_floor * chunk_size;
+        let eps = 1e-7 * chunk_size;
+        if (position - boundary).abs() <= eps {
+            chunk -= 1;
+        }
+    }
+    chunk
+}
+
+fn vte_cpu_step_sign(d: f32) -> i32 {
+    if d > 0.0 {
+        1
+    } else if d < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn vte_cpu_safe_inv_abs(d: f32) -> f32 {
+    const EPS: f32 = 1e-6;
+    if d.abs() > EPS {
+        1.0 / d.abs()
+    } else {
+        1e30
+    }
+}
+
+fn vte_cpu_intersect_aabb(
+    ray_origin: [f32; 4],
+    ray_dir: [f32; 4],
+    bmin: [f32; 4],
+    bmax: [f32; 4],
+) -> Option<(f32, f32)> {
+    const EPS: f32 = 1e-6;
+    let mut t_min = 0.0f32;
+    let mut t_max = 1e30f32;
+    for axis in 0..4 {
+        if ray_dir[axis].abs() > EPS {
+            let t0 = (bmin[axis] - ray_origin[axis]) / ray_dir[axis];
+            let t1 = (bmax[axis] - ray_origin[axis]) / ray_dir[axis];
+            t_min = t_min.max(t0.min(t1));
+            t_max = t_max.min(t0.max(t1));
+        } else if ray_origin[axis] < bmin[axis] || ray_origin[axis] > bmax[axis] {
+            return None;
+        }
+    }
+    if t_max >= t_min {
+        Some((t_min, t_max))
+    } else {
+        None
+    }
+}
+
+fn vte_cpu_lookup_leaf_chunk_entry(
+    leaf: &GpuVoxelLeafHeader,
+    chunk_coord: [i32; 4],
+    leaf_chunk_entries: &[u32],
+    leaf_chunk_entry_count: u32,
+) -> u32 {
+    let local_x = chunk_coord[0] - leaf.min_chunk_coord[0];
+    let local_y = chunk_coord[1] - leaf.min_chunk_coord[1];
+    let local_z = chunk_coord[2] - leaf.min_chunk_coord[2];
+    let local_w = chunk_coord[3] - leaf.min_chunk_coord[3];
+    if local_x < 0 || local_y < 0 || local_z < 0 || local_w < 0 {
+        return vte::VTE_LEAF_CHUNK_ENTRY_EMPTY;
+    }
+    let dim_x = (leaf.max_chunk_coord[0] - leaf.min_chunk_coord[0] + 1).max(0) as usize;
+    let dim_y = (leaf.max_chunk_coord[1] - leaf.min_chunk_coord[1] + 1).max(0) as usize;
+    let dim_z = (leaf.max_chunk_coord[2] - leaf.min_chunk_coord[2] + 1).max(0) as usize;
+    let dim_w = (leaf.max_chunk_coord[3] - leaf.min_chunk_coord[3] + 1).max(0) as usize;
+    if local_x as usize >= dim_x
+        || local_y as usize >= dim_y
+        || local_z as usize >= dim_z
+        || local_w as usize >= dim_w
+    {
+        return vte::VTE_LEAF_CHUNK_ENTRY_EMPTY;
+    }
+    let linear = local_x as usize
+        + dim_x * (local_y as usize + dim_y * (local_z as usize + dim_z * local_w as usize));
+    let entry_index = leaf.chunk_entry_offset as usize + linear;
+    if entry_index >= leaf_chunk_entry_count as usize || entry_index >= leaf_chunk_entries.len() {
+        return vte::VTE_LEAF_CHUNK_ENTRY_EMPTY;
+    }
+    leaf_chunk_entries[entry_index]
+}
+
+fn vte_cpu_lookup_chunk_payload_linear(
+    chunk_coord: [i32; 4],
+    leaf_headers: &[GpuVoxelLeafHeader],
+    leaf_count: u32,
+    leaf_chunk_entries: &[u32],
+    leaf_chunk_entry_count: u32,
+    chunk_count: u32,
+) -> VteCpuChunkPayload {
+    for leaf in leaf_headers.iter().take(leaf_count as usize) {
+        if chunk_coord[0] < leaf.min_chunk_coord[0]
+            || chunk_coord[0] > leaf.max_chunk_coord[0]
+            || chunk_coord[1] < leaf.min_chunk_coord[1]
+            || chunk_coord[1] > leaf.max_chunk_coord[1]
+            || chunk_coord[2] < leaf.min_chunk_coord[2]
+            || chunk_coord[2] > leaf.max_chunk_coord[2]
+            || chunk_coord[3] < leaf.min_chunk_coord[3]
+            || chunk_coord[3] > leaf.max_chunk_coord[3]
+        {
+            continue;
+        }
+        if leaf.leaf_kind == vte::VTE_LEAF_KIND_UNIFORM {
+            return if leaf.uniform_material != 0 {
+                VteCpuChunkPayload::Uniform(leaf.uniform_material)
+            } else {
+                VteCpuChunkPayload::Empty
+            };
+        }
+        if leaf.leaf_kind != vte::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY {
+            continue;
+        }
+        let encoded = vte_cpu_lookup_leaf_chunk_entry(
+            leaf,
+            chunk_coord,
+            leaf_chunk_entries,
+            leaf_chunk_entry_count,
+        );
+        if (encoded & vte::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG) != 0 {
+            let material = encoded & (!vte::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG);
+            return if material != 0 {
+                VteCpuChunkPayload::Uniform(material)
+            } else {
+                VteCpuChunkPayload::Empty
+            };
+        }
+        if encoded == vte::VTE_LEAF_CHUNK_ENTRY_EMPTY {
+            return VteCpuChunkPayload::Empty;
+        }
+        let chunk_index = encoded.saturating_sub(1);
+        if chunk_index < chunk_count {
+            return VteCpuChunkPayload::Dense(chunk_index);
+        }
+        return VteCpuChunkPayload::Empty;
+    }
+    VteCpuChunkPayload::Empty
+}
+
+fn vte_cpu_sample_voxel_in_chunk(
+    voxel_coord: [i32; 4],
+    chunk_min: [i32; 4],
+    header: &GpuVoxelChunkHeader,
+    occupancy_words: &[u32],
+    occupancy_word_count: u32,
+    material_words: &[u32],
+    material_word_count: u32,
+) -> Option<u32> {
+    let local = [
+        voxel_coord[0] - chunk_min[0],
+        voxel_coord[1] - chunk_min[1],
+        voxel_coord[2] - chunk_min[2],
+        voxel_coord[3] - chunk_min[3],
+    ];
+    let local_idx =
+        (local[3] as u32) * 512 + (local[2] as u32) * 64 + (local[1] as u32) * 8 + local[0] as u32;
+    if (header.flags & GpuVoxelChunkHeader::FLAG_FULL) == 0 {
+        let occupancy_idx = header.occupancy_word_offset + (local_idx >> 5);
+        let occupancy_idx = occupancy_idx as usize;
+        if occupancy_idx >= occupancy_word_count as usize || occupancy_idx >= occupancy_words.len()
+        {
+            return None;
+        }
+        let occupancy_word = occupancy_words[occupancy_idx];
+        if (occupancy_word & (1u32 << (local_idx & 31))) == 0 {
+            return None;
+        }
+    }
+    let material_idx = header.material_word_offset + (local_idx >> 2);
+    let material_idx = material_idx as usize;
+    if material_idx >= material_word_count as usize || material_idx >= material_words.len() {
+        return None;
+    }
+    let material_word = material_words[material_idx];
+    let material = (material_word >> ((local_idx & 3) * 8)) & 0xFF;
+    if material != 0 {
+        Some(material)
+    } else {
+        None
+    }
+}
+
+fn vte_cpu_macro_cell_may_contain_solid(
+    voxel_coord: [i32; 4],
+    chunk_min: [i32; 4],
+    header: &GpuVoxelChunkHeader,
+    macro_words: &[u32],
+    macro_word_count: u32,
+) -> bool {
+    if macro_word_count == 0 {
+        return true;
+    }
+    let local = [
+        voxel_coord[0] - chunk_min[0],
+        voxel_coord[1] - chunk_min[1],
+        voxel_coord[2] - chunk_min[2],
+        voxel_coord[3] - chunk_min[3],
+    ];
+    let mx = (local[0] >> 1) as u32;
+    let my = (local[1] >> 1) as u32;
+    let mz = (local[2] >> 1) as u32;
+    let mw = (local[3] >> 1) as u32;
+    let macro_idx = mw * 64 + mz * 16 + my * 4 + mx;
+    let macro_word_idx = header.macro_word_offset + (macro_idx >> 5);
+    let macro_word_idx = macro_word_idx as usize;
+    if macro_word_idx >= macro_word_count as usize || macro_word_idx >= macro_words.len() {
+        return true;
+    }
+    (macro_words[macro_word_idx] & (1u32 << (macro_idx & 31))) != 0
+}
+
+fn vte_cpu_advance_dda4(
+    coord: &mut [i32; 4],
+    step: [i32; 4],
+    t_max: &mut [f32; 4],
+    t_delta: [f32; 4],
+) -> f32 {
+    let mut axis = 0usize;
+    let mut best = t_max[0];
+    for (i, value) in t_max.iter().enumerate().skip(1) {
+        if *value < best {
+            axis = i;
+            best = *value;
+        }
+    }
+    t_max[axis] += t_delta[axis];
+    coord[axis] += step[axis];
+    best
+}
+
+fn vte_cpu_trace_voxels_in_chunk(
+    ray_origin: [f32; 4],
+    ray_dir: [f32; 4],
+    mut t_enter: f32,
+    mut t_exit: f32,
+    chunk_coord: [i32; 4],
+    header: &GpuVoxelChunkHeader,
+    occupancy_words: &[u32],
+    occupancy_word_count: u32,
+    material_words: &[u32],
+    material_word_count: u32,
+    macro_words: &[u32],
+    macro_word_count: u32,
+    remaining_voxels: &mut u32,
+) -> Option<(u32, f32)> {
+    const EPS: f32 = 1e-6;
+    if *remaining_voxels == 0 {
+        return None;
+    }
+
+    let chunk_min = [
+        chunk_coord[0] * 8,
+        chunk_coord[1] * 8,
+        chunk_coord[2] * 8,
+        chunk_coord[3] * 8,
+    ];
+    let chunk_max = [
+        chunk_min[0] + 8,
+        chunk_min[1] + 8,
+        chunk_min[2] + 8,
+        chunk_min[3] + 8,
+    ];
+
+    let solid_bmin = [
+        (chunk_min[0] + header.solid_local_min[0]) as f32,
+        (chunk_min[1] + header.solid_local_min[1]) as f32,
+        (chunk_min[2] + header.solid_local_min[2]) as f32,
+        (chunk_min[3] + header.solid_local_min[3]) as f32,
+    ];
+    let solid_bmax = [
+        (chunk_min[0] + header.solid_local_max[0] + 1) as f32,
+        (chunk_min[1] + header.solid_local_max[1] + 1) as f32,
+        (chunk_min[2] + header.solid_local_max[2] + 1) as f32,
+        (chunk_min[3] + header.solid_local_max[3] + 1) as f32,
+    ];
+    let (solid_enter, solid_exit) =
+        vte_cpu_intersect_aabb(ray_origin, ray_dir, solid_bmin, solid_bmax)?;
+    t_enter = t_enter.max(solid_enter);
+    t_exit = t_exit.min(solid_exit);
+    let mut interval_eps = EPS.max(t_enter.abs().max(t_exit.abs()) * 1e-7);
+    if t_exit <= t_enter + interval_eps {
+        return None;
+    }
+
+    let t_start = t_enter.max(0.0);
+    let start_bias = interval_eps.max(t_start.abs() * 1e-7);
+    let t_trace_start = t_start + start_bias;
+    if t_trace_start >= t_exit {
+        return None;
+    }
+    let local_t_exit = t_exit - t_trace_start;
+    if local_t_exit <= interval_eps {
+        return None;
+    }
+
+    let start_pos = [
+        ray_origin[0] + ray_dir[0] * t_trace_start,
+        ray_origin[1] + ray_dir[1] * t_trace_start,
+        ray_origin[2] + ray_dir[2] * t_trace_start,
+        ray_origin[3] + ray_dir[3] * t_trace_start,
+    ];
+    let mut voxel_coord = [
+        start_pos[0].floor() as i32,
+        start_pos[1].floor() as i32,
+        start_pos[2].floor() as i32,
+        start_pos[3].floor() as i32,
+    ];
+    for axis in 0..4 {
+        if voxel_coord[axis] < chunk_min[axis] {
+            voxel_coord[axis] = chunk_min[axis];
+        }
+        if voxel_coord[axis] >= chunk_max[axis] {
+            voxel_coord[axis] = chunk_max[axis] - 1;
+        }
+    }
+
+    let step = [
+        vte_cpu_step_sign(ray_dir[0]),
+        vte_cpu_step_sign(ray_dir[1]),
+        vte_cpu_step_sign(ray_dir[2]),
+        vte_cpu_step_sign(ray_dir[3]),
+    ];
+    let t_delta = [
+        vte_cpu_safe_inv_abs(ray_dir[0]),
+        vte_cpu_safe_inv_abs(ray_dir[1]),
+        vte_cpu_safe_inv_abs(ray_dir[2]),
+        vte_cpu_safe_inv_abs(ray_dir[3]),
+    ];
+    let mut t_max_local = [1e30f32; 4];
+    if step[0] > 0 {
+        t_max_local[0] = (voxel_coord[0] as f32 + 1.0 - start_pos[0]) * t_delta[0];
+    } else if step[0] < 0 {
+        t_max_local[0] = (start_pos[0] - voxel_coord[0] as f32) * t_delta[0];
+    }
+    if step[1] > 0 {
+        t_max_local[1] = (voxel_coord[1] as f32 + 1.0 - start_pos[1]) * t_delta[1];
+    } else if step[1] < 0 {
+        t_max_local[1] = (start_pos[1] - voxel_coord[1] as f32) * t_delta[1];
+    }
+    if step[2] > 0 {
+        t_max_local[2] = (voxel_coord[2] as f32 + 1.0 - start_pos[2]) * t_delta[2];
+    } else if step[2] < 0 {
+        t_max_local[2] = (start_pos[2] - voxel_coord[2] as f32) * t_delta[2];
+    }
+    if step[3] > 0 {
+        t_max_local[3] = (voxel_coord[3] as f32 + 1.0 - start_pos[3]) * t_delta[3];
+    } else if step[3] < 0 {
+        t_max_local[3] = (start_pos[3] - voxel_coord[3] as f32) * t_delta[3];
+    }
+
+    let can_macro_skip =
+        (header.flags & GpuVoxelChunkHeader::FLAG_FULL) == 0 && macro_word_count > 0;
+    let mut cached_macro_coord = [i32::MIN; 4];
+    let mut cached_macro_has_solid = true;
+    let mut local_t = 0.0f32;
+
+    loop {
+        if *remaining_voxels == 0 {
+            return None;
+        }
+        if local_t > local_t_exit + interval_eps {
+            return None;
+        }
+
+        let next_local_t = t_max_local.iter().copied().fold(f32::INFINITY, f32::min);
+        let segment_end = next_local_t.min(local_t_exit);
+        let has_interior = (segment_end - local_t) > interval_eps;
+        if has_interior {
+            *remaining_voxels = remaining_voxels.saturating_sub(1);
+            let mut macro_has_solid = true;
+            if can_macro_skip {
+                let macro_coord = [
+                    (voxel_coord[0] - chunk_min[0]) >> 1,
+                    (voxel_coord[1] - chunk_min[1]) >> 1,
+                    (voxel_coord[2] - chunk_min[2]) >> 1,
+                    (voxel_coord[3] - chunk_min[3]) >> 1,
+                ];
+                if macro_coord != cached_macro_coord {
+                    cached_macro_coord = macro_coord;
+                    cached_macro_has_solid = vte_cpu_macro_cell_may_contain_solid(
+                        voxel_coord,
+                        chunk_min,
+                        header,
+                        macro_words,
+                        macro_word_count,
+                    );
+                }
+                macro_has_solid = cached_macro_has_solid;
+            }
+            if macro_has_solid {
+                if let Some(material) = vte_cpu_sample_voxel_in_chunk(
+                    voxel_coord,
+                    chunk_min,
+                    header,
+                    occupancy_words,
+                    occupancy_word_count,
+                    material_words,
+                    material_word_count,
+                ) {
+                    return Some((material, t_trace_start + local_t));
+                }
+            }
+        }
+
+        let _ = vte_cpu_advance_dda4(&mut voxel_coord, step, &mut t_max_local, t_delta);
+        local_t = local_t.max(next_local_t);
+        for axis in 0..4 {
+            if voxel_coord[axis] < chunk_min[axis] || voxel_coord[axis] >= chunk_max[axis] {
+                return None;
+            }
+        }
+        interval_eps = EPS.max(t_enter.abs().max(t_exit.abs()) * 1e-7);
+    }
+}
+
+fn vte_cpu_trace_ray_linear(
+    ray_origin: [f32; 4],
+    ray_dir: [f32; 4],
+    meta: &vte::GpuVoxelFrameMeta,
+    region_bvh_nodes: &[GpuVoxelChunkBvhNode],
+    leaf_headers: &[GpuVoxelLeafHeader],
+    leaf_chunk_entries: &[u32],
+    chunk_headers: &[GpuVoxelChunkHeader],
+    occupancy_words: &[u32],
+    material_words: &[u32],
+    macro_words: &[u32],
+) -> VteCpuRayTraceResult {
+    const CHUNK_EPS: f32 = 1e-6;
+    if meta.leaf_count == 0 || meta.region_bvh_node_count == 0 {
+        return VteCpuRayTraceResult::default();
+    }
+    let root_index = meta.region_bvh_node_count.saturating_sub(1) as usize;
+    let Some(root_node) = region_bvh_nodes.get(root_index) else {
+        return VteCpuRayTraceResult::default();
+    };
+    let root_bmin = [
+        root_node.min_chunk_coord[0] as f32 * 8.0,
+        root_node.min_chunk_coord[1] as f32 * 8.0,
+        root_node.min_chunk_coord[2] as f32 * 8.0,
+        root_node.min_chunk_coord[3] as f32 * 8.0,
+    ];
+    let root_bmax = [
+        (root_node.max_chunk_coord[0] + 1) as f32 * 8.0,
+        (root_node.max_chunk_coord[1] + 1) as f32 * 8.0,
+        (root_node.max_chunk_coord[2] + 1) as f32 * 8.0,
+        (root_node.max_chunk_coord[3] + 1) as f32 * 8.0,
+    ];
+    let Some((root_enter, root_exit)) =
+        vte_cpu_intersect_aabb(ray_origin, ray_dir, root_bmin, root_bmax)
+    else {
+        return VteCpuRayTraceResult::default();
+    };
+    let traversal_min_t = root_enter.max(0.0);
+    let max_distance = meta.max_trace_distance.max(1.0);
+    let traversal_max_t = root_exit.min(max_distance);
+    if traversal_max_t <= traversal_min_t + CHUNK_EPS {
+        return VteCpuRayTraceResult::default();
+    }
+
+    let clipped_by_max_distance = root_exit > max_distance + CHUNK_EPS;
+    let mut touched_visible_chunk = false;
+    let max_chunk_steps = meta.max_trace_steps.max(1).min(4096);
+    let mut remaining_voxels = meta.max_trace_steps.saturating_mul(8).clamp(1, 32768);
+    let mut chunk_steps = 0u32;
+    let mut current_t = traversal_min_t;
+    let mut chunk_coord = [0i32; 4];
+    let mut chunk_state_valid = false;
+    let chunk_step = [
+        vte_cpu_step_sign(ray_dir[0]),
+        vte_cpu_step_sign(ray_dir[1]),
+        vte_cpu_step_sign(ray_dir[2]),
+        vte_cpu_step_sign(ray_dir[3]),
+    ];
+    let t_delta_chunk = [
+        vte_cpu_safe_inv_abs(ray_dir[0]) * 8.0,
+        vte_cpu_safe_inv_abs(ray_dir[1]) * 8.0,
+        vte_cpu_safe_inv_abs(ray_dir[2]) * 8.0,
+        vte_cpu_safe_inv_abs(ray_dir[3]) * 8.0,
+    ];
+    let mut t_max_chunk = [1e30f32; 4];
+    let mut last_chunk = [0i32; 4];
+
+    while remaining_voxels > 0 && chunk_steps < max_chunk_steps {
+        chunk_steps += 1;
+        if current_t > traversal_max_t {
+            break;
+        }
+        if !chunk_state_valid {
+            let probe_eps = CHUNK_EPS.max(current_t.abs() * 1e-7);
+            let probe_t = traversal_max_t.min(current_t + probe_eps);
+            let probe_pos = [
+                ray_origin[0] + ray_dir[0] * probe_t,
+                ray_origin[1] + ray_dir[1] * probe_t,
+                ray_origin[2] + ray_dir[2] * probe_t,
+                ray_origin[3] + ray_dir[3] * probe_t,
+            ];
+            chunk_coord = [
+                vte_cpu_entry_chunk_coord(probe_pos[0], ray_dir[0]),
+                vte_cpu_entry_chunk_coord(probe_pos[1], ray_dir[1]),
+                vte_cpu_entry_chunk_coord(probe_pos[2], ray_dir[2]),
+                vte_cpu_entry_chunk_coord(probe_pos[3], ray_dir[3]),
+            ];
+            t_max_chunk = [1e30; 4];
+            if chunk_step[0] > 0 {
+                t_max_chunk[0] = (((chunk_coord[0] + 1) * 8) as f32 - ray_origin[0]) / ray_dir[0];
+            } else if chunk_step[0] < 0 {
+                t_max_chunk[0] = ((chunk_coord[0] * 8) as f32 - ray_origin[0]) / ray_dir[0];
+            }
+            if chunk_step[1] > 0 {
+                t_max_chunk[1] = (((chunk_coord[1] + 1) * 8) as f32 - ray_origin[1]) / ray_dir[1];
+            } else if chunk_step[1] < 0 {
+                t_max_chunk[1] = ((chunk_coord[1] * 8) as f32 - ray_origin[1]) / ray_dir[1];
+            }
+            if chunk_step[2] > 0 {
+                t_max_chunk[2] = (((chunk_coord[2] + 1) * 8) as f32 - ray_origin[2]) / ray_dir[2];
+            } else if chunk_step[2] < 0 {
+                t_max_chunk[2] = ((chunk_coord[2] * 8) as f32 - ray_origin[2]) / ray_dir[2];
+            }
+            if chunk_step[3] > 0 {
+                t_max_chunk[3] = (((chunk_coord[3] + 1) * 8) as f32 - ray_origin[3]) / ray_dir[3];
+            } else if chunk_step[3] < 0 {
+                t_max_chunk[3] = ((chunk_coord[3] * 8) as f32 - ray_origin[3]) / ray_dir[3];
+            }
+            chunk_state_valid = true;
+        }
+        last_chunk = chunk_coord;
+        let mut chunk_exit_t =
+            traversal_max_t.min(t_max_chunk.iter().copied().fold(f32::INFINITY, f32::min));
+        chunk_exit_t = chunk_exit_t.max(current_t);
+
+        let payload = vte_cpu_lookup_chunk_payload_linear(
+            chunk_coord,
+            leaf_headers,
+            meta.leaf_count,
+            leaf_chunk_entries,
+            meta.leaf_chunk_entry_count,
+            meta.chunk_count,
+        );
+        if payload != VteCpuChunkPayload::Empty {
+            touched_visible_chunk = true;
+        }
+        match payload {
+            VteCpuChunkPayload::Uniform(material) => {
+                if material != 0 {
+                    let hit_t = current_t.max(0.0);
+                    let probe_eps = CHUNK_EPS.max(hit_t.abs() * 1e-7);
+                    let probe_t = chunk_exit_t.min(hit_t + probe_eps);
+                    let probe_pos = [
+                        ray_origin[0] + ray_dir[0] * probe_t,
+                        ray_origin[1] + ray_dir[1] * probe_t,
+                        ray_origin[2] + ray_dir[2] * probe_t,
+                        ray_origin[3] + ray_dir[3] * probe_t,
+                    ];
+                    let hit_chunk = [
+                        vte_cpu_entry_chunk_coord(probe_pos[0], ray_dir[0]),
+                        vte_cpu_entry_chunk_coord(probe_pos[1], ray_dir[1]),
+                        vte_cpu_entry_chunk_coord(probe_pos[2], ray_dir[2]),
+                        vte_cpu_entry_chunk_coord(probe_pos[3], ray_dir[3]),
+                    ];
+                    return VteCpuRayTraceResult {
+                        hit: true,
+                        hit_material: material,
+                        hit_chunk,
+                        hit_t,
+                        miss_reason: VTE_CPU_MISS_REASON_NONE,
+                        chunk_steps,
+                        remaining_voxels,
+                    };
+                }
+            }
+            VteCpuChunkPayload::Dense(chunk_index) => {
+                if let Some(header) = chunk_headers.get(chunk_index as usize) {
+                    if chunk_exit_t > current_t + CHUNK_EPS {
+                        if let Some((material, hit_t)) = vte_cpu_trace_voxels_in_chunk(
+                            ray_origin,
+                            ray_dir,
+                            current_t,
+                            chunk_exit_t,
+                            chunk_coord,
+                            header,
+                            occupancy_words,
+                            meta.occupancy_word_count,
+                            material_words,
+                            meta.material_word_count,
+                            macro_words,
+                            meta.macro_word_count,
+                            &mut remaining_voxels,
+                        ) {
+                            return VteCpuRayTraceResult {
+                                hit: true,
+                                hit_material: material,
+                                hit_chunk: chunk_coord,
+                                hit_t,
+                                miss_reason: VTE_CPU_MISS_REASON_NONE,
+                                chunk_steps,
+                                remaining_voxels,
+                            };
+                        }
+                    }
+                }
+            }
+            VteCpuChunkPayload::Empty => {}
+        }
+
+        let next_chunk_t = vte_cpu_advance_dda4(
+            &mut chunk_coord,
+            chunk_step,
+            &mut t_max_chunk,
+            t_delta_chunk,
+        );
+        let advance_eps = CHUNK_EPS.max(next_chunk_t.abs() * 1e-7);
+        current_t = (current_t + CHUNK_EPS).max(next_chunk_t + advance_eps);
+    }
+
+    let miss_reason = if remaining_voxels == 0 {
+        VTE_CPU_MISS_REASON_VOXEL_BUDGET
+    } else if chunk_steps >= max_chunk_steps {
+        VTE_CPU_MISS_REASON_CHUNK_BUDGET
+    } else if clipped_by_max_distance {
+        VTE_CPU_MISS_REASON_MAX_DISTANCE
+    } else if touched_visible_chunk {
+        VTE_CPU_MISS_REASON_TOUCHED_VISIBLE_CHUNK
+    } else {
+        VTE_CPU_MISS_REASON_NONE
+    };
+    VteCpuRayTraceResult {
+        hit: false,
+        hit_material: 0,
+        hit_chunk: last_chunk,
+        hit_t: -1.0,
+        miss_reason,
+        chunk_steps,
+        remaining_voxels,
+    }
+}
+
+fn vte_world_ray_direction_for_pixel_layer(
+    pixel_x: u32,
+    pixel_y: u32,
+    layer: u32,
+    render_dimensions: [u32; 3],
+    present_dimensions: [u32; 2],
+    focal_length_xy: f32,
+    focal_length_zw: f32,
+    world_dir_x: [f32; 4],
+    world_dir_y: [f32; 4],
+    world_dir_z: [f32; 4],
+    world_dir_w: [f32; 4],
+) -> [f32; 4] {
+    let width = render_dimensions[0].max(1);
+    let height = render_dimensions[1].max(1);
+    let layer_count = render_dimensions[2].max(1);
+    let pixel_pos_x = pixel_x as f32 / width as f32 * 2.0 - 1.0;
+    let pixel_pos_y = pixel_y as f32 / height as f32 * 2.0 - 1.0;
+    let aspect_ratio =
+        (present_dimensions[0].max(1)) as f32 / (present_dimensions[1].max(1)) as f32;
+    let sx = pixel_pos_x / focal_length_xy;
+    let sy = (-pixel_pos_y / aspect_ratio) / focal_length_xy;
+    let view_angle = (std::f32::consts::PI / 2.0) / focal_length_zw;
+    let z_norm = ((layer as f32 + 0.5) / layer_count as f32) * 2.0 - 1.0;
+    let zw_angle = z_norm * (view_angle * 0.5) + (std::f32::consts::PI * 0.25);
+    let mut dir = [0.0f32; 4];
+    for axis in 0..4 {
+        dir[axis] = world_dir_x[axis] * sx
+            + world_dir_y[axis] * sy
+            + world_dir_z[axis] * zw_angle.cos()
+            + world_dir_w[axis] * zw_angle.sin();
+    }
+    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] + dir[3] * dir[3]).sqrt();
+    if len > 1e-8 {
+        for c in &mut dir {
+            *c /= len;
+        }
+    }
+    dir
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_world_bvh_ray_diag_expected_records(
+    meta: &vte::GpuVoxelFrameMeta,
+    render_dimensions: [u32; 3],
+    present_dimensions: [u32; 2],
+    focal_length_xy: f32,
+    focal_length_zw: f32,
+    world_origin: [f32; 4],
+    world_dir_x: [f32; 4],
+    world_dir_y: [f32; 4],
+    world_dir_z: [f32; 4],
+    world_dir_w: [f32; 4],
+    chunk_headers: &[GpuVoxelChunkHeader],
+    occupancy_words: &[u32],
+    material_words: &[u32],
+    leaf_headers: &[GpuVoxelLeafHeader],
+    region_bvh_nodes: &[GpuVoxelChunkBvhNode],
+    leaf_chunk_entries: &[u32],
+    macro_words: &[u32],
+) -> Vec<VteWorldBvhRayDiagExpectedRecord> {
+    let requested = usize::min(
+        meta.world_bvh_diag_sample_count as usize,
+        vte::VTE_WORLD_BVH_RAY_DIAG_CAPACITY,
+    );
+    if requested == 0 {
+        return Vec::new();
+    }
+    let width = render_dimensions[0].max(1);
+    let height = render_dimensions[1].max(1);
+    let dispatch_layers = if meta.stage_b_mode == VteDisplayMode::Integral.as_u32()
+        && render_dimensions[2].max(1) > 1
+    {
+        1
+    } else {
+        render_dimensions[2].max(1)
+    };
+    let plane = width as usize * height as usize;
+    let total_dispatch_threads = plane * dispatch_layers as usize;
+    if total_dispatch_threads == 0 {
+        return Vec::new();
+    }
+    let stride = usize::max(1, total_dispatch_threads / requested);
+    let offset = (meta.world_bvh_diag_seed as usize) % stride;
+    let center_layer = meta
+        .stage_b_slice_layer
+        .min(render_dimensions[2].max(1).saturating_sub(1));
+
+    let mut out = Vec::with_capacity(requested);
+    for linear in 0..total_dispatch_threads {
+        if linear % stride != offset {
+            continue;
+        }
+        let slot = linear / stride;
+        if slot >= vte::VTE_WORLD_BVH_RAY_DIAG_CAPACITY {
+            continue;
+        }
+        let dispatch_z = linear / plane;
+        let in_plane = linear % plane;
+        let pixel_y = (in_plane / width as usize) as u32;
+        let pixel_x = (in_plane % width as usize) as u32;
+        let layer = if dispatch_layers == 1 && render_dimensions[2].max(1) > 1 {
+            center_layer
+        } else {
+            dispatch_z as u32
+        };
+        let ray_dir = vte_world_ray_direction_for_pixel_layer(
+            pixel_x,
+            pixel_y,
+            layer,
+            render_dimensions,
+            present_dimensions,
+            focal_length_xy,
+            focal_length_zw,
+            world_dir_x,
+            world_dir_y,
+            world_dir_z,
+            world_dir_w,
+        );
+        let traced = vte_cpu_trace_ray_linear(
+            world_origin,
+            ray_dir,
+            meta,
+            region_bvh_nodes,
+            leaf_headers,
+            leaf_chunk_entries,
+            chunk_headers,
+            occupancy_words,
+            material_words,
+            macro_words,
+        );
+        out.push(VteWorldBvhRayDiagExpectedRecord {
+            slot: slot as u32,
+            pixel_x,
+            pixel_y,
+            layer,
+            hit: traced.hit,
+            hit_material: traced.hit_material,
+            hit_chunk: traced.hit_chunk,
+            hit_t: traced.hit_t,
+            miss_reason: traced.miss_reason,
+            chunk_steps: traced.chunk_steps,
+            remaining_voxels: traced.remaining_voxels,
+        });
+    }
+    out
+}
+
 pub struct RenderContext {
     pub window: Option<Arc<Window>>,
     swapchain: Option<Arc<Swapchain>>,
@@ -515,6 +1359,10 @@ pub struct RenderContext {
     vte_entity_diag_bvh_topology: bool,
     vte_entity_diag_interval: usize,
     vte_entity_diag_last_log_frame: Option<usize>,
+    vte_world_bvh_ray_diag_enabled: bool,
+    vte_world_bvh_ray_diag_samples: usize,
+    vte_world_bvh_ray_diag_interval: usize,
+    vte_world_bvh_ray_diag_last_log_frame: Option<usize>,
     vte_entity_diag_prev_used_non_voxel: Option<usize>,
     vte_entity_diag_prev_tets_non_voxel: Option<usize>,
     drop_next_profile_sample: bool,
@@ -534,6 +1382,14 @@ impl RenderContext {
             let mut writer = self.frames_in_flight[frame_idx]
                 .live_buffers
                 .vte_first_mismatch_buffer
+                .write()
+                .unwrap();
+            writer.fill(0u32);
+        }
+        {
+            let mut writer = self.frames_in_flight[frame_idx]
+                .live_buffers
+                .vte_world_bvh_ray_diag_buffer
                 .write()
                 .unwrap();
             writer.fill(0u32);
@@ -670,6 +1526,184 @@ impl RenderContext {
             };
         } else {
             self.vte_first_mismatch = vte::VteFirstMismatch::default();
+        }
+    }
+
+    fn refresh_vte_world_bvh_ray_diagnostics(&mut self, frame_idx: usize) {
+        let expected =
+            std::mem::take(&mut self.frames_in_flight[frame_idx].vte_world_bvh_ray_diag_expected);
+        if expected.is_empty() {
+            return;
+        }
+
+        let words = self.frames_in_flight[frame_idx]
+            .live_buffers
+            .vte_world_bvh_ray_diag_buffer
+            .read()
+            .unwrap();
+        if words.len() < vte::VTE_WORLD_BVH_RAY_DIAG_WORD_COUNT {
+            eprintln!(
+                "[vte-world-bvh-ray-diag] invalid readback word count: got={} expected={}",
+                words.len(),
+                vte::VTE_WORLD_BVH_RAY_DIAG_WORD_COUNT
+            );
+            return;
+        }
+
+        let gpu_count = words[vte::VTE_WORLD_BVH_RAY_DIAG_COUNT_WORD]
+            .min(vte::VTE_WORLD_BVH_RAY_DIAG_CAPACITY as u32) as usize;
+        let mut mismatches = 0usize;
+        let mut missing = 0usize;
+        let mut hit_state_mismatches = 0usize;
+        let mut material_mismatches = 0usize;
+        let mut chunk_mismatches = 0usize;
+        let mut distance_mismatches = 0usize;
+        let mut metadata_mismatches = 0usize;
+        let mut miss_reason_mismatches = 0usize;
+        let mut first_mismatch_detail: Option<String> = None;
+
+        for expected_record in &expected {
+            let slot = expected_record.slot as usize;
+            if slot >= gpu_count {
+                missing += 1;
+                mismatches += 1;
+                if first_mismatch_detail.is_none() {
+                    first_mismatch_detail = Some(format!(
+                        "slot={} missing_gpu_record expected(px={},py={},l={})",
+                        expected_record.slot,
+                        expected_record.pixel_x,
+                        expected_record.pixel_y,
+                        expected_record.layer
+                    ));
+                }
+                continue;
+            }
+
+            let base = vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_BASE_WORD
+                + slot * vte::VTE_WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD;
+            if base + vte::VTE_WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD > words.len() {
+                missing += 1;
+                mismatches += 1;
+                if first_mismatch_detail.is_none() {
+                    first_mismatch_detail =
+                        Some(format!("slot={} out_of_bounds_record_base={}", slot, base));
+                }
+                continue;
+            }
+
+            let gpu_record = vte::VteWorldBvhRayDiagRecord {
+                pixel_x: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_PIXEL_X],
+                pixel_y: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_PIXEL_Y],
+                layer: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_LAYER],
+                hit: (words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_MASK] & 0x1) != 0,
+                miss_reason: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_MISS_REASON],
+                hit_material: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_MATERIAL],
+                hit_chunk: [
+                    words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_X] as i32,
+                    words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Y] as i32,
+                    words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_Z] as i32,
+                    words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_CHUNK_W] as i32,
+                ],
+                hit_t: f32::from_bits(words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_HIT_T_BITS]),
+                chunk_steps: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_CHUNK_STEPS],
+                remaining_voxels: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_REMAINING_VOXELS],
+                node_visits: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_NODE_VISITS],
+                path_hash: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_PATH_HASH],
+                flags: words[base + vte::VTE_WORLD_BVH_RAY_DIAG_RECORD_FLAGS],
+            };
+
+            let mut record_mismatch = false;
+            if gpu_record.pixel_x != expected_record.pixel_x
+                || gpu_record.pixel_y != expected_record.pixel_y
+                || gpu_record.layer != expected_record.layer
+            {
+                metadata_mismatches += 1;
+                record_mismatch = true;
+            }
+            if gpu_record.hit != expected_record.hit {
+                hit_state_mismatches += 1;
+                record_mismatch = true;
+            }
+            if gpu_record.hit && expected_record.hit {
+                if gpu_record.hit_material != expected_record.hit_material {
+                    material_mismatches += 1;
+                    record_mismatch = true;
+                }
+                if gpu_record.hit_chunk != expected_record.hit_chunk {
+                    chunk_mismatches += 1;
+                    record_mismatch = true;
+                }
+                let tol =
+                    1e-3f32.max(1e-3f32 * expected_record.hit_t.abs().max(gpu_record.hit_t.abs()));
+                if (gpu_record.hit_t - expected_record.hit_t).abs() > tol {
+                    distance_mismatches += 1;
+                    record_mismatch = true;
+                }
+            } else if gpu_record.miss_reason != expected_record.miss_reason {
+                miss_reason_mismatches += 1;
+                record_mismatch = true;
+            }
+
+            if record_mismatch {
+                mismatches += 1;
+                if first_mismatch_detail.is_none() {
+                    first_mismatch_detail = Some(format!(
+                        "slot={} exp(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={}) \
+gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},node_visits={},path_hash=0x{:08x},flags=0x{:08x})",
+                        expected_record.slot,
+                        expected_record.pixel_x,
+                        expected_record.pixel_y,
+                        expected_record.layer,
+                        expected_record.hit as u32,
+                        expected_record.hit_material,
+                        expected_record.hit_chunk,
+                        expected_record.hit_t,
+                        expected_record.miss_reason,
+                        expected_record.chunk_steps,
+                        expected_record.remaining_voxels,
+                        gpu_record.pixel_x,
+                        gpu_record.pixel_y,
+                        gpu_record.layer,
+                        gpu_record.hit as u32,
+                        gpu_record.hit_material,
+                        gpu_record.hit_chunk,
+                        gpu_record.hit_t,
+                        gpu_record.miss_reason,
+                        gpu_record.chunk_steps,
+                        gpu_record.remaining_voxels,
+                        gpu_record.node_visits,
+                        gpu_record.path_hash,
+                        gpu_record.flags
+                    ));
+                }
+            }
+        }
+
+        let now_frame = self.frames_rendered;
+        let should_log = mismatches > 0
+            || self
+                .vte_world_bvh_ray_diag_last_log_frame
+                .map(|last| now_frame.saturating_sub(last) >= self.vte_world_bvh_ray_diag_interval)
+                .unwrap_or(true);
+        if should_log {
+            eprintln!(
+                "[vte-world-bvh-ray-diag] frame={} samples={} gpu_records={} mismatches={} missing={} hit_state={} material={} chunk={} distance={} metadata={} miss_reason={}",
+                now_frame,
+                expected.len(),
+                gpu_count,
+                mismatches,
+                missing,
+                hit_state_mismatches,
+                material_mismatches,
+                chunk_mismatches,
+                distance_mismatches,
+                metadata_mismatches,
+                miss_reason_mismatches
+            );
+            if let Some(detail) = first_mismatch_detail {
+                eprintln!("[vte-world-bvh-ray-diag][first] {}", detail);
+            }
+            self.vte_world_bvh_ray_diag_last_log_frame = Some(now_frame);
         }
     }
 
@@ -967,6 +2001,13 @@ impl RenderContext {
         } else {
             self.clear_vte_compare_diagnostics();
         }
+        if self.frames_in_flight[frame_idx].vte_world_bvh_ray_diag_enabled {
+            self.refresh_vte_world_bvh_ray_diagnostics(frame_idx);
+        } else {
+            self.frames_in_flight[frame_idx]
+                .vte_world_bvh_ray_diag_expected
+                .clear();
+        }
 
         let force_clear = false;
 
@@ -1145,24 +2186,57 @@ impl RenderContext {
                 );
             }
         }
+        let world_origin_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
+        let world_origin_inv_w = if world_origin_h[4].abs() > 1e-6 {
+            1.0 / world_origin_h[4]
+        } else {
+            1.0
+        };
+        let world_origin = glam::Vec4::new(
+            world_origin_h[0] * world_origin_inv_w,
+            world_origin_h[1] * world_origin_inv_w,
+            world_origin_h[2] * world_origin_inv_w,
+            world_origin_h[3] * world_origin_inv_w,
+        );
+        let world_dir_x_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [1.0, 0.0, 0.0, 0.0, 0.0]);
+        let world_dir_y_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 1.0, 0.0, 0.0, 0.0]);
+        let world_dir_z_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 1.0, 0.0, 0.0]);
+        let world_dir_w_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 1.0, 0.0]);
+        let world_dir_x = glam::Vec4::new(
+            world_dir_x_h[0],
+            world_dir_x_h[1],
+            world_dir_x_h[2],
+            world_dir_x_h[3],
+        );
+        let world_dir_y = glam::Vec4::new(
+            world_dir_y_h[0],
+            world_dir_y_h[1],
+            world_dir_y_h[2],
+            world_dir_y_h[3],
+        );
+        let world_dir_z = glam::Vec4::new(
+            world_dir_z_h[0],
+            world_dir_z_h[1],
+            world_dir_z_h[2],
+            world_dir_z_h[3],
+        );
+        let world_dir_w = glam::Vec4::new(
+            world_dir_w_h[0],
+            world_dir_w_h[1],
+            world_dir_w_h[2],
+            world_dir_w_h[3],
+        );
+        let present_dimensions = match self.window.clone() {
+            None => [
+                self.sized_buffers.render_dimensions[0].max(1),
+                self.sized_buffers.render_dimensions[1].max(1),
+            ],
+            Some(window) => {
+                let window_size = window.inner_size();
+                [window_size.width.max(1), window_size.height.max(1)]
+            }
+        };
         {
-            let world_origin_h =
-                mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 0.0, 1.0]);
-            let world_origin_inv_w = if world_origin_h[4].abs() > 1e-6 {
-                1.0 / world_origin_h[4]
-            } else {
-                1.0
-            };
-            let world_origin = glam::Vec4::new(
-                world_origin_h[0] * world_origin_inv_w,
-                world_origin_h[1] * world_origin_inv_w,
-                world_origin_h[2] * world_origin_inv_w,
-                world_origin_h[3] * world_origin_inv_w,
-            );
-            let world_dir_x_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [1.0, 0.0, 0.0, 0.0, 0.0]);
-            let world_dir_y_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 1.0, 0.0, 0.0, 0.0]);
-            let world_dir_z_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 1.0, 0.0, 0.0]);
-            let world_dir_w_h = mat5_mul_vec5(&view_matrix_nalgebra_inv, [0.0, 0.0, 0.0, 1.0, 0.0]);
             let mut writer = self.frames_in_flight[frame_idx]
                 .live_buffers
                 .working_data_buffer
@@ -1176,13 +2250,8 @@ impl RenderContext {
                 self.sized_buffers.render_dimensions[2],
                 0,
             );
-            writer.present_dimensions = match self.window.clone() {
-                None => writer.render_dimensions.xy(),
-                Some(window) => {
-                    let window_size = window.inner_size();
-                    glam::UVec2::new(window_size.width, window_size.height)
-                }
-            };
+            writer.present_dimensions =
+                glam::UVec2::new(present_dimensions[0], present_dimensions[1]);
             writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
             writer.raytrace_seed = 6364136223846793005u64
                 .wrapping_mul(self.frames_rendered as u64)
@@ -1209,30 +2278,10 @@ impl RenderContext {
             // bypass tone mapping for debug compare output.
             writer.padding = [working_flags, render_options.vte_display_mode.as_u32()];
             writer.world_origin = world_origin;
-            writer.world_dir_x = glam::Vec4::new(
-                world_dir_x_h[0],
-                world_dir_x_h[1],
-                world_dir_x_h[2],
-                world_dir_x_h[3],
-            );
-            writer.world_dir_y = glam::Vec4::new(
-                world_dir_y_h[0],
-                world_dir_y_h[1],
-                world_dir_y_h[2],
-                world_dir_y_h[3],
-            );
-            writer.world_dir_z = glam::Vec4::new(
-                world_dir_z_h[0],
-                world_dir_z_h[1],
-                world_dir_z_h[2],
-                world_dir_z_h[3],
-            );
-            writer.world_dir_w = glam::Vec4::new(
-                world_dir_w_h[0],
-                world_dir_w_h[1],
-                world_dir_w_h[2],
-                world_dir_w_h[3],
-            );
+            writer.world_dir_x = world_dir_x;
+            writer.world_dir_y = world_dir_y;
+            writer.world_dir_z = world_dir_z;
+            writer.world_dir_w = world_dir_w;
         }
 
         // Compute non-voxel scene hash BEFORE writing to the GPU buffer so the
@@ -1416,6 +2465,18 @@ impl RenderContext {
                 vte_visible_chunk_max = [0; 4];
             }
         }
+        let vte_world_bvh_ray_diag_active =
+            voxel_input.is_some() && self.vte_world_bvh_ray_diag_enabled;
+        let vte_world_bvh_ray_diag_sample_count = if vte_world_bvh_ray_diag_active {
+            self.vte_world_bvh_ray_diag_samples
+                .min(vte::VTE_WORLD_BVH_RAY_DIAG_CAPACITY) as u32
+        } else {
+            0
+        };
+        let vte_world_bvh_ray_diag_seed = (self.frames_rendered as u32)
+            .wrapping_mul(747_796_405)
+            .wrapping_add(2_891_336_453);
+        let written_voxel_frame_meta;
         {
             let mut writer = self.frames_in_flight[frame_idx]
                 .live_buffers
@@ -1463,7 +2524,32 @@ impl RenderContext {
                 0.0
             };
             let max_trace_distance = render_options.vte_max_trace_distance.max(1.0);
-            *writer = vte::GpuVoxelFrameMeta {
+            let debug_flags = {
+                let mut flags = 0;
+                if render_options.vte_reference_compare {
+                    flags |= vte::VTE_DEBUG_FLAG_REFERENCE_COMPARE;
+                }
+                if render_options.vte_reference_mismatch_only {
+                    flags |= vte::VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY;
+                }
+                if render_options.vte_compare_slice_only {
+                    flags |= vte::VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
+                }
+                if vte_lod_tint_enabled() {
+                    flags |= vte::VTE_DEBUG_FLAG_LOD_TINT;
+                }
+                if vte_entity_linear_only_enabled() {
+                    flags |= vte::VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY;
+                }
+                if vte_entity_bvh_compare_enabled() {
+                    flags |= vte::VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE;
+                }
+                if vte_world_bvh_ray_diag_active {
+                    flags |= vte::VTE_DEBUG_FLAG_WORLD_BVH_RAY_DIAG;
+                }
+                flags
+            };
+            written_voxel_frame_meta = vte::GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 leaf_count: vte_leaf_count as u32,
                 occupancy_word_count: vte_occupancy_word_count as u32,
@@ -1477,28 +2563,11 @@ impl RenderContext {
                 stage_b_mode: render_options.vte_display_mode.as_u32(),
                 stage_b_slice_layer,
                 stage_b_thick_half_width: render_options.vte_thick_half_width,
-                debug_flags: {
-                    let mut flags = 0;
-                    if render_options.vte_reference_compare {
-                        flags |= vte::VTE_DEBUG_FLAG_REFERENCE_COMPARE;
-                    }
-                    if render_options.vte_reference_mismatch_only {
-                        flags |= vte::VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY;
-                    }
-                    if render_options.vte_compare_slice_only {
-                        flags |= vte::VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
-                    }
-                    if vte_lod_tint_enabled() {
-                        flags |= vte::VTE_DEBUG_FLAG_LOD_TINT;
-                    }
-                    if vte_entity_linear_only_enabled() {
-                        flags |= vte::VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY;
-                    }
-                    if vte_entity_bvh_compare_enabled() {
-                        flags |= vte::VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE;
-                    }
-                    flags
-                },
+                debug_flags,
+                world_bvh_diag_seed: vte_world_bvh_ray_diag_seed,
+                world_bvh_diag_sample_count: vte_world_bvh_ray_diag_sample_count,
+                _world_bvh_diag_padding0: 0,
+                _world_bvh_diag_padding1: 0,
                 visible_chunk_min_x: vte_visible_chunk_min[0],
                 visible_chunk_min_y: vte_visible_chunk_min[1],
                 visible_chunk_min_z: vte_visible_chunk_min[2],
@@ -1516,6 +2585,45 @@ impl RenderContext {
                 highlight_hit_voxel,
                 highlight_place_voxel,
             };
+            *writer = written_voxel_frame_meta;
+        }
+
+        if vte_world_bvh_ray_diag_active {
+            if let Some(input) = voxel_input {
+                let expected = build_world_bvh_ray_diag_expected_records(
+                    &written_voxel_frame_meta,
+                    self.sized_buffers.render_dimensions,
+                    present_dimensions,
+                    focal_length_xy,
+                    focal_length_zw,
+                    [
+                        world_origin.x,
+                        world_origin.y,
+                        world_origin.z,
+                        world_origin.w,
+                    ],
+                    [world_dir_x.x, world_dir_x.y, world_dir_x.z, world_dir_x.w],
+                    [world_dir_y.x, world_dir_y.y, world_dir_y.z, world_dir_y.w],
+                    [world_dir_z.x, world_dir_z.y, world_dir_z.z, world_dir_z.w],
+                    [world_dir_w.x, world_dir_w.y, world_dir_w.z, world_dir_w.w],
+                    &input.chunk_headers[..vte_chunk_count],
+                    &input.occupancy_words[..vte_occupancy_word_count],
+                    &input.material_words[..vte_material_word_count],
+                    &input.leaf_headers[..vte_leaf_count],
+                    &input.region_bvh_nodes[..vte_region_bvh_node_count],
+                    &input.leaf_chunk_entries[..vte_leaf_chunk_entry_count],
+                    &input.macro_words[..vte_macro_word_count],
+                );
+                self.frames_in_flight[frame_idx].vte_world_bvh_ray_diag_expected = expected;
+            } else {
+                self.frames_in_flight[frame_idx]
+                    .vte_world_bvh_ray_diag_expected
+                    .clear();
+            }
+        } else {
+            self.frames_in_flight[frame_idx]
+                .vte_world_bvh_ray_diag_expected
+                .clear();
         }
 
         let mut line_render_count = 0;
@@ -1621,7 +2729,12 @@ impl RenderContext {
                     VteDisplayMode::DebugCompare | VteDisplayMode::DebugIntegral
                 );
             let vte_entity_bvh_compare = vte_entity_bvh_compare_enabled();
-            if vte_compare_diagnostics_enabled || vte_entity_bvh_compare {
+            let vte_world_bvh_ray_diag_active =
+                self.vte_world_bvh_ray_diag_enabled && voxel_input.is_some();
+            if vte_compare_diagnostics_enabled
+                || vte_entity_bvh_compare
+                || vte_world_bvh_ray_diag_active
+            {
                 self.reset_vte_compare_buffers(frame_idx);
             } else {
                 self.clear_vte_compare_diagnostics();
@@ -1681,7 +2794,7 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (dense_chunks={}, leaves={}, region_bvh_nodes={}, leaf_entries={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, lod_tint={}, entity_linear_only={}, entity_bvh_compare={}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (dense_chunks={}, leaves={}, region_bvh_nodes={}, leaf_entries={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, lod_tint={}, entity_linear_only={}, entity_bvh_compare={}, world_bvh_ray_diag={}@{}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_leaves,
@@ -1698,6 +2811,8 @@ impl RenderContext {
                     vte_lod_tint_enabled(),
                     vte_entity_linear_only_enabled(),
                     vte_entity_bvh_compare_enabled(),
+                    self.vte_world_bvh_ray_diag_enabled,
+                    self.vte_world_bvh_ray_diag_samples,
                     storage_layers,
                     logical_layers,
                 );
@@ -1731,6 +2846,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
 
         self.frames_in_flight[frame_idx].vte_compare_enabled =
             do_voxel_vte && (vte_compare_diagnostics_enabled || vte_entity_bvh_compare_enabled());
+        self.frames_in_flight[frame_idx].vte_world_bvh_ray_diag_enabled =
+            do_voxel_vte && self.vte_world_bvh_ray_diag_enabled;
 
         self.last_backend = if do_voxel_vte {
             RenderBackend::VoxelTraversal
