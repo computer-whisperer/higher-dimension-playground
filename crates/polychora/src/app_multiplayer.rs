@@ -9,7 +9,6 @@ use polychora::shared::region_tree::{RegionNodeKind, RegionTreeCore};
 use polychora::shared::spatial::Aabb4i;
 use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-const MULTIPLAYER_WORLD_REQUEST_RADIUS_CHUNKS: i32 = 6;
 
 #[derive(Copy, Clone, Debug)]
 enum RegionTreeDiagKind {
@@ -356,18 +355,26 @@ fn world_request_bounds_for_center_chunk(center_chunk: [i32; 4], radius_chunks: 
     let radius = radius_chunks.max(0);
     Aabb4i::new(
         [
-            center_chunk[0] - radius,
-            center_chunk[1] - radius,
-            center_chunk[2] - radius,
-            center_chunk[3] - radius,
+            center_chunk[0].saturating_sub(radius),
+            center_chunk[1].saturating_sub(radius),
+            center_chunk[2].saturating_sub(radius),
+            center_chunk[3].saturating_sub(radius),
         ],
         [
-            center_chunk[0] + radius,
-            center_chunk[1] + radius,
-            center_chunk[2] + radius,
-            center_chunk[3] + radius,
+            center_chunk[0].saturating_add(radius),
+            center_chunk[1].saturating_add(radius),
+            center_chunk[2].saturating_add(radius),
+            center_chunk[3].saturating_add(radius),
         ],
     )
+}
+
+fn world_request_radius_chunks_for_l0_distance(l0_distance_world: f32) -> i32 {
+    let chunk_size = voxel::CHUNK_SIZE as f32;
+    // One-chunk margin prevents request thrash at the interest boundary.
+    ((l0_distance_world.max(0.0) / chunk_size).ceil() as i32)
+        .saturating_add(1)
+        .max(1)
 }
 
 fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
@@ -712,10 +719,10 @@ impl App {
 
     fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
         let center_chunk = world_chunk_from_position(position);
-        let desired_bounds = world_request_bounds_for_center_chunk(
-            center_chunk,
-            MULTIPLAYER_WORLD_REQUEST_RADIUS_CHUNKS,
-        );
+        let request_radius_chunks =
+            world_request_radius_chunks_for_l0_distance(self.vte_lod_near_max_distance);
+        let desired_bounds =
+            world_request_bounds_for_center_chunk(center_chunk, request_radius_chunks);
         if self.multiplayer_last_world_request_bounds == Some(desired_bounds) {
             return;
         }
