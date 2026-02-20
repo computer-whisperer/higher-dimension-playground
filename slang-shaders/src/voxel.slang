@@ -1845,6 +1845,7 @@ bool traceVoxelsInChunk(
     else if (step.w < 0) tMaxLocal.w = (startPos.w - float(voxelCoord.w)) * tDelta.w;
 
     float localT = 0.0;
+    bool firstVoxelInInterval = true;
     bool canMacroSkip = ((h.flags & CHUNK_FLAG_FULL) == 0u) && (meta.macroWordCount > 0u);
     int4 cachedMacroCoord = int4(-1, -1, -1, -1);
     bool cachedMacroHasSolid = true;
@@ -1878,8 +1879,15 @@ bool traceVoxelsInChunk(
                 uint materialId = 0;
                 if (sampleVoxelInChunk(voxelCoord, chunkMin, h, meta, materialId))
                 {
+                    float hitT = tTraceStart + localT;
+                    if (firstVoxelInInterval)
+                    {
+                        // Match uniform-leaf behavior at interval entry so boundary-sensitive
+                        // materials don't shift appearance when a chunk becomes dense.
+                        hitT = tStart;
+                    }
                     hitMaterial = materialId;
-                    hitPos = rayOrigin + rayDir * (tTraceStart + localT);
+                    hitPos = rayOrigin + rayDir * hitT;
                     hitChunkCoord = chunkCoord;
                     return true;
                 }
@@ -1889,6 +1897,7 @@ bool traceVoxelsInChunk(
         nextLocalT = 0.0;
         advanceDDA4(voxelCoord, step, tMaxLocal, tDelta, nextLocalT);
         localT = max(localT, nextLocalT);
+        firstVoxelInInterval = false;
 
         if (!voxelInChunk(voxelCoord, chunkMin, chunkMax))
         {
