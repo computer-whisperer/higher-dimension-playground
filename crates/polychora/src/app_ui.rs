@@ -111,29 +111,9 @@ impl App {
                     )
                     .text("VTE Max Trace Distance"),
                 );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.vte_lod_near_max_distance,
-                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
-                    )
-                    .text("VTE L0->L1 Distance"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.vte_lod_mid_max_distance,
-                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
-                    )
-                    .text("VTE L1->L2 Distance"),
-                );
                 self.vte_max_trace_distance = self
                     .vte_max_trace_distance
                     .clamp(VTE_TRACE_DISTANCE_MIN, VTE_TRACE_DISTANCE_MAX);
-                self.vte_lod_near_max_distance = self
-                    .vte_lod_near_max_distance
-                    .clamp(1.0, self.vte_max_trace_distance);
-                self.vte_lod_mid_max_distance = self
-                    .vte_lod_mid_max_distance
-                    .clamp(self.vte_lod_near_max_distance, self.vte_max_trace_distance);
                 self.zw_angle_color_shift_strength = self.zw_angle_color_shift_strength.clamp(
                     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
                     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,

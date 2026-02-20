@@ -290,7 +290,7 @@ impl App {
 
         // Pre-load chunks around spawn position
         self.scene
-            .preload_spawn_chunks(self.camera.position, self.vte_lod_near_max_distance);
+            .preload_spawn_chunks(self.camera.position, self.vte_max_trace_distance);
 
         if !self.perf_suite_active() {
             self.grab_mouse(window);
@@ -403,8 +403,6 @@ impl App {
             render_backend: backend,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
-            vte_lod_near_max_distance: self.vte_lod_near_max_distance,
-            vte_lod_mid_max_distance: self.vte_lod_mid_max_distance,
             vte_display_mode: self.args.vte_display_mode.to_render_mode(),
             vte_slice_layer: self.args.vte_slice_layer,
             vte_thick_half_width: self.args.vte_thick_half_width,
@@ -438,8 +436,6 @@ impl App {
             let voxel_frame = self.scene.build_voxel_frame_data(
                 self.menu_camera.position,
                 self.menu_camera.look_direction(),
-                self.vte_lod_near_max_distance,
-                self.vte_lod_mid_max_distance,
                 self.vte_max_trace_distance,
             );
             self.rcx.as_mut().unwrap().render_voxel_frame(

@@ -62,8 +62,6 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) macro_word_count: u32,
     pub(super) max_trace_steps: u32,
     pub(super) max_trace_distance: f32,
-    pub(super) lod_near_max_distance: f32,
-    pub(super) lod_mid_max_distance: f32,
     pub(super) chunk_lookup_capacity: u32,
     pub(super) y_slice_count: u32,
     pub(super) y_slice_lookup_entry_count: u32,

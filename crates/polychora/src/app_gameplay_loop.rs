@@ -725,8 +725,6 @@ impl App {
             render_backend: backend,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
-            vte_lod_near_max_distance: self.vte_lod_near_max_distance,
-            vte_lod_mid_max_distance: self.vte_lod_mid_max_distance,
             vte_display_mode: self.args.vte_display_mode.to_render_mode(),
             vte_slice_layer: self.args.vte_slice_layer,
             vte_thick_half_width: self.args.vte_thick_half_width,
@@ -782,8 +780,6 @@ impl App {
             let voxel_frame = self.scene.build_voxel_frame_data(
                 self.camera.position,
                 look_dir,
-                self.vte_lod_near_max_distance,
-                self.vte_lod_mid_max_distance,
                 self.vte_max_trace_distance,
             );
 

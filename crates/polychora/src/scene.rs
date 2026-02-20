@@ -37,7 +37,6 @@ const COLLISION_BINARY_STEPS: usize = 14;
 const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 const GPU_PAYLOAD_SLOT_CAPACITY: usize = VTE_MAX_CHUNKS;
-pub const VOXEL_LOD_LEVEL_NEAR: u8 = 0;
 const FLAT_PRESET_FLOOR_MATERIAL: VoxelType = VoxelType(11);
 const SHOWCASE_MATERIALS: [u8; 37] = [
     15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50, 55,
@@ -121,7 +120,6 @@ struct ChunkPayloadCacheEntry {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct RuntimeChunkKey {
-    lod_level: u8,
     chunk_pos: ChunkPos,
 }
 
@@ -212,7 +210,7 @@ pub struct BlockEditTargets {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct NearRegionPatchStats {
+pub struct RegionPatchStats {
     pub previous_non_empty: usize,
     pub desired_non_empty: usize,
     pub upserts: usize,
@@ -663,13 +661,13 @@ impl Scene {
         out
     }
 
-    pub fn apply_near_lod_region_patch(
+    pub fn apply_region_patch(
         &mut self,
         bounds: Aabb4i,
         subtree: &RegionTreeCore,
-    ) -> NearRegionPatchStats {
+    ) -> RegionPatchStats {
         if !bounds.is_valid() {
-            return NearRegionPatchStats::default();
+            return RegionPatchStats::default();
         }
 
         let collect_previous_start = Instant::now();
@@ -680,7 +678,7 @@ impl Scene {
         let collect_desired_ms = collect_desired_start.elapsed().as_secs_f64() * 1000.0;
         if previous_core.kind == desired_core.kind {
             let previous_non_empty = Self::count_non_empty_chunks_in_core(&previous_core);
-            return NearRegionPatchStats {
+            return RegionPatchStats {
                 previous_non_empty,
                 desired_non_empty: previous_non_empty,
                 upserts: 0,
@@ -746,7 +744,7 @@ impl Scene {
         let changed_chunks = changed_positions.len();
 
         if changed_chunks == 0 {
-            return NearRegionPatchStats {
+            return RegionPatchStats {
                 previous_non_empty,
                 desired_non_empty,
                 upserts: 0,
@@ -782,7 +780,7 @@ impl Scene {
 
         self.world_dirty = true;
 
-        NearRegionPatchStats {
+        RegionPatchStats {
             previous_non_empty,
             desired_non_empty,
             upserts,
@@ -1388,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_near_lod_region_patch_splices_chunk_and_queues_update() {
+    fn apply_region_patch_splices_chunk_and_queues_update() {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut patch_tree = RegionChunkTree::new();
@@ -1396,7 +1394,7 @@ mod tests {
         assert!(changed);
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
-        let stats = scene.apply_near_lod_region_patch(bounds, &patch_core);
+        let stats = scene.apply_region_patch(bounds, &patch_core);
 
         assert_eq!(stats.previous_non_empty, 0);
         assert_eq!(stats.desired_non_empty, 1);
@@ -1418,13 +1416,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_near_lod_region_patch_removes_chunk_and_queues_update() {
+    fn apply_region_patch_removes_chunk_and_queues_update() {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut seed_tree = RegionChunkTree::new();
         let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(5)));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
-        let _ = scene.apply_near_lod_region_patch(bounds, &seed_core);
+        let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
 
         let empty_core = RegionTreeCore {
@@ -1432,7 +1430,7 @@ mod tests {
             kind: polychora::shared::region_tree::RegionNodeKind::Empty,
             generator_version_hash: 0,
         };
-        let stats = scene.apply_near_lod_region_patch(bounds, &empty_core);
+        let stats = scene.apply_region_patch(bounds, &empty_core);
 
         assert_eq!(stats.previous_non_empty, 1);
         assert_eq!(stats.desired_non_empty, 0);
@@ -1454,17 +1452,17 @@ mod tests {
     }
 
     #[test]
-    fn apply_near_lod_region_patch_identical_patch_is_noop() {
+    fn apply_region_patch_identical_patch_is_noop() {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut patch_tree = RegionChunkTree::new();
         let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(7)));
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
-        let _ = scene.apply_near_lod_region_patch(bounds, &patch_core);
+        let _ = scene.apply_region_patch(bounds, &patch_core);
         let _ = scene.world_drain_pending_chunk_updates();
 
-        let stats = scene.apply_near_lod_region_patch(bounds, &patch_core);
+        let stats = scene.apply_region_patch(bounds, &patch_core);
         assert_eq!(stats.previous_non_empty, 1);
         assert_eq!(stats.desired_non_empty, 1);
         assert_eq!(stats.upserts, 0);
@@ -1481,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_near_lod_region_patch_semantic_noop_skips_splice() {
+    fn apply_region_patch_semantic_noop_skips_splice() {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
 
@@ -1489,7 +1487,7 @@ mod tests {
         let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(3)));
         let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ChunkPayload::Uniform(4)));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
-        let _ = scene.apply_near_lod_region_patch(bounds, &seed_core);
+        let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
         let before = scene.world_tree.root().cloned();
 
@@ -1507,7 +1505,7 @@ mod tests {
             generator_version_hash: 0,
         };
 
-        let stats = scene.apply_near_lod_region_patch(bounds, &patch_core);
+        let stats = scene.apply_region_patch(bounds, &patch_core);
         assert_eq!(stats.changed_chunks, 0);
         assert_eq!(stats.upserts, 0);
         assert_eq!(stats.removals, 0);

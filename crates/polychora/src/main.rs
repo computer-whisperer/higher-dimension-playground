@@ -428,14 +428,6 @@ struct Args {
     #[arg(long, default_value_t = 160.0)]
     vte_max_trace_distance: f32,
 
-    /// World-space distance where L0 tracing hands off to coarser LODs.
-    #[arg(long, default_value_t = 48.0)]
-    vte_lod_near_max_distance: f32,
-
-    /// World-space distance where L1 tracing hands off to L2 tracing.
-    #[arg(long, default_value_t = 112.0)]
-    vte_lod_mid_max_distance: f32,
-
     /// VTE Stage-B display operator (integral, slice, thick-slice, debug-compare, debug-integral)
     #[arg(long, value_enum, default_value_t = VteDisplayModeArg::Integral)]
     vte_display_mode: VteDisplayModeArg,
@@ -785,14 +777,6 @@ fn main() {
     let initial_vte_integral_log_merge_k = args.vte_integral_log_merge_k.max(0.0);
     let initial_vte_max_trace_steps = args.vte_max_trace_steps.max(1);
     let initial_vte_max_trace_distance = args.vte_max_trace_distance.max(1.0);
-    let initial_vte_lod_near_max_distance = args
-        .vte_lod_near_max_distance
-        .max(1.0)
-        .min(initial_vte_max_trace_distance);
-    let initial_vte_lod_mid_max_distance = args
-        .vte_lod_mid_max_distance
-        .max(initial_vte_lod_near_max_distance)
-        .min(initial_vte_max_trace_distance);
 
     let world_file = args.world_file.clone();
     // Determine whether to skip the main menu and go straight to playing.
@@ -976,8 +960,6 @@ fn main() {
         vte_max_trace_steps: initial_vte_max_trace_steps,
         vte_max_trace_distance: initial_vte_max_trace_distance,
         vte_sweep_include_no_non_voxel,
-        vte_lod_near_max_distance: initial_vte_lod_near_max_distance,
-        vte_lod_mid_max_distance: initial_vte_lod_mid_max_distance,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
         hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
@@ -1284,8 +1266,6 @@ struct App {
     vte_max_trace_steps: u32,
     vte_max_trace_distance: f32,
     vte_sweep_include_no_non_voxel: bool,
-    vte_lod_near_max_distance: f32,
-    vte_lod_mid_max_distance: f32,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
     hotbar_slots: [u8; 9],

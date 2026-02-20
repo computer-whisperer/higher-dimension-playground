@@ -332,14 +332,10 @@ impl Scene {
         let mut required_keys: Vec<RuntimeChunkKey> = self
             .collect_render_non_empty_chunks_in_bounds(Aabb4i::new(min_chunk, max_chunk))
             .into_iter()
-            .map(|chunk_pos| RuntimeChunkKey {
-                lod_level: VOXEL_LOD_LEVEL_NEAR,
-                chunk_pos,
-            })
+            .map(|chunk_pos| RuntimeChunkKey { chunk_pos })
             .collect();
         required_keys.sort_unstable_by_key(|key| {
             (
-                key.lod_level,
                 key.chunk_pos.w,
                 key.chunk_pos.z,
                 key.chunk_pos.y,
@@ -374,10 +370,7 @@ impl Scene {
         let updated_chunks: Vec<RuntimeChunkKey> = self
             .world_drain_pending_chunk_updates()
             .into_iter()
-            .map(|chunk_pos| RuntimeChunkKey {
-                lod_level: VOXEL_LOD_LEVEL_NEAR,
-                chunk_pos,
-            })
+            .map(|chunk_pos| RuntimeChunkKey { chunk_pos })
             .collect();
         if updated_chunks.is_empty() {
             return;
@@ -415,12 +408,9 @@ impl Scene {
         &mut self,
         cam_pos: [f32; 4],
         cam_forward: [f32; 4],
-        _near_lod_max_distance: f32,
-        _mid_lod_max_distance: f32,
         max_trace_distance: f32,
     ) {
         struct YSliceBuildData {
-            lod_level: u8,
             min_chunk_x: i32,
             max_chunk_x: i32,
             min_chunk_z: i32,
@@ -439,7 +429,7 @@ impl Scene {
 
         let mut chunk_headers = Vec::new();
         let mut visible_chunk_indices = Vec::new();
-        let mut y_slice_build: BTreeMap<(u8, i32), YSliceBuildData> = BTreeMap::new();
+        let mut y_slice_build: BTreeMap<i32, YSliceBuildData> = BTreeMap::new();
         let mut y_slice_lookup_entries = Vec::new();
         let use_forward_halfspace_cull = voxel_forward_halfspace_cull_enabled();
 
@@ -449,10 +439,6 @@ impl Scene {
 
         let mut candidates = Vec::<Candidate>::with_capacity(self.voxel_active_chunks.len());
         for &key in &self.voxel_active_chunks {
-            if key.lod_level != VOXEL_LOD_LEVEL_NEAR {
-                continue;
-            }
-
             // Cheap directional cull: drop chunks fully behind the camera's
             // current forward half-space so Stage A traces fewer chunk candidates.
             let chunk_span = CHUNK_SIZE as f32;
@@ -515,7 +501,6 @@ impl Scene {
         candidates.sort_unstable_by(|a, b| {
             a.min_dist_sq
                 .total_cmp(&b.min_dist_sq)
-                .then_with(|| a.key.lod_level.cmp(&b.key.lod_level))
                 .then_with(|| a.key.chunk_pos.w.cmp(&b.key.chunk_pos.w))
                 .then_with(|| a.key.chunk_pos.z.cmp(&b.key.chunk_pos.z))
                 .then_with(|| a.key.chunk_pos.y.cmp(&b.key.chunk_pos.y))
@@ -552,7 +537,7 @@ impl Scene {
             let chunk_index = chunk_headers.len() as u32;
             chunk_headers.push(GpuVoxelChunkHeader {
                 chunk_coord: [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                lod_level: key.lod_level as u32,
+                lod_level: 0,
                 _lod_padding: [0; 3],
                 occupancy_word_offset,
                 material_word_offset,
@@ -563,7 +548,7 @@ impl Scene {
             });
             visible_chunk_indices.push(chunk_index);
 
-            let slice_key = (key.lod_level, chunk_pos.y);
+            let slice_key = chunk_pos.y;
             y_slice_build
                 .entry(slice_key)
                 .and_modify(|slice| {
@@ -578,7 +563,6 @@ impl Scene {
                         .push(([chunk_pos.x, chunk_pos.z, chunk_pos.w], chunk_index));
                 })
                 .or_insert_with(|| YSliceBuildData {
-                    lod_level: key.lod_level,
                     min_chunk_x: chunk_pos.x,
                     max_chunk_x: chunk_pos.x,
                     min_chunk_z: chunk_pos.z,
@@ -590,7 +574,7 @@ impl Scene {
         }
 
         let mut y_slice_bounds = Vec::with_capacity(y_slice_build.len());
-        for ((_lod_level, chunk_y), slice) in y_slice_build {
+        for (chunk_y, slice) in y_slice_build {
             let dim_x = (slice.max_chunk_x - slice.min_chunk_x + 1).max(0) as usize;
             let dim_z = (slice.max_chunk_z - slice.min_chunk_z + 1).max(0) as usize;
             let dim_w = (slice.max_chunk_w - slice.min_chunk_w + 1).max(0) as usize;
@@ -621,7 +605,7 @@ impl Scene {
 
             y_slice_bounds.push(GpuVoxelYSliceBounds {
                 chunk_y,
-                lod_level: slice.lod_level as u32,
+                lod_level: 0,
                 min_chunk_x: slice.min_chunk_x,
                 max_chunk_x: slice.max_chunk_x,
                 min_chunk_z: slice.min_chunk_z,
@@ -686,8 +670,6 @@ impl Scene {
         &mut self,
         cam_pos: [f32; 4],
         cam_forward: [f32; 4],
-        near_lod_max_distance: f32,
-        _mid_lod_max_distance: f32,
         max_trace_distance: f32,
     ) -> &VoxelFrameData {
         self.sync_active_chunk_window(cam_pos, max_trace_distance);
@@ -719,13 +701,7 @@ impl Scene {
         let visibility_cache_valid = self.voxel_cached_visibility_camera_chunk == Some(cam_key)
             && self.voxel_cached_visibility_world_revision == self.voxel_world_revision;
         if !visibility_cache_valid {
-            self.rebuild_visible_voxel_metadata(
-                cam_pos,
-                view_forward,
-                near_lod_max_distance,
-                _mid_lod_max_distance,
-                max_trace_distance,
-            );
+            self.rebuild_visible_voxel_metadata(cam_pos, view_forward, max_trace_distance);
             self.voxel_cached_visibility_camera_chunk = Some(cam_key);
             self.voxel_cached_visibility_world_revision = self.voxel_world_revision;
         }
@@ -736,9 +712,9 @@ impl Scene {
 
     /// Pre-load chunks around the spawn position.
     /// This should be called once after scene creation to avoid showing an empty world.
-    pub fn preload_spawn_chunks(&mut self, spawn_pos: [f32; 4], near_lod_max_distance: f32) {
+    pub fn preload_spawn_chunks(&mut self, spawn_pos: [f32; 4], max_trace_distance: f32) {
         // Queue all chunks in the active window
-        self.sync_active_chunk_window(spawn_pos, near_lod_max_distance);
+        self.sync_active_chunk_window(spawn_pos, max_trace_distance);
 
         // Process all queued chunks immediately (not just a batch)
         // Keep processing until there are no more pending updates
@@ -752,7 +728,7 @@ impl Scene {
             }
 
             // Re-queue them since we just drained them
-            self.sync_active_chunk_window(spawn_pos, near_lod_max_distance);
+            self.sync_active_chunk_window(spawn_pos, max_trace_distance);
         }
 
         eprintln!("Preloaded chunks around spawn position");

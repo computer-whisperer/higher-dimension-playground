@@ -1537,14 +1537,6 @@ impl RenderContext {
                 0.0
             };
             let max_trace_distance = render_options.vte_max_trace_distance.max(1.0);
-            let lod_near_max_distance = render_options
-                .vte_lod_near_max_distance
-                .max(1.0)
-                .min(max_trace_distance);
-            let lod_mid_max_distance = render_options
-                .vte_lod_mid_max_distance
-                .max(lod_near_max_distance)
-                .min(max_trace_distance);
             *writer = vte::GpuVoxelFrameMeta {
                 chunk_count: vte_chunk_count as u32,
                 visible_chunk_count: vte_visible_chunk_count as u32,
@@ -1553,8 +1545,6 @@ impl RenderContext {
                 macro_word_count: vte_macro_word_count as u32,
                 max_trace_steps: render_options.vte_max_trace_steps.max(1),
                 max_trace_distance,
-                lod_near_max_distance,
-                lod_mid_max_distance,
                 chunk_lookup_capacity: vte_chunk_lookup_capacity as u32,
                 y_slice_count: vte_y_slice_count as u32,
                 y_slice_lookup_entry_count: vte_y_slice_lookup_entry_count as u32,
@@ -1781,7 +1771,7 @@ impl RenderContext {
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, lod_near={:.1}, lod_mid={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, lod_tint={}, entity_linear_only={}, entity_bvh_compare={}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (chunks={}, visible={}, payload_updates={} applied={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, yslice_fastpath=true, chunk_solid_clip=true, yslice_lookup_cache={}, lod_tint={}, entity_linear_only={}, entity_bvh_compare={}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_chunks,
@@ -1789,8 +1779,6 @@ impl RenderContext {
                     payload_updates_applied,
                     render_options.vte_max_trace_steps.max(1),
                     render_options.vte_max_trace_distance.max(1.0),
-                    render_options.vte_lod_near_max_distance,
-                    render_options.vte_lod_mid_max_distance,
                     render_options.vte_display_mode.label(),
                     render_options.vte_slice_layer,
                     render_options.vte_thick_half_width,
@@ -3520,14 +3508,12 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 );
                                 if self.last_backend == RenderBackend::VoxelTraversal {
                                     println!(
-                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} lod_near={:.1} lod_mid={:.1} reference_compare={} mismatch_only={} compare_slice_only={} yslice_fastpath=true chunk_solid_clip=true yslice_lookup_cache={} lod_tint={}",
+                                        "  VTE mode={} slice_layer={:?} thick_half_width={} max_steps={} max_distance={:.1} reference_compare={} mismatch_only={} compare_slice_only={} yslice_fastpath=true chunk_solid_clip=true yslice_lookup_cache={} lod_tint={}",
                                         render_options.vte_display_mode.label(),
                                         render_options.vte_slice_layer,
                                         render_options.vte_thick_half_width,
                                         render_options.vte_max_trace_steps,
                                         render_options.vte_max_trace_distance,
-                                        render_options.vte_lod_near_max_distance,
-                                        render_options.vte_lod_mid_max_distance,
                                         render_options.vte_reference_compare,
                                         render_options.vte_reference_mismatch_only,
                                         render_options.vte_compare_slice_only,

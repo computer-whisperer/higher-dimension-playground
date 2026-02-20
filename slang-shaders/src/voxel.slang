@@ -134,8 +134,6 @@ struct VoxelFrameMeta
     uint macroWordCount;
     uint maxTraceSteps;
     float maxTraceDistance;
-    float lodNearMaxDistance;
-    float lodMidMaxDistance;
     uint chunkLookupCapacity;
     uint ySliceCount;
     uint ySliceLookupEntryCount;

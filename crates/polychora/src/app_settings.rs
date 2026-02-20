@@ -34,8 +34,6 @@ pub(super) struct CliOverrides {
     pub zw_angle_color_shift_strength: bool,
     pub vte_max_trace_steps: bool,
     pub vte_max_trace_distance: bool,
-    pub vte_lod_near_max_distance: bool,
-    pub vte_lod_mid_max_distance: bool,
 }
 
 impl CliOverrides {
@@ -75,8 +73,6 @@ impl CliOverrides {
             ),
             vte_max_trace_steps: arg_present(&raw_args, "--vte-max-trace-steps", None),
             vte_max_trace_distance: arg_present(&raw_args, "--vte-max-trace-distance", None),
-            vte_lod_near_max_distance: arg_present(&raw_args, "--vte-lod-near-max-distance", None),
-            vte_lod_mid_max_distance: arg_present(&raw_args, "--vte-lod-mid-max-distance", None),
         }
     }
 }
@@ -107,8 +103,6 @@ pub(super) struct PersistedSettings {
     pub vte_integral_log_merge_k: f32,
     pub vte_max_trace_steps: u32,
     pub vte_max_trace_distance: f32,
-    pub vte_lod_near_max_distance: f32,
-    pub vte_lod_mid_max_distance: f32,
     pub main_menu_server_address: String,
     pub main_menu_player_name: String,
 }
@@ -139,8 +133,6 @@ impl Default for PersistedSettings {
             vte_integral_log_merge_k: 8.0,
             vte_max_trace_steps: 320,
             vte_max_trace_distance: 160.0,
-            vte_lod_near_max_distance: 48.0,
-            vte_lod_mid_max_distance: 112.0,
             main_menu_server_address: DEFAULT_MAIN_MENU_SERVER_ADDRESS.to_string(),
             main_menu_player_name: default_multiplayer_player_name(),
         }
@@ -186,12 +178,6 @@ impl PersistedSettings {
         self.vte_max_trace_distance = self
             .vte_max_trace_distance
             .clamp(VTE_TRACE_DISTANCE_MIN, VTE_TRACE_DISTANCE_MAX);
-        self.vte_lod_near_max_distance = self
-            .vte_lod_near_max_distance
-            .clamp(VTE_TRACE_DISTANCE_MIN, self.vte_max_trace_distance);
-        self.vte_lod_mid_max_distance = self
-            .vte_lod_mid_max_distance
-            .clamp(self.vte_lod_near_max_distance, self.vte_max_trace_distance);
         let server = self.main_menu_server_address.trim();
         self.main_menu_server_address = if server.is_empty() {
             DEFAULT_MAIN_MENU_SERVER_ADDRESS.to_string()
@@ -368,12 +354,6 @@ pub(super) fn apply_settings_to_args(
     if !cli_overrides.vte_max_trace_distance {
         args.vte_max_trace_distance = settings.vte_max_trace_distance;
     }
-    if !cli_overrides.vte_lod_near_max_distance {
-        args.vte_lod_near_max_distance = settings.vte_lod_near_max_distance;
-    }
-    if !cli_overrides.vte_lod_mid_max_distance {
-        args.vte_lod_mid_max_distance = settings.vte_lod_mid_max_distance;
-    }
 }
 
 impl App {
@@ -421,8 +401,6 @@ impl App {
             vte_integral_log_merge_k: self.vte_integral_log_merge_k,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
-            vte_lod_near_max_distance: self.vte_lod_near_max_distance,
-            vte_lod_mid_max_distance: self.vte_lod_mid_max_distance,
             main_menu_server_address: self.main_menu_server_address.clone(),
             main_menu_player_name: self.main_menu_player_name.clone(),
         }

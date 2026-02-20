@@ -158,8 +158,6 @@ impl App {
             "vte_display_mode": format!("{:?}", self.args.vte_display_mode),
             "vte_max_trace_steps": self.vte_max_trace_steps,
             "vte_max_trace_distance": self.vte_max_trace_distance,
-            "vte_lod_near_max_distance": self.vte_lod_near_max_distance,
-            "vte_lod_mid_max_distance": self.vte_lod_mid_max_distance,
             "warmup_frames": state.warmup_frames,
             "sample_frames": state.sample_frames,
             "scenario_count": scenarios.len(),
