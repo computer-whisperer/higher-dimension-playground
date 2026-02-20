@@ -5,7 +5,9 @@ use higher_dimension_playground::render::{
     OVERLAY_EDGE_TAG_REGION_UNIFORM, OVERLAY_EDGE_TAG_TARGET,
 };
 use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
-use polychora::shared::region_tree::{RegionNodeKind, RegionTreeCore};
+use polychora::shared::region_tree::{
+    collect_non_empty_chunks_from_core_in_bounds, RegionNodeKind, RegionTreeCore,
+};
 use polychora::shared::spatial::Aabb4i;
 use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -377,6 +379,45 @@ fn world_request_radius_chunks_for_distance(distance_world: f32) -> i32 {
         .max(1)
 }
 
+fn zero_dense_chunk_materials() -> Vec<u16> {
+    vec![0u16; polychora::shared::voxel::CHUNK_VOLUME]
+}
+
+fn dense_materials_from_payload_or_zero(payload: Option<ChunkPayload>) -> Vec<u16> {
+    let Some(payload) = payload else {
+        return zero_dense_chunk_materials();
+    };
+    let Ok(materials) = payload.dense_materials() else {
+        return zero_dense_chunk_materials();
+    };
+    if materials.len() == polychora::shared::voxel::CHUNK_VOLUME {
+        materials
+    } else {
+        zero_dense_chunk_materials()
+    }
+}
+
+fn dense_materials_from_region_core_chunk(core: &RegionTreeCore, chunk: [i32; 4]) -> Vec<u16> {
+    let bounds = Aabb4i::new(chunk, chunk);
+    let chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
+    for (key, payload) in chunks {
+        if key == chunk {
+            return dense_materials_from_payload_or_zero(Some(payload));
+        }
+    }
+    zero_dense_chunk_materials()
+}
+
+fn dense_materials_hash(materials: &[u16]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    materials.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn dense_materials_non_zero_count(materials: &[u16]) -> usize {
+    materials.iter().filter(|m| **m != 0).count()
+}
+
 fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
     if velocity.iter().any(|v| !v.is_finite()) {
         return [0.0; 4];
@@ -700,6 +741,162 @@ impl App {
                 self.player_modifier_external_velocity,
                 previous_velocity_y,
                 self.camera.velocity_y
+            );
+        }
+    }
+
+    fn next_multiplayer_chunk_sample_diag_u32(&mut self) -> u32 {
+        self.multiplayer_chunk_sample_diag_rng_state = self
+            .multiplayer_chunk_sample_diag_rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.multiplayer_chunk_sample_diag_rng_state >> 32) as u32
+    }
+
+    fn next_multiplayer_chunk_sample_diag_chunk_in_bounds(&mut self, bounds: Aabb4i) -> [i32; 4] {
+        let mut chunk = [0i32; 4];
+        for axis in 0..4 {
+            let lo = bounds.min[axis];
+            let hi = bounds.max[axis];
+            if hi <= lo {
+                chunk[axis] = lo;
+                continue;
+            }
+            let span = (hi - lo + 1) as u32;
+            chunk[axis] = lo + (self.next_multiplayer_chunk_sample_diag_u32() % span) as i32;
+        }
+        chunk
+    }
+
+    pub(super) fn send_multiplayer_chunk_sample_diag_request(&mut self) {
+        if !self.multiplayer_chunk_sample_diag_enabled {
+            return;
+        }
+        let Some(bounds) = self.multiplayer_last_world_request_bounds else {
+            return;
+        };
+        if !bounds.is_valid() {
+            return;
+        }
+        let chunk = self.next_multiplayer_chunk_sample_diag_chunk_in_bounds(bounds);
+        let request_id = self.multiplayer_chunk_sample_diag_next_request_id;
+        self.multiplayer_chunk_sample_diag_next_request_id = self
+            .multiplayer_chunk_sample_diag_next_request_id
+            .wrapping_add(1)
+            .max(1);
+
+        let Some(client) = self.multiplayer.as_ref() else {
+            return;
+        };
+        client.send(MultiplayerClientMessage::WorldChunkSampleRequest { request_id, chunk });
+    }
+
+    fn record_multiplayer_chunk_sample_diag_patch(&mut self, patch: &RegionTreeCore) {
+        if !self.multiplayer_chunk_sample_diag_enabled {
+            return;
+        }
+        self.multiplayer_chunk_sample_diag_patch_seq = self
+            .multiplayer_chunk_sample_diag_patch_seq
+            .wrapping_add(1)
+            .max(1);
+        self.multiplayer_chunk_sample_diag_recent_patches
+            .push_back((self.multiplayer_chunk_sample_diag_patch_seq, patch.clone()));
+        while self.multiplayer_chunk_sample_diag_recent_patches.len()
+            > self.multiplayer_chunk_sample_diag_history_limit
+        {
+            self.multiplayer_chunk_sample_diag_recent_patches
+                .pop_front();
+        }
+    }
+
+    fn handle_multiplayer_chunk_sample_diag_response(
+        &mut self,
+        request_id: u64,
+        chunk: [i32; 4],
+        dense_materials: Vec<u16>,
+    ) {
+        if !self.multiplayer_chunk_sample_diag_enabled {
+            return;
+        }
+        if dense_materials.len() != polychora::shared::voxel::CHUNK_VOLUME {
+            eprintln!(
+                "[client-chunk-sample-diag] invalid dense response: request_id={} chunk={:?} len={} expected={}",
+                request_id,
+                chunk,
+                dense_materials.len(),
+                polychora::shared::voxel::CHUNK_VOLUME
+            );
+            return;
+        }
+
+        let world_dense =
+            dense_materials_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk));
+        let render_bounds = self
+            .multiplayer_last_world_request_bounds
+            .unwrap_or_else(|| Aabb4i::new(chunk, chunk));
+        let render_payloads = self
+            .scene
+            .debug_render_bvh_chunk_payloads_in_bounds(render_bounds, chunk);
+        let render_dense_variants: Vec<Vec<u16>> = render_payloads
+            .iter()
+            .cloned()
+            .map(|payload| dense_materials_from_payload_or_zero(Some(payload)))
+            .collect();
+        let render_dense = render_dense_variants
+            .first()
+            .cloned()
+            .unwrap_or_else(zero_dense_chunk_materials);
+        let render_conflict = render_dense_variants
+            .iter()
+            .skip(1)
+            .any(|dense| *dense != render_dense);
+
+        let world_match = world_dense == dense_materials;
+        let render_match = render_dense == dense_materials;
+
+        let mut overlap_count = 0usize;
+        let mut overlap_mismatch_count = 0usize;
+        let mut newest_overlap_seq = None;
+        let mut newest_overlap_match = None;
+        for (seq, patch) in self
+            .multiplayer_chunk_sample_diag_recent_patches
+            .iter()
+            .rev()
+        {
+            if !patch.bounds.contains_chunk(chunk) {
+                continue;
+            }
+            let patch_dense = dense_materials_from_region_core_chunk(patch, chunk);
+            let patch_match = patch_dense == dense_materials;
+            if newest_overlap_seq.is_none() {
+                newest_overlap_seq = Some(*seq);
+                newest_overlap_match = Some(patch_match);
+            }
+            overlap_count = overlap_count.saturating_add(1);
+            if !patch_match {
+                overlap_mismatch_count = overlap_mismatch_count.saturating_add(1);
+            }
+        }
+
+        if !world_match || !render_match || render_conflict || newest_overlap_match == Some(false) {
+            eprintln!(
+                "[client-chunk-sample-diag] request_id={} chunk={:?} server(hash={},nz={}) world(match={},hash={},nz={}) render(match={},hash={},nz={},payloads={},conflict={}) patch_overlaps={} patch_mismatches={} newest_patch_seq={:?} newest_patch_match={:?}",
+                request_id,
+                chunk,
+                dense_materials_hash(&dense_materials),
+                dense_materials_non_zero_count(&dense_materials),
+                world_match,
+                dense_materials_hash(&world_dense),
+                dense_materials_non_zero_count(&world_dense),
+                render_match,
+                dense_materials_hash(&render_dense),
+                dense_materials_non_zero_count(&render_dense),
+                render_payloads.len(),
+                render_conflict,
+                overlap_count,
+                overlap_mismatch_count,
+                newest_overlap_seq,
+                newest_overlap_match
             );
         }
     }
@@ -1053,6 +1250,9 @@ impl App {
                 self.multiplayer_last_world_request_bounds = None;
                 self.multiplayer_stream_tree_diag =
                     polychora::shared::region_tree::RegionChunkTree::new();
+                self.multiplayer_chunk_sample_diag_recent_patches.clear();
+                self.multiplayer_chunk_sample_diag_patch_seq = 0;
+                self.multiplayer_chunk_sample_diag_next_request_id = 1;
                 self.pending_player_movement_modifiers.clear();
                 self.player_modifier_external_velocity = [0.0; 4];
                 self.maybe_request_multiplayer_world_for_position(self.camera.position, "welcome");
@@ -1066,10 +1266,22 @@ impl App {
                 self.append_dev_console_log_line(format!("[server] {message}"));
             }
             multiplayer::ServerMessage::WorldSubtreePatch { subtree } => {
+                self.record_multiplayer_chunk_sample_diag_patch(&subtree);
                 if self.apply_multiplayer_world_patch(subtree).is_some() && !self.world_ready {
                     self.world_ready = true;
                     eprintln!("World ready: subtree patch applied");
                 }
+            }
+            multiplayer::ServerMessage::WorldChunkSampleResponse {
+                request_id,
+                chunk,
+                dense_materials,
+            } => {
+                self.handle_multiplayer_chunk_sample_diag_response(
+                    request_id,
+                    chunk,
+                    dense_materials,
+                );
             }
             multiplayer::ServerMessage::Pong { .. } => {}
             multiplayer::ServerMessage::EntitySpawned { entity } => match entity.class {

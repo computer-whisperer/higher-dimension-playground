@@ -1254,6 +1254,12 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
     if children.len() != 2 {
         return;
     }
+    if !branch_matches_split(node.bounds, children) {
+        // Only collapse two-child branches when they are the canonical binary partition
+        // of this node's bounds. Two arbitrary non-overlapping children with the same kind
+        // must not fill gaps in the parent region.
+        return;
+    }
 
     sort_children_canonical(children);
     let left_kind = children[0].kind.clone();

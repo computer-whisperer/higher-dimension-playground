@@ -511,6 +511,7 @@ impl App {
 
         let look_dir = self.current_look_direction();
         self.send_multiplayer_player_update(now, look_dir);
+        self.send_multiplayer_chunk_sample_diag_request();
         let preview_elapsed = now - self.start_time;
         let preview_time_s = preview_elapsed.as_secs_f32();
         let preview_time_ticks_ms = preview_elapsed.as_millis() as u32;

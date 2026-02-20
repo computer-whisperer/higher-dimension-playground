@@ -85,6 +85,9 @@ const CLIENT_REGION_TREE_COMPARE_DIAG_MAX_CHUNKS_ENV: &str =
     "R4D_CLIENT_REGION_TREE_COMPARE_DIAG_MAX_CHUNKS";
 const CLIENT_REGION_TREE_COMPARE_DIAG_LOG_INTERVAL_ENV: &str =
     "R4D_CLIENT_REGION_TREE_COMPARE_DIAG_LOG_INTERVAL";
+const CLIENT_WORLD_CHUNK_SAMPLE_DIAG_ENV: &str = "R4D_CLIENT_WORLD_CHUNK_SAMPLE_DIAG";
+const CLIENT_WORLD_CHUNK_SAMPLE_DIAG_HISTORY_ENV: &str =
+    "R4D_CLIENT_WORLD_CHUNK_SAMPLE_DIAG_HISTORY";
 // Tags held-block preview instances so shaders can apply preview-only shading boosts.
 const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
@@ -980,6 +983,16 @@ fn main() {
         .max(1),
         multiplayer_stream_tree_compare_diag_last_hash: None,
         multiplayer_stream_tree_compare_diag_frame_counter: 0,
+        multiplayer_chunk_sample_diag_enabled: env_flag_enabled(CLIENT_WORLD_CHUNK_SAMPLE_DIAG_ENV),
+        multiplayer_chunk_sample_diag_history_limit: env_usize_or(
+            CLIENT_WORLD_CHUNK_SAMPLE_DIAG_HISTORY_ENV,
+            24,
+        )
+        .clamp(1, 256),
+        multiplayer_chunk_sample_diag_rng_state: 0x9E37_79B9_7F4A_7C15,
+        multiplayer_chunk_sample_diag_next_request_id: 1,
+        multiplayer_chunk_sample_diag_recent_patches: VecDeque::new(),
+        multiplayer_chunk_sample_diag_patch_seq: 0,
         pending_player_movement_modifiers: VecDeque::new(),
         player_modifier_external_velocity: [0.0; 4],
         remote_players: HashMap::new(),
@@ -1108,6 +1121,14 @@ fn main() {
             CLIENT_REGION_TREE_COMPARE_DIAG_ENV,
             app.multiplayer_stream_tree_compare_diag_max_chunks,
             app.multiplayer_stream_tree_compare_diag_log_interval
+        );
+    }
+    if app.multiplayer_chunk_sample_diag_enabled {
+        eprintln!(
+            "Client chunk-sample diagnostics enabled via {} (recent patch history {} via {}).",
+            CLIENT_WORLD_CHUNK_SAMPLE_DIAG_ENV,
+            app.multiplayer_chunk_sample_diag_history_limit,
+            CLIENT_WORLD_CHUNK_SAMPLE_DIAG_HISTORY_ENV
         );
     }
     if app.perf_suite_active() {
@@ -1246,6 +1267,13 @@ struct App {
     multiplayer_stream_tree_compare_diag_log_interval: usize,
     multiplayer_stream_tree_compare_diag_last_hash: Option<u64>,
     multiplayer_stream_tree_compare_diag_frame_counter: u64,
+    multiplayer_chunk_sample_diag_enabled: bool,
+    multiplayer_chunk_sample_diag_history_limit: usize,
+    multiplayer_chunk_sample_diag_rng_state: u64,
+    multiplayer_chunk_sample_diag_next_request_id: u64,
+    multiplayer_chunk_sample_diag_recent_patches:
+        VecDeque<(u64, polychora::shared::region_tree::RegionTreeCore)>,
+    multiplayer_chunk_sample_diag_patch_seq: u64,
     pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,
     player_modifier_external_velocity: [f32; 4],
     remote_players: HashMap<u64, RemotePlayerState>,

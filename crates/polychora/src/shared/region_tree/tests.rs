@@ -198,6 +198,35 @@ fn uniform_merge_and_fragment_behavior_is_stable() {
 }
 
 #[test]
+fn non_covering_uniform_children_do_not_fill_parent_gaps() {
+    let mut tree = RegionChunkTree::new();
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(11))));
+    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(11))));
+
+    assert_eq!(
+        tree.chunk_payload(key(0, 0, 0, 0)),
+        Some(ChunkPayload::Uniform(11))
+    );
+    assert_eq!(
+        tree.chunk_payload(key(2, 0, 0, 0)),
+        Some(ChunkPayload::Uniform(11))
+    );
+    assert_eq!(tree.chunk_payload(key(1, 0, 0, 0)), None);
+
+    let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+    let non_empty = collect_non_empty_chunks_from_core_in_bounds(
+        &tree.slice_non_empty_core_in_bounds(bounds),
+        bounds,
+    );
+    let mut keys: Vec<[i32; 4]> = non_empty
+        .into_iter()
+        .map(|(chunk_key, _)| chunk_key)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec![key(0, 0, 0, 0), key(2, 0, 0, 0)]);
+}
+
+#[test]
 fn splice_non_empty_core_replaces_window_contents() {
     let mut tree = RegionChunkTree::new();
     assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));

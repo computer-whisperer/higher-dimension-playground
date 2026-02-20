@@ -236,6 +236,75 @@ fn send_empty_world_subtree_patch_to_client(state: &SharedState, client_id: u64,
     );
 }
 
+fn zero_dense_chunk_materials() -> Vec<u16> {
+    vec![0u16; voxel::CHUNK_VOLUME]
+}
+
+fn dense_materials_from_chunk_payload(
+    payload: &crate::shared::chunk_payload::ChunkPayload,
+) -> Vec<u16> {
+    let Ok(materials) = payload.dense_materials() else {
+        return zero_dense_chunk_materials();
+    };
+    if materials.len() == voxel::CHUNK_VOLUME {
+        materials
+    } else {
+        zero_dense_chunk_materials()
+    }
+}
+
+fn dense_materials_from_region_core_chunk(
+    core: &crate::shared::region_tree::RegionTreeCore,
+    chunk_key: [i32; 4],
+) -> Vec<u16> {
+    let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
+    let chunks = crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds(
+        core,
+        chunk_bounds,
+    );
+    for (key, payload) in chunks {
+        if key == chunk_key {
+            return dense_materials_from_chunk_payload(&payload);
+        }
+    }
+    zero_dense_chunk_materials()
+}
+
+fn handle_world_chunk_sample_request(
+    state: &SharedState,
+    client_id: u64,
+    request_id: u64,
+    chunk: [i32; 4],
+) {
+    let chunk_bounds = Aabb4i::new(chunk, chunk);
+    if !chunk_bounds.is_valid() {
+        send_to_client(
+            state,
+            client_id,
+            ServerMessage::Error {
+                message: format!("invalid world chunk sample request chunk={chunk:?}"),
+            },
+        );
+        return;
+    }
+
+    let dense_materials = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        let subtree = guard.query_world_subtree(chunk_bounds);
+        dense_materials_from_region_core_chunk(subtree.as_ref(), chunk)
+    };
+
+    send_to_client(
+        state,
+        client_id,
+        ServerMessage::WorldChunkSampleResponse {
+            request_id,
+            chunk,
+            dense_materials,
+        },
+    );
+}
+
 fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aabb4i) {
     if !bounds.is_valid() {
         send_to_client(
@@ -1032,6 +1101,9 @@ pub(super) fn handle_message(
         }
         ClientMessage::WorldInterestUpdate { bounds } => {
             handle_world_interest_update(state, client_id, bounds);
+        }
+        ClientMessage::WorldChunkSampleRequest { request_id, chunk } => {
+            handle_world_chunk_sample_request(state, client_id, request_id, chunk);
         }
         ClientMessage::Ping { nonce } => {
             send_to_client(state, client_id, ServerMessage::Pong { nonce });

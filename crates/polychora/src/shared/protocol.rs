@@ -77,6 +77,10 @@ pub enum ClientMessage {
     WorldInterestUpdate {
         bounds: Aabb4i,
     },
+    WorldChunkSampleRequest {
+        request_id: u64,
+        chunk: [i32; 4],
+    },
     Ping {
         nonce: u64,
     },
@@ -95,6 +99,11 @@ pub enum ServerMessage {
     },
     WorldSubtreePatch {
         subtree: RegionTreeCore,
+    },
+    WorldChunkSampleResponse {
+        request_id: u64,
+        chunk: [i32; 4],
+        dense_materials: Vec<u16>,
     },
     Pong {
         nonce: u64,

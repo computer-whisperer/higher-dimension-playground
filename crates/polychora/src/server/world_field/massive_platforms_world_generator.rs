@@ -223,9 +223,11 @@ impl MassivePlatformsWorldGenerator {
         if !bounds.is_valid() || self.platform_voxel.is_none() {
             return;
         }
-        let min_level = (bounds.min[1] - (PLATFORM_THICKNESS_CHUNKS - 1))
-            .div_euclid(PLATFORM_LEVEL_STRIDE_Y_CHUNKS);
-        let max_level = bounds.max[1].div_euclid(PLATFORM_LEVEL_STRIDE_Y_CHUNKS);
+        let Some((min_level, max_level)) =
+            level_range_for_platform_chunk_bounds(bounds.min[1], bounds.max[1])
+        else {
+            return;
+        };
         self.for_each_platform_instance_in_level_range(bounds, min_level, max_level, |platform| {
             let Some(intersection) = intersect_bounds(bounds, platform.bounds) else {
                 return;
@@ -305,8 +307,15 @@ impl MassivePlatformsWorldGenerator {
             return;
         }
         let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
-        let min_level = (bounds.min[1] - local_max_y).div_euclid(PLATFORM_LEVEL_STRIDE_Y_CHUNKS);
-        let max_level = (bounds.max[1] - local_min_y).div_euclid(PLATFORM_LEVEL_STRIDE_Y_CHUNKS);
+        let Some((min_level, max_level)) = level_range_for_shifted_local_chunk_bounds(
+            bounds.min[1],
+            bounds.max[1],
+            local_min_y,
+            local_max_y,
+            PLATFORM_LEVEL_STRIDE_Y_CHUNKS,
+        ) else {
+            return;
+        };
         self.for_each_platform_instance_in_level_range(bounds, min_level, max_level, |platform| {
             self.insert_procgen_chunks_for_platform(bounds, platform, tree);
         });
@@ -436,6 +445,42 @@ fn signed_jitter(hash: u64, max_abs: i32) -> i32 {
     }
     let span = ((max_abs * 2) + 1) as u64;
     (hash % span) as i32 - max_abs
+}
+
+fn div_ceil_i32(numerator: i32, denominator: i32) -> i32 {
+    debug_assert!(denominator > 0);
+    -((-numerator).div_euclid(denominator))
+}
+
+fn level_range_for_shifted_local_chunk_bounds(
+    query_min_y: i32,
+    query_max_y: i32,
+    local_min_y: i32,
+    local_max_y: i32,
+    level_stride_y: i32,
+) -> Option<(i32, i32)> {
+    if query_min_y > query_max_y || local_min_y > local_max_y || level_stride_y <= 0 {
+        return None;
+    }
+    let min_level = div_ceil_i32(query_min_y.saturating_sub(local_max_y), level_stride_y);
+    let max_level = query_max_y
+        .saturating_sub(local_min_y)
+        .div_euclid(level_stride_y);
+    if min_level <= max_level {
+        Some((min_level, max_level))
+    } else {
+        None
+    }
+}
+
+fn level_range_for_platform_chunk_bounds(query_min_y: i32, query_max_y: i32) -> Option<(i32, i32)> {
+    level_range_for_shifted_local_chunk_bounds(
+        query_min_y,
+        query_max_y,
+        -PLATFORM_THICKNESS_CHUNKS,
+        -1,
+        PLATFORM_LEVEL_STRIDE_Y_CHUNKS,
+    )
 }
 
 fn platform_min_chunk_y_for_level(level: i32) -> i32 {
@@ -594,6 +639,13 @@ mod tests {
     use super::*;
     use crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
     use std::collections::HashMap;
+
+    fn payload_at_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Option<ChunkPayload> {
+        let bounds = Aabb4i::new(chunk_key, chunk_key);
+        collect_non_empty_chunks_from_core_in_bounds(core, bounds)
+            .into_iter()
+            .find_map(|(key, payload)| (key == chunk_key).then_some(payload))
+    }
 
     fn collect_uniform_bounds(core: &RegionTreeCore, out: &mut Vec<Aabb4i>) {
         match &core.kind {
@@ -923,5 +975,80 @@ mod tests {
             );
             assert!(anchored, "unanchored structure chunk at {:?}", key);
         }
+    }
+
+    #[test]
+    fn chunk_sampling_is_query_volume_invariant_across_platform_y_boundaries() {
+        let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
+            BaseWorldKind::MassivePlatforms {
+                material: VoxelType(11),
+            },
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            0xD1A6_2026,
+            true,
+            HashSet::new(),
+        );
+
+        let chunk_key = [-14, -1, -22, -19];
+        let single_bounds = Aabb4i::new(chunk_key, chunk_key);
+        let neighborhood_bounds = Aabb4i::new(
+            [
+                chunk_key[0] - 1,
+                chunk_key[1] - 1,
+                chunk_key[2] - 1,
+                chunk_key[3] - 1,
+            ],
+            [
+                chunk_key[0] + 1,
+                chunk_key[1] + 1,
+                chunk_key[2] + 1,
+                chunk_key[3] + 1,
+            ],
+        );
+        let wide_bounds = Aabb4i::new(
+            [
+                chunk_key[0] - 8,
+                chunk_key[1] - 8,
+                chunk_key[2] - 8,
+                chunk_key[3] - 8,
+            ],
+            [
+                chunk_key[0] + 8,
+                chunk_key[1] + 8,
+                chunk_key[2] + 8,
+                chunk_key[3] + 8,
+            ],
+        );
+
+        let single = generator.query_region_core(
+            QueryVolume {
+                bounds: single_bounds,
+            },
+            QueryDetail::Exact,
+        );
+        let neighborhood = generator.query_region_core(
+            QueryVolume {
+                bounds: neighborhood_bounds,
+            },
+            QueryDetail::Exact,
+        );
+        let wide = generator.query_region_core(
+            QueryVolume {
+                bounds: wide_bounds,
+            },
+            QueryDetail::Exact,
+        );
+
+        let expected = payload_at_chunk(single.as_ref(), chunk_key);
+        assert_eq!(
+            payload_at_chunk(neighborhood.as_ref(), chunk_key),
+            expected,
+            "chunk payload changed between single-cell and neighborhood query",
+        );
+        assert_eq!(
+            payload_at_chunk(wide.as_ref(), chunk_key),
+            expected,
+            "chunk payload changed between single-cell and wide query",
+        );
     }
 }

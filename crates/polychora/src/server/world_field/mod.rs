@@ -607,6 +607,54 @@ mod tests {
     use super::*;
     use crate::shared::voxel::BaseWorldKind;
 
+    fn dense_materials_from_core_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Vec<u16> {
+        let Some(payload) = chunk_payload_from_core(core, chunk_key) else {
+            return vec![0u16; CHUNK_VOLUME];
+        };
+        let Ok(materials) = payload.dense_materials() else {
+            return vec![0u16; CHUNK_VOLUME];
+        };
+        if materials.len() == CHUNK_VOLUME {
+            materials
+        } else {
+            vec![0u16; CHUNK_VOLUME]
+        }
+    }
+
+    fn sample_virgin_chunk_dense(
+        base_kind: BaseWorldKind,
+        world_seed: u64,
+        procgen_structures: bool,
+        chunk_key: [i32; 4],
+    ) -> Vec<u16> {
+        sample_virgin_chunk_dense_with_query_bounds(
+            base_kind,
+            world_seed,
+            procgen_structures,
+            chunk_key,
+            Aabb4i::new(chunk_key, chunk_key),
+        )
+    }
+
+    fn sample_virgin_chunk_dense_with_query_bounds(
+        base_kind: BaseWorldKind,
+        world_seed: u64,
+        procgen_structures: bool,
+        chunk_key: [i32; 4],
+        query_bounds: Aabb4i,
+    ) -> Vec<u16> {
+        let field =
+            build_server_world_field(base_kind, world_seed, procgen_structures, HashSet::new());
+        assert!(query_bounds.contains_chunk(chunk_key));
+        let core = field.query_region_core(
+            QueryVolume {
+                bounds: query_bounds,
+            },
+            QueryDetail::Exact,
+        );
+        dense_materials_from_core_chunk(core.as_ref(), chunk_key)
+    }
+
     fn collect_chunk_keys(bounds_list: &[Aabb4i]) -> Vec<[i32; 4]> {
         let mut keys = Vec::new();
         for bounds in bounds_list {
@@ -752,5 +800,94 @@ mod tests {
         assert!(virgin_chunk[voxel_idx].is_solid());
 
         overlay.clear_dirty();
+    }
+
+    #[test]
+    fn virgin_world_generator_chunk_sampling_is_deterministic_for_observed_coords() {
+        let observed_chunks = [
+            [-14, -1, -22, -19],
+            [-10, -2, -4, 0],
+            [-12, -1, 0, 7],
+            [-18, -14, -24, 22],
+            [17, -26, -20, 23],
+            [5, -2, 10, 3],
+        ];
+        let world_kinds = [
+            BaseWorldKind::FlatFloor {
+                material: VoxelType(11),
+            },
+            BaseWorldKind::MassivePlatforms {
+                material: VoxelType(11),
+            },
+        ];
+
+        for base_kind in world_kinds {
+            for chunk_key in observed_chunks {
+                let baseline = sample_virgin_chunk_dense(base_kind, 0xD1A6_2026, true, chunk_key);
+                for sample_idx in 0..16 {
+                    let sample = sample_virgin_chunk_dense(base_kind, 0xD1A6_2026, true, chunk_key);
+                    assert_eq!(
+                        sample, baseline,
+                        "virgin generator changed output for base_kind={base_kind:?} chunk={chunk_key:?} sample_idx={sample_idx}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn virgin_world_generator_chunk_sampling_is_query_volume_invariant() {
+        let observed_chunks = [
+            [-14, -1, -22, -19],
+            [-10, -2, -4, 0],
+            [-12, -1, 0, 7],
+            [-18, -14, -24, 22],
+            [17, -26, -20, 23],
+            [5, -2, 10, 3],
+        ];
+        let world_kinds = [
+            BaseWorldKind::FlatFloor {
+                material: VoxelType(11),
+            },
+            BaseWorldKind::MassivePlatforms {
+                material: VoxelType(11),
+            },
+        ];
+        let query_radii = [0i32, 1, 2, 4, 8, 16];
+
+        for base_kind in world_kinds {
+            for chunk_key in observed_chunks {
+                let baseline = sample_virgin_chunk_dense(base_kind, 0xD1A6_2026, true, chunk_key);
+                for radius in query_radii {
+                    let query_bounds = Aabb4i::new(
+                        [
+                            chunk_key[0] - radius,
+                            chunk_key[1] - radius,
+                            chunk_key[2] - radius,
+                            chunk_key[3] - radius,
+                        ],
+                        [
+                            chunk_key[0] + radius,
+                            chunk_key[1] + radius,
+                            chunk_key[2] + radius,
+                            chunk_key[3] + radius,
+                        ],
+                    );
+                    let sample = sample_virgin_chunk_dense_with_query_bounds(
+                        base_kind,
+                        0xD1A6_2026,
+                        true,
+                        chunk_key,
+                        query_bounds,
+                    );
+                    assert_eq!(
+                        sample, baseline,
+                        "virgin generator changed per query volume: base_kind={base_kind:?} chunk={chunk_key:?} query_bounds={:?}->{:?}",
+                        query_bounds.min,
+                        query_bounds.max
+                    );
+                }
+            }
+        }
     }
 }

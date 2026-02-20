@@ -258,6 +258,43 @@ pub fn collect_non_empty_chunk_keys_from_bvh_in_bounds(
     keys
 }
 
+pub fn sample_chunk_payloads_from_bvh(bvh: &RenderBvh, key: ChunkKey) -> Vec<ChunkPayload> {
+    if !bvh.bounds.contains_chunk(key) {
+        return Vec::new();
+    }
+    let Some(root) = bvh.root else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::<ChunkPayload>::new();
+    let mut stack = Vec::<u32>::with_capacity(64);
+    stack.push(root);
+
+    while let Some(node_idx) = stack.pop() {
+        let Some(node) = bvh.nodes.get(node_idx as usize) else {
+            continue;
+        };
+        if !node.bounds.contains_chunk(key) {
+            continue;
+        }
+        match node.kind {
+            RenderBvhNodeKind::Internal { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            RenderBvhNodeKind::Leaf { leaf_index } => {
+                let Some(leaf) = bvh.leaves.get(leaf_index as usize) else {
+                    continue;
+                };
+                if let Some(payload) = sample_leaf_payload_at_key(leaf, key) {
+                    out.push(payload);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn collect_render_leaves_in_bounds(
     core: &RenderTreeCore,
     bounds: Aabb4i,
@@ -286,6 +323,36 @@ fn collect_render_leaves_in_bounds(
             }
         }
     }
+}
+
+fn sample_leaf_payload_at_key(leaf: &RenderLeaf, key: ChunkKey) -> Option<ChunkPayload> {
+    if !leaf.bounds.contains_chunk(key) {
+        return None;
+    }
+    match &leaf.kind {
+        RenderLeafKind::Uniform(material) => Some(ChunkPayload::Uniform(*material)),
+        RenderLeafKind::VoxelChunkArray(chunk_array) => {
+            sample_chunkarray_payload_at_key(chunk_array, key)
+        }
+    }
+}
+
+fn sample_chunkarray_payload_at_key(
+    chunk_array: &ChunkArrayData,
+    key: ChunkKey,
+) -> Option<ChunkPayload> {
+    if !chunk_array.bounds.contains_chunk(key) {
+        return None;
+    }
+    let dims = chunk_array.bounds.chunk_extents()?;
+    let dense_indices = chunk_array.decode_dense_indices().ok()?;
+    let lx = (key[0] - chunk_array.bounds.min[0]) as usize;
+    let ly = (key[1] - chunk_array.bounds.min[1]) as usize;
+    let lz = (key[2] - chunk_array.bounds.min[2]) as usize;
+    let lw = (key[3] - chunk_array.bounds.min[3]) as usize;
+    let linear = lx + dims[0] * (ly + dims[1] * (lz + dims[2] * lw));
+    let palette_idx = *dense_indices.get(linear)? as usize;
+    chunk_array.chunk_palette.get(palette_idx).cloned()
 }
 
 fn build_bvh_recursive(
@@ -629,5 +696,42 @@ mod tests {
         assert!(bvh.root.is_none());
         assert!(bvh.nodes.is_empty());
         assert!(bvh.leaves.is_empty());
+    }
+
+    #[test]
+    fn sample_chunk_payloads_from_bvh_reads_uniform_and_chunk_array_leaves() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
+        let chunk_array_bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
+        let chunk_array = ChunkArrayData::from_dense_indices(
+            chunk_array_bounds,
+            vec![ChunkPayload::Uniform(11)],
+            vec![0],
+            None,
+        )
+        .expect("chunk array");
+        let core = RenderTreeCore {
+            bounds,
+            kind: RenderNodeKind::Branch(vec![
+                RenderTreeCore {
+                    bounds: Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]),
+                    kind: RenderNodeKind::Uniform(7),
+                },
+                RenderTreeCore {
+                    bounds: chunk_array_bounds,
+                    kind: RenderNodeKind::VoxelChunkArray(chunk_array),
+                },
+            ]),
+        };
+        let bvh = build_bvh_in_bounds(&core, bounds);
+
+        assert_eq!(
+            sample_chunk_payloads_from_bvh(&bvh, [0, 0, 0, 0]),
+            vec![ChunkPayload::Uniform(7)]
+        );
+        assert_eq!(
+            sample_chunk_payloads_from_bvh(&bvh, [1, 0, 0, 0]),
+            vec![ChunkPayload::Uniform(11)]
+        );
+        assert!(sample_chunk_payloads_from_bvh(&bvh, [2, 0, 0, 0]).is_empty());
     }
 }

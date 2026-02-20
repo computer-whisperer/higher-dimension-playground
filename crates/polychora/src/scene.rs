@@ -627,6 +627,25 @@ impl Scene {
         self.world_get_voxel(wx, wy, wz, ww)
     }
 
+    pub fn debug_world_tree_chunk_payload(&self, chunk_key: [i32; 4]) -> Option<ChunkPayload> {
+        self.world_tree.chunk_payload(chunk_key)
+    }
+
+    pub fn debug_render_bvh_chunk_payloads_in_bounds(
+        &mut self,
+        bounds: Aabb4i,
+        chunk_key: [i32; 4],
+    ) -> Vec<ChunkPayload> {
+        if !bounds.is_valid() {
+            return Vec::new();
+        }
+        self.ensure_render_bvh_cache_for_bounds(bounds);
+        self.render_bvh_cache
+            .as_ref()
+            .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
+            .unwrap_or_default()
+    }
+
     pub fn collect_non_empty_explicit_chunk_positions(&self) -> Vec<[i32; 4]> {
         let Some(root) = self.world_tree.root() else {
             return Vec::new();
