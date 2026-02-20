@@ -154,6 +154,8 @@ pub struct RenderBvh {
     pub root: Option<u32>,
     pub nodes: Vec<RenderBvhNode>,
     pub leaves: Vec<RenderLeaf>,
+    free_node_ids: Vec<u32>,
+    free_leaf_ids: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -194,6 +196,23 @@ pub struct DebugRayBvhNodeHit {
     pub t_enter: f32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderBvhChunkMutationDelta {
+    pub key: ChunkKey,
+    pub expected_root: Option<u32>,
+    pub new_root: Option<u32>,
+    pub node_writes: Vec<(u32, RenderBvhNode)>,
+    pub leaf_writes: Vec<(u32, RenderLeaf)>,
+    pub freed_node_ids: Vec<u32>,
+    pub freed_leaf_ids: Vec<u32>,
+}
+
+impl RenderBvhChunkMutationDelta {
+    pub fn root_changed(&self) -> bool {
+        self.expected_root != self.new_root
+    }
+}
+
 pub fn build_bvh_in_bounds(core: &RenderTreeCore, bounds: Aabb4i) -> RenderBvh {
     if !bounds.is_valid() {
         return RenderBvh {
@@ -201,34 +220,45 @@ pub fn build_bvh_in_bounds(core: &RenderTreeCore, bounds: Aabb4i) -> RenderBvh {
             root: None,
             nodes: Vec::new(),
             leaves: Vec::new(),
+            free_node_ids: Vec::new(),
+            free_leaf_ids: Vec::new(),
         };
     }
 
-    let mut leaves = Vec::<RenderLeaf>::new();
-    collect_render_leaves_in_bounds(core, bounds, &mut leaves);
-    if leaves.is_empty() {
+    let mut leaf_inputs = Vec::<RenderLeaf>::new();
+    collect_render_leaves_in_bounds(core, bounds, &mut leaf_inputs);
+    if leaf_inputs.is_empty() {
         return RenderBvh {
             bounds,
             root: None,
             nodes: Vec::new(),
-            leaves,
+            leaves: Vec::new(),
+            free_node_ids: Vec::new(),
+            free_leaf_ids: Vec::new(),
         };
     }
 
-    let mut nodes = Vec::<RenderBvhNode>::new();
-    let mut leaf_indices: Vec<usize> = (0..leaves.len()).collect();
-    let root = Some(build_bvh_recursive(
-        &leaves,
-        &mut leaf_indices[..],
-        &mut nodes,
-    ));
-
-    RenderBvh {
+    let mut bvh = RenderBvh {
         bounds,
-        root,
-        nodes,
-        leaves,
-    }
+        root: None,
+        nodes: Vec::new(),
+        leaves: Vec::new(),
+        free_node_ids: Vec::new(),
+        free_leaf_ids: Vec::new(),
+    };
+    let mut init_delta = RenderBvhChunkMutationDelta {
+        key: bounds.min,
+        expected_root: None,
+        new_root: None,
+        node_writes: Vec::new(),
+        leaf_writes: Vec::new(),
+        freed_node_ids: Vec::new(),
+        freed_leaf_ids: Vec::new(),
+    };
+    let root = append_leaves_subtree_with_delta(&mut bvh, leaf_inputs, &mut init_delta)
+        .expect("initial BVH build should succeed");
+    bvh.root = Some(root);
+    bvh
 }
 
 pub fn collect_non_empty_chunk_keys_from_bvh_in_bounds(
@@ -308,6 +338,118 @@ pub fn sample_chunk_payloads_from_bvh(bvh: &RenderBvh, key: ChunkKey) -> Vec<Chu
         }
     }
     out
+}
+
+pub fn apply_chunk_payload_mutations_in_bvh(
+    bvh: &mut RenderBvh,
+    mutations: &[(ChunkKey, Option<ChunkPayload>)],
+) -> Result<usize, String> {
+    Ok(apply_chunk_payload_mutations_with_deltas_in_bvh(bvh, mutations)?.len())
+}
+
+pub fn apply_chunk_payload_mutations_with_deltas_in_bvh(
+    bvh: &mut RenderBvh,
+    mutations: &[(ChunkKey, Option<ChunkPayload>)],
+) -> Result<Vec<RenderBvhChunkMutationDelta>, String> {
+    let mut deltas = Vec::<RenderBvhChunkMutationDelta>::new();
+    for (key, payload) in mutations {
+        if !bvh.bounds.contains_chunk(*key) {
+            continue;
+        }
+        let key_bounds = Aabb4i::new(*key, *key);
+        let patch_core = if let Some(payload) = payload.clone() {
+            repeated_voxel_leaf(key_bounds, payload).unwrap_or_else(|| RenderTreeCore::empty(key_bounds))
+        } else {
+            RenderTreeCore::empty(key_bounds)
+        };
+        if let Some(delta) = apply_core_patch_in_bounds_with_delta_in_bvh(bvh, key_bounds, &patch_core)? {
+            deltas.push(delta);
+        }
+    }
+    Ok(deltas)
+}
+
+pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
+    bvh: &mut RenderBvh,
+    patch_bounds: Aabb4i,
+    patch_core: &RenderTreeCore,
+) -> Result<Option<RenderBvhChunkMutationDelta>, String> {
+    if !patch_bounds.is_valid() {
+        return Ok(None);
+    }
+    let Some(clipped_patch_bounds) = intersect_bounds(bvh.bounds, patch_bounds) else {
+        return Ok(None);
+    };
+
+    let expected_root = bvh.root;
+    let (old_reachable_nodes, old_reachable_leaves) =
+        collect_reachable_node_leaf_ids(bvh, expected_root);
+
+    let mut delta = RenderBvhChunkMutationDelta {
+        key: clipped_patch_bounds.min,
+        expected_root,
+        new_root: expected_root,
+        node_writes: Vec::new(),
+        leaf_writes: Vec::new(),
+        freed_node_ids: Vec::new(),
+        freed_leaf_ids: Vec::new(),
+    };
+
+    let outside_root = if let Some(root_idx) = expected_root {
+        clone_subtree_excluding_bounds(bvh, root_idx, clipped_patch_bounds, &mut delta)?
+    } else {
+        None
+    };
+
+    let mut replacement_leaves = Vec::<RenderLeaf>::new();
+    collect_render_leaves_in_bounds(patch_core, clipped_patch_bounds, &mut replacement_leaves);
+    let replacement_root = if replacement_leaves.is_empty() {
+        None
+    } else {
+        Some(append_leaves_subtree_with_delta(
+            bvh,
+            replacement_leaves,
+            &mut delta,
+        )?)
+    };
+
+    let new_root = match (outside_root, replacement_root) {
+        (None, None) => None,
+        (Some(root), None) | (None, Some(root)) => Some(root),
+        (Some(left), Some(right)) => {
+            let bounds = union_bounds(
+                bvh.nodes[left as usize].bounds,
+                bvh.nodes[right as usize].bounds,
+            );
+            Some(append_internal_node_with_delta(
+                bvh, left, right, bounds, &mut delta,
+            ))
+        }
+    };
+
+    bvh.root = new_root;
+
+    let (new_reachable_nodes, new_reachable_leaves) = collect_reachable_node_leaf_ids(bvh, bvh.root);
+    release_unreachable_nodes_and_leaves(
+        bvh,
+        &old_reachable_nodes,
+        &old_reachable_leaves,
+        &new_reachable_nodes,
+        &new_reachable_leaves,
+        &mut delta,
+    );
+    delta.new_root = bvh.root;
+
+    if delta.expected_root == delta.new_root
+        && delta.node_writes.is_empty()
+        && delta.leaf_writes.is_empty()
+        && delta.freed_node_ids.is_empty()
+        && delta.freed_leaf_ids.is_empty()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(delta))
 }
 
 pub fn collect_ray_intersected_nodes_from_bvh(
@@ -470,6 +612,441 @@ fn sample_chunkarray_payload_at_key(
     chunk_array.chunk_palette.get(palette_idx).cloned()
 }
 
+fn clone_subtree_excluding_bounds(
+    bvh: &mut RenderBvh,
+    node_idx: u32,
+    excluded_bounds: Aabb4i,
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> Result<Option<u32>, String> {
+    let Some(node) = bvh.nodes.get(node_idx as usize).cloned() else {
+        return Ok(None);
+    };
+    if !node.bounds.intersects(&excluded_bounds) {
+        return Ok(Some(node_idx));
+    }
+    if bounds_contains_bounds(excluded_bounds, node.bounds) {
+        return Ok(None);
+    }
+
+    match node.kind {
+        RenderBvhNodeKind::Leaf { leaf_index } => {
+            let Some(leaf) = bvh.leaves.get(leaf_index as usize).cloned() else {
+                return Ok(None);
+            };
+            let replacement_leaves = build_leaf_outside_bounds_pieces(&leaf, excluded_bounds)?;
+            if replacement_leaves.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(append_leaves_subtree_with_delta(
+                    bvh,
+                    replacement_leaves,
+                    delta,
+                )?))
+            }
+        }
+        RenderBvhNodeKind::Internal { left, right } => {
+            let left_root = clone_subtree_excluding_bounds(bvh, left, excluded_bounds, delta)?;
+            let right_root = clone_subtree_excluding_bounds(bvh, right, excluded_bounds, delta)?;
+            match (left_root, right_root) {
+                (None, None) => Ok(None),
+                (Some(only), None) | (None, Some(only)) => Ok(Some(only)),
+                (Some(new_left), Some(new_right)) => {
+                    let bounds = union_bounds(
+                        bvh.nodes[new_left as usize].bounds,
+                        bvh.nodes[new_right as usize].bounds,
+                    );
+                    Ok(Some(append_internal_node_with_delta(
+                        bvh, new_left, new_right, bounds, delta,
+                    )))
+                }
+            }
+        }
+    }
+}
+
+fn build_leaf_outside_bounds_pieces(
+    leaf: &RenderLeaf,
+    excluded_bounds: Aabb4i,
+) -> Result<Vec<RenderLeaf>, String> {
+    let mut out = Vec::<RenderLeaf>::new();
+    if !leaf.bounds.intersects(&excluded_bounds) {
+        out.push(leaf.clone());
+        return Ok(out);
+    }
+    let split_bounds = split_bounds_excluding_bounds(leaf.bounds, excluded_bounds);
+    match &leaf.kind {
+        RenderLeafKind::Uniform(material) => {
+            if *material == 0 {
+                return Ok(out);
+            }
+            for piece_bounds in split_bounds {
+                out.push(RenderLeaf {
+                    bounds: piece_bounds,
+                    kind: RenderLeafKind::Uniform(*material),
+                });
+            }
+        }
+        RenderLeafKind::VoxelChunkArray(chunk_array) => {
+            let source_indices = chunk_array
+                .decode_dense_indices()
+                .map_err(|error| format!("decode chunk-array leaf failed: {error:?}"))?;
+            for piece_bounds in split_bounds {
+                if let Some(piece_kind) =
+                    slice_chunk_array_kind_to_bounds(chunk_array, &source_indices, piece_bounds)?
+                {
+                    out.push(RenderLeaf {
+                        bounds: piece_bounds,
+                        kind: piece_kind,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn split_bounds_excluding_bounds(bounds: Aabb4i, excluded_bounds: Aabb4i) -> Vec<Aabb4i> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    let Some(clipped_excluded) = intersect_bounds(bounds, excluded_bounds) else {
+        return vec![bounds];
+    };
+
+    let mut rem_min = bounds.min;
+    let mut rem_max = bounds.max;
+    let mut pieces = Vec::<Aabb4i>::new();
+    for axis in 0..4 {
+        if rem_min[axis] < clipped_excluded.min[axis] {
+            let mut piece_max = rem_max;
+            piece_max[axis] = clipped_excluded.min[axis] - 1;
+            pieces.push(Aabb4i::new(rem_min, piece_max));
+            rem_min[axis] = clipped_excluded.min[axis];
+        }
+        if rem_max[axis] > clipped_excluded.max[axis] {
+            let mut piece_min = rem_min;
+            piece_min[axis] = clipped_excluded.max[axis] + 1;
+            pieces.push(Aabb4i::new(piece_min, rem_max));
+            rem_max[axis] = clipped_excluded.max[axis];
+        }
+    }
+    pieces
+}
+
+fn slice_chunk_array_kind_to_bounds(
+    chunk_array: &ChunkArrayData,
+    source_indices: &[u16],
+    bounds: Aabb4i,
+) -> Result<Option<RenderLeafKind>, String> {
+    let Some(clipped_bounds) = intersect_bounds(bounds, chunk_array.bounds) else {
+        return Ok(None);
+    };
+    if clipped_bounds != bounds {
+        return Ok(None);
+    }
+
+    let Some(src_dims) = chunk_array.bounds.chunk_extents() else {
+        return Ok(None);
+    };
+    let Some(piece_dims) = bounds.chunk_extents() else {
+        return Ok(None);
+    };
+    let piece_cell_count = bounds
+        .chunk_cell_count()
+        .ok_or_else(|| "piece chunk count overflow".to_string())?;
+    let mut piece_indices = Vec::<u16>::with_capacity(piece_cell_count);
+    let palette_non_empty: Vec<bool> = chunk_array
+        .chunk_palette
+        .iter()
+        .map(chunk_payload_has_solid_material)
+        .collect();
+    let mut any_non_empty = false;
+
+    for w in 0..piece_dims[3] {
+        for z in 0..piece_dims[2] {
+            for y in 0..piece_dims[1] {
+                for x in 0..piece_dims[0] {
+                    let src_coord = [
+                        bounds.min[0] + x as i32,
+                        bounds.min[1] + y as i32,
+                        bounds.min[2] + z as i32,
+                        bounds.min[3] + w as i32,
+                    ];
+                    let lx = (src_coord[0] - chunk_array.bounds.min[0]) as usize;
+                    let ly = (src_coord[1] - chunk_array.bounds.min[1]) as usize;
+                    let lz = (src_coord[2] - chunk_array.bounds.min[2]) as usize;
+                    let lw = (src_coord[3] - chunk_array.bounds.min[3]) as usize;
+                    let src_linear =
+                        lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
+                    let Some(&palette_index) = source_indices.get(src_linear) else {
+                        return Err("chunk-array source index out of bounds".to_string());
+                    };
+                    if palette_non_empty
+                        .get(palette_index as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        any_non_empty = true;
+                    }
+                    piece_indices.push(palette_index);
+                }
+            }
+        }
+    }
+
+    if !any_non_empty {
+        return Ok(None);
+    }
+
+    let piece_chunk_array = ChunkArrayData::from_dense_indices(
+        bounds,
+        chunk_array.chunk_palette.clone(),
+        piece_indices,
+        None,
+    )
+    .map_err(|error| format!("slice chunk-array piece failed: {error:?}"))?;
+    Ok(Some(RenderLeafKind::VoxelChunkArray(piece_chunk_array)))
+}
+
+fn append_leaves_subtree_with_delta(
+    bvh: &mut RenderBvh,
+    leaves: Vec<RenderLeaf>,
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> Result<u32, String> {
+    if leaves.is_empty() {
+        return Err("cannot append empty leaf subtree".to_string());
+    }
+    let mut leaf_ids = Vec::<u32>::with_capacity(leaves.len());
+    for leaf in leaves {
+        let leaf_id = allocate_leaf_slot(bvh, leaf, delta)?;
+        leaf_ids.push(leaf_id);
+    }
+    build_bvh_recursive_for_leaf_ids(bvh, &mut leaf_ids[..], delta)
+}
+
+fn append_internal_node_with_delta(
+    bvh: &mut RenderBvh,
+    left: u32,
+    right: u32,
+    bounds: Aabb4i,
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> u32 {
+    allocate_node_slot(
+        bvh,
+        RenderBvhNode {
+            bounds,
+            kind: RenderBvhNodeKind::Internal { left, right },
+        },
+        delta,
+    )
+    .expect("allocate internal node")
+}
+
+fn allocate_leaf_slot(
+    bvh: &mut RenderBvh,
+    leaf: RenderLeaf,
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> Result<u32, String> {
+    if let Some(leaf_id) = bvh.free_leaf_ids.pop() {
+        let Some(slot) = bvh.leaves.get_mut(leaf_id as usize) else {
+            return Err(format!("free leaf id {} out of range", leaf_id));
+        };
+        *slot = leaf.clone();
+        delta.leaf_writes.push((leaf_id, leaf));
+        Ok(leaf_id)
+    } else {
+        let leaf_id = bvh.leaves.len() as u32;
+        bvh.leaves.push(leaf.clone());
+        delta.leaf_writes.push((leaf_id, leaf));
+        Ok(leaf_id)
+    }
+}
+
+fn allocate_node_slot(
+    bvh: &mut RenderBvh,
+    node: RenderBvhNode,
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> Result<u32, String> {
+    if let Some(node_id) = bvh.free_node_ids.pop() {
+        let Some(slot) = bvh.nodes.get_mut(node_id as usize) else {
+            return Err(format!("free node id {} out of range", node_id));
+        };
+        *slot = node.clone();
+        delta.node_writes.push((node_id, node));
+        Ok(node_id)
+    } else {
+        let node_id = bvh.nodes.len() as u32;
+        bvh.nodes.push(node.clone());
+        delta.node_writes.push((node_id, node));
+        Ok(node_id)
+    }
+}
+
+fn build_bvh_recursive_for_leaf_ids(
+    bvh: &mut RenderBvh,
+    leaf_ids: &mut [u32],
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> Result<u32, String> {
+    if leaf_ids.is_empty() {
+        return Err("cannot build BVH for empty leaf id slice".to_string());
+    }
+    if leaf_ids.len() == 1 {
+        let leaf_id = leaf_ids[0];
+        let Some(leaf) = bvh.leaves.get(leaf_id as usize) else {
+            return Err(format!("leaf id {} out of range", leaf_id));
+        };
+        return allocate_node_slot(
+            bvh,
+            RenderBvhNode {
+                bounds: leaf.bounds,
+                kind: RenderBvhNodeKind::Leaf { leaf_index: leaf_id },
+            },
+            delta,
+        );
+    }
+
+    let aggregate_bounds = aggregate_bounds_for_leaf_ids_in_bvh(bvh, leaf_ids);
+    let split_axis = longest_axis(aggregate_bounds);
+    leaf_ids.sort_unstable_by(|a, b| {
+        let ab = bvh
+            .leaves
+            .get(*a as usize)
+            .map(|leaf| leaf.bounds)
+            .unwrap_or(Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]));
+        let bb = bvh
+            .leaves
+            .get(*b as usize)
+            .map(|leaf| leaf.bounds)
+            .unwrap_or(Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]));
+        let ca = centroid_axis(ab, split_axis);
+        let cb = centroid_axis(bb, split_axis);
+        ca.total_cmp(&cb)
+            .then_with(|| ab.min.cmp(&bb.min))
+            .then_with(|| ab.max.cmp(&bb.max))
+    });
+
+    let mid = leaf_ids.len() / 2;
+    let (left_ids, right_ids) = leaf_ids.split_at_mut(mid);
+    let left = build_bvh_recursive_for_leaf_ids(bvh, left_ids, delta)?;
+    let right = build_bvh_recursive_for_leaf_ids(bvh, right_ids, delta)?;
+    let left_bounds = bvh
+        .nodes
+        .get(left as usize)
+        .map(|node| node.bounds)
+        .ok_or_else(|| format!("left node {} out of range", left))?;
+    let right_bounds = bvh
+        .nodes
+        .get(right as usize)
+        .map(|node| node.bounds)
+        .ok_or_else(|| format!("right node {} out of range", right))?;
+    allocate_node_slot(
+        bvh,
+        RenderBvhNode {
+            bounds: union_bounds(left_bounds, right_bounds),
+            kind: RenderBvhNodeKind::Internal { left, right },
+        },
+        delta,
+    )
+}
+
+fn aggregate_bounds_for_leaf_ids_in_bvh(bvh: &RenderBvh, leaf_ids: &[u32]) -> Aabb4i {
+    let first = leaf_ids
+        .first()
+        .and_then(|leaf_id| bvh.leaves.get(*leaf_id as usize))
+        .map(|leaf| leaf.bounds)
+        .unwrap_or(Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]));
+    let mut bounds = first;
+    for &leaf_id in &leaf_ids[1..] {
+        if let Some(leaf) = bvh.leaves.get(leaf_id as usize) {
+            bounds = union_bounds(bounds, leaf.bounds);
+        }
+    }
+    bounds
+}
+
+fn collect_reachable_node_leaf_ids(
+    bvh: &RenderBvh,
+    root: Option<u32>,
+) -> (Vec<bool>, Vec<bool>) {
+    let mut node_reachable = vec![false; bvh.nodes.len()];
+    let mut leaf_reachable = vec![false; bvh.leaves.len()];
+    let Some(root) = root else {
+        return (node_reachable, leaf_reachable);
+    };
+    let mut stack = vec![root];
+    while let Some(node_id) = stack.pop() {
+        let idx = node_id as usize;
+        if idx >= bvh.nodes.len() || node_reachable[idx] {
+            continue;
+        }
+        node_reachable[idx] = true;
+        let node = &bvh.nodes[idx];
+        match node.kind {
+            RenderBvhNodeKind::Internal { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            RenderBvhNodeKind::Leaf { leaf_index } => {
+                let leaf_idx = leaf_index as usize;
+                if leaf_idx < leaf_reachable.len() {
+                    leaf_reachable[leaf_idx] = true;
+                }
+            }
+        }
+    }
+    (node_reachable, leaf_reachable)
+}
+
+fn release_unreachable_nodes_and_leaves(
+    bvh: &mut RenderBvh,
+    old_node_reachable: &[bool],
+    old_leaf_reachable: &[bool],
+    new_node_reachable: &[bool],
+    new_leaf_reachable: &[bool],
+    delta: &mut RenderBvhChunkMutationDelta,
+) {
+    for (node_id, was_old_reachable) in old_node_reachable.iter().enumerate() {
+        if !*was_old_reachable {
+            continue;
+        }
+        let still_reachable = new_node_reachable.get(node_id).copied().unwrap_or(false);
+        if still_reachable {
+            continue;
+        }
+        if !bvh.free_node_ids.iter().any(|id| *id as usize == node_id) {
+            bvh.free_node_ids.push(node_id as u32);
+            if let Some(slot) = bvh.nodes.get_mut(node_id) {
+                *slot = RenderBvhNode {
+                    bounds: Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]),
+                    kind: RenderBvhNodeKind::Leaf {
+                        leaf_index: u32::MAX,
+                    },
+                };
+            }
+            delta.freed_node_ids.push(node_id as u32);
+        }
+    }
+    for (leaf_id, was_old_reachable) in old_leaf_reachable.iter().enumerate() {
+        if !*was_old_reachable {
+            continue;
+        }
+        let still_reachable = new_leaf_reachable.get(leaf_id).copied().unwrap_or(false);
+        if still_reachable {
+            continue;
+        }
+        if !bvh.free_leaf_ids.iter().any(|id| *id as usize == leaf_id) {
+            bvh.free_leaf_ids.push(leaf_id as u32);
+            if let Some(slot) = bvh.leaves.get_mut(leaf_id) {
+                *slot = RenderLeaf {
+                    bounds: Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]),
+                    kind: RenderLeafKind::Uniform(0),
+                };
+            }
+            delta.freed_leaf_ids.push(leaf_id as u32);
+        }
+    }
+}
+
 fn ray_intersects_chunk_bounds(
     ray_origin_world: [f32; 4],
     ray_dir_world: [f32; 4],
@@ -522,50 +1099,6 @@ fn ray_intersects_chunk_bounds(
         return None;
     }
     Some(t_near.max(0.0))
-}
-
-fn build_bvh_recursive(
-    leaves: &[RenderLeaf],
-    leaf_indices: &mut [usize],
-    nodes: &mut Vec<RenderBvhNode>,
-) -> u32 {
-    if leaf_indices.len() == 1 {
-        let leaf_index = leaf_indices[0] as u32;
-        let node_idx = nodes.len() as u32;
-        nodes.push(RenderBvhNode {
-            bounds: leaves[leaf_indices[0]].bounds,
-            kind: RenderBvhNodeKind::Leaf { leaf_index },
-        });
-        return node_idx;
-    }
-
-    let aggregate_bounds = aggregate_bounds_for_leaf_indices(leaves, leaf_indices);
-    let split_axis = longest_axis(aggregate_bounds);
-    leaf_indices.sort_unstable_by(|a, b| {
-        let ca = centroid_axis(leaves[*a].bounds, split_axis);
-        let cb = centroid_axis(leaves[*b].bounds, split_axis);
-        ca.total_cmp(&cb).then_with(|| {
-            leaves[*a]
-                .bounds
-                .min
-                .cmp(&leaves[*b].bounds.min)
-                .then_with(|| leaves[*a].bounds.max.cmp(&leaves[*b].bounds.max))
-        })
-    });
-
-    let mid = leaf_indices.len() / 2;
-    let (left_indices, right_indices) = leaf_indices.split_at_mut(mid);
-    let left = build_bvh_recursive(leaves, left_indices, nodes);
-    let right = build_bvh_recursive(leaves, right_indices, nodes);
-    let left_bounds = nodes[left as usize].bounds;
-    let right_bounds = nodes[right as usize].bounds;
-
-    let node_idx = nodes.len() as u32;
-    nodes.push(RenderBvhNode {
-        bounds: union_bounds(left_bounds, right_bounds),
-        kind: RenderBvhNodeKind::Internal { left, right },
-    });
-    node_idx
 }
 
 fn collect_non_empty_leaf_chunk_keys_in_bounds(
@@ -662,14 +1195,6 @@ fn enumerate_chunk_keys(bounds: Aabb4i, out: &mut Vec<ChunkKey>) {
     }
 }
 
-fn aggregate_bounds_for_leaf_indices(leaves: &[RenderLeaf], leaf_indices: &[usize]) -> Aabb4i {
-    let mut bounds = leaves[leaf_indices[0]].bounds;
-    for &leaf_idx in &leaf_indices[1..] {
-        bounds = union_bounds(bounds, leaves[leaf_idx].bounds);
-    }
-    bounds
-}
-
 fn longest_axis(bounds: Aabb4i) -> usize {
     let mut axis = 0usize;
     let mut best_span = i64::MIN;
@@ -722,6 +1247,19 @@ fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
             a.max[3].max(b.max[3]),
         ],
     )
+}
+
+fn bounds_contains_bounds(outer: Aabb4i, inner: Aabb4i) -> bool {
+    outer.is_valid()
+        && inner.is_valid()
+        && outer.min[0] <= inner.min[0]
+        && outer.min[1] <= inner.min[1]
+        && outer.min[2] <= inner.min[2]
+        && outer.min[3] <= inner.min[3]
+        && outer.max[0] >= inner.max[0]
+        && outer.max[1] >= inner.max[1]
+        && outer.max[2] >= inner.max[2]
+        && outer.max[3] >= inner.max[3]
 }
 
 fn normalize_render_core(core: &mut RenderTreeCore) {
@@ -902,6 +1440,115 @@ mod tests {
             vec![ChunkPayload::Uniform(11)]
         );
         assert!(sample_chunk_payloads_from_bvh(&bvh, [2, 0, 0, 0]).is_empty());
+    }
+
+    #[test]
+    fn bvh_chunk_mutation_delta_reports_root_change_for_outside_insert() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+        let core = RenderTreeCore {
+            bounds,
+            kind: RenderNodeKind::Branch(vec![RenderTreeCore {
+                bounds: Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]),
+                kind: RenderNodeKind::Uniform(7),
+            }]),
+        };
+        let mut bvh = build_bvh_in_bounds(&core, bounds);
+        let old_root = bvh.root;
+        let deltas = apply_chunk_payload_mutations_with_deltas_in_bvh(
+            &mut bvh,
+            &[([2, 0, 0, 0], Some(ChunkPayload::Uniform(9)))],
+        )
+        .expect("apply mutation");
+        assert_eq!(deltas.len(), 1);
+        let delta = &deltas[0];
+        assert_eq!(delta.key, [2, 0, 0, 0]);
+        assert_eq!(delta.expected_root, old_root);
+        assert_eq!(delta.new_root, bvh.root);
+        assert!(delta.root_changed());
+        assert!(!delta.node_writes.is_empty());
+        assert!(!delta.leaf_writes.is_empty());
+    }
+
+    #[test]
+    fn bvh_chunk_mutation_delta_reports_touched_ancestors() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
+        let core = RenderTreeCore {
+            bounds,
+            kind: RenderNodeKind::Branch(vec![
+                RenderTreeCore {
+                    bounds: Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]),
+                    kind: RenderNodeKind::Uniform(7),
+                },
+                RenderTreeCore {
+                    bounds: Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]),
+                    kind: RenderNodeKind::Uniform(7),
+                },
+            ]),
+        };
+        let mut bvh = build_bvh_in_bounds(&core, bounds);
+        let old_root = bvh.root.expect("root");
+        let deltas =
+            apply_chunk_payload_mutations_with_deltas_in_bvh(&mut bvh, &[([0, 0, 0, 0], None)])
+                .expect("apply mutation");
+        assert_eq!(deltas.len(), 1);
+        let delta = &deltas[0];
+        assert_eq!(delta.key, [0, 0, 0, 0]);
+        assert_eq!(delta.expected_root, Some(old_root));
+        assert!(
+            !delta.node_writes.is_empty()
+                || !delta.freed_node_ids.is_empty()
+                || delta.root_changed()
+        );
+        assert_eq!(delta.new_root, bvh.root);
+    }
+
+    #[test]
+    fn bvh_patch_reuses_freed_ids_instead_of_append_only_growth() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+        let core = RenderTreeCore {
+            bounds,
+            kind: RenderNodeKind::Uniform(7),
+        };
+        let mut bvh = build_bvh_in_bounds(&core, bounds);
+        let old_node_capacity = bvh.nodes.len();
+        let old_leaf_capacity = bvh.leaves.len();
+
+        let remove = apply_chunk_payload_mutations_with_deltas_in_bvh(
+            &mut bvh,
+            &[([1, 0, 0, 0], None)],
+        )
+        .expect("remove patch");
+        assert_eq!(remove.len(), 1);
+        assert!(
+            !remove[0].freed_node_ids.is_empty() || !remove[0].freed_leaf_ids.is_empty(),
+            "expected removal to release at least one id"
+        );
+        let free_node_count_after_remove = bvh.free_node_ids.len();
+        let free_leaf_count_after_remove = bvh.free_leaf_ids.len();
+        assert!(free_node_count_after_remove > 0 || free_leaf_count_after_remove > 0);
+
+        let insert = apply_chunk_payload_mutations_with_deltas_in_bvh(
+            &mut bvh,
+            &[([1, 0, 0, 0], Some(ChunkPayload::Uniform(9)))],
+        )
+        .expect("insert patch");
+        assert_eq!(insert.len(), 1);
+        let reused_node_slot = insert[0]
+            .node_writes
+            .iter()
+            .any(|(node_id, _)| remove[0].freed_node_ids.contains(node_id));
+        let reused_leaf_slot = insert[0]
+            .leaf_writes
+            .iter()
+            .any(|(leaf_id, _)| remove[0].freed_leaf_ids.contains(leaf_id));
+        assert!(
+            reused_node_slot || reused_leaf_slot,
+            "expected insertion patch to reuse at least one freed slot"
+        );
+        assert!(bvh.nodes.len() >= old_node_capacity);
+        assert!(bvh.leaves.len() >= old_leaf_capacity);
+        assert!(bvh.free_node_ids.len() <= free_node_count_after_remove);
+        assert!(bvh.free_leaf_ids.len() <= free_leaf_count_after_remove);
     }
 
     #[test]

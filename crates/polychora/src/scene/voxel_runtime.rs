@@ -1,6 +1,8 @@
 use super::*;
 use polychora::shared::chunk_payload::ChunkPayload;
-use polychora::shared::render_tree::{RenderBvh, RenderBvhNodeKind, RenderLeafKind};
+use polychora::shared::render_tree::{
+    RenderBvh, RenderBvhChunkMutationDelta, RenderBvhNodeKind, RenderLeaf, RenderLeafKind,
+};
 use std::time::Instant;
 
 fn pack_dense_materials_words(
@@ -81,26 +83,241 @@ impl Scene {
         ]
     }
 
-    fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
-        a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
-    }
-
-    fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
-        let len_sq = Self::dot4(v, v);
-        if len_sq > 1e-12 {
-            let inv_len = len_sq.sqrt().recip();
-            [
-                v[0] * inv_len,
-                v[1] * inv_len,
-                v[2] * inv_len,
-                v[3] * inv_len,
-            ]
-        } else {
-            fallback
+    fn encode_bvh_node(
+        node: &polychora::shared::render_tree::RenderBvhNode,
+    ) -> GpuVoxelChunkBvhNode {
+        let (left_child, right_child, leaf_index, flags) = match node.kind {
+            RenderBvhNodeKind::Internal { left, right } => (left, right, u32::MAX, 0),
+            RenderBvhNodeKind::Leaf { leaf_index } => (
+                higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
+                higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
+                leaf_index,
+                higher_dimension_playground::render::VTE_REGION_BVH_NODE_FLAG_LEAF,
+            ),
+        };
+        GpuVoxelChunkBvhNode {
+            min_chunk_coord: node.bounds.min,
+            max_chunk_coord: node.bounds.max,
+            left_child,
+            right_child,
+            leaf_index,
+            flags,
         }
     }
 
-    fn rebuild_voxel_frame_data_from_render_bvh(&mut self, render_bvh: &RenderBvh) {
+    fn append_dense_payload_encoded(
+        voxel_frame_data: &mut VoxelFrameData,
+        dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
+        payload: &ChunkPayload,
+    ) -> Result<u32, String> {
+        if let Some(&encoded) = dense_payload_cache.get(payload) {
+            return Ok(encoded);
+        }
+        if voxel_frame_data.chunk_headers.len() >= VTE_MAX_DENSE_CHUNKS {
+            return Err("dense chunk capacity exceeded".to_string());
+        }
+        let dense_materials = payload
+            .dense_materials()
+            .map_err(|error| format!("dense payload decode failed: {error}"))?;
+        if dense_materials.len() != CHUNK_VOLUME {
+            return Err(format!(
+                "dense payload voxel count {} != {}",
+                dense_materials.len(),
+                CHUNK_VOLUME
+            ));
+        }
+        let mut occ = [0u32; OCCUPANCY_WORDS_PER_CHUNK];
+        let mut mat = [0u32; MATERIAL_WORDS_PER_CHUNK];
+        let mut mac = [0u32; MACRO_WORDS_PER_CHUNK];
+        let (_solid_count, is_full, solid_local_min, solid_local_max) =
+            pack_dense_materials_words(&dense_materials, &mut occ, &mut mat, &mut mac);
+        let chunk_index = voxel_frame_data.chunk_headers.len() as u32;
+        let occ_offset = voxel_frame_data.occupancy_words.len() as u32;
+        let mat_offset = voxel_frame_data.material_words.len() as u32;
+        let mac_offset = voxel_frame_data.macro_words.len() as u32;
+        voxel_frame_data.occupancy_words.extend_from_slice(&occ);
+        voxel_frame_data.material_words.extend_from_slice(&mat);
+        voxel_frame_data.macro_words.extend_from_slice(&mac);
+        let mut flags = 0u32;
+        if is_full {
+            flags |= GpuVoxelChunkHeader::FLAG_FULL;
+        }
+        voxel_frame_data.chunk_headers.push(GpuVoxelChunkHeader {
+            occupancy_word_offset: occ_offset,
+            material_word_offset: mat_offset,
+            flags,
+            macro_word_offset: mac_offset,
+            solid_local_min,
+            solid_local_max,
+            _padding: [0; 2],
+        });
+        let encoded = chunk_index.saturating_add(1);
+        dense_payload_cache.insert(payload.clone(), encoded);
+        Ok(encoded)
+    }
+
+    fn append_leaf_to_voxel_frame_data(
+        voxel_frame_data: &mut VoxelFrameData,
+        dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
+        leaf: &RenderLeaf,
+    ) -> Result<(), String> {
+        if voxel_frame_data.leaf_headers.len() >= VTE_REGION_LEAF_CAPACITY {
+            return Err("leaf capacity exceeded".to_string());
+        }
+
+        match &leaf.kind {
+            RenderLeafKind::Uniform(material) => {
+                voxel_frame_data.leaf_headers.push(GpuVoxelLeafHeader {
+                    min_chunk_coord: leaf.bounds.min,
+                    max_chunk_coord: leaf.bounds.max,
+                    leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
+                    uniform_material: u32::from(*material),
+                    chunk_entry_offset: 0,
+                    _padding: 0,
+                });
+            }
+            RenderLeafKind::VoxelChunkArray(chunk_array) => {
+                let Some(leaf_extents) = leaf.bounds.chunk_extents() else {
+                    voxel_frame_data.leaf_headers.push(GpuVoxelLeafHeader {
+                        min_chunk_coord: leaf.bounds.min,
+                        max_chunk_coord: leaf.bounds.max,
+                        leaf_kind:
+                            higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
+                        uniform_material: 0,
+                        chunk_entry_offset: 0,
+                        _padding: 0,
+                    });
+                    return Ok(());
+                };
+                let leaf_cell_count = leaf.bounds.chunk_cell_count().unwrap_or(0);
+                if voxel_frame_data
+                    .leaf_chunk_entries
+                    .len()
+                    .saturating_add(leaf_cell_count)
+                    > VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY
+                {
+                    return Err("leaf chunk-entry capacity exceeded".to_string());
+                }
+                let entry_offset = voxel_frame_data.leaf_chunk_entries.len() as u32;
+                let src_indices = chunk_array
+                    .decode_dense_indices()
+                    .map_err(|error| format!("decode chunk-array leaf failed: {error:?}"))?;
+                let src_dims = chunk_array
+                    .bounds
+                    .chunk_extents()
+                    .ok_or_else(|| "chunk-array source extents missing".to_string())?;
+
+                for w in 0..leaf_extents[3] {
+                    for z in 0..leaf_extents[2] {
+                        for y in 0..leaf_extents[1] {
+                            for x in 0..leaf_extents[0] {
+                                let chunk_coord = [
+                                    leaf.bounds.min[0] + x as i32,
+                                    leaf.bounds.min[1] + y as i32,
+                                    leaf.bounds.min[2] + z as i32,
+                                    leaf.bounds.min[3] + w as i32,
+                                ];
+                                let lx = (chunk_coord[0] - chunk_array.bounds.min[0]) as usize;
+                                let ly = (chunk_coord[1] - chunk_array.bounds.min[1]) as usize;
+                                let lz = (chunk_coord[2] - chunk_array.bounds.min[2]) as usize;
+                                let lw = (chunk_coord[3] - chunk_array.bounds.min[3]) as usize;
+                                let linear =
+                                    lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
+                                let palette_index =
+                                    src_indices.get(linear).copied().ok_or_else(|| {
+                                        "chunk-array index out of bounds".to_string()
+                                    })? as usize;
+                                let payload =
+                                    chunk_array.chunk_palette.get(palette_index).ok_or_else(
+                                        || "chunk-array palette out of bounds".to_string(),
+                                    )?;
+                                let encoded = match payload {
+                                    ChunkPayload::Empty | ChunkPayload::Uniform(0) => {
+                                        higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
+                                    }
+                                    ChunkPayload::Uniform(material) => {
+                                        higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                            | u32::from(*material)
+                                    }
+                                    dense_payload => {
+                                        Self::append_dense_payload_encoded(
+                                            voxel_frame_data,
+                                            dense_payload_cache,
+                                            dense_payload,
+                                        )?
+                                    }
+                                };
+                                voxel_frame_data.leaf_chunk_entries.push(encoded);
+                            }
+                        }
+                    }
+                }
+
+                voxel_frame_data.leaf_headers.push(GpuVoxelLeafHeader {
+                    min_chunk_coord: leaf.bounds.min,
+                    max_chunk_coord: leaf.bounds.max,
+                    leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
+                    uniform_material: 0,
+                    chunk_entry_offset: entry_offset,
+                    _padding: 0,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_render_bvh_mutation_deltas_to_voxel_frame_data(
+        &mut self,
+        render_bvh: &RenderBvh,
+        deltas: &[RenderBvhChunkMutationDelta],
+        bounds: Aabb4i,
+    ) -> Result<(), String> {
+        if !bounds.is_valid() {
+            return Ok(());
+        }
+        for delta in deltas {
+            // Until leaf payload arena mutation is implemented, any leaf mutation triggers
+            // a safe full rebuild fallback in the caller.
+            if !delta.leaf_writes.is_empty() || !delta.freed_leaf_ids.is_empty() {
+                return Err("leaf mutation requires full rebuild".to_string());
+            }
+
+            for (node_index, src_node) in &delta.node_writes {
+                let node_index = *node_index as usize;
+                if node_index >= VTE_REGION_BVH_NODE_CAPACITY {
+                    return Err(format!(
+                        "node write index {} exceeds capacity {}",
+                        node_index, VTE_REGION_BVH_NODE_CAPACITY
+                    ));
+                }
+                if self.voxel_frame_data.region_bvh_nodes.len() <= node_index {
+                    self.voxel_frame_data
+                        .region_bvh_nodes
+                        .resize(node_index + 1, GpuVoxelChunkBvhNode::empty());
+                }
+                self.voxel_frame_data.region_bvh_nodes[node_index] = Self::encode_bvh_node(src_node);
+            }
+
+            for node_index in &delta.freed_node_ids {
+                let node_index = *node_index as usize;
+                if node_index < self.voxel_frame_data.region_bvh_nodes.len() {
+                    self.voxel_frame_data.region_bvh_nodes[node_index] = GpuVoxelChunkBvhNode::empty();
+                }
+            }
+        }
+
+        self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
+        self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
+        self.voxel_frame_data.region_bvh_root_index = render_bvh
+            .root
+            .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
+        self.voxel_cached_visibility_bounds = Some(bounds);
+        Ok(())
+    }
+
+    fn build_voxel_frame_buffers_from_render_bvh(
+        render_bvh: &RenderBvh,
+    ) -> Option<VoxelFrameDataBuffers> {
         if render_bvh.nodes.len() > VTE_REGION_BVH_NODE_CAPACITY
             || render_bvh.leaves.len() > VTE_REGION_LEAF_CAPACITY
         {
@@ -111,16 +328,7 @@ impl Scene {
                 render_bvh.leaves.len(),
                 VTE_REGION_LEAF_CAPACITY
             );
-            self.voxel_frame_data.chunk_headers.clear();
-            self.voxel_frame_data.occupancy_words.clear();
-            self.voxel_frame_data.material_words.clear();
-            self.voxel_frame_data.macro_words.clear();
-            self.voxel_frame_data.region_bvh_nodes.clear();
-            self.voxel_frame_data.leaf_headers.clear();
-            self.voxel_frame_data.leaf_chunk_entries.clear();
-            self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
-            self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
-            return;
+            return None;
         }
 
         let mut dense_chunk_headers = Vec::<GpuVoxelChunkHeader>::new();
@@ -362,47 +570,74 @@ impl Scene {
         }
 
         for node in &render_bvh.nodes {
-            let (left_child, right_child, leaf_index, flags) = match node.kind {
-                RenderBvhNodeKind::Internal { left, right } => (left, right, u32::MAX, 0),
-                RenderBvhNodeKind::Leaf { leaf_index } => (
-                    higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
-                    higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
-                    leaf_index,
-                    higher_dimension_playground::render::VTE_REGION_BVH_NODE_FLAG_LEAF,
-                ),
-            };
-            region_bvh_nodes.push(GpuVoxelChunkBvhNode {
-                min_chunk_coord: node.bounds.min,
-                max_chunk_coord: node.bounds.max,
-                left_child,
-                right_child,
-                leaf_index,
-                flags,
-            });
+            region_bvh_nodes.push(Self::encode_bvh_node(node));
         }
 
+        Some(VoxelFrameDataBuffers {
+            region_bvh_root_index: render_bvh
+                .root
+                .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE),
+            dense_payload_encoded_cache,
+            chunk_headers: dense_chunk_headers,
+            occupancy_words,
+            material_words,
+            macro_words,
+            region_bvh_nodes,
+            leaf_headers,
+            leaf_chunk_entries,
+        })
+    }
+
+    fn clear_voxel_frame_buffers(&mut self) {
+        self.voxel_frame_data.region_bvh_root_index =
+            higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE;
+        self.voxel_dense_payload_encoded_cache.clear();
+        self.voxel_frame_data.chunk_headers.clear();
+        self.voxel_frame_data.occupancy_words.clear();
+        self.voxel_frame_data.material_words.clear();
+        self.voxel_frame_data.macro_words.clear();
+        self.voxel_frame_data.region_bvh_nodes.clear();
+        self.voxel_frame_data.leaf_headers.clear();
+        self.voxel_frame_data.leaf_chunk_entries.clear();
+    }
+
+    fn apply_voxel_frame_buffers(
+        &mut self,
+        bounds: Aabb4i,
+        buffers: Option<VoxelFrameDataBuffers>,
+    ) {
         self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
         self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
-        self.voxel_frame_data.chunk_headers = dense_chunk_headers;
-        self.voxel_frame_data.occupancy_words = occupancy_words;
-        self.voxel_frame_data.material_words = material_words;
-        self.voxel_frame_data.macro_words = macro_words;
-        self.voxel_frame_data.region_bvh_nodes = region_bvh_nodes;
-        self.voxel_frame_data.leaf_headers = leaf_headers;
-        self.voxel_frame_data.leaf_chunk_entries = leaf_chunk_entries;
+        if let Some(buffers) = buffers {
+            self.voxel_frame_data.region_bvh_root_index = buffers.region_bvh_root_index;
+            self.voxel_dense_payload_encoded_cache = buffers.dense_payload_encoded_cache;
+            self.voxel_frame_data.chunk_headers = buffers.chunk_headers;
+            self.voxel_frame_data.occupancy_words = buffers.occupancy_words;
+            self.voxel_frame_data.material_words = buffers.material_words;
+            self.voxel_frame_data.macro_words = buffers.macro_words;
+            self.voxel_frame_data.region_bvh_nodes = buffers.region_bvh_nodes;
+            self.voxel_frame_data.leaf_headers = buffers.leaf_headers;
+            self.voxel_frame_data.leaf_chunk_entries = buffers.leaf_chunk_entries;
+        } else {
+            self.clear_voxel_frame_buffers();
+        }
+        self.voxel_cached_visibility_bounds = Some(bounds);
     }
 
     /// Build the voxel-native frame payload for VTE.
     pub fn build_voxel_frame_data(
         &mut self,
         cam_pos: [f32; 4],
-        cam_forward: [f32; 4],
+        _cam_forward: [f32; 4],
         max_trace_distance: f32,
     ) -> &VoxelFrameData {
+        const SCENE_RESIDENCY_RADIUS_MULTIPLIER: i32 = 2;
+        const SCENE_RESIDENCY_EXTRA_CHUNKS: i32 = 2;
+
         let active_distance = max_trace_distance.max(VOXEL_NEAR_ACTIVE_DISTANCE);
         let chunk_radius = (active_distance / CHUNK_SIZE as f32).ceil() as i32 + 1;
         let cam_chunk = Self::camera_chunk_key(cam_pos);
-        let bounds = Aabb4i::new(
+        let view_bounds = Aabb4i::new(
             [
                 cam_chunk[0] - chunk_radius,
                 cam_chunk[1] - chunk_radius,
@@ -416,50 +651,62 @@ impl Scene {
                 cam_chunk[3] + chunk_radius,
             ],
         );
+        let resident_radius = chunk_radius
+            .saturating_mul(SCENE_RESIDENCY_RADIUS_MULTIPLIER)
+            .saturating_add(SCENE_RESIDENCY_EXTRA_CHUNKS)
+            .max(chunk_radius + 1);
+        let desired_scene_bounds = Aabb4i::new(
+            [
+                cam_chunk[0] - resident_radius,
+                cam_chunk[1] - resident_radius,
+                cam_chunk[2] - resident_radius,
+                cam_chunk[3] - resident_radius,
+            ],
+            [
+                cam_chunk[0] + resident_radius,
+                cam_chunk[1] + resident_radius,
+                cam_chunk[2] + resident_radius,
+                cam_chunk[3] + resident_radius,
+            ],
+        );
+        let scene_bounds = self
+            .voxel_cached_visibility_bounds
+            .filter(|active_bounds| Self::bounds_contains_bounds(*active_bounds, view_bounds))
+            .unwrap_or(desired_scene_bounds);
 
-        self.ensure_render_bvh_cache_for_bounds(bounds);
-
-        let cam_voxel = [
-            cam_pos[0].floor() as i32,
-            cam_pos[1].floor() as i32,
-            cam_pos[2].floor() as i32,
-            cam_pos[3].floor() as i32,
-        ];
-        let view_forward = Self::normalize4_with_fallback(cam_forward, [0.0, 0.0, 1.0, 0.0]);
-        const VIEW_BIN_SCALE: f32 = 32.0;
-        let cam_key = [
-            cam_chunk[0],
-            cam_chunk[1],
-            cam_chunk[2],
-            cam_chunk[3],
-            cam_voxel[0],
-            cam_voxel[1],
-            cam_voxel[2],
-            cam_voxel[3],
-            (view_forward[0] * VIEW_BIN_SCALE).round() as i32,
-            (view_forward[1] * VIEW_BIN_SCALE).round() as i32,
-            (view_forward[2] * VIEW_BIN_SCALE).round() as i32,
-            (view_forward[3] * VIEW_BIN_SCALE).round() as i32,
-        ];
-        let visibility_cache_valid = self.voxel_cached_visibility_camera_chunk == Some(cam_key)
-            && self.voxel_cached_visibility_world_tree_revision == self.world_tree_revision;
+        let visibility_cache_valid = self.voxel_cached_visibility_bounds == Some(scene_bounds)
+            && !self.voxel_scene_bounds_has_pending_dirty_regions(scene_bounds);
         if !visibility_cache_valid {
-            let render_bvh = self.render_bvh_cache.clone();
-            if let Some(render_bvh) = render_bvh.as_ref() {
-                self.rebuild_voxel_frame_data_from_render_bvh(render_bvh);
-            } else {
-                self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
-                self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
-                self.voxel_frame_data.chunk_headers.clear();
-                self.voxel_frame_data.occupancy_words.clear();
-                self.voxel_frame_data.material_words.clear();
-                self.voxel_frame_data.macro_words.clear();
-                self.voxel_frame_data.region_bvh_nodes.clear();
-                self.voxel_frame_data.leaf_headers.clear();
-                self.voxel_frame_data.leaf_chunk_entries.clear();
+            self.ensure_render_bvh_cache_for_bounds(scene_bounds);
+            let (needs_rebuild, deltas) = self.take_pending_render_bvh_update_flags();
+
+            if needs_rebuild {
+                let buffers = self
+                    .render_bvh_cache
+                    .as_ref()
+                    .and_then(Self::build_voxel_frame_buffers_from_render_bvh);
+                self.apply_voxel_frame_buffers(scene_bounds, buffers);
+            } else if !deltas.is_empty() {
+                let mut apply_ok = false;
+                if let Some(render_bvh) = self.render_bvh_cache.take() {
+                    apply_ok = self
+                        .apply_render_bvh_mutation_deltas_to_voxel_frame_data(
+                            &render_bvh,
+                            &deltas,
+                            scene_bounds,
+                        )
+                        .is_ok();
+                    self.render_bvh_cache = Some(render_bvh);
+                }
+
+                if !apply_ok {
+                    let buffers = self
+                        .render_bvh_cache
+                        .as_ref()
+                        .and_then(Self::build_voxel_frame_buffers_from_render_bvh);
+                    self.apply_voxel_frame_buffers(scene_bounds, buffers);
+                }
             }
-            self.voxel_cached_visibility_camera_chunk = Some(cam_key);
-            self.voxel_cached_visibility_world_tree_revision = self.world_tree_revision;
         }
 
         &self.voxel_frame_data
