@@ -1,11 +1,32 @@
 use crate::shared::protocol::{ClientMessage, ServerMessage};
+use crate::shared::voxel::{BaseWorldKind, VoxelType};
 use std::path::PathBuf;
 use std::sync::mpsc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WorldGeneratorKind {
+    FlatFloor,
+    MassivePlatforms,
+}
+
+impl WorldGeneratorKind {
+    pub fn default_base_world_kind(self) -> BaseWorldKind {
+        match self {
+            WorldGeneratorKind::FlatFloor => BaseWorldKind::FlatFloor {
+                material: VoxelType(11),
+            },
+            WorldGeneratorKind::MassivePlatforms => BaseWorldKind::MassivePlatforms {
+                material: VoxelType(11),
+            },
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub bind: String,
     pub world_file: PathBuf,
+    pub world_generator: WorldGeneratorKind,
     pub tick_hz: f32,
     pub entity_sim_hz: f32,
     pub save_interval_secs: u64,
@@ -23,6 +44,7 @@ impl Default for RuntimeConfig {
         Self {
             bind: "0.0.0.0:4000".to_string(),
             world_file: PathBuf::from("saves/world"),
+            world_generator: WorldGeneratorKind::FlatFloor,
             tick_hz: 10.0,
             entity_sim_hz: 30.0,
             save_interval_secs: 5,

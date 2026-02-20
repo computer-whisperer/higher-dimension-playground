@@ -420,7 +420,10 @@ impl Scene {
 
     fn flat_floor_chunk_for_base(base_kind: BaseWorldKind) -> DenseChunk {
         match base_kind {
-            BaseWorldKind::FlatFloor { material } => Self::build_flat_floor_chunk(material),
+            BaseWorldKind::FlatFloor { material }
+            | BaseWorldKind::MassivePlatforms { material } => {
+                Self::build_flat_floor_chunk(material)
+            }
             BaseWorldKind::Empty => empty_dense_chunk(),
         }
     }
@@ -428,10 +431,12 @@ impl Scene {
     fn world_base_chunk_for_pos(&self, pos: ChunkPos) -> Option<&DenseChunk> {
         match self.world_base_kind {
             BaseWorldKind::Empty => None,
-            BaseWorldKind::FlatFloor { .. } if pos.y == FLAT_FLOOR_CHUNK_Y => {
+            BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. }
+                if pos.y == FLAT_FLOOR_CHUNK_Y =>
+            {
                 Some(&self.world_flat_floor_chunk)
             }
-            BaseWorldKind::FlatFloor { .. } => None,
+            BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. } => None,
         }
     }
 
@@ -577,7 +582,10 @@ impl Scene {
                 .map(|key| chunk_pos_from_chunk_key(key)),
         );
 
-        if let BaseWorldKind::FlatFloor { .. } = self.world_base_kind {
+        if matches!(
+            self.world_base_kind,
+            BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. }
+        ) {
             let y = FLAT_FLOOR_CHUNK_Y;
             if y >= min_chunk[1] && y <= max_chunk[1] {
                 let floor_bounds = Aabb4i::new(

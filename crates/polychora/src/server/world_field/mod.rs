@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod flat_world_generator;
+mod massive_platforms_world_generator;
 
 pub use flat_world_generator::FlatWorldGenerator;
+pub use massive_platforms_world_generator::MassivePlatformsWorldGenerator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QueryDetail {
@@ -30,6 +32,21 @@ pub trait WorldField {
 }
 
 pub trait WorldOverlay: WorldField {}
+
+#[derive(Debug)]
+pub enum ServerWorldField {
+    Flat(FlatWorldGenerator),
+    MassivePlatforms(MassivePlatformsWorldGenerator),
+}
+
+impl WorldField for ServerWorldField {
+    fn query_region_core(&self, query: QueryVolume, detail: QueryDetail) -> Arc<RegionTreeCore> {
+        match self {
+            ServerWorldField::Flat(field) => field.query_region_core(query, detail),
+            ServerWorldField::MassivePlatforms(field) => field.query_region_core(query, detail),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct SaveStreamingState {
@@ -222,7 +239,35 @@ fn subtract_covered_bounds(target: Aabb4i, covered: &[Aabb4i]) -> Vec<Aabb4i> {
     remaining
 }
 
-impl PassthroughWorldOverlay<FlatWorldGenerator> {
+fn build_server_world_field(
+    base_kind: BaseWorldKind,
+    world_seed: u64,
+    procgen_structures: bool,
+    blocked_cells: HashSet<crate::server::procgen::StructureCell>,
+) -> ServerWorldField {
+    match base_kind {
+        BaseWorldKind::MassivePlatforms { .. } => {
+            ServerWorldField::MassivePlatforms(MassivePlatformsWorldGenerator::from_chunk_payloads(
+                base_kind,
+                Vec::<([i32; 4], ChunkPayload)>::new(),
+                world_seed,
+                procgen_structures,
+                blocked_cells,
+            ))
+        }
+        BaseWorldKind::FlatFloor { .. } | BaseWorldKind::Empty => {
+            ServerWorldField::Flat(FlatWorldGenerator::from_chunk_payloads(
+                base_kind,
+                Vec::<([i32; 4], ChunkPayload)>::new(),
+                world_seed,
+                procgen_structures,
+                blocked_cells,
+            ))
+        }
+    }
+}
+
+impl PassthroughWorldOverlay<ServerWorldField> {
     pub fn from_chunk_payloads(
         base_kind: BaseWorldKind,
         chunk_payloads: impl IntoIterator<Item = ([i32; 4], ChunkPayload)>,
@@ -230,13 +275,8 @@ impl PassthroughWorldOverlay<FlatWorldGenerator> {
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
     ) -> Self {
-        let field = FlatWorldGenerator::from_chunk_payloads(
-            base_kind,
-            Vec::<([i32; 4], ChunkPayload)>::new(),
-            world_seed,
-            procgen_structures,
-            blocked_cells,
-        );
+        let field =
+            build_server_world_field(base_kind, world_seed, procgen_structures, blocked_cells);
         Self {
             field,
             override_chunks: RegionChunkTree::from_chunks(chunk_payloads),
@@ -260,9 +300,8 @@ impl PassthroughWorldOverlay<FlatWorldGenerator> {
             save_v4::load_or_init_state_metadata(root, default_base_kind, world_seed, now_ms)?;
         let base_world_kind = metadata.global.base_world_kind.to_runtime();
         let runtime_world_seed = metadata.global.world_seed;
-        let field = FlatWorldGenerator::from_chunk_payloads(
+        let field = build_server_world_field(
             base_world_kind,
-            Vec::<([i32; 4], ChunkPayload)>::new(),
             runtime_world_seed,
             procgen_structures,
             blocked_cells,
@@ -561,7 +600,7 @@ fn chunks_equal(a: &[VoxelType; CHUNK_VOLUME], b: &[VoxelType; CHUNK_VOLUME]) ->
     a[..] == b[..]
 }
 
-pub type ServerWorldOverlay = PassthroughWorldOverlay<FlatWorldGenerator>;
+pub type ServerWorldOverlay = PassthroughWorldOverlay<ServerWorldField>;
 
 #[cfg(test)]
 mod tests {

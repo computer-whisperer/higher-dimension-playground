@@ -103,10 +103,12 @@ pub(super) fn apply_menu_camera_orbit_pose(camera: &mut Camera4D, time_s: f32) {
 pub(super) fn build_singleplayer_runtime_config(
     args: &Args,
     world_file: PathBuf,
+    world_generator: polychora::server::WorldGeneratorKind,
 ) -> polychora::server::RuntimeConfig {
     polychora::server::RuntimeConfig {
         bind: "127.0.0.1:0".to_string(),
         world_file,
+        world_generator,
         tick_hz: args.singleplayer_tick_hz.max(0.1),
         entity_sim_hz: args.singleplayer_entity_sim_hz.max(0.1),
         save_interval_secs: args.singleplayer_save_interval_secs,

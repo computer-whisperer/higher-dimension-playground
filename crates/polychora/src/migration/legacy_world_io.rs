@@ -59,7 +59,7 @@ pub fn save_world<W: Write>(world: &RegionChunkWorld, writer: &mut W) -> io::Res
 fn write_base_kind<W: Write>(base_kind: BaseWorldKind, writer: &mut W) -> io::Result<()> {
     match base_kind {
         BaseWorldKind::Empty => writer.write_all(&[BASE_KIND_EMPTY])?,
-        BaseWorldKind::FlatFloor { material } => {
+        BaseWorldKind::FlatFloor { material } | BaseWorldKind::MassivePlatforms { material } => {
             writer.write_all(&[BASE_KIND_FLAT_FLOOR])?;
             writer.write_all(&[material.0])?;
         }

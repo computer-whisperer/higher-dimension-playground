@@ -176,13 +176,18 @@ impl App {
         }
     }
 
-    pub(super) fn connect_singleplayer_local(&mut self, world_file: PathBuf) -> Result<(), String> {
+    pub(super) fn connect_singleplayer_local(
+        &mut self,
+        world_file: PathBuf,
+        world_generator: polychora::server::WorldGeneratorKind,
+    ) -> Result<(), String> {
         let player_name = if self.main_menu_player_name.trim().is_empty() {
             default_multiplayer_player_name()
         } else {
             self.main_menu_player_name.trim().to_string()
         };
-        let config = build_singleplayer_runtime_config(&self.args, world_file.clone());
+        let config =
+            build_singleplayer_runtime_config(&self.args, world_file.clone(), world_generator);
         match MultiplayerClient::connect_local(config, player_name.clone()) {
             Ok(client) => {
                 eprintln!(
@@ -298,9 +303,9 @@ impl App {
         window: &Window,
     ) {
         match transition {
-            MainMenuTransition::NewWorld => {
+            MainMenuTransition::NewWorld(world_generator) => {
                 let path = generate_new_singleplayer_world_path();
-                match self.connect_singleplayer_local(path.clone()) {
+                match self.connect_singleplayer_local(path.clone(), world_generator) {
                     Ok(()) => {
                         self.world_file = path.clone();
                         self.enter_play_state(window);
@@ -316,7 +321,9 @@ impl App {
                 }
             }
             MainMenuTransition::LoadWorld(path) => {
-                match self.connect_singleplayer_local(path.clone()) {
+                match self
+                    .connect_singleplayer_local(path.clone(), self.main_menu_new_world_generator)
+                {
                     Ok(()) => {
                         self.world_file = path.clone();
                         self.enter_play_state(window);
@@ -596,6 +603,21 @@ impl App {
                 }
 
                 ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("New World Type").strong());
+                    ui.selectable_value(
+                        &mut self.main_menu_new_world_generator,
+                        polychora::server::WorldGeneratorKind::FlatFloor,
+                        "Flat Floor",
+                    );
+                    ui.selectable_value(
+                        &mut self.main_menu_new_world_generator,
+                        polychora::server::WorldGeneratorKind::MassivePlatforms,
+                        "Massive Platforms",
+                    );
+                });
+
+                ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(8.0);
 
@@ -613,7 +635,9 @@ impl App {
                         }
                     }
                     if ui.button("Create New World").clicked() {
-                        *transition = Some(MainMenuTransition::NewWorld);
+                        *transition = Some(MainMenuTransition::NewWorld(
+                            self.main_menu_new_world_generator,
+                        ));
                     }
                     if ui.button("Migrations").clicked() {
                         self.main_menu_migration_status = None;

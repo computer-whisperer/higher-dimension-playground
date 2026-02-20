@@ -39,6 +39,7 @@ impl ChunkPos {
 pub enum BaseWorldKind {
     Empty,
     FlatFloor { material: VoxelType },
+    MassivePlatforms { material: VoxelType },
 }
 
 #[inline]

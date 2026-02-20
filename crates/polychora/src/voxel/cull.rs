@@ -73,8 +73,12 @@ fn base_chunk_for_pos(
 ) -> Option<&DenseChunk> {
     match base_kind {
         BaseWorldKind::Empty => None,
-        BaseWorldKind::FlatFloor { .. } if pos.y == FLAT_FLOOR_CHUNK_Y => Some(flat_floor_chunk),
-        BaseWorldKind::FlatFloor { .. } => None,
+        BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. }
+            if pos.y == FLAT_FLOOR_CHUNK_Y =>
+        {
+            Some(flat_floor_chunk)
+        }
+        BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. } => None,
     }
 }
 

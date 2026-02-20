@@ -163,7 +163,9 @@ impl WorldField for FlatWorldGenerator {
 fn floor_voxel_from_base_kind(base_kind: BaseWorldKind) -> Option<VoxelType> {
     match base_kind {
         BaseWorldKind::FlatFloor { material } if !material.is_air() => Some(material),
-        BaseWorldKind::FlatFloor { .. } | BaseWorldKind::Empty => None,
+        BaseWorldKind::FlatFloor { .. }
+        | BaseWorldKind::MassivePlatforms { .. }
+        | BaseWorldKind::Empty => None,
     }
 }
 

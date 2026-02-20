@@ -265,6 +265,9 @@ fn print_world_stats(label: &str, stats: &WorldStats) {
         BaseWorldKind::FlatFloor { material } => {
             println!("  base: flat-floor (material {})", material.0)
         }
+        BaseWorldKind::MassivePlatforms { material } => {
+            println!("  base: massive-platforms (material {})", material.0)
+        }
     }
     println!(
         "  overrides: {} total, {} non-empty",

@@ -82,7 +82,10 @@ impl RegionChunkWorld {
 
     pub fn new_with_base(base_kind: BaseWorldKind) -> Self {
         let flat_floor_chunk = match base_kind {
-            BaseWorldKind::FlatFloor { material } => Self::build_flat_floor_chunk(material),
+            BaseWorldKind::FlatFloor { material }
+            | BaseWorldKind::MassivePlatforms { material } => {
+                Self::build_flat_floor_chunk(material)
+            }
             BaseWorldKind::Empty => Chunk::new(),
         };
         Self {
@@ -125,10 +128,12 @@ impl RegionChunkWorld {
     fn base_chunk_for_pos(&self, pos: ChunkPos) -> Option<&Chunk> {
         match self.base_kind {
             BaseWorldKind::Empty => None,
-            BaseWorldKind::FlatFloor { .. } if pos.y == FLAT_FLOOR_CHUNK_Y => {
+            BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. }
+                if pos.y == FLAT_FLOOR_CHUNK_Y =>
+            {
                 Some(&self.flat_floor_chunk)
             }
-            BaseWorldKind::FlatFloor { .. } => None,
+            BaseWorldKind::FlatFloor { .. } | BaseWorldKind::MassivePlatforms { .. } => None,
         }
     }
 

@@ -71,6 +71,7 @@ pub struct Manifest {
 pub enum PersistedBaseWorldKind {
     Empty,
     FlatFloor { material: u8 },
+    MassivePlatforms { material: u8 },
 }
 
 impl PersistedBaseWorldKind {
@@ -78,6 +79,9 @@ impl PersistedBaseWorldKind {
         match base {
             BaseWorldKind::Empty => Self::Empty,
             BaseWorldKind::FlatFloor { material } => Self::FlatFloor {
+                material: material.0,
+            },
+            BaseWorldKind::MassivePlatforms { material } => Self::MassivePlatforms {
                 material: material.0,
             },
         }
@@ -89,6 +93,11 @@ impl PersistedBaseWorldKind {
             PersistedBaseWorldKind::FlatFloor { material } => BaseWorldKind::FlatFloor {
                 material: VoxelType(material),
             },
+            PersistedBaseWorldKind::MassivePlatforms { material } => {
+                BaseWorldKind::MassivePlatforms {
+                    material: VoxelType(material),
+                }
+            }
         }
     }
 }

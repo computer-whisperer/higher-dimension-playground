@@ -330,6 +330,23 @@ impl EditHighlightModeArg {
     }
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum SingleplayerWorldTypeArg {
+    FlatFloor,
+    MassivePlatforms,
+}
+
+impl SingleplayerWorldTypeArg {
+    fn to_runtime(self) -> polychora::server::WorldGeneratorKind {
+        match self {
+            SingleplayerWorldTypeArg::FlatFloor => polychora::server::WorldGeneratorKind::FlatFloor,
+            SingleplayerWorldTypeArg::MassivePlatforms => {
+                polychora::server::WorldGeneratorKind::MassivePlatforms
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum AutoCommand {
     Press(KeyCode),
@@ -548,6 +565,10 @@ struct Args {
     #[arg(long, default_value_t = 1337)]
     singleplayer_world_seed: u64,
 
+    /// World generator used when creating/loading integrated singleplayer worlds without metadata.
+    #[arg(long, value_enum, default_value_t = SingleplayerWorldTypeArg::FlatFloor)]
+    singleplayer_world_type: SingleplayerWorldTypeArg,
+
     /// Window inner width (overrides OS default)
     #[arg(long)]
     window_width: Option<u32>,
@@ -688,6 +709,7 @@ fn main() {
     if let Some(settings) = loaded_settings.as_ref() {
         app_settings::apply_settings_to_args(&mut args, settings, cli_overrides);
     }
+    let initial_singleplayer_world_generator = args.singleplayer_world_type.to_runtime();
 
     if args.cpu_render {
         run_cpu_render(args.scene.to_scene_preset(), &args);
@@ -833,7 +855,11 @@ fn main() {
             .player_name
             .clone()
             .unwrap_or_else(default_multiplayer_player_name);
-        let runtime_config = build_singleplayer_runtime_config(&args, world_file.clone());
+        let runtime_config = build_singleplayer_runtime_config(
+            &args,
+            world_file.clone(),
+            initial_singleplayer_world_generator,
+        );
         match MultiplayerClient::connect_local(runtime_config, player_name.clone()) {
             Ok(client) => {
                 eprintln!(
@@ -1026,6 +1052,7 @@ fn main() {
         main_menu_player_name: initial_player_name,
         main_menu_world_files: Vec::new(),
         main_menu_selected_world: None,
+        main_menu_new_world_generator: initial_singleplayer_world_generator,
         main_menu_connect_error: None,
         main_menu_migration_status: None,
         main_menu_migrate_trim_input: "saves/world.v4dw".to_string(),
@@ -1184,7 +1211,7 @@ enum MainMenuPage {
 }
 
 enum MainMenuTransition {
-    NewWorld,
+    NewWorld(polychora::server::WorldGeneratorKind),
     LoadWorld(PathBuf),
     ConnectMultiplayer(String),
 }
@@ -1305,6 +1332,7 @@ struct App {
     main_menu_player_name: String,
     main_menu_world_files: Vec<WorldFileEntry>,
     main_menu_selected_world: Option<usize>,
+    main_menu_new_world_generator: polychora::server::WorldGeneratorKind,
     main_menu_connect_error: Option<String>,
     main_menu_migration_status: Option<String>,
     main_menu_migrate_trim_input: String,

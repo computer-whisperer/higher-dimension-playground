@@ -9,7 +9,7 @@ mod spawn_logic;
 mod types;
 pub mod world_field;
 
-pub use self::config::{LocalConnection, RuntimeConfig};
+pub use self::config::{LocalConnection, RuntimeConfig, WorldGeneratorKind};
 use self::core_state::{
     allocate_or_reserve_server_object_id, allocate_server_object_id, mark_entity_record_despawned,
     monotonic_ms, record_server_cpu_sample, upsert_entity_record, ServerState, SharedState,
@@ -39,7 +39,7 @@ use crate::shared::protocol::{
     WorldSummary,
 };
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{self, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE};
+use crate::shared::voxel::{self, ChunkPos, VoxelType, CHUNK_SIZE};
 use std::cmp::Reverse;
 use std::collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet};
 use std::io::{self, BufWriter, Read, Write};
@@ -300,9 +300,7 @@ fn initialize_state(
     let start = Instant::now();
     procgen::clear_runtime_maze_layout_cache();
     let requested_world_seed = config.world_seed;
-    let base_world_kind = BaseWorldKind::FlatFloor {
-        material: VoxelType(11),
-    };
+    let base_world_kind = config.world_generator.default_base_world_kind();
     let mut initial_world = ServerWorldOverlay::from_save_root(
         &config.world_file,
         base_world_kind,
