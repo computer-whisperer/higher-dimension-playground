@@ -1,5 +1,85 @@
 use super::*;
-use higher_dimension_playground::render::{OVERLAY_EDGE_TAG_PLACE, OVERLAY_EDGE_TAG_TARGET};
+use higher_dimension_playground::render::{
+    OVERLAY_EDGE_TAG_PLACE, OVERLAY_EDGE_TAG_REGION_BRANCH, OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
+    OVERLAY_EDGE_TAG_REGION_UNIFORM, OVERLAY_EDGE_TAG_TARGET,
+};
+use polychora::shared::render_tree::{DebugRayBvhNodeHit, DebugRayBvhNodeKind};
+
+fn describe_sample_ray_hit_for_hud(hit: &DebugRayBvhNodeHit) -> String {
+    let span = [
+        hit.bounds.max[0]
+            .saturating_sub(hit.bounds.min[0])
+            .saturating_add(1),
+        hit.bounds.max[1]
+            .saturating_sub(hit.bounds.min[1])
+            .saturating_add(1),
+        hit.bounds.max[2]
+            .saturating_sub(hit.bounds.min[2])
+            .saturating_add(1),
+        hit.bounds.max[3]
+            .saturating_sub(hit.bounds.min[3])
+            .saturating_add(1),
+    ];
+    match hit.kind {
+        DebugRayBvhNodeKind::Internal => format!(
+            "kind=Internal bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
+            hit.bounds.min[0],
+            hit.bounds.min[1],
+            hit.bounds.min[2],
+            hit.bounds.min[3],
+            hit.bounds.max[0],
+            hit.bounds.max[1],
+            hit.bounds.max[2],
+            hit.bounds.max[3],
+            span[0],
+            span[1],
+            span[2],
+            span[3],
+            hit.t_enter,
+        ),
+        DebugRayBvhNodeKind::LeafUniform { material } => format!(
+            "kind=LeafUniform material={} bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
+            material,
+            hit.bounds.min[0],
+            hit.bounds.min[1],
+            hit.bounds.min[2],
+            hit.bounds.min[3],
+            hit.bounds.max[0],
+            hit.bounds.max[1],
+            hit.bounds.max[2],
+            hit.bounds.max[3],
+            span[0],
+            span[1],
+            span[2],
+            span[3],
+            hit.t_enter,
+        ),
+        DebugRayBvhNodeKind::LeafChunkArray => format!(
+            "kind=LeafChunkArray bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
+            hit.bounds.min[0],
+            hit.bounds.min[1],
+            hit.bounds.min[2],
+            hit.bounds.min[3],
+            hit.bounds.max[0],
+            hit.bounds.max[1],
+            hit.bounds.max[2],
+            hit.bounds.max[3],
+            span[0],
+            span[1],
+            span[2],
+            span[3],
+            hit.t_enter,
+        ),
+    }
+}
+
+fn overlay_edge_tag_for_sample_ray_hit(hit: &DebugRayBvhNodeHit) -> u32 {
+    match hit.kind {
+        DebugRayBvhNodeKind::Internal => OVERLAY_EDGE_TAG_REGION_BRANCH,
+        DebugRayBvhNodeKind::LeafUniform { .. } => OVERLAY_EDGE_TAG_REGION_UNIFORM,
+        DebugRayBvhNodeKind::LeafChunkArray => OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
+    }
+}
 
 impl App {
     pub(super) fn update_and_render(&mut self) {
@@ -573,6 +653,30 @@ impl App {
                 }
             }
         }
+        let sample_ray_node_hits = if !self.menu_open && self.mouse_grabbed {
+            self.scene.debug_render_bvh_ray_node_hits(
+                self.camera.position,
+                look_dir,
+                edit_reach,
+                self.multiplayer_stream_tree_diag_sample_ray_max_nodes
+                    .max(1),
+            )
+        } else {
+            Vec::new()
+        };
+        let hud_stream_first_node_desc = sample_ray_node_hits
+            .first()
+            .map(describe_sample_ray_hit_for_hud);
+        let hud_stream_final_solid_leaf_desc = sample_ray_node_hits
+            .iter()
+            .rev()
+            .find(|hit| {
+                matches!(
+                    hit.kind,
+                    DebugRayBvhNodeKind::LeafUniform { .. } | DebugRayBvhNodeKind::LeafChunkArray
+                )
+            })
+            .map(describe_sample_ray_hit_for_hud);
 
         // WAILA: show targeted block name below crosshair
         let waila_text = if !self.menu_open && self.mouse_grabbed && !self.args.no_hud {
@@ -599,6 +703,14 @@ impl App {
             } else {
                 0
             })
+            .saturating_add(
+                if self.multiplayer_stream_tree_diag_sample_ray_bounds_enabled {
+                    self.multiplayer_stream_tree_diag_sample_ray_max_nodes
+                        .max(1)
+                } else {
+                    0
+                },
+            )
             .saturating_add(if self.multiplayer_stream_tree_compare_diag_enabled {
                 self.multiplayer_stream_tree_compare_diag_max_chunks
                     .saturating_mul(2)
@@ -622,6 +734,16 @@ impl App {
                         OVERLAY_EDGE_TAG_PLACE,
                     );
                 }
+            }
+        }
+        if self.multiplayer_stream_tree_diag_sample_ray_bounds_enabled {
+            for hit in &sample_ray_node_hits {
+                append_chunk_bounds_outline_edge_instance(
+                    &mut custom_overlay_edge_instances,
+                    hit.bounds.min,
+                    hit.bounds.max,
+                    overlay_edge_tag_for_sample_ray_hit(hit),
+                );
             }
         }
         self.append_multiplayer_stream_tree_diag_overlay_instances(
@@ -711,6 +833,8 @@ impl App {
             &vte_sweep_status,
             hud_target_hit_voxel,
             hud_target_hit_face,
+            hud_stream_first_node_desc.as_deref(),
+            hud_stream_final_solid_leaf_desc.as_deref(),
         );
         let hud_rotation_label = if self.args.no_hud {
             None

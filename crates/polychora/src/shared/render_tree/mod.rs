@@ -3,6 +3,7 @@ use crate::shared::region_tree::{
     collect_non_empty_chunks_from_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
+use crate::shared::voxel::CHUNK_SIZE;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RenderTreeCore {
@@ -179,6 +180,20 @@ pub enum RenderLeafKind {
     VoxelChunkArray(ChunkArrayData),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DebugRayBvhNodeKind {
+    Internal,
+    LeafUniform { material: u16 },
+    LeafChunkArray,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugRayBvhNodeHit {
+    pub bounds: Aabb4i,
+    pub kind: DebugRayBvhNodeKind,
+    pub t_enter: f32,
+}
+
 pub fn build_bvh_in_bounds(core: &RenderTreeCore, bounds: Aabb4i) -> RenderBvh {
     if !bounds.is_valid() {
         return RenderBvh {
@@ -295,6 +310,106 @@ pub fn sample_chunk_payloads_from_bvh(bvh: &RenderBvh, key: ChunkKey) -> Vec<Chu
     out
 }
 
+pub fn collect_ray_intersected_nodes_from_bvh(
+    bvh: &RenderBvh,
+    ray_origin_world: [f32; 4],
+    ray_direction_world: [f32; 4],
+    max_distance_world: f32,
+    max_nodes: usize,
+) -> Vec<DebugRayBvhNodeHit> {
+    if max_nodes == 0 {
+        return Vec::new();
+    }
+    let Some(root) = bvh.root else {
+        return Vec::new();
+    };
+    if !max_distance_world.is_finite() || max_distance_world <= 0.0 {
+        return Vec::new();
+    }
+    let dir_len_sq = ray_direction_world[0] * ray_direction_world[0]
+        + ray_direction_world[1] * ray_direction_world[1]
+        + ray_direction_world[2] * ray_direction_world[2]
+        + ray_direction_world[3] * ray_direction_world[3];
+    if !dir_len_sq.is_finite() || dir_len_sq <= 1e-12 {
+        return Vec::new();
+    }
+    let inv_dir_len = dir_len_sq.sqrt().recip();
+    let ray_dir = [
+        ray_direction_world[0] * inv_dir_len,
+        ray_direction_world[1] * inv_dir_len,
+        ray_direction_world[2] * inv_dir_len,
+        ray_direction_world[3] * inv_dir_len,
+    ];
+
+    let root_enter =
+        ray_intersects_chunk_bounds(ray_origin_world, ray_dir, bvh.bounds, max_distance_world);
+    let Some(root_enter) = root_enter else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::<DebugRayBvhNodeHit>::new();
+    let mut frontier = Vec::<(u32, f32)>::with_capacity(64);
+    frontier.push((root, root_enter));
+
+    while !frontier.is_empty() && out.len() < max_nodes {
+        let mut best_idx = 0usize;
+        for idx in 1..frontier.len() {
+            if frontier[idx].1 < frontier[best_idx].1 {
+                best_idx = idx;
+            }
+        }
+        let (node_idx, t_enter) = frontier.swap_remove(best_idx);
+        let Some(node) = bvh.nodes.get(node_idx as usize) else {
+            continue;
+        };
+
+        let kind = match node.kind {
+            RenderBvhNodeKind::Internal { left, right } => {
+                if let Some(left_node) = bvh.nodes.get(left as usize) {
+                    if let Some(left_enter) = ray_intersects_chunk_bounds(
+                        ray_origin_world,
+                        ray_dir,
+                        left_node.bounds,
+                        max_distance_world,
+                    ) {
+                        frontier.push((left, left_enter));
+                    }
+                }
+                if let Some(right_node) = bvh.nodes.get(right as usize) {
+                    if let Some(right_enter) = ray_intersects_chunk_bounds(
+                        ray_origin_world,
+                        ray_dir,
+                        right_node.bounds,
+                        max_distance_world,
+                    ) {
+                        frontier.push((right, right_enter));
+                    }
+                }
+                DebugRayBvhNodeKind::Internal
+            }
+            RenderBvhNodeKind::Leaf { leaf_index } => {
+                let Some(leaf) = bvh.leaves.get(leaf_index as usize) else {
+                    continue;
+                };
+                match leaf.kind {
+                    RenderLeafKind::Uniform(material) => {
+                        DebugRayBvhNodeKind::LeafUniform { material }
+                    }
+                    RenderLeafKind::VoxelChunkArray(_) => DebugRayBvhNodeKind::LeafChunkArray,
+                }
+            }
+        };
+
+        out.push(DebugRayBvhNodeHit {
+            bounds: node.bounds,
+            kind,
+            t_enter,
+        });
+    }
+
+    out
+}
+
 fn collect_render_leaves_in_bounds(
     core: &RenderTreeCore,
     bounds: Aabb4i,
@@ -353,6 +468,60 @@ fn sample_chunkarray_payload_at_key(
     let linear = lx + dims[0] * (ly + dims[1] * (lz + dims[2] * lw));
     let palette_idx = *dense_indices.get(linear)? as usize;
     chunk_array.chunk_palette.get(palette_idx).cloned()
+}
+
+fn ray_intersects_chunk_bounds(
+    ray_origin_world: [f32; 4],
+    ray_dir_world: [f32; 4],
+    chunk_bounds: Aabb4i,
+    max_distance_world: f32,
+) -> Option<f32> {
+    if !chunk_bounds.is_valid() {
+        return None;
+    }
+    let chunk_size = CHUNK_SIZE as f32;
+    let min = [
+        chunk_bounds.min[0] as f32 * chunk_size,
+        chunk_bounds.min[1] as f32 * chunk_size,
+        chunk_bounds.min[2] as f32 * chunk_size,
+        chunk_bounds.min[3] as f32 * chunk_size,
+    ];
+    let max = [
+        (chunk_bounds.max[0] + 1) as f32 * chunk_size,
+        (chunk_bounds.max[1] + 1) as f32 * chunk_size,
+        (chunk_bounds.max[2] + 1) as f32 * chunk_size,
+        (chunk_bounds.max[3] + 1) as f32 * chunk_size,
+    ];
+
+    let mut t_near = 0.0f32;
+    let mut t_far = max_distance_world;
+    for axis in 0..4 {
+        let origin = ray_origin_world[axis];
+        let dir = ray_dir_world[axis];
+        let slab_min = min[axis];
+        let slab_max = max[axis];
+        if dir.abs() < 1e-8 {
+            if origin < slab_min || origin > slab_max {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / dir;
+        let mut t0 = (slab_min - origin) * inv;
+        let mut t1 = (slab_max - origin) * inv;
+        if t0 > t1 {
+            std::mem::swap(&mut t0, &mut t1);
+        }
+        t_near = t_near.max(t0);
+        t_far = t_far.min(t1);
+        if t_far < t_near {
+            return None;
+        }
+    }
+    if t_far < 0.0 {
+        return None;
+    }
+    Some(t_near.max(0.0))
 }
 
 fn build_bvh_recursive(
@@ -733,5 +902,60 @@ mod tests {
             vec![ChunkPayload::Uniform(11)]
         );
         assert!(sample_chunk_payloads_from_bvh(&bvh, [2, 0, 0, 0]).is_empty());
+    }
+
+    #[test]
+    fn ray_bvh_hits_uniform_leaf() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let core = RenderTreeCore {
+            bounds,
+            kind: RenderNodeKind::Uniform(7),
+        };
+        let bvh = build_bvh_in_bounds(&core, bounds);
+        let hits = collect_ray_intersected_nodes_from_bvh(
+            &bvh,
+            [0.5, 0.5, -2.0, 0.5],
+            [0.0, 0.0, 1.0, 0.0],
+            16.0,
+            16,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].bounds, bounds);
+        assert_eq!(
+            hits[0].kind,
+            DebugRayBvhNodeKind::LeafUniform { material: 7 }
+        );
+    }
+
+    #[test]
+    fn ray_bvh_hits_internal_then_near_leaf() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
+        let core = RenderTreeCore {
+            bounds,
+            kind: RenderNodeKind::Branch(vec![
+                RenderTreeCore {
+                    bounds: Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]),
+                    kind: RenderNodeKind::Uniform(3),
+                },
+                RenderTreeCore {
+                    bounds: Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]),
+                    kind: RenderNodeKind::Uniform(9),
+                },
+            ]),
+        };
+        let bvh = build_bvh_in_bounds(&core, bounds);
+        let hits = collect_ray_intersected_nodes_from_bvh(
+            &bvh,
+            [0.5, 0.5, -2.0, 0.5],
+            [0.0, 0.0, 1.0, 0.0],
+            16.0,
+            16,
+        );
+        assert!(hits.len() >= 2);
+        assert_eq!(hits[0].kind, DebugRayBvhNodeKind::Internal);
+        assert_eq!(
+            hits[1].kind,
+            DebugRayBvhNodeKind::LeafUniform { material: 3 }
+        );
     }
 }

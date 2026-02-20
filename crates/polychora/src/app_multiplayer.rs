@@ -31,7 +31,6 @@ struct RegionTreeDiagNode {
 #[derive(Copy, Clone, Debug)]
 struct RegionTreeDiagStyle {
     edge_tag: u32,
-    short_code: &'static str,
     text_color: [f32; 4],
     border_color: [f32; 4],
     connector_color: [f32; 4],
@@ -59,35 +58,30 @@ fn region_tree_diag_style(kind: RegionTreeDiagKind) -> RegionTreeDiagStyle {
     match kind {
         RegionTreeDiagKind::Branch => RegionTreeDiagStyle {
             edge_tag: OVERLAY_EDGE_TAG_REGION_BRANCH,
-            short_code: "BR",
             text_color: [1.00, 0.86, 0.56, 1.00],
             border_color: [0.96, 0.66, 0.18, 0.90],
             connector_color: [0.96, 0.66, 0.18, 0.70],
         },
         RegionTreeDiagKind::Empty => RegionTreeDiagStyle {
             edge_tag: OVERLAY_EDGE_TAG_REGION_EMPTY,
-            short_code: "EM",
             text_color: [0.92, 0.93, 0.96, 0.96],
             border_color: [0.62, 0.66, 0.76, 0.72],
             connector_color: [0.62, 0.66, 0.76, 0.52],
         },
         RegionTreeDiagKind::Uniform(_) => RegionTreeDiagStyle {
             edge_tag: OVERLAY_EDGE_TAG_REGION_UNIFORM,
-            short_code: "UF",
             text_color: [0.80, 0.98, 0.78, 1.00],
             border_color: [0.36, 0.84, 0.34, 0.88],
             connector_color: [0.36, 0.84, 0.34, 0.70],
         },
         RegionTreeDiagKind::ChunkArray => RegionTreeDiagStyle {
             edge_tag: OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
-            short_code: "CA",
             text_color: [0.78, 0.96, 1.00, 1.00],
             border_color: [0.22, 0.80, 0.90, 0.90],
             connector_color: [0.22, 0.80, 0.90, 0.72],
         },
         RegionTreeDiagKind::ProceduralRef => RegionTreeDiagStyle {
             edge_tag: OVERLAY_EDGE_TAG_REGION_PROCEDURAL,
-            short_code: "PR",
             text_color: [0.96, 0.84, 1.00, 1.00],
             border_color: [0.72, 0.44, 0.96, 0.88],
             connector_color: [0.72, 0.44, 0.96, 0.70],
@@ -96,7 +90,6 @@ fn region_tree_diag_style(kind: RegionTreeDiagKind) -> RegionTreeDiagStyle {
 }
 
 fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
-    let style = region_tree_diag_style(node.kind);
     let span = [
         node.bounds.max[0]
             .saturating_sub(node.bounds.min[0])
@@ -111,56 +104,17 @@ fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
             .saturating_sub(node.bounds.min[3])
             .saturating_add(1),
     ];
-    let kind_suffix = match node.kind {
-        RegionTreeDiagKind::Uniform(material) => format!(" m{material}"),
-        _ => String::new(),
+    let (kind_label, kind_suffix) = match node.kind {
+        RegionTreeDiagKind::Branch => ("Branch", String::new()),
+        RegionTreeDiagKind::Empty => ("Empty", String::new()),
+        RegionTreeDiagKind::Uniform(material) => ("Uniform", format!(" material={material}")),
+        RegionTreeDiagKind::ChunkArray => ("ChunkArray", String::new()),
+        RegionTreeDiagKind::ProceduralRef => ("ProceduralRef", String::new()),
     };
     format!(
-        "{} d{} {}x{}x{}x{}{}",
-        style.short_code, node.depth, span[0], span[1], span[2], span[3], kind_suffix
+        "{} depth={} span={}x{}x{}x{}{}",
+        kind_label, node.depth, span[0], span[1], span[2], span[3], kind_suffix
     )
-}
-
-fn chunk_key_from_world_voxel(voxel: [i32; 4]) -> [i32; 4] {
-    let chunk_size = voxel::CHUNK_SIZE as i32;
-    [
-        voxel[0].div_euclid(chunk_size),
-        voxel[1].div_euclid(chunk_size),
-        voxel[2].div_euclid(chunk_size),
-        voxel[3].div_euclid(chunk_size),
-    ]
-}
-
-fn find_deepest_region_tree_node_for_chunk(
-    root: &RegionTreeCore,
-    chunk_key: [i32; 4],
-) -> Option<RegionTreeDiagNode> {
-    if !root.bounds.contains_chunk(chunk_key) {
-        return None;
-    }
-
-    let mut current = root;
-    let mut depth = 0usize;
-    loop {
-        match &current.kind {
-            RegionNodeKind::Branch(children) => {
-                if let Some(child) = children
-                    .iter()
-                    .find(|child| child.bounds.contains_chunk(chunk_key))
-                {
-                    current = child;
-                    depth = depth.saturating_add(1);
-                    continue;
-                }
-            }
-            _ => {}
-        }
-        return Some(RegionTreeDiagNode {
-            bounds: current.bounds,
-            depth,
-            kind: region_tree_diag_kind(&current.kind),
-        });
-    }
 }
 
 fn project_chunk_bounds_to_ndc(
@@ -511,56 +465,6 @@ impl App {
                 self.multiplayer_stream_tree_diag_show_procedural_bounds
             }
         }
-    }
-
-    pub(super) fn multiplayer_stream_tree_diag_leaf_description_for_voxel(
-        &self,
-        voxel: [i32; 4],
-    ) -> Option<String> {
-        let root = self.multiplayer_stream_tree_diag.root()?;
-        let chunk_key = chunk_key_from_world_voxel(voxel);
-        let node = find_deepest_region_tree_node_for_chunk(root, chunk_key)?;
-        let style = region_tree_diag_style(node.kind);
-        let span = [
-            node.bounds.max[0]
-                .saturating_sub(node.bounds.min[0])
-                .saturating_add(1),
-            node.bounds.max[1]
-                .saturating_sub(node.bounds.min[1])
-                .saturating_add(1),
-            node.bounds.max[2]
-                .saturating_sub(node.bounds.min[2])
-                .saturating_add(1),
-            node.bounds.max[3]
-                .saturating_sub(node.bounds.min[3])
-                .saturating_add(1),
-        ];
-        let kind_suffix = match node.kind {
-            RegionTreeDiagKind::Uniform(material) => format!(" m{material}"),
-            _ => String::new(),
-        };
-        Some(format!(
-            "ch=({:+},{:+},{:+},{:+}) {} d{} b=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) s={}x{}x{}x{}{}",
-            chunk_key[0],
-            chunk_key[1],
-            chunk_key[2],
-            chunk_key[3],
-            style.short_code,
-            node.depth,
-            node.bounds.min[0],
-            node.bounds.min[1],
-            node.bounds.min[2],
-            node.bounds.min[3],
-            node.bounds.max[0],
-            node.bounds.max[1],
-            node.bounds.max[2],
-            node.bounds.max[3],
-            span[0],
-            span[1],
-            span[2],
-            span[3],
-            kind_suffix
-        ))
     }
 
     pub(super) fn poll_multiplayer_events(&mut self) {

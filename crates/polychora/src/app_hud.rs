@@ -10,6 +10,8 @@ impl App {
         vte_sweep_status: &str,
         target_hit_voxel: Option<[i32; 4]>,
         target_hit_face: Option<[i32; 4]>,
+        stream_first_node_desc: Option<&str>,
+        stream_final_solid_leaf_desc: Option<&str>,
     ) -> Option<String> {
         match self.info_panel_mode {
             InfoPanelMode::Off => None,
@@ -27,6 +29,8 @@ impl App {
                 vte_sweep_status,
                 target_hit_voxel,
                 target_hit_face,
+                stream_first_node_desc,
+                stream_final_solid_leaf_desc,
             )),
         }
     }
@@ -188,6 +192,8 @@ impl App {
         vte_sweep_status: &str,
         target_hit_voxel: Option<[i32; 4]>,
         target_hit_face: Option<[i32; 4]>,
+        stream_first_node_desc: Option<&str>,
+        stream_final_solid_leaf_desc: Option<&str>,
     ) -> String {
         let inv = self.current_y_inverted();
         let inv = if inv { " Y-INV" } else { "" };
@@ -197,9 +203,8 @@ impl App {
         let face_text = target_hit_face
             .map(|face| format!("({:+},{:+},{:+},{:+})", face[0], face[1], face[2], face[3]))
             .unwrap_or_else(|| "--".to_string());
-        let leaf_text = target_hit_voxel
-            .and_then(|voxel| self.multiplayer_stream_tree_diag_leaf_description_for_voxel(voxel))
-            .unwrap_or_else(|| "--".to_string());
+        let stream_first_node_text = stream_first_node_desc.unwrap_or("--");
+        let stream_final_solid_leaf_text = stream_final_solid_leaf_desc.unwrap_or("--");
         if self.control_scheme.uses_look_frame() {
             format!(
                 "LOOK-FRAME [{}]  spd:{:.1}{}\n\
@@ -208,7 +213,8 @@ impl App {
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
                  target:{} face:{}\n\
-                 stream-leaf:{}\n\
+                 stream-first-node:{}\n\
+                 stream-final-solid:{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 self.control_scheme.label(),
@@ -227,7 +233,8 @@ impl App {
                 highlight_mode.label(),
                 target_text,
                 face_text,
-                leaf_text,
+                stream_first_node_text,
+                stream_final_solid_leaf_text,
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {
@@ -253,7 +260,8 @@ impl App {
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
                  mat:[ ]/wheel cycle, 1-0 direct\n\
                  target:{} face:{}\n\
-                 stream-leaf:{}\n\
+                 stream-first-node:{}\n\
+                 stream-final-solid:{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 pair.label(),
@@ -274,7 +282,8 @@ impl App {
                 highlight_mode.label(),
                 target_text,
                 face_text,
-                leaf_text,
+                stream_first_node_text,
+                stream_final_solid_leaf_text,
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {

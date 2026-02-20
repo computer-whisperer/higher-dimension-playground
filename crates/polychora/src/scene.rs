@@ -646,6 +646,54 @@ impl Scene {
             .unwrap_or_default()
     }
 
+    pub fn debug_render_bvh_ray_node_hits(
+        &mut self,
+        ray_origin_world: [f32; 4],
+        ray_direction_world: [f32; 4],
+        max_distance_world: f32,
+        max_nodes: usize,
+    ) -> Vec<render_tree::DebugRayBvhNodeHit> {
+        if max_nodes == 0 || !max_distance_world.is_finite() || max_distance_world <= 0.0 {
+            return Vec::new();
+        }
+        let active_distance = max_distance_world.max(VOXEL_NEAR_ACTIVE_DISTANCE);
+        let chunk_radius = (active_distance / CHUNK_SIZE as f32).ceil() as i32 + 1;
+        let chunk_size = CHUNK_SIZE as i32;
+        let cam_chunk = [
+            (ray_origin_world[0].floor() as i32).div_euclid(chunk_size),
+            (ray_origin_world[1].floor() as i32).div_euclid(chunk_size),
+            (ray_origin_world[2].floor() as i32).div_euclid(chunk_size),
+            (ray_origin_world[3].floor() as i32).div_euclid(chunk_size),
+        ];
+        let bounds = Aabb4i::new(
+            [
+                cam_chunk[0] - chunk_radius,
+                cam_chunk[1] - chunk_radius,
+                cam_chunk[2] - chunk_radius,
+                cam_chunk[3] - chunk_radius,
+            ],
+            [
+                cam_chunk[0] + chunk_radius,
+                cam_chunk[1] + chunk_radius,
+                cam_chunk[2] + chunk_radius,
+                cam_chunk[3] + chunk_radius,
+            ],
+        );
+        self.ensure_render_bvh_cache_for_bounds(bounds);
+        self.render_bvh_cache
+            .as_ref()
+            .map(|bvh| {
+                render_tree::collect_ray_intersected_nodes_from_bvh(
+                    bvh,
+                    ray_origin_world,
+                    ray_direction_world,
+                    max_distance_world,
+                    max_nodes,
+                )
+            })
+            .unwrap_or_default()
+    }
+
     pub fn collect_non_empty_explicit_chunk_positions(&self) -> Vec<[i32; 4]> {
         let Some(root) = self.world_tree.root() else {
             return Vec::new();

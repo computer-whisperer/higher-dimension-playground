@@ -964,6 +964,8 @@ fn main() {
         multiplayer_stream_tree_diag_show_uniform_bounds: true,
         multiplayer_stream_tree_diag_show_chunk_array_bounds: true,
         multiplayer_stream_tree_diag_show_procedural_bounds: true,
+        multiplayer_stream_tree_diag_sample_ray_bounds_enabled: false,
+        multiplayer_stream_tree_diag_sample_ray_max_nodes: 64,
         multiplayer_stream_tree_diag_labels_enabled: env_flag_enabled_or(
             CLIENT_REGION_TREE_BOUNDS_DIAG_LABELS_ENV,
             true,
@@ -1270,6 +1272,8 @@ struct App {
     multiplayer_stream_tree_diag_show_uniform_bounds: bool,
     multiplayer_stream_tree_diag_show_chunk_array_bounds: bool,
     multiplayer_stream_tree_diag_show_procedural_bounds: bool,
+    multiplayer_stream_tree_diag_sample_ray_bounds_enabled: bool,
+    multiplayer_stream_tree_diag_sample_ray_max_nodes: usize,
     multiplayer_stream_tree_diag_labels_enabled: bool,
     multiplayer_stream_tree_diag_max_labels: usize,
     multiplayer_stream_tree_compare_diag_enabled: bool,

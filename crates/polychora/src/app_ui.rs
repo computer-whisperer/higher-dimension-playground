@@ -265,9 +265,20 @@ impl App {
                         "Empty",
                     );
                 });
+                ui.checkbox(
+                    &mut self.multiplayer_stream_tree_diag_sample_ray_bounds_enabled,
+                    "Render sample-ray BVH node bounds",
+                );
                 ui.add(
                     egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_nodes, 1..=4096)
                         .text("Bounds max nodes"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.multiplayer_stream_tree_diag_sample_ray_max_nodes,
+                        1..=512,
+                    )
+                    .text("Sample-ray max nodes"),
                 );
                 ui.add(
                     egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_labels, 1..=512)
