@@ -266,6 +266,192 @@ impl Scene {
         Ok(())
     }
 
+    fn invalid_leaf_header() -> GpuVoxelLeafHeader {
+        GpuVoxelLeafHeader {
+            min_chunk_coord: [0, 0, 0, 0],
+            max_chunk_coord: [-1, -1, -1, -1],
+            leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
+            uniform_material: 0,
+            chunk_entry_offset: 0,
+            _padding: 0,
+        }
+    }
+
+    fn encode_leaf_chunk_entries(
+        voxel_frame_data: &mut VoxelFrameData,
+        dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
+        leaf: &RenderLeaf,
+    ) -> Result<Vec<u32>, String> {
+        let RenderLeafKind::VoxelChunkArray(chunk_array) = &leaf.kind else {
+            return Ok(Vec::new());
+        };
+        let Some(leaf_extents) = leaf.bounds.chunk_extents() else {
+            return Ok(Vec::new());
+        };
+        let src_indices = chunk_array
+            .decode_dense_indices()
+            .map_err(|error| format!("decode chunk-array leaf failed: {error:?}"))?;
+        let src_dims = chunk_array
+            .bounds
+            .chunk_extents()
+            .ok_or_else(|| "chunk-array source extents missing".to_string())?;
+
+        let mut encoded = Vec::<u32>::with_capacity(leaf.bounds.chunk_cell_count().unwrap_or(0));
+        for w in 0..leaf_extents[3] {
+            for z in 0..leaf_extents[2] {
+                for y in 0..leaf_extents[1] {
+                    for x in 0..leaf_extents[0] {
+                        let chunk_coord = [
+                            leaf.bounds.min[0] + x as i32,
+                            leaf.bounds.min[1] + y as i32,
+                            leaf.bounds.min[2] + z as i32,
+                            leaf.bounds.min[3] + w as i32,
+                        ];
+                        let lx = (chunk_coord[0] - chunk_array.bounds.min[0]) as usize;
+                        let ly = (chunk_coord[1] - chunk_array.bounds.min[1]) as usize;
+                        let lz = (chunk_coord[2] - chunk_array.bounds.min[2]) as usize;
+                        let lw = (chunk_coord[3] - chunk_array.bounds.min[3]) as usize;
+                        let linear = lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
+                        let palette_index = src_indices
+                            .get(linear)
+                            .copied()
+                            .ok_or_else(|| "chunk-array index out of bounds".to_string())?
+                            as usize;
+                        let payload = chunk_array
+                            .chunk_palette
+                            .get(palette_index)
+                            .ok_or_else(|| "chunk-array palette out of bounds".to_string())?;
+                        let encoded_entry = match payload {
+                            ChunkPayload::Empty | ChunkPayload::Uniform(0) => {
+                                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
+                            }
+                            ChunkPayload::Uniform(material) => {
+                                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                    | u32::from(*material)
+                            }
+                            dense_payload => Self::append_dense_payload_encoded(
+                                voxel_frame_data,
+                                dense_payload_cache,
+                                dense_payload,
+                            )?,
+                        };
+                        encoded.push(encoded_entry);
+                    }
+                }
+            }
+        }
+        Ok(encoded)
+    }
+
+    fn rebuild_leaf_entry_spans_from_headers(
+        voxel_frame_data: &VoxelFrameData,
+    ) -> Vec<Option<std::ops::Range<usize>>> {
+        let mut out = vec![None; voxel_frame_data.leaf_headers.len()];
+        for (idx, header) in voxel_frame_data.leaf_headers.iter().enumerate() {
+            if header.leaf_kind
+                != higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY
+            {
+                continue;
+            }
+            let bounds = Aabb4i::new(header.min_chunk_coord, header.max_chunk_coord);
+            let Some(cell_count) = bounds.chunk_cell_count() else {
+                continue;
+            };
+            if cell_count == 0 {
+                continue;
+            }
+            let start = header.chunk_entry_offset as usize;
+            let end = start.saturating_add(cell_count);
+            if end > voxel_frame_data.leaf_chunk_entries.len() {
+                continue;
+            }
+            out[idx] = Some(start..end);
+        }
+        out
+    }
+
+    fn merge_free_span(
+        free_spans: &mut Vec<std::ops::Range<usize>>,
+        new_span: std::ops::Range<usize>,
+    ) {
+        if new_span.start >= new_span.end {
+            return;
+        }
+        free_spans.push(new_span);
+        free_spans.sort_unstable_by_key(|span| span.start);
+        let mut merged = Vec::<std::ops::Range<usize>>::with_capacity(free_spans.len());
+        for span in free_spans.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                if span.start <= last.end {
+                    last.end = last.end.max(span.end);
+                } else {
+                    merged.push(span);
+                }
+            } else {
+                merged.push(span);
+            }
+        }
+        *free_spans = merged;
+    }
+
+    fn build_free_spans_from_leaf_spans(
+        spans: &[Option<std::ops::Range<usize>>],
+        used_len: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        let mut used = spans
+            .iter()
+            .filter_map(|span| span.clone())
+            .collect::<Vec<std::ops::Range<usize>>>();
+        used.sort_unstable_by_key(|span| span.start);
+        let mut free = Vec::<std::ops::Range<usize>>::new();
+        let mut cursor = 0usize;
+        for span in used {
+            if span.start > cursor {
+                free.push(cursor..span.start);
+            }
+            cursor = cursor.max(span.end);
+        }
+        if cursor < used_len {
+            free.push(cursor..used_len);
+        }
+        if used_len < VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY {
+            free.push(used_len..VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY);
+        }
+        free
+    }
+
+    fn allocate_leaf_entry_span(
+        free_spans: &mut Vec<std::ops::Range<usize>>,
+        leaf_chunk_entries: &mut Vec<u32>,
+        len: usize,
+    ) -> Result<std::ops::Range<usize>, String> {
+        if len == 0 {
+            return Ok(0..0);
+        }
+        let mut selected_idx = None;
+        for (idx, span) in free_spans.iter().enumerate() {
+            if span.end.saturating_sub(span.start) >= len {
+                selected_idx = Some(idx);
+                break;
+            }
+        }
+        let Some(span_idx) = selected_idx else {
+            return Err("leaf chunk-entry arena exhausted".to_string());
+        };
+        let span = free_spans.remove(span_idx);
+        let alloc = span.start..(span.start + len);
+        if alloc.end < span.end {
+            free_spans.push(alloc.end..span.end);
+        }
+        if leaf_chunk_entries.len() < alloc.end {
+            leaf_chunk_entries.resize(
+                alloc.end,
+                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY,
+            );
+        }
+        Ok(alloc)
+    }
+
     fn apply_render_bvh_mutation_deltas_to_voxel_frame_data(
         &mut self,
         render_bvh: &RenderBvh,
@@ -275,13 +461,13 @@ impl Scene {
         if !bounds.is_valid() {
             return Ok(());
         }
-        for delta in deltas {
-            // Until leaf payload arena mutation is implemented, any leaf mutation triggers
-            // a safe full rebuild fallback in the caller.
-            if !delta.leaf_writes.is_empty() || !delta.freed_leaf_ids.is_empty() {
-                return Err("leaf mutation requires full rebuild".to_string());
-            }
+        let mut leaf_spans = Self::rebuild_leaf_entry_spans_from_headers(&self.voxel_frame_data);
+        let mut free_spans = Self::build_free_spans_from_leaf_spans(
+            &leaf_spans,
+            self.voxel_frame_data.leaf_chunk_entries.len(),
+        );
 
+        for delta in deltas {
             for (node_index, src_node) in &delta.node_writes {
                 let node_index = *node_index as usize;
                 if node_index >= VTE_REGION_BVH_NODE_CAPACITY {
@@ -302,6 +488,76 @@ impl Scene {
                 let node_index = *node_index as usize;
                 if node_index < self.voxel_frame_data.region_bvh_nodes.len() {
                     self.voxel_frame_data.region_bvh_nodes[node_index] = GpuVoxelChunkBvhNode::empty();
+                }
+            }
+
+            for leaf_index in &delta.freed_leaf_ids {
+                let leaf_index = *leaf_index as usize;
+                if leaf_index < leaf_spans.len() {
+                    if let Some(old_span) = leaf_spans[leaf_index].take() {
+                        Self::merge_free_span(&mut free_spans, old_span);
+                    }
+                }
+                if leaf_index < self.voxel_frame_data.leaf_headers.len() {
+                    self.voxel_frame_data.leaf_headers[leaf_index] = Self::invalid_leaf_header();
+                }
+            }
+
+            for (leaf_index, leaf) in &delta.leaf_writes {
+                let leaf_index = *leaf_index as usize;
+                if leaf_index >= VTE_REGION_LEAF_CAPACITY {
+                    return Err(format!(
+                        "leaf write index {} exceeds capacity {}",
+                        leaf_index, VTE_REGION_LEAF_CAPACITY
+                    ));
+                }
+                if self.voxel_frame_data.leaf_headers.len() <= leaf_index {
+                    self.voxel_frame_data
+                        .leaf_headers
+                        .resize(leaf_index + 1, Self::invalid_leaf_header());
+                }
+                if leaf_spans.len() <= leaf_index {
+                    leaf_spans.resize(leaf_index + 1, None);
+                }
+                if let Some(old_span) = leaf_spans[leaf_index].take() {
+                    Self::merge_free_span(&mut free_spans, old_span);
+                }
+
+                match &leaf.kind {
+                    RenderLeafKind::Uniform(material) => {
+                        self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
+                            min_chunk_coord: leaf.bounds.min,
+                            max_chunk_coord: leaf.bounds.max,
+                            leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
+                            uniform_material: u32::from(*material),
+                            chunk_entry_offset: 0,
+                            _padding: 0,
+                        };
+                    }
+                    RenderLeafKind::VoxelChunkArray(_) => {
+                        let entries = Self::encode_leaf_chunk_entries(
+                            &mut self.voxel_frame_data,
+                            &mut self.voxel_dense_payload_encoded_cache,
+                            leaf,
+                        )?;
+                        let span = Self::allocate_leaf_entry_span(
+                            &mut free_spans,
+                            &mut self.voxel_frame_data.leaf_chunk_entries,
+                            entries.len(),
+                        )?;
+                        self.voxel_frame_data.leaf_chunk_entries[span.clone()]
+                            .copy_from_slice(entries.as_slice());
+                        leaf_spans[leaf_index] = Some(span.clone());
+                        self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
+                            min_chunk_coord: leaf.bounds.min,
+                            max_chunk_coord: leaf.bounds.max,
+                            leaf_kind:
+                                higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
+                            uniform_material: 0,
+                            chunk_entry_offset: span.start as u32,
+                            _padding: 0,
+                        };
+                    }
                 }
             }
         }
