@@ -1037,6 +1037,53 @@ float4 estimateVoxelHitNormal(float4 hitPos, float4 rayDir)
     return normal;
 }
 
+float4 voxelMaterialSampleCoords(float4 hitPos, float4 rayDir, float4 hitNormal)
+{
+    // Sample from the entered voxel, then map the hit hyperface to 3D local
+    // coordinates by dropping the normal axis.
+    float4 local = frac(hitPos + rayDir * 1e-4);
+
+    float4 absN = abs(hitNormal);
+    uint axis = 0u;
+    float best = absN.x;
+    if (absN.y > best) { axis = 1u; best = absN.y; }
+    if (absN.z > best) { axis = 2u; best = absN.z; }
+    if (absN.w > best) { axis = 3u; }
+
+    int sign = 1;
+    if (axis == 0u) sign = (hitNormal.x < 0.0) ? -1 : 1;
+    else if (axis == 1u) sign = (hitNormal.y < 0.0) ? -1 : 1;
+    else if (axis == 2u) sign = (hitNormal.z < 0.0) ? -1 : 1;
+    else sign = (hitNormal.w < 0.0) ? -1 : 1;
+
+    float3 uvw;
+    if (axis == 0u)
+    {
+        uvw = float3(local.y, local.z, local.w);
+    }
+    else if (axis == 1u)
+    {
+        uvw = float3(local.x, local.z, local.w);
+    }
+    else if (axis == 2u)
+    {
+        uvw = float3(local.x, local.y, local.w);
+    }
+    else
+    {
+        uvw = float3(local.x, local.y, local.z);
+    }
+
+    // Basic orientation consistency for opposite faces.
+    if (sign < 0)
+    {
+        uvw.x = 1.0 - uvw.x;
+    }
+
+    // Keep float4 API: xyz carry true 3D hyperface coordinates.
+    return float4(uvw, uvw.z);
+}
+
 float3 shadeVoxelMaterial(MaterialProperties mat, float4 hitNormal)
 {
     float4 sunWorldDir = normalize(float4(0.3, 1.0, -0.3, 0.0));
@@ -2852,11 +2899,11 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
                 if (highlightKind != 0u)
                 {
+                    float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     MaterialProperties mat = sampleMaterial(
                         hitMaterial,
-                        frac(hitPos),
+                        voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
                         wd.timeTicksMs);
-                    float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     float3 litColor = shadeVoxelMaterial(mat, hitNormal);
                     float3 highlighted = shadeHighlightedVoxelSample(
                         litColor,
@@ -2885,11 +2932,11 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                 }
                 else
                 {
+                    float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     MaterialProperties mat = sampleMaterial(
                         hitMaterial,
-                        frac(hitPos),
+                        voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
                         wd.timeTicksMs);
-                    float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     float w = max(1e-4, mat.integrationWeight);
                     float hitBrightnessScale = (hitMaterial == MATERIAL_ID_GROUND)
                         ? integralSkyScale
@@ -3521,11 +3568,11 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
         if (highlightKind != 0u)
         {
+            float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             MaterialProperties mat = sampleMaterial(
                 hitMaterial,
-                frac(hitPos),
+                voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
                 wd.timeTicksMs);
-            float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             float3 litColor = shadeVoxelMaterial(mat, hitNormal);
             outColor = shadeHighlightedVoxelSample(
                 litColor,
@@ -3539,11 +3586,11 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         }
         else
         {
+            float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             MaterialProperties mat = sampleMaterial(
                 hitMaterial,
-                frac(hitPos),
+                voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
                 wd.timeTicksMs);
-            float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             outColor = shadeVoxelMaterial(mat, hitNormal);
             outColor = maybeApplyLodTint(outColor, hitLodLevel, meta);
         }
