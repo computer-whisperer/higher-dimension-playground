@@ -10,9 +10,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-mod legacy_generator;
+mod flat_world_generator;
 
-pub use legacy_generator::LegacyWorldGenerator;
+pub use flat_world_generator::FlatWorldGenerator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QueryDetail {
@@ -222,7 +222,7 @@ fn subtract_covered_bounds(target: Aabb4i, covered: &[Aabb4i]) -> Vec<Aabb4i> {
     remaining
 }
 
-impl PassthroughWorldOverlay<LegacyWorldGenerator> {
+impl PassthroughWorldOverlay<FlatWorldGenerator> {
     pub fn from_chunk_payloads(
         base_kind: BaseWorldKind,
         chunk_payloads: impl IntoIterator<Item = ([i32; 4], ChunkPayload)>,
@@ -230,7 +230,7 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
     ) -> Self {
-        let field = LegacyWorldGenerator::from_chunk_payloads(
+        let field = FlatWorldGenerator::from_chunk_payloads(
             base_kind,
             Vec::<([i32; 4], ChunkPayload)>::new(),
             world_seed,
@@ -260,7 +260,7 @@ impl PassthroughWorldOverlay<LegacyWorldGenerator> {
             save_v4::load_or_init_state_metadata(root, default_base_kind, world_seed, now_ms)?;
         let base_world_kind = metadata.global.base_world_kind.to_runtime();
         let runtime_world_seed = metadata.global.world_seed;
-        let field = LegacyWorldGenerator::from_chunk_payloads(
+        let field = FlatWorldGenerator::from_chunk_payloads(
             base_world_kind,
             Vec::<([i32; 4], ChunkPayload)>::new(),
             runtime_world_seed,
@@ -561,7 +561,7 @@ fn chunks_equal(a: &[VoxelType; CHUNK_VOLUME], b: &[VoxelType; CHUNK_VOLUME]) ->
     a[..] == b[..]
 }
 
-pub type ServerWorldOverlay = PassthroughWorldOverlay<LegacyWorldGenerator>;
+pub type ServerWorldOverlay = PassthroughWorldOverlay<FlatWorldGenerator>;
 
 #[cfg(test)]
 mod tests {
