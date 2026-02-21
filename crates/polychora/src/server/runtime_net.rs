@@ -75,10 +75,22 @@ fn send_world_subtree_patch_to_client(
         return;
     }
 
+    let query_start = Instant::now();
     let subtree = {
         let mut guard = state.lock().expect("server state lock poisoned");
         guard.query_world_subtree(bounds)
     };
+    let query_ms = query_start.elapsed().as_secs_f64() * 1000.0;
+    if query_ms >= 50.0 {
+        eprintln!(
+            "[server-world-patch-query-slow] client_id={} bounds={:?}->{:?} elapsed_ms={:.3} allow_empty={}",
+            client_id,
+            bounds.min,
+            bounds.max,
+            query_ms,
+            allow_empty
+        );
+    }
     if !allow_empty
         && matches!(
             subtree.kind,
@@ -340,8 +352,9 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
     for remove_bounds in removed_bounds {
         send_empty_world_subtree_patch_to_client(state, client_id, remove_bounds);
     }
+    let allow_empty_add = previous.is_none();
     for add_bounds in added_bounds {
-        send_world_subtree_patch_to_client(state, client_id, add_bounds, false);
+        send_world_subtree_patch_to_client(state, client_id, add_bounds, allow_empty_add);
     }
 }
 
@@ -1143,8 +1156,28 @@ pub(super) fn spawn_client_thread(
     thread::spawn(move || {
         let mut writer = BufWriter::new(writer_stream);
         while let Ok(message) = rx.recv() {
-            let Ok(encoded) = postcard::to_stdvec(&message) else {
-                continue;
+            let encoded = match postcard::to_stdvec(&message) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    match &message {
+                        ServerMessage::WorldSubtreePatch { subtree } => {
+                            eprintln!(
+                                "failed to encode world subtree patch for client {} bounds={:?}->{:?}: {}",
+                                client_id,
+                                subtree.bounds.min,
+                                subtree.bounds.max,
+                                error
+                            );
+                        }
+                        _ => {
+                            eprintln!(
+                                "failed to encode server message for client {}: {}",
+                                client_id, error
+                            );
+                        }
+                    }
+                    continue;
+                }
             };
             let len = (encoded.len() as u32).to_le_bytes();
             if writer.write_all(&len).is_err() {

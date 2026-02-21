@@ -147,6 +147,8 @@ impl App {
         self.multiplayer_self_id = None;
         self.multiplayer_last_world_request_center_chunk = None;
         self.multiplayer_last_world_request_bounds = None;
+        self.multiplayer_last_world_request_radius_chunks = None;
+        self.multiplayer_world_interest_bootstrap_pending = false;
         self.multiplayer_stream_tree_diag = polychora::shared::region_tree::RegionChunkTree::new();
         self.multiplayer_chunk_sample_diag_recent_patches.clear();
         self.multiplayer_chunk_sample_diag_patch_seq = 0;

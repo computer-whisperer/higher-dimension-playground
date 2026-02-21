@@ -375,6 +375,9 @@ fn world_request_radius_chunks_for_distance(distance_world: f32) -> i32 {
         .max(1)
 }
 
+const WORLD_INTEREST_BOOTSTRAP_MAX_RADIUS_CHUNKS: i32 = 32;
+const WORLD_INTEREST_RADIUS_RAMP_STEP_CHUNKS: i32 = 12;
+
 fn bounds_contains_chunk(bounds: Aabb4i, chunk: [i32; 4]) -> bool {
     bounds.is_valid()
         && chunk[0] >= bounds.min[0]
@@ -938,26 +941,48 @@ impl App {
 
     fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
         let center_chunk = world_chunk_from_position(position);
-        let request_radius_chunks =
+        let target_radius_chunks =
             world_request_radius_chunks_for_distance(self.vte_max_trace_distance);
+        let mut request_radius_chunks = if self.multiplayer_world_interest_bootstrap_pending {
+            target_radius_chunks.min(WORLD_INTEREST_BOOTSTRAP_MAX_RADIUS_CHUNKS.max(1))
+        } else {
+            target_radius_chunks
+        };
+        if let Some(last_radius) = self.multiplayer_last_world_request_radius_chunks {
+            if request_radius_chunks > last_radius {
+                request_radius_chunks = (last_radius + WORLD_INTEREST_RADIUS_RAMP_STEP_CHUNKS)
+                    .min(target_radius_chunks)
+                    .max(last_radius + 1);
+            }
+        }
+        let radius_changed = self
+            .multiplayer_last_world_request_radius_chunks
+            .map(|last| request_radius_chunks != last)
+            .unwrap_or(false);
+        let radius_expanding = self
+            .multiplayer_last_world_request_radius_chunks
+            .map(|last| request_radius_chunks > last)
+            .unwrap_or(false);
         if let Some(last_bounds) = self.multiplayer_last_world_request_bounds {
-            let hysteresis = (request_radius_chunks / 4).max(1);
-            let keep_bounds = Aabb4i::new(
-                [
-                    last_bounds.min[0].saturating_add(hysteresis),
-                    last_bounds.min[1].saturating_add(hysteresis),
-                    last_bounds.min[2].saturating_add(hysteresis),
-                    last_bounds.min[3].saturating_add(hysteresis),
-                ],
-                [
-                    last_bounds.max[0].saturating_sub(hysteresis),
-                    last_bounds.max[1].saturating_sub(hysteresis),
-                    last_bounds.max[2].saturating_sub(hysteresis),
-                    last_bounds.max[3].saturating_sub(hysteresis),
-                ],
-            );
-            if bounds_contains_chunk(keep_bounds, center_chunk) {
-                return;
+            if !radius_expanding && !radius_changed {
+                let hysteresis = (request_radius_chunks / 4).max(1);
+                let keep_bounds = Aabb4i::new(
+                    [
+                        last_bounds.min[0].saturating_add(hysteresis),
+                        last_bounds.min[1].saturating_add(hysteresis),
+                        last_bounds.min[2].saturating_add(hysteresis),
+                        last_bounds.min[3].saturating_add(hysteresis),
+                    ],
+                    [
+                        last_bounds.max[0].saturating_sub(hysteresis),
+                        last_bounds.max[1].saturating_sub(hysteresis),
+                        last_bounds.max[2].saturating_sub(hysteresis),
+                        last_bounds.max[3].saturating_sub(hysteresis),
+                    ],
+                );
+                if bounds_contains_chunk(keep_bounds, center_chunk) {
+                    return;
+                }
             }
         }
         let desired_bounds =
@@ -968,6 +993,10 @@ impl App {
         self.send_multiplayer_world_interest_update(desired_bounds, reason);
         self.multiplayer_last_world_request_center_chunk = Some(center_chunk);
         self.multiplayer_last_world_request_bounds = Some(desired_bounds);
+        self.multiplayer_last_world_request_radius_chunks = Some(request_radius_chunks);
+        if request_radius_chunks >= target_radius_chunks {
+            self.multiplayer_world_interest_bootstrap_pending = false;
+        }
     }
 
     pub(super) fn append_multiplayer_stream_tree_diag_overlay_instances(
@@ -1297,6 +1326,8 @@ impl App {
                 self.multiplayer_self_id = Some(client_id);
                 self.multiplayer_last_world_request_center_chunk = None;
                 self.multiplayer_last_world_request_bounds = None;
+                self.multiplayer_last_world_request_radius_chunks = None;
+                self.multiplayer_world_interest_bootstrap_pending = true;
                 self.multiplayer_stream_tree_diag =
                     polychora::shared::region_tree::RegionChunkTree::new();
                 self.multiplayer_chunk_sample_diag_recent_patches.clear();

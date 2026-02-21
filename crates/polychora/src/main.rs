@@ -949,6 +949,8 @@ fn main() {
         multiplayer_self_id: None,
         multiplayer_last_world_request_center_chunk: None,
         multiplayer_last_world_request_bounds: None,
+        multiplayer_last_world_request_radius_chunks: None,
+        multiplayer_world_interest_bootstrap_pending: false,
         multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree::new(),
         multiplayer_stream_tree_diag_enabled: env_flag_enabled(CLIENT_REGION_TREE_BOUNDS_DIAG_ENV),
         multiplayer_stream_tree_diag_max_nodes: env_usize_or(
@@ -1290,6 +1292,8 @@ struct App {
     multiplayer_self_id: Option<u64>,
     multiplayer_last_world_request_center_chunk: Option<[i32; 4]>,
     multiplayer_last_world_request_bounds: Option<Aabb4i>,
+    multiplayer_last_world_request_radius_chunks: Option<i32>,
+    multiplayer_world_interest_bootstrap_pending: bool,
     multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree,
     multiplayer_stream_tree_diag_enabled: bool,
     multiplayer_stream_tree_diag_max_nodes: usize,
