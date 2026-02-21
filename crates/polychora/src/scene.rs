@@ -731,6 +731,7 @@ impl Scene {
         let mut changed = false;
         let mut deltas = Vec::<RenderBvhChunkMutationDelta>::new();
         let mut fallback_full_rebuild = false;
+        let mut fallback_reason: Option<String> = None;
         for dirty_region in dirty_regions {
             let Some(dirty_bounds) = Self::intersect_bounds(dirty_region, bounds) else {
                 continue;
@@ -746,6 +747,7 @@ impl Scene {
                 };
             } else {
                 fallback_full_rebuild = true;
+                fallback_reason = Some("missing_render_region_cache".to_string());
                 break;
             }
 
@@ -761,18 +763,30 @@ impl Scene {
                         deltas.push(delta);
                     }
                     Ok(None) => {}
-                    Err(_) => {
+                    Err(error) => {
                         fallback_full_rebuild = true;
+                        fallback_reason = Some(format!(
+                            "apply_core_patch_delta_failed bounds={:?}->{:?} error={}",
+                            dirty_bounds.min, dirty_bounds.max, error
+                        ));
                         break;
                     }
                 }
             } else {
                 fallback_full_rebuild = true;
+                fallback_reason = Some("missing_render_bvh_cache".to_string());
                 break;
             }
         }
 
         if fallback_full_rebuild {
+            eprintln!(
+                "[vte-bvh-delta-fallback] reason={} rebuild_bounds={:?}->{:?} pending_deltas={}",
+                fallback_reason.as_deref().unwrap_or("unknown"),
+                bounds.min,
+                bounds.max,
+                deltas.len()
+            );
             self.rebuild_render_bvh_from_region_cache(bounds);
             self.voxel_pending_render_bvh_rebuild = true;
             self.voxel_pending_render_bvh_mutation_deltas.clear();
