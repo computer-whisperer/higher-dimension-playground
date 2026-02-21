@@ -211,6 +211,62 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
     pieces
 }
 
+fn split_bounds_for_streaming(
+    bounds: Aabb4i,
+    max_chunk_cells_per_patch: usize,
+    max_patches: usize,
+) -> Vec<Aabb4i> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    if max_patches <= 1 {
+        return vec![bounds];
+    }
+
+    let mut out = Vec::<Aabb4i>::new();
+    let mut stack = vec![bounds];
+    while let Some(current) = stack.pop() {
+        let Some(cell_count) = current.chunk_cell_count() else {
+            out.push(current);
+            continue;
+        };
+        if cell_count <= max_chunk_cells_per_patch || out.len() + stack.len() + 1 >= max_patches {
+            out.push(current);
+            continue;
+        }
+
+        let extents = [
+            current.max[0] - current.min[0] + 1,
+            current.max[1] - current.min[1] + 1,
+            current.max[2] - current.min[2] + 1,
+            current.max[3] - current.min[3] + 1,
+        ];
+        let mut split_axis = 0usize;
+        for axis in 1..4 {
+            if extents[axis] > extents[split_axis] {
+                split_axis = axis;
+            }
+        }
+        if extents[split_axis] <= 1 {
+            out.push(current);
+            continue;
+        }
+
+        let mid = current.min[split_axis] + (extents[split_axis] / 2) - 1;
+        let mut left = current;
+        let mut right = current;
+        left.max[split_axis] = mid;
+        right.min[split_axis] = mid + 1;
+        if left.is_valid() {
+            stack.push(left);
+        }
+        if right.is_valid() {
+            stack.push(right);
+        }
+    }
+    out
+}
+
 fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aabb4i]) -> usize {
     if dirty_bounds.is_empty() {
         return 0;
@@ -429,7 +485,26 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
         );
     }
     for add_bounds in added_bounds {
-        send_world_subtree_patch_to_client(state, client_id, add_bounds, allow_empty_add);
+        const WORLD_PATCH_MAX_CHUNK_CELLS: usize = 2_000_000;
+        const WORLD_PATCH_MAX_SPLITS: usize = 256;
+        let add_slices = split_bounds_for_streaming(
+            add_bounds,
+            WORLD_PATCH_MAX_CHUNK_CELLS,
+            WORLD_PATCH_MAX_SPLITS,
+        );
+        if world_bootstrap_diag_enabled() && add_slices.len() > 1 {
+            eprintln!(
+                "[server-world-bootstrap] interest-split client_id={} source={:?}->{:?} slices={} max_cells_per_patch={}",
+                client_id,
+                add_bounds.min,
+                add_bounds.max,
+                add_slices.len(),
+                WORLD_PATCH_MAX_CHUNK_CELLS
+            );
+        }
+        for slice_bounds in add_slices {
+            send_world_subtree_patch_to_client(state, client_id, slice_bounds, allow_empty_add);
+        }
     }
 }
 
