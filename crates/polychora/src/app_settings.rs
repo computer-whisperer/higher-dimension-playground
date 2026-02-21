@@ -13,6 +13,7 @@ const DEFAULT_RENDER_WIDTH: u32 = 960;
 const DEFAULT_RENDER_HEIGHT: u32 = 540;
 const DEFAULT_RENDER_LAYERS: u32 = 128;
 const DEFAULT_AUDIO_VOLUME: f32 = 0.7;
+const DEFAULT_AUDIO_SPATIAL_FALLOFF_POWER: f32 = AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT;
 const DEFAULT_MAIN_MENU_SERVER_ADDRESS: &str = "c-gateway.computer-whisperer.network:4000";
 const MAX_HOTBAR_SLOT_INDEX: usize = 8;
 
@@ -23,6 +24,7 @@ pub(super) struct CliOverrides {
     pub layers: bool,
     pub player_name: bool,
     pub audio_volume: bool,
+    pub audio_spatial_falloff_power: bool,
     pub vte_y_slice_lookup_cache: bool,
     pub vte_integral_sky_emissive_tweak: bool,
     pub vte_integral_sky_scale: bool,
@@ -44,6 +46,11 @@ impl CliOverrides {
             layers: arg_present(&raw_args, "--layers", None),
             player_name: arg_present(&raw_args, "--player-name", None),
             audio_volume: arg_present(&raw_args, "--audio-volume", None),
+            audio_spatial_falloff_power: arg_present(
+                &raw_args,
+                "--audio-spatial-falloff-power",
+                None,
+            ),
             vte_y_slice_lookup_cache: arg_present(&raw_args, "--vte-y-slice-lookup-cache", None),
             vte_integral_sky_emissive_tweak: arg_present(
                 &raw_args,
@@ -91,6 +98,7 @@ pub(super) struct PersistedSettings {
     pub render_height: u32,
     pub render_layers: u32,
     pub audio_volume: f32,
+    pub audio_spatial_falloff_power: f32,
     pub vte_y_slice_lookup_cache_enabled: bool,
     pub vte_integral_sky_emissive_enabled: bool,
     pub vte_integral_sky_scale: f32,
@@ -120,6 +128,7 @@ impl Default for PersistedSettings {
             render_height: DEFAULT_RENDER_HEIGHT,
             render_layers: DEFAULT_RENDER_LAYERS,
             audio_volume: DEFAULT_AUDIO_VOLUME,
+            audio_spatial_falloff_power: DEFAULT_AUDIO_SPATIAL_FALLOFF_POWER,
             vte_y_slice_lookup_cache_enabled: true,
             vte_integral_sky_emissive_enabled: true,
             vte_integral_sky_scale: 0.25,
@@ -158,6 +167,10 @@ impl PersistedSettings {
         self.render_height = self.render_height.clamp(128, 2160);
         self.render_layers = self.render_layers.clamp(1, 512);
         self.audio_volume = self.audio_volume.clamp(0.0, 2.0);
+        self.audio_spatial_falloff_power = self.audio_spatial_falloff_power.clamp(
+            AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+            AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+        );
         self.vte_integral_sky_scale = self
             .vte_integral_sky_scale
             .clamp(VTE_INTEGRAL_SKY_SCALE_MIN, VTE_INTEGRAL_SKY_SCALE_MAX);
@@ -313,6 +326,9 @@ pub(super) fn apply_settings_to_args(
     if !cli_overrides.audio_volume {
         args.audio_volume = settings.audio_volume;
     }
+    if !cli_overrides.audio_spatial_falloff_power {
+        args.audio_spatial_falloff_power = settings.audio_spatial_falloff_power;
+    }
     if !cli_overrides.player_name && args.player_name.is_none() {
         args.player_name = Some(settings.main_menu_player_name.clone());
     }
@@ -366,6 +382,10 @@ impl App {
         self.pending_render_height = self.args.height;
         self.pending_render_layers = self.args.layers;
         self.audio.master_volume = self.args.audio_volume.clamp(0.0, 2.0);
+        self.audio.spatial_falloff_power = self.args.audio_spatial_falloff_power.clamp(
+            AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+            AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+        );
     }
 
     pub(super) fn capture_persisted_settings(&self) -> PersistedSettings {
@@ -384,6 +404,7 @@ impl App {
             render_height: self.args.height,
             render_layers: self.args.layers,
             audio_volume: self.audio.master_volume,
+            audio_spatial_falloff_power: self.audio.spatial_falloff_power,
             vte_y_slice_lookup_cache_enabled: self.vte_y_slice_lookup_cache_enabled,
             vte_integral_sky_emissive_enabled: self.vte_integral_sky_emissive_enabled,
             vte_integral_sky_scale: self.vte_integral_sky_scale,

@@ -61,6 +61,36 @@ impl App {
         }
     }
 
+    pub(super) fn play_spatial_sound(
+        &self,
+        effect: SoundEffect,
+        emitter_position: [f32; 4],
+        scale: f32,
+    ) {
+        self.audio.play_spatial_scaled(
+            effect,
+            scale,
+            self.camera.position,
+            self.current_view_basis(),
+            emitter_position,
+        );
+    }
+
+    pub(super) fn play_spatial_sound_voxel(
+        &self,
+        effect: SoundEffect,
+        voxel_position: [i32; 4],
+        scale: f32,
+    ) {
+        self.audio.play_spatial_voxel_scaled(
+            effect,
+            scale,
+            self.camera.position,
+            self.current_view_basis(),
+            voxel_position,
+        );
+    }
+
     pub(super) fn current_y_inverted(&self) -> bool {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.is_y_inverted_upright(),

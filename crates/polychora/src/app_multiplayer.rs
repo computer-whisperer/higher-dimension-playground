@@ -501,6 +501,16 @@ fn summarize_payloads_compact(payloads: &[ChunkPayload]) -> String {
     out
 }
 
+fn remote_entity_speed_xzw(entity: &RemoteEntityState) -> f32 {
+    let speed_sq = entity.velocity[0] * entity.velocity[0]
+        + entity.velocity[2] * entity.velocity[2]
+        + entity.velocity[3] * entity.velocity[3];
+    if speed_sq.is_finite() {
+        speed_sq.sqrt()
+    } else {
+        0.0
+    }
+}
 impl App {
     fn multiplayer_stream_tree_diag_kind_enabled(&self, kind: RegionTreeDiagKind) -> bool {
         match kind {
@@ -601,7 +611,7 @@ impl App {
         let pos_alpha = 1.0 - (-REMOTE_PLAYER_POSITION_SMOOTH_HZ * dt).exp();
         let look_alpha = 1.0 - (-REMOTE_PLAYER_LOOK_SMOOTH_HZ * dt).exp();
         let listener_position = self.camera.position;
-        let mut footstep_scales = Vec::new();
+        let mut footstep_events: Vec<([f32; 4], f32)> = Vec::new();
         for player in self.remote_players.values_mut() {
             let previous_render_position = player.render_position;
             let network_age = now.duration_since(player.last_received_at).as_secs_f32();
@@ -652,7 +662,7 @@ impl App {
 
             player.footstep_distance_accum += moved_xzw;
             while player.footstep_distance_accum >= FOOTSTEP_DISTANCE_WALK {
-                if footstep_scales.len() >= REMOTE_FOOTSTEP_MAX_PER_FRAME {
+                if footstep_events.len() >= REMOTE_FOOTSTEP_MAX_PER_FRAME {
                     player.footstep_distance_accum = 0.0;
                     break;
                 }
@@ -664,15 +674,15 @@ impl App {
                     let distance_gain = distance_t * distance_t;
                     let speed_gain =
                         (moved_speed_xzw / REMOTE_PLAYER_MAX_PREDICTED_SPEED).clamp(0.30, 1.0);
-                    let gain = (distance_gain * speed_gain).clamp(0.05, 0.65);
-                    footstep_scales.push(gain);
+                    let gain = (distance_gain * speed_gain).clamp(0.08, 0.75);
+                    footstep_events.push((player.render_position, gain));
                 }
                 player.footstep_distance_accum -= FOOTSTEP_DISTANCE_WALK;
             }
         }
 
-        for scale in footstep_scales {
-            self.audio.play_scaled(SoundEffect::Footstep, scale);
+        for (position, scale) in footstep_events {
+            self.play_spatial_sound(SoundEffect::Footstep, position, scale);
         }
     }
 
@@ -1571,10 +1581,9 @@ impl App {
                 let distance = distance4(self.camera.position, position);
                 if distance <= max_distance {
                     let distance_t = 1.0 - (distance / max_distance).clamp(0.0, 1.0);
-                    let distance_gain = distance_t * distance_t;
                     let radius_gain = (radius / 2.5).clamp(0.6, 1.6);
-                    self.audio
-                        .play_scaled(SoundEffect::Break, distance_gain * radius_gain * 1.4);
+                    let gain = (distance_t * radius_gain * 1.2).clamp(0.1, 2.0);
+                    self.play_spatial_sound(SoundEffect::Explosion, position, gain);
                 }
             }
             multiplayer::ServerMessage::PlayerMovementModifier {
@@ -1664,7 +1673,7 @@ impl App {
     pub(super) fn remote_entity_instances(&self) -> Vec<common::ModelInstance> {
         let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
         ids.sort_unstable();
-        let mut instances = Vec::with_capacity(ids.len() * 8);
+        let mut instances = Vec::with_capacity(ids.len() * 18);
         for entity_id in ids {
             if let Some(entity) = self.remote_entities.get(&entity_id) {
                 if !vec4_is_finite(entity.render_position)
@@ -1732,49 +1741,248 @@ impl App {
                     }
                     multiplayer::EntityKind::MobSeeker => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        instances.push(build_centered_model_instance(
+                        let speed = remote_entity_speed_xzw(entity);
+                        let stride = (speed / 3.6).clamp(0.0, 1.35);
+                        let anim_t = entity.last_received_at.elapsed().as_secs_f32()
+                            * (2.9 + stride * 4.8)
+                            + entity_id as f32 * 0.31;
+                        let bob = (0.02 + 0.035 * stride) * (anim_t * 0.9).sin();
+                        let pulse = ((anim_t * 1.1).sin() * 0.5 + 0.5).powf(1.6);
+                        let core_center = offset_point_along_basis(
                             entity.render_position,
                             &basis,
+                            [0.0, 0.06 + bob, 0.0, 0.0],
+                        );
+                        let pulse_bias = if pulse > 0.66 { 8u8 } else { 6u8 };
+                        instances.push(build_centered_model_instance(
+                            core_center,
+                            &basis,
                             [
-                                entity.scale * 0.48,
-                                entity.scale * 1.25,
-                                entity.scale * 0.58,
-                                entity.scale * 1.12,
+                                entity.scale * 0.54,
+                                entity.scale * 0.52,
+                                entity.scale * 0.74,
+                                entity.scale * 0.56,
                             ],
                             [
-                                (entity.material.saturating_add(1)) as u32,
                                 entity.material as u32,
+                                (entity.material.saturating_add(1)) as u32,
                                 (entity.material.saturating_add(2)) as u32,
                                 entity.material as u32,
                                 (entity.material.saturating_add(3)) as u32,
                                 entity.material as u32,
-                                (entity.material.saturating_add(1)) as u32,
+                                (entity.material.saturating_add(4)) as u32,
                                 entity.material as u32,
                             ],
                         ));
+
+                        let prow_center =
+                            offset_point_along_basis(core_center, &basis, [0.0, 0.08, 0.47, 0.0]);
+                        instances.push(build_centered_model_instance(
+                            prow_center,
+                            &basis,
+                            [
+                                entity.scale * 0.30,
+                                entity.scale * 0.26,
+                                entity.scale * 0.30,
+                                entity.scale * 0.26,
+                            ],
+                            [
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(pulse_bias)) as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(pulse_bias)) as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(pulse_bias)) as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(pulse_bias)) as u32,
+                            ],
+                        ));
+
+                        let fin_specs = [
+                            ([0.0, 0.18, 0.05, 0.34], [0.14, 0.30, 0.44, 0.12], 5u8),
+                            ([0.0, 0.18, 0.05, -0.34], [0.14, 0.30, 0.44, 0.12], 5u8),
+                        ];
+                        for (offset, scales, bias) in fin_specs {
+                            let fin_center = offset_point_along_basis(core_center, &basis, offset);
+                            instances.push(build_centered_model_instance(
+                                fin_center,
+                                &basis,
+                                [
+                                    entity.scale * scales[0],
+                                    entity.scale * scales[1],
+                                    entity.scale * scales[2],
+                                    entity.scale * scales[3],
+                                ],
+                                [
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(bias)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(2)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(bias)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(2)) as u32,
+                                ],
+                            ));
+                        }
+
+                        let pod_specs = [
+                            ([0.34, -0.19, 0.18, 0.18], 0.0f32),
+                            ([-0.34, -0.19, -0.18, -0.18], std::f32::consts::PI),
+                            ([0.34, -0.19, -0.18, 0.18], std::f32::consts::FRAC_PI_2),
+                            (
+                                [-0.34, -0.19, 0.18, -0.18],
+                                std::f32::consts::PI + std::f32::consts::FRAC_PI_2,
+                            ),
+                        ];
+                        for (mut offset, phase) in pod_specs {
+                            let swing = (anim_t * 1.8 + phase).sin();
+                            let lift = (anim_t * 1.8 + phase).sin().max(0.0);
+                            offset[2] += 0.11 * stride * swing;
+                            offset[1] += 0.08 * stride * lift;
+                            let pod_center = offset_point_along_basis(core_center, &basis, offset);
+                            instances.push(build_centered_model_instance(
+                                pod_center,
+                                &basis,
+                                [
+                                    entity.scale * 0.18,
+                                    entity.scale * 0.24,
+                                    entity.scale * 0.18,
+                                    entity.scale * 0.16,
+                                ],
+                                [
+                                    (entity.material.saturating_add(1)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(3)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(1)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(3)) as u32,
+                                    entity.material as u32,
+                                ],
+                            ));
+                        }
                     }
                     multiplayer::EntityKind::MobCreeper4d => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        instances.push(build_centered_model_instance(
+                        let speed = remote_entity_speed_xzw(entity);
+                        let stride = (speed / 3.2).clamp(0.0, 1.45);
+                        let anim_t = entity.last_received_at.elapsed().as_secs_f32()
+                            * (2.4 + stride * 4.2)
+                            + entity_id as f32 * 0.29;
+                        let charge = ((anim_t * 0.8).sin() * 0.5 + 0.5).powf(1.8);
+                        let charge_bias = if charge > 0.70 { 9u8 } else { 7u8 };
+                        let body_center = offset_point_along_basis(
                             entity.render_position,
                             &basis,
+                            [0.0, 0.05 + 0.03 * (anim_t * 0.7).sin(), 0.0, 0.0],
+                        );
+                        instances.push(build_centered_model_instance(
+                            body_center,
+                            &basis,
                             [
-                                entity.scale * 0.92,
-                                entity.scale * 1.18,
-                                entity.scale * 0.92,
-                                entity.scale * 1.18,
+                                entity.scale * 0.86,
+                                entity.scale * 0.94,
+                                entity.scale * 0.84,
+                                entity.scale * 0.98,
                             ],
                             [
-                                (entity.material.saturating_add(5)) as u32,
-                                (entity.material.saturating_add(1)) as u32,
                                 (entity.material.saturating_add(3)) as u32,
+                                (entity.material.saturating_add(1)) as u32,
+                                (entity.material.saturating_add(4)) as u32,
                                 entity.material as u32,
-                                (entity.material.saturating_add(6)) as u32,
+                                (entity.material.saturating_add(5)) as u32,
                                 (entity.material.saturating_add(2)) as u32,
                                 (entity.material.saturating_add(4)) as u32,
                                 entity.material as u32,
                             ],
                         ));
+
+                        let head_center = offset_point_along_basis(
+                            body_center,
+                            &basis,
+                            [0.0, 0.58 + 0.04 * (anim_t * 0.6).sin(), 0.0, 0.0],
+                        );
+                        instances.push(build_centered_model_instance(
+                            head_center,
+                            &basis,
+                            [
+                                entity.scale * 0.52,
+                                entity.scale * 0.40,
+                                entity.scale * 0.50,
+                                entity.scale * 0.58,
+                            ],
+                            [
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(charge_bias)) as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(charge_bias)) as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(charge_bias)) as u32,
+                                (entity.material.saturating_add(2)) as u32,
+                                (entity.material.saturating_add(charge_bias)) as u32,
+                            ],
+                        ));
+
+                        let vent_center =
+                            offset_point_along_basis(body_center, &basis, [0.0, 0.16, -0.40, 0.0]);
+                        instances.push(build_centered_model_instance(
+                            vent_center,
+                            &basis,
+                            [
+                                entity.scale * 0.46,
+                                entity.scale * 0.22,
+                                entity.scale * 0.24,
+                                entity.scale * 0.40,
+                            ],
+                            [
+                                (entity.material.saturating_add(6)) as u32,
+                                (entity.material.saturating_add(3)) as u32,
+                                (entity.material.saturating_add(6)) as u32,
+                                (entity.material.saturating_add(3)) as u32,
+                                (entity.material.saturating_add(6)) as u32,
+                                (entity.material.saturating_add(3)) as u32,
+                                (entity.material.saturating_add(6)) as u32,
+                                (entity.material.saturating_add(3)) as u32,
+                            ],
+                        ));
+
+                        let leg_specs = [
+                            ([0.38, -0.56, 0.30, 0.30], 0.0f32),
+                            ([-0.38, -0.56, -0.30, -0.30], std::f32::consts::PI),
+                            ([0.38, -0.56, -0.30, 0.30], std::f32::consts::FRAC_PI_2),
+                            (
+                                [-0.38, -0.56, 0.30, -0.30],
+                                std::f32::consts::PI + std::f32::consts::FRAC_PI_2,
+                            ),
+                        ];
+                        for (mut offset, phase) in leg_specs {
+                            let swing = (anim_t * 1.65 + phase).sin();
+                            let lift = swing.max(0.0);
+                            offset[2] += 0.12 * stride * swing;
+                            offset[1] += 0.10 * stride * lift;
+                            let leg_center = offset_point_along_basis(body_center, &basis, offset);
+                            instances.push(build_centered_model_instance(
+                                leg_center,
+                                &basis,
+                                [
+                                    entity.scale * 0.26,
+                                    entity.scale * 0.36,
+                                    entity.scale * 0.24,
+                                    entity.scale * 0.24,
+                                ],
+                                [
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(1)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(2)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(1)) as u32,
+                                    entity.material as u32,
+                                    (entity.material.saturating_add(2)) as u32,
+                                ],
+                            ));
+                        }
                     }
                     multiplayer::EntityKind::MobPhaseSpider => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
