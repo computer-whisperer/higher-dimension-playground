@@ -342,30 +342,9 @@ impl Scene {
         if max_nodes == 0 || !max_distance_world.is_finite() || max_distance_world <= 0.0 {
             return Vec::new();
         }
-        let active_distance = max_distance_world.max(VOXEL_NEAR_ACTIVE_DISTANCE);
-        let chunk_radius = (active_distance / CHUNK_SIZE as f32).ceil() as i32 + 1;
-        let chunk_size = CHUNK_SIZE as i32;
-        let cam_chunk = [
-            (ray_origin_world[0].floor() as i32).div_euclid(chunk_size),
-            (ray_origin_world[1].floor() as i32).div_euclid(chunk_size),
-            (ray_origin_world[2].floor() as i32).div_euclid(chunk_size),
-            (ray_origin_world[3].floor() as i32).div_euclid(chunk_size),
-        ];
-        let bounds = Aabb4i::new(
-            [
-                cam_chunk[0] - chunk_radius,
-                cam_chunk[1] - chunk_radius,
-                cam_chunk[2] - chunk_radius,
-                cam_chunk[3] - chunk_radius,
-            ],
-            [
-                cam_chunk[0] + chunk_radius,
-                cam_chunk[1] + chunk_radius,
-                cam_chunk[2] + chunk_radius,
-                cam_chunk[3] + chunk_radius,
-            ],
-        );
-        self.ensure_render_bvh_cache_for_bounds(bounds);
+        // Diagnostics must not mutate the active render cache: forcing a
+        // per-frame cache resize here can trigger pathological full snapshot
+        // rebuild loops in the main voxel path.
         self.render_bvh_cache
             .as_ref()
             .map(|bvh| {
