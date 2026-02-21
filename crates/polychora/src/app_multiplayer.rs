@@ -939,15 +939,17 @@ impl App {
         }
     }
 
-    fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
-        let center_chunk = world_chunk_from_position(position);
-        let target_radius_chunks =
-            world_request_radius_chunks_for_distance(self.vte_max_trace_distance);
-        let mut request_radius_chunks = if self.multiplayer_world_interest_bootstrap_pending {
-            target_radius_chunks.min(WORLD_INTEREST_BOOTSTRAP_MAX_RADIUS_CHUNKS.max(1))
-        } else {
-            target_radius_chunks
-        };
+fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
+    let center_chunk = world_chunk_from_position(position);
+    let target_radius_chunks =
+        world_request_radius_chunks_for_distance(self.vte_max_trace_distance);
+    let mut request_radius_chunks = target_radius_chunks;
+    // Only ramp while bootstrapping an initial connection.
+    // After bootstrap, send the full requested radius directly to avoid cascading
+    // intermediate shell patches when users adjust render distance.
+    if self.multiplayer_world_interest_bootstrap_pending {
+        request_radius_chunks =
+            target_radius_chunks.min(WORLD_INTEREST_BOOTSTRAP_MAX_RADIUS_CHUNKS.max(1));
         if let Some(last_radius) = self.multiplayer_last_world_request_radius_chunks {
             if request_radius_chunks > last_radius {
                 request_radius_chunks = (last_radius + WORLD_INTEREST_RADIUS_RAMP_STEP_CHUNKS)
@@ -955,6 +957,7 @@ impl App {
                     .max(last_radius + 1);
             }
         }
+    }
         let radius_changed = self
             .multiplayer_last_world_request_radius_chunks
             .map(|last| request_radius_chunks != last)
@@ -1266,11 +1269,10 @@ impl App {
             self.scene.apply_region_patch_fast(patch_bounds, &patch)
         };
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
-        let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
-            || self.multiplayer_stream_tree_compare_diag_enabled
-            || self.multiplayer_stream_tree_diag_labels_enabled)
-            && scene_patch_stats.changed_chunks > 0
-        {
+    let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
+        || self.multiplayer_stream_tree_compare_diag_enabled)
+        && scene_patch_stats.changed_chunks > 0
+    {
             let diag_splice_start = Instant::now();
             let _ = self
                 .multiplayer_stream_tree_diag
