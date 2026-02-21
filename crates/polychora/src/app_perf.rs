@@ -44,6 +44,35 @@ impl App {
         self.profile_gpu_ms_sum = 0.0;
         self.profile_gpu_ms_max = 0.0;
         self.profile_gpu_samples = 0;
+        self.profile_cpu_phase_window = RuntimeCpuPhaseWindow::default();
+    }
+
+    pub(super) fn begin_runtime_profile_frame(&mut self) {
+        self.profile_cpu_phase_current = RuntimeCpuPhaseMetrics::default();
+    }
+
+    pub(super) fn set_runtime_profile_update_ms(&mut self, elapsed_ms: f64) {
+        self.profile_cpu_phase_current.update_ms = elapsed_ms.max(0.0);
+    }
+
+    pub(super) fn set_runtime_profile_voxel_build_ms(&mut self, elapsed_ms: f64) {
+        self.profile_cpu_phase_current.voxel_build_ms = elapsed_ms.max(0.0);
+    }
+
+    pub(super) fn set_runtime_profile_render_submit_ms(&mut self, elapsed_ms: f64) {
+        self.profile_cpu_phase_current.render_submit_ms = elapsed_ms.max(0.0);
+    }
+
+    pub(super) fn set_runtime_profile_post_render_ms(&mut self, elapsed_ms: f64) {
+        self.profile_cpu_phase_current.post_render_ms = elapsed_ms.max(0.0);
+    }
+
+    pub(super) fn note_runtime_profile_multiplayer_patch(&mut self, elapsed_ms: f64) {
+        self.profile_cpu_phase_current.multiplayer_patch_ms += elapsed_ms.max(0.0);
+        self.profile_cpu_phase_current.multiplayer_patch_count = self
+            .profile_cpu_phase_current
+            .multiplayer_patch_count
+            .saturating_add(1);
     }
 
     pub(super) fn begin_perf_suite_phase(&mut self, announce: bool) {
@@ -315,6 +344,39 @@ impl App {
         self.profile_frame_samples = self.profile_frame_samples.saturating_add(1);
         self.profile_client_cpu_ms_sum += client_cpu_ms;
         self.profile_client_cpu_ms_max = self.profile_client_cpu_ms_max.max(client_cpu_ms);
+        self.profile_cpu_phase_window.update_sum_ms += self.profile_cpu_phase_current.update_ms;
+        self.profile_cpu_phase_window.update_max_ms = self
+            .profile_cpu_phase_window
+            .update_max_ms
+            .max(self.profile_cpu_phase_current.update_ms);
+        self.profile_cpu_phase_window.voxel_build_sum_ms +=
+            self.profile_cpu_phase_current.voxel_build_ms;
+        self.profile_cpu_phase_window.voxel_build_max_ms = self
+            .profile_cpu_phase_window
+            .voxel_build_max_ms
+            .max(self.profile_cpu_phase_current.voxel_build_ms);
+        self.profile_cpu_phase_window.render_submit_sum_ms +=
+            self.profile_cpu_phase_current.render_submit_ms;
+        self.profile_cpu_phase_window.render_submit_max_ms = self
+            .profile_cpu_phase_window
+            .render_submit_max_ms
+            .max(self.profile_cpu_phase_current.render_submit_ms);
+        self.profile_cpu_phase_window.post_render_sum_ms +=
+            self.profile_cpu_phase_current.post_render_ms;
+        self.profile_cpu_phase_window.post_render_max_ms = self
+            .profile_cpu_phase_window
+            .post_render_max_ms
+            .max(self.profile_cpu_phase_current.post_render_ms);
+        self.profile_cpu_phase_window.multiplayer_patch_sum_ms +=
+            self.profile_cpu_phase_current.multiplayer_patch_ms;
+        self.profile_cpu_phase_window.multiplayer_patch_max_ms = self
+            .profile_cpu_phase_window
+            .multiplayer_patch_max_ms
+            .max(self.profile_cpu_phase_current.multiplayer_patch_ms);
+        self.profile_cpu_phase_window.multiplayer_patch_count_sum = self
+            .profile_cpu_phase_window
+            .multiplayer_patch_count_sum
+            .saturating_add(self.profile_cpu_phase_current.multiplayer_patch_count as u64);
 
         if let Some(rcx) = self.rcx.as_ref() {
             let gpu_ms = rcx.last_gpu_frame_ms().max(0.0) as f64;
@@ -331,6 +393,20 @@ impl App {
             let frame_samples = self.profile_frame_samples as f64;
             let client_avg_ms = self.profile_client_cpu_ms_sum / frame_samples;
             let client_max_ms = self.profile_client_cpu_ms_max;
+            let update_avg_ms = self.profile_cpu_phase_window.update_sum_ms / frame_samples;
+            let voxel_build_avg_ms =
+                self.profile_cpu_phase_window.voxel_build_sum_ms / frame_samples;
+            let render_submit_avg_ms =
+                self.profile_cpu_phase_window.render_submit_sum_ms / frame_samples;
+            let post_render_avg_ms =
+                self.profile_cpu_phase_window.post_render_sum_ms / frame_samples;
+            let multiplayer_patch_avg_ms =
+                self.profile_cpu_phase_window.multiplayer_patch_sum_ms / frame_samples;
+            let multiplayer_patch_avg_count =
+                self.profile_cpu_phase_window.multiplayer_patch_count_sum as f64 / frame_samples;
+            let instrumented_avg_ms =
+                update_avg_ms + voxel_build_avg_ms + render_submit_avg_ms + post_render_avg_ms;
+            let unattributed_avg_ms = (client_avg_ms - instrumented_avg_ms).max(0.0);
             let (gpu_avg_ms, gpu_max_ms, gpu_samples) = if self.profile_gpu_samples > 0 {
                 (
                     self.profile_gpu_ms_sum / self.profile_gpu_samples as f64,
@@ -342,18 +418,44 @@ impl App {
             };
             if gpu_samples > 0 {
                 eprintln!(
-                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu avg={:.3}ms max={:.3}ms samples={}",
+                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu avg={:.3}ms max={:.3}ms samples={} | cpu-phases update avg={:.3}ms max={:.3}ms voxel-build avg={:.3}ms max={:.3}ms render-submit avg={:.3}ms max={:.3}ms post-render avg={:.3}ms max={:.3}ms mp-patch avg={:.3}ms max={:.3}ms patches/frame={:.3} unattributed avg={:.3}ms",
                     client_avg_ms,
                     client_max_ms,
                     self.profile_frame_samples,
                     gpu_avg_ms,
                     gpu_max_ms,
                     gpu_samples,
+                    update_avg_ms,
+                    self.profile_cpu_phase_window.update_max_ms,
+                    voxel_build_avg_ms,
+                    self.profile_cpu_phase_window.voxel_build_max_ms,
+                    render_submit_avg_ms,
+                    self.profile_cpu_phase_window.render_submit_max_ms,
+                    post_render_avg_ms,
+                    self.profile_cpu_phase_window.post_render_max_ms,
+                    multiplayer_patch_avg_ms,
+                    self.profile_cpu_phase_window.multiplayer_patch_max_ms,
+                    multiplayer_patch_avg_count,
+                    unattributed_avg_ms,
                 );
             } else {
                 eprintln!(
-                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu unavailable",
-                    client_avg_ms, client_max_ms, self.profile_frame_samples,
+                    "profile client-cpu avg={:.3}ms max={:.3}ms frames={} | render-gpu unavailable | cpu-phases update avg={:.3}ms max={:.3}ms voxel-build avg={:.3}ms max={:.3}ms render-submit avg={:.3}ms max={:.3}ms post-render avg={:.3}ms max={:.3}ms mp-patch avg={:.3}ms max={:.3}ms patches/frame={:.3} unattributed avg={:.3}ms",
+                    client_avg_ms,
+                    client_max_ms,
+                    self.profile_frame_samples,
+                    update_avg_ms,
+                    self.profile_cpu_phase_window.update_max_ms,
+                    voxel_build_avg_ms,
+                    self.profile_cpu_phase_window.voxel_build_max_ms,
+                    render_submit_avg_ms,
+                    self.profile_cpu_phase_window.render_submit_max_ms,
+                    post_render_avg_ms,
+                    self.profile_cpu_phase_window.post_render_max_ms,
+                    multiplayer_patch_avg_ms,
+                    self.profile_cpu_phase_window.multiplayer_patch_max_ms,
+                    multiplayer_patch_avg_count,
+                    unattributed_avg_ms,
                 );
             }
         }

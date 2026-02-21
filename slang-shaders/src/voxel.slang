@@ -159,7 +159,7 @@ struct VoxelFrameMeta
     uint maxTraceSteps;
     float maxTraceDistance;
     uint regionBvhNodeCount;
-    uint reserved0;
+    uint regionBvhRootIndex;
     uint leafChunkEntryCount;
     uint stageBMode;
     uint stageBSliceLayer;
@@ -1293,7 +1293,11 @@ uint findLeafIndexForChunkCoord(int4 chunkCoord, VoxelFrameMeta meta)
 
     uint stack[64];
     int stackPtr = 0;
-    stack[stackPtr++] = meta.regionBvhNodeCount - 1u;
+    if (meta.regionBvhRootIndex >= meta.regionBvhNodeCount)
+    {
+        return INVALID_INDEX;
+    }
+    stack[stackPtr++] = meta.regionBvhRootIndex;
 
     while (stackPtr > 0)
     {
@@ -2036,7 +2040,11 @@ bool traceVoxelRayDDA(
     bool useSlabChunkInterval = collectDebugFlags
         || (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) != 0u;
 
-    uint rootIndex = meta.regionBvhNodeCount - 1u;
+    if (meta.regionBvhRootIndex >= meta.regionBvhNodeCount)
+    {
+        return false;
+    }
+    uint rootIndex = meta.regionBvhRootIndex;
     VoxelChunkBvhNode rootNode = voxelChunkBvhNodes[rootIndex];
     float4 rootBMin = float4(
         float(rootNode.minChunkCoord.x) * chunkSizeF,

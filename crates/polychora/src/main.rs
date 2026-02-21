@@ -1036,6 +1036,8 @@ fn main() {
         profile_gpu_ms_sum: 0.0,
         profile_gpu_ms_max: 0.0,
         profile_gpu_samples: 0,
+        profile_cpu_phase_window: RuntimeCpuPhaseWindow::default(),
+        profile_cpu_phase_current: RuntimeCpuPhaseMetrics::default(),
         perf_suite_state,
         world_ready: initial_app_state == AppState::MainMenu,
         vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
@@ -1202,6 +1204,31 @@ enum LookAtTarget {
     Direction([f32; 4]),
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+struct RuntimeCpuPhaseMetrics {
+    update_ms: f64,
+    voxel_build_ms: f64,
+    render_submit_ms: f64,
+    post_render_ms: f64,
+    multiplayer_patch_ms: f64,
+    multiplayer_patch_count: u32,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct RuntimeCpuPhaseWindow {
+    update_sum_ms: f64,
+    update_max_ms: f64,
+    voxel_build_sum_ms: f64,
+    voxel_build_max_ms: f64,
+    render_submit_sum_ms: f64,
+    render_submit_max_ms: f64,
+    post_render_sum_ms: f64,
+    post_render_max_ms: f64,
+    multiplayer_patch_sum_ms: f64,
+    multiplayer_patch_max_ms: f64,
+    multiplayer_patch_count_sum: u64,
+}
+
 struct App {
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -1325,6 +1352,8 @@ struct App {
     profile_gpu_ms_sum: f64,
     profile_gpu_ms_max: f64,
     profile_gpu_samples: u32,
+    profile_cpu_phase_window: RuntimeCpuPhaseWindow,
+    profile_cpu_phase_current: RuntimeCpuPhaseMetrics,
     perf_suite_state: Option<PerfSuiteState>,
     world_ready: bool,
     vte_overlay_raster_enabled: bool,

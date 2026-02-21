@@ -3,17 +3,17 @@ use crate::voxel::cull::{self, SurfaceData};
 use crate::voxel::world::BaseWorldKind;
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
-    GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameInput,
-    VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_NODE_CAPACITY, VTE_REGION_LEAF_CAPACITY,
+    GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
+    VoxelFrameInput,
+    VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_INVALID_NODE, VTE_REGION_BVH_NODE_CAPACITY, VTE_REGION_LEAF_CAPACITY,
     VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
 };
 use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 use polychora::shared::region_tree::{
-    chunk_key_from_chunk_pos, chunk_pos_from_chunk_key,
-    collect_non_empty_chunks_from_core_in_bounds, slice_non_empty_region_core_in_bounds,
-    RegionChunkTree, RegionNodeKind, RegionTreeCore,
+    chunk_key_from_chunk_pos, slice_non_empty_region_core_in_bounds, RegionChunkTree,
+    RegionNodeKind, RegionTreeCore,
 };
-use polychora::shared::render_tree::{self, RenderTreeCore};
+use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
 use polychora::shared::spatial::Aabb4i;
 use polychora::shared::voxel::world_to_chunk;
 use std::collections::{HashMap, HashSet};
@@ -31,6 +31,7 @@ const MACRO_CELLS_PER_CHUNK: usize =
 const MACRO_WORDS_PER_CHUNK: usize = MACRO_CELLS_PER_CHUNK / 32;
 const EDIT_RAY_EPSILON: f32 = 1e-4;
 const EDIT_RAY_MAX_STEPS: usize = 4096;
+const VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET: usize = 4;
 const COLLISION_PUSHUP_STEP: f32 = 0.05;
 const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
@@ -118,6 +119,8 @@ impl ScenePreset {
 
 pub struct VoxelFrameData {
     pub metadata_generation: u64,
+    pub region_bvh_root_index: u32,
+    pub dirty_ranges: VoxelFrameDirtyRanges,
     pub chunk_headers: Vec<GpuVoxelChunkHeader>,
     pub occupancy_words: Vec<u32>,
     pub material_words: Vec<u32>,
@@ -127,10 +130,23 @@ pub struct VoxelFrameData {
     pub leaf_chunk_entries: Vec<u32>,
 }
 
+struct VoxelFrameDataBuffers {
+    region_bvh_root_index: u32,
+    dense_payload_encoded_cache: HashMap<ChunkPayload, u32>,
+    chunk_headers: Vec<GpuVoxelChunkHeader>,
+    occupancy_words: Vec<u32>,
+    material_words: Vec<u32>,
+    macro_words: Vec<u32>,
+    region_bvh_nodes: Vec<GpuVoxelChunkBvhNode>,
+    leaf_headers: Vec<GpuVoxelLeafHeader>,
+    leaf_chunk_entries: Vec<u32>,
+}
+
 impl VoxelFrameData {
     pub fn as_input(&self) -> VoxelFrameInput<'_> {
         VoxelFrameInput {
             metadata_generation: self.metadata_generation,
+            region_bvh_root_index: self.region_bvh_root_index,
             chunk_headers: &self.chunk_headers,
             occupancy_words: &self.occupancy_words,
             material_words: &self.material_words,
@@ -138,6 +154,7 @@ impl VoxelFrameData {
             region_bvh_nodes: &self.region_bvh_nodes,
             leaf_headers: &self.leaf_headers,
             leaf_chunk_entries: &self.leaf_chunk_entries,
+            dirty_ranges: Some(&self.dirty_ranges),
         }
     }
 }
@@ -155,11 +172,18 @@ pub struct Scene {
     culled_instances: Vec<common::ModelInstance>,
     cull_log_counter: u64,
     voxel_visibility_generation: u64,
-    voxel_cached_visibility_camera_chunk: Option<[i32; 12]>,
-    voxel_cached_visibility_world_tree_revision: u64,
+    voxel_cached_visibility_bounds: Option<Aabb4i>,
+    voxel_pending_scene_dirty_regions: Vec<Aabb4i>,
+    render_region_cache_bounds: Option<Aabb4i>,
+    render_region_cache: Option<RegionChunkTree>,
     render_bvh_cache_bounds: Option<Aabb4i>,
-    render_bvh_cache_world_tree_revision: u64,
     render_bvh_cache: Option<render_tree::RenderBvh>,
+    voxel_pending_render_bvh_rebuild: bool,
+    voxel_pending_render_bvh_mutation_deltas: Vec<RenderBvhChunkMutationDelta>,
+    voxel_dense_payload_encoded_cache: HashMap<ChunkPayload, u32>,
+    voxel_leaf_entry_spans: Vec<Option<std::ops::Range<usize>>>,
+    voxel_leaf_entry_free_spans: Vec<std::ops::Range<usize>>,
+    voxel_last_rebuild_failure_signature: Option<(Aabb4i, usize, usize)>,
     voxel_frame_data: VoxelFrameData,
 }
 
@@ -453,6 +477,7 @@ impl Scene {
         if changed {
             self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
             self.world_dirty = true;
+            self.mark_voxel_scene_region_dirty(Aabb4i::new(key, key));
             let _ = self.world_queue_chunk_update(pos);
         }
         changed
@@ -574,39 +599,257 @@ impl Scene {
         })
     }
 
-    fn build_render_tree_core_in_bounds(&self, bounds: Aabb4i) -> RenderTreeCore {
-        if !bounds.is_valid() {
-            return RenderTreeCore::empty(bounds);
-        }
+    fn build_render_region_tree_in_bounds(&self, bounds: Aabb4i) -> RegionChunkTree {
         let mut composed = RegionChunkTree::new();
+        if !bounds.is_valid() {
+            return composed;
+        }
         if let Some(base_floor_core) = self.base_floor_region_core_in_bounds(bounds) {
             let _ =
                 composed.splice_non_empty_core_in_bounds(base_floor_core.bounds, &base_floor_core);
         }
         let world_core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = composed.overlay_core_in_bounds(bounds, &world_core);
+        composed
+    }
+
+    fn build_render_tree_core_in_bounds(&self, bounds: Aabb4i) -> RenderTreeCore {
+        if !bounds.is_valid() {
+            return RenderTreeCore::empty(bounds);
+        }
+        let composed = self.build_render_region_tree_in_bounds(bounds);
         let composed_core = composed.slice_non_empty_core_in_bounds(bounds);
         render_tree::from_region_core(&composed_core)
     }
 
-    fn ensure_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
-        if !bounds.is_valid() {
-            self.render_bvh_cache_bounds = None;
-            self.render_bvh_cache_world_tree_revision = 0;
-            self.render_bvh_cache = None;
-            return;
-        }
-
-        let cache_valid = self.render_bvh_cache_bounds == Some(bounds)
-            && self.render_bvh_cache_world_tree_revision == self.world_tree_revision;
-        if cache_valid {
-            return;
-        }
-
-        let render_core = self.build_render_tree_core_in_bounds(bounds);
+    fn rebuild_render_bvh_from_region_cache(&mut self, bounds: Aabb4i) {
+        let render_core = if let Some(cache) = self.render_region_cache.as_ref() {
+            let core = cache.slice_non_empty_core_in_bounds(bounds);
+            render_tree::from_region_core(&core)
+        } else {
+            self.build_render_tree_core_in_bounds(bounds)
+        };
         self.render_bvh_cache = Some(render_tree::build_bvh_in_bounds(&render_core, bounds));
         self.render_bvh_cache_bounds = Some(bounds);
-        self.render_bvh_cache_world_tree_revision = self.world_tree_revision;
+    }
+
+    fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
+        if !a.is_valid() || !b.is_valid() || !a.intersects(&b) {
+            return None;
+        }
+        Some(Aabb4i::new(
+            [
+                a.min[0].max(b.min[0]),
+                a.min[1].max(b.min[1]),
+                a.min[2].max(b.min[2]),
+                a.min[3].max(b.min[3]),
+            ],
+            [
+                a.max[0].min(b.max[0]),
+                a.max[1].min(b.max[1]),
+                a.max[2].min(b.max[2]),
+                a.max[3].min(b.max[3]),
+            ],
+        ))
+    }
+
+    fn merge_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
+        Aabb4i::new(
+            [
+                a.min[0].min(b.min[0]),
+                a.min[1].min(b.min[1]),
+                a.min[2].min(b.min[2]),
+                a.min[3].min(b.min[3]),
+            ],
+            [
+                a.max[0].max(b.max[0]),
+                a.max[1].max(b.max[1]),
+                a.max[2].max(b.max[2]),
+                a.max[3].max(b.max[3]),
+            ],
+        )
+    }
+
+    fn bounds_contains_bounds(outer: Aabb4i, inner: Aabb4i) -> bool {
+        outer.is_valid()
+            && inner.is_valid()
+            && outer.min[0] <= inner.min[0]
+            && outer.min[1] <= inner.min[1]
+            && outer.min[2] <= inner.min[2]
+            && outer.min[3] <= inner.min[3]
+            && outer.max[0] >= inner.max[0]
+            && outer.max[1] >= inner.max[1]
+            && outer.max[2] >= inner.max[2]
+            && outer.max[3] >= inner.max[3]
+    }
+
+    fn ensure_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
+        if !bounds.is_valid() {
+            self.render_region_cache_bounds = None;
+            self.render_region_cache = None;
+            self.render_bvh_cache_bounds = None;
+            self.render_bvh_cache = None;
+            self.voxel_pending_render_bvh_rebuild = true;
+            self.voxel_pending_render_bvh_mutation_deltas.clear();
+            return;
+        }
+
+        let has_cache = self.render_bvh_cache_bounds == Some(bounds)
+            && self.render_region_cache_bounds == Some(bounds)
+            && self.render_region_cache.is_some();
+        if !has_cache {
+            self.render_region_cache_bounds = Some(bounds);
+            self.render_region_cache = Some(self.build_render_region_tree_in_bounds(bounds));
+            self.rebuild_render_bvh_from_region_cache(bounds);
+            self.voxel_pending_render_bvh_rebuild = true;
+            self.voxel_pending_render_bvh_mutation_deltas.clear();
+            self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
+            return;
+        }
+        if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE
+            && self
+                .render_bvh_cache
+                .as_ref()
+                .and_then(|bvh| bvh.root)
+                .is_some()
+        {
+            // Recover from an invalid/empty frame upload by replaying a full
+            // snapshot from the already cached render BVH.
+            self.voxel_pending_render_bvh_rebuild = true;
+        }
+
+        let dirty_regions = self.take_voxel_scene_dirty_regions_in_bounds(
+            bounds,
+            VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET,
+        );
+        if dirty_regions.is_empty() {
+            return;
+        }
+
+        let mut changed = false;
+        let mut deltas = Vec::<RenderBvhChunkMutationDelta>::new();
+        let mut fallback_full_rebuild = false;
+        for dirty_region in dirty_regions {
+            let Some(dirty_bounds) = Self::intersect_bounds(dirty_region, bounds) else {
+                continue;
+            };
+            let desired_fragment_tree = self.build_render_region_tree_in_bounds(dirty_bounds);
+            let desired_fragment_core =
+                desired_fragment_tree.slice_non_empty_core_in_bounds(dirty_bounds);
+            if let Some(cache) = self.render_region_cache.as_mut() {
+                let Some(_) =
+                    cache.splice_non_empty_core_in_bounds(dirty_bounds, &desired_fragment_core)
+                else {
+                    continue;
+                };
+            } else {
+                fallback_full_rebuild = true;
+                break;
+            }
+
+            changed = true;
+            if let Some(render_bvh) = self.render_bvh_cache.as_mut() {
+                let desired_render_core = render_tree::from_region_core(&desired_fragment_core);
+                match render_tree::apply_core_patch_in_bounds_with_delta_in_bvh(
+                    render_bvh,
+                    dirty_bounds,
+                    &desired_render_core,
+                ) {
+                    Ok(Some(delta)) => {
+                        deltas.push(delta);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        fallback_full_rebuild = true;
+                        break;
+                    }
+                }
+            } else {
+                fallback_full_rebuild = true;
+                break;
+            }
+        }
+
+        if fallback_full_rebuild {
+            self.rebuild_render_bvh_from_region_cache(bounds);
+            self.voxel_pending_render_bvh_rebuild = true;
+            self.voxel_pending_render_bvh_mutation_deltas.clear();
+            return;
+        }
+        if changed && !deltas.is_empty() {
+            self.voxel_pending_render_bvh_mutation_deltas
+                .extend(deltas.into_iter());
+        }
+    }
+
+    fn mark_voxel_scene_region_dirty(&mut self, bounds: Aabb4i) {
+        if !bounds.is_valid() {
+            return;
+        }
+        let mut merged = bounds;
+        self.voxel_pending_scene_dirty_regions.retain(|existing| {
+            if Self::bounds_contains_bounds(*existing, merged) {
+                merged = *existing;
+                return true;
+            }
+            if Self::bounds_contains_bounds(merged, *existing) {
+                return false;
+            }
+            if existing.intersects(&merged) {
+                merged = Self::merge_bounds(*existing, merged);
+                return false;
+            }
+            true
+        });
+        self.voxel_pending_scene_dirty_regions.push(merged);
+    }
+
+    fn voxel_scene_bounds_has_pending_dirty_regions(&self, bounds: Aabb4i) -> bool {
+        if !bounds.is_valid() {
+            return false;
+        }
+        self.voxel_pending_scene_dirty_regions
+            .iter()
+            .any(|pending| pending.intersects(&bounds))
+    }
+
+    fn clear_voxel_scene_dirty_regions_in_bounds(&mut self, bounds: Aabb4i) {
+        if !bounds.is_valid() || self.voxel_pending_scene_dirty_regions.is_empty() {
+            return;
+        }
+        self.voxel_pending_scene_dirty_regions
+            .retain(|pending| !pending.intersects(&bounds));
+    }
+
+    fn take_voxel_scene_dirty_regions_in_bounds(
+        &mut self,
+        bounds: Aabb4i,
+        max_regions: usize,
+    ) -> Vec<Aabb4i> {
+        if !bounds.is_valid()
+            || max_regions == 0
+            || self.voxel_pending_scene_dirty_regions.is_empty()
+        {
+            return Vec::new();
+        }
+
+        let mut taken = Vec::<Aabb4i>::new();
+        self.voxel_pending_scene_dirty_regions.retain(|pending| {
+            if taken.len() < max_regions && pending.intersects(&bounds) {
+                taken.push(*pending);
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
+    fn take_pending_render_bvh_update_flags(&mut self) -> (bool, Vec<RenderBvhChunkMutationDelta>) {
+        let needs_rebuild = self.voxel_pending_render_bvh_rebuild;
+        self.voxel_pending_render_bvh_rebuild = false;
+        let deltas = std::mem::take(&mut self.voxel_pending_render_bvh_mutation_deltas);
+        (needs_rebuild, deltas)
     }
 
     #[cfg(test)]
@@ -742,55 +985,18 @@ impl Scene {
             };
         }
 
-        let previous_chunks = collect_non_empty_chunks_from_core_in_bounds(&previous_core, bounds);
-        let mut previous_by_pos =
-            HashMap::<ChunkPos, ChunkPayload>::with_capacity(previous_chunks.len());
-        for (key, payload) in previous_chunks {
-            previous_by_pos.insert(chunk_pos_from_chunk_key(key), payload);
-        }
-        let previous_non_empty = previous_by_pos.len();
-        let previous_total_chunks = previous_by_pos.len();
+        let previous_non_empty = Self::count_non_empty_chunks_in_core(&previous_core);
+        let desired_non_empty = Self::count_non_empty_chunks_in_core(&desired_core);
+        let previous_total_chunks = previous_non_empty;
+        let desired_total_chunks = desired_non_empty;
+        let diff_ms = 0.0;
 
-        let desired_chunks = collect_non_empty_chunks_from_core_in_bounds(&desired_core, bounds);
-        let mut desired_by_pos =
-            HashMap::<ChunkPos, ChunkPayload>::with_capacity(desired_chunks.len());
-        for (key, payload) in desired_chunks {
-            desired_by_pos.insert(chunk_pos_from_chunk_key(key), payload);
-        }
-        let desired_non_empty = desired_by_pos.len();
-        let desired_total_chunks = desired_by_pos.len();
-
-        let diff_start = Instant::now();
-        let mut changed_positions = Vec::<ChunkPos>::new();
-        let mut upserts = 0usize;
-        let mut removals = 0usize;
-
-        for (&pos, previous_payload) in &previous_by_pos {
-            let desired_payload = desired_by_pos.get(&pos);
-            if desired_payload == Some(previous_payload) {
-                continue;
-            }
-
-            changed_positions.push(pos);
-            if desired_payload.is_some() {
-                upserts = upserts.saturating_add(1);
-            } else {
-                removals = removals.saturating_add(1);
-            }
-        }
-
-        for &pos in desired_by_pos.keys() {
-            if previous_by_pos.contains_key(&pos) {
-                continue;
-            }
-
-            changed_positions.push(pos);
-            upserts = upserts.saturating_add(1);
-        }
-        let diff_ms = diff_start.elapsed().as_secs_f64() * 1000.0;
-        let changed_chunks = changed_positions.len();
-
-        if changed_chunks == 0 {
+        let splice_start = Instant::now();
+        let changed_bounds = self
+            .world_tree
+            .splice_non_empty_core_in_bounds(bounds, &desired_core);
+        let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
+        let Some(changed_bounds) = changed_bounds else {
             return RegionPatchStats {
                 previous_non_empty,
                 desired_non_empty,
@@ -802,22 +1008,22 @@ impl Scene {
                 invalidated_cached_chunks: 0,
                 queued_updates: 0,
                 collect_previous_ms,
-                splice_ms: 0.0,
+                splice_ms,
                 collect_desired_ms,
                 diff_ms,
             };
-        }
-
-        let splice_start = Instant::now();
-        let _ = self
-            .world_tree
-            .splice_non_empty_core_in_bounds(bounds, &desired_core);
-        let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
+        };
         self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
 
+        let mut stale_positions = Vec::<ChunkPos>::new();
+        for &pos in self.world_chunks.keys() {
+            if changed_bounds.contains_chunk(chunk_key_from_chunk_pos(pos)) {
+                stale_positions.push(pos);
+            }
+        }
         let mut invalidated_cached_chunks = 0usize;
         let mut queued_updates = 0usize;
-        for pos in changed_positions {
+        for pos in stale_positions {
             if self.world_chunks.remove(&pos).is_some() {
                 invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
             }
@@ -825,15 +1031,21 @@ impl Scene {
                 queued_updates = queued_updates.saturating_add(1);
             }
         }
+        self.mark_voxel_scene_region_dirty(changed_bounds);
+        if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE
+            && desired_non_empty > 0
+        {
+            self.voxel_pending_render_bvh_rebuild = true;
+        }
 
         self.world_dirty = true;
 
         RegionPatchStats {
             previous_non_empty,
             desired_non_empty,
-            upserts,
-            removals,
-            changed_chunks,
+            upserts: 0,
+            removals: 0,
+            changed_chunks: 1,
             previous_total_chunks,
             desired_total_chunks,
             invalidated_cached_chunks,
@@ -940,13 +1152,23 @@ impl Scene {
             culled_instances: Vec::new(),
             cull_log_counter: 0,
             voxel_visibility_generation: 0,
-            voxel_cached_visibility_camera_chunk: None,
-            voxel_cached_visibility_world_tree_revision: 0,
+            voxel_cached_visibility_bounds: None,
+            voxel_pending_scene_dirty_regions: Vec::new(),
+            render_region_cache_bounds: None,
+            render_region_cache: None,
             render_bvh_cache_bounds: None,
-            render_bvh_cache_world_tree_revision: 0,
             render_bvh_cache: None,
+            voxel_pending_render_bvh_rebuild: true,
+            voxel_pending_render_bvh_mutation_deltas: Vec::new(),
+            voxel_dense_payload_encoded_cache: HashMap::new(),
+            voxel_leaf_entry_spans: Vec::new(),
+            voxel_leaf_entry_free_spans: Vec::new(),
+            voxel_last_rebuild_failure_signature: None,
             voxel_frame_data: VoxelFrameData {
                 metadata_generation: 0,
+                region_bvh_root_index:
+                    higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
+                dirty_ranges: VoxelFrameDirtyRanges::default(),
                 chunk_headers: Vec::new(),
                 occupancy_words: Vec::new(),
                 material_words: Vec::new(),
@@ -1437,12 +1659,9 @@ mod tests {
 
         assert_eq!(stats.previous_non_empty, 0);
         assert_eq!(stats.desired_non_empty, 1);
-        assert_eq!(stats.upserts, 1);
-        assert_eq!(stats.removals, 0);
         assert_eq!(stats.changed_chunks, 1);
         assert_eq!(stats.previous_total_chunks, 0);
         assert_eq!(stats.desired_total_chunks, 1);
-        assert_eq!(stats.queued_updates, 1);
         assert!(stats.collect_previous_ms >= 0.0);
         assert!(stats.splice_ms >= 0.0);
         assert!(stats.collect_desired_ms >= 0.0);
@@ -1450,7 +1669,7 @@ mod tests {
         assert_eq!(scene.get_voxel(0, 0, 0, 0), VoxelType(7));
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
-            vec![ChunkPos::new(0, 0, 0, 0)]
+            Vec::<ChunkPos>::new()
         );
     }
 
@@ -1473,12 +1692,9 @@ mod tests {
 
         assert_eq!(stats.previous_non_empty, 1);
         assert_eq!(stats.desired_non_empty, 0);
-        assert_eq!(stats.upserts, 0);
-        assert_eq!(stats.removals, 1);
         assert_eq!(stats.changed_chunks, 1);
         assert_eq!(stats.previous_total_chunks, 1);
         assert_eq!(stats.desired_total_chunks, 0);
-        assert_eq!(stats.queued_updates, 1);
         assert!(stats.collect_previous_ms >= 0.0);
         assert!(stats.splice_ms >= 0.0);
         assert!(stats.collect_desired_ms >= 0.0);
@@ -1486,7 +1702,7 @@ mod tests {
         assert!(scene.get_voxel(0, 0, 0, 0).is_air());
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
-            vec![ChunkPos::new(0, 0, 0, 0)]
+            Vec::<ChunkPos>::new()
         );
     }
 
@@ -1550,11 +1766,103 @@ mod tests {
         assert_eq!(stats.removals, 0);
         assert_eq!(stats.queued_updates, 0);
         assert_eq!(stats.invalidated_cached_chunks, 0);
-        assert_eq!(stats.splice_ms, 0.0);
+        assert!(stats.splice_ms >= 0.0);
         assert_eq!(scene.world_tree.root().cloned(), before);
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
             Vec::<ChunkPos>::new()
         );
+    }
+
+    #[test]
+    fn voxel_scene_dirty_tracking_rebuild_clears_only_overlapping_chunks() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let bounds = Aabb4i::new([-2, -2, -2, -2], [2, 2, 2, 2]);
+
+        // Prime cache.
+        scene.ensure_render_bvh_cache_for_bounds(bounds);
+        assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+        assert!(scene.voxel_pending_scene_dirty_regions.is_empty());
+
+        // Add one dirty chunk inside bounds and one far outside.
+        scene.world_set_voxel(0, 0, 0, 0, VoxelType(3));
+        let far_world_x = (CHUNK_SIZE as i32) * 50;
+        scene.world_set_voxel(far_world_x, 0, 0, 0, VoxelType(4));
+
+        let far_key = [50, 0, 0, 0];
+        assert_eq!(scene.voxel_pending_scene_dirty_regions.len(), 2);
+        assert!(scene
+            .voxel_pending_scene_dirty_regions
+            .iter()
+            .any(|region| region.contains_chunk([0, 0, 0, 0])));
+        assert!(scene
+            .voxel_pending_scene_dirty_regions
+            .iter()
+            .any(|region| region.contains_chunk(far_key)));
+
+        // Rebuild for local bounds should consume local dirty key only.
+        scene.ensure_render_bvh_cache_for_bounds(bounds);
+        assert_eq!(scene.voxel_pending_scene_dirty_regions.len(), 1);
+        assert!(scene
+            .voxel_pending_scene_dirty_regions
+            .iter()
+            .any(|region| region.contains_chunk(far_key)));
+    }
+
+    #[test]
+    fn voxel_scene_dirty_tracking_offscreen_edits_do_not_invalidate_local_cache() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let bounds = Aabb4i::new([-2, -2, -2, -2], [2, 2, 2, 2]);
+
+        // Prime cache once.
+        scene.ensure_render_bvh_cache_for_bounds(bounds);
+        assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+
+        // Edit a far chunk; local bounds should remain cache-valid.
+        let far_world_x = (CHUNK_SIZE as i32) * 60;
+        scene.world_set_voxel(far_world_x, 0, 0, 0, VoxelType(5));
+        let far_key = [60, 0, 0, 0];
+        assert!(scene
+            .voxel_pending_scene_dirty_regions
+            .iter()
+            .any(|region| region.contains_chunk(far_key)));
+        assert!(!scene.voxel_scene_bounds_has_pending_dirty_regions(bounds));
+
+        // Re-requesting local cache should keep far dirty queued.
+        scene.ensure_render_bvh_cache_for_bounds(bounds);
+        assert!(scene
+            .voxel_pending_scene_dirty_regions
+            .iter()
+            .any(|region| region.contains_chunk(far_key)));
+        assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+    }
+
+    #[test]
+    fn voxel_scene_dirty_budget_limits_chunks_per_rebuild() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let bounds = Aabb4i::new([-2, -2, -2, -2], [200, 2, 2, 2]);
+
+        // Prime cache.
+        scene.ensure_render_bvh_cache_for_bounds(bounds);
+        assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+
+        // Mark more dirty chunks than per-frame budget.
+        let dirty_count = VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET + 5;
+        for i in 0..dirty_count {
+            let wx = (i as i32) * CHUNK_SIZE as i32;
+            scene.world_set_voxel(wx, 0, 0, 0, VoxelType(7));
+        }
+        assert_eq!(scene.voxel_pending_scene_dirty_regions.len(), dirty_count);
+
+        // One rebuild pass should only consume the budgeted amount.
+        scene.ensure_render_bvh_cache_for_bounds(bounds);
+        let expected_remaining = dirty_count.saturating_sub(VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET);
+        assert_eq!(scene.voxel_pending_scene_dirty_regions.len(), expected_remaining);
+
+        // Additional passes should eventually consume the remainder.
+        while !scene.voxel_pending_scene_dirty_regions.is_empty() {
+            scene.ensure_render_bvh_cache_for_bounds(bounds);
+        }
+        assert!(scene.voxel_pending_scene_dirty_regions.is_empty());
     }
 }

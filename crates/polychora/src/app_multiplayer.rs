@@ -375,6 +375,18 @@ fn world_request_radius_chunks_for_distance(distance_world: f32) -> i32 {
         .max(1)
 }
 
+fn bounds_contains_chunk(bounds: Aabb4i, chunk: [i32; 4]) -> bool {
+    bounds.is_valid()
+        && chunk[0] >= bounds.min[0]
+        && chunk[0] <= bounds.max[0]
+        && chunk[1] >= bounds.min[1]
+        && chunk[1] <= bounds.max[1]
+        && chunk[2] >= bounds.min[2]
+        && chunk[2] <= bounds.max[2]
+        && chunk[3] >= bounds.min[3]
+        && chunk[3] <= bounds.max[3]
+}
+
 fn zero_dense_chunk_materials() -> Vec<u16> {
     vec![0u16; polychora::shared::voxel::CHUNK_VOLUME]
 }
@@ -928,6 +940,26 @@ impl App {
         let center_chunk = world_chunk_from_position(position);
         let request_radius_chunks =
             world_request_radius_chunks_for_distance(self.vte_max_trace_distance);
+        if let Some(last_bounds) = self.multiplayer_last_world_request_bounds {
+            let hysteresis = (request_radius_chunks / 4).max(1);
+            let keep_bounds = Aabb4i::new(
+                [
+                    last_bounds.min[0].saturating_add(hysteresis),
+                    last_bounds.min[1].saturating_add(hysteresis),
+                    last_bounds.min[2].saturating_add(hysteresis),
+                    last_bounds.min[3].saturating_add(hysteresis),
+                ],
+                [
+                    last_bounds.max[0].saturating_sub(hysteresis),
+                    last_bounds.max[1].saturating_sub(hysteresis),
+                    last_bounds.max[2].saturating_sub(hysteresis),
+                    last_bounds.max[3].saturating_sub(hysteresis),
+                ],
+            );
+            if bounds_contains_chunk(keep_bounds, center_chunk) {
+                return;
+            }
+        }
         let desired_bounds =
             world_request_bounds_for_center_chunk(center_chunk, request_radius_chunks);
         if self.multiplayer_last_world_request_bounds == Some(desired_bounds) {
@@ -1215,6 +1247,7 @@ impl App {
             0.0
         };
         let patch_apply_elapsed_ms = patch_apply_start.elapsed().as_secs_f64() * 1000.0;
+        self.note_runtime_profile_multiplayer_patch(patch_apply_elapsed_ms);
         if patch_apply_elapsed_ms >= 50.0 {
             eprintln!(
                 "[client-world-patch] elapsed_ms={:.3} bounds={:?}->{:?} patch_cells={} previous_non_empty={} desired_non_empty={} upserts={} removals={}",

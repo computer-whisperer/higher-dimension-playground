@@ -1,6 +1,7 @@
 use bytemuck::{Pod, Zeroable};
+use std::ops::Range;
 
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
 pub struct GpuVoxelChunkHeader {
     pub occupancy_word_offset: u32,
@@ -16,7 +17,7 @@ impl GpuVoxelChunkHeader {
     pub const FLAG_FULL: u32 = 1 << 0;
 }
 
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
 pub struct GpuVoxelLeafHeader {
     pub min_chunk_coord: [i32; 4],
@@ -29,6 +30,7 @@ pub struct GpuVoxelLeafHeader {
 
 pub struct VoxelFrameInput<'a> {
     pub metadata_generation: u64,
+    pub region_bvh_root_index: u32,
     pub chunk_headers: &'a [GpuVoxelChunkHeader],
     pub occupancy_words: &'a [u32],
     pub material_words: &'a [u32],
@@ -36,6 +38,18 @@ pub struct VoxelFrameInput<'a> {
     pub region_bvh_nodes: &'a [GpuVoxelChunkBvhNode],
     pub leaf_headers: &'a [GpuVoxelLeafHeader],
     pub leaf_chunk_entries: &'a [u32],
+    pub dirty_ranges: Option<&'a VoxelFrameDirtyRanges>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VoxelFrameDirtyRanges {
+    pub chunk_headers: Option<Range<usize>>,
+    pub occupancy_words: Option<Range<usize>>,
+    pub material_words: Option<Range<usize>>,
+    pub macro_words: Option<Range<usize>>,
+    pub region_bvh_nodes: Option<Range<usize>>,
+    pub leaf_headers: Option<Range<usize>>,
+    pub leaf_chunk_entries: Option<Range<usize>>,
 }
 
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
@@ -49,7 +63,7 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) max_trace_steps: u32,
     pub(super) max_trace_distance: f32,
     pub(super) region_bvh_node_count: u32,
-    pub(super) _reserved0: u32,
+    pub(super) region_bvh_root_index: u32,
     pub(super) leaf_chunk_entry_count: u32,
     pub(super) stage_b_mode: u32,
     pub(super) stage_b_slice_layer: u32,
@@ -73,7 +87,7 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) highlight_place_voxel: [i32; 4],
 }
 
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
 pub struct GpuVoxelChunkBvhNode {
     pub min_chunk_coord: [i32; 4],

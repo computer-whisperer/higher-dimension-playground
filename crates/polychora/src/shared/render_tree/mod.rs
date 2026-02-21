@@ -382,9 +382,6 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
     };
 
     let expected_root = bvh.root;
-    let (old_reachable_nodes, old_reachable_leaves) =
-        collect_reachable_node_leaf_ids(bvh, expected_root);
-
     let mut delta = RenderBvhChunkMutationDelta {
         key: clipped_patch_bounds.min,
         expected_root,
@@ -394,9 +391,18 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
         freed_node_ids: Vec::new(),
         freed_leaf_ids: Vec::new(),
     };
+    let mut retired_node_ids = Vec::<u32>::new();
+    let mut retired_leaf_ids = Vec::<u32>::new();
 
     let outside_root = if let Some(root_idx) = expected_root {
-        clone_subtree_excluding_bounds(bvh, root_idx, clipped_patch_bounds, &mut delta)?
+        clone_subtree_excluding_bounds(
+            bvh,
+            root_idx,
+            clipped_patch_bounds,
+            &mut delta,
+            &mut retired_node_ids,
+            &mut retired_leaf_ids,
+        )?
     } else {
         None
     };
@@ -428,14 +434,10 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
     };
 
     bvh.root = new_root;
-
-    let (new_reachable_nodes, new_reachable_leaves) = collect_reachable_node_leaf_ids(bvh, bvh.root);
-    release_unreachable_nodes_and_leaves(
+    release_retired_nodes_and_leaves(
         bvh,
-        &old_reachable_nodes,
-        &old_reachable_leaves,
-        &new_reachable_nodes,
-        &new_reachable_leaves,
+        retired_node_ids,
+        retired_leaf_ids,
         &mut delta,
     );
     delta.new_root = bvh.root;
@@ -617,6 +619,8 @@ fn clone_subtree_excluding_bounds(
     node_idx: u32,
     excluded_bounds: Aabb4i,
     delta: &mut RenderBvhChunkMutationDelta,
+    retired_node_ids: &mut Vec<u32>,
+    retired_leaf_ids: &mut Vec<u32>,
 ) -> Result<Option<u32>, String> {
     let Some(node) = bvh.nodes.get(node_idx as usize).cloned() else {
         return Ok(None);
@@ -625,14 +629,17 @@ fn clone_subtree_excluding_bounds(
         return Ok(Some(node_idx));
     }
     if bounds_contains_bounds(excluded_bounds, node.bounds) {
+        collect_subtree_node_leaf_ids(bvh, node_idx, retired_node_ids, retired_leaf_ids);
         return Ok(None);
     }
+    retired_node_ids.push(node_idx);
 
     match node.kind {
         RenderBvhNodeKind::Leaf { leaf_index } => {
             let Some(leaf) = bvh.leaves.get(leaf_index as usize).cloned() else {
                 return Ok(None);
             };
+            retired_leaf_ids.push(leaf_index);
             let replacement_leaves = build_leaf_outside_bounds_pieces(&leaf, excluded_bounds)?;
             if replacement_leaves.is_empty() {
                 Ok(None)
@@ -645,8 +652,22 @@ fn clone_subtree_excluding_bounds(
             }
         }
         RenderBvhNodeKind::Internal { left, right } => {
-            let left_root = clone_subtree_excluding_bounds(bvh, left, excluded_bounds, delta)?;
-            let right_root = clone_subtree_excluding_bounds(bvh, right, excluded_bounds, delta)?;
+            let left_root = clone_subtree_excluding_bounds(
+                bvh,
+                left,
+                excluded_bounds,
+                delta,
+                retired_node_ids,
+                retired_leaf_ids,
+            )?;
+            let right_root = clone_subtree_excluding_bounds(
+                bvh,
+                right,
+                excluded_bounds,
+                delta,
+                retired_node_ids,
+                retired_leaf_ids,
+            )?;
             match (left_root, right_root) {
                 (None, None) => Ok(None),
                 (Some(only), None) | (None, Some(only)) => Ok(Some(only)),
@@ -964,86 +985,73 @@ fn aggregate_bounds_for_leaf_ids_in_bvh(bvh: &RenderBvh, leaf_ids: &[u32]) -> Aa
     bounds
 }
 
-fn collect_reachable_node_leaf_ids(
+fn collect_subtree_node_leaf_ids(
     bvh: &RenderBvh,
-    root: Option<u32>,
-) -> (Vec<bool>, Vec<bool>) {
-    let mut node_reachable = vec![false; bvh.nodes.len()];
-    let mut leaf_reachable = vec![false; bvh.leaves.len()];
-    let Some(root) = root else {
-        return (node_reachable, leaf_reachable);
-    };
+    root: u32,
+    out_nodes: &mut Vec<u32>,
+    out_leaves: &mut Vec<u32>,
+) {
     let mut stack = vec![root];
     while let Some(node_id) = stack.pop() {
         let idx = node_id as usize;
-        if idx >= bvh.nodes.len() || node_reachable[idx] {
+        let Some(node) = bvh.nodes.get(idx) else {
             continue;
-        }
-        node_reachable[idx] = true;
-        let node = &bvh.nodes[idx];
+        };
+        out_nodes.push(node_id);
         match node.kind {
             RenderBvhNodeKind::Internal { left, right } => {
                 stack.push(right);
                 stack.push(left);
             }
             RenderBvhNodeKind::Leaf { leaf_index } => {
-                let leaf_idx = leaf_index as usize;
-                if leaf_idx < leaf_reachable.len() {
-                    leaf_reachable[leaf_idx] = true;
-                }
+                out_leaves.push(leaf_index);
             }
         }
     }
-    (node_reachable, leaf_reachable)
 }
 
-fn release_unreachable_nodes_and_leaves(
+fn release_retired_nodes_and_leaves(
     bvh: &mut RenderBvh,
-    old_node_reachable: &[bool],
-    old_leaf_reachable: &[bool],
-    new_node_reachable: &[bool],
-    new_leaf_reachable: &[bool],
+    mut retired_node_ids: Vec<u32>,
+    mut retired_leaf_ids: Vec<u32>,
     delta: &mut RenderBvhChunkMutationDelta,
 ) {
-    for (node_id, was_old_reachable) in old_node_reachable.iter().enumerate() {
-        if !*was_old_reachable {
+    retired_node_ids.sort_unstable();
+    retired_node_ids.dedup();
+    for node_id in retired_node_ids {
+        let node_idx = node_id as usize;
+        if node_idx >= bvh.nodes.len() {
             continue;
         }
-        let still_reachable = new_node_reachable.get(node_id).copied().unwrap_or(false);
-        if still_reachable {
+        if bvh.free_node_ids.contains(&node_id) {
             continue;
         }
-        if !bvh.free_node_ids.iter().any(|id| *id as usize == node_id) {
-            bvh.free_node_ids.push(node_id as u32);
-            if let Some(slot) = bvh.nodes.get_mut(node_id) {
-                *slot = RenderBvhNode {
-                    bounds: Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]),
-                    kind: RenderBvhNodeKind::Leaf {
-                        leaf_index: u32::MAX,
-                    },
-                };
-            }
-            delta.freed_node_ids.push(node_id as u32);
-        }
+        bvh.free_node_ids.push(node_id);
+        bvh.nodes[node_idx] = RenderBvhNode {
+            bounds: Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]),
+            kind: RenderBvhNodeKind::Leaf {
+                leaf_index: u32::MAX,
+            },
+        };
+        delta.freed_node_ids.push(node_id);
     }
-    for (leaf_id, was_old_reachable) in old_leaf_reachable.iter().enumerate() {
-        if !*was_old_reachable {
+
+    retired_leaf_ids.sort_unstable();
+    retired_leaf_ids.dedup();
+    for leaf_id in retired_leaf_ids {
+        let leaf_idx = leaf_id as usize;
+        if leaf_idx >= bvh.leaves.len() {
             continue;
         }
-        let still_reachable = new_leaf_reachable.get(leaf_id).copied().unwrap_or(false);
-        if still_reachable {
+        if bvh.free_leaf_ids.contains(&leaf_id) {
             continue;
         }
-        if !bvh.free_leaf_ids.iter().any(|id| *id as usize == leaf_id) {
-            bvh.free_leaf_ids.push(leaf_id as u32);
-            if let Some(slot) = bvh.leaves.get_mut(leaf_id) {
-                *slot = RenderLeaf {
-                    bounds: Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]),
-                    kind: RenderLeafKind::Uniform(0),
-                };
-            }
-            delta.freed_leaf_ids.push(leaf_id as u32);
-        }
+        bvh.free_leaf_ids.push(leaf_id);
+        bvh.leaves[leaf_idx] = RenderLeaf {
+            bounds: Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]),
+            kind: RenderLeafKind::Uniform(0),
+        };
+        delta.freed_leaf_ids.push(leaf_id);
     }
 }
 

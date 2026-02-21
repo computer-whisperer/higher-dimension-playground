@@ -73,6 +73,36 @@ fn pack_dense_materials_words(
 }
 
 impl Scene {
+    fn voxel_frame_root_is_valid(&self) -> bool {
+        let root = self.voxel_frame_data.region_bvh_root_index;
+        root != higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE
+            && (root as usize) < self.voxel_frame_data.region_bvh_nodes.len()
+    }
+
+    fn log_voxel_rebuild_failure_once(
+        &mut self,
+        bounds: Aabb4i,
+        reason: &str,
+        node_count: usize,
+        leaf_count: usize,
+    ) {
+        let signature = (bounds, node_count, leaf_count);
+        if self.voxel_last_rebuild_failure_signature == Some(signature) {
+            return;
+        }
+        self.voxel_last_rebuild_failure_signature = Some(signature);
+        eprintln!(
+            "[vte-voxel-rebuild-failure] reason={} bounds={:?}->{:?} nodes={} leaves={} node_cap={} leaf_cap={} (preserving last-good GPU voxel frame)",
+            reason,
+            bounds.min,
+            bounds.max,
+            node_count,
+            leaf_count,
+            VTE_REGION_BVH_NODE_CAPACITY,
+            VTE_REGION_LEAF_CAPACITY
+        );
+    }
+
     fn camera_chunk_key(cam_pos: [f32; 4]) -> [i32; 4] {
         let cs = CHUNK_SIZE as i32;
         [
@@ -277,6 +307,62 @@ impl Scene {
         }
     }
 
+    fn mark_dirty_range(
+        slot: &mut Option<std::ops::Range<usize>>,
+        range: std::ops::Range<usize>,
+    ) {
+        if range.start >= range.end {
+            return;
+        }
+        match slot {
+            Some(existing) => {
+                existing.start = existing.start.min(range.start);
+                existing.end = existing.end.max(range.end);
+            }
+            None => *slot = Some(range),
+        }
+    }
+
+    fn mark_dirty_index(slot: &mut Option<std::ops::Range<usize>>, index: usize) {
+        Self::mark_dirty_range(slot, index..index.saturating_add(1));
+    }
+
+    fn mark_appended_tail(
+        slot: &mut Option<std::ops::Range<usize>>,
+        old_len: usize,
+        new_len: usize,
+    ) {
+        if new_len > old_len {
+            Self::mark_dirty_range(slot, old_len..new_len);
+        }
+    }
+
+    fn full_dirty_ranges_from_frame(voxel_frame_data: &VoxelFrameData) -> VoxelFrameDirtyRanges {
+        let mut dirty = VoxelFrameDirtyRanges::default();
+        if !voxel_frame_data.chunk_headers.is_empty() {
+            dirty.chunk_headers = Some(0..voxel_frame_data.chunk_headers.len());
+        }
+        if !voxel_frame_data.occupancy_words.is_empty() {
+            dirty.occupancy_words = Some(0..voxel_frame_data.occupancy_words.len());
+        }
+        if !voxel_frame_data.material_words.is_empty() {
+            dirty.material_words = Some(0..voxel_frame_data.material_words.len());
+        }
+        if !voxel_frame_data.macro_words.is_empty() {
+            dirty.macro_words = Some(0..voxel_frame_data.macro_words.len());
+        }
+        if !voxel_frame_data.region_bvh_nodes.is_empty() {
+            dirty.region_bvh_nodes = Some(0..voxel_frame_data.region_bvh_nodes.len());
+        }
+        if !voxel_frame_data.leaf_headers.is_empty() {
+            dirty.leaf_headers = Some(0..voxel_frame_data.leaf_headers.len());
+        }
+        if !voxel_frame_data.leaf_chunk_entries.is_empty() {
+            dirty.leaf_chunk_entries = Some(0..voxel_frame_data.leaf_chunk_entries.len());
+        }
+        dirty
+    }
+
     fn encode_leaf_chunk_entries(
         voxel_frame_data: &mut VoxelFrameData,
         dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
@@ -343,7 +429,7 @@ impl Scene {
         Ok(encoded)
     }
 
-    fn rebuild_leaf_entry_spans_from_headers(
+    fn build_leaf_entry_spans_from_headers(
         voxel_frame_data: &VoxelFrameData,
     ) -> Vec<Option<std::ops::Range<usize>>> {
         let mut out = vec![None; voxel_frame_data.leaf_headers.len()];
@@ -368,6 +454,16 @@ impl Scene {
             out[idx] = Some(start..end);
         }
         out
+    }
+
+    fn sync_leaf_entry_allocator_from_frame(&mut self) {
+        let spans = Self::build_leaf_entry_spans_from_headers(&self.voxel_frame_data);
+        let free_spans = Self::build_free_spans_from_leaf_spans(
+            &spans,
+            self.voxel_frame_data.leaf_chunk_entries.len(),
+        );
+        self.voxel_leaf_entry_spans = spans;
+        self.voxel_leaf_entry_free_spans = free_spans;
     }
 
     fn merge_free_span(
@@ -461,11 +557,16 @@ impl Scene {
         if !bounds.is_valid() {
             return Ok(());
         }
-        let mut leaf_spans = Self::rebuild_leaf_entry_spans_from_headers(&self.voxel_frame_data);
-        let mut free_spans = Self::build_free_spans_from_leaf_spans(
-            &leaf_spans,
-            self.voxel_frame_data.leaf_chunk_entries.len(),
-        );
+        if self.voxel_leaf_entry_spans.len() != self.voxel_frame_data.leaf_headers.len() {
+            self.sync_leaf_entry_allocator_from_frame();
+        }
+        let leaf_spans = &mut self.voxel_leaf_entry_spans;
+        let free_spans = &mut self.voxel_leaf_entry_free_spans;
+        let old_chunk_headers_len = self.voxel_frame_data.chunk_headers.len();
+        let old_occupancy_words_len = self.voxel_frame_data.occupancy_words.len();
+        let old_material_words_len = self.voxel_frame_data.material_words.len();
+        let old_macro_words_len = self.voxel_frame_data.macro_words.len();
+        let mut dirty = VoxelFrameDirtyRanges::default();
 
         for delta in deltas {
             for (node_index, src_node) in &delta.node_writes {
@@ -482,12 +583,14 @@ impl Scene {
                         .resize(node_index + 1, GpuVoxelChunkBvhNode::empty());
                 }
                 self.voxel_frame_data.region_bvh_nodes[node_index] = Self::encode_bvh_node(src_node);
+                Self::mark_dirty_index(&mut dirty.region_bvh_nodes, node_index);
             }
 
             for node_index in &delta.freed_node_ids {
                 let node_index = *node_index as usize;
                 if node_index < self.voxel_frame_data.region_bvh_nodes.len() {
                     self.voxel_frame_data.region_bvh_nodes[node_index] = GpuVoxelChunkBvhNode::empty();
+                    Self::mark_dirty_index(&mut dirty.region_bvh_nodes, node_index);
                 }
             }
 
@@ -495,11 +598,12 @@ impl Scene {
                 let leaf_index = *leaf_index as usize;
                 if leaf_index < leaf_spans.len() {
                     if let Some(old_span) = leaf_spans[leaf_index].take() {
-                        Self::merge_free_span(&mut free_spans, old_span);
+                        Self::merge_free_span(free_spans, old_span);
                     }
                 }
                 if leaf_index < self.voxel_frame_data.leaf_headers.len() {
                     self.voxel_frame_data.leaf_headers[leaf_index] = Self::invalid_leaf_header();
+                    Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                 }
             }
 
@@ -520,7 +624,7 @@ impl Scene {
                     leaf_spans.resize(leaf_index + 1, None);
                 }
                 if let Some(old_span) = leaf_spans[leaf_index].take() {
-                    Self::merge_free_span(&mut free_spans, old_span);
+                    Self::merge_free_span(free_spans, old_span);
                 }
 
                 match &leaf.kind {
@@ -533,6 +637,7 @@ impl Scene {
                             chunk_entry_offset: 0,
                             _padding: 0,
                         };
+                        Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                     }
                     RenderLeafKind::VoxelChunkArray(_) => {
                         let entries = Self::encode_leaf_chunk_entries(
@@ -541,12 +646,13 @@ impl Scene {
                             leaf,
                         )?;
                         let span = Self::allocate_leaf_entry_span(
-                            &mut free_spans,
+                            free_spans,
                             &mut self.voxel_frame_data.leaf_chunk_entries,
                             entries.len(),
                         )?;
                         self.voxel_frame_data.leaf_chunk_entries[span.clone()]
                             .copy_from_slice(entries.as_slice());
+                        Self::mark_dirty_range(&mut dirty.leaf_chunk_entries, span.clone());
                         leaf_spans[leaf_index] = Some(span.clone());
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
                             min_chunk_coord: leaf.bounds.min,
@@ -557,10 +663,33 @@ impl Scene {
                             chunk_entry_offset: span.start as u32,
                             _padding: 0,
                         };
+                        Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                     }
                 }
             }
         }
+
+        Self::mark_appended_tail(
+            &mut dirty.chunk_headers,
+            old_chunk_headers_len,
+            self.voxel_frame_data.chunk_headers.len(),
+        );
+        Self::mark_appended_tail(
+            &mut dirty.occupancy_words,
+            old_occupancy_words_len,
+            self.voxel_frame_data.occupancy_words.len(),
+        );
+        Self::mark_appended_tail(
+            &mut dirty.material_words,
+            old_material_words_len,
+            self.voxel_frame_data.material_words.len(),
+        );
+        Self::mark_appended_tail(
+            &mut dirty.macro_words,
+            old_macro_words_len,
+            self.voxel_frame_data.macro_words.len(),
+        );
+        self.voxel_frame_data.dirty_ranges = dirty;
 
         self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
         self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
@@ -568,6 +697,7 @@ impl Scene {
             .root
             .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
         self.voxel_cached_visibility_bounds = Some(bounds);
+        self.voxel_last_rebuild_failure_signature = None;
         Ok(())
     }
 
@@ -847,7 +977,10 @@ impl Scene {
     fn clear_voxel_frame_buffers(&mut self) {
         self.voxel_frame_data.region_bvh_root_index =
             higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE;
+        self.voxel_frame_data.dirty_ranges = VoxelFrameDirtyRanges::default();
         self.voxel_dense_payload_encoded_cache.clear();
+        self.voxel_leaf_entry_spans.clear();
+        self.voxel_leaf_entry_free_spans.clear();
         self.voxel_frame_data.chunk_headers.clear();
         self.voxel_frame_data.occupancy_words.clear();
         self.voxel_frame_data.material_words.clear();
@@ -874,8 +1007,13 @@ impl Scene {
             self.voxel_frame_data.region_bvh_nodes = buffers.region_bvh_nodes;
             self.voxel_frame_data.leaf_headers = buffers.leaf_headers;
             self.voxel_frame_data.leaf_chunk_entries = buffers.leaf_chunk_entries;
+            self.voxel_frame_data.dirty_ranges =
+                Self::full_dirty_ranges_from_frame(&self.voxel_frame_data);
+            self.sync_leaf_entry_allocator_from_frame();
+            self.voxel_last_rebuild_failure_signature = None;
         } else {
             self.clear_voxel_frame_buffers();
+            self.voxel_last_rebuild_failure_signature = None;
         }
         self.voxel_cached_visibility_bounds = Some(bounds);
     }
@@ -930,18 +1068,35 @@ impl Scene {
             .filter(|active_bounds| Self::bounds_contains_bounds(*active_bounds, view_bounds))
             .unwrap_or(desired_scene_bounds);
 
+        let frame_root_valid = self.voxel_frame_root_is_valid();
+        let cached_render_bvh_empty = self
+            .render_bvh_cache
+            .as_ref()
+            .map(|bvh| bvh.root.is_none())
+            .unwrap_or(false);
         let visibility_cache_valid = self.voxel_cached_visibility_bounds == Some(scene_bounds)
-            && !self.voxel_scene_bounds_has_pending_dirty_regions(scene_bounds);
+            && !self.voxel_scene_bounds_has_pending_dirty_regions(scene_bounds)
+            && (frame_root_valid || cached_render_bvh_empty);
         if !visibility_cache_valid {
             self.ensure_render_bvh_cache_for_bounds(scene_bounds);
             let (needs_rebuild, deltas) = self.take_pending_render_bvh_update_flags();
 
             if needs_rebuild {
-                let buffers = self
-                    .render_bvh_cache
-                    .as_ref()
-                    .and_then(Self::build_voxel_frame_buffers_from_render_bvh);
-                self.apply_voxel_frame_buffers(scene_bounds, buffers);
+                if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
+                    if let Some(buffers) = Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
+                    {
+                        self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
+                    } else {
+                        // Preserve last-good GPU voxel buffers and keep retrying full snapshot builds.
+                        self.voxel_pending_render_bvh_rebuild = true;
+                        self.log_voxel_rebuild_failure_once(
+                            scene_bounds,
+                            "snapshot_encode_capacity_overflow",
+                            render_bvh.nodes.len(),
+                            render_bvh.leaves.len(),
+                        );
+                    }
+                }
             } else if !deltas.is_empty() {
                 let mut apply_ok = false;
                 if let Some(render_bvh) = self.render_bvh_cache.take() {
@@ -956,11 +1111,21 @@ impl Scene {
                 }
 
                 if !apply_ok {
-                    let buffers = self
-                        .render_bvh_cache
-                        .as_ref()
-                        .and_then(Self::build_voxel_frame_buffers_from_render_bvh);
-                    self.apply_voxel_frame_buffers(scene_bounds, buffers);
+                    if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
+                        if let Some(buffers) =
+                            Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
+                        {
+                            self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
+                        } else {
+                            self.voxel_pending_render_bvh_rebuild = true;
+                            self.log_voxel_rebuild_failure_once(
+                                scene_bounds,
+                                "delta_recovery_snapshot_encode_capacity_overflow",
+                                render_bvh.nodes.len(),
+                                render_bvh.leaves.len(),
+                            );
+                        }
+                    }
                 }
             }
         }

@@ -84,12 +84,17 @@ fn overlay_edge_tag_for_sample_ray_hit(hit: &DebugRayBvhNodeHit) -> u32 {
 impl App {
     pub(super) fn update_and_render(&mut self) {
         let frame_start = Instant::now();
+        self.begin_runtime_profile_frame();
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
 
         if self.app_state == AppState::MainMenu {
+            let main_menu_update_start = Instant::now();
             self.update_and_render_main_menu(dt);
+            self.set_runtime_profile_update_ms(
+                main_menu_update_start.elapsed().as_secs_f64() * 1000.0,
+            );
             if self.perf_suite_active() {
                 self.advance_perf_suite_after_frame(frame_start);
             } else {
@@ -99,6 +104,7 @@ impl App {
             return;
         }
 
+        let gameplay_update_start = Instant::now();
         self.poll_multiplayer_events();
         self.smooth_remote_players(dt, now);
         self.smooth_remote_entities(dt);
@@ -897,13 +903,16 @@ impl App {
             focal_length_zw: self.focal_length_zw,
             render_options,
         };
+        self.set_runtime_profile_update_ms(gameplay_update_start.elapsed().as_secs_f64() * 1000.0);
 
         if backend == RenderBackend::VoxelTraversal {
+            let voxel_build_start = Instant::now();
             let voxel_frame = self.scene.build_voxel_frame_data(
                 self.camera.position,
                 look_dir,
                 self.vte_max_trace_distance,
             );
+            let voxel_build_elapsed_ms = voxel_build_start.elapsed().as_secs_f64() * 1000.0;
 
             // If we are playing without a live server connection, do not keep the loading gate up.
             if !self.world_ready
@@ -913,11 +922,16 @@ impl App {
                 self.world_ready = true;
                 eprintln!("World ready: no multiplayer connection");
             }
+            let render_submit_start = Instant::now();
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
+            );
+            self.set_runtime_profile_voxel_build_ms(voxel_build_elapsed_ms);
+            self.set_runtime_profile_render_submit_ms(
+                render_submit_start.elapsed().as_secs_f64() * 1000.0,
             );
         } else {
             let remote_instances = if disable_remote_non_voxel {
@@ -939,6 +953,7 @@ impl App {
             render_instances.extend(remote_instances);
             render_instances.extend(entity_instances);
             render_instances.push(preview_instance);
+            let render_submit_start = Instant::now();
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),
                 self.queue.clone(),
@@ -947,8 +962,12 @@ impl App {
                     model_instances: &render_instances,
                 },
             );
+            self.set_runtime_profile_render_submit_ms(
+                render_submit_start.elapsed().as_secs_f64() * 1000.0,
+            );
         }
 
+        let post_render_start = Instant::now();
         if auto_screenshot {
             if let Some(parent) = self.args.screenshot_output.parent() {
                 if !parent.as_os_str().is_empty() {
@@ -1058,6 +1077,7 @@ impl App {
         }
 
         self.advance_vte_runtime_sweep_after_frame();
+        self.set_runtime_profile_post_render_ms(post_render_start.elapsed().as_secs_f64() * 1000.0);
         if self.perf_suite_active() {
             self.advance_perf_suite_after_frame(frame_start);
         } else {
