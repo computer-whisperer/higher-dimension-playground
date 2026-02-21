@@ -1900,4 +1900,41 @@ mod tests {
                 || !batch.leaf_chunk_entry_writes.is_empty()
         );
     }
+
+    #[test]
+    fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        scene.world_set_voxel(0, 0, 0, 0, VoxelType(3));
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+
+        let frame_root = scene.voxel_frame_data.region_bvh_root_index;
+        assert_ne!(frame_root, VTE_REGION_BVH_INVALID_NODE);
+        assert!(scene.render_bvh_cache.is_some());
+
+        scene.voxel_pending_render_bvh_rebuild = false;
+        scene.voxel_pending_render_bvh_mutation_deltas.clear();
+        scene
+            .voxel_pending_render_bvh_mutation_deltas
+            .push(RenderBvhChunkMutationDelta {
+                key: [0, 0, 0, 0],
+                expected_root: Some(frame_root.wrapping_add(1)),
+                new_root: Some(frame_root),
+                node_writes: Vec::new(),
+                leaf_writes: Vec::new(),
+                freed_node_ids: Vec::new(),
+                freed_leaf_ids: Vec::new(),
+            });
+        scene.voxel_cached_visibility_bounds = None;
+
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+
+        assert!(scene.voxel_pending_render_bvh_mutation_deltas.is_empty());
+        assert!(scene.voxel_frame_data.mutation_batch.is_none());
+        let cpu_root = scene
+            .render_bvh_cache
+            .as_ref()
+            .and_then(|bvh| bvh.root)
+            .unwrap_or(VTE_REGION_BVH_INVALID_NODE);
+        assert_eq!(scene.voxel_frame_data.region_bvh_root_index, cpu_root);
+    }
 }

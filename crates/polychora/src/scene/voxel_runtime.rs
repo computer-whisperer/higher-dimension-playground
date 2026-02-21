@@ -103,6 +103,27 @@ impl Scene {
         );
     }
 
+    fn log_voxel_snapshot_rebuild(
+        &self,
+        bounds: Aabb4i,
+        reason: &str,
+        applied_deltas: usize,
+        pending_deltas: usize,
+        frame_root: u32,
+        cpu_root: u32,
+    ) {
+        eprintln!(
+            "[vte-voxel-snapshot-rebuild] reason={} bounds={:?}->{:?} applied_deltas={} pending_deltas={} frame_root={} cpu_root={}",
+            reason,
+            bounds.min,
+            bounds.max,
+            applied_deltas,
+            pending_deltas,
+            frame_root,
+            cpu_root,
+        );
+    }
+
     fn camera_chunk_key(cam_pos: [f32; 4]) -> [i32; 4] {
         let cs = CHUNK_SIZE as i32;
         [
@@ -661,7 +682,6 @@ impl Scene {
 
     fn apply_render_bvh_mutation_deltas_to_voxel_frame_data(
         &mut self,
-        render_bvh: &RenderBvh,
         deltas: &[RenderBvhChunkMutationDelta],
         bounds: Aabb4i,
     ) -> Result<(), String> {
@@ -678,8 +698,24 @@ impl Scene {
         let old_material_words_len = self.voxel_frame_data.material_words.len();
         let old_macro_words_len = self.voxel_frame_data.macro_words.len();
         let mut dirty = VoxelFrameDirtyRanges::default();
+        let mut current_root = if self.voxel_frame_data.region_bvh_root_index
+            == higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE
+        {
+            None
+        } else {
+            Some(self.voxel_frame_data.region_bvh_root_index)
+        };
 
-        for delta in deltas {
+        for (delta_index, delta) in deltas.iter().enumerate() {
+            if delta.expected_root != current_root {
+                return Err(format!(
+                    "delta root mismatch at index {} (expected_root={:?}, frame_root={:?}, new_root={:?})",
+                    delta_index,
+                    delta.expected_root,
+                    current_root,
+                    delta.new_root,
+                ));
+            }
             for (node_index, src_node) in &delta.node_writes {
                 let node_index = *node_index as usize;
                 if node_index >= VTE_REGION_BVH_NODE_CAPACITY {
@@ -778,6 +814,8 @@ impl Scene {
                     }
                 }
             }
+
+            current_root = delta.new_root;
         }
 
         Self::mark_appended_tail(
@@ -806,8 +844,7 @@ impl Scene {
 
         self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
         self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
-        self.voxel_frame_data.region_bvh_root_index = render_bvh
-            .root
+        self.voxel_frame_data.region_bvh_root_index = current_root
             .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
         self.voxel_cached_visibility_bounds = Some(bounds);
         self.voxel_last_rebuild_failure_signature = None;
@@ -1198,6 +1235,17 @@ impl Scene {
 
             if needs_rebuild {
                 if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
+                    let cpu_root = render_bvh
+                        .root
+                        .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
+                    self.log_voxel_snapshot_rebuild(
+                        scene_bounds,
+                        "pending_rebuild_flag",
+                        0,
+                        self.voxel_pending_render_bvh_mutation_deltas.len(),
+                        self.voxel_frame_data.region_bvh_root_index,
+                        cpu_root,
+                    );
                     if let Some(buffers) = Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
                     {
                         self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
@@ -1213,20 +1261,38 @@ impl Scene {
                     }
                 }
             } else if !deltas.is_empty() {
+                let applied_deltas = deltas.len();
                 let mut apply_ok = false;
+                let mut apply_error: Option<String> = None;
                 if let Some(render_bvh) = self.render_bvh_cache.take() {
-                    apply_ok = self
-                        .apply_render_bvh_mutation_deltas_to_voxel_frame_data(
-                            &render_bvh,
-                            &deltas,
-                            scene_bounds,
-                        )
-                        .is_ok();
+                    match self.apply_render_bvh_mutation_deltas_to_voxel_frame_data(
+                        &deltas,
+                        scene_bounds,
+                    ) {
+                        Ok(()) => {
+                            apply_ok = true;
+                        }
+                        Err(error) => {
+                            apply_error = Some(error);
+                        }
+                    }
                     self.render_bvh_cache = Some(render_bvh);
                 }
 
                 if !apply_ok {
+                    self.voxel_pending_render_bvh_mutation_deltas.clear();
                     if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
+                        let cpu_root = render_bvh
+                            .root
+                            .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
+                        self.log_voxel_snapshot_rebuild(
+                            scene_bounds,
+                            apply_error.as_deref().unwrap_or("delta_apply_failed"),
+                            applied_deltas,
+                            self.voxel_pending_render_bvh_mutation_deltas.len(),
+                            self.voxel_frame_data.region_bvh_root_index,
+                            cpu_root,
+                        );
                         if let Some(buffers) =
                             Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
                         {
