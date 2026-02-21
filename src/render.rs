@@ -23,9 +23,10 @@ use self::pipelines::{ComputePipelineContext, PresentPipelineContext};
 use self::profiler::{GpuProfiler, PROFILER_MAX_TIMESTAMPS};
 pub use self::types::*;
 pub use self::vte::{
-    GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
-    VoxelFrameInput,
-    VteDebugCounters, VTE_LEAF_CHUNK_ENTRY_EMPTY, VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG,
+    GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelChunkBvhNodeRangeWrite,
+    VoxelChunkHeaderRangeWrite, VoxelFrameDirtyRanges, VoxelFrameInput, VoxelLeafHeaderRangeWrite,
+    VoxelMutationBatch, VoxelU32RangeWrite, VteDebugCounters, VTE_LEAF_CHUNK_ENTRY_EMPTY,
+    VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG,
     VTE_LEAF_KIND_UNIFORM, VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY, VTE_MAX_DENSE_CHUNKS,
     VTE_REGION_BVH_INVALID_NODE, VTE_REGION_BVH_NODE_CAPACITY, VTE_REGION_BVH_NODE_FLAG_LEAF,
     VTE_REGION_LEAF_CAPACITY, VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
@@ -170,6 +171,26 @@ fn clamp_dirty_range(
         return None;
     }
     Some(start..end)
+}
+
+fn clamp_write_span(
+    start: u32,
+    values_len: usize,
+    limit: usize,
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    if values_len == 0 || limit == 0 {
+        return None;
+    }
+    let dst_start = (start as usize).min(limit);
+    if dst_start >= limit {
+        return None;
+    }
+    let dst_end = dst_start.saturating_add(values_len).min(limit);
+    if dst_end <= dst_start {
+        return None;
+    }
+    let src_len = dst_end - dst_start;
+    Some((dst_start..dst_end, 0..src_len))
 }
 
 /// Collection of all shader modules loaded from Slang-compiled SPIR-V
@@ -2413,104 +2434,208 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 let region_bvh_nodes = &input.region_bvh_nodes[..vte_region_bvh_node_count];
                 let leaf_chunk_entries = &input.leaf_chunk_entries[..vte_leaf_chunk_entry_count];
                 let macro_words = &input.macro_words[..vte_macro_word_count];
-                let dirty = input.dirty_ranges;
+                if let Some(batch) = input.mutation_batch {
+                    for write in &batch.chunk_header_writes {
+                        let Some((dst, src)) =
+                            clamp_write_span(write.start, write.values.len(), vte_chunk_count)
+                        else {
+                            continue;
+                        };
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_chunk_headers_buffer
+                            .write()
+                            .unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
 
-                let chunk_headers_dirty = clamp_dirty_range(
-                    dirty.and_then(|ranges| ranges.chunk_headers.clone()),
-                    vte_chunk_count,
-                )
-                .or_else(|| (vte_chunk_count > 0).then_some(0..vte_chunk_count));
-                if let Some(range) = chunk_headers_dirty {
-                    let mut writer = frame
-                        .live_buffers
-                        .voxel_chunk_headers_buffer
-                        .write()
-                        .unwrap();
-                    writer[range.clone()].copy_from_slice(&chunk_headers[range]);
-                }
+                    for write in &batch.occupancy_word_writes {
+                        let Some((dst, src)) = clamp_write_span(
+                            write.start,
+                            write.values.len(),
+                            vte_occupancy_word_count,
+                        ) else {
+                            continue;
+                        };
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_occupancy_words_buffer
+                            .write()
+                            .unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
 
-                let occupancy_words_dirty = clamp_dirty_range(
-                    dirty.and_then(|ranges| ranges.occupancy_words.clone()),
-                    vte_occupancy_word_count,
-                )
-                .or_else(|| (vte_occupancy_word_count > 0).then_some(0..vte_occupancy_word_count));
-                if let Some(range) = occupancy_words_dirty {
-                    let mut writer = frame
-                        .live_buffers
-                        .voxel_occupancy_words_buffer
-                        .write()
-                        .unwrap();
-                    writer[range.clone()].copy_from_slice(&occupancy_words[range]);
-                }
+                    for write in &batch.material_word_writes {
+                        let Some((dst, src)) = clamp_write_span(
+                            write.start,
+                            write.values.len(),
+                            vte_material_word_count,
+                        ) else {
+                            continue;
+                        };
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_material_words_buffer
+                            .write()
+                            .unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
 
-                let material_words_dirty = clamp_dirty_range(
-                    dirty.and_then(|ranges| ranges.material_words.clone()),
-                    vte_material_word_count,
-                )
-                .or_else(|| (vte_material_word_count > 0).then_some(0..vte_material_word_count));
-                if let Some(range) = material_words_dirty {
-                    let mut writer = frame
-                        .live_buffers
-                        .voxel_material_words_buffer
-                        .write()
-                        .unwrap();
-                    writer[range.clone()].copy_from_slice(&material_words[range]);
-                }
+                    for write in &batch.macro_word_writes {
+                        let Some((dst, src)) =
+                            clamp_write_span(write.start, write.values.len(), vte_macro_word_count)
+                        else {
+                            continue;
+                        };
+                        let mut writer = frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
 
-                let leaf_headers_dirty = clamp_dirty_range(
-                    dirty.and_then(|ranges| ranges.leaf_headers.clone()),
-                    vte_leaf_count,
-                )
-                .or_else(|| (vte_leaf_count > 0).then_some(0..vte_leaf_count));
-                if let Some(range) = leaf_headers_dirty {
-                    let mut writer = frame
-                        .live_buffers
-                        .voxel_leaf_headers_buffer
-                        .write()
-                        .unwrap();
-                    writer[range.clone()].copy_from_slice(&leaf_headers[range]);
-                }
+                    for write in &batch.region_bvh_node_writes {
+                        let Some((dst, src)) = clamp_write_span(
+                            write.start,
+                            write.values.len(),
+                            vte_region_bvh_node_count,
+                        ) else {
+                            continue;
+                        };
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_region_bvh_nodes_buffer
+                            .write()
+                            .unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
 
-                let region_bvh_nodes_dirty = clamp_dirty_range(
-                    dirty.and_then(|ranges| ranges.region_bvh_nodes.clone()),
-                    vte_region_bvh_node_count,
-                )
-                .or_else(|| {
-                    (vte_region_bvh_node_count > 0).then_some(0..vte_region_bvh_node_count)
-                });
-                if let Some(range) = region_bvh_nodes_dirty {
-                    let mut writer = frame
-                        .live_buffers
-                        .voxel_region_bvh_nodes_buffer
-                        .write()
-                        .unwrap();
-                    writer[range.clone()].copy_from_slice(&region_bvh_nodes[range]);
-                }
+                    for write in &batch.leaf_header_writes {
+                        let Some((dst, src)) =
+                            clamp_write_span(write.start, write.values.len(), vte_leaf_count)
+                        else {
+                            continue;
+                        };
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_leaf_headers_buffer
+                            .write()
+                            .unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
 
-                let leaf_chunk_entries_dirty = clamp_dirty_range(
-                    dirty.and_then(|ranges| ranges.leaf_chunk_entries.clone()),
-                    vte_leaf_chunk_entry_count,
-                )
-                .or_else(|| {
-                    (vte_leaf_chunk_entry_count > 0).then_some(0..vte_leaf_chunk_entry_count)
-                });
-                if let Some(range) = leaf_chunk_entries_dirty {
-                    let mut writer = frame
-                        .live_buffers
-                        .voxel_leaf_chunk_entries_buffer
-                        .write()
-                        .unwrap();
-                    writer[range.clone()].copy_from_slice(&leaf_chunk_entries[range]);
-                }
+                    for write in &batch.leaf_chunk_entry_writes {
+                        let Some((dst, src)) = clamp_write_span(
+                            write.start,
+                            write.values.len(),
+                            vte_leaf_chunk_entry_count,
+                        ) else {
+                            continue;
+                        };
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_leaf_chunk_entries_buffer
+                            .write()
+                            .unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
+                } else {
+                    let dirty = input.dirty_ranges;
 
-                let macro_words_dirty = clamp_dirty_range(
-                    dirty.and_then(|ranges| ranges.macro_words.clone()),
-                    vte_macro_word_count,
-                )
-                .or_else(|| (vte_macro_word_count > 0).then_some(0..vte_macro_word_count));
-                if let Some(range) = macro_words_dirty {
-                    let mut writer = frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
-                    writer[range.clone()].copy_from_slice(&macro_words[range]);
+                    let chunk_headers_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.chunk_headers.clone()),
+                        vte_chunk_count,
+                    )
+                    .or_else(|| (vte_chunk_count > 0).then_some(0..vte_chunk_count));
+                    if let Some(range) = chunk_headers_dirty {
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_chunk_headers_buffer
+                            .write()
+                            .unwrap();
+                        writer[range.clone()].copy_from_slice(&chunk_headers[range]);
+                    }
+
+                    let occupancy_words_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.occupancy_words.clone()),
+                        vte_occupancy_word_count,
+                    )
+                    .or_else(|| (vte_occupancy_word_count > 0).then_some(0..vte_occupancy_word_count));
+                    if let Some(range) = occupancy_words_dirty {
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_occupancy_words_buffer
+                            .write()
+                            .unwrap();
+                        writer[range.clone()].copy_from_slice(&occupancy_words[range]);
+                    }
+
+                    let material_words_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.material_words.clone()),
+                        vte_material_word_count,
+                    )
+                    .or_else(|| (vte_material_word_count > 0).then_some(0..vte_material_word_count));
+                    if let Some(range) = material_words_dirty {
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_material_words_buffer
+                            .write()
+                            .unwrap();
+                        writer[range.clone()].copy_from_slice(&material_words[range]);
+                    }
+
+                    let leaf_headers_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.leaf_headers.clone()),
+                        vte_leaf_count,
+                    )
+                    .or_else(|| (vte_leaf_count > 0).then_some(0..vte_leaf_count));
+                    if let Some(range) = leaf_headers_dirty {
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_leaf_headers_buffer
+                            .write()
+                            .unwrap();
+                        writer[range.clone()].copy_from_slice(&leaf_headers[range]);
+                    }
+
+                    let region_bvh_nodes_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.region_bvh_nodes.clone()),
+                        vte_region_bvh_node_count,
+                    )
+                    .or_else(|| {
+                        (vte_region_bvh_node_count > 0).then_some(0..vte_region_bvh_node_count)
+                    });
+                    if let Some(range) = region_bvh_nodes_dirty {
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_region_bvh_nodes_buffer
+                            .write()
+                            .unwrap();
+                        writer[range.clone()].copy_from_slice(&region_bvh_nodes[range]);
+                    }
+
+                    let leaf_chunk_entries_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.leaf_chunk_entries.clone()),
+                        vte_leaf_chunk_entry_count,
+                    )
+                    .or_else(|| {
+                        (vte_leaf_chunk_entry_count > 0).then_some(0..vte_leaf_chunk_entry_count)
+                    });
+                    if let Some(range) = leaf_chunk_entries_dirty {
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_leaf_chunk_entries_buffer
+                            .write()
+                            .unwrap();
+                        writer[range.clone()].copy_from_slice(&leaf_chunk_entries[range]);
+                    }
+
+                    let macro_words_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.macro_words.clone()),
+                        vte_macro_word_count,
+                    )
+                    .or_else(|| (vte_macro_word_count > 0).then_some(0..vte_macro_word_count));
+                    if let Some(range) = macro_words_dirty {
+                        let mut writer = frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
+                        writer[range.clone()].copy_from_slice(&macro_words[range]);
+                    }
                 }
 
                 frame.last_voxel_metadata_generation = Some(input.metadata_generation);

@@ -38,6 +38,7 @@ pub struct VoxelFrameInput<'a> {
     pub region_bvh_nodes: &'a [GpuVoxelChunkBvhNode],
     pub leaf_headers: &'a [GpuVoxelLeafHeader],
     pub leaf_chunk_entries: &'a [u32],
+    pub mutation_batch: Option<&'a VoxelMutationBatch>,
     pub dirty_ranges: Option<&'a VoxelFrameDirtyRanges>,
 }
 
@@ -50,6 +51,41 @@ pub struct VoxelFrameDirtyRanges {
     pub region_bvh_nodes: Option<Range<usize>>,
     pub leaf_headers: Option<Range<usize>>,
     pub leaf_chunk_entries: Option<Range<usize>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VoxelMutationBatch {
+    pub chunk_header_writes: Vec<VoxelChunkHeaderRangeWrite>,
+    pub occupancy_word_writes: Vec<VoxelU32RangeWrite>,
+    pub material_word_writes: Vec<VoxelU32RangeWrite>,
+    pub macro_word_writes: Vec<VoxelU32RangeWrite>,
+    pub region_bvh_node_writes: Vec<VoxelChunkBvhNodeRangeWrite>,
+    pub leaf_header_writes: Vec<VoxelLeafHeaderRangeWrite>,
+    pub leaf_chunk_entry_writes: Vec<VoxelU32RangeWrite>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoxelChunkHeaderRangeWrite {
+    pub start: u32,
+    pub values: Vec<GpuVoxelChunkHeader>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoxelChunkBvhNodeRangeWrite {
+    pub start: u32,
+    pub values: Vec<GpuVoxelChunkBvhNode>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoxelLeafHeaderRangeWrite {
+    pub start: u32,
+    pub values: Vec<GpuVoxelLeafHeader>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoxelU32RangeWrite {
+    pub start: u32,
+    pub values: Vec<u32>,
 }
 
 #[derive(Copy, Clone, Default, Pod, Zeroable)]

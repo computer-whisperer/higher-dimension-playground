@@ -5,6 +5,7 @@ use higher_dimension_playground::matrix_operations::{
 };
 use higher_dimension_playground::render::{
     FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput, VoxelFrameInput,
+    VTE_REGION_BVH_INVALID_NODE,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::f32::consts::PI;
@@ -215,14 +216,16 @@ impl DemoScene {
                 frame_params,
                 VoxelFrameInput {
                     metadata_generation: 0,
+                    region_bvh_root_index: VTE_REGION_BVH_INVALID_NODE,
                     chunk_headers: &[],
-                    payload_update_slots: &[],
                     occupancy_words: &[],
                     material_words: &[],
                     macro_words: &[],
-                    visible_chunk_indices: &[],
-                    y_slice_bounds: &[],
-                    y_slice_lookup_entries: &[],
+                    region_bvh_nodes: &[],
+                    leaf_headers: &[],
+                    leaf_chunk_entries: &[],
+                    mutation_batch: None,
+                    dirty_ranges: None,
                 },
             );
         } else {
@@ -427,14 +430,16 @@ impl DemoScene {
                 frame_params,
                 VoxelFrameInput {
                     metadata_generation: 0,
+                    region_bvh_root_index: VTE_REGION_BVH_INVALID_NODE,
                     chunk_headers: &[],
-                    payload_update_slots: &[],
                     occupancy_words: &[],
                     material_words: &[],
                     macro_words: &[],
-                    visible_chunk_indices: &[],
-                    y_slice_bounds: &[],
-                    y_slice_lookup_entries: &[],
+                    region_bvh_nodes: &[],
+                    leaf_headers: &[],
+                    leaf_chunk_entries: &[],
+                    mutation_batch: None,
+                    dirty_ranges: None,
                 },
             );
         } else {

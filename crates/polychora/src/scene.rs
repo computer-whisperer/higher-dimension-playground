@@ -4,7 +4,7 @@ use crate::voxel::world::BaseWorldKind;
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
-    VoxelFrameInput,
+    VoxelFrameInput, VoxelMutationBatch,
     VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_INVALID_NODE, VTE_REGION_BVH_NODE_CAPACITY, VTE_REGION_LEAF_CAPACITY,
     VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
 };
@@ -121,6 +121,7 @@ pub struct VoxelFrameData {
     pub metadata_generation: u64,
     pub region_bvh_root_index: u32,
     pub dirty_ranges: VoxelFrameDirtyRanges,
+    pub mutation_batch: Option<VoxelMutationBatch>,
     pub chunk_headers: Vec<GpuVoxelChunkHeader>,
     pub occupancy_words: Vec<u32>,
     pub material_words: Vec<u32>,
@@ -154,6 +155,7 @@ impl VoxelFrameData {
             region_bvh_nodes: &self.region_bvh_nodes,
             leaf_headers: &self.leaf_headers,
             leaf_chunk_entries: &self.leaf_chunk_entries,
+            mutation_batch: self.mutation_batch.as_ref(),
             dirty_ranges: Some(&self.dirty_ranges),
         }
     }
@@ -1169,6 +1171,7 @@ impl Scene {
                 region_bvh_root_index:
                     higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
                 dirty_ranges: VoxelFrameDirtyRanges::default(),
+                mutation_batch: None,
                 chunk_headers: Vec::new(),
                 occupancy_words: Vec::new(),
                 material_words: Vec::new(),
@@ -1864,5 +1867,37 @@ mod tests {
             scene.ensure_render_bvh_cache_for_bounds(bounds);
         }
         assert!(scene.voxel_pending_scene_dirty_regions.is_empty());
+    }
+
+    #[test]
+    fn voxel_frame_snapshot_path_clears_mutation_batch() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        scene.world_set_voxel(0, 0, 0, 0, VoxelType(3));
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+        assert!(scene.voxel_frame_data.mutation_batch.is_none());
+    }
+
+    #[test]
+    fn voxel_frame_delta_path_emits_mutation_batch() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        scene.world_set_voxel(0, 0, 0, 0, VoxelType(3));
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+        assert!(scene.voxel_frame_data.mutation_batch.is_none());
+
+        scene.world_set_voxel(CHUNK_SIZE as i32, 0, 0, 0, VoxelType(4));
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+
+        let batch = scene.voxel_frame_data.mutation_batch.as_ref();
+        assert!(batch.is_some());
+        let batch = batch.unwrap();
+        assert!(
+            !batch.chunk_header_writes.is_empty()
+                || !batch.occupancy_word_writes.is_empty()
+                || !batch.material_word_writes.is_empty()
+                || !batch.macro_word_writes.is_empty()
+                || !batch.region_bvh_node_writes.is_empty()
+                || !batch.leaf_header_writes.is_empty()
+                || !batch.leaf_chunk_entry_writes.is_empty()
+        );
     }
 }

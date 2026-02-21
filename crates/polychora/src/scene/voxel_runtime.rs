@@ -363,6 +363,117 @@ impl Scene {
         dirty
     }
 
+    fn chunk_header_range_write_from_dirty(
+        chunk_headers: &[GpuVoxelChunkHeader],
+        dirty: Option<std::ops::Range<usize>>,
+    ) -> Option<higher_dimension_playground::render::VoxelChunkHeaderRangeWrite> {
+        let range = dirty?;
+        if range.start >= range.end || range.end > chunk_headers.len() {
+            return None;
+        }
+        Some(higher_dimension_playground::render::VoxelChunkHeaderRangeWrite {
+            start: range.start as u32,
+            values: chunk_headers[range].to_vec(),
+        })
+    }
+
+    fn bvh_node_range_write_from_dirty(
+        nodes: &[GpuVoxelChunkBvhNode],
+        dirty: Option<std::ops::Range<usize>>,
+    ) -> Option<higher_dimension_playground::render::VoxelChunkBvhNodeRangeWrite> {
+        let range = dirty?;
+        if range.start >= range.end || range.end > nodes.len() {
+            return None;
+        }
+        Some(higher_dimension_playground::render::VoxelChunkBvhNodeRangeWrite {
+            start: range.start as u32,
+            values: nodes[range].to_vec(),
+        })
+    }
+
+    fn leaf_header_range_write_from_dirty(
+        leaf_headers: &[GpuVoxelLeafHeader],
+        dirty: Option<std::ops::Range<usize>>,
+    ) -> Option<higher_dimension_playground::render::VoxelLeafHeaderRangeWrite> {
+        let range = dirty?;
+        if range.start >= range.end || range.end > leaf_headers.len() {
+            return None;
+        }
+        Some(higher_dimension_playground::render::VoxelLeafHeaderRangeWrite {
+            start: range.start as u32,
+            values: leaf_headers[range].to_vec(),
+        })
+    }
+
+    fn u32_range_write_from_dirty(
+        values: &[u32],
+        dirty: Option<std::ops::Range<usize>>,
+    ) -> Option<higher_dimension_playground::render::VoxelU32RangeWrite> {
+        let range = dirty?;
+        if range.start >= range.end || range.end > values.len() {
+            return None;
+        }
+        Some(higher_dimension_playground::render::VoxelU32RangeWrite {
+            start: range.start as u32,
+            values: values[range].to_vec(),
+        })
+    }
+
+    fn build_mutation_batch_from_dirty_ranges(
+        voxel_frame_data: &VoxelFrameData,
+        dirty: &VoxelFrameDirtyRanges,
+    ) -> Option<higher_dimension_playground::render::VoxelMutationBatch> {
+        let mut batch = higher_dimension_playground::render::VoxelMutationBatch::default();
+        if let Some(write) = Self::chunk_header_range_write_from_dirty(
+            &voxel_frame_data.chunk_headers,
+            dirty.chunk_headers.clone(),
+        ) {
+            batch.chunk_header_writes.push(write);
+        }
+        if let Some(write) =
+            Self::u32_range_write_from_dirty(&voxel_frame_data.occupancy_words, dirty.occupancy_words.clone())
+        {
+            batch.occupancy_word_writes.push(write);
+        }
+        if let Some(write) =
+            Self::u32_range_write_from_dirty(&voxel_frame_data.material_words, dirty.material_words.clone())
+        {
+            batch.material_word_writes.push(write);
+        }
+        if let Some(write) =
+            Self::u32_range_write_from_dirty(&voxel_frame_data.macro_words, dirty.macro_words.clone())
+        {
+            batch.macro_word_writes.push(write);
+        }
+        if let Some(write) = Self::bvh_node_range_write_from_dirty(
+            &voxel_frame_data.region_bvh_nodes,
+            dirty.region_bvh_nodes.clone(),
+        ) {
+            batch.region_bvh_node_writes.push(write);
+        }
+        if let Some(write) = Self::leaf_header_range_write_from_dirty(
+            &voxel_frame_data.leaf_headers,
+            dirty.leaf_headers.clone(),
+        ) {
+            batch.leaf_header_writes.push(write);
+        }
+        if let Some(write) = Self::u32_range_write_from_dirty(
+            &voxel_frame_data.leaf_chunk_entries,
+            dirty.leaf_chunk_entries.clone(),
+        ) {
+            batch.leaf_chunk_entry_writes.push(write);
+        }
+
+        let has_ops = !batch.chunk_header_writes.is_empty()
+            || !batch.occupancy_word_writes.is_empty()
+            || !batch.material_word_writes.is_empty()
+            || !batch.macro_word_writes.is_empty()
+            || !batch.region_bvh_node_writes.is_empty()
+            || !batch.leaf_header_writes.is_empty()
+            || !batch.leaf_chunk_entry_writes.is_empty();
+        has_ops.then_some(batch)
+    }
+
     fn encode_leaf_chunk_entries(
         voxel_frame_data: &mut VoxelFrameData,
         dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
@@ -689,6 +800,8 @@ impl Scene {
             old_macro_words_len,
             self.voxel_frame_data.macro_words.len(),
         );
+        self.voxel_frame_data.mutation_batch =
+            Self::build_mutation_batch_from_dirty_ranges(&self.voxel_frame_data, &dirty);
         self.voxel_frame_data.dirty_ranges = dirty;
 
         self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
@@ -978,6 +1091,7 @@ impl Scene {
         self.voxel_frame_data.region_bvh_root_index =
             higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE;
         self.voxel_frame_data.dirty_ranges = VoxelFrameDirtyRanges::default();
+        self.voxel_frame_data.mutation_batch = None;
         self.voxel_dense_payload_encoded_cache.clear();
         self.voxel_leaf_entry_spans.clear();
         self.voxel_leaf_entry_free_spans.clear();
@@ -1007,6 +1121,7 @@ impl Scene {
             self.voxel_frame_data.region_bvh_nodes = buffers.region_bvh_nodes;
             self.voxel_frame_data.leaf_headers = buffers.leaf_headers;
             self.voxel_frame_data.leaf_chunk_entries = buffers.leaf_chunk_entries;
+            self.voxel_frame_data.mutation_batch = None;
             self.voxel_frame_data.dirty_ranges =
                 Self::full_dirty_ranges_from_frame(&self.voxel_frame_data);
             self.sync_leaf_entry_allocator_from_frame();
