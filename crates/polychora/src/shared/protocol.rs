@@ -100,10 +100,19 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
-    // Subtree patch to apply into client world cache. `subtree.bounds` may be
-    // larger than the client's requested interest AABB in order to avoid
-    // fragmenting canonical leaves (for example, large Uniform spans).
+    // Subtree patch to apply into client world cache.
+    //
+    // `authoritative_bounds` is the exact region where this patch is a
+    // coverage contract. Inside that AABB, the client may treat both presence
+    // and absence as authoritative.
+    //
+    // `subtree.bounds` may be larger than `authoritative_bounds` in order to
+    // avoid fragmenting canonical leaves (for example, large Uniform spans).
+    // Outside `authoritative_bounds`, subtree data is advisory: present leaves
+    // are valid terrain data, but absent leaves must not be interpreted as
+    // "known empty coverage".
     WorldSubtreePatch {
+        authoritative_bounds: Aabb4i,
         subtree: RegionTreeCore,
     },
     WorldChunkSampleResponse {

@@ -1326,7 +1326,11 @@ struct App {
     multiplayer_chunk_sample_diag_rng_state: u64,
     multiplayer_chunk_sample_diag_next_request_id: u64,
     multiplayer_chunk_sample_diag_recent_patches:
-        VecDeque<(u64, polychora::shared::region_tree::RegionTreeCore)>,
+        VecDeque<(
+            u64,
+            Aabb4i,
+            polychora::shared::region_tree::RegionTreeCore,
+        )>,
     multiplayer_chunk_sample_diag_patch_seq: u64,
     pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,
     player_modifier_external_velocity: [f32; 4],

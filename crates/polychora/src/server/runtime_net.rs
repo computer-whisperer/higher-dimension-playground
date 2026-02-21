@@ -150,6 +150,7 @@ fn send_world_subtree_patch_to_client(
         state,
         client_id,
         ServerMessage::WorldSubtreePatch {
+            authoritative_bounds: bounds,
             subtree: (*subtree).clone(),
         },
     );
@@ -324,6 +325,7 @@ fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aab
                 state,
                 client_id,
                 ServerMessage::WorldSubtreePatch {
+                    authoritative_bounds: clip_bounds,
                     subtree: (*subtree).clone(),
                 },
             );
@@ -341,6 +343,7 @@ fn send_empty_world_subtree_patch_to_client(state: &SharedState, client_id: u64,
         state,
         client_id,
         ServerMessage::WorldSubtreePatch {
+            authoritative_bounds: bounds,
             subtree: crate::shared::region_tree::RegionTreeCore {
                 bounds,
                 kind: crate::shared::region_tree::RegionNodeKind::Empty,
@@ -1310,10 +1313,15 @@ pub(super) fn spawn_client_thread(
                 Ok(encoded) => encoded,
                 Err(error) => {
                     match &message {
-                        ServerMessage::WorldSubtreePatch { subtree } => {
+                        ServerMessage::WorldSubtreePatch {
+                            authoritative_bounds,
+                            subtree,
+                        } => {
                             eprintln!(
-                                "failed to encode world subtree patch for client {} bounds={:?}->{:?}: {}",
+                                "failed to encode world subtree patch for client {} authoritative={:?}->{:?} subtree={:?}->{:?}: {}",
                                 client_id,
+                                authoritative_bounds.min,
+                                authoritative_bounds.max,
                                 subtree.bounds.min,
                                 subtree.bounds.max,
                                 error

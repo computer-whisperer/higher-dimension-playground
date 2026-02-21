@@ -850,7 +850,11 @@ impl App {
         client.send(MultiplayerClientMessage::WorldChunkSampleRequest { request_id, chunk });
     }
 
-    fn record_multiplayer_chunk_sample_diag_patch(&mut self, patch: &RegionTreeCore) {
+    fn record_multiplayer_chunk_sample_diag_patch(
+        &mut self,
+        authoritative_bounds: Aabb4i,
+        patch: &RegionTreeCore,
+    ) {
         if !self.multiplayer_chunk_sample_diag_enabled {
             return;
         }
@@ -859,7 +863,11 @@ impl App {
             .wrapping_add(1)
             .max(1);
         self.multiplayer_chunk_sample_diag_recent_patches
-            .push_back((self.multiplayer_chunk_sample_diag_patch_seq, patch.clone()));
+            .push_back((
+                self.multiplayer_chunk_sample_diag_patch_seq,
+                authoritative_bounds,
+                patch.clone(),
+            ));
         while self.multiplayer_chunk_sample_diag_recent_patches.len()
             > self.multiplayer_chunk_sample_diag_history_limit
         {
@@ -932,12 +940,12 @@ impl App {
         let mut overlap_mismatch_count = 0usize;
         let mut newest_overlap_seq = None;
         let mut newest_overlap_match = None;
-        for (seq, patch) in self
+        for (seq, authoritative_bounds, patch) in self
             .multiplayer_chunk_sample_diag_recent_patches
             .iter()
             .rev()
         {
-            if !patch.bounds.contains_chunk(chunk) {
+            if !authoritative_bounds.contains_chunk(chunk) {
                 continue;
             }
             let patch_dense = dense_materials_from_region_core_chunk(patch, chunk);
@@ -1301,11 +1309,22 @@ impl App {
 
     pub(super) fn apply_multiplayer_world_patch(
         &mut self,
+        authoritative_bounds: Aabb4i,
         patch: RegionTreeCore,
     ) -> Option<(usize, usize)> {
-        let patch_bounds = patch.bounds;
-        let patch_single_chunk_key =
-            (patch_bounds.min == patch_bounds.max).then_some(patch_bounds.min);
+        if !authoritative_bounds.is_valid() {
+            eprintln!(
+                "Ignored multiplayer world patch with invalid authoritative bounds {:?}->{:?} (subtree {:?}->{:?})",
+                authoritative_bounds.min,
+                authoritative_bounds.max,
+                patch.bounds.min,
+                patch.bounds.max
+            );
+            return None;
+        }
+        let patch_envelope_bounds = patch.bounds;
+        let patch_single_chunk_key = (authoritative_bounds.min == authoritative_bounds.max)
+            .then_some(authoritative_bounds.min);
         let sync_diag_enabled = std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some();
         let world_before =
             patch_single_chunk_key.and_then(|key| self.scene.debug_world_tree_chunk_payload(key));
@@ -1319,9 +1338,9 @@ impl App {
 
         let scene_patch_start = Instant::now();
         let scene_patch_stats = if self.multiplayer_world_patch_full_stats_enabled {
-            self.scene.apply_region_patch(patch_bounds, &patch)
+            self.scene.apply_region_patch(authoritative_bounds, &patch)
         } else {
-            self.scene.apply_region_patch_fast(patch_bounds, &patch)
+            self.scene.apply_region_patch_fast(authoritative_bounds, &patch)
         };
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
         let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
@@ -1331,7 +1350,7 @@ impl App {
             let diag_splice_start = Instant::now();
             let _ = self
                 .multiplayer_stream_tree_diag
-                .splice_non_empty_core_in_bounds(patch_bounds, &patch);
+                .splice_non_empty_core_in_bounds(authoritative_bounds, &patch);
             diag_splice_start.elapsed().as_secs_f64() * 1000.0
         } else {
             0.0
@@ -1340,11 +1359,14 @@ impl App {
         self.note_runtime_profile_multiplayer_patch(patch_apply_elapsed_ms);
         if patch_apply_elapsed_ms >= 50.0 {
             eprintln!(
-                "[client-world-patch] elapsed_ms={:.3} bounds={:?}->{:?} patch_cells={} previous_non_empty={} desired_non_empty={} upserts={} removals={}",
+                "[client-world-patch] elapsed_ms={:.3} authoritative={:?}->{:?} subtree={:?}->{:?} auth_cells={} subtree_cells={} previous_non_empty={} desired_non_empty={} upserts={} removals={}",
                 patch_apply_elapsed_ms,
-                patch_bounds.min,
-                patch_bounds.max,
-                patch_bounds.chunk_cell_count().unwrap_or(0),
+                authoritative_bounds.min,
+                authoritative_bounds.max,
+                patch_envelope_bounds.min,
+                patch_envelope_bounds.max,
+                authoritative_bounds.chunk_cell_count().unwrap_or(0),
+                patch_envelope_bounds.chunk_cell_count().unwrap_or(0),
                 scene_patch_stats.previous_non_empty,
                 scene_patch_stats.desired_non_empty,
                 scene_patch_stats.upserts,
@@ -1367,9 +1389,11 @@ impl App {
             );
         }
         eprintln!(
-            "Applied multiplayer world patch bounds={:?}->{:?} upserts={} removals={} changed_chunks={} queued_updates={} invalidated_cached_chunks={}",
-            patch_bounds.min,
-            patch_bounds.max,
+            "Applied multiplayer world patch authoritative={:?}->{:?} subtree={:?}->{:?} upserts={} removals={} changed_chunks={} queued_updates={} invalidated_cached_chunks={}",
+            authoritative_bounds.min,
+            authoritative_bounds.max,
+            patch_envelope_bounds.min,
+            patch_envelope_bounds.max,
             scene_patch_stats.upserts,
             scene_patch_stats.removals,
             scene_patch_stats.changed_chunks,
@@ -1429,9 +1453,14 @@ impl App {
                 eprintln!("Multiplayer server error: {message}");
                 self.append_dev_console_log_line(format!("[server] {message}"));
             }
-            multiplayer::ServerMessage::WorldSubtreePatch { subtree } => {
-                self.record_multiplayer_chunk_sample_diag_patch(&subtree);
-                let changed = self.apply_multiplayer_world_patch(subtree).is_some();
+            multiplayer::ServerMessage::WorldSubtreePatch {
+                authoritative_bounds,
+                subtree,
+            } => {
+                self.record_multiplayer_chunk_sample_diag_patch(authoritative_bounds, &subtree);
+                let changed = self
+                    .apply_multiplayer_world_patch(authoritative_bounds, subtree)
+                    .is_some();
                 self.multiplayer_initial_world_wait_since = None;
                 if !self.world_ready {
                     self.world_ready = true;
