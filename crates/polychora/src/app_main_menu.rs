@@ -449,6 +449,8 @@ impl App {
                 self.queue.clone(),
                 frame_params,
                 voxel_frame.as_input(),
+                &[],
+                &[],
             );
         } else {
             let instances: &[common::ModelInstance] = &[];

@@ -106,6 +106,8 @@ const VTE_ENTITY_DIAG_DEFAULT_INTERVAL: usize = 120;
 const VTE_WORLD_BVH_RAY_DIAG_DEFAULT_SAMPLES: usize = 64;
 const VTE_WORLD_BVH_RAY_DIAG_DEFAULT_INTERVAL: usize = 60;
 const VTE_ENTITY_DIAG_TRANSFORM_ABS_WARN: f32 = 16_384.0;
+// Force an occasional full rebuild after repeated refits to keep traversal quality healthy.
+const VTE_ENTITY_BVH_REFIT_REBUILD_INTERVAL: usize = 120;
 // Keep in sync with OVERLAY_RASTER_SCALE in `slang-shaders/src/rasterizer.slang`.
 const VTE_OVERLAY_RASTER_SCALE: u32 = 3;
 const WORKING_FLAG_VTE_COLLAPSED: u32 = 1u32 << 0u32;
@@ -1371,6 +1373,8 @@ pub struct RenderContext {
     frames_rendered: usize,
     bvh_scene_hash: u64,
     vte_non_voxel_scene_hash: u64,
+    vte_non_voxel_bvh_topology_tet_count: usize,
+    vte_non_voxel_bvh_refit_frames: usize,
     last_clipped_tet_count: u32,
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
@@ -1977,9 +1981,18 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         queue: Arc<Queue>,
         mut frame_params: FrameParams,
         voxel_input: VoxelFrameInput<'_>,
+        tetra_entity_instances: &[common::ModelInstance],
+        tetra_overlay_instances: &[common::ModelInstance],
     ) {
         frame_params.render_options.render_backend = RenderBackend::VoxelTraversal;
-        self.render_internal(device, queue, frame_params, &[], &[], Some(&voxel_input));
+        self.render_internal(
+            device,
+            queue,
+            frame_params,
+            tetra_entity_instances,
+            tetra_overlay_instances,
+            Some(&voxel_input),
+        );
     }
 
     fn render_internal(
@@ -3045,6 +3058,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         let mut vte_non_voxel_rebuild_needed = false;
         let mut vte_non_voxel_rebuild_executed = false;
         let mut vte_non_voxel_rebuild_reason = "non_vte";
+        let mut vte_non_voxel_bvh_update_mode = "non_vte";
 
         if do_voxel_vte {
             vte_non_voxel_rebuild_reason = "empty";
@@ -3147,6 +3161,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             // Non-VTE passes reuse the same tetra/BVH buffers for other pipelines.
             // Force non-voxel reprovisioning when VTE is re-enabled.
             self.vte_non_voxel_scene_hash = 0;
+            self.vte_non_voxel_bvh_topology_tet_count = 0;
+            self.vte_non_voxel_bvh_refit_frames = 0;
             self.clear_vte_compare_diagnostics();
         }
 
@@ -3271,7 +3287,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 if non_voxel_tetrahedron_count == 0 {
                     vte_non_voxel_rebuild_needed = false;
                     vte_non_voxel_rebuild_reason = "empty";
+                    vte_non_voxel_bvh_update_mode = "empty";
                     self.vte_non_voxel_scene_hash = 0;
+                    self.vte_non_voxel_bvh_topology_tet_count = 0;
+                    self.vte_non_voxel_bvh_refit_frames = 0;
                 } else {
                     // In overlay-raster mode, the shared tetra output buffer is reused by the
                     // overlay tet preprocess pass later in the frame. Force non-voxel
@@ -3326,64 +3345,74 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         }
 
                         if non_voxel_tetrahedron_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
-                            // Build a non-voxel-only BVH used by the VTE Stage A tetra pass.
                             let n = non_voxel_tetrahedron_count as u32;
-                            let n_pow2 = n.next_power_of_two();
-
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_scene_bounds_pipeline.clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([1, 1, 1]) }.unwrap();
-
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([(n_pow2 + 63) / 64u32, 1, 1]) }.unwrap();
-
-                            let num_stages = n_pow2.trailing_zeros();
-                            let local_stages = 6u32.min(num_stages);
-                            let workgroups = (n_pow2 + 63) / 64;
-
-                            let push_data: [u32; 4] = [0, 0, n_pow2, 0];
-                            builder
-                                .push_constants(
-                                    self.compute_pipeline.pipeline_layout.clone(),
-                                    0,
-                                    push_data,
-                                )
-                                .unwrap();
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline
-                                        .bvh_bitonic_sort_local_pipeline
-                                        .clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-
-                            for stage in local_stages..num_stages {
-                                builder
-                                    .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_bitonic_sort_pipeline.clone(),
-                                    )
-                                    .unwrap();
-                                for step in (local_stages..=stage).rev() {
-                                    let push_data: [u32; 4] = [stage, step, n_pow2, 0];
+                            let topology_tet_count_matches =
+                                self.vte_non_voxel_bvh_topology_tet_count
+                                    == non_voxel_tetrahedron_count;
+                            let periodic_rebuild_due = self.vte_non_voxel_bvh_refit_frames
+                                >= VTE_ENTITY_BVH_REFIT_REBUILD_INTERVAL;
+                            let can_refit_only =
+                                topology_tet_count_matches && !periodic_rebuild_due;
+                            if can_refit_only {
+                                // Refit-only update for rapid movers: keep tree topology and
+                                // update leaf/internal bounds from current tetrahedra.
+                                let num_internal_nodes = n.saturating_sub(1);
+                                if num_internal_nodes > 0 {
                                     builder
-                                        .push_constants(
-                                            self.compute_pipeline.pipeline_layout.clone(),
-                                            0,
-                                            push_data,
+                                        .bind_pipeline_compute(
+                                            self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                         )
                                         .unwrap();
-                                    unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+                                    unsafe {
+                                        builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
+                                    }
+                                    .unwrap();
                                 }
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                {
+                                    let q =
+                                        self.profiler.next_query_index("vte_non_voxel_bvh_refit");
+                                    unsafe {
+                                        builder.write_timestamp(
+                                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                                            q,
+                                            PipelineStage::AllCommands,
+                                        )
+                                    }
+                                    .unwrap();
+                                }
+                                self.vte_non_voxel_bvh_refit_frames =
+                                    self.vte_non_voxel_bvh_refit_frames.saturating_add(1);
+                                vte_non_voxel_bvh_update_mode = "refit";
+                            } else {
+                                // Full build path (first build, changed tetra count, or periodic
+                                // topology refresh after repeated refits).
+                                let n_pow2 = n.next_power_of_two();
 
-                                let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_scene_bounds_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                unsafe { builder.dispatch([1, 1, 1]) }.unwrap();
+
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                unsafe { builder.dispatch([(n_pow2 + 63) / 64u32, 1, 1]) }.unwrap();
+
+                                let num_stages = n_pow2.trailing_zeros();
+                                let local_stages = 6u32.min(num_stages);
+                                let workgroups = (n_pow2 + 63) / 64;
+
+                                let push_data: [u32; 4] = [0, 0, n_pow2, 0];
                                 builder
                                     .push_constants(
                                         self.compute_pipeline.pipeline_layout.clone(),
@@ -3394,59 +3423,112 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 builder
                                     .bind_pipeline_compute(
                                         self.compute_pipeline
-                                            .bvh_bitonic_sort_local_merge_pipeline
+                                            .bvh_bitonic_sort_local_pipeline
                                             .clone(),
                                     )
                                     .unwrap();
                                 unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-                            }
 
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                for stage in local_stages..num_stages {
+                                    builder
+                                        .bind_pipeline_compute(
+                                            self.compute_pipeline.bvh_bitonic_sort_pipeline.clone(),
+                                        )
+                                        .unwrap();
+                                    for step in (local_stages..=stage).rev() {
+                                        let push_data: [u32; 4] = [stage, step, n_pow2, 0];
+                                        builder
+                                            .push_constants(
+                                                self.compute_pipeline.pipeline_layout.clone(),
+                                                0,
+                                                push_data,
+                                            )
+                                            .unwrap();
+                                        unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+                                    }
 
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_build_tree_pipeline.clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                    let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
+                                    builder
+                                        .push_constants(
+                                            self.compute_pipeline.pipeline_layout.clone(),
+                                            0,
+                                            push_data,
+                                        )
+                                        .unwrap();
+                                    builder
+                                        .bind_pipeline_compute(
+                                            self.compute_pipeline
+                                                .bvh_bitonic_sort_local_merge_pipeline
+                                                .clone(),
+                                        )
+                                        .unwrap();
+                                    unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+                                }
 
-                            let num_internal_nodes =
-                                non_voxel_tetrahedron_count.saturating_sub(1) as u32;
-                            if num_internal_nodes > 0 {
                                 builder
                                     .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_link_parents_pipeline.clone(),
+                                        self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe { builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1]) }
-                                    .unwrap();
-                            }
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
 
-                            {
-                                let q = self.profiler.next_query_index("vte_non_voxel_bvh");
-                                unsafe {
-                                    builder.write_timestamp(
-                                        self.frames_in_flight[frame_idx].query_pool.clone(),
-                                        q,
-                                        PipelineStage::AllCommands,
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_build_tree_pipeline.clone(),
                                     )
+                                    .unwrap();
+                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+
+                                let num_internal_nodes = n.saturating_sub(1);
+                                if num_internal_nodes > 0 {
+                                    builder
+                                        .bind_pipeline_compute(
+                                            self.compute_pipeline.bvh_link_parents_pipeline.clone(),
+                                        )
+                                        .unwrap();
+                                    unsafe {
+                                        builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
+                                    }
+                                    .unwrap();
                                 }
-                                .unwrap();
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+
+                                {
+                                    let q = self.profiler.next_query_index("vte_non_voxel_bvh");
+                                    unsafe {
+                                        builder.write_timestamp(
+                                            self.frames_in_flight[frame_idx].query_pool.clone(),
+                                            q,
+                                            PipelineStage::AllCommands,
+                                        )
+                                    }
+                                    .unwrap();
+                                }
+                                self.vte_non_voxel_bvh_topology_tet_count =
+                                    non_voxel_tetrahedron_count;
+                                self.vte_non_voxel_bvh_refit_frames = 0;
+                                vte_non_voxel_bvh_update_mode = if periodic_rebuild_due
+                                    && topology_tet_count_matches
+                                {
+                                    "rebuild_interval"
+                                } else {
+                                    "rebuild"
+                                };
                             }
+                        } else {
+                            self.vte_non_voxel_bvh_topology_tet_count = 0;
+                            self.vte_non_voxel_bvh_refit_frames = 0;
+                            vte_non_voxel_bvh_update_mode = "linear";
                         }
 
                         self.vte_non_voxel_scene_hash = non_voxel_scene_hash;
+                    } else {
+                        vte_non_voxel_bvh_update_mode = "reuse";
                     }
                 }
 
@@ -4142,7 +4224,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 || (do_voxel_vte && vte_entity_diag_periodic_due))
         {
             eprintln!(
-                "[vte-entity-diag] frame={} backend={} mode={} input_non_voxel={} input_overlay={} used_non_voxel={} dropped_non_finite={} tets_non_voxel={} tets_overlay={} do_raster={} prev_hash=0x{:016x} hash=0x{:016x} rebuild_needed={} rebuild_executed={} rebuild_reason={} max_abs_translation={:.2} max_abs_basis={:.2} outlier_instances={}",
+                "[vte-entity-diag] frame={} backend={} mode={} input_non_voxel={} input_overlay={} used_non_voxel={} dropped_non_finite={} tets_non_voxel={} tets_overlay={} do_raster={} prev_hash=0x{:016x} hash=0x{:016x} rebuild_needed={} rebuild_executed={} rebuild_reason={} bvh_mode={} bvh_refit_frames={} bvh_topology_tets={} max_abs_translation={:.2} max_abs_basis={:.2} outlier_instances={}",
                 self.frames_rendered,
                 self.last_backend.label(),
                 render_options.vte_display_mode.label(),
@@ -4158,6 +4240,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 vte_non_voxel_rebuild_needed,
                 vte_non_voxel_rebuild_executed,
                 vte_non_voxel_rebuild_reason,
+                vte_non_voxel_bvh_update_mode,
+                self.vte_non_voxel_bvh_refit_frames,
+                self.vte_non_voxel_bvh_topology_tet_count,
                 non_voxel_translation_abs_max,
                 non_voxel_basis_abs_max,
                 non_voxel_outlier_count
@@ -4196,7 +4281,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
         }
         if self.vte_entity_diag_enabled && (used_non_voxel_went_zero || tets_non_voxel_went_zero) {
             eprintln!(
-                "[vte-entity-diag][transition-zero] frame={} backend={} mode={} used_non_voxel:{}->{} tets_non_voxel:{}->{} input_non_voxel={} input_overlay={} dropped_non_finite={} do_raster={} prev_hash=0x{:016x} hash=0x{:016x} rebuild_needed={} rebuild_executed={} rebuild_reason={}",
+                "[vte-entity-diag][transition-zero] frame={} backend={} mode={} used_non_voxel:{}->{} tets_non_voxel:{}->{} input_non_voxel={} input_overlay={} dropped_non_finite={} do_raster={} prev_hash=0x{:016x} hash=0x{:016x} rebuild_needed={} rebuild_executed={} rebuild_reason={} bvh_mode={} bvh_refit_frames={} bvh_topology_tets={}",
                 self.frames_rendered,
                 self.last_backend.label(),
                 render_options.vte_display_mode.label(),
@@ -4212,7 +4297,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 non_voxel_scene_hash,
                 vte_non_voxel_rebuild_needed,
                 vte_non_voxel_rebuild_executed,
-                vte_non_voxel_rebuild_reason
+                vte_non_voxel_rebuild_reason,
+                vte_non_voxel_bvh_update_mode,
+                self.vte_non_voxel_bvh_refit_frames,
+                self.vte_non_voxel_bvh_topology_tet_count
             );
         }
 

@@ -625,6 +625,8 @@ impl RenderContext {
             frames_rendered: 0,
             bvh_scene_hash: 0,
             vte_non_voxel_scene_hash: 0,
+            vte_non_voxel_bvh_topology_tet_count: 0,
+            vte_non_voxel_bvh_refit_frames: 0,
             last_clipped_tet_count: 0,
             profiler,
             hud_font,

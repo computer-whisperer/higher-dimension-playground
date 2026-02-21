@@ -2607,7 +2607,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
         float3 skyAccumColor = float3(0.0, 0.0, 0.0);
         float skyAccumWeight = 0.0;
         float maxEntityDistance = max(1.0, meta.maxTraceDistance);
-        bool evaluateEntityTetra = false;
+        bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u;
         uint hitMaterial = 0u;
         float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
         int4 hitChunkCoord = int4(0, 0, 0, 0);
@@ -3074,7 +3074,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             debugFlags);
     }
 
-    bool evaluateEntityTetra = false;
+    bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u;
     EntityTetraHit entityHit = entityTetraHitNone();
     if (evaluateEntityTetra)
     {
