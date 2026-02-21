@@ -160,6 +160,10 @@ impl RenderContext {
             device.clone(),
             shader_spirv!("mainRaytracerTetrahedronPreprocessor"),
         );
+        let entity_instance_aabb_preprocess = load_shader(
+            device.clone(),
+            shader_spirv!("mainEntityInstanceAabbPreprocessor"),
+        );
         let raytrace_clear = load_shader(device.clone(), shader_spirv!("mainRaytracerClear"));
         let voxel_trace_stage_a =
             load_shader(device.clone(), shader_spirv!("mainVoxelTraceStageA"));
@@ -305,6 +309,7 @@ impl RenderContext {
             tetrahedron_pixel_cs: raster_pixel,
             bin_tets_cs,
             raytrace_preprocess: raytrace_preprocess,
+            entity_instance_aabb_preprocess,
             raytrace_pixel: raytrace_pixel,
             raytrace_clear: raytrace_clear,
             voxel_trace_stage_a,

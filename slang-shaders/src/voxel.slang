@@ -217,12 +217,16 @@ struct VoxelLeafHeader
     uint padding0;
 }
 
+// Set 0: OneTimeBuffers
+[[vk::binding(0, 0)]] StructuredBuffer<ModelTetrahedron> modelTetrahedrons;
+
 // Set 1: SizedBuffers
 [[vk::binding(1, 1)]] StructuredBuffer<Tetrahedron> outputTetrahedrons;
 [[vk::binding(2, 1)]] RWStructuredBuffer<float4> pixelBuffer;
 [[vk::binding(4, 1)]] StructuredBuffer<BVHNode> bvhNodes;
 
 // Set 2: LiveBuffers
+[[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;
 [[vk::binding(1, 2)]] StructuredBuffer<WorkingData> workingDataBuffer;
 [[vk::binding(2, 2)]] StructuredBuffer<VoxelFrameMeta> voxelFrameMetaBuffer;
 [[vk::binding(3, 2)]] StructuredBuffer<VoxelChunkHeader> voxelChunkHeaders;
@@ -584,28 +588,89 @@ float2 rayAABBIntersect4DEntity(
     return float2(max(tmin, 0.0), tmax);
 }
 
-bool testEntityTetrahedronHit(
-    float4 start,
-    float4 direction,
-    uint tetIndex,
+struct EntityAffineTransform
+{
+    float4 col0;
+    float4 col1;
+    float4 col2;
+    float4 col3;
+    float4 translation;
+};
+
+EntityAffineTransform entityAffineFromInstance(ModelInstance instance)
+{
+    EntityAffineTransform affine;
+    affine.col0 = float4(
+        instance.modelTransform.data[0][0],
+        instance.modelTransform.data[1][0],
+        instance.modelTransform.data[2][0],
+        instance.modelTransform.data[3][0]);
+    affine.col1 = float4(
+        instance.modelTransform.data[0][1],
+        instance.modelTransform.data[1][1],
+        instance.modelTransform.data[2][1],
+        instance.modelTransform.data[3][1]);
+    affine.col2 = float4(
+        instance.modelTransform.data[0][2],
+        instance.modelTransform.data[1][2],
+        instance.modelTransform.data[2][2],
+        instance.modelTransform.data[3][2]);
+    affine.col3 = float4(
+        instance.modelTransform.data[0][3],
+        instance.modelTransform.data[1][3],
+        instance.modelTransform.data[2][3],
+        instance.modelTransform.data[3][3]);
+    affine.translation = float4(
+        instance.modelTransform.data[0][4],
+        instance.modelTransform.data[1][4],
+        instance.modelTransform.data[2][4],
+        instance.modelTransform.data[3][4]);
+    return affine;
+}
+
+float4 transformEntityModelPointToWorld(EntityAffineTransform affine, float4 modelPoint)
+{
+    return affine.translation
+        + affine.col0 * modelPoint.x
+        + affine.col1 * modelPoint.y
+        + affine.col2 * modelPoint.z
+        + affine.col3 * modelPoint.w;
+}
+
+bool testEntityModelTetrahedronHit(
+    float4 worldStart,
+    float4 worldDirection,
+    ModelInstance instance,
+    EntityAffineTransform affine,
+    uint instanceIndex,
+    uint modelTetIndex,
+    uint modelTetCount,
     float maxDistance,
     inout EntityTetraHit closestHit)
 {
-    Tetrahedron tet = outputTetrahedrons[tetIndex];
-
-    if (tet.materialId == 0u)
+    ModelTetrahedron tet = modelTetrahedrons[modelTetIndex];
+    uint packedTetraIndex = instanceIndex * modelTetCount + modelTetIndex;
+    uint cellIndex = min(tet.cellId, 7u);
+    uint materialId = instance.cellMaterialIds[cellIndex];
+    if (materialId == 0u)
     {
         return false;
     }
 
-    float denom = dot(tet.normal, direction);
+    float4 worldV0 = transformEntityModelPointToWorld(affine, tet.vertexPositions[0]);
+    float4 worldV1 = transformEntityModelPointToWorld(affine, tet.vertexPositions[1]);
+    float4 worldV2 = transformEntityModelPointToWorld(affine, tet.vertexPositions[2]);
+    float4 worldV3 = transformEntityModelPointToWorld(affine, tet.vertexPositions[3]);
+
+    float4 worldNormal = getNormal4D(worldV0, worldV1, worldV2, worldV3);
+    float denom = dot(worldNormal, worldDirection);
     if (abs(denom) < 0.001)
     {
         return false;
     }
 
-    float4 b = start - tet.vertexPositions[0];
-    float hitDistance = -dot(b, tet.normal) / denom;
+    float4 b = worldStart - worldV0;
+    float hitDistance = -dot(b, worldNormal) / denom;
     if (hitDistance <= 0.0 || hitDistance > maxDistance)
     {
         return false;
@@ -618,19 +683,19 @@ bool testEntityTetrahedronHit(
             return false;
         }
         if (abs(hitDistance - closestHit.hitDistance) <= distTolerance
-            && tetIndex >= closestHit.tetrahedronIndex)
+            && packedTetraIndex >= closestHit.tetrahedronIndex)
         {
             return false;
         }
     }
 
-    float4 q = b + hitDistance * direction;
+    float4 q = b + hitDistance * worldDirection;
 
-    float4 e1 = tet.vertexPositions[1] - tet.vertexPositions[0];
-    float4 e2 = tet.vertexPositions[2] - tet.vertexPositions[0];
-    float4 e3 = tet.vertexPositions[3] - tet.vertexPositions[0];
+    float4 e1 = worldV1 - worldV0;
+    float4 e2 = worldV2 - worldV0;
+    float4 e3 = worldV3 - worldV0;
 
-    float4 absN = abs(tet.normal);
+    float4 absN = abs(worldNormal);
     float3 e1s;
     float3 e2s;
     float3 e3s;
@@ -682,19 +747,52 @@ bool testEntityTetrahedronHit(
     {
         closestHit.didHit = true;
         closestHit.hitDistance = hitDistance;
-        closestHit.hitPosition = start + hitDistance * direction;
-        closestHit.hitNormal = denom < 0.0 ? tet.normal : -tet.normal;
+        closestHit.hitPosition = worldStart + hitDistance * worldDirection;
+        closestHit.hitNormal = denom < 0.0 ? worldNormal : -worldNormal;
         closestHit.textureCoordinates =
             bary0 * tet.texturePositions[0]
             + u * tet.texturePositions[1]
             + v * tet.texturePositions[2]
             + w * tet.texturePositions[3];
-        closestHit.materialId = tet.materialId;
-        closestHit.tetrahedronIndex = tetIndex;
+        closestHit.materialId = materialId;
+        closestHit.tetrahedronIndex = packedTetraIndex;
         return true;
     }
 
     return false;
+}
+
+bool testEntityLeafHit(
+    float4 worldStart,
+    float4 worldDirection,
+    uint leafIndex,
+    uint modelTetCount,
+    float maxDistance,
+    inout EntityTetraHit closestHit)
+{
+    if (modelTetCount == 0u)
+    {
+        return false;
+    }
+
+    ModelInstance instance = instances[leafIndex];
+    EntityAffineTransform affine = entityAffineFromInstance(instance);
+    bool anyHit = false;
+    for (uint modelTetIndex = 0u; modelTetIndex < modelTetCount; modelTetIndex++)
+    {
+        anyHit = testEntityModelTetrahedronHit(
+                worldStart,
+                worldDirection,
+                instance,
+                affine,
+                leafIndex,
+                modelTetIndex,
+                modelTetCount,
+                maxDistance,
+                closestHit)
+            || anyHit;
+    }
+    return anyHit;
 }
 
 EntityTetraHit traceEntityTetraLinear(
@@ -704,9 +802,11 @@ EntityTetraHit traceEntityTetraLinear(
     float maxDistance)
 {
     EntityTetraHit closestHit = entityTetraHitNone();
+    uint modelTetCount, modelTetStride;
+    modelTetrahedrons.GetDimensions(modelTetCount, modelTetStride);
     for (uint i = 0u; i < numTetrahedrons; i++)
     {
-        testEntityTetrahedronHit(start, direction, i, maxDistance, closestHit);
+        testEntityLeafHit(start, direction, i, modelTetCount, maxDistance, closestHit);
     }
     return closestHit;
 }
@@ -718,9 +818,11 @@ EntityTetraHit traceEntityTetraLinearReverse(
     float maxDistance)
 {
     EntityTetraHit closestHit = entityTetraHitNone();
+    uint modelTetCount, modelTetStride;
+    modelTetrahedrons.GetDimensions(modelTetCount, modelTetStride);
     for (uint i = numTetrahedrons; i > 0u; i--)
     {
-        testEntityTetrahedronHit(start, direction, i - 1u, maxDistance, closestHit);
+        testEntityLeafHit(start, direction, i - 1u, modelTetCount, maxDistance, closestHit);
     }
     return closestHit;
 }
@@ -737,6 +839,14 @@ EntityTetraHit traceEntityTetraBVH(
     {
         return closestHit;
     }
+
+    uint modelTetCount, modelTetStride;
+    modelTetrahedrons.GetDimensions(modelTetCount, modelTetStride);
+    if (modelTetCount == 0u)
+    {
+        return closestHit;
+    }
+
     uint totalNodes = 2u * numTetrahedrons - 1u;
 
     float4 invDir = float4(
@@ -780,10 +890,11 @@ EntityTetraHit traceEntityTetraBVH(
         {
             if (node.tetrahedronIndex < numTetrahedrons)
             {
-                testEntityTetrahedronHit(
+                testEntityLeafHit(
                     start,
                     direction,
                     node.tetrahedronIndex,
+                    modelTetCount,
                     maxDistance,
                     closestHit);
             }
@@ -867,7 +978,7 @@ EntityTetraHit traceEntityTetraBVH(
     {
         for (uint i = 0u; i < numTetrahedrons; i++)
         {
-            testEntityTetrahedronHit(start, direction, i, maxDistance, closestHit);
+            testEntityLeafHit(start, direction, i, modelTetCount, maxDistance, closestHit);
         }
     }
 
@@ -904,6 +1015,14 @@ EntityTetraHit traceEntityTetraBVHNoAabb(
     {
         return closestHit;
     }
+
+    uint modelTetCount, modelTetStride;
+    modelTetrahedrons.GetDimensions(modelTetCount, modelTetStride);
+    if (modelTetCount == 0u)
+    {
+        return closestHit;
+    }
+
     uint totalNodes = 2u * numTetrahedrons - 1u;
     uint stack[BVH_STACK_SIZE];
     int stackPtr = 0;
@@ -923,10 +1042,11 @@ EntityTetraHit traceEntityTetraBVHNoAabb(
         {
             if (node.tetrahedronIndex < numTetrahedrons)
             {
-                testEntityTetrahedronHit(
+                testEntityLeafHit(
                     start,
                     direction,
                     node.tetrahedronIndex,
+                    modelTetCount,
                     maxDistance,
                     closestHit);
             }
@@ -954,7 +1074,7 @@ EntityTetraHit traceEntityTetraBVHNoAabb(
     {
         for (uint i = 0u; i < numTetrahedrons; i++)
         {
-            testEntityTetrahedronHit(start, direction, i, maxDistance, closestHit);
+            testEntityLeafHit(start, direction, i, modelTetCount, maxDistance, closestHit);
         }
     }
 
@@ -973,14 +1093,22 @@ EntityTetraHit traceEntityTetraBVHLeafArray(
         return closestHit;
     }
 
+    uint modelTetCount, modelTetStride;
+    modelTetrahedrons.GetDimensions(modelTetCount, modelTetStride);
+    if (modelTetCount == 0u)
+    {
+        return closestHit;
+    }
+
     if (numTetrahedrons == 1u)
     {
         if (bvhNodes[0].isLeaf != 0u && bvhNodes[0].tetrahedronIndex < numTetrahedrons)
         {
-            testEntityTetrahedronHit(
+            testEntityLeafHit(
                 start,
                 direction,
                 bvhNodes[0].tetrahedronIndex,
+                modelTetCount,
                 maxDistance,
                 closestHit);
         }
@@ -996,12 +1124,18 @@ EntityTetraHit traceEntityTetraBVHLeafArray(
         {
             continue;
         }
-        uint tetIdx = leaf.tetrahedronIndex;
-        if (tetIdx >= numTetrahedrons)
+        uint instanceIdx = leaf.tetrahedronIndex;
+        if (instanceIdx >= numTetrahedrons)
         {
             continue;
         }
-        testEntityTetrahedronHit(start, direction, tetIdx, maxDistance, closestHit);
+        testEntityLeafHit(
+            start,
+            direction,
+            instanceIdx,
+            modelTetCount,
+            maxDistance,
+            closestHit);
     }
     return closestHit;
 }

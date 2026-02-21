@@ -254,6 +254,7 @@ pub(super) struct ComputePipelineContext {
     pub(super) tetrahedron_pixel_pipeline: Arc<ComputePipeline>,
     pub(super) bin_tets_pipeline: Arc<ComputePipeline>,
     pub(super) raytrace_pre_pipeline: Arc<ComputePipeline>,
+    pub(super) entity_instance_aabb_pre_pipeline: Arc<ComputePipeline>,
     pub(super) raytrace_pixel_pipeline: Arc<ComputePipeline>,
     pub(super) raytrace_clear_pipeline: Arc<ComputePipeline>,
     // Voxel traversal engine (VTE) pipelines
@@ -337,6 +338,20 @@ impl ComputePipelineContext {
                         shaders
                             .raytrace_preprocess
                             .entry_point("mainRaytracerTetrahedronPreprocessor")
+                            .unwrap(),
+                    ),
+                    pipeline_layout.clone(),
+                ),
+            )
+            .unwrap(),
+            entity_instance_aabb_pre_pipeline: ComputePipeline::new(
+                device.clone(),
+                None,
+                ComputePipelineCreateInfo::stage_layout(
+                    PipelineShaderStageCreateInfo::new(
+                        shaders
+                            .entity_instance_aabb_preprocess
+                            .entry_point("mainEntityInstanceAabbPreprocessor")
                             .unwrap(),
                     ),
                     pipeline_layout.clone(),

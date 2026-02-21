@@ -157,6 +157,68 @@ void mainRaytracerTetrahedronPreprocessor(uint3 globalId : SV_DispatchThreadID)
     outputTetrahedrons[outTetIndex] = outTet;
 }
 
+// Entity TLAS preprocess: writes one proxy tetrahedron per instance whose AABB
+// matches the transformed [0,1]^4 model bounds.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mainEntityInstanceAabbPreprocessor(uint3 globalId : SV_DispatchThreadID)
+{
+    WorkingData workingData = workingDataBuffer[0];
+
+    uint outputIndex = globalId.x;
+    uint instanceCount = dispatchParams.tetrahedronCount != 0u
+        ? dispatchParams.tetrahedronCount
+        : workingData.totalNumTetrahedrons;
+    if (outputIndex >= instanceCount)
+    {
+        return;
+    }
+
+    uint instanceIndex = dispatchParams.instanceBase + outputIndex;
+    uint outTetIndex = dispatchParams.outputBase + outputIndex;
+    ModelInstance instance = instances[instanceIndex];
+
+    float4 translation = float4(
+        instance.modelTransform.data[0][4],
+        instance.modelTransform.data[1][4],
+        instance.modelTransform.data[2][4],
+        instance.modelTransform.data[3][4]);
+
+    // For local coordinates in [0, 1], each transformed axis contributes either
+    // 0 or the column vector. Aggregate per-axis min/max contributions.
+    float4 minBounds = translation;
+    float4 maxBounds = translation;
+    [ForceUnroll]
+    for (int axis = 0; axis < 4; axis++)
+    {
+        float4 column = float4(
+            instance.modelTransform.data[0][axis],
+            instance.modelTransform.data[1][axis],
+            instance.modelTransform.data[2][axis],
+            instance.modelTransform.data[3][axis]);
+        minBounds += min(float4(0.0), column);
+        maxBounds += max(float4(0.0), column);
+    }
+
+    Tetrahedron outTet;
+    outTet.vertexPositions[0] = minBounds;
+    outTet.vertexPositions[1] = float4(maxBounds.x, minBounds.y, minBounds.z, minBounds.w);
+    outTet.vertexPositions[2] = float4(minBounds.x, maxBounds.y, maxBounds.z, minBounds.w);
+    outTet.vertexPositions[3] = maxBounds;
+    outTet.texturePositions[0] = float4(0.0, 0.0, 0.0, 1.0);
+    outTet.texturePositions[1] = float4(1.0, 0.0, 0.0, 1.0);
+    outTet.texturePositions[2] = float4(0.0, 1.0, 1.0, 1.0);
+    outTet.texturePositions[3] = float4(1.0, 1.0, 1.0, 1.0);
+    outTet.normal = float4(0.0, 0.0, 0.0, 0.0);
+    outTet.invProjectionDivisors = float4(0.0, 0.0, 0.0, 0.0);
+    outTet.materialId = 1u;
+    outTet.padding[0] = 0u;
+    outTet.padding[1] = 0u;
+    outTet.padding[2] = 0u;
+
+    outputTetrahedrons[outTetIndex] = outTet;
+}
+
 // Clear the pixel buffer
 [shader("compute")]
 [numthreads(8, 8, 1)]

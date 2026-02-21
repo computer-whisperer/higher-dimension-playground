@@ -209,6 +209,7 @@ struct ShaderModules {
     edge_cs: Arc<ShaderModule>,
     tetrahedron_pixel_cs: Arc<ShaderModule>,
     raytrace_preprocess: Arc<ShaderModule>,
+    entity_instance_aabb_preprocess: Arc<ShaderModule>,
     raytrace_pixel: Arc<ShaderModule>,
     raytrace_clear: Arc<ShaderModule>,
     // Voxel traversal engine (VTE) compute shaders
@@ -2242,6 +2243,11 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         } else {
             total_tetrahedron_count
         };
+        let non_voxel_bvh_leaf_count = if use_split_voxel_instances {
+            non_voxel_used_instance_count
+        } else {
+            total_tetrahedron_count
+        };
         let (non_voxel_translation_abs_max, non_voxel_basis_abs_max, non_voxel_outlier_count) =
             model_instance_transform_extrema(&model_instances[..non_voxel_used_instance_count]);
 
@@ -2284,9 +2290,10 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     overlay_used_instance_count
                 );
                 println!(
-                    "VTE non-voxel BVH: {} internal nodes, {} total nodes",
-                    total_tetrahedron_count.saturating_sub(1),
-                    2 * total_tetrahedron_count.saturating_sub(1) + 1
+                    "VTE non-voxel BVH: {} internal nodes, {} total nodes (leaf_count={})",
+                    non_voxel_bvh_leaf_count.saturating_sub(1),
+                    2 * non_voxel_bvh_leaf_count.saturating_sub(1) + 1,
+                    non_voxel_bvh_leaf_count
                 );
             } else {
                 if model_instances.len() > used_instance_count {
@@ -2388,7 +2395,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             );
             writer.present_dimensions =
                 glam::UVec2::new(present_dimensions[0], present_dimensions[1]);
-            writer.total_num_tetrahedrons = total_tetrahedron_count as u32;
+            writer.total_num_tetrahedrons = non_voxel_bvh_leaf_count as u32;
             writer.raytrace_seed = 6364136223846793005u64
                 .wrapping_mul(self.frames_rendered as u64)
                 .wrapping_add(1442695040888963407);
@@ -2424,12 +2431,12 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         // BVH rebuild decision later in this frame reflects what is actually in
         // the buffer.  Using a per-frame hash avoids stale comparisons when
         // multiple frames are in flight.
-        let non_voxel_scene_hash = if total_tetrahedron_count == 0 {
+        let non_voxel_scene_hash = if non_voxel_bvh_leaf_count == 0 {
             0u64
         } else {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             non_voxel_used_instance_count.hash(&mut hasher);
-            total_tetrahedron_count.hash(&mut hasher);
+            non_voxel_bvh_leaf_count.hash(&mut hasher);
             bytemuck::cast_slice::<_, u8>(&model_instances[..non_voxel_used_instance_count])
                 .hash(&mut hasher);
             hasher.finish()
@@ -3283,8 +3290,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             }
 
             if do_voxel_vte {
-                let non_voxel_tetrahedron_count = total_tetrahedron_count;
-                if non_voxel_tetrahedron_count == 0 {
+                let non_voxel_leaf_count = non_voxel_bvh_leaf_count;
+                if non_voxel_leaf_count == 0 {
                     vte_non_voxel_rebuild_needed = false;
                     vte_non_voxel_rebuild_reason = "empty";
                     vte_non_voxel_bvh_update_mode = "empty";
@@ -3309,9 +3316,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     };
                     if vte_non_voxel_rebuild_needed {
                         vte_non_voxel_rebuild_executed = true;
-                        // Preprocess tetra non-voxel instances into world-space tetrahedra.
+                        // Preprocess one proxy tetrahedron per non-voxel instance using the
+                        // transformed [0,1]^4 instance AABB as the leaf primitive.
                         let vte_preprocess_push_data: [u32; 4] =
-                            [0, non_voxel_tetrahedron_count as u32, 0, 0];
+                            [0, non_voxel_leaf_count as u32, 0, 0];
                         builder
                             .push_constants(
                                 self.compute_pipeline.pipeline_layout.clone(),
@@ -3321,15 +3329,13 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .unwrap();
                         builder
                             .bind_pipeline_compute(
-                                self.compute_pipeline.raytrace_pre_pipeline.clone(),
+                                self.compute_pipeline
+                                    .entity_instance_aabb_pre_pipeline
+                                    .clone(),
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([
-                                (non_voxel_tetrahedron_count as u32 + 63) / 64u32,
-                                1,
-                                1,
-                            ])
+                            builder.dispatch([(non_voxel_leaf_count as u32 + 63) / 64u32, 1, 1])
                         }
                         .unwrap();
                         {
@@ -3344,11 +3350,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .unwrap();
                         }
 
-                        if non_voxel_tetrahedron_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
-                            let n = non_voxel_tetrahedron_count as u32;
+                        if non_voxel_leaf_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
+                            let n = non_voxel_leaf_count as u32;
                             let topology_tet_count_matches =
                                 self.vte_non_voxel_bvh_topology_tet_count
-                                    == non_voxel_tetrahedron_count;
+                                    == non_voxel_leaf_count;
                             let periodic_rebuild_due = self.vte_non_voxel_bvh_refit_frames
                                 >= VTE_ENTITY_BVH_REFIT_REBUILD_INTERVAL;
                             let can_refit_only =
@@ -3510,7 +3516,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     .unwrap();
                                 }
                                 self.vte_non_voxel_bvh_topology_tet_count =
-                                    non_voxel_tetrahedron_count;
+                                    non_voxel_leaf_count;
                                 self.vte_non_voxel_bvh_refit_frames = 0;
                                 vte_non_voxel_bvh_update_mode = if periodic_rebuild_due
                                     && topology_tet_count_matches
@@ -4163,11 +4169,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 .unwrap_or(false);
         let tets_non_voxel_went_zero = do_voxel_vte
             && prev_tets_non_voxel
-                .map(|prev| prev > 0 && total_tetrahedron_count == 0)
+                .map(|prev| prev > 0 && non_voxel_bvh_leaf_count == 0)
                 .unwrap_or(false);
         if do_voxel_vte {
             self.vte_entity_diag_prev_used_non_voxel = Some(non_voxel_used_instance_count);
-            self.vte_entity_diag_prev_tets_non_voxel = Some(total_tetrahedron_count);
+            self.vte_entity_diag_prev_tets_non_voxel = Some(non_voxel_bvh_leaf_count);
         } else {
             self.vte_entity_diag_prev_used_non_voxel = None;
             self.vte_entity_diag_prev_tets_non_voxel = None;
@@ -4179,7 +4185,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 || used_non_voxel_went_zero
                 || tets_non_voxel_went_zero
                 || (model_instances_input.len() > 0 && non_voxel_used_instance_count == 0)
-                || (non_voxel_used_instance_count > 0 && total_tetrahedron_count == 0));
+                || (non_voxel_used_instance_count > 0 && non_voxel_bvh_leaf_count == 0));
         let vte_entity_diag_periodic_due = self
             .vte_entity_diag_last_log_frame
             .map(|last| {
@@ -4189,14 +4195,14 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
         let vte_entity_diag_copy_requested = self.vte_entity_diag_enabled
             && self.vte_entity_diag_bvh_readback
             && do_voxel_vte
-            && total_tetrahedron_count > 0
+            && non_voxel_bvh_leaf_count > 0
             && (self.vte_entity_diag_verbose
                 || vte_entity_diag_anomaly
                 || self.frames_rendered % self.vte_entity_diag_interval.max(1) == 0);
         self.frames_in_flight[frame_idx].vte_entity_diag_copy_scheduled =
             vte_entity_diag_copy_requested;
         self.frames_in_flight[frame_idx].vte_entity_diag_non_voxel_tet_count = if do_voxel_vte {
-            total_tetrahedron_count
+            non_voxel_bvh_leaf_count
         } else {
             0
         };
@@ -4232,7 +4238,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 raster_overlay_instances_input.len(),
                 non_voxel_used_instance_count,
                 dropped_model_instance_count,
-                total_tetrahedron_count,
+                non_voxel_bvh_leaf_count,
                 raster_overlay_tetrahedron_count,
                 do_raster,
                 previous_vte_non_voxel_scene_hash,
@@ -4288,7 +4294,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 prev_used_non_voxel.unwrap_or(0),
                 non_voxel_used_instance_count,
                 prev_tets_non_voxel.unwrap_or(0),
-                total_tetrahedron_count,
+                non_voxel_bvh_leaf_count,
                 model_instances_input.len(),
                 raster_overlay_instances_input.len(),
                 dropped_model_instance_count,

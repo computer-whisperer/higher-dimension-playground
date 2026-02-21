@@ -25,6 +25,11 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
     },
     ShaderEntry {
         file: "raytracer.slang",
+        entry: "mainEntityInstanceAabbPreprocessor",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "raytracer.slang",
         entry: "mainRaytracerClear",
         profile: "cs_6_5",
     },
