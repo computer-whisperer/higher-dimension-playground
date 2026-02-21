@@ -205,6 +205,14 @@ pub(super) struct VteCompareStats {
     pub(super) entity_bvh_leafarray_hit_state_mismatches: u32,
     pub(super) entity_bvh_leafarray_distance_mismatches: u32,
     pub(super) entity_bvh_leafarray_tetra_mismatches: u32,
+    pub(super) stagea_samples: u32,
+    pub(super) stagea_entity_queries: u32,
+    pub(super) stagea_entity_hits: u32,
+    pub(super) stagea_voxel_hits: u32,
+    pub(super) stagea_sky_misses: u32,
+    pub(super) stagea_chunk_steps_sum: u32,
+    pub(super) stagea_voxel_steps_sum: u32,
+    pub(super) stagea_node_visits_sum: u32,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -250,9 +258,10 @@ pub(super) const VTE_DEBUG_FLAG_LOD_TINT: u32 = 1 << 3;
 pub(super) const VTE_DEBUG_FLAG_ENTITY_LINEAR_ONLY: u32 = 1 << 4;
 pub(super) const VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE: u32 = 1 << 5;
 pub(super) const VTE_DEBUG_FLAG_WORLD_BVH_RAY_DIAG: u32 = 1 << 6;
+pub(super) const VTE_DEBUG_FLAG_STAGE_A_BREAKDOWN: u32 = 1 << 7;
 pub(super) const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
 pub(super) const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
-pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 40;
+pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 48;
 pub(super) const VTE_COMPARE_STAT_COMPARED: usize = 0;
 pub(super) const VTE_COMPARE_STAT_MATCHES: usize = 1;
 pub(super) const VTE_COMPARE_STAT_MISMATCHES: usize = 2;
@@ -293,6 +302,14 @@ pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_MISMATCH: usize = 36;
 pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_HIT_STATE_MISMATCH: usize = 37;
 pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH: usize = 38;
 pub(super) const VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH: usize = 39;
+pub(super) const VTE_COMPARE_STAT_STAGEA_SAMPLES: usize = 40;
+pub(super) const VTE_COMPARE_STAT_STAGEA_ENTITY_QUERIES: usize = 41;
+pub(super) const VTE_COMPARE_STAT_STAGEA_ENTITY_HITS: usize = 42;
+pub(super) const VTE_COMPARE_STAT_STAGEA_VOXEL_HITS: usize = 43;
+pub(super) const VTE_COMPARE_STAT_STAGEA_SKY_MISSES: usize = 44;
+pub(super) const VTE_COMPARE_STAT_STAGEA_CHUNK_STEPS_SUM: usize = 45;
+pub(super) const VTE_COMPARE_STAT_STAGEA_VOXEL_STEPS_SUM: usize = 46;
+pub(super) const VTE_COMPARE_STAT_STAGEA_NODE_VISITS_SUM: usize = 47;
 pub(super) const VTE_FIRST_MISMATCH_WORD_COUNT: usize = 27;
 pub(super) const VTE_FIRST_MISMATCH_VALID: usize = 0;
 pub(super) const VTE_FIRST_MISMATCH_PIXEL_X: usize = 1;

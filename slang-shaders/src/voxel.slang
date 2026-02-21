@@ -13,8 +13,6 @@ import materials;
 static const uint CHUNK_SIZE = 8;
 static const uint CHUNK_VOLUME = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
 static const uint INVALID_INDEX = 0xFFFFFFFF;
-static const float LOD_MID_SCALE = 2.0;
-static const float LOD_FAR_SCALE = 4.0;
 static const float LOD_TINT_BLEND = 0.35;
 static const uint CHUNK_FLAG_FULL = 1u << 0u;
 static const uint STAGE_B_MODE_INTEGRAL = 0u;
@@ -51,6 +49,7 @@ static const uint META_DEBUG_FLAG_LOD_TINT = 1u << 3u;
 static const uint META_DEBUG_FLAG_ENTITY_LINEAR_ONLY = 1u << 4u;
 static const uint META_DEBUG_FLAG_ENTITY_BVH_COMPARE = 1u << 5u;
 static const uint META_DEBUG_FLAG_WORLD_BVH_RAY_DIAG = 1u << 6u;
+static const uint META_DEBUG_FLAG_STAGE_A_BREAKDOWN = 1u << 7u;
 static const float ENTITY_BVH_TOL_REL = 1e-3;
 static const float ENTITY_BVH_TOL_ABS = 1e-3;
 static const uint DEBUG_FLAG_CHUNK_TIE_STEPPED = 1u << 1u;
@@ -100,7 +99,15 @@ static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_MISMATCH = 36u;
 static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_HIT_STATE_MISMATCH = 37u;
 static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH = 38u;
 static const uint COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH = 39u;
-static const uint COMPARE_STAT_COUNT = 40u;
+static const uint COMPARE_STAT_STAGEA_SAMPLES = 40u;
+static const uint COMPARE_STAT_STAGEA_ENTITY_QUERIES = 41u;
+static const uint COMPARE_STAT_STAGEA_ENTITY_HITS = 42u;
+static const uint COMPARE_STAT_STAGEA_VOXEL_HITS = 43u;
+static const uint COMPARE_STAT_STAGEA_SKY_MISSES = 44u;
+static const uint COMPARE_STAT_STAGEA_CHUNK_STEPS_SUM = 45u;
+static const uint COMPARE_STAT_STAGEA_VOXEL_STEPS_SUM = 46u;
+static const uint COMPARE_STAT_STAGEA_NODE_VISITS_SUM = 47u;
+static const uint COMPARE_STAT_COUNT = 48u;
 
 static const uint FIRST_MISMATCH_VALID = 0u;
 static const uint FIRST_MISMATCH_PIXEL_X = 1u;
@@ -447,6 +454,68 @@ void writeWorldBvhRayDiagRecord(
 
     uint priorCount = 0u;
     InterlockedMax(vteWorldBvhRayDiagBuffer[WORLD_BVH_RAY_DIAG_COUNT_WORD], slot + 1u, priorCount);
+}
+
+bool stageABreakdownEnabled(VoxelFrameMeta meta)
+{
+    return VTE_DIAGNOSTICS && ((meta.debugFlags & META_DEBUG_FLAG_STAGE_A_BREAKDOWN) != 0u);
+}
+
+bool selectStageABreakdownSample(uint3 globalId, VoxelFrameMeta meta)
+{
+    if (!stageABreakdownEnabled(meta))
+    {
+        return false;
+    }
+    uint h =
+        globalId.x * 73856093u
+        ^ globalId.y * 19349663u
+        ^ globalId.z * 83492791u
+        ^ meta.worldBvhDiagSeed;
+    // Sample 1/64 threads to keep diagnostic overhead bounded.
+    return (h & 63u) == 0u;
+}
+
+void recordStageABreakdown(
+    VoxelFrameMeta meta,
+    bool sampled,
+    bool entityQuery,
+    bool entityHit,
+    bool voxelHit,
+    uint chunkSteps,
+    uint remainingVoxelSteps,
+    uint nodeVisits)
+{
+    if (!sampled)
+    {
+        return;
+    }
+
+    incrementCompareStat(COMPARE_STAT_STAGEA_SAMPLES);
+    if (entityQuery)
+    {
+        incrementCompareStat(COMPARE_STAT_STAGEA_ENTITY_QUERIES);
+    }
+    if (entityHit)
+    {
+        incrementCompareStat(COMPARE_STAT_STAGEA_ENTITY_HITS);
+    }
+    else if (voxelHit)
+    {
+        incrementCompareStat(COMPARE_STAT_STAGEA_VOXEL_HITS);
+    }
+    else
+    {
+        incrementCompareStat(COMPARE_STAT_STAGEA_SKY_MISSES);
+    }
+
+    InterlockedAdd(vteCompareStats[COMPARE_STAT_STAGEA_CHUNK_STEPS_SUM], chunkSteps);
+    uint maxVoxelSteps = max(1u, min(meta.maxTraceSteps * 8u, 32768u));
+    uint voxelStepsUsed = maxVoxelSteps > remainingVoxelSteps
+        ? (maxVoxelSteps - remainingVoxelSteps)
+        : 0u;
+    InterlockedAdd(vteCompareStats[COMPARE_STAT_STAGEA_VOXEL_STEPS_SUM], voxelStepsUsed);
+    InterlockedAdd(vteCompareStats[COMPARE_STAT_STAGEA_NODE_VISITS_SUM], nodeVisits);
 }
 
 int floorDiv(int a, int b)
@@ -2721,6 +2790,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
     uint worldBvhRayDiagSlot = INVALID_INDEX;
     bool worldBvhRayDiagSelected = selectWorldBvhRayDiagSample(globalId, wd, meta, worldBvhRayDiagSlot);
     bool worldBvhRayDiagWritten = false;
+    bool stageABreakdownSampled = selectStageABreakdownSample(globalId, meta);
 
     // Integral mode fast path: collapse across all layers in Stage A and write
     // directly to layer 0, so Stage B can be skipped for this mode.
@@ -3033,6 +3103,16 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
                             nearestVoxelDistance);
                 }
             }
+
+            recordStageABreakdown(
+                meta,
+                stageABreakdownSampled,
+                evaluateEntityTetra,
+                entityHit.didHit,
+                hit,
+                chunkStepsTaken,
+                remainingVoxelSteps,
+                nodeVisitCount);
 
             if (entityHit.didHit)
             {
@@ -3447,6 +3527,16 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
                     maxEntityDistance);
         }
     }
+
+    recordStageABreakdown(
+        meta,
+        stageABreakdownSampled,
+        evaluateEntityTetra,
+        entityHit.didHit,
+        hit,
+        chunkStepsTaken,
+        remainingVoxelSteps,
+        nodeVisitCount);
 
     float3 outColor;
     float outAlpha = 1.0;

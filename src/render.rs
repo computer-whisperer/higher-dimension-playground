@@ -99,10 +99,13 @@ const VTE_ENTITY_DIAG_VERBOSE_ENV: &str = "R4D_VTE_ENTITY_DIAG_VERBOSE";
 const VTE_ENTITY_DIAG_BVH_READBACK_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_READBACK";
 const VTE_ENTITY_DIAG_BVH_TOPOLOGY_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_TOPOLOGY";
 const VTE_ENTITY_DIAG_BVH_INTERVAL_ENV: &str = "R4D_VTE_ENTITY_DIAG_BVH_INTERVAL";
+const VTE_STAGE_A_BREAKDOWN_ENV: &str = "R4D_VTE_STAGEA_BREAKDOWN";
+const VTE_STAGE_A_BREAKDOWN_INTERVAL_ENV: &str = "R4D_VTE_STAGEA_BREAKDOWN_INTERVAL";
 const VTE_WORLD_BVH_RAY_DIAG_ENV: &str = "R4D_VTE_WORLD_BVH_RAY_DIAG";
 const VTE_WORLD_BVH_RAY_DIAG_SAMPLES_ENV: &str = "R4D_VTE_WORLD_BVH_RAY_DIAG_SAMPLES";
 const VTE_WORLD_BVH_RAY_DIAG_INTERVAL_ENV: &str = "R4D_VTE_WORLD_BVH_RAY_DIAG_INTERVAL";
 const VTE_ENTITY_DIAG_DEFAULT_INTERVAL: usize = 120;
+const VTE_STAGE_A_BREAKDOWN_DEFAULT_INTERVAL: usize = 120;
 const VTE_WORLD_BVH_RAY_DIAG_DEFAULT_SAMPLES: usize = 64;
 const VTE_WORLD_BVH_RAY_DIAG_DEFAULT_INTERVAL: usize = 60;
 const VTE_ENTITY_DIAG_TRANSFORM_ABS_WARN: f32 = 16_384.0;
@@ -152,6 +155,14 @@ fn vte_entity_bvh_compare_enabled() -> bool {
     }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled(VTE_ENTITY_BVH_COMPARE_ENV))
+}
+
+fn vte_stage_a_breakdown_enabled() -> bool {
+    if !vte_diagnostics_feature_enabled() {
+        return false;
+    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(VTE_STAGE_A_BREAKDOWN_ENV))
 }
 
 fn vte_world_bvh_ray_diag_env_enabled() -> bool {
@@ -1415,6 +1426,9 @@ pub struct RenderContext {
     vte_entity_diag_bvh_topology: bool,
     vte_entity_diag_interval: usize,
     vte_entity_diag_last_log_frame: Option<usize>,
+    vte_stage_a_breakdown_enabled: bool,
+    vte_stage_a_breakdown_interval: usize,
+    vte_stage_a_breakdown_last_log_frame: Option<usize>,
     vte_world_bvh_ray_diag_enabled: bool,
     vte_world_bvh_ray_diag_samples: usize,
     vte_world_bvh_ray_diag_interval: usize,
@@ -1530,6 +1544,14 @@ impl RenderContext {
                     [vte::VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_DISTANCE_MISMATCH],
                 entity_bvh_leafarray_tetra_mismatches: stats_words
                     [vte::VTE_COMPARE_STAT_ENTITY_BVH_LEAFARRAY_TETRA_MISMATCH],
+                stagea_samples: stats_words[vte::VTE_COMPARE_STAT_STAGEA_SAMPLES],
+                stagea_entity_queries: stats_words[vte::VTE_COMPARE_STAT_STAGEA_ENTITY_QUERIES],
+                stagea_entity_hits: stats_words[vte::VTE_COMPARE_STAT_STAGEA_ENTITY_HITS],
+                stagea_voxel_hits: stats_words[vte::VTE_COMPARE_STAT_STAGEA_VOXEL_HITS],
+                stagea_sky_misses: stats_words[vte::VTE_COMPARE_STAT_STAGEA_SKY_MISSES],
+                stagea_chunk_steps_sum: stats_words[vte::VTE_COMPARE_STAT_STAGEA_CHUNK_STEPS_SUM],
+                stagea_voxel_steps_sum: stats_words[vte::VTE_COMPARE_STAT_STAGEA_VOXEL_STEPS_SUM],
+                stagea_node_visits_sum: stats_words[vte::VTE_COMPARE_STAT_STAGEA_NODE_VISITS_SUM],
             };
         } else {
             self.vte_compare_stats = vte::VteCompareStats::default();
@@ -2908,6 +2930,9 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 if vte_world_bvh_ray_diag_active {
                     flags |= vte::VTE_DEBUG_FLAG_WORLD_BVH_RAY_DIAG;
                 }
+                if self.vte_stage_a_breakdown_enabled {
+                    flags |= vte::VTE_DEBUG_FLAG_STAGE_A_BREAKDOWN;
+                }
                 flags
             };
             written_voxel_frame_meta = vte::GpuVoxelFrameMeta {
@@ -3092,10 +3117,12 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     VteDisplayMode::DebugCompare | VteDisplayMode::DebugIntegral
                 );
             let vte_entity_bvh_compare = vte_entity_bvh_compare_enabled();
+            let vte_stage_a_breakdown_active = self.vte_stage_a_breakdown_enabled;
             let vte_world_bvh_ray_diag_active =
                 self.vte_world_bvh_ray_diag_enabled && voxel_input.is_some();
             if vte_compare_diagnostics_enabled
                 || vte_entity_bvh_compare
+                || vte_stage_a_breakdown_active
                 || vte_world_bvh_ray_diag_active
             {
                 self.reset_vte_compare_buffers(frame_idx);
@@ -3158,7 +3185,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             };
             if !self.vte_backend_notice_printed {
                 println!(
-                    "Render backend '{}' selected: VTE active (dense_chunks={}, leaves={}, region_bvh_nodes={}, leaf_entries={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, lod_tint={}, entity_linear_only={}, entity_bvh_compare={}, world_bvh_ray_diag={}@{}, storage_layers={}/{}).",
+                    "Render backend '{}' selected: VTE active (dense_chunks={}, leaves={}, region_bvh_nodes={}, leaf_entries={}, max_trace_steps={}, max_trace_distance={:.1}, stage_b={}, slice_layer={:?}, thick_half_width={}, reference_compare={}, mismatch_only={}, compare_slice_only={}, lod_tint={}, entity_linear_only={}, entity_bvh_compare={}, stagea_breakdown={}@{}, world_bvh_ray_diag={}@{}, storage_layers={}/{}).",
                     RenderBackend::VoxelTraversal.label(),
                     candidate_chunks,
                     visible_leaves,
@@ -3175,6 +3202,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     vte_lod_tint_enabled(),
                     vte_entity_linear_only_enabled(),
                     vte_entity_bvh_compare_enabled(),
+                    self.vte_stage_a_breakdown_enabled,
+                    self.vte_stage_a_breakdown_interval,
                     self.vte_world_bvh_ray_diag_enabled,
                     self.vte_world_bvh_ray_diag_samples,
                     storage_layers,
@@ -3215,7 +3244,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
         }
 
         self.frames_in_flight[frame_idx].vte_compare_enabled =
-            do_voxel_vte && (vte_compare_diagnostics_enabled || vte_entity_bvh_compare_enabled());
+            do_voxel_vte
+                && (vte_compare_diagnostics_enabled
+                    || vte_entity_bvh_compare_enabled()
+                    || self.vte_stage_a_breakdown_enabled);
         self.frames_in_flight[frame_idx].vte_world_bvh_ray_diag_enabled =
             do_voxel_vte && self.vte_world_bvh_ray_diag_enabled;
 
@@ -4308,6 +4340,44 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             }
             self.vte_entity_diag_last_log_frame = Some(self.frames_rendered);
         }
+        if self.vte_stage_a_breakdown_enabled && do_voxel_vte {
+            let periodic_due = self
+                .vte_stage_a_breakdown_last_log_frame
+                .map(|last| {
+                    self.frames_rendered
+                        .saturating_sub(last)
+                        >= self.vte_stage_a_breakdown_interval.max(1)
+                })
+                .unwrap_or(true);
+            let samples = self.vte_compare_stats.stagea_samples;
+            if periodic_due && samples > 0 {
+                let s = samples as f64;
+                let entity_queries = self.vte_compare_stats.stagea_entity_queries as f64;
+                let entity_hits = self.vte_compare_stats.stagea_entity_hits as f64;
+                let voxel_hits = self.vte_compare_stats.stagea_voxel_hits as f64;
+                let sky_misses = self.vte_compare_stats.stagea_sky_misses as f64;
+                let avg_chunk_steps = self.vte_compare_stats.stagea_chunk_steps_sum as f64 / s;
+                let avg_voxel_steps = self.vte_compare_stats.stagea_voxel_steps_sum as f64 / s;
+                let avg_node_visits = self.vte_compare_stats.stagea_node_visits_sum as f64 / s;
+                eprintln!(
+                    "[vte-stagea-breakdown] frame={} samples={} entity_queries={} ({:.1}%) entity_hits={} ({:.1}%) voxel_hits={} ({:.1}%) sky_misses={} ({:.1}%) avg_chunk_steps={:.2} avg_voxel_steps={:.2} avg_node_visits={:.2}",
+                    self.frames_rendered,
+                    samples,
+                    self.vte_compare_stats.stagea_entity_queries,
+                    (entity_queries * 100.0) / s,
+                    self.vte_compare_stats.stagea_entity_hits,
+                    (entity_hits * 100.0) / s,
+                    self.vte_compare_stats.stagea_voxel_hits,
+                    (voxel_hits * 100.0) / s,
+                    self.vte_compare_stats.stagea_sky_misses,
+                    (sky_misses * 100.0) / s,
+                    avg_chunk_steps,
+                    avg_voxel_steps,
+                    avg_node_visits,
+                );
+                self.vte_stage_a_breakdown_last_log_frame = Some(self.frames_rendered);
+            }
+        }
         if self.vte_entity_diag_enabled && (used_non_voxel_went_zero || tets_non_voxel_went_zero) {
             eprintln!(
                 "[vte-entity-diag][transition-zero] frame={} backend={} mode={} used_non_voxel:{}->{} tets_non_voxel:{}->{} input_non_voxel={} input_overlay={} dropped_non_finite={} do_raster={} prev_hash=0x{:016x} hash=0x{:016x} rebuild_needed={} rebuild_executed={} rebuild_reason={} bvh_mode={} bvh_refit_frames={} bvh_topology_tets={}",
@@ -5045,6 +5115,24 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                                 self.vte_first_mismatch.last_chunk[3],
                                             );
                                         }
+                                    }
+                                    if self.vte_compare_stats.stagea_samples > 0 {
+                                        let s = self.vte_compare_stats.stagea_samples as f64;
+                                        println!(
+                                            "  VTE stagea samples={} entity_query={} ({:.1}%) entity_hit={} ({:.1}%) voxel_hit={} ({:.1}%) sky={} ({:.1}%) avg_chunk_steps={:.2} avg_voxel_steps={:.2} avg_node_visits={:.2}",
+                                            self.vte_compare_stats.stagea_samples,
+                                            self.vte_compare_stats.stagea_entity_queries,
+                                            self.vte_compare_stats.stagea_entity_queries as f64 * 100.0 / s,
+                                            self.vte_compare_stats.stagea_entity_hits,
+                                            self.vte_compare_stats.stagea_entity_hits as f64 * 100.0 / s,
+                                            self.vte_compare_stats.stagea_voxel_hits,
+                                            self.vte_compare_stats.stagea_voxel_hits as f64 * 100.0 / s,
+                                            self.vte_compare_stats.stagea_sky_misses,
+                                            self.vte_compare_stats.stagea_sky_misses as f64 * 100.0 / s,
+                                            self.vte_compare_stats.stagea_chunk_steps_sum as f64 / s,
+                                            self.vte_compare_stats.stagea_voxel_steps_sum as f64 / s,
+                                            self.vte_compare_stats.stagea_node_visits_sum as f64 / s,
+                                        );
                                     }
                                 }
                                 println!(

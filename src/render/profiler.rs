@@ -241,7 +241,7 @@ impl GpuProfiler {
         if self.vte_frame_samples > 0 {
             let s = self.vte_frame_samples as f64;
             println!(
-                "  VTE avg chunks: headers {:.1} visible {:.1} (L0 {:.1} / L1 {:.1} / L2 {:.1}) y_slices {:.1} y_lookup {:.1}",
+                "  VTE avg chunks: headers {:.1} visible {:.1} (leaf {:.1} / legacy_l1 {:.1} / legacy_l2 {:.1}) y_slices {:.1} y_lookup {:.1}",
                 self.vte_chunk_headers_sum as f64 / s,
                 self.vte_visible_chunks_sum as f64 / s,
                 self.vte_visible_lod0_sum as f64 / s,
