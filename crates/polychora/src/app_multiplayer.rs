@@ -375,9 +375,6 @@ fn world_request_radius_chunks_for_distance(distance_world: f32) -> i32 {
         .max(1)
 }
 
-const WORLD_INTEREST_BOOTSTRAP_MAX_RADIUS_CHUNKS: i32 = 32;
-const WORLD_INTEREST_RADIUS_RAMP_STEP_CHUNKS: i32 = 12;
-
 fn bounds_contains_chunk(bounds: Aabb4i, chunk: [i32; 4]) -> bool {
     bounds.is_valid()
         && chunk[0] >= bounds.min[0]
@@ -943,21 +940,7 @@ fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], r
     let center_chunk = world_chunk_from_position(position);
     let target_radius_chunks =
         world_request_radius_chunks_for_distance(self.vte_max_trace_distance);
-    let mut request_radius_chunks = target_radius_chunks;
-    // Only ramp while bootstrapping an initial connection.
-    // After bootstrap, send the full requested radius directly to avoid cascading
-    // intermediate shell patches when users adjust render distance.
-    if self.multiplayer_world_interest_bootstrap_pending {
-        request_radius_chunks =
-            target_radius_chunks.min(WORLD_INTEREST_BOOTSTRAP_MAX_RADIUS_CHUNKS.max(1));
-        if let Some(last_radius) = self.multiplayer_last_world_request_radius_chunks {
-            if request_radius_chunks > last_radius {
-                request_radius_chunks = (last_radius + WORLD_INTEREST_RADIUS_RAMP_STEP_CHUNKS)
-                    .min(target_radius_chunks)
-                    .max(last_radius + 1);
-            }
-        }
-    }
+    let request_radius_chunks = target_radius_chunks;
         let radius_changed = self
             .multiplayer_last_world_request_radius_chunks
             .map(|last| request_radius_chunks != last)
@@ -997,9 +980,7 @@ fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], r
         self.multiplayer_last_world_request_center_chunk = Some(center_chunk);
         self.multiplayer_last_world_request_bounds = Some(desired_bounds);
         self.multiplayer_last_world_request_radius_chunks = Some(request_radius_chunks);
-        if request_radius_chunks >= target_radius_chunks {
-            self.multiplayer_world_interest_bootstrap_pending = false;
-        }
+        self.multiplayer_world_interest_bootstrap_pending = false;
     }
 
     pub(super) fn append_multiplayer_stream_tree_diag_overlay_instances(

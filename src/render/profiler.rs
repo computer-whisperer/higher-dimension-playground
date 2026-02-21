@@ -26,6 +26,10 @@ pub(super) struct GpuProfiler {
     pub(super) vte_visible_lod2_sum: u64,
     pub(super) vte_y_slices_sum: u64,
     pub(super) vte_y_slice_lookup_entries_sum: u64,
+    pub(super) vte_dense_cap_last: usize,
+    pub(super) vte_leaf_cap_last: usize,
+    pub(super) vte_node_cap_last: usize,
+    pub(super) vte_leaf_entry_cap_last: usize,
     pub(super) raster_frame_samples: usize,
     pub(super) raster_tetrahedrons_sum: u64,
     pub(super) entity_tetrahedrons_sum: u64,
@@ -52,6 +56,10 @@ impl GpuProfiler {
             vte_visible_lod2_sum: 0,
             vte_y_slices_sum: 0,
             vte_y_slice_lookup_entries_sum: 0,
+            vte_dense_cap_last: 0,
+            vte_leaf_cap_last: 0,
+            vte_node_cap_last: 0,
+            vte_leaf_entry_cap_last: 0,
             raster_frame_samples: 0,
             raster_tetrahedrons_sum: 0,
             entity_tetrahedrons_sum: 0,
@@ -154,6 +162,10 @@ impl GpuProfiler {
         vte_visible_lod_counts: [u32; 3],
         vte_y_slices: usize,
         vte_y_slice_lookup_entries: usize,
+        vte_dense_cap: usize,
+        vte_leaf_cap: usize,
+        vte_node_cap: usize,
+        vte_leaf_entry_cap: usize,
         raster_tetrahedrons: usize,
         entity_tetrahedrons: usize,
     ) {
@@ -178,6 +190,10 @@ impl GpuProfiler {
             self.vte_y_slice_lookup_entries_sum = self
                 .vte_y_slice_lookup_entries_sum
                 .saturating_add(vte_y_slice_lookup_entries as u64);
+            self.vte_dense_cap_last = vte_dense_cap;
+            self.vte_leaf_cap_last = vte_leaf_cap;
+            self.vte_node_cap_last = vte_node_cap;
+            self.vte_leaf_entry_cap_last = vte_leaf_entry_cap;
         }
 
         self.raster_frame_samples = self.raster_frame_samples.saturating_add(1);
@@ -234,6 +250,13 @@ impl GpuProfiler {
                 self.vte_y_slices_sum as f64 / s,
                 self.vte_y_slice_lookup_entries_sum as f64 / s,
             );
+            println!(
+                "  VTE caps: dense {} leaf {} nodes {} leaf_entries {}",
+                self.vte_dense_cap_last,
+                self.vte_leaf_cap_last,
+                self.vte_node_cap_last,
+                self.vte_leaf_entry_cap_last
+            );
         }
         if self.raster_frame_samples > 0 {
             let s = self.raster_frame_samples as f64;
@@ -256,6 +279,10 @@ impl GpuProfiler {
         self.vte_visible_lod2_sum = 0;
         self.vte_y_slices_sum = 0;
         self.vte_y_slice_lookup_entries_sum = 0;
+        self.vte_dense_cap_last = 0;
+        self.vte_leaf_cap_last = 0;
+        self.vte_node_cap_last = 0;
+        self.vte_leaf_entry_cap_last = 0;
         self.raster_frame_samples = 0;
         self.raster_tetrahedrons_sum = 0;
         self.entity_tetrahedrons_sum = 0;

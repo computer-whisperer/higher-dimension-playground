@@ -465,7 +465,53 @@ pub(super) struct LiveBuffers {
     pub(super) vte_compare_stats_buffer: Subbuffer<[u32]>,
     pub(super) vte_first_mismatch_buffer: Subbuffer<[u32]>,
     pub(super) vte_world_bvh_ray_diag_buffer: Subbuffer<[u32]>,
+    pub(super) voxel_caps: VoxelBufferCapacities,
     pub(super) descriptor_set: Arc<DescriptorSet>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) struct VoxelBufferCapacities {
+    pub(super) dense_chunks: usize,
+    pub(super) leaf_headers: usize,
+    pub(super) region_bvh_nodes: usize,
+    pub(super) leaf_chunk_entries: usize,
+}
+
+impl Default for VoxelBufferCapacities {
+    fn default() -> Self {
+        Self {
+            dense_chunks: vte::VTE_MAX_DENSE_CHUNKS,
+            leaf_headers: vte::VTE_REGION_LEAF_CAPACITY,
+            region_bvh_nodes: vte::VTE_REGION_BVH_NODE_CAPACITY,
+            leaf_chunk_entries: vte::VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
+        }
+    }
+}
+
+impl VoxelBufferCapacities {
+    pub(super) fn with_minimums(self) -> Self {
+        Self {
+            dense_chunks: self.dense_chunks.max(1),
+            leaf_headers: self.leaf_headers.max(1),
+            region_bvh_nodes: self.region_bvh_nodes.max(1),
+            leaf_chunk_entries: self.leaf_chunk_entries.max(1),
+        }
+    }
+
+    pub(super) fn occupancy_words(self) -> usize {
+        self.dense_chunks
+            .saturating_mul(vte::VTE_OCCUPANCY_WORDS_PER_CHUNK)
+    }
+
+    pub(super) fn material_words(self) -> usize {
+        self.dense_chunks
+            .saturating_mul(vte::VTE_MATERIAL_WORDS_PER_CHUNK)
+    }
+
+    pub(super) fn macro_words(self) -> usize {
+        self.dense_chunks
+            .saturating_mul(vte::VTE_MACRO_WORDS_PER_CHUNK)
+    }
 }
 
 impl LiveBuffers {
@@ -474,6 +520,22 @@ impl LiveBuffers {
         descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
         descriptor_set_layout: Arc<DescriptorSetLayout>,
     ) -> Self {
+        Self::new_with_voxel_caps(
+            memory_allocator,
+            descriptor_set_allocator,
+            descriptor_set_layout,
+            VoxelBufferCapacities::default(),
+        )
+    }
+
+    pub(super) fn new_with_voxel_caps(
+        memory_allocator: Arc<dyn MemoryAllocator>,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
+        descriptor_set_layout: Arc<DescriptorSetLayout>,
+        voxel_caps: VoxelBufferCapacities,
+    ) -> Self {
+        let voxel_caps = voxel_caps.with_minimums();
+
         let model_instance_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -530,7 +592,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![GpuVoxelChunkHeader::zeroed(); vte::VTE_MAX_DENSE_CHUNKS],
+            vec![GpuVoxelChunkHeader::zeroed(); voxel_caps.dense_chunks],
         )
         .unwrap();
 
@@ -545,7 +607,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK],
+            vec![0u32; voxel_caps.occupancy_words()],
         )
         .unwrap();
 
@@ -560,7 +622,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_MATERIAL_WORDS_PER_CHUNK],
+            vec![0u32; voxel_caps.material_words()],
         )
         .unwrap();
 
@@ -575,7 +637,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![vte::GpuVoxelLeafHeader::zeroed(); vte::VTE_REGION_LEAF_CAPACITY],
+            vec![vte::GpuVoxelLeafHeader::zeroed(); voxel_caps.leaf_headers],
         )
         .unwrap();
 
@@ -590,7 +652,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![vte::GpuVoxelChunkBvhNode::empty(); vte::VTE_REGION_BVH_NODE_CAPACITY],
+            vec![vte::GpuVoxelChunkBvhNode::empty(); voxel_caps.region_bvh_nodes],
         )
         .unwrap();
 
@@ -605,7 +667,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; vte::VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY],
+            vec![0u32; voxel_caps.leaf_chunk_entries],
         )
         .unwrap();
 
@@ -620,7 +682,7 @@ impl LiveBuffers {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![0u32; vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_MACRO_WORDS_PER_CHUNK],
+            vec![0u32; voxel_caps.macro_words()],
         )
         .unwrap();
 
@@ -704,8 +766,13 @@ impl LiveBuffers {
             vte_compare_stats_buffer,
             vte_first_mismatch_buffer,
             vte_world_bvh_ray_diag_buffer,
+            voxel_caps,
             descriptor_set,
         }
+    }
+
+    pub(super) fn voxel_capacities(&self) -> VoxelBufferCapacities {
+        self.voxel_caps
     }
 
     pub(super) fn create_descriptor_set_layout(device: Arc<Device>) -> Arc<DescriptorSetLayout> {

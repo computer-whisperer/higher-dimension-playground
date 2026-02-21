@@ -11,7 +11,7 @@ mod profiler;
 mod types;
 mod vte;
 
-use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers};
+use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers, VoxelBufferCapacities};
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
@@ -1817,6 +1817,21 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         self.profiler.last_gpu_total_ms
     }
 
+    pub fn voxel_buffer_capacities(&self) -> (usize, usize, usize, usize) {
+        self.frames_in_flight
+            .first()
+            .map(|frame| {
+                let caps = frame.live_buffers.voxel_capacities();
+                (
+                    caps.dense_chunks,
+                    caps.leaf_headers,
+                    caps.region_bvh_nodes,
+                    caps.leaf_chunk_entries,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0))
+    }
+
     fn wait_for_all_frames(&mut self) {
         for frame in &mut self.frames_in_flight {
             if let Some(future) = frame.fence.take() {
@@ -1834,6 +1849,77 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 }
             }
         }
+    }
+
+    fn next_grow_capacity(current: usize, required: usize) -> usize {
+        if current >= required {
+            return current.max(1);
+        }
+        let mut cap = current.max(1);
+        while cap < required {
+            let next = cap.saturating_mul(2);
+            if next <= cap {
+                return required;
+            }
+            cap = next;
+        }
+        cap
+    }
+
+    fn ensure_live_voxel_buffer_capacity(
+        &mut self,
+        required: VoxelBufferCapacities,
+    ) -> VoxelBufferCapacities {
+        let required = required.with_minimums();
+        let current = self.frames_in_flight[0].live_buffers.voxel_capacities();
+        let grown = VoxelBufferCapacities {
+            dense_chunks: Self::next_grow_capacity(current.dense_chunks, required.dense_chunks),
+            leaf_headers: Self::next_grow_capacity(current.leaf_headers, required.leaf_headers),
+            region_bvh_nodes: Self::next_grow_capacity(
+                current.region_bvh_nodes,
+                required.region_bvh_nodes,
+            ),
+            leaf_chunk_entries: Self::next_grow_capacity(
+                current.leaf_chunk_entries,
+                required.leaf_chunk_entries,
+            ),
+        };
+        if grown == current {
+            return current;
+        }
+
+        self.wait_for_all_frames();
+        let live_layout = self
+            .compute_pipeline
+            .pipeline_layout
+            .set_layouts()
+            .get(2)
+            .cloned()
+            .expect("live descriptor set layout");
+        for frame in &mut self.frames_in_flight {
+            frame.live_buffers = LiveBuffers::new_with_voxel_caps(
+                self.memory_allocator.clone(),
+                self.descriptor_set_allocator.clone(),
+                live_layout.clone(),
+                grown,
+            );
+            frame.last_voxel_metadata_generation = None;
+            frame.vte_compare_enabled = false;
+            frame.vte_world_bvh_ray_diag_enabled = false;
+            frame.vte_world_bvh_ray_diag_expected.clear();
+        }
+        eprintln!(
+            "[vte-buffers-grow] dense {}->{} leaf_headers {}->{} bvh_nodes {}->{} leaf_entries {}->{}",
+            current.dense_chunks,
+            grown.dense_chunks,
+            current.leaf_headers,
+            grown.leaf_headers,
+            current.region_bvh_nodes,
+            grown.region_bvh_nodes,
+            current.leaf_chunk_entries,
+            grown.leaf_chunk_entries
+        );
+        grown
     }
 
     pub fn render(
@@ -2365,40 +2451,69 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         let mut vte_visible_lod_counts = [0u32; 3];
         let mut vte_visible_chunk_min = [0; 4];
         let mut vte_visible_chunk_max = [0; 4];
+        let mut vte_buffer_caps = self.frames_in_flight[frame_idx]
+            .live_buffers
+            .voxel_capacities();
         if let Some(input) = voxel_input {
-            vte_chunk_count = input.chunk_headers.len().min(vte::VTE_MAX_DENSE_CHUNKS);
-            vte_leaf_count = input.leaf_headers.len().min(vte::VTE_REGION_LEAF_CAPACITY);
+            let ceil_div = |value: usize, divisor: usize| -> usize {
+                if divisor == 0 {
+                    0
+                } else {
+                    value.saturating_add(divisor - 1) / divisor
+                }
+            };
+            let dense_required = input
+                .chunk_headers
+                .len()
+                .max(ceil_div(
+                    input.occupancy_words.len(),
+                    vte::VTE_OCCUPANCY_WORDS_PER_CHUNK,
+                ))
+                .max(ceil_div(
+                    input.material_words.len(),
+                    vte::VTE_MATERIAL_WORDS_PER_CHUNK,
+                ))
+                .max(ceil_div(input.macro_words.len(), vte::VTE_MACRO_WORDS_PER_CHUNK));
+            let required_caps = VoxelBufferCapacities {
+                dense_chunks: dense_required,
+                leaf_headers: input.leaf_headers.len(),
+                region_bvh_nodes: input.region_bvh_nodes.len(),
+                leaf_chunk_entries: input.leaf_chunk_entries.len(),
+            };
+            vte_buffer_caps = self.ensure_live_voxel_buffer_capacity(required_caps);
+
+            vte_chunk_count = input.chunk_headers.len().min(vte_buffer_caps.dense_chunks);
+            vte_leaf_count = input.leaf_headers.len().min(vte_buffer_caps.leaf_headers);
             vte_region_bvh_node_count = input
                 .region_bvh_nodes
                 .len()
-                .min(vte::VTE_REGION_BVH_NODE_CAPACITY);
+                .min(vte_buffer_caps.region_bvh_nodes);
             vte_region_bvh_root_index = input.region_bvh_root_index;
             vte_leaf_chunk_entry_count = input
                 .leaf_chunk_entries
                 .len()
-                .min(vte::VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY);
+                .min(vte_buffer_caps.leaf_chunk_entries);
             vte_occupancy_word_count = input
                 .occupancy_words
                 .len()
-                .min(vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_OCCUPANCY_WORDS_PER_CHUNK);
+                .min(vte_buffer_caps.occupancy_words());
             vte_material_word_count = input
                 .material_words
                 .len()
-                .min(vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_MATERIAL_WORDS_PER_CHUNK);
+                .min(vte_buffer_caps.material_words());
             vte_macro_word_count = input
                 .macro_words
                 .len()
-                .min(vte::VTE_MAX_DENSE_CHUNKS * vte::VTE_MACRO_WORDS_PER_CHUNK);
+                .min(vte_buffer_caps.macro_words());
             vte_visible_lod_counts[0] = vte_leaf_count as u32;
 
-            if self.frames_rendered == 0
-                && (input.chunk_headers.len() > vte_chunk_count
-                    || input.leaf_headers.len() > vte_leaf_count
-                    || input.region_bvh_nodes.len() > vte_region_bvh_node_count
-                    || input.leaf_chunk_entries.len() > vte_leaf_chunk_entry_count
-                    || input.occupancy_words.len() > vte_occupancy_word_count
-                    || input.material_words.len() > vte_material_word_count
-                    || input.macro_words.len() > vte_macro_word_count)
+            if input.chunk_headers.len() > vte_chunk_count
+                || input.leaf_headers.len() > vte_leaf_count
+                || input.region_bvh_nodes.len() > vte_region_bvh_node_count
+                || input.leaf_chunk_entries.len() > vte_leaf_chunk_entry_count
+                || input.occupancy_words.len() > vte_occupancy_word_count
+                || input.material_words.len() > vte_material_word_count
+                || input.macro_words.len() > vte_macro_word_count
             {
                 eprintln!(
                     "VTE input truncated to capacities: dense_chunks {}->{}, leaves {}->{}, bvh_nodes {}->{}, leaf_entries {}->{}, occ_words {}->{}, mat_words {}->{}, macro_words {}->{}",
@@ -3020,6 +3135,10 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             vte_visible_lod_counts,
             0,
             0,
+            vte_buffer_caps.dense_chunks,
+            vte_buffer_caps.leaf_headers,
+            vte_buffer_caps.region_bvh_nodes,
+            vte_buffer_caps.leaf_chunk_entries,
             raster_tetrahedron_count,
             total_tetrahedron_count,
         );

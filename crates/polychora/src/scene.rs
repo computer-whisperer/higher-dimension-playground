@@ -5,7 +5,7 @@ use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
     VoxelFrameInput, VoxelMutationBatch,
-    VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_INVALID_NODE, VTE_REGION_BVH_NODE_CAPACITY, VTE_REGION_LEAF_CAPACITY,
+    VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_INVALID_NODE,
     VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
 };
 use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
@@ -888,6 +888,19 @@ impl Scene {
 
     pub fn debug_world_tree_chunk_payload(&self, chunk_key: [i32; 4]) -> Option<ChunkPayload> {
         self.world_tree.chunk_payload(chunk_key)
+    }
+
+    pub fn debug_world_tree_root_bounds(&self) -> Option<Aabb4i> {
+        self.world_tree.root().map(|root| root.bounds)
+    }
+
+    pub fn debug_voxel_frame_buffer_lengths(&self) -> (usize, usize, usize, usize) {
+        (
+            self.voxel_frame_data.chunk_headers.len(),
+            self.voxel_frame_data.leaf_headers.len(),
+            self.voxel_frame_data.region_bvh_nodes.len(),
+            self.voxel_frame_data.leaf_chunk_entries.len(),
+        )
     }
 
     pub fn debug_render_bvh_chunk_payloads_in_bounds(

@@ -92,14 +92,12 @@ impl Scene {
         }
         self.voxel_last_rebuild_failure_signature = Some(signature);
         eprintln!(
-            "[vte-voxel-rebuild-failure] reason={} bounds={:?}->{:?} nodes={} leaves={} node_cap={} leaf_cap={} (preserving last-good GPU voxel frame)",
+            "[vte-voxel-rebuild-failure] reason={} bounds={:?}->{:?} nodes={} leaves={} (preserving last-good GPU voxel frame)",
             reason,
             bounds.min,
             bounds.max,
             node_count,
             leaf_count,
-            VTE_REGION_BVH_NODE_CAPACITY,
-            VTE_REGION_LEAF_CAPACITY
         );
     }
 
@@ -212,10 +210,6 @@ impl Scene {
         dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
         leaf: &RenderLeaf,
     ) -> Result<(), String> {
-        if voxel_frame_data.leaf_headers.len() >= VTE_REGION_LEAF_CAPACITY {
-            return Err("leaf capacity exceeded".to_string());
-        }
-
         match &leaf.kind {
             RenderLeafKind::Uniform(material) => {
                 voxel_frame_data.leaf_headers.push(GpuVoxelLeafHeader {
@@ -642,9 +636,6 @@ impl Scene {
         if cursor < used_len {
             free.push(cursor..used_len);
         }
-        if used_len < VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY {
-            free.push(used_len..VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY);
-        }
         free
     }
 
@@ -664,7 +655,13 @@ impl Scene {
             }
         }
         let Some(span_idx) = selected_idx else {
-            return Err("leaf chunk-entry arena exhausted".to_string());
+            let start = leaf_chunk_entries.len();
+            let end = start.saturating_add(len);
+            leaf_chunk_entries.resize(
+                end,
+                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY,
+            );
+            return Ok(start..end);
         };
         let span = free_spans.remove(span_idx);
         let alloc = span.start..(span.start + len);
@@ -718,12 +715,6 @@ impl Scene {
             }
             for (node_index, src_node) in &delta.node_writes {
                 let node_index = *node_index as usize;
-                if node_index >= VTE_REGION_BVH_NODE_CAPACITY {
-                    return Err(format!(
-                        "node write index {} exceeds capacity {}",
-                        node_index, VTE_REGION_BVH_NODE_CAPACITY
-                    ));
-                }
                 if self.voxel_frame_data.region_bvh_nodes.len() <= node_index {
                     self.voxel_frame_data
                         .region_bvh_nodes
@@ -756,12 +747,6 @@ impl Scene {
 
             for (leaf_index, leaf) in &delta.leaf_writes {
                 let leaf_index = *leaf_index as usize;
-                if leaf_index >= VTE_REGION_LEAF_CAPACITY {
-                    return Err(format!(
-                        "leaf write index {} exceeds capacity {}",
-                        leaf_index, VTE_REGION_LEAF_CAPACITY
-                    ));
-                }
                 if self.voxel_frame_data.leaf_headers.len() <= leaf_index {
                     self.voxel_frame_data
                         .leaf_headers
@@ -854,19 +839,6 @@ impl Scene {
     fn build_voxel_frame_buffers_from_render_bvh(
         render_bvh: &RenderBvh,
     ) -> Option<VoxelFrameDataBuffers> {
-        if render_bvh.nodes.len() > VTE_REGION_BVH_NODE_CAPACITY
-            || render_bvh.leaves.len() > VTE_REGION_LEAF_CAPACITY
-        {
-            eprintln!(
-                "VTE render tree overflow: nodes {}>{}, leaves {}>{}; dropping frame tree.",
-                render_bvh.nodes.len(),
-                VTE_REGION_BVH_NODE_CAPACITY,
-                render_bvh.leaves.len(),
-                VTE_REGION_LEAF_CAPACITY
-            );
-            return None;
-        }
-
         let mut dense_chunk_headers = Vec::<GpuVoxelChunkHeader>::new();
         let mut occupancy_words = Vec::<u32>::new();
         let mut material_words = Vec::<u32>::new();
@@ -904,12 +876,7 @@ impl Scene {
                     };
                     let leaf_cell_count = leaf.bounds.chunk_cell_count().unwrap_or(0);
                     let entry_offset = leaf_chunk_entries.len() as u32;
-                    if leaf_chunk_entries.len().saturating_add(leaf_cell_count)
-                        > VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY
-                    {
-                        overflowed = true;
-                        break;
-                    }
+                    leaf_chunk_entries.reserve(leaf_cell_count);
 
                     let src_indices = chunk_array.decode_dense_indices().ok();
                     let src_dims = chunk_array.bounds.chunk_extents();

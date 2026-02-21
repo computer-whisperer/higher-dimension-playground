@@ -205,6 +205,26 @@ impl App {
             .unwrap_or_else(|| "--".to_string());
         let stream_first_node_text = stream_first_node_desc.unwrap_or("--");
         let stream_final_solid_leaf_text = stream_final_solid_leaf_desc.unwrap_or("--");
+        let format_bounds = |bounds: Option<Aabb4i>| -> String {
+            bounds
+                .map(|b| {
+                    format!(
+                        "[{:+},{:+},{:+},{:+}]->[{:+},{:+},{:+},{:+}]",
+                        b.min[0], b.min[1], b.min[2], b.min[3], b.max[0], b.max[1], b.max[2],
+                        b.max[3]
+                    )
+                })
+                .unwrap_or_else(|| "--".to_string())
+        };
+        let cache_tree_bounds_text = format_bounds(self.scene.debug_world_tree_root_bounds());
+        let cache_interest_bounds_text = format_bounds(self.multiplayer_last_world_request_bounds);
+        let (cpu_dense_chunks, cpu_leaf_headers, cpu_bvh_nodes, cpu_leaf_entries) =
+            self.scene.debug_voxel_frame_buffer_lengths();
+        let (gpu_dense_cap, gpu_leaf_cap, gpu_node_cap, gpu_leaf_entry_cap) = self
+            .rcx
+            .as_ref()
+            .map(|rcx| rcx.voxel_buffer_capacities())
+            .unwrap_or((0, 0, 0, 0));
         if self.control_scheme.uses_look_frame() {
             format!(
                 "LOOK-FRAME [{}]  spd:{:.1}{}\n\
@@ -215,6 +235,9 @@ impl App {
                  target:{} face:{}\n\
                  stream-first-node:{}\n\
                  stream-final-solid:{}\n\
+                 cache-tree:{}\n\
+                 cache-interest:{}\n\
+                 vte-buf:d{}/{} l{}/{} n{}/{} e{}/{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 self.control_scheme.label(),
@@ -235,6 +258,16 @@ impl App {
                 face_text,
                 stream_first_node_text,
                 stream_final_solid_leaf_text,
+                cache_tree_bounds_text,
+                cache_interest_bounds_text,
+                cpu_dense_chunks,
+                gpu_dense_cap,
+                cpu_leaf_headers,
+                gpu_leaf_cap,
+                cpu_bvh_nodes,
+                gpu_node_cap,
+                cpu_leaf_entries,
+                gpu_leaf_entry_cap,
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {
@@ -262,6 +295,9 @@ impl App {
                  target:{} face:{}\n\
                  stream-first-node:{}\n\
                  stream-final-solid:{}\n\
+                 cache-tree:{}\n\
+                 cache-interest:{}\n\
+                 vte-buf:d{}/{} l{}/{} n{}/{} e{}/{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 pair.label(),
@@ -284,6 +320,16 @@ impl App {
                 face_text,
                 stream_first_node_text,
                 stream_final_solid_leaf_text,
+                cache_tree_bounds_text,
+                cache_interest_bounds_text,
+                cpu_dense_chunks,
+                gpu_dense_cap,
+                cpu_leaf_headers,
+                gpu_leaf_cap,
+                cpu_bvh_nodes,
+                gpu_node_cap,
+                cpu_leaf_entries,
+                gpu_leaf_entry_cap,
                 if self.vte_y_slice_lookup_cache_enabled {
                     "on"
                 } else {
