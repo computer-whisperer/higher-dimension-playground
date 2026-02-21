@@ -11,26 +11,28 @@ use std::sync::Arc;
 
 type DenseChunk = [VoxelType; CHUNK_VOLUME];
 
-const PLATFORM_GRID_STRIDE_XZW_CHUNKS: i32 = 48;
-const PLATFORM_LEVEL_STRIDE_Y_CHUNKS: i32 = 12;
-const PLATFORM_THICKNESS_CHUNKS: i32 = 2;
-const PLATFORM_HALF_EXTENT_MIN_CHUNKS: i32 = 12;
-const PLATFORM_HALF_EXTENT_MAX_CHUNKS: i32 = 20;
-const PLATFORM_CENTER_JITTER_CHUNKS: i32 = 8;
-const PLATFORM_PRESENCE_PERCENT: u64 = 86;
-const ORIGIN_ANCHOR_LEVEL: i32 = 0;
-const ORIGIN_ANCHOR_CELL_X: i32 = 0;
-const ORIGIN_ANCHOR_CELL_Z: i32 = 0;
-const ORIGIN_ANCHOR_CELL_W: i32 = 0;
-const ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS: i32 = 18;
+// Poisson-disk grid cell sizes.
+const POISSON_CELL_XZW: i32 = 48;
+const POISSON_CELL_Y: i32 = 12;
+// Anisotropic scaling: Y distances are multiplied by this before comparison.
+const POISSON_Y_SCALE: i64 = 4; // = POISSON_CELL_XZW / POISSON_CELL_Y
+// Minimum squared distance in scaled space between accepted candidates.
+const POISSON_MIN_DIST_SQ: i64 = 2304; // 48 * 48
 
-const PLATFORM_HASH_SALT_PRESENCE: u64 = 0x91f4_2b7e_87f1_3a55;
+const PLATFORM_THICKNESS_CHUNKS: i32 = 2;
+const PLATFORM_HALF_EXTENT_MIN_CHUNKS: i32 = 10;
+const PLATFORM_HALF_EXTENT_MAX_CHUNKS: i32 = 18;
+const ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS: i32 = 18;
+const ORIGIN_ANCHOR_POS: [i32; 4] = [0, 0, 0, 0];
+
 const PLATFORM_HASH_SALT_EXTENT_X: u64 = 0x58d7_6c29_2a0b_4cd1;
 const PLATFORM_HASH_SALT_EXTENT_Z: u64 = 0x7ef8_18a3_02e5_2b3f;
 const PLATFORM_HASH_SALT_EXTENT_W: u64 = 0x4cc2_743e_91ad_0627;
-const PLATFORM_HASH_SALT_JITTER_X: u64 = 0x0a1e_d952_75c4_6619;
-const PLATFORM_HASH_SALT_JITTER_Z: u64 = 0x8f63_d4b2_3c14_20e3;
-const PLATFORM_HASH_SALT_JITTER_W: u64 = 0x3ce7_b890_5d61_489f;
+const SALT_CANDIDATE_X: u64 = 0x0a1e_d952_75c4_6619;
+const SALT_CANDIDATE_Y: u64 = 0x8f63_d4b2_3c14_20e3;
+const SALT_CANDIDATE_Z: u64 = 0x3ce7_b890_5d61_489f;
+const SALT_CANDIDATE_W: u64 = 0xd4f7_3a61_e28b_5c09;
+const SALT_PRIORITY: u64 = 0x91f4_2b7e_87f1_3a55;
 const PLATFORM_HASH_SALT_PROCGEN_SEED: u64 = 0x2b8a_4e19_9df3_512c;
 const PLATFORM_HASH_SALT_PROCGEN_FRAME: u64 = 0x7a63_1fbc_3d71_2a94;
 const PLATFORM_PROCGEN_FRAME_BASE_OFFSET_CHUNKS: i32 = 4096;
@@ -78,139 +80,77 @@ impl MassivePlatformsWorldGenerator {
 
     fn sample_platform_bounds(
         &self,
-        level: i32,
-        cell_x: i32,
-        cell_z: i32,
-        cell_w: i32,
+        cy: i32,
+        cx: i32,
+        cz: i32,
+        cw: i32,
     ) -> Option<Aabb4i> {
         let material = self.platform_voxel?;
         if material.is_air() {
             return None;
         }
 
-        if level == ORIGIN_ANCHOR_LEVEL
-            && cell_x == ORIGIN_ANCHOR_CELL_X
-            && cell_z == ORIGIN_ANCHOR_CELL_Z
-            && cell_w == ORIGIN_ANCHOR_CELL_W
-        {
-            let min_y = platform_min_chunk_y_for_level(level);
-            let max_y = min_y + PLATFORM_THICKNESS_CHUNKS - 1;
+        if is_origin_cell(cx, cy, cz, cw) {
+            let h = ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS;
+            let min_y = ORIGIN_ANCHOR_POS[1] - PLATFORM_THICKNESS_CHUNKS + 1;
+            let max_y = ORIGIN_ANCHOR_POS[1];
             return Some(Aabb4i::new(
-                [
-                    -ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS,
-                    min_y,
-                    -ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS,
-                    -ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS,
-                ],
-                [
-                    ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS - 1,
-                    max_y,
-                    ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS - 1,
-                    ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS - 1,
-                ],
+                [-h, min_y, -h, -h],
+                [h - 1, max_y, h - 1, h - 1],
             ));
         }
 
-        let presence_hash = hash_platform_cell(
-            self.world_seed,
-            level,
-            cell_x,
-            cell_z,
-            cell_w,
-            PLATFORM_HASH_SALT_PRESENCE,
-        );
-        if presence_hash % 100 >= PLATFORM_PRESENCE_PERCENT {
+        if !is_candidate_accepted(self.world_seed, cx, cy, cz, cw) {
             return None;
         }
+
+        let pos = candidate_position_xyzw(self.world_seed, cx, cy, cz, cw);
 
         let extent_span =
             (PLATFORM_HALF_EXTENT_MAX_CHUNKS - PLATFORM_HALF_EXTENT_MIN_CHUNKS + 1).max(1) as u64;
         let half_x = PLATFORM_HALF_EXTENT_MIN_CHUNKS
             + (hash_platform_cell(
                 self.world_seed,
-                level,
-                cell_x,
-                cell_z,
-                cell_w,
+                cy,
+                cx,
+                cz,
+                cw,
                 PLATFORM_HASH_SALT_EXTENT_X,
             ) % extent_span) as i32;
         let half_z = PLATFORM_HALF_EXTENT_MIN_CHUNKS
             + (hash_platform_cell(
                 self.world_seed,
-                level,
-                cell_x,
-                cell_z,
-                cell_w,
+                cy,
+                cx,
+                cz,
+                cw,
                 PLATFORM_HASH_SALT_EXTENT_Z,
             ) % extent_span) as i32;
         let half_w = PLATFORM_HALF_EXTENT_MIN_CHUNKS
             + (hash_platform_cell(
                 self.world_seed,
-                level,
-                cell_x,
-                cell_z,
-                cell_w,
+                cy,
+                cx,
+                cz,
+                cw,
                 PLATFORM_HASH_SALT_EXTENT_W,
             ) % extent_span) as i32;
 
-        let jitter_x = signed_jitter(
-            hash_platform_cell(
-                self.world_seed,
-                level,
-                cell_x,
-                cell_z,
-                cell_w,
-                PLATFORM_HASH_SALT_JITTER_X,
-            ),
-            PLATFORM_CENTER_JITTER_CHUNKS,
-        );
-        let jitter_z = signed_jitter(
-            hash_platform_cell(
-                self.world_seed,
-                level,
-                cell_x,
-                cell_z,
-                cell_w,
-                PLATFORM_HASH_SALT_JITTER_Z,
-            ),
-            PLATFORM_CENTER_JITTER_CHUNKS,
-        );
-        let jitter_w = signed_jitter(
-            hash_platform_cell(
-                self.world_seed,
-                level,
-                cell_x,
-                cell_z,
-                cell_w,
-                PLATFORM_HASH_SALT_JITTER_W,
-            ),
-            PLATFORM_CENTER_JITTER_CHUNKS,
-        );
-
-        let center_x = cell_x * PLATFORM_GRID_STRIDE_XZW_CHUNKS
-            + (PLATFORM_GRID_STRIDE_XZW_CHUNKS / 2)
-            + jitter_x;
-        let center_z = cell_z * PLATFORM_GRID_STRIDE_XZW_CHUNKS
-            + (PLATFORM_GRID_STRIDE_XZW_CHUNKS / 2)
-            + jitter_z;
-        let center_w = cell_w * PLATFORM_GRID_STRIDE_XZW_CHUNKS
-            + (PLATFORM_GRID_STRIDE_XZW_CHUNKS / 2)
-            + jitter_w;
-        let min_y = platform_min_chunk_y_for_level(level);
-        let max_y = min_y + PLATFORM_THICKNESS_CHUNKS - 1;
+        let min_y = pos[1] - PLATFORM_THICKNESS_CHUNKS + 1;
+        let max_y = pos[1];
 
         let platform_bounds = Aabb4i::new(
             [
-                center_x - half_x,
+                pos[0] - half_x,
                 min_y,
-                center_z - half_z,
-                center_w - half_w,
+                pos[2] - half_z,
+                pos[3] - half_w,
             ],
             [
-                center_x + half_x - 1,
+                pos[0] + half_x - 1,
                 max_y,
-                center_z + half_z - 1,
-                center_w + half_w - 1,
+                pos[2] + half_z - 1,
+                pos[3] + half_w - 1,
             ],
         );
         platform_bounds.is_valid().then_some(platform_bounds)
@@ -223,12 +163,14 @@ impl MassivePlatformsWorldGenerator {
         if !bounds.is_valid() || self.platform_voxel.is_none() {
             return;
         }
-        let Some((min_level, max_level)) =
-            level_range_for_platform_chunk_bounds(bounds.min[1], bounds.max[1])
-        else {
-            return;
-        };
-        self.for_each_platform_instance_in_level_range(bounds, min_level, max_level, |platform| {
+        // Candidate Y = platform surface (bounds.max[1]).
+        // Platform spans [surface - THICKNESS + 1, surface].
+        // To intersect query [qmin_y, qmax_y]:
+        //   surface >= qmin_y AND surface - THICKNESS + 1 <= qmax_y
+        //   surface in [qmin_y, qmax_y + THICKNESS - 1]
+        let min_cy = bounds.min[1].div_euclid(POISSON_CELL_Y);
+        let max_cy = (bounds.max[1] + PLATFORM_THICKNESS_CHUNKS - 1).div_euclid(POISSON_CELL_Y);
+        self.for_each_platform_instance_in_bounds(bounds, min_cy, max_cy, |platform| {
             let Some(_intersection) = intersect_bounds(bounds, platform.bounds) else {
                 return;
             };
@@ -236,39 +178,33 @@ impl MassivePlatformsWorldGenerator {
         });
     }
 
-    fn for_each_platform_instance_in_level_range<F>(
+    fn for_each_platform_instance_in_bounds<F>(
         &self,
         bounds: Aabb4i,
-        min_level: i32,
-        max_level: i32,
+        min_cy: i32,
+        max_cy: i32,
         mut visitor: F,
     ) where
         F: FnMut(PlatformInstance),
     {
-        if !bounds.is_valid() || self.platform_voxel.is_none() || min_level > max_level {
+        if !bounds.is_valid() || self.platform_voxel.is_none() || min_cy > max_cy {
             return;
         }
 
-        let horizontal_margin = PLATFORM_HALF_EXTENT_MAX_CHUNKS + PLATFORM_CENTER_JITTER_CHUNKS + 1;
-        let min_cell_x =
-            (bounds.min[0] - horizontal_margin).div_euclid(PLATFORM_GRID_STRIDE_XZW_CHUNKS);
-        let max_cell_x =
-            (bounds.max[0] + horizontal_margin).div_euclid(PLATFORM_GRID_STRIDE_XZW_CHUNKS);
-        let min_cell_z =
-            (bounds.min[2] - horizontal_margin).div_euclid(PLATFORM_GRID_STRIDE_XZW_CHUNKS);
-        let max_cell_z =
-            (bounds.max[2] + horizontal_margin).div_euclid(PLATFORM_GRID_STRIDE_XZW_CHUNKS);
-        let min_cell_w =
-            (bounds.min[3] - horizontal_margin).div_euclid(PLATFORM_GRID_STRIDE_XZW_CHUNKS);
-        let max_cell_w =
-            (bounds.max[3] + horizontal_margin).div_euclid(PLATFORM_GRID_STRIDE_XZW_CHUNKS);
+        let xzw_margin = POISSON_CELL_XZW - 1 + PLATFORM_HALF_EXTENT_MAX_CHUNKS;
+        let min_cx = (bounds.min[0] - xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let max_cx = (bounds.max[0] + xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let min_cz = (bounds.min[2] - xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let max_cz = (bounds.max[2] + xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let min_cw = (bounds.min[3] - xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let max_cw = (bounds.max[3] + xzw_margin).div_euclid(POISSON_CELL_XZW);
 
-        for level in min_level..=max_level {
-            for cell_w in min_cell_w..=max_cell_w {
-                for cell_z in min_cell_z..=max_cell_z {
-                    for cell_x in min_cell_x..=max_cell_x {
+        for cw in min_cw..=max_cw {
+            for cz in min_cz..=max_cz {
+                for cy in min_cy..=max_cy {
+                    for cx in min_cx..=max_cx {
                         let Some(platform_bounds) =
-                            self.sample_platform_bounds(level, cell_x, cell_z, cell_w)
+                            self.sample_platform_bounds(cy, cx, cz, cw)
                         else {
                             continue;
                         };
@@ -276,10 +212,10 @@ impl MassivePlatformsWorldGenerator {
                             continue;
                         }
                         visitor(PlatformInstance {
-                            level,
-                            cell_x,
-                            cell_z,
-                            cell_w,
+                            level: cy,
+                            cell_x: cx,
+                            cell_z: cz,
+                            cell_w: cw,
                             bounds: platform_bounds,
                         });
                     }
@@ -307,16 +243,18 @@ impl MassivePlatformsWorldGenerator {
             return;
         }
         let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
-        let Some((min_level, max_level)) = level_range_for_shifted_local_chunk_bounds(
-            bounds.min[1],
-            bounds.max[1],
-            local_min_y,
-            local_max_y,
-            PLATFORM_LEVEL_STRIDE_Y_CHUNKS,
-        ) else {
+        // Procgen Y for platform at surface s: [s + 1 + local_min_y, s + 1 + local_max_y]
+        // To intersect query [qmin_y, qmax_y]:
+        //   s + 1 + local_min_y <= qmax_y AND s + 1 + local_max_y >= qmin_y
+        //   s in [qmin_y - 1 - local_max_y, qmax_y - 1 - local_min_y]
+        let surface_min = bounds.min[1] - 1 - local_max_y;
+        let surface_max = bounds.max[1] - 1 - local_min_y;
+        if surface_min > surface_max {
             return;
-        };
-        self.for_each_platform_instance_in_level_range(bounds, min_level, max_level, |platform| {
+        }
+        let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
+        let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
+        self.for_each_platform_instance_in_bounds(bounds, min_cy, max_cy, |platform| {
             self.insert_procgen_chunks_for_platform(bounds, platform, tree);
         });
     }
@@ -356,7 +294,7 @@ impl MassivePlatformsWorldGenerator {
             };
             let chunk_pos = chunk_pos_from_local_to_platform(
                 local_chunk_pos,
-                platform.level,
+                &platform,
                 procgen_frame_offset,
             );
             let key = chunk_key_from_chunk_pos(chunk_pos);
@@ -443,66 +381,96 @@ fn mix_u64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-fn signed_jitter(hash: u64, max_abs: i32) -> i32 {
-    if max_abs <= 0 {
-        return 0;
+fn is_origin_cell(cx: i32, cy: i32, cz: i32, cw: i32) -> bool {
+    cx == 0 && cy == 0 && cz == 0 && cw == 0
+}
+
+/// Returns the candidate position [x, y, z, w] in chunk coordinates for a Poisson cell.
+fn candidate_position_xyzw(seed: u64, cx: i32, cy: i32, cz: i32, cw: i32) -> [i32; 4] {
+    let hx = hash_platform_cell(seed, cy, cx, cz, cw, SALT_CANDIDATE_X);
+    let hy = hash_platform_cell(seed, cy, cx, cz, cw, SALT_CANDIDATE_Y);
+    let hz = hash_platform_cell(seed, cy, cx, cz, cw, SALT_CANDIDATE_Z);
+    let hw = hash_platform_cell(seed, cy, cx, cz, cw, SALT_CANDIDATE_W);
+    [
+        cx * POISSON_CELL_XZW + (hx % POISSON_CELL_XZW as u64) as i32,
+        cy * POISSON_CELL_Y + (hy % POISSON_CELL_Y as u64) as i32,
+        cz * POISSON_CELL_XZW + (hz % POISSON_CELL_XZW as u64) as i32,
+        cw * POISSON_CELL_XZW + (hw % POISSON_CELL_XZW as u64) as i32,
+    ]
+}
+
+/// Priority for tie-breaking when two candidates conflict.
+fn cell_priority(seed: u64, cx: i32, cy: i32, cz: i32, cw: i32) -> u64 {
+    hash_platform_cell(seed, cy, cx, cz, cw, SALT_PRIORITY)
+}
+
+/// Anisotropic squared distance with Y scaled up.
+fn scaled_distance_sq(a: [i32; 4], b: [i32; 4]) -> i64 {
+    let dx = (a[0] as i64) - (b[0] as i64);
+    let dy = ((a[1] as i64) - (b[1] as i64)) * POISSON_Y_SCALE;
+    let dz = (a[2] as i64) - (b[2] as i64);
+    let dw = (a[3] as i64) - (b[3] as i64);
+    dx * dx + dy * dy + dz * dz + dw * dw
+}
+
+/// Returns true if the candidate at cell (cx,cy,cz,cw) is accepted by the Poisson-disk filter.
+/// Checks 80 neighboring cells (3^4 - 1). A candidate is rejected if a neighbor within the
+/// minimum distance has higher priority (or equal priority with a smaller cell tuple).
+fn is_candidate_accepted(seed: u64, cx: i32, cy: i32, cz: i32, cw: i32) -> bool {
+    if is_origin_cell(cx, cy, cz, cw) {
+        return true;
     }
-    let span = ((max_abs * 2) + 1) as u64;
-    (hash % span) as i32 - max_abs
-}
-
-fn div_ceil_i32(numerator: i32, denominator: i32) -> i32 {
-    debug_assert!(denominator > 0);
-    -((-numerator).div_euclid(denominator))
-}
-
-fn level_range_for_shifted_local_chunk_bounds(
-    query_min_y: i32,
-    query_max_y: i32,
-    local_min_y: i32,
-    local_max_y: i32,
-    level_stride_y: i32,
-) -> Option<(i32, i32)> {
-    if query_min_y > query_max_y || local_min_y > local_max_y || level_stride_y <= 0 {
-        return None;
+    let my_pos = candidate_position_xyzw(seed, cx, cy, cz, cw);
+    let my_pri = cell_priority(seed, cx, cy, cz, cw);
+    for dw in -1i32..=1 {
+        for dz in -1i32..=1 {
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 && dw == 0 {
+                        continue;
+                    }
+                    let nx = cx + dx;
+                    let ny = cy + dy;
+                    let nz = cz + dz;
+                    let nw = cw + dw;
+                    let neighbor_pos = if is_origin_cell(nx, ny, nz, nw) {
+                        ORIGIN_ANCHOR_POS
+                    } else {
+                        candidate_position_xyzw(seed, nx, ny, nz, nw)
+                    };
+                    if scaled_distance_sq(my_pos, neighbor_pos) < POISSON_MIN_DIST_SQ {
+                        // Origin anchor has infinite priority.
+                        if is_origin_cell(nx, ny, nz, nw) {
+                            return false;
+                        }
+                        let neighbor_pri = cell_priority(seed, nx, ny, nz, nw);
+                        if neighbor_pri > my_pri
+                            || (neighbor_pri == my_pri
+                                && (ny, nx, nz, nw) < (cy, cx, cz, cw))
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
     }
-    let min_level = div_ceil_i32(query_min_y.saturating_sub(local_max_y), level_stride_y);
-    let max_level = query_max_y
-        .saturating_sub(local_min_y)
-        .div_euclid(level_stride_y);
-    if min_level <= max_level {
-        Some((min_level, max_level))
-    } else {
-        None
-    }
+    true
 }
 
-fn level_range_for_platform_chunk_bounds(query_min_y: i32, query_max_y: i32) -> Option<(i32, i32)> {
-    level_range_for_shifted_local_chunk_bounds(
-        query_min_y,
-        query_max_y,
-        -PLATFORM_THICKNESS_CHUNKS,
-        -1,
-        PLATFORM_LEVEL_STRIDE_Y_CHUNKS,
-    )
-}
-
-fn platform_min_chunk_y_for_level(level: i32) -> i32 {
-    level * PLATFORM_LEVEL_STRIDE_Y_CHUNKS - PLATFORM_THICKNESS_CHUNKS
-}
-
-fn platform_level_chunk_y_offset(level: i32) -> i32 {
-    level * PLATFORM_LEVEL_STRIDE_Y_CHUNKS
+fn platform_y_offset(platform: &PlatformInstance) -> i32 {
+    platform.bounds.max[1] + 1
 }
 
 fn chunk_pos_from_local_to_platform(
     local: ChunkPos,
-    level: i32,
+    platform: &PlatformInstance,
     procgen_frame_offset_xzw: [i32; 3],
 ) -> ChunkPos {
+    let y_offset = platform_y_offset(platform);
     ChunkPos::new(
         local.x.saturating_sub(procgen_frame_offset_xzw[0]),
-        local.y + platform_level_chunk_y_offset(level),
+        local.y + y_offset,
         local.z.saturating_sub(procgen_frame_offset_xzw[1]),
         local.w.saturating_sub(procgen_frame_offset_xzw[2]),
     )
@@ -513,7 +481,7 @@ fn query_bounds_local_to_platform(
     platform: PlatformInstance,
     procgen_frame_offset_xzw: [i32; 3],
 ) -> Option<Aabb4i> {
-    let y_offset = platform_level_chunk_y_offset(platform.level);
+    let y_offset = platform_y_offset(&platform);
     let local = Aabb4i::new(
         [
             query_bounds.min[0]
@@ -663,6 +631,39 @@ mod tests {
         }
     }
 
+    /// Find a non-empty platform chunk key for a given seed, suitable for query-invariance tests.
+    fn find_platform_chunk_key(seed: u64) -> [i32; 4] {
+        let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
+            BaseWorldKind::MassivePlatforms {
+                material: VoxelType(11),
+            },
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            seed,
+            true,
+            HashSet::new(),
+        );
+        let bounds = Aabb4i::new([-96, -16, -96, -96], [96, 48, 96, 96]);
+        let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        let chunks = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
+        // Find a chunk that's NOT in the origin anchor (to test non-trivial platforms).
+        let origin_bounds = generator
+            .sample_platform_bounds(0, 0, 0, 0)
+            .unwrap();
+        for (key, _) in &chunks {
+            if key[0] < origin_bounds.min[0]
+                || key[0] > origin_bounds.max[0]
+                || key[2] < origin_bounds.min[2]
+                || key[2] > origin_bounds.max[2]
+                || key[3] < origin_bounds.min[3]
+                || key[3] > origin_bounds.max[3]
+            {
+                return *key;
+            }
+        }
+        // Fallback to any non-empty chunk.
+        chunks[0].0
+    }
+
     #[test]
     fn invalid_bounds_query_returns_empty() {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
@@ -715,11 +716,11 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-1, -1, -1, -1], [1, 0, 1, 1]);
+        let bounds = Aabb4i::new([-1, -1, -1, -1], [1, 1, 1, 1]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let non_empty = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
-        assert!(non_empty.iter().any(|(key, _)| *key == [0, -1, 0, 0]));
-        assert!(!non_empty.iter().any(|(key, _)| *key == [0, 0, 0, 0]));
+        assert!(non_empty.iter().any(|(key, _)| *key == [0, 0, 0, 0]));
+        assert!(!non_empty.iter().any(|(key, _)| *key == [0, 1, 0, 0]));
     }
 
     #[test]
@@ -735,17 +736,12 @@ mod tests {
         );
         let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
         let platform = PlatformInstance {
-            level: ORIGIN_ANCHOR_LEVEL,
-            cell_x: ORIGIN_ANCHOR_CELL_X,
-            cell_z: ORIGIN_ANCHOR_CELL_Z,
-            cell_w: ORIGIN_ANCHOR_CELL_W,
+            level: 0,
+            cell_x: 0,
+            cell_z: 0,
+            cell_w: 0,
             bounds: generator
-                .sample_platform_bounds(
-                    ORIGIN_ANCHOR_LEVEL,
-                    ORIGIN_ANCHOR_CELL_X,
-                    ORIGIN_ANCHOR_CELL_Z,
-                    ORIGIN_ANCHOR_CELL_W,
-                )
+                .sample_platform_bounds(0, 0, 0, 0)
                 .expect("origin anchor platform must exist"),
         };
         let probe = Aabb4i::new(
@@ -810,24 +806,35 @@ mod tests {
         let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
         let search = Aabb4i::new([-96, -64, -96, -96], [96, 96, 96, 96]);
         let mut validated = false;
-        seeded.for_each_platform_instance_in_level_range(search, 1, 8, |platform| {
+        // Search cells at cy >= 1 to find platforms above level 0.
+        let min_cy = 1;
+        let max_cy = 8;
+        seeded.for_each_platform_instance_in_bounds(search, min_cy, max_cy, |platform| {
             if validated {
                 return;
             }
-            let local_probe = Aabb4i::new(
+            let y_offset = platform_y_offset(&platform);
+            let frame_offset = procgen_frame_offset_xzw_chunks(seeded.world_seed, platform);
+            // Build probe in world coords, then convert to frame-shifted local space.
+            let world_probe = Aabb4i::new(
                 [
                     platform.bounds.min[0],
-                    local_min_y,
+                    y_offset + local_min_y,
                     platform.bounds.min[2],
                     platform.bounds.min[3],
                 ],
                 [
                     platform.bounds.max[0],
-                    local_max_y,
+                    y_offset + local_max_y,
                     platform.bounds.max[2],
                     platform.bounds.max[3],
                 ],
             );
+            let Some(local_probe) =
+                query_bounds_local_to_platform(world_probe, platform, frame_offset)
+            else {
+                return;
+            };
             let seed = hash_platform_cell(
                 seeded.world_seed,
                 platform.level,
@@ -845,10 +852,11 @@ mod tests {
             };
             let global_chunk = chunk_pos_from_local_to_platform(
                 local_chunk,
-                platform.level,
-                procgen_frame_offset_xzw_chunks(seeded.world_seed, platform),
+                &platform,
+                frame_offset,
             );
-            if global_chunk.y < PLATFORM_LEVEL_STRIDE_Y_CHUNKS {
+            // Verify the global chunk is above the origin platform surface.
+            if global_chunk.y < POISSON_CELL_Y {
                 return;
             }
 
@@ -921,7 +929,7 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-24, -8, -24, 0], [24, 36, 24, 0]);
+        let bounds = Aabb4i::new([-24, -8, -24, -24], [24, 36, 24, 24]);
         let with_structures =
             generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let without_structures =
@@ -955,15 +963,22 @@ mod tests {
 
         for key in changed_keys.into_iter().take(64) {
             let key_bounds = Aabb4i::new(key, key);
-            let min_level = (key[1] - local_max_y).div_euclid(PLATFORM_LEVEL_STRIDE_Y_CHUNKS);
-            let max_level = (key[1] - local_min_y).div_euclid(PLATFORM_LEVEL_STRIDE_Y_CHUNKS);
+            // Find platforms whose procgen Y extent covers this chunk.
+            // Procgen Y = [y_offset + local_min_y, y_offset + local_max_y]
+            // y_offset = surface + 1, surface = candidate Y.
+            // We need: y_offset + local_min_y <= key[1] <= y_offset + local_max_y
+            // So: surface in [key[1] - 1 - local_max_y, key[1] - 1 - local_min_y]
+            let surface_min = key[1] - 1 - local_max_y;
+            let surface_max = key[1] - 1 - local_min_y;
+            let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
+            let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
             let mut anchored = false;
-            generator.for_each_platform_instance_in_level_range(
+            generator.for_each_platform_instance_in_bounds(
                 key_bounds,
-                min_level,
-                max_level,
+                min_cy,
+                max_cy,
                 |platform| {
-                    let y_offset = platform_level_chunk_y_offset(platform.level);
+                    let y_offset = platform_y_offset(&platform);
                     let in_horizontal = key[0] >= platform.bounds.min[0]
                         && key[0] <= platform.bounds.max[0]
                         && key[2] >= platform.bounds.min[2]
@@ -983,17 +998,18 @@ mod tests {
 
     #[test]
     fn chunk_sampling_is_query_volume_invariant_across_platform_y_boundaries() {
+        let seed = 0xD1A6_2026;
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
                 material: VoxelType(11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
-            0xD1A6_2026,
+            seed,
             true,
             HashSet::new(),
         );
 
-        let chunk_key = [-14, -1, -22, -19];
+        let chunk_key = find_platform_chunk_key(seed);
         let single_bounds = Aabb4i::new(chunk_key, chunk_key);
         let neighborhood_bounds = Aabb4i::new(
             [
