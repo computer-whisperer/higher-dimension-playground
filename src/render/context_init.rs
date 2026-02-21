@@ -165,8 +165,14 @@ impl RenderContext {
             shader_spirv!("mainEntityInstanceAabbPreprocessor"),
         );
         let raytrace_clear = load_shader(device.clone(), shader_spirv!("mainRaytracerClear"));
-        let voxel_trace_stage_a =
-            load_shader(device.clone(), shader_spirv!("mainVoxelTraceStageA"));
+        let voxel_trace_stage_a_integral_fused = load_shader(
+            device.clone(),
+            shader_spirv!("mainVoxelTraceStageAIntegralFused"),
+        );
+        let voxel_trace_stage_a_layered = load_shader(
+            device.clone(),
+            shader_spirv!("mainVoxelTraceStageALayered"),
+        );
         let voxel_display_stage_b =
             load_shader(device.clone(), shader_spirv!("mainVoxelDisplayStageB"));
         let raster_tet = load_shader(device.clone(), shader_spirv!("mainTetrahedronCS"));
@@ -312,7 +318,8 @@ impl RenderContext {
             entity_instance_aabb_preprocess,
             raytrace_pixel: raytrace_pixel,
             raytrace_clear: raytrace_clear,
-            voxel_trace_stage_a,
+            voxel_trace_stage_a_integral_fused,
+            voxel_trace_stage_a_layered,
             voxel_display_stage_b,
             bvh_scene_bounds,
             bvh_morton_codes,
@@ -571,7 +578,8 @@ impl RenderContext {
             });
         }
 
-        let vte_entity_diag_enabled = env_flag_enabled(VTE_ENTITY_DIAG_ENV);
+        let vte_entity_diag_enabled =
+            vte_diagnostics_feature_enabled() && env_flag_enabled(VTE_ENTITY_DIAG_ENV);
         let vte_entity_diag_verbose =
             vte_entity_diag_enabled && env_flag_enabled(VTE_ENTITY_DIAG_VERBOSE_ENV);
         let vte_entity_diag_bvh_readback =

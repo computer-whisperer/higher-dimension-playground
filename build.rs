@@ -113,7 +113,12 @@ const SHADER_ENTRIES: &[ShaderEntry] = &[
     },
     ShaderEntry {
         file: "voxel.slang",
-        entry: "mainVoxelTraceStageA",
+        entry: "mainVoxelTraceStageAIntegralFused",
+        profile: "cs_6_5",
+    },
+    ShaderEntry {
+        file: "voxel.slang",
+        entry: "mainVoxelTraceStageALayered",
         profile: "cs_6_5",
     },
     ShaderEntry {
@@ -159,6 +164,12 @@ fn main() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let shader_src_dir = Path::new("slang-shaders/src");
     let spirv_out_dir = PathBuf::from(&out_dir).join("spirv");
+    let vte_diagnostics_enabled = env::var_os("CARGO_FEATURE_VTE_DIAGNOSTICS").is_some();
+    let vte_diagnostics_define = if vte_diagnostics_enabled {
+        "VTE_DIAGNOSTICS_ENABLED=1"
+    } else {
+        "VTE_DIAGNOSTICS_ENABLED=0"
+    };
 
     // Create output directory
     std::fs::create_dir_all(&spirv_out_dir).expect("Failed to create SPIR-V output directory");
@@ -173,6 +184,7 @@ fn main() {
             }
         }
     }
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_VTE_DIAGNOSTICS");
 
     // Check if required tools are available
     check_tool(
@@ -212,6 +224,8 @@ fn main() {
                 "-fvk-use-entrypoint-name",
                 // Compile via GLSL for better Vulkano compatibility (avoids SPIR-V extensions)
                 "-emit-spirv-via-glsl",
+                "-D",
+                vte_diagnostics_define,
                 "-o",
                 output_path.to_str().unwrap(),
                 input_path.to_str().unwrap(),
@@ -268,6 +282,14 @@ fn main() {
 
     // Export the SPIR-V output directory for the main crate
     println!("cargo:rustc-env=SPIRV_OUT_DIR={}", spirv_out_dir.display());
+    println!(
+        "cargo:warning=VTE diagnostics feature {}",
+        if vte_diagnostics_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!(
         "cargo:warning=Slang shaders compiled to {}",
         spirv_out_dir.display()

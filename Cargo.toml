@@ -16,6 +16,10 @@ edition = "2021"
 name = "higher_dimension_playground"
 path = "src/lib.rs"
 
+[features]
+default = []
+vte-diagnostics = []
+
 [dependencies]
 
 # The `vulkano` crate is the main crate that you must use to use Vulkan.

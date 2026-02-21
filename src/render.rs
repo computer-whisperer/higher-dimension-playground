@@ -129,22 +129,35 @@ fn env_flag_enabled(name: &str) -> bool {
     }
 }
 
+pub(super) const fn vte_diagnostics_feature_enabled() -> bool {
+    cfg!(feature = "vte-diagnostics")
+}
+
 fn vte_lod_tint_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled(VTE_LOD_TINT_ENV))
 }
 
 fn vte_entity_linear_only_enabled() -> bool {
+    if !vte_diagnostics_feature_enabled() {
+        return false;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled(VTE_ENTITY_LINEAR_ONLY_ENV))
 }
 
 fn vte_entity_bvh_compare_enabled() -> bool {
+    if !vte_diagnostics_feature_enabled() {
+        return false;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled(VTE_ENTITY_BVH_COMPARE_ENV))
 }
 
 fn vte_world_bvh_ray_diag_env_enabled() -> bool {
+    if !vte_diagnostics_feature_enabled() {
+        return false;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled(VTE_WORLD_BVH_RAY_DIAG_ENV))
 }
@@ -213,7 +226,8 @@ struct ShaderModules {
     raytrace_pixel: Arc<ShaderModule>,
     raytrace_clear: Arc<ShaderModule>,
     // Voxel traversal engine (VTE) compute shaders
-    voxel_trace_stage_a: Arc<ShaderModule>,
+    voxel_trace_stage_a_integral_fused: Arc<ShaderModule>,
+    voxel_trace_stage_a_layered: Arc<ShaderModule>,
     voxel_display_stage_b: Arc<ShaderModule>,
     // Tile binning
     bin_tets_cs: Arc<ShaderModule>,
@@ -2871,14 +2885,16 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             let max_trace_distance = render_options.vte_max_trace_distance.max(1.0);
             let debug_flags = {
                 let mut flags = 0;
-                if render_options.vte_reference_compare {
-                    flags |= vte::VTE_DEBUG_FLAG_REFERENCE_COMPARE;
-                }
-                if render_options.vte_reference_mismatch_only {
-                    flags |= vte::VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY;
-                }
-                if render_options.vte_compare_slice_only {
-                    flags |= vte::VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
+                if vte_diagnostics_feature_enabled() {
+                    if render_options.vte_reference_compare {
+                        flags |= vte::VTE_DEBUG_FLAG_REFERENCE_COMPARE;
+                    }
+                    if render_options.vte_reference_mismatch_only {
+                        flags |= vte::VTE_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY;
+                    }
+                    if render_options.vte_compare_slice_only {
+                        flags |= vte::VTE_DEBUG_FLAG_COMPARE_SLICE_ONLY;
+                    }
                 }
                 if vte_lod_tint_enabled() {
                     flags |= vte::VTE_DEBUG_FLAG_LOD_TINT;
@@ -3069,7 +3085,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
 
         if do_voxel_vte {
             vte_non_voxel_rebuild_reason = "empty";
-            vte_compare_diagnostics_enabled = render_options.vte_reference_compare
+            vte_compare_diagnostics_enabled = vte_diagnostics_feature_enabled()
+                && render_options.vte_reference_compare
                 && matches!(
                     render_options.vte_display_mode,
                     VteDisplayMode::DebugCompare | VteDisplayMode::DebugIntegral
@@ -3099,7 +3116,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     .iter()
                     .filter(|h| (h.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0)
                     .count() as u32;
-                let collect_visible_set_hash = render_options.vte_reference_compare;
+                let collect_visible_set_hash =
+                    vte_diagnostics_feature_enabled() && render_options.vte_reference_compare;
                 let hash = if collect_visible_set_hash {
                     let mut hash = 0x811C_9DC5u32;
                     for node in input.region_bvh_nodes {
@@ -3551,10 +3569,15 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     }
                     .unwrap();
                 }
+                let voxel_trace_stage_a_pipeline = if fuse_integral_in_stage_a {
+                    self.compute_pipeline
+                        .voxel_trace_stage_a_integral_fused_pipeline
+                        .clone()
+                } else {
+                    self.compute_pipeline.voxel_trace_stage_a_layered_pipeline.clone()
+                };
                 builder
-                    .bind_pipeline_compute(
-                        self.compute_pipeline.voxel_trace_stage_a_pipeline.clone(),
-                    )
+                    .bind_pipeline_compute(voxel_trace_stage_a_pipeline)
                     .unwrap();
                 unsafe {
                     builder.dispatch([

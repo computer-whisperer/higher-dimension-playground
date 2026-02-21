@@ -6,6 +6,10 @@ import math;
 import types;
 import materials;
 
+#ifndef VTE_DIAGNOSTICS_ENABLED
+#define VTE_DIAGNOSTICS_ENABLED 1
+#endif
+
 static const uint CHUNK_SIZE = 8;
 static const uint CHUNK_VOLUME = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE; // 4096
 static const uint INVALID_INDEX = 0xFFFFFFFF;
@@ -148,6 +152,7 @@ static const uint WORLD_BVH_RAY_DIAG_RECORD_PATH_HASH = 14u;
 static const uint WORLD_BVH_RAY_DIAG_RECORD_FLAGS = 15u;
 static const uint WORLD_BVH_RAY_DIAG_WORD_COUNT =
     WORLD_BVH_RAY_DIAG_RECORD_BASE_WORD + WORLD_BVH_RAY_DIAG_CAPACITY * WORLD_BVH_RAY_DIAG_WORDS_PER_RECORD;
+static const bool VTE_DIAGNOSTICS = (VTE_DIAGNOSTICS_ENABLED != 0);
 
 struct VoxelFrameMeta
 {
@@ -242,6 +247,10 @@ struct VoxelLeafHeader
 
 void incrementCompareStat(uint statIndex)
 {
+    if (!VTE_DIAGNOSTICS)
+    {
+        return;
+    }
     if (statIndex < COMPARE_STAT_COUNT)
     {
         InterlockedAdd(vteCompareStats[statIndex], 1u);
@@ -296,6 +305,10 @@ void captureFirstMismatch(
     float finalT,
     int4 lastChunkCoord)
 {
+    if (!VTE_DIAGNOSTICS)
+    {
+        return;
+    }
     uint prior = 1u;
     InterlockedCompareExchange(
         vteFirstMismatchRecord[FIRST_MISMATCH_VALID],
@@ -345,6 +358,10 @@ bool selectWorldBvhRayDiagSample(
     out uint outSlot)
 {
     outSlot = INVALID_INDEX;
+    if (!VTE_DIAGNOSTICS)
+    {
+        return false;
+    }
     if ((meta.debugFlags & META_DEBUG_FLAG_WORLD_BVH_RAY_DIAG) == 0u)
     {
         return false;
@@ -396,6 +413,10 @@ void writeWorldBvhRayDiagRecord(
     uint pathHash,
     uint flags)
 {
+    if (!VTE_DIAGNOSTICS)
+    {
+        return;
+    }
     if (slot >= WORLD_BVH_RAY_DIAG_CAPACITY)
     {
         return;
@@ -2169,7 +2190,8 @@ bool traceVoxelRayDDA(
     float MAX_DISTANCE = max(1.0, meta.maxTraceDistance);
     uint maxChunkSteps = max(1u, min(meta.maxTraceSteps, 4096u));
     uint remainingVoxelSteps = max(1u, min(meta.maxTraceSteps * 8u, 32768u));
-    bool collectDebugFlags = (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
+    bool collectDebugFlags = VTE_DIAGNOSTICS
+        && (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE
         || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL);
     bool useSlabChunkInterval = collectDebugFlags
         || (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) != 0u;
@@ -2653,7 +2675,7 @@ void mainVoxelClear(uint3 globalId : SV_DispatchThreadID)
         return;
     }
 
-    if (globalId.x == 0u && globalId.y == 0u)
+    if (VTE_DIAGNOSTICS && globalId.x == 0u && globalId.y == 0u)
     {
         for (uint i = 0u; i < COMPARE_STAT_COUNT; i++)
         {
@@ -2673,9 +2695,7 @@ void mainVoxelClear(uint3 globalId : SV_DispatchThreadID)
     }
 }
 
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
+void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
 {
     WorkingData wd = workingDataBuffer[0];
     VoxelFrameMeta meta = voxelFrameMetaBuffer[0];
@@ -2704,7 +2724,7 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
 
     // Integral mode fast path: collapse across all layers in Stage A and write
     // directly to layer 0, so Stage B can be skipped for this mode.
-    if (meta.stageBMode == STAGE_B_MODE_INTEGRAL && globalId.z == 0u && layerCount > 1u)
+    if (integralFusedDispatch && globalId.z == 0u && layerCount > 1u)
     {
         float2 pixelPos = float2(
             float(globalId.x) / float(wd.renderDimensions.x) * 2.0 - 1.0,
@@ -2802,7 +2822,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
                     ? max(1e-4, dot(hitPos - worldOrigin, worldDirection))
                     : maxEntityDistance;
                 bool forceEntityLinear = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_LINEAR_ONLY) != 0u;
-                bool doEntityBvhCompare = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_BVH_COMPARE) != 0u
+                bool doEntityBvhCompare = VTE_DIAGNOSTICS
+                    && (meta.debugFlags & META_DEBUG_FLAG_ENTITY_BVH_COMPARE) != 0u
                     && (((globalId.x + 3u * globalId.y + 5u * sampleLayer) & 15u) == 0u);
                 if (doEntityBvhCompare)
                 {
@@ -3218,7 +3239,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
             maxEntityDistance = max(1e-4, dot(hitPos - worldOrigin, worldDirection));
         }
         bool forceEntityLinear = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_LINEAR_ONLY) != 0u;
-        bool doEntityBvhCompare = (meta.debugFlags & META_DEBUG_FLAG_ENTITY_BVH_COMPARE) != 0u
+        bool doEntityBvhCompare = VTE_DIAGNOSTICS
+            && (meta.debugFlags & META_DEBUG_FLAG_ENTITY_BVH_COMPARE) != 0u
             && (((globalId.x + 3u * globalId.y) & 15u) == 0u);
         if (doEntityBvhCompare)
         {
@@ -3428,7 +3450,8 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
 
     float3 outColor;
     float outAlpha = 1.0;
-    if (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL)
+    if (VTE_DIAGNOSTICS
+        && (meta.stageBMode == STAGE_B_MODE_DEBUG_COMPARE || meta.stageBMode == STAGE_B_MODE_DEBUG_INTEGRAL))
     {
         bool doReferenceCompare = (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_COMPARE) != 0u;
         bool mismatchOnly = (meta.debugFlags & META_DEBUG_FLAG_REFERENCE_MISMATCH_ONLY) != 0u;
@@ -3744,6 +3767,20 @@ void mainVoxelTraceStageA(uint3 globalId : SV_DispatchThreadID)
     }
 
     pixelBuffer[index] = float4(outColor, outAlpha);
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void mainVoxelTraceStageAIntegralFused(uint3 globalId : SV_DispatchThreadID)
+{
+    voxelTraceStageAImpl(globalId, true);
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void mainVoxelTraceStageALayered(uint3 globalId : SV_DispatchThreadID)
+{
+    voxelTraceStageAImpl(globalId, false);
 }
 
 float decodeZwAngleColorShiftStrength(WorkingData wd)

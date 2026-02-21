@@ -8,6 +8,10 @@ default-run = "polychora"
 name = "polychora-server"
 path = "src/bin/polychora-server.rs"
 
+[features]
+default = []
+vte-diagnostics = ["higher-dimension-playground/vte-diagnostics"]
+
 [dependencies]
 higher-dimension-playground = { path = "../.." }
 common = { path = "../../common", features = ["ndarray", "nalgebra"] }

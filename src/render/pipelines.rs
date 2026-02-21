@@ -258,7 +258,8 @@ pub(super) struct ComputePipelineContext {
     pub(super) raytrace_pixel_pipeline: Arc<ComputePipeline>,
     pub(super) raytrace_clear_pipeline: Arc<ComputePipeline>,
     // Voxel traversal engine (VTE) pipelines
-    pub(super) voxel_trace_stage_a_pipeline: Arc<ComputePipeline>,
+    pub(super) voxel_trace_stage_a_integral_fused_pipeline: Arc<ComputePipeline>,
+    pub(super) voxel_trace_stage_a_layered_pipeline: Arc<ComputePipeline>,
     pub(super) voxel_display_stage_b_pipeline: Arc<ComputePipeline>,
     // BVH pipelines
     pub(super) bvh_scene_bounds_pipeline: Arc<ComputePipeline>,
@@ -386,14 +387,28 @@ impl ComputePipelineContext {
                 ),
             )
             .unwrap(),
-            voxel_trace_stage_a_pipeline: ComputePipeline::new(
+            voxel_trace_stage_a_integral_fused_pipeline: ComputePipeline::new(
                 device.clone(),
                 None,
                 ComputePipelineCreateInfo::stage_layout(
                     PipelineShaderStageCreateInfo::new(
                         shaders
-                            .voxel_trace_stage_a
-                            .entry_point("mainVoxelTraceStageA")
+                            .voxel_trace_stage_a_integral_fused
+                            .entry_point("mainVoxelTraceStageAIntegralFused")
+                            .unwrap(),
+                    ),
+                    pipeline_layout.clone(),
+                ),
+            )
+            .unwrap(),
+            voxel_trace_stage_a_layered_pipeline: ComputePipeline::new(
+                device.clone(),
+                None,
+                ComputePipelineCreateInfo::stage_layout(
+                    PipelineShaderStageCreateInfo::new(
+                        shaders
+                            .voxel_trace_stage_a_layered
+                            .entry_point("mainVoxelTraceStageALayered")
                             .unwrap(),
                     ),
                     pipeline_layout.clone(),
