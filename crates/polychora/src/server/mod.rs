@@ -36,7 +36,7 @@ use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField
 use crate::materials;
 use crate::shared::protocol::{
     ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
-    WorldSummary,
+    WorldBounds, WorldSummary,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{self, ChunkPos, VoxelType, CHUNK_SIZE};
@@ -60,7 +60,6 @@ const CREEPER_EXPLOSION_RADIUS_VOXELS: i32 = 3;
 const CREEPER_EXPLOSION_IMPULSE_RADIUS: f32 = 7.0;
 const CREEPER_EXPLOSION_MAX_IMPULSE_DISTANCE: f32 = 5.0;
 const CREEPER_POUNCE_TARGET_BELOW_PLAYER_Y: f32 = 1.05;
-const MOB_HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const MOB_COLLISION_RADIUS_SCALE: f32 = 0.42;
 const MOB_COLLISION_RADIUS_MIN: f32 = 0.20;
 const MOB_COLLISION_RADIUS_MAX: f32 = 0.55;

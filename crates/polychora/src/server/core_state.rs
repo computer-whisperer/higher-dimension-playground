@@ -76,6 +76,10 @@ impl ServerState {
         subtree
     }
 
+    pub(super) fn world_bounds(&self) -> crate::shared::protocol::WorldBounds {
+        self.world.world_bounds()
+    }
+
     pub(super) fn world_seed(&self) -> u64 {
         self.world.world_seed()
     }

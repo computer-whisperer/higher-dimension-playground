@@ -18,9 +18,17 @@ impl Scene {
     }
 
     fn aabb_intersects_solid(&self, min: [f32; 4], max: [f32; 4]) -> bool {
-        // Infinite hard floor: disallow moving below this world Y plane.
-        if min[1] < HARD_WORLD_FLOOR_Y {
-            return true;
+        for axis in 0..4 {
+            if let Some(lo) = self.world_bounds.min[axis] {
+                if min[axis] < lo {
+                    return true;
+                }
+            }
+            if let Some(hi) = self.world_bounds.max[axis] {
+                if max[axis] > hi {
+                    return true;
+                }
+            }
         }
 
         let max_epsilon = 1e-4f32;

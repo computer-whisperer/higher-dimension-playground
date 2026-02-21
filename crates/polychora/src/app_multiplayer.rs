@@ -1452,6 +1452,7 @@ impl App {
                 self.multiplayer_chunk_sample_diag_next_request_id = 1;
                 self.pending_player_movement_modifiers.clear();
                 self.player_modifier_external_velocity = [0.0; 4];
+                self.scene.world_bounds = world.bounds;
                 self.multiplayer_initial_world_wait_since = Some(Instant::now());
                 self.maybe_request_multiplayer_world_for_position(self.camera.position, "welcome");
                 eprintln!(

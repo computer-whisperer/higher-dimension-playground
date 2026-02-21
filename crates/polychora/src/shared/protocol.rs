@@ -46,9 +46,17 @@ pub struct EntityTransform {
     pub last_update_ms: u64,
 }
 
+/// Per-axis hard collision boundaries. `None` means unbounded in that direction.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct WorldBounds {
+    pub min: [Option<f32>; 4], // X, Y, Z, W lower bounds
+    pub max: [Option<f32>; 4], // X, Y, Z, W upper bounds
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldSummary {
     pub non_empty_chunks: usize,
+    pub bounds: WorldBounds,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

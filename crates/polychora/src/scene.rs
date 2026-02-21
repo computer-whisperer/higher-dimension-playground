@@ -5,6 +5,7 @@ use higher_dimension_playground::render::{
     VoxelFrameInput, VoxelMutationBatch, VTE_REGION_BVH_INVALID_NODE,
 };
 use polychora::shared::chunk_payload::ChunkPayload;
+use polychora::shared::protocol::WorldBounds;
 use polychora::shared::region_tree::{
     chunk_key_from_chunk_pos, slice_non_empty_region_core_in_bounds, RegionChunkTree,
     RegionNodeKind, RegionTreeCore,
@@ -34,7 +35,6 @@ const VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET: usize = 4;
 const COLLISION_PUSHUP_STEP: f32 = 0.05;
 const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
-const HARD_WORLD_FLOOR_Y: f32 = -4.0;
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 const FLAT_PRESET_FLOOR_MATERIAL: VoxelType = VoxelType(11);
 const SHOWCASE_MATERIALS: [u8; 37] = [
@@ -154,6 +154,7 @@ impl VoxelFrameData {
 }
 
 pub struct Scene {
+    pub world_bounds: WorldBounds,
     world_tree: RegionChunkTree,
     world_tree_revision: u64,
     // Dense decode cache for local edits/collision/surface extraction. The
@@ -673,7 +674,16 @@ impl Scene {
         let world_chunks_init = Self::build_scene_preset_world(preset);
         let (world_tree, world_chunks) = Self::scene_world_from_chunks(world_chunks_init);
 
+        let world_bounds = match preset {
+            ScenePreset::Flat => WorldBounds {
+                min: [None, Some(-4.0), None, None],
+                max: [None; 4],
+            },
+            ScenePreset::Empty | ScenePreset::DemoCubes => WorldBounds::default(),
+        };
+
         Self {
+            world_bounds,
             world_tree,
             world_tree_revision: 1,
             world_chunks,
@@ -872,7 +882,11 @@ mod tests {
 
     #[test]
     fn resolve_player_collision_lands_on_hard_world_floor() {
-        let scene = make_scene_with_voxels(&[]);
+        let mut scene = make_scene_with_voxels(&[]);
+        scene.world_bounds = WorldBounds {
+            min: [None, Some(-4.0), None, None],
+            max: [None; 4],
+        };
 
         let old_pos = [0.0, 0.4, 0.0, 0.0];
         let attempted = [0.0, -6.0, 0.0, 0.0];
@@ -881,7 +895,7 @@ mod tests {
             scene.resolve_player_collision(old_pos, attempted, &mut velocity_y);
 
         assert!(grounded);
-        assert!((resolved[1] - (HARD_WORLD_FLOOR_Y + PLAYER_HEIGHT)).abs() < 0.03);
+        assert!((resolved[1] - (-4.0 + PLAYER_HEIGHT)).abs() < 0.03);
         assert_eq!(velocity_y, 0.0);
     }
 

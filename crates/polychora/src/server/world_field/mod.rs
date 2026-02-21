@@ -1,5 +1,6 @@
 use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
+use crate::shared::protocol::WorldBounds;
 use crate::shared::region_tree::{
     chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
@@ -80,6 +81,16 @@ impl<F> PassthroughWorldOverlay<F> {
             save_stream: None,
             base_world_kind,
             world_seed,
+        }
+    }
+
+    pub fn world_bounds(&self) -> WorldBounds {
+        match self.base_world_kind {
+            BaseWorldKind::FlatFloor { .. } => WorldBounds {
+                min: [None, Some(-4.0), None, None],
+                max: [None; 4],
+            },
+            _ => WorldBounds::default(),
         }
     }
 

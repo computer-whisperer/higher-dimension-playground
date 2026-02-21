@@ -55,8 +55,27 @@ fn mob_collides_at(
     position: [f32; 4],
     radius: f32,
 ) -> bool {
-    if position[1] - radius < MOB_HARD_WORLD_FLOOR_Y {
-        return true;
+    mob_collides_at_with_bounds(state, cache, position, radius, &state.world_bounds())
+}
+
+fn mob_collides_at_with_bounds(
+    state: &ServerState,
+    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    position: [f32; 4],
+    radius: f32,
+    world_bounds: &WorldBounds,
+) -> bool {
+    for axis in 0..4 {
+        if let Some(lo) = world_bounds.min[axis] {
+            if position[axis] - radius < lo {
+                return true;
+            }
+        }
+        if let Some(hi) = world_bounds.max[axis] {
+            if position[axis] + radius > hi {
+                return true;
+            }
+        }
     }
 
     let min = [
