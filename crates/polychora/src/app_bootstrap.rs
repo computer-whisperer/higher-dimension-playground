@@ -74,10 +74,9 @@ pub(super) fn parse_commands(input: &str) -> Vec<AutoCommand> {
     commands
 }
 
-pub(super) fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
+pub(super) fn run_cpu_render(_scene_preset: ScenePreset, args: &Args) {
     use common::MatN;
 
-    let mut scene = Scene::new(scene_preset);
     if args.load_world {
         eprintln!(
             "--load-world is ignored for client-side CPU render; run the integrated server to load world data."
@@ -116,8 +115,8 @@ pub(super) fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
         camera.yw_deviation = yw;
     }
 
-    scene.update_surfaces_if_dirty();
-    let instances = scene.build_instances(camera.position);
+    eprintln!("CPU world-geometry raster path removed; rendering empty tetra scene.");
+    let instances: Vec<common::ModelInstance> = Vec::new();
 
     let view_matrix_ndarray = camera.view_matrix();
     let view_matrix: MatN<5> = MatN::from(&view_matrix_ndarray);
@@ -135,7 +134,7 @@ pub(super) fn run_cpu_render(scene_preset: ScenePreset, args: &Args) {
 
     eprintln!("CPU render: {}x{}", params.width, params.height);
     let start = Instant::now();
-    let img = cpu_render::cpu_render(instances, &model_tets, &params);
+    let img = cpu_render::cpu_render(&instances, &model_tets, &params);
     let elapsed = start.elapsed();
     eprintln!("CPU render done in {:.2}s", elapsed.as_secs_f32());
 

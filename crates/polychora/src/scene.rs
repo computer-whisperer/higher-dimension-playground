@@ -1,5 +1,4 @@
 use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
-use crate::voxel::cull::{self, SurfaceData};
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
@@ -23,7 +22,6 @@ mod patching;
 mod render_cache;
 mod voxel_runtime;
 
-const RENDER_DISTANCE: f32 = 64.0;
 const VOXEL_NEAR_ACTIVE_DISTANCE: f32 = 32.0;
 const OCCUPANCY_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 32;
 const MATERIAL_WORDS_PER_CHUNK: usize = CHUNK_VOLUME / 4; // packed 4x u8 per u32
@@ -84,6 +82,7 @@ fn dense_chunk_to_payload_compact(chunk: &DenseChunk) -> ChunkPayload {
         .unwrap_or(ChunkPayload::Dense16 { materials })
 }
 
+#[cfg(test)]
 fn dense_chunk_from_payload(payload: &ChunkPayload) -> Result<DenseChunk, String> {
     let materials = payload
         .dense_materials()
@@ -107,16 +106,6 @@ pub enum ScenePreset {
     Empty,
     Flat,
     DemoCubes,
-}
-
-impl ScenePreset {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Empty => "empty",
-            Self::Flat => "flat",
-            Self::DemoCubes => "demo_cubes",
-        }
-    }
 }
 
 pub struct VoxelFrameData {
@@ -169,12 +158,8 @@ pub struct Scene {
     // Dense decode cache for local edits/collision/surface extraction. The
     // authoritative world state is always `world_tree`.
     world_chunks: HashMap<ChunkPos, DenseChunk>,
-    world_dirty: bool,
     world_pending_chunk_updates: Vec<ChunkPos>,
     world_pending_chunk_update_set: HashSet<ChunkPos>,
-    surface: SurfaceData,
-    culled_instances: Vec<common::ModelInstance>,
-    cull_log_counter: u64,
     voxel_visibility_generation: u64,
     voxel_cached_visibility_bounds: Option<Aabb4i>,
     voxel_pending_scene_dirty_regions: Vec<Aabb4i>,
@@ -263,6 +248,7 @@ impl Scene {
         }
     }
 
+    #[cfg(test)]
     fn chunk_payload_has_solid_material(payload: &ChunkPayload) -> bool {
         match payload {
             ChunkPayload::Empty => false,
@@ -378,7 +364,7 @@ impl Scene {
 
     fn scene_world_from_chunks(
         mut world_chunks: HashMap<ChunkPos, DenseChunk>,
-    ) -> (RegionChunkTree, HashMap<ChunkPos, DenseChunk>, bool) {
+    ) -> (RegionChunkTree, HashMap<ChunkPos, DenseChunk>) {
         world_chunks.retain(|_, chunk| !dense_chunk_is_empty(chunk));
         let world_tree = RegionChunkTree::from_chunks(world_chunks.iter().map(|(&pos, chunk)| {
             (
@@ -386,7 +372,7 @@ impl Scene {
                 dense_chunk_to_payload_compact(chunk),
             )
         }));
-        (world_tree, world_chunks, false)
+        (world_tree, world_chunks)
     }
 
     fn build_flat_floor_chunk(material: VoxelType) -> DenseChunk {
@@ -417,6 +403,7 @@ impl Scene {
         }
     }
 
+    #[cfg(test)]
     fn world_set_chunk(&mut self, pos: ChunkPos, chunk: Option<DenseChunk>) -> bool {
         let key = chunk_key_from_chunk_pos(pos);
         let previous_payload = self.world_tree.chunk_payload(key);
@@ -465,13 +452,13 @@ impl Scene {
         }
         if changed {
             self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
-            self.world_dirty = true;
             self.mark_voxel_scene_region_dirty(Aabb4i::new(key, key));
             let _ = self.world_queue_chunk_update(pos);
         }
         changed
     }
 
+    #[cfg(test)]
     fn world_chunk_at(&mut self, pos: ChunkPos) -> Option<DenseChunk> {
         let chunk_key = chunk_key_from_chunk_pos(pos);
         if let Some(payload) = self.world_tree.chunk_payload(chunk_key) {
@@ -518,6 +505,7 @@ impl Scene {
         VoxelType::AIR
     }
 
+    #[cfg(test)]
     fn world_set_voxel(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, v: VoxelType) {
         let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
         let old = self.world_get_voxel(wx, wy, wz, ww);
@@ -534,14 +522,6 @@ impl Scene {
     fn world_drain_pending_chunk_updates(&mut self) -> Vec<ChunkPos> {
         self.world_pending_chunk_update_set.clear();
         std::mem::take(&mut self.world_pending_chunk_updates)
-    }
-
-    fn world_any_dirty(&self) -> bool {
-        self.world_dirty
-    }
-
-    fn world_clear_dirty(&mut self) {
-        self.world_dirty = false;
     }
 
     pub fn get_voxel(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> VoxelType {
@@ -673,42 +653,16 @@ impl Scene {
         out
     }
 
-    fn surface_voxel_count(surface: &SurfaceData) -> u32 {
-        surface
-            .chunks
-            .iter()
-            .map(|c| c.voxel_end - c.voxel_start)
-            .sum()
-    }
-
-    fn rebuild_surface(&mut self, label: &str) {
-        self.surface = cull::extract_surfaces(&self.world_tree);
-        self.world_clear_dirty();
-        let total_voxels = Self::surface_voxel_count(&self.surface);
-        eprintln!(
-            "{}: {} chunks, {} surface voxels",
-            label,
-            self.surface.chunks.len(),
-            total_voxels
-        );
-    }
-
     pub fn new(preset: ScenePreset) -> Self {
         let world_chunks_init = Self::build_scene_preset_world(preset);
-        let (world_tree, world_chunks, world_dirty) =
-            Self::scene_world_from_chunks(world_chunks_init);
+        let (world_tree, world_chunks) = Self::scene_world_from_chunks(world_chunks_init);
 
-        let surface = cull::extract_surfaces(&world_tree);
-        let scene = Self {
+        Self {
             world_tree,
             world_tree_revision: 1,
             world_chunks,
-            world_dirty,
             world_pending_chunk_updates: Vec::new(),
             world_pending_chunk_update_set: HashSet::new(),
-            surface,
-            culled_instances: Vec::new(),
-            cull_log_counter: 0,
             voxel_visibility_generation: 0,
             voxel_cached_visibility_bounds: None,
             voxel_pending_scene_dirty_regions: Vec::new(),
@@ -736,41 +690,7 @@ impl Scene {
                 leaf_headers: Vec::new(),
                 leaf_chunk_entries: Vec::new(),
             },
-        };
-        let total_voxels = Self::surface_voxel_count(&scene.surface);
-        eprintln!(
-            "Voxel surface ({}): {} chunks, {} surface voxels",
-            preset.label(),
-            scene.surface.chunks.len(),
-            total_voxels
-        );
-        scene
-    }
-
-    /// Rebuild surface data if any chunk is dirty.
-    pub fn update_surfaces_if_dirty(&mut self) {
-        if self.world_any_dirty() {
-            self.rebuild_surface("Voxel surface rebuilt");
         }
-    }
-
-    /// Per-frame: cull and build ModelInstances for the current camera position.
-    pub fn build_instances(&mut self, cam_pos: [f32; 4]) -> &[common::ModelInstance] {
-        self.culled_instances.clear();
-        cull::cull_and_build(
-            &self.surface,
-            cam_pos,
-            RENDER_DISTANCE,
-            &mut self.culled_instances,
-        );
-
-        let (num_instances, num_tets) = cull::mesh_stats(&self.culled_instances);
-        if self.cull_log_counter == 0 || self.cull_log_counter % 120 == 0 {
-            eprintln!("Culled: {num_instances} instances, {num_tets} tetrahedra");
-        }
-        self.cull_log_counter = self.cull_log_counter.wrapping_add(1);
-
-        &self.culled_instances
     }
 }
 
@@ -859,7 +779,6 @@ mod tests {
         for ([x, y, z, w], material) in voxels.iter().copied() {
             scene.world_set_voxel(x, y, z, w, material);
         }
-        scene.update_surfaces_if_dirty();
         scene
     }
 
@@ -950,13 +869,13 @@ mod tests {
     }
 
     #[test]
-    fn edit_back_to_air_rebuilds_surface_for_clean_world() {
+    fn edit_back_to_air_removes_voxel_from_world_tree() {
         let mut scene = make_scene_with_voxels(&[([0, 0, 0, 0], VoxelType(3))]);
-        assert!(!scene.surface.chunks.is_empty());
+        assert_eq!(scene.get_voxel(0, 0, 0, 0), VoxelType(3));
 
         scene.world_set_voxel(0, 0, 0, 0, VoxelType::AIR);
-        scene.update_surfaces_if_dirty();
-        assert!(scene.surface.chunks.is_empty());
+        assert!(scene.get_voxel(0, 0, 0, 0).is_air());
+        assert!(!scene.world_tree.has_chunk([0, 0, 0, 0]));
     }
 
     #[test]

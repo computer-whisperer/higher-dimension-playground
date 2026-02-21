@@ -118,8 +118,6 @@ impl Scene {
             self.voxel_pending_render_bvh_rebuild = true;
         }
 
-        self.world_dirty = true;
-
         RegionPatchStats {
             previous_non_empty,
             desired_non_empty,
@@ -218,8 +216,6 @@ impl Scene {
         if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE {
             self.voxel_pending_render_bvh_rebuild = true;
         }
-        self.world_dirty = true;
-
         RegionPatchStats {
             changed_chunks: 1,
             invalidated_cached_chunks,

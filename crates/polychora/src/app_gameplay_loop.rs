@@ -540,11 +540,11 @@ impl App {
                 }
                 if remove_requested || place_requested {
                     if remove_requested {
-                        if let Some([x, y, z, w]) = self.scene.remove_block_along_ray(
-                            self.camera.position,
-                            look_dir_for_edit,
-                            edit_reach,
-                        ) {
+                        let removed = self
+                            .scene
+                            .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
+                            .hit_voxel;
+                        if let Some([x, y, z, w]) = removed {
                             eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
                             self.audio.play(SoundEffect::Break);
                             self.send_multiplayer_voxel_update(
@@ -554,12 +554,11 @@ impl App {
                             );
                         }
                     } else if place_requested {
-                        if let Some([x, y, z, w]) = self.scene.place_block_along_ray(
-                            self.camera.position,
-                            look_dir_for_edit,
-                            edit_reach,
-                            voxel::VoxelType(self.place_material),
-                        ) {
+                        let placed = self
+                            .scene
+                            .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
+                            .place_voxel;
+                        if let Some([x, y, z, w]) = placed {
                             eprintln!(
                                 "Placed voxel material {} at ({x}, {y}, {z}, {w})",
                                 self.place_material
@@ -944,12 +943,8 @@ impl App {
             } else {
                 self.remote_entity_instances()
             };
-            self.scene.update_surfaces_if_dirty();
-            let instances = self.scene.build_instances(self.camera.position);
-            let mut render_instances = Vec::with_capacity(
-                instances.len() + remote_instances.len() + entity_instances.len() + 1,
-            );
-            render_instances.extend_from_slice(instances);
+            let mut render_instances =
+                Vec::with_capacity(remote_instances.len() + entity_instances.len() + 1);
             render_instances.extend(remote_instances);
             render_instances.extend(entity_instances);
             render_instances.push(preview_instance);

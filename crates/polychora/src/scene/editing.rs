@@ -95,6 +95,7 @@ impl Scene {
     }
 
     /// Remove the first solid voxel intersected by a camera ray.
+    #[cfg(test)]
     pub fn remove_block_along_ray(
         &mut self,
         ray_origin: [f32; 4],
@@ -180,6 +181,7 @@ impl Scene {
     }
 
     /// Place a voxel in the last empty cell before the first solid hit.
+    #[cfg(test)]
     pub fn place_block_along_ray(
         &mut self,
         ray_origin: [f32; 4],

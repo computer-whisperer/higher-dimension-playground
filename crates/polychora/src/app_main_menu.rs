@@ -450,8 +450,7 @@ impl App {
                 voxel_frame.as_input(),
             );
         } else {
-            self.scene.update_surfaces_if_dirty();
-            let instances = self.scene.build_instances(self.menu_camera.position);
+            let instances: &[common::ModelInstance] = &[];
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),
                 self.queue.clone(),
