@@ -4,6 +4,7 @@ use crate::shared::chunk_payload::{
     ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload,
 };
 use crate::shared::protocol::{EntityClass, EntityKind};
+use crate::shared::region_tree::{slice_region_core_in_bounds, RegionNodeKind, RegionTreeCore};
 use crate::shared::spatial::Aabb4i;
 #[cfg(test)]
 use crate::shared::voxel::CHUNK_VOLUME;
@@ -525,6 +526,141 @@ pub fn load_world_chunk_payloads_for_bounds_from_index(
         return Ok(Vec::new());
     }
     materialize_world_chunk_payloads_from_index_filtered(root, index, None, true, Some(bounds))
+}
+
+pub fn load_world_subtree_core_for_bounds_from_index(
+    root: &Path,
+    index: &IndexPayload,
+    bounds: Aabb4i,
+) -> io::Result<RegionTreeCore> {
+    if !bounds.is_valid() {
+        return Ok(RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::Empty,
+            generator_version_hash: 0,
+        });
+    }
+
+    let node_by_id = build_node_lookup(index);
+    let mut payload_cache = HashMap::<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>::new();
+    let mut chunk_array_cache = HashMap::<(u32, u64, u32, u32, u8, u16), ChunkArrayData>::new();
+    let root_core = load_world_subtree_core_from_index_node_filtered(
+        root,
+        &node_by_id,
+        index.root_node_id,
+        bounds,
+        &mut payload_cache,
+        &mut chunk_array_cache,
+    )?
+    .unwrap_or(RegionTreeCore {
+        bounds,
+        kind: RegionNodeKind::Empty,
+        generator_version_hash: 0,
+    });
+    Ok(slice_region_core_in_bounds(&root_core, bounds))
+}
+
+fn load_world_subtree_core_from_index_node_filtered(
+    root: &Path,
+    node_by_id: &HashMap<u32, &IndexNode>,
+    node_id: u32,
+    bounds_filter: Aabb4i,
+    payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
+    chunk_array_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), ChunkArrayData>,
+) -> io::Result<Option<RegionTreeCore>> {
+    let Some(node) = node_by_id.get(&node_id).copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("index references missing world node id {node_id}"),
+        ));
+    };
+
+    let node_bounds = Aabb4i::new(node.bounds_min_chunk, node.bounds_max_chunk);
+    if !node_bounds.is_valid() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("index world node {node_id} has invalid bounds"),
+        ));
+    }
+    if !node_bounds.intersects(&bounds_filter) {
+        return Ok(None);
+    }
+
+    let kind = match &node.kind {
+        IndexNodeKind::Branch { child_node_ids } => {
+            let mut children = Vec::new();
+            for child_id in child_node_ids {
+                if let Some(child_core) = load_world_subtree_core_from_index_node_filtered(
+                    root,
+                    node_by_id,
+                    *child_id,
+                    bounds_filter,
+                    payload_cache,
+                    chunk_array_cache,
+                )? {
+                    children.push(child_core);
+                }
+            }
+            if children.is_empty() {
+                RegionNodeKind::Empty
+            } else {
+                RegionNodeKind::Branch(children)
+            }
+        }
+        IndexNodeKind::LeafEmpty => RegionNodeKind::Empty,
+        IndexNodeKind::LeafUniform { material } => RegionNodeKind::Uniform(*material),
+        IndexNodeKind::LeafChunkArray { chunk_array_ref } => {
+            if chunk_array_ref.blob_type != BLOB_KIND_CHUNK_ARRAY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "world subtree leaf references non-chunk-array blob type {}",
+                        chunk_array_ref.blob_type
+                    ),
+                ));
+            }
+            let key = blob_ref_identity(chunk_array_ref);
+            let chunk_array = if let Some(cached) = chunk_array_cache.get(&key) {
+                cached.clone()
+            } else {
+                let payload = read_blob_payload(root, chunk_array_ref)?;
+                let blob: ChunkArrayBlob = postcard::from_bytes(&payload)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                let chunk_array_bounds = Aabb4i::new(blob.volume_min_chunk, blob.volume_max_chunk);
+                if !chunk_array_bounds.is_valid() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid chunk array bounds",
+                    ));
+                }
+                let mut chunk_palette =
+                    Vec::<FieldChunkPayload>::with_capacity(blob.payload_palette.len());
+                for payload_ref in &blob.payload_palette {
+                    chunk_palette.push(load_chunk_payload_from_ref(
+                        root,
+                        payload_ref,
+                        payload_cache,
+                    )?);
+                }
+                let decoded = ChunkArrayData {
+                    bounds: chunk_array_bounds,
+                    chunk_palette,
+                    index_codec: blob.index_codec,
+                    index_data: blob.index_data.clone(),
+                    default_chunk_idx: blob.default_palette_index,
+                };
+                chunk_array_cache.insert(key, decoded.clone());
+                decoded
+            };
+            RegionNodeKind::ChunkArray(chunk_array)
+        }
+    };
+
+    Ok(Some(RegionTreeCore {
+        bounds: node_bounds,
+        kind,
+        generator_version_hash: 0,
+    }))
 }
 
 pub fn load_entities_for_regions(
@@ -3301,6 +3437,28 @@ mod tests {
         assert_eq!(loaded_both[0].0, chunk_a);
         assert_eq!(loaded_both[1].0, chunk_b);
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_world_subtree_core_for_bounds_keeps_uniform_leaf() {
+        let root = test_root("bounds-core-uniform");
+        let index = IndexPayload {
+            generation: 1,
+            root_node_id: 7,
+            entity_root_node_id: None,
+            nodes: vec![IndexNode {
+                node_id: 7,
+                bounds_min_chunk: [-128, -8, -128, -128],
+                bounds_max_chunk: [127, 8, 127, 127],
+                kind: IndexNodeKind::LeafUniform { material: 11 },
+            }],
+        };
+        let bounds = Aabb4i::new([-4, -2, -4, -4], [4, 2, 4, 4]);
+        let core = load_world_subtree_core_for_bounds_from_index(&root, &index, bounds)
+            .expect("load subtree core");
+        assert_eq!(core.bounds, bounds);
+        assert!(matches!(core.kind, RegionNodeKind::Uniform(11)));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -157,6 +157,12 @@ where
 
         // Compose authoritative runtime world as:
         // virgin field query + explicit override chunks.
+        //
+        // NOTE: `base_core.bounds` is intentionally allowed to exceed
+        // `query.bounds`. This preserves canonical large leaves (for example,
+        // wide Uniform spans) across repeated overlapping queries so client
+        // cache merges naturally de-fragment instead of accumulating clipped
+        // fragments.
         let base_core = self.field.query_region_core(query, detail);
         let compose_bounds = union_bounds(bounds, base_core.bounds);
         let mut composed = RegionChunkTree::new();
@@ -357,20 +363,20 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             return Ok(0);
         }
 
-        let mut loaded_payloads = 0usize;
+        let mut loaded_regions = 0usize;
         for missing_bounds in missing {
-            let payloads = save_v4::load_world_chunk_payloads_for_bounds_from_index(
+            let core = save_v4::load_world_subtree_core_for_bounds_from_index(
                 &save_stream.root,
                 &save_stream.index,
                 missing_bounds,
             )?;
-            loaded_payloads = loaded_payloads.saturating_add(payloads.len());
-            for (chunk_key, payload) in payloads {
-                let _ = self.override_chunks.set_chunk(chunk_key, Some(payload));
-            }
+            let _ = self
+                .override_chunks
+                .splice_core_in_bounds(missing_bounds, &core);
+            loaded_regions = loaded_regions.saturating_add(1);
             save_stream.loaded_bounds.push(missing_bounds);
         }
-        Ok(loaded_payloads)
+        Ok(loaded_regions)
     }
 
     fn query_virgin_chunk_payload(&self, chunk_pos: ChunkPos) -> Option<ChunkPayload> {

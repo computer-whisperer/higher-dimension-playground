@@ -74,6 +74,9 @@ pub enum ClientMessage {
     ConsoleCommand {
         command: String,
     },
+    // Requested authoritative coverage in chunk space. This is a coverage contract,
+    // not a strict payload clipping request: server subtree patches may extend
+    // outside this AABB when doing so preserves larger canonical leaves.
     WorldInterestUpdate {
         bounds: Aabb4i,
     },
@@ -97,6 +100,9 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
+    // Subtree patch to apply into client world cache. `subtree.bounds` may be
+    // larger than the client's requested interest AABB in order to avoid
+    // fragmenting canonical leaves (for example, large Uniform spans).
     WorldSubtreePatch {
         subtree: RegionTreeCore,
     },

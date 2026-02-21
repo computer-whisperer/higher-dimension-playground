@@ -409,6 +409,9 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
         Some(prev) => subtract_bounds(prev, bounds),
         None => Vec::new(),
     };
+    // Interest diff is computed from requested AABBs only. WorldSubtreePatch
+    // payloads may extend beyond these AABBs to preserve canonical tree leaves;
+    // requested bounds still define the authoritative "must be present" volume.
     let removed_count = removed_bounds.len();
     let added_count = added_bounds.len();
 
