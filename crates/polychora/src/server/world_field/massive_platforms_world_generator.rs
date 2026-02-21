@@ -229,10 +229,10 @@ impl MassivePlatformsWorldGenerator {
             return;
         };
         self.for_each_platform_instance_in_level_range(bounds, min_level, max_level, |platform| {
-            let Some(intersection) = intersect_bounds(bounds, platform.bounds) else {
+            let Some(_intersection) = intersect_bounds(bounds, platform.bounds) else {
                 return;
             };
-            visitor(intersection);
+            visitor(platform.bounds);
         });
     }
 
@@ -397,7 +397,11 @@ impl MassivePlatformsWorldGenerator {
         let mut tree = RegionChunkTree::new();
         self.insert_platform_uniform_nodes(bounds, &mut tree);
         self.insert_procgen_chunks_for_bounds(bounds, &mut tree);
-        Arc::new(tree.slice_non_empty_core_in_bounds(bounds))
+        Arc::new(tree.root().cloned().unwrap_or(RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::Empty,
+            generator_version_hash: 0,
+        }))
     }
 }
 

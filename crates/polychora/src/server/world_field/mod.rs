@@ -158,11 +158,16 @@ where
         // Compose authoritative runtime world as:
         // virgin field query + explicit override chunks.
         let base_core = self.field.query_region_core(query, detail);
+        let compose_bounds = union_bounds(bounds, base_core.bounds);
         let mut composed = RegionChunkTree::new();
-        let _ = composed.splice_non_empty_core_in_bounds(bounds, base_core.as_ref());
-        let override_core = self.override_chunks.slice_core_in_bounds(bounds);
-        let _ = composed.overlay_core_in_bounds(bounds, &override_core);
-        Arc::new(composed.slice_core_in_bounds(bounds))
+        let _ = composed.splice_non_empty_core_in_bounds(base_core.bounds, base_core.as_ref());
+        let override_core = self.override_chunks.slice_core_in_bounds(compose_bounds);
+        let _ = composed.overlay_core_in_bounds(compose_bounds, &override_core);
+        Arc::new(composed.root().cloned().unwrap_or(RegionTreeCore {
+            bounds: compose_bounds,
+            kind: RegionNodeKind::Empty,
+            generator_version_hash: 0,
+        }))
     }
 }
 
@@ -191,6 +196,23 @@ fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
     } else {
         None
     }
+}
+
+fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
+    Aabb4i::new(
+        [
+            a.min[0].min(b.min[0]),
+            a.min[1].min(b.min[1]),
+            a.min[2].min(b.min[2]),
+            a.min[3].min(b.min[3]),
+        ],
+        [
+            a.max[0].max(b.max[0]),
+            a.max[1].max(b.max[1]),
+            a.max[2].max(b.max[2]),
+            a.max[3].max(b.max[3]),
+        ],
+    )
 }
 
 fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
@@ -420,12 +442,41 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 virgin_payload.is_none() && dense_chunk_is_empty(&working_chunk)
             };
 
-        let changed = if should_remove_override {
-            self.override_chunks.remove_chunk(chunk_key)
+        let desired_payload = if should_remove_override {
+            None
         } else {
-            let payload = payload_from_chunk_compact(&working_chunk);
-            self.override_chunks.set_chunk(chunk_key, Some(payload))
+            Some(payload_from_chunk_compact(&working_chunk))
         };
+        let previous_payload = self.override_chunks.chunk_payload(chunk_key);
+        let changed_by_api = self
+            .override_chunks
+            .set_chunk(chunk_key, desired_payload.clone());
+        let current_payload = self.override_chunks.chunk_payload(chunk_key);
+        let mut changed = changed_by_api || previous_payload != current_payload;
+        if !changed {
+            if current_payload != desired_payload {
+                let mut repair_tree = RegionChunkTree::new();
+                if let Some(payload) = desired_payload.clone() {
+                    let _ = repair_tree.set_chunk(chunk_key, Some(payload));
+                }
+                let repair_core = repair_tree.root().cloned().unwrap_or(RegionTreeCore {
+                    bounds: chunk_bounds,
+                    kind: RegionNodeKind::Empty,
+                    generator_version_hash: 0,
+                });
+                if self
+                    .override_chunks
+                    .splice_non_empty_core_in_bounds(chunk_bounds, &repair_core)
+                    .is_some()
+                {
+                    changed = true;
+                    eprintln!(
+                        "[server-world-repair] forced override chunk repair at {:?} (expected={:?} current={:?})",
+                        chunk_key, desired_payload, current_payload
+                    );
+                }
+            }
+        }
 
         if !changed {
             return None;
@@ -800,6 +851,66 @@ mod tests {
         assert!(virgin_chunk[voxel_idx].is_solid());
 
         overlay.clear_dirty();
+    }
+
+    #[test]
+    fn overlay_query_preserves_generator_leaf_expansion_beyond_request_bounds() {
+        let overlay = ServerWorldOverlay::from_chunk_payloads(
+            BaseWorldKind::MassivePlatforms {
+                material: VoxelType(11),
+            },
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            1337,
+            false,
+            HashSet::new(),
+        );
+        let query_bounds = Aabb4i::new([0, -1, 0, 0], [0, -1, 0, 0]);
+        let core = overlay.query_region_core(
+            QueryVolume {
+                bounds: query_bounds,
+            },
+            QueryDetail::Exact,
+        );
+        assert!(core.bounds.contains_chunk(query_bounds.min));
+        assert!(core.bounds.contains_chunk(query_bounds.max));
+        assert_ne!(core.bounds, query_bounds);
+    }
+
+    #[test]
+    fn overlay_edit_is_visible_when_generator_returns_expanded_platform_leaf() {
+        let mut overlay = ServerWorldOverlay::from_chunk_payloads(
+            BaseWorldKind::MassivePlatforms {
+                material: VoxelType(11),
+            },
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            1337,
+            true,
+            HashSet::new(),
+        );
+        let edit_pos = [0, -1, 0, 0];
+        let (chunk_pos, voxel_idx) =
+            world_to_chunk(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3]);
+        let chunk_key = chunk_key_from_chunk_pos(chunk_pos);
+        let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
+        assert_eq!(
+            overlay.apply_voxel_edit(edit_pos, VoxelType(5)),
+            Some(chunk_pos)
+        );
+
+        let queried = overlay.query_region_core(
+            QueryVolume {
+                bounds: chunk_bounds,
+            },
+            QueryDetail::Exact,
+        );
+        if let Some(payload) = chunk_payload_from_core(queried.as_ref(), chunk_key) {
+            let chunk = chunk_from_payload(&payload).expect("edited dense chunk");
+            assert_eq!(
+                chunk[voxel_idx],
+                VoxelType(5),
+                "expanded-bounds overlay query returned wrong edited voxel value",
+            );
+        }
     }
 
     #[test]

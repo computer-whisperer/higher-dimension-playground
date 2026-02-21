@@ -872,9 +872,24 @@ impl App {
             .iter()
             .skip(1)
             .any(|dense| *dense != render_dense);
+        let frame_payloads = self.scene.debug_voxel_frame_chunk_payloads(chunk);
+        let frame_dense_variants: Vec<Vec<u16>> = frame_payloads
+            .iter()
+            .cloned()
+            .map(|payload| dense_materials_from_payload_or_zero(Some(payload)))
+            .collect();
+        let frame_dense = frame_dense_variants
+            .first()
+            .cloned()
+            .unwrap_or_else(zero_dense_chunk_materials);
+        let frame_conflict = frame_dense_variants
+            .iter()
+            .skip(1)
+            .any(|dense| *dense != frame_dense);
 
         let world_match = world_dense == dense_materials;
         let render_match = render_dense == dense_materials;
+        let frame_match = frame_dense == dense_materials;
 
         let mut overlap_count = 0usize;
         let mut overlap_mismatch_count = 0usize;
@@ -900,9 +915,15 @@ impl App {
             }
         }
 
-        if !world_match || !render_match || render_conflict || newest_overlap_match == Some(false) {
+        if !world_match
+            || !render_match
+            || !frame_match
+            || render_conflict
+            || frame_conflict
+            || newest_overlap_match == Some(false)
+        {
             eprintln!(
-                "[client-chunk-sample-diag] request_id={} chunk={:?} server(hash={},nz={}) world(match={},hash={},nz={}) render(match={},hash={},nz={},payloads={},conflict={}) patch_overlaps={} patch_mismatches={} newest_patch_seq={:?} newest_patch_match={:?}",
+                "[client-chunk-sample-diag] request_id={} chunk={:?} server(hash={},nz={}) world(match={},hash={},nz={}) render(match={},hash={},nz={},payloads={},conflict={}) frame(match={},hash={},nz={},payloads={},conflict={}) patch_overlaps={} patch_mismatches={} newest_patch_seq={:?} newest_patch_match={:?}",
                 request_id,
                 chunk,
                 dense_materials_hash(&dense_materials),
@@ -915,6 +936,11 @@ impl App {
                 dense_materials_non_zero_count(&render_dense),
                 render_payloads.len(),
                 render_conflict,
+                frame_match,
+                dense_materials_hash(&frame_dense),
+                dense_materials_non_zero_count(&frame_dense),
+                frame_payloads.len(),
+                frame_conflict,
                 overlap_count,
                 overlap_mismatch_count,
                 newest_overlap_seq,
@@ -936,11 +962,11 @@ impl App {
         }
     }
 
-fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
-    let center_chunk = world_chunk_from_position(position);
-    let target_radius_chunks =
-        world_request_radius_chunks_for_distance(self.vte_max_trace_distance);
-    let request_radius_chunks = target_radius_chunks;
+    fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], reason: &str) {
+        let center_chunk = world_chunk_from_position(position);
+        let target_radius_chunks =
+            world_request_radius_chunks_for_distance(self.vte_max_trace_distance);
+        let request_radius_chunks = target_radius_chunks;
         let radius_changed = self
             .multiplayer_last_world_request_radius_chunks
             .map(|last| request_radius_chunks != last)
@@ -1250,10 +1276,10 @@ fn maybe_request_multiplayer_world_for_position(&mut self, position: [f32; 4], r
             self.scene.apply_region_patch_fast(patch_bounds, &patch)
         };
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
-    let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
-        || self.multiplayer_stream_tree_compare_diag_enabled)
-        && scene_patch_stats.changed_chunks > 0
-    {
+        let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
+            || self.multiplayer_stream_tree_compare_diag_enabled)
+            && scene_patch_stats.changed_chunks > 0
+        {
             let diag_splice_start = Instant::now();
             let _ = self
                 .multiplayer_stream_tree_diag

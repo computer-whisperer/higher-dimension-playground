@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct RegionChunkTree {
@@ -1232,6 +1233,106 @@ fn ensure_binary_children(node: &mut RegionTreeCore) {
     node.kind = RegionNodeKind::Branch(children);
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum AdjacentMergeKind {
+    Uniform(u16),
+    ProceduralRef(GeneratorRef),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct AdjacentMergeGroupKey {
+    axis: u8,
+    kind: AdjacentMergeKind,
+    generator_version_hash: u64,
+    other_mins: [i32; 3],
+    other_maxs: [i32; 3],
+}
+
+fn adjacent_merge_kind(kind: &RegionNodeKind) -> Option<AdjacentMergeKind> {
+    match kind {
+        RegionNodeKind::Uniform(material) => Some(AdjacentMergeKind::Uniform(*material)),
+        RegionNodeKind::ProceduralRef(generator_ref) => {
+            Some(AdjacentMergeKind::ProceduralRef(generator_ref.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn build_adjacent_merge_group_key(
+    node: &RegionTreeCore,
+    axis: usize,
+) -> Option<AdjacentMergeGroupKey> {
+    let kind = adjacent_merge_kind(&node.kind)?;
+    let mut other_mins = [0i32; 3];
+    let mut other_maxs = [0i32; 3];
+    let mut write_idx = 0usize;
+    for dim in 0..4 {
+        if dim == axis {
+            continue;
+        }
+        other_mins[write_idx] = node.bounds.min[dim];
+        other_maxs[write_idx] = node.bounds.max[dim];
+        write_idx += 1;
+    }
+    Some(AdjacentMergeGroupKey {
+        axis: axis as u8,
+        kind,
+        generator_version_hash: node.generator_version_hash,
+        other_mins,
+        other_maxs,
+    })
+}
+
+fn merge_adjacent_children_once(children: &mut Vec<RegionTreeCore>) -> bool {
+    if children.len() < 2 {
+        return false;
+    }
+
+    for axis in 0..4 {
+        let mut grouped = HashMap::<AdjacentMergeGroupKey, Vec<RegionTreeCore>>::new();
+        let mut passthrough = Vec::<RegionTreeCore>::new();
+        for child in std::mem::take(children) {
+            let Some(key) = build_adjacent_merge_group_key(&child, axis) else {
+                passthrough.push(child);
+                continue;
+            };
+            grouped.entry(key).or_default().push(child);
+        }
+
+        let mut merged_any = false;
+        let mut rebuilt = passthrough;
+        for (_key, mut group) in grouped {
+            if group.len() < 2 {
+                rebuilt.extend(group.into_iter());
+                continue;
+            }
+
+            group.sort_unstable_by_key(|node| node.bounds.min[axis]);
+            let mut iter = group.into_iter();
+            let mut current = iter
+                .next()
+                .expect("group with len >= 2 must produce first child");
+            for node in iter {
+                if node.bounds.min[axis] == current.bounds.max[axis].saturating_add(1) {
+                    current.bounds.max[axis] = node.bounds.max[axis];
+                    merged_any = true;
+                } else {
+                    rebuilt.push(current);
+                    current = node;
+                }
+            }
+            rebuilt.push(current);
+        }
+
+        *children = rebuilt;
+        if merged_any {
+            sort_children_canonical(children);
+            return true;
+        }
+    }
+    false
+}
+
 fn normalize_chunk_node(node: &mut RegionTreeCore) {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
         return;
@@ -1244,6 +1345,20 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
         node.kind = RegionNodeKind::Empty;
         return;
     }
+    if children.len() == 1 && children[0].bounds == node.bounds {
+        let child = children.pop().expect("single child");
+        node.kind = child.kind;
+        return;
+    }
+
+    let mut merge_passes = 0usize;
+    while merge_adjacent_children_once(children) {
+        merge_passes += 1;
+        if merge_passes >= 64 {
+            break;
+        }
+    }
+
     if children.len() == 1 && children[0].bounds == node.bounds {
         let child = children.pop().expect("single child");
         node.kind = child.kind;

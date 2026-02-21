@@ -26,10 +26,9 @@ pub use self::vte::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelChunkBvhNodeRangeWrite,
     VoxelChunkHeaderRangeWrite, VoxelFrameDirtyRanges, VoxelFrameInput, VoxelLeafHeaderRangeWrite,
     VoxelMutationBatch, VoxelU32RangeWrite, VteDebugCounters, VTE_LEAF_CHUNK_ENTRY_EMPTY,
-    VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG,
-    VTE_LEAF_KIND_UNIFORM, VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY, VTE_MAX_DENSE_CHUNKS,
-    VTE_REGION_BVH_INVALID_NODE, VTE_REGION_BVH_NODE_CAPACITY, VTE_REGION_BVH_NODE_FLAG_LEAF,
-    VTE_REGION_LEAF_CAPACITY, VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
+    VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG, VTE_LEAF_KIND_UNIFORM, VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
+    VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_INVALID_NODE, VTE_REGION_BVH_NODE_CAPACITY,
+    VTE_REGION_BVH_NODE_FLAG_LEAF, VTE_REGION_LEAF_CAPACITY, VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
 };
 use ab_glyph::FontArc;
 use bytemuck::Zeroable;
@@ -2473,7 +2472,10 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     input.material_words.len(),
                     vte::VTE_MATERIAL_WORDS_PER_CHUNK,
                 ))
-                .max(ceil_div(input.macro_words.len(), vte::VTE_MACRO_WORDS_PER_CHUNK));
+                .max(ceil_div(
+                    input.macro_words.len(),
+                    vte::VTE_MACRO_WORDS_PER_CHUNK,
+                ));
             let required_caps = VoxelBufferCapacities {
                 dense_chunks: dense_required,
                 leaf_headers: input.leaf_headers.len(),
@@ -2501,10 +2503,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 .material_words
                 .len()
                 .min(vte_buffer_caps.material_words());
-            vte_macro_word_count = input
-                .macro_words
-                .len()
-                .min(vte_buffer_caps.macro_words());
+            vte_macro_word_count = input.macro_words.len().min(vte_buffer_caps.macro_words());
             vte_visible_lod_counts[0] = vte_leaf_count as u32;
 
             if input.chunk_headers.len() > vte_chunk_count
@@ -2602,7 +2601,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         else {
                             continue;
                         };
-                        let mut writer = frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
+                        let mut writer =
+                            frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
                     }
 
@@ -2672,7 +2672,9 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         dirty.and_then(|ranges| ranges.occupancy_words.clone()),
                         vte_occupancy_word_count,
                     )
-                    .or_else(|| (vte_occupancy_word_count > 0).then_some(0..vte_occupancy_word_count));
+                    .or_else(|| {
+                        (vte_occupancy_word_count > 0).then_some(0..vte_occupancy_word_count)
+                    });
                     if let Some(range) = occupancy_words_dirty {
                         let mut writer = frame
                             .live_buffers
@@ -2686,7 +2688,9 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         dirty.and_then(|ranges| ranges.material_words.clone()),
                         vte_material_word_count,
                     )
-                    .or_else(|| (vte_material_word_count > 0).then_some(0..vte_material_word_count));
+                    .or_else(|| {
+                        (vte_material_word_count > 0).then_some(0..vte_material_word_count)
+                    });
                     if let Some(range) = material_words_dirty {
                         let mut writer = frame
                             .live_buffers
@@ -2748,7 +2752,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     )
                     .or_else(|| (vte_macro_word_count > 0).then_some(0..vte_macro_word_count));
                     if let Some(range) = macro_words_dirty {
-                        let mut writer = frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
+                        let mut writer =
+                            frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
                         writer[range.clone()].copy_from_slice(&macro_words[range]);
                     }
                 }

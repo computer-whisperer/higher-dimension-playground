@@ -146,6 +146,49 @@ fn assert_tree_matches_expected_uniform_map(
     assert_eq!(&sliced_map, expected, "slice_non_empty snapshot mismatch");
 }
 
+fn assert_tree_non_overlapping(node: &RegionTreeCore) {
+    fn contains_bounds(outer: Aabb4i, inner: Aabb4i) -> bool {
+        outer.is_valid()
+            && inner.is_valid()
+            && outer.min[0] <= inner.min[0]
+            && outer.min[1] <= inner.min[1]
+            && outer.min[2] <= inner.min[2]
+            && outer.min[3] <= inner.min[3]
+            && outer.max[0] >= inner.max[0]
+            && outer.max[1] >= inner.max[1]
+            && outer.max[2] >= inner.max[2]
+            && outer.max[3] >= inner.max[3]
+    }
+
+    if let RegionNodeKind::Branch(children) = &node.kind {
+        for child in children {
+            assert!(
+                contains_bounds(node.bounds, child.bounds),
+                "child {:?}->{:?} escapes parent {:?}->{:?}",
+                child.bounds.min,
+                child.bounds.max,
+                node.bounds.min,
+                node.bounds.max
+            );
+            assert_tree_non_overlapping(child);
+        }
+        for i in 0..children.len() {
+            for j in (i + 1)..children.len() {
+                assert!(
+                    !children[i].bounds.intersects(&children[j].bounds),
+                    "overlapping siblings: {} {:?}->{:?} and {} {:?}->{:?}",
+                    i,
+                    children[i].bounds.min,
+                    children[i].bounds.max,
+                    j,
+                    children[j].bounds.min,
+                    children[j].bounds.max
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn set_get_remove_single_chunk_roundtrip() {
     let mut tree = RegionChunkTree::new();
@@ -224,6 +267,87 @@ fn non_covering_uniform_children_do_not_fill_parent_gaps() {
         .collect();
     keys.sort_unstable();
     assert_eq!(keys, vec![key(0, 0, 0, 0), key(2, 0, 0, 0)]);
+}
+
+#[test]
+fn adjacent_uniform_children_merge_even_when_branch_partition_is_non_canonical() {
+    let mut tree = RegionChunkTree::new();
+    let full_bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+    let full_uniform = RegionTreeCore {
+        bounds: full_bounds,
+        kind: RegionNodeKind::Uniform(11),
+        generator_version_hash: 0,
+    };
+    assert_eq!(
+        tree.splice_non_empty_core_in_bounds(full_bounds, &full_uniform),
+        Some(full_bounds)
+    );
+
+    let center_bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
+    let center_empty = RegionTreeCore {
+        bounds: center_bounds,
+        kind: RegionNodeKind::Empty,
+        generator_version_hash: 0,
+    };
+    assert_eq!(
+        tree.splice_non_empty_core_in_bounds(center_bounds, &center_empty),
+        Some(center_bounds)
+    );
+
+    let center_uniform = RegionTreeCore {
+        bounds: center_bounds,
+        kind: RegionNodeKind::Uniform(11),
+        generator_version_hash: 0,
+    };
+    assert_eq!(
+        tree.splice_non_empty_core_in_bounds(center_bounds, &center_uniform),
+        Some(center_bounds)
+    );
+
+    let root = tree.root().expect("root exists");
+    assert_eq!(root.bounds, full_bounds);
+    assert!(matches!(root.kind, RegionNodeKind::Uniform(11)));
+}
+
+#[test]
+fn randomized_mutations_preserve_non_overlapping_branches() {
+    let mut rng = TestRng::new(0x8A5F_3D71_C2B4_9E10);
+    let mut tree = RegionChunkTree::new();
+    let global = Aabb4i::new([-6, -3, -6, -3], [6, 3, 6, 3]);
+
+    for _step in 0..5000 {
+        let op = rng.next_u32() % 10;
+        if op < 7 {
+            let chunk = [
+                rng.next_inclusive_i32(global.min[0], global.max[0]),
+                rng.next_inclusive_i32(global.min[1], global.max[1]),
+                rng.next_inclusive_i32(global.min[2], global.max[2]),
+                rng.next_inclusive_i32(global.min[3], global.max[3]),
+            ];
+            let payload = match rng.next_u32() % 4 {
+                0 => None,
+                1 => Some(ChunkPayload::Uniform(0)),
+                _ => Some(ChunkPayload::Uniform(((rng.next_u32() % 15) + 1) as u16)),
+            };
+            let _ = tree.set_chunk(chunk, payload);
+        } else {
+            let bounds = random_sub_bounds(&mut rng, global);
+            let core = RegionTreeCore {
+                bounds,
+                kind: if (rng.next_u32() & 1) == 0 {
+                    RegionNodeKind::Empty
+                } else {
+                    RegionNodeKind::Uniform(((rng.next_u32() % 15) + 1) as u16)
+                },
+                generator_version_hash: 0,
+            };
+            let _ = tree.splice_non_empty_core_in_bounds(bounds, &core);
+        }
+
+        if let Some(root) = tree.root() {
+            assert_tree_non_overlapping(root);
+        }
+    }
 }
 
 #[test]

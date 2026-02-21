@@ -1986,29 +1986,18 @@ fn build_temp_tree_from_leaves(leaves: &[LeafDescriptor]) -> Option<TempNode> {
         }
     }
 
-    let mut split_axis = 0usize;
-    let mut split_span = i64::MIN;
-    for axis in 0..4 {
-        let span = i64::from(max[axis]) - i64::from(min[axis]);
-        if span > split_span {
-            split_span = span;
-            split_axis = axis;
-        }
+    // Save-v4 index validation requires direct branch siblings to have non-overlapping
+    // hypervolumes. A BVH split can create overlapping sibling bounds even when leaf
+    // volumes themselves are disjoint, so emit direct leaf children here.
+    let mut children = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        children.push(TempNode {
+            min: leaf.min,
+            max: leaf.max,
+            kind: TempNodeKind::Leaf(leaf.kind.clone()),
+        });
     }
-
-    let mut sorted = leaves.to_vec();
-    sorted.sort_unstable_by_key(|leaf| {
-        (
-            i64::from(leaf.min[split_axis]) + i64::from(leaf.max[split_axis]),
-            bounds_key(leaf.min, leaf.max),
-        )
-    });
-
-    let mid = (sorted.len() / 2).max(1).min(sorted.len() - 1);
-    let left = build_temp_tree_from_leaves(&sorted[..mid]).expect("left subtree");
-    let right = build_temp_tree_from_leaves(&sorted[mid..]).expect("right subtree");
-    let mut children = vec![left, right];
-    children.sort_unstable_by_key(|child| bounds_key(child.min, child.max));
+    children.sort_unstable_by_key(temp_node_order_key);
 
     Some(TempNode {
         min,
@@ -3483,6 +3472,74 @@ mod tests {
     }
 
     #[test]
+    fn save_state_from_chunk_payload_patch_persists_without_overlapping_children() {
+        let root = test_root("chunk-payload-patch-no-overlap");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+
+        let mut dense_materials = vec![1u16; CHUNK_VOLUME];
+        dense_materials[0] = 2;
+        let dense_payload = FieldChunkPayload::Dense16 {
+            materials: dense_materials,
+        };
+
+        let mut initial_payloads = Vec::new();
+        for x in 0..=3 {
+            initial_payloads.push(([x, 0, 0, 0], dense_payload.clone()));
+            initial_payloads.push(([x, 1, 0, 0], dense_payload.clone()));
+        }
+
+        let initial = save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: initial_payloads,
+                entities: &[],
+                players: &[],
+                world_seed: 7,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("initial save");
+        assert_eq!(initial.generation, 1);
+
+        let patched = save_state_from_chunk_payload_patch(
+            &root,
+            SaveChunkPayloadPatchRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                dirty_chunk_payloads: vec![([1, 0, 0, 0], Some(FieldChunkPayload::Uniform(9)))],
+                world_seed: 7,
+                next_entity_id: 1,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                now_ms: now_ms.saturating_add(1),
+            },
+        )
+        .expect("patch save")
+        .expect("patch should write a generation");
+        assert_eq!(patched.generation, 2);
+
+        let loaded = load_state(&root).expect("load patched state");
+        let loaded_world = materialize_loaded_world(&loaded);
+        let chunk_size = CHUNK_SIZE as i32;
+        assert_eq!(
+            loaded_world.get_voxel(1 * chunk_size, 0, 0, 0),
+            VoxelType(9)
+        );
+        assert_eq!(loaded_world.get_voxel(0, chunk_size, 0, 0), VoxelType(2));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn migrate_legacy_world_to_v4_roundtrip() {
         let root = test_root("migrate");
         let legacy_world = root.join("legacy.v4dw");
@@ -3625,6 +3682,48 @@ mod tests {
 
         let err = validate_index_payload(&index).expect_err("overlap should fail");
         assert!(err.to_string().contains("overlapping children"));
+    }
+
+    #[test]
+    fn build_temp_tree_from_leaves_emits_non_overlapping_branch_children() {
+        // These leaves are disjoint, but BVH-style grouping can produce overlapping
+        // sibling union bounds. The temp-tree builder must avoid that pattern.
+        let leaves = vec![
+            LeafDescriptor {
+                min: [0, 0, 0, 0],
+                max: [100, 0, 0, 0],
+                kind: IndexNodeKind::LeafUniform { material: 1 },
+            },
+            LeafDescriptor {
+                min: [0, 2, 0, 0],
+                max: [100, 2, 0, 0],
+                kind: IndexNodeKind::LeafUniform { material: 1 },
+            },
+            LeafDescriptor {
+                min: [50, 1, 0, 0],
+                max: [150, 1, 0, 0],
+                kind: IndexNodeKind::LeafUniform { material: 1 },
+            },
+            LeafDescriptor {
+                min: [50, 3, 0, 0],
+                max: [150, 3, 0, 0],
+                kind: IndexNodeKind::LeafUniform { material: 1 },
+            },
+        ];
+
+        let mut tree = build_temp_tree_from_leaves(&leaves).expect("temp tree");
+        canonicalize_temp_tree(&mut tree);
+
+        let mut nodes = Vec::<IndexNode>::new();
+        let root_node_id = flatten_temp_tree(&tree, &mut nodes);
+        let index = IndexPayload {
+            generation: 1,
+            root_node_id,
+            entity_root_node_id: None,
+            nodes,
+        };
+
+        validate_index_payload(&index).expect("leaf-based temp tree should validate");
     }
 
     #[test]

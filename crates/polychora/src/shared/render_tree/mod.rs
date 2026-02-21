@@ -358,11 +358,14 @@ pub fn apply_chunk_payload_mutations_with_deltas_in_bvh(
         }
         let key_bounds = Aabb4i::new(*key, *key);
         let patch_core = if let Some(payload) = payload.clone() {
-            repeated_voxel_leaf(key_bounds, payload).unwrap_or_else(|| RenderTreeCore::empty(key_bounds))
+            repeated_voxel_leaf(key_bounds, payload)
+                .unwrap_or_else(|| RenderTreeCore::empty(key_bounds))
         } else {
             RenderTreeCore::empty(key_bounds)
         };
-        if let Some(delta) = apply_core_patch_in_bounds_with_delta_in_bvh(bvh, key_bounds, &patch_core)? {
+        if let Some(delta) =
+            apply_core_patch_in_bounds_with_delta_in_bvh(bvh, key_bounds, &patch_core)?
+        {
             deltas.push(delta);
         }
     }
@@ -434,12 +437,7 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
     };
 
     bvh.root = new_root;
-    release_retired_nodes_and_leaves(
-        bvh,
-        retired_node_ids,
-        retired_leaf_ids,
-        &mut delta,
-    );
+    release_retired_nodes_and_leaves(bvh, retired_node_ids, retired_leaf_ids, &mut delta);
     delta.new_root = bvh.root;
 
     if delta.expected_root == delta.new_root
@@ -920,7 +918,9 @@ fn build_bvh_recursive_for_leaf_ids(
             bvh,
             RenderBvhNode {
                 bounds: leaf.bounds,
-                kind: RenderBvhNodeKind::Leaf { leaf_index: leaf_id },
+                kind: RenderBvhNodeKind::Leaf {
+                    leaf_index: leaf_id,
+                },
             },
             delta,
         );
@@ -1521,11 +1521,9 @@ mod tests {
         let old_node_capacity = bvh.nodes.len();
         let old_leaf_capacity = bvh.leaves.len();
 
-        let remove = apply_chunk_payload_mutations_with_deltas_in_bvh(
-            &mut bvh,
-            &[([1, 0, 0, 0], None)],
-        )
-        .expect("remove patch");
+        let remove =
+            apply_chunk_payload_mutations_with_deltas_in_bvh(&mut bvh, &[([1, 0, 0, 0], None)])
+                .expect("remove patch");
         assert_eq!(remove.len(), 1);
         assert!(
             !remove[0].freed_node_ids.is_empty() || !remove[0].freed_leaf_ids.is_empty(),

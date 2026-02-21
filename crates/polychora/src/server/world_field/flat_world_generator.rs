@@ -150,7 +150,11 @@ impl FlatWorldGenerator {
             let _ = tree.splice_non_empty_core_in_bounds(floor_core.bounds, &floor_core);
         }
         self.insert_procgen_chunks_for_bounds(bounds, &mut tree);
-        Arc::new(tree.slice_non_empty_core_in_bounds(bounds))
+        Arc::new(tree.root().cloned().unwrap_or(RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::Empty,
+            generator_version_hash: 0,
+        }))
     }
 }
 

@@ -210,7 +210,13 @@ impl App {
                 .map(|b| {
                     format!(
                         "[{:+},{:+},{:+},{:+}]->[{:+},{:+},{:+},{:+}]",
-                        b.min[0], b.min[1], b.min[2], b.min[3], b.max[0], b.max[1], b.max[2],
+                        b.min[0],
+                        b.min[1],
+                        b.min[2],
+                        b.min[3],
+                        b.max[0],
+                        b.max[1],
+                        b.max[2],
                         b.max[3]
                     )
                 })
@@ -236,7 +242,7 @@ impl App {
                  stream-first-node:{}\n\
                  stream-final-solid:{}\n\
                  cache-tree:{}\n\
-                 cache-interest:{}\n\
+                 known-interest:{}\n\
                  vte-buf:d{}/{} l{}/{} n{}/{} e{}/{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
@@ -296,7 +302,7 @@ impl App {
                  stream-first-node:{}\n\
                  stream-final-solid:{}\n\
                  cache-tree:{}\n\
-                 cache-interest:{}\n\
+                 known-interest:{}\n\
                  vte-buf:d{}/{} l{}/{} n{}/{} e{}/{}\n\
                  vte:F7 ycache:{} F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",

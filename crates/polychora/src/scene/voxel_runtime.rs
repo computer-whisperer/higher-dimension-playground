@@ -322,10 +322,7 @@ impl Scene {
         }
     }
 
-    fn mark_dirty_range(
-        slot: &mut Option<std::ops::Range<usize>>,
-        range: std::ops::Range<usize>,
-    ) {
+    fn mark_dirty_range(slot: &mut Option<std::ops::Range<usize>>, range: std::ops::Range<usize>) {
         if range.start >= range.end {
             return;
         }
@@ -386,10 +383,12 @@ impl Scene {
         if range.start >= range.end || range.end > chunk_headers.len() {
             return None;
         }
-        Some(higher_dimension_playground::render::VoxelChunkHeaderRangeWrite {
-            start: range.start as u32,
-            values: chunk_headers[range].to_vec(),
-        })
+        Some(
+            higher_dimension_playground::render::VoxelChunkHeaderRangeWrite {
+                start: range.start as u32,
+                values: chunk_headers[range].to_vec(),
+            },
+        )
     }
 
     fn bvh_node_range_write_from_dirty(
@@ -400,10 +399,12 @@ impl Scene {
         if range.start >= range.end || range.end > nodes.len() {
             return None;
         }
-        Some(higher_dimension_playground::render::VoxelChunkBvhNodeRangeWrite {
-            start: range.start as u32,
-            values: nodes[range].to_vec(),
-        })
+        Some(
+            higher_dimension_playground::render::VoxelChunkBvhNodeRangeWrite {
+                start: range.start as u32,
+                values: nodes[range].to_vec(),
+            },
+        )
     }
 
     fn leaf_header_range_write_from_dirty(
@@ -414,10 +415,12 @@ impl Scene {
         if range.start >= range.end || range.end > leaf_headers.len() {
             return None;
         }
-        Some(higher_dimension_playground::render::VoxelLeafHeaderRangeWrite {
-            start: range.start as u32,
-            values: leaf_headers[range].to_vec(),
-        })
+        Some(
+            higher_dimension_playground::render::VoxelLeafHeaderRangeWrite {
+                start: range.start as u32,
+                values: leaf_headers[range].to_vec(),
+            },
+        )
     }
 
     fn u32_range_write_from_dirty(
@@ -445,19 +448,22 @@ impl Scene {
         ) {
             batch.chunk_header_writes.push(write);
         }
-        if let Some(write) =
-            Self::u32_range_write_from_dirty(&voxel_frame_data.occupancy_words, dirty.occupancy_words.clone())
-        {
+        if let Some(write) = Self::u32_range_write_from_dirty(
+            &voxel_frame_data.occupancy_words,
+            dirty.occupancy_words.clone(),
+        ) {
             batch.occupancy_word_writes.push(write);
         }
-        if let Some(write) =
-            Self::u32_range_write_from_dirty(&voxel_frame_data.material_words, dirty.material_words.clone())
-        {
+        if let Some(write) = Self::u32_range_write_from_dirty(
+            &voxel_frame_data.material_words,
+            dirty.material_words.clone(),
+        ) {
             batch.material_word_writes.push(write);
         }
-        if let Some(write) =
-            Self::u32_range_write_from_dirty(&voxel_frame_data.macro_words, dirty.macro_words.clone())
-        {
+        if let Some(write) = Self::u32_range_write_from_dirty(
+            &voxel_frame_data.macro_words,
+            dirty.macro_words.clone(),
+        ) {
             batch.macro_word_writes.push(write);
         }
         if let Some(write) = Self::bvh_node_range_write_from_dirty(
@@ -523,7 +529,8 @@ impl Scene {
                         let ly = (chunk_coord[1] - chunk_array.bounds.min[1]) as usize;
                         let lz = (chunk_coord[2] - chunk_array.bounds.min[2]) as usize;
                         let lw = (chunk_coord[3] - chunk_array.bounds.min[3]) as usize;
-                        let linear = lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
+                        let linear =
+                            lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
                         let palette_index = src_indices
                             .get(linear)
                             .copied()
@@ -720,14 +727,16 @@ impl Scene {
                         .region_bvh_nodes
                         .resize(node_index + 1, GpuVoxelChunkBvhNode::empty());
                 }
-                self.voxel_frame_data.region_bvh_nodes[node_index] = Self::encode_bvh_node(src_node);
+                self.voxel_frame_data.region_bvh_nodes[node_index] =
+                    Self::encode_bvh_node(src_node);
                 Self::mark_dirty_index(&mut dirty.region_bvh_nodes, node_index);
             }
 
             for node_index in &delta.freed_node_ids {
                 let node_index = *node_index as usize;
                 if node_index < self.voxel_frame_data.region_bvh_nodes.len() {
-                    self.voxel_frame_data.region_bvh_nodes[node_index] = GpuVoxelChunkBvhNode::empty();
+                    self.voxel_frame_data.region_bvh_nodes[node_index] =
+                        GpuVoxelChunkBvhNode::empty();
                     Self::mark_dirty_index(&mut dirty.region_bvh_nodes, node_index);
                 }
             }
@@ -1202,9 +1211,9 @@ impl Scene {
 
             if needs_rebuild {
                 if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
-                    let cpu_root = render_bvh
-                        .root
-                        .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
+                    let cpu_root = render_bvh.root.unwrap_or(
+                        higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
+                    );
                     self.log_voxel_snapshot_rebuild(
                         scene_bounds,
                         "pending_rebuild_flag",
@@ -1213,7 +1222,8 @@ impl Scene {
                         self.voxel_frame_data.region_bvh_root_index,
                         cpu_root,
                     );
-                    if let Some(buffers) = Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
+                    if let Some(buffers) =
+                        Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
                     {
                         self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
                     } else {
@@ -1232,10 +1242,9 @@ impl Scene {
                 let mut apply_ok = false;
                 let mut apply_error: Option<String> = None;
                 if let Some(render_bvh) = self.render_bvh_cache.take() {
-                    match self.apply_render_bvh_mutation_deltas_to_voxel_frame_data(
-                        &deltas,
-                        scene_bounds,
-                    ) {
+                    match self
+                        .apply_render_bvh_mutation_deltas_to_voxel_frame_data(&deltas, scene_bounds)
+                    {
                         Ok(()) => {
                             apply_ok = true;
                         }
@@ -1249,9 +1258,9 @@ impl Scene {
                 if !apply_ok {
                     self.voxel_pending_render_bvh_mutation_deltas.clear();
                     if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
-                        let cpu_root = render_bvh
-                            .root
-                            .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
+                        let cpu_root = render_bvh.root.unwrap_or(
+                            higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
+                        );
                         self.log_voxel_snapshot_rebuild(
                             scene_bounds,
                             apply_error.as_deref().unwrap_or("delta_apply_failed"),
