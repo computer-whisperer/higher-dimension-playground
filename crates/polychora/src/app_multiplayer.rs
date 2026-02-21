@@ -1260,7 +1260,11 @@ impl App {
         let patch_apply_start = Instant::now();
 
         let scene_patch_start = Instant::now();
-        let scene_patch_stats = self.scene.apply_region_patch(patch_bounds, &patch);
+        let scene_patch_stats = if self.multiplayer_world_patch_full_stats_enabled {
+            self.scene.apply_region_patch(patch_bounds, &patch)
+        } else {
+            self.scene.apply_region_patch_fast(patch_bounds, &patch)
+        };
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
         let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
             || self.multiplayer_stream_tree_compare_diag_enabled
@@ -1290,7 +1294,8 @@ impl App {
                 scene_patch_stats.removals
             );
             eprintln!(
-                "[client-world-patch-breakdown] scene_apply_ms={:.3} scene_collect_previous_ms={:.3} scene_splice_ms={:.3} scene_collect_desired_ms={:.3} scene_diff_ms={:.3} diag_splice_ms={:.3} previous_total={} desired_total={} changed_chunks={} invalidated_cached_chunks={} queued_updates={}",
+                "[client-world-patch-breakdown] full_stats={} scene_apply_ms={:.3} scene_collect_previous_ms={:.3} scene_splice_ms={:.3} scene_collect_desired_ms={:.3} scene_diff_ms={:.3} diag_splice_ms={:.3} previous_total={} desired_total={} changed_chunks={} invalidated_cached_chunks={} queued_updates={}",
+                self.multiplayer_world_patch_full_stats_enabled,
                 scene_patch_elapsed_ms,
                 scene_patch_stats.collect_previous_ms,
                 scene_patch_stats.splice_ms,

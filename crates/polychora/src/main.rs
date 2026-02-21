@@ -88,6 +88,7 @@ const CLIENT_REGION_TREE_COMPARE_DIAG_LOG_INTERVAL_ENV: &str =
 const CLIENT_WORLD_CHUNK_SAMPLE_DIAG_ENV: &str = "R4D_CLIENT_WORLD_CHUNK_SAMPLE_DIAG";
 const CLIENT_WORLD_CHUNK_SAMPLE_DIAG_HISTORY_ENV: &str =
     "R4D_CLIENT_WORLD_CHUNK_SAMPLE_DIAG_HISTORY";
+const CLIENT_WORLD_PATCH_FULL_STATS_ENV: &str = "R4D_CLIENT_WORLD_PATCH_FULL_STATS";
 // Tags held-block preview instances so shaders can apply preview-only shading boosts.
 const PREVIEW_MATERIAL_FLAG: u32 = 0x8000_0000;
 const FOCAL_LENGTH_MIN: f32 = 0.20;
@@ -951,6 +952,9 @@ fn main() {
         multiplayer_last_world_request_bounds: None,
         multiplayer_last_world_request_radius_chunks: None,
         multiplayer_world_interest_bootstrap_pending: false,
+        multiplayer_world_patch_full_stats_enabled: env_flag_enabled(
+            CLIENT_WORLD_PATCH_FULL_STATS_ENV,
+        ),
         multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree::new(),
         multiplayer_stream_tree_diag_enabled: env_flag_enabled(CLIENT_REGION_TREE_BOUNDS_DIAG_ENV),
         multiplayer_stream_tree_diag_max_nodes: env_usize_or(
@@ -1154,7 +1158,10 @@ fn main() {
         eprintln!("[perf-suite] report path: {}", report_path.display());
     }
 
-    event_loop.run_app(&mut app).unwrap();
+    if let Err(error) = event_loop.run_app(&mut app) {
+        eprintln!("event loop exited with error: {error:?}");
+        std::process::exit(1);
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -1294,6 +1301,7 @@ struct App {
     multiplayer_last_world_request_bounds: Option<Aabb4i>,
     multiplayer_last_world_request_radius_chunks: Option<i32>,
     multiplayer_world_interest_bootstrap_pending: bool,
+    multiplayer_world_patch_full_stats_enabled: bool,
     multiplayer_stream_tree_diag: polychora::shared::region_tree::RegionChunkTree,
     multiplayer_stream_tree_diag_enabled: bool,
     multiplayer_stream_tree_diag_max_nodes: usize,

@@ -1073,6 +1073,68 @@ impl Scene {
         }
     }
 
+    pub fn apply_region_patch_fast(
+        &mut self,
+        bounds: Aabb4i,
+        subtree: &RegionTreeCore,
+    ) -> RegionPatchStats {
+        if !bounds.is_valid() {
+            return RegionPatchStats::default();
+        }
+
+        let desired_owned;
+        let desired_core = if subtree.bounds == bounds {
+            subtree
+        } else {
+            desired_owned = slice_non_empty_region_core_in_bounds(subtree, bounds);
+            &desired_owned
+        };
+
+        let splice_start = Instant::now();
+        let changed_bounds = self
+            .world_tree
+            .splice_non_empty_core_in_bounds(bounds, desired_core);
+        let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
+        let Some(changed_bounds) = changed_bounds else {
+            return RegionPatchStats {
+                splice_ms,
+                ..RegionPatchStats::default()
+            };
+        };
+        self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
+
+        let mut stale_positions = Vec::<ChunkPos>::new();
+        for &pos in self.world_chunks.keys() {
+            if changed_bounds.contains_chunk(chunk_key_from_chunk_pos(pos)) {
+                stale_positions.push(pos);
+            }
+        }
+        let mut invalidated_cached_chunks = 0usize;
+        let mut queued_updates = 0usize;
+        for pos in stale_positions {
+            if self.world_chunks.remove(&pos).is_some() {
+                invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
+            }
+            if self.world_queue_chunk_update(pos) {
+                queued_updates = queued_updates.saturating_add(1);
+            }
+        }
+
+        self.mark_voxel_scene_region_dirty(changed_bounds);
+        if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE {
+            self.voxel_pending_render_bvh_rebuild = true;
+        }
+        self.world_dirty = true;
+
+        RegionPatchStats {
+            changed_chunks: 1,
+            invalidated_cached_chunks,
+            queued_updates,
+            splice_ms,
+            ..RegionPatchStats::default()
+        }
+    }
+
     fn surface_voxel_count(surface: &SurfaceData) -> u32 {
         surface
             .chunks
@@ -1789,6 +1851,42 @@ mod tests {
             scene.world_drain_pending_chunk_updates(),
             Vec::<ChunkPos>::new()
         );
+    }
+
+    #[test]
+    fn apply_region_patch_fast_matches_full_splice_state() {
+        let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
+        let mut full_scene = Scene::new(ScenePreset::Empty);
+        let mut fast_scene = Scene::new(ScenePreset::Empty);
+
+        let mut seed_tree = RegionChunkTree::new();
+        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(3)));
+        let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ChunkPayload::Uniform(4)));
+        let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
+        let _ = full_scene.apply_region_patch(bounds, &seed_core);
+        let _ = fast_scene.apply_region_patch(bounds, &seed_core);
+        let _ = full_scene.world_drain_pending_chunk_updates();
+        let _ = fast_scene.world_drain_pending_chunk_updates();
+
+        let mut patch_tree = RegionChunkTree::new();
+        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(7)));
+        let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
+
+        let full_stats = full_scene.apply_region_patch(bounds, &patch_core);
+        let fast_stats = fast_scene.apply_region_patch_fast(bounds, &patch_core);
+
+        assert_eq!(full_stats.changed_chunks, 1);
+        assert_eq!(fast_stats.changed_chunks, 1);
+        assert_eq!(full_scene.world_tree.root(), fast_scene.world_tree.root());
+        assert_eq!(full_scene.world_tree_revision, fast_scene.world_tree_revision);
+        assert_eq!(
+            full_scene.world_drain_pending_chunk_updates(),
+            fast_scene.world_drain_pending_chunk_updates()
+        );
+        assert_eq!(full_scene.get_voxel(0, 0, 0, 0), VoxelType(7));
+        assert_eq!(fast_scene.get_voxel(0, 0, 0, 0), VoxelType(7));
+        assert!(full_scene.get_voxel(CHUNK_SIZE as i32, 0, 0, 0).is_air());
+        assert!(fast_scene.get_voxel(CHUNK_SIZE as i32, 0, 0, 0).is_air());
     }
 
     #[test]
