@@ -14,6 +14,20 @@ pub(super) enum MobArchetype {
     PhaseSpider,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MobLocomotionMode {
+    Walking,
+    Flying,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MobArchetypeDefaults {
+    pub(super) move_speed: f32,
+    pub(super) preferred_distance: f32,
+    pub(super) tangent_weight: f32,
+    pub(super) locomotion: MobLocomotionMode,
+}
+
 pub(super) type MobNavCell = [i32; 4];
 
 #[derive(Clone, Debug, Default)]
@@ -21,6 +35,7 @@ pub(super) struct MobNavigationState {
     pub(super) goal_cell: Option<MobNavCell>,
     pub(super) path_cells: Vec<MobNavCell>,
     pub(super) path_cursor: usize,
+    pub(super) blocked_without_path: bool,
     pub(super) last_repath_ms: u64,
     pub(super) last_debug_log_ms: u64,
 }

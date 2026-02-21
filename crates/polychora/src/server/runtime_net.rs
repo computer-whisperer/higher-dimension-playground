@@ -764,6 +764,10 @@ pub(super) fn start_broadcast_thread(
             let now = monotonic_ms(start);
             let (entity_batches, explosion_events, player_movement_modifiers) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
+                let _ = guard.evict_far_mob_nav_cache_chunks(
+                    MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS,
+                    MOB_NAV_CACHE_EVICT_BUDGET_PER_TICK,
+                );
                 let (explosion_events, player_movement_modifiers) = tick_entity_simulation_window(
                     &mut guard,
                     now,
@@ -1474,7 +1478,7 @@ fn spawn_mob_entity(
         material,
         now_ms,
     );
-    let (default_speed, default_distance, default_tangent) = mob_archetype_defaults(archetype);
+    let defaults = mob_archetype_defaults(archetype);
     let phase_offset = persisted_mob
         .as_ref()
         .map(|mob| mob.phase_offset)
@@ -1482,17 +1486,17 @@ fn spawn_mob_entity(
     let move_speed = persisted_mob
         .as_ref()
         .map(|mob| mob.move_speed)
-        .unwrap_or(default_speed)
+        .unwrap_or(defaults.move_speed)
         .max(0.1);
     let preferred_distance = persisted_mob
         .as_ref()
         .map(|mob| mob.preferred_distance)
-        .unwrap_or(default_distance)
+        .unwrap_or(defaults.preferred_distance)
         .max(0.1);
     let tangent_weight = persisted_mob
         .as_ref()
         .map(|mob| mob.tangent_weight)
-        .unwrap_or(default_tangent)
+        .unwrap_or(defaults.tangent_weight)
         .clamp(0.0, 2.0);
     let initial_phase_tick_seed = (entity_id as u32).wrapping_mul(7477);
     let next_phase_ms =

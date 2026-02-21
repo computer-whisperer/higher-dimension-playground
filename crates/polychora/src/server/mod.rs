@@ -28,9 +28,10 @@ use self::spawn_logic::{
 };
 use self::types::{
     ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityLifecycle, EntityRecord,
-    EntityRecordSummary, LiveReplicationFrame, MobArchetype, MobNavCell, MobNavPathResult,
-    MobNavigationState, MobState, PersistedMobEntry, PlayerState, QueuedExplosionEvent,
-    QueuedPlayerMovementModifier, SpawnableEntitySpec, SPAWNABLE_ENTITY_SPECS,
+    EntityRecordSummary, LiveReplicationFrame, MobArchetype, MobArchetypeDefaults,
+    MobLocomotionMode, MobNavCell, MobNavPathResult, MobNavigationState, MobState,
+    PersistedMobEntry, PlayerState, QueuedExplosionEvent, QueuedPlayerMovementModifier,
+    SpawnableEntitySpec, SPAWNABLE_ENTITY_SPECS,
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
 use crate::materials;
@@ -76,6 +77,12 @@ const MOB_NAV_PATH_MAX_SEARCH_RADIUS_CELLS: i32 = 42;
 const MOB_NAV_PATH_GOAL_ADJUST_RADIUS_CELLS: i32 = 6;
 const MOB_NAV_PATH_MAX_WAYPOINTS: usize = 96;
 const MOB_NAV_DEBUG_MIN_INTERVAL_MS: u64 = 250;
+const MOB_WALK_GROUND_STICK_STEP: f32 = 0.05;
+const MOB_WALK_GROUND_STICK_MAX_DROP: f32 = 0.65;
+const MOB_WALK_STEP_UP_MAX_HEIGHT: f32 = 1.10;
+const MOB_WALK_STEP_UP_SAMPLE_STEP: f32 = 0.05;
+const MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS: i32 = 16;
+const MOB_NAV_CACHE_EVICT_BUDGET_PER_TICK: usize = 64;
 const PHASE_SPIDER_PHASE_MIN_INTERVAL_MS: u64 = 720;
 const PHASE_SPIDER_PHASE_MAX_INTERVAL_MS: u64 = 1520;
 const PHASE_SPIDER_PHASE_DISTANCE: f32 = 2.8;

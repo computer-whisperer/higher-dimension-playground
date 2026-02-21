@@ -1,5 +1,6 @@
 use super::*;
-use crate::shared::region_tree::RegionTreeCore;
+use crate::shared::chunk_payload::ChunkPayload;
+use crate::shared::region_tree::{chunk_key_from_chunk_pos, RegionChunkTree, RegionTreeCore};
 use crate::shared::voxel::CHUNK_VOLUME;
 
 pub(super) struct ServerState {
@@ -7,6 +8,7 @@ pub(super) struct ServerState {
     pub(super) entity_store: EntityStore,
     pub(super) entity_records: HashMap<u64, EntityRecord>,
     world: ServerWorldOverlay,
+    pub(super) mob_nav_chunk_cache: RegionChunkTree,
     pub(super) players: HashMap<u64, PlayerState>,
     pub(super) mobs: HashMap<u64, MobState>,
     pub(super) mob_nav_debug: bool,
@@ -30,6 +32,7 @@ impl ServerState {
             entity_store: EntityStore::new(),
             entity_records: HashMap::new(),
             world,
+            mob_nav_chunk_cache: RegionChunkTree::new(),
             players: HashMap::new(),
             mobs: HashMap::new(),
             mob_nav_debug,
@@ -60,6 +63,7 @@ impl ServerState {
         let subtree = self
             .world
             .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        self.absorb_world_subtree_into_mob_nav_cache(bounds, subtree.as_ref());
         let query_ms = query_start.elapsed().as_secs_f64() * 1000.0;
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
         if total_ms >= 50.0 {
@@ -74,6 +78,65 @@ impl ServerState {
             );
         }
         subtree
+    }
+
+    pub(super) fn mob_nav_cached_chunk_at(
+        &self,
+        chunk_pos: ChunkPos,
+    ) -> Option<[VoxelType; CHUNK_VOLUME]> {
+        self.mob_nav_chunk_cache
+            .chunk_payload(chunk_key_from_chunk_pos(chunk_pos))
+            .and_then(dense_chunk_from_payload)
+    }
+
+    pub(super) fn evict_far_mob_nav_cache_chunks(
+        &mut self,
+        keep_radius_chunks: i32,
+        max_subtree_drops: usize,
+    ) -> Option<Aabb4i> {
+        let keep_bounds = self.mob_nav_cache_keep_bounds(keep_radius_chunks);
+        self.mob_nav_chunk_cache
+            .lazy_drop_outside_bounds(keep_bounds, max_subtree_drops)
+    }
+
+    fn absorb_world_subtree_into_mob_nav_cache(&mut self, bounds: Aabb4i, subtree: &RegionTreeCore) {
+        if !bounds.is_valid() {
+            return;
+        }
+        let _ = self
+            .mob_nav_chunk_cache
+            .splice_core_in_bounds(bounds, subtree);
+    }
+
+    fn mob_nav_cache_keep_bounds(&self, keep_radius_chunks: i32) -> Aabb4i {
+        let radius = keep_radius_chunks.max(0);
+        let mut keep_bounds = None::<Aabb4i>;
+        for player in self.players.values() {
+            let Some(snapshot) = self.entity_store.snapshot(player.entity_id) else {
+                continue;
+            };
+            let center = world_chunk_from_position(snapshot.position);
+            let player_keep = Aabb4i::new(
+                [
+                    center[0] - radius,
+                    center[1] - radius,
+                    center[2] - radius,
+                    center[3] - radius,
+                ],
+                [
+                    center[0] + radius,
+                    center[1] + radius,
+                    center[2] + radius,
+                    center[3] + radius,
+                ],
+            );
+            keep_bounds = Some(match keep_bounds {
+                Some(acc) => union_bounds(acc, player_keep),
+                None => player_keep,
+            });
+        }
+
+        keep_bounds.unwrap_or_else(|| Aabb4i::new([1, 1, 1, 1], [0, 0, 0, 0]))
     }
 
     pub(super) fn world_seed(&self) -> u64 {
@@ -124,6 +187,35 @@ impl ServerState {
     ) -> Option<Aabb4i> {
         self.client_world_interest_bounds.insert(client_id, bounds)
     }
+}
+
+fn dense_chunk_from_payload(payload: ChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    let materials = payload.dense_materials().ok()?;
+    if materials.len() != CHUNK_VOLUME {
+        return None;
+    }
+    let mut chunk = [VoxelType::AIR; CHUNK_VOLUME];
+    for (idx, material) in materials.into_iter().enumerate() {
+        chunk[idx] = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
+    }
+    Some(chunk)
+}
+
+fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
+    Aabb4i::new(
+        [
+            a.min[0].min(b.min[0]),
+            a.min[1].min(b.min[1]),
+            a.min[2].min(b.min[2]),
+            a.min[3].min(b.min[3]),
+        ],
+        [
+            a.max[0].max(b.max[0]),
+            a.max[1].max(b.max[1]),
+            a.max[2].max(b.max[2]),
+            a.max[3].max(b.max[3]),
+        ],
+    )
 }
 
 pub(super) type SharedState = Arc<Mutex<ServerState>>;

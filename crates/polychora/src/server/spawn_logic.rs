@@ -94,11 +94,26 @@ pub(super) fn default_spawn_pose_for_client(
     (position, look)
 }
 
-pub(super) fn mob_archetype_defaults(archetype: MobArchetype) -> (f32, f32, f32) {
+pub(super) fn mob_archetype_defaults(archetype: MobArchetype) -> MobArchetypeDefaults {
     match archetype {
-        MobArchetype::Seeker => (2.9, 2.6, 0.64),
-        MobArchetype::Creeper4d => (2.4, 3.8, 1.15),
-        MobArchetype::PhaseSpider => (3.1, 2.4, 0.95),
+        MobArchetype::Seeker => MobArchetypeDefaults {
+            move_speed: 3.0,
+            preferred_distance: 2.6,
+            tangent_weight: 0.72,
+            locomotion: MobLocomotionMode::Walking,
+        },
+        MobArchetype::Creeper4d => MobArchetypeDefaults {
+            move_speed: 2.55,
+            preferred_distance: 3.8,
+            tangent_weight: 0.92,
+            locomotion: MobLocomotionMode::Walking,
+        },
+        MobArchetype::PhaseSpider => MobArchetypeDefaults {
+            move_speed: 3.1,
+            preferred_distance: 2.4,
+            tangent_weight: 0.95,
+            locomotion: MobLocomotionMode::Flying,
+        },
     }
 }
 
