@@ -921,6 +921,23 @@ impl App {
                 self.world_ready = true;
                 eprintln!("World ready: no multiplayer connection");
             }
+            // Failsafe: do not let the loading gate stick forever if the first
+            // world subtree patch is delayed or dropped.
+            if !self.world_ready
+                && self.app_state == AppState::Playing
+                && self.multiplayer.is_some()
+            {
+                if let Some(wait_since) = self.multiplayer_initial_world_wait_since {
+                    const MULTIPLAYER_WORLD_READY_FALLBACK_SECS: f32 = 3.0;
+                    if wait_since.elapsed().as_secs_f32() >= MULTIPLAYER_WORLD_READY_FALLBACK_SECS {
+                        self.world_ready = true;
+                        eprintln!(
+                            "World ready fallback: no subtree patch after {:.1}s (continuing with async world streaming)",
+                            MULTIPLAYER_WORLD_READY_FALLBACK_SECS
+                        );
+                    }
+                }
+            }
             let render_submit_start = Instant::now();
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),

@@ -1418,6 +1418,7 @@ impl App {
                 self.multiplayer_chunk_sample_diag_next_request_id = 1;
                 self.pending_player_movement_modifiers.clear();
                 self.player_modifier_external_velocity = [0.0; 4];
+                self.multiplayer_initial_world_wait_since = Some(Instant::now());
                 self.maybe_request_multiplayer_world_for_position(self.camera.position, "welcome");
                 eprintln!(
                     "Multiplayer connected: client_id={} chunks={} server_tick_hz={:.2}",
@@ -1430,9 +1431,15 @@ impl App {
             }
             multiplayer::ServerMessage::WorldSubtreePatch { subtree } => {
                 self.record_multiplayer_chunk_sample_diag_patch(&subtree);
-                if self.apply_multiplayer_world_patch(subtree).is_some() && !self.world_ready {
+                let changed = self.apply_multiplayer_world_patch(subtree).is_some();
+                self.multiplayer_initial_world_wait_since = None;
+                if !self.world_ready {
                     self.world_ready = true;
-                    eprintln!("World ready: subtree patch applied");
+                    if changed {
+                        eprintln!("World ready: subtree patch applied");
+                    } else {
+                        eprintln!("World ready: subtree patch received (no-op)");
+                    }
                 }
             }
             multiplayer::ServerMessage::WorldChunkSampleResponse {

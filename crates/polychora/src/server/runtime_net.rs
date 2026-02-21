@@ -1,5 +1,30 @@
 use super::*;
 
+fn world_bootstrap_diag_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var("R4D_WORLD_BOOTSTRAP_DIAG") {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            !(value.is_empty()
+                || value == "0"
+                || value == "false"
+                || value == "off"
+                || value == "no")
+        }
+        Err(_) => false,
+    })
+}
+
+fn summarize_region_kind(kind: &crate::shared::region_tree::RegionNodeKind) -> &'static str {
+    match kind {
+        crate::shared::region_tree::RegionNodeKind::Empty => "Empty",
+        crate::shared::region_tree::RegionNodeKind::Uniform(_) => "Uniform",
+        crate::shared::region_tree::RegionNodeKind::ChunkArray(_) => "ChunkArray",
+        crate::shared::region_tree::RegionNodeKind::Branch(_) => "Branch",
+        crate::shared::region_tree::RegionNodeKind::ProceduralRef(_) => "ProceduralRef",
+    }
+}
+
 fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
     let sender = {
         let guard = state.lock().expect("server state lock poisoned");
@@ -97,7 +122,28 @@ fn send_world_subtree_patch_to_client(
             crate::shared::region_tree::RegionNodeKind::Empty
         )
     {
+        if world_bootstrap_diag_enabled() {
+            eprintln!(
+                "[server-world-bootstrap] skip-empty-patch client_id={} bounds={:?}->{:?} allow_empty={}",
+                client_id,
+                bounds.min,
+                bounds.max,
+                allow_empty
+            );
+        }
         return;
+    }
+    if world_bootstrap_diag_enabled() {
+        eprintln!(
+            "[server-world-bootstrap] send-patch client_id={} requested={:?}->{:?} subtree={:?}->{:?} kind={} allow_empty={}",
+            client_id,
+            bounds.min,
+            bounds.max,
+            subtree.bounds.min,
+            subtree.bounds.max,
+            summarize_region_kind(&subtree.kind),
+            allow_empty
+        );
     }
 
     send_to_client(
@@ -336,7 +382,22 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
         let mut guard = state.lock().expect("server state lock poisoned");
         guard.set_client_world_interest_bounds(client_id, bounds)
     };
+    if world_bootstrap_diag_enabled() {
+        eprintln!(
+            "[server-world-bootstrap] interest-update client_id={} bounds={:?}->{:?} previous={:?}",
+            client_id,
+            bounds.min,
+            bounds.max,
+            previous.as_ref().map(|prev| (prev.min, prev.max))
+        );
+    }
     if previous == Some(bounds) {
+        if world_bootstrap_diag_enabled() {
+            eprintln!(
+                "[server-world-bootstrap] interest-noop client_id={} bounds={:?}->{:?}",
+                client_id, bounds.min, bounds.max
+            );
+        }
         return;
     }
 
@@ -348,11 +409,22 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
         Some(prev) => subtract_bounds(prev, bounds),
         None => Vec::new(),
     };
+    let removed_count = removed_bounds.len();
+    let added_count = added_bounds.len();
 
     for remove_bounds in removed_bounds {
         send_empty_world_subtree_patch_to_client(state, client_id, remove_bounds);
     }
     let allow_empty_add = previous.is_none();
+    if world_bootstrap_diag_enabled() {
+        eprintln!(
+            "[server-world-bootstrap] interest-delta client_id={} adds={} removals={} allow_empty_add={}",
+            client_id,
+            added_count,
+            removed_count,
+            allow_empty_add
+        );
+    }
     for add_bounds in added_bounds {
         send_world_subtree_patch_to_client(state, client_id, add_bounds, allow_empty_add);
     }

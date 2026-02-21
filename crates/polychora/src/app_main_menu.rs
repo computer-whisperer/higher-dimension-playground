@@ -158,6 +158,7 @@ impl App {
         self.remote_players.clear();
         self.remote_entities.clear();
         self.last_multiplayer_player_update = Instant::now();
+        self.multiplayer_initial_world_wait_since = None;
     }
 
     pub(super) fn connect_multiplayer_remote(&mut self, server_addr: String) -> Result<(), String> {
