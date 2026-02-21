@@ -464,6 +464,43 @@ fn sanitize_remote_scale(scale: f32, fallback: f32) -> f32 {
     }
 }
 
+fn summarize_payload_compact(payload: Option<&ChunkPayload>) -> String {
+    match payload {
+        None => "None".to_string(),
+        Some(ChunkPayload::Empty) => "Empty".to_string(),
+        Some(ChunkPayload::Uniform(material)) => format!("Uniform({material})"),
+        Some(ChunkPayload::Dense16 { materials }) => {
+            let non_empty = materials.iter().filter(|material| **material != 0).count();
+            format!("Dense16(nz={non_empty})")
+        }
+        Some(ChunkPayload::PalettePacked {
+            palette, bit_width, ..
+        }) => format!(
+            "PalettePacked(palette={},bits={})",
+            palette.len(),
+            bit_width
+        ),
+    }
+}
+
+fn summarize_payloads_compact(payloads: &[ChunkPayload]) -> String {
+    if payloads.is_empty() {
+        return "[]".to_string();
+    }
+    let mut out = String::from("[");
+    for (idx, payload) in payloads.iter().take(3).enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&summarize_payload_compact(Some(payload)));
+    }
+    if payloads.len() > 3 {
+        out.push_str(", ...");
+    }
+    out.push(']');
+    out
+}
+
 impl App {
     fn multiplayer_stream_tree_diag_kind_enabled(&self, kind: RegionTreeDiagKind) -> bool {
         match kind {
@@ -1267,6 +1304,17 @@ impl App {
         patch: RegionTreeCore,
     ) -> Option<(usize, usize)> {
         let patch_bounds = patch.bounds;
+        let patch_single_chunk_key =
+            (patch_bounds.min == patch_bounds.max).then_some(patch_bounds.min);
+        let sync_diag_enabled = std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some();
+        let world_before =
+            patch_single_chunk_key.and_then(|key| self.scene.debug_world_tree_chunk_payload(key));
+        let patch_payload = patch_single_chunk_key.and_then(|key| {
+            collect_non_empty_chunks_from_core_in_bounds(&patch, Aabb4i::new(key, key))
+                .into_iter()
+                .find(|(chunk_key, _)| *chunk_key == key)
+                .map(|(_, payload)| payload)
+        });
         let patch_apply_start = Instant::now();
 
         let scene_patch_start = Instant::now();
@@ -1319,12 +1367,33 @@ impl App {
             );
         }
         eprintln!(
-            "Applied multiplayer world patch bounds={:?}->{:?} upserts={} removals={}",
+            "Applied multiplayer world patch bounds={:?}->{:?} upserts={} removals={} changed_chunks={} queued_updates={} invalidated_cached_chunks={}",
             patch_bounds.min,
             patch_bounds.max,
             scene_patch_stats.upserts,
-            scene_patch_stats.removals
+            scene_patch_stats.removals,
+            scene_patch_stats.changed_chunks,
+            scene_patch_stats.queued_updates,
+            scene_patch_stats.invalidated_cached_chunks,
         );
+        if sync_diag_enabled {
+            if let Some(key) = patch_single_chunk_key {
+                let world_after = self.scene.debug_world_tree_chunk_payload(key);
+                let render_cache_payloads = self.scene.debug_render_bvh_cache_chunk_payloads(key);
+                let frame_payloads = self.scene.debug_voxel_frame_chunk_payloads(key);
+                eprintln!(
+                    "[edit-sync-patch] key={:?} patch={} world_before={} world_after={} render_cache={} frame={} pending_dirty={} pending_deltas={}",
+                    key,
+                    summarize_payload_compact(patch_payload.as_ref()),
+                    summarize_payload_compact(world_before.as_ref()),
+                    summarize_payload_compact(world_after.as_ref()),
+                    summarize_payloads_compact(&render_cache_payloads),
+                    summarize_payloads_compact(&frame_payloads),
+                    self.scene.debug_pending_dirty_region_count(),
+                    self.scene.debug_pending_render_bvh_delta_count(),
+                );
+            }
+        }
         Some((scene_patch_stats.upserts, scene_patch_stats.removals))
     }
 

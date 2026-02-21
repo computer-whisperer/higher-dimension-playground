@@ -532,6 +532,21 @@ impl Scene {
         self.world_tree.chunk_payload(chunk_key)
     }
 
+    pub fn debug_render_bvh_cache_chunk_payloads(&self, chunk_key: [i32; 4]) -> Vec<ChunkPayload> {
+        self.render_bvh_cache
+            .as_ref()
+            .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
+            .unwrap_or_default()
+    }
+
+    pub fn debug_pending_dirty_region_count(&self) -> usize {
+        self.voxel_pending_scene_dirty_regions.len()
+    }
+
+    pub fn debug_pending_render_bvh_delta_count(&self) -> usize {
+        self.voxel_pending_render_bvh_mutation_deltas.len()
+    }
+
     pub fn debug_world_tree_root_bounds(&self) -> Option<Aabb4i> {
         self.world_tree.root().map(|root| root.bounds)
     }
@@ -1043,6 +1058,48 @@ mod tests {
         assert_eq!(fast_scene.get_voxel(0, 0, 0, 0), VoxelType(7));
         assert!(full_scene.get_voxel(CHUNK_SIZE as i32, 0, 0, 0).is_air());
         assert!(fast_scene.get_voxel(CHUNK_SIZE as i32, 0, 0, 0).is_air());
+    }
+
+    #[test]
+    fn apply_region_patch_fast_updates_render_bvh_for_chunk_payload_changes() {
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let chunk_key = [0, 0, 0, 0];
+        let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
+        let view_bounds = Aabb4i::new([-2, -2, -2, -2], [2, 2, 2, 2]);
+
+        // Seed one non-empty chunk.
+        let mut initial_patch = RegionChunkTree::new();
+        let _ = initial_patch.set_chunk(chunk_key, Some(ChunkPayload::Uniform(11)));
+        let initial_core = initial_patch.slice_non_empty_core_in_bounds(chunk_bounds);
+        let initial_stats = scene.apply_region_patch_fast(chunk_bounds, &initial_core);
+        assert_eq!(initial_stats.changed_chunks, 1);
+        let initial_payloads =
+            scene.debug_render_bvh_chunk_payloads_in_bounds(view_bounds, chunk_key);
+        assert_eq!(initial_payloads.len(), 1);
+        assert_eq!(
+            Scene::chunk_payload_material_at(&initial_payloads[0], 0),
+            Some(11)
+        );
+
+        // Update the same chunk with a dense payload that changes only one voxel.
+        let mut edited_dense = vec![11u16; CHUNK_VOLUME];
+        edited_dense[0] = 4;
+        let edited_payload = ChunkPayload::from_dense_materials_compact(&edited_dense)
+            .expect("compact dense payload");
+        let mut edited_patch = RegionChunkTree::new();
+        let _ = edited_patch.set_chunk(chunk_key, Some(edited_payload));
+        let edited_core = edited_patch.slice_non_empty_core_in_bounds(chunk_bounds);
+        let edited_stats = scene.apply_region_patch_fast(chunk_bounds, &edited_core);
+        assert_eq!(edited_stats.changed_chunks, 1);
+
+        let edited_payloads =
+            scene.debug_render_bvh_chunk_payloads_in_bounds(view_bounds, chunk_key);
+        assert_eq!(edited_payloads.len(), 1);
+        assert_eq!(
+            Scene::chunk_payload_material_at(&edited_payloads[0], 0),
+            Some(4)
+        );
+        assert_eq!(scene.get_voxel(0, 0, 0, 0), VoxelType(4));
     }
 
     #[test]

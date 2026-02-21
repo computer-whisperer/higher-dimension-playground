@@ -120,6 +120,19 @@ impl Scene {
             bounds,
             VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET,
         );
+        if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some()
+            && dirty_regions.is_empty()
+            && !self.voxel_pending_scene_dirty_regions.is_empty()
+        {
+            eprintln!(
+                "[edit-sync-dirty-skip] bounds={:?}->{:?} pending_total={} pending_sample={:?}->{:?}",
+                bounds.min,
+                bounds.max,
+                self.voxel_pending_scene_dirty_regions.len(),
+                self.voxel_pending_scene_dirty_regions[0].min,
+                self.voxel_pending_scene_dirty_regions[0].max
+            );
+        }
         if dirty_regions.is_empty() {
             return;
         }
@@ -128,6 +141,7 @@ impl Scene {
         let mut deltas = Vec::<RenderBvhChunkMutationDelta>::new();
         let mut fallback_full_rebuild = false;
         let mut fallback_reason: Option<String> = None;
+        let dirty_region_count = dirty_regions.len();
         for dirty_region in dirty_regions {
             let Some(dirty_bounds) = Self::intersect_bounds(dirty_region, bounds) else {
                 continue;
@@ -136,11 +150,25 @@ impl Scene {
             let desired_fragment_core =
                 desired_fragment_tree.slice_non_empty_core_in_bounds(dirty_bounds);
             if let Some(cache) = self.render_region_cache.as_mut() {
-                let Some(_) =
-                    cache.splice_non_empty_core_in_bounds(dirty_bounds, &desired_fragment_core)
-                else {
+                let previous_fragment_core = cache.slice_non_empty_core_in_bounds(dirty_bounds);
+                let splice_changed =
+                    cache.splice_non_empty_core_in_bounds(dirty_bounds, &desired_fragment_core);
+                if splice_changed.is_none() {
+                    let current_fragment_core = cache.slice_non_empty_core_in_bounds(dirty_bounds);
+                    if current_fragment_core.kind != desired_fragment_core.kind {
+                        fallback_full_rebuild = true;
+                        fallback_reason = Some(format!(
+                            "render_region_splice_noop_mismatch bounds={:?}->{:?} prev_kind={:?} desired_kind={:?} current_kind={:?}",
+                            dirty_bounds.min,
+                            dirty_bounds.max,
+                            previous_fragment_core.kind,
+                            desired_fragment_core.kind,
+                            current_fragment_core.kind
+                        ));
+                        break;
+                    }
                     continue;
-                };
+                }
             } else {
                 fallback_full_rebuild = true;
                 fallback_reason = Some("missing_render_region_cache".to_string());
@@ -183,6 +211,8 @@ impl Scene {
                 bounds.max,
                 deltas.len()
             );
+            self.render_region_cache_bounds = Some(bounds);
+            self.render_region_cache = Some(self.build_render_region_tree_in_bounds(bounds));
             self.rebuild_render_bvh_from_region_cache(bounds);
             self.voxel_pending_render_bvh_rebuild = true;
             self.voxel_pending_render_bvh_mutation_deltas.clear();
@@ -200,6 +230,16 @@ impl Scene {
                 self.voxel_pending_render_bvh_rebuild = true;
                 self.voxel_pending_render_bvh_mutation_deltas.clear();
                 return;
+            }
+            if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
+                eprintln!(
+                    "[edit-sync-dirty-apply] bounds={:?}->{:?} dirty_regions={} deltas={} pending_after={}",
+                    bounds.min,
+                    bounds.max,
+                    dirty_region_count,
+                    deltas.len(),
+                    self.voxel_pending_scene_dirty_regions.len()
+                );
             }
             self.voxel_pending_render_bvh_mutation_deltas.extend(deltas);
         }

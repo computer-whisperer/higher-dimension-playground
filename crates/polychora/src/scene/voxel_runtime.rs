@@ -73,6 +73,43 @@ fn pack_dense_materials_words(
 }
 
 impl Scene {
+    fn summarize_chunk_payload_compact(payload: Option<&ChunkPayload>) -> String {
+        match payload {
+            None => "None".to_string(),
+            Some(ChunkPayload::Empty) => "Empty".to_string(),
+            Some(ChunkPayload::Uniform(material)) => format!("Uniform({material})"),
+            Some(ChunkPayload::Dense16 { materials }) => {
+                let non_empty = materials.iter().filter(|material| **material != 0).count();
+                format!("Dense16(nz={non_empty})")
+            }
+            Some(ChunkPayload::PalettePacked {
+                palette, bit_width, ..
+            }) => format!(
+                "PalettePacked(palette={},bits={})",
+                palette.len(),
+                bit_width
+            ),
+        }
+    }
+
+    fn summarize_chunk_payload_list_compact(payloads: &[ChunkPayload]) -> String {
+        if payloads.is_empty() {
+            return "[]".to_string();
+        }
+        let mut out = String::from("[");
+        for (idx, payload) in payloads.iter().take(3).enumerate() {
+            if idx > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&Self::summarize_chunk_payload_compact(Some(payload)));
+        }
+        if payloads.len() > 3 {
+            out.push_str(", ...");
+        }
+        out.push(']');
+        out
+    }
+
     fn voxel_frame_root_is_valid(&self) -> bool {
         let root = self.voxel_frame_data.region_bvh_root_index;
         root != higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE
@@ -1202,12 +1239,58 @@ impl Scene {
             .as_ref()
             .map(|bvh| bvh.root.is_none())
             .unwrap_or(false);
+        let has_pending_render_updates = self.voxel_pending_render_bvh_rebuild
+            || !self.voxel_pending_render_bvh_mutation_deltas.is_empty();
         let visibility_cache_valid = self.voxel_cached_visibility_bounds == Some(scene_bounds)
             && !self.voxel_scene_bounds_has_pending_dirty_regions(scene_bounds)
+            && !has_pending_render_updates
             && (frame_root_valid || cached_render_bvh_empty);
+        if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some()
+            && !self.voxel_pending_scene_dirty_regions.is_empty()
+        {
+            let pending_intersects =
+                self.voxel_scene_bounds_has_pending_dirty_regions(scene_bounds);
+            if visibility_cache_valid || !pending_intersects {
+                eprintln!(
+                    "[edit-sync-voxel-build] scene_bounds={:?}->{:?} cached_bounds={:?} pending_total={} pending_intersects={} visibility_cache_valid={} frame_root_valid={} cached_bvh_empty={}",
+                    scene_bounds.min,
+                    scene_bounds.max,
+                    self.voxel_cached_visibility_bounds,
+                    self.voxel_pending_scene_dirty_regions.len(),
+                    pending_intersects,
+                    visibility_cache_valid,
+                    frame_root_valid,
+                    cached_render_bvh_empty
+                );
+            }
+        }
+        if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some()
+            && has_pending_render_updates
+            && self.voxel_cached_visibility_bounds == Some(scene_bounds)
+            && !self.voxel_scene_bounds_has_pending_dirty_regions(scene_bounds)
+        {
+            eprintln!(
+                "[edit-sync-voxel-build] scene_bounds={:?}->{:?} forcing_update_for_pending_render_changes pending_rebuild={} pending_deltas={}",
+                scene_bounds.min,
+                scene_bounds.max,
+                self.voxel_pending_render_bvh_rebuild,
+                self.voxel_pending_render_bvh_mutation_deltas.len()
+            );
+        }
         if !visibility_cache_valid {
             self.ensure_render_bvh_cache_for_bounds(scene_bounds);
             let (needs_rebuild, deltas) = self.take_pending_render_bvh_update_flags();
+            if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
+                eprintln!(
+                    "[edit-sync-voxel-flags] scene_bounds={:?}->{:?} needs_rebuild={} deltas={} frame_root={} cache_root={:?}",
+                    scene_bounds.min,
+                    scene_bounds.max,
+                    needs_rebuild,
+                    deltas.len(),
+                    self.voxel_frame_data.region_bvh_root_index,
+                    self.render_bvh_cache.as_ref().and_then(|bvh| bvh.root),
+                );
+            }
 
             if needs_rebuild {
                 if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
@@ -1226,6 +1309,14 @@ impl Scene {
                         Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
                     {
                         self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
+                        if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
+                            eprintln!(
+                                "[edit-sync-voxel-rebuild] scene_bounds={:?}->{:?} result=ok frame_root={}",
+                                scene_bounds.min,
+                                scene_bounds.max,
+                                self.voxel_frame_data.region_bvh_root_index
+                            );
+                        }
                     } else {
                         // Preserve last-good GPU voxel buffers and keep retrying full snapshot builds.
                         self.voxel_pending_render_bvh_rebuild = true;
@@ -1235,6 +1326,13 @@ impl Scene {
                             render_bvh.nodes.len(),
                             render_bvh.leaves.len(),
                         );
+                        if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
+                            eprintln!(
+                                "[edit-sync-voxel-rebuild] scene_bounds={:?}->{:?} result=encode_overflow",
+                                scene_bounds.min,
+                                scene_bounds.max
+                            );
+                        }
                     }
                 }
             } else if !deltas.is_empty() {
@@ -1256,6 +1354,14 @@ impl Scene {
                 }
 
                 if !apply_ok {
+                    if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
+                        eprintln!(
+                            "[edit-sync-voxel-delta] scene_bounds={:?}->{:?} result=error error={:?}",
+                            scene_bounds.min,
+                            scene_bounds.max,
+                            apply_error
+                        );
+                    }
                     self.voxel_pending_render_bvh_mutation_deltas.clear();
                     if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
                         let cpu_root = render_bvh.root.unwrap_or(
@@ -1282,6 +1388,42 @@ impl Scene {
                                 render_bvh.leaves.len(),
                             );
                         }
+                    }
+                } else if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
+                    eprintln!(
+                        "[edit-sync-voxel-delta] scene_bounds={:?}->{:?} result=ok applied_deltas={} frame_root={}",
+                        scene_bounds.min,
+                        scene_bounds.max,
+                        applied_deltas,
+                        self.voxel_frame_data.region_bvh_root_index
+                    );
+                    for delta in deltas.iter().take(8) {
+                        let key = delta.key;
+                        let world_payload = self.world_tree.chunk_payload(key);
+                        let cache_payload = self
+                            .render_region_cache
+                            .as_ref()
+                            .and_then(|cache| cache.chunk_payload(key));
+                        let bvh_payloads = self
+                            .render_bvh_cache
+                            .as_ref()
+                            .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, key))
+                            .unwrap_or_default();
+                        let frame_payloads = self.debug_voxel_frame_chunk_payloads(key);
+                        eprintln!(
+                            "[edit-sync-render] key={:?} root={:?}->{:?} writes(nodes={},leaves={},freed_nodes={},freed_leaves={}) world={} cache={} bvh={} frame={}",
+                            key,
+                            delta.expected_root,
+                            delta.new_root,
+                            delta.node_writes.len(),
+                            delta.leaf_writes.len(),
+                            delta.freed_node_ids.len(),
+                            delta.freed_leaf_ids.len(),
+                            Self::summarize_chunk_payload_compact(world_payload.as_ref()),
+                            Self::summarize_chunk_payload_compact(cache_payload.as_ref()),
+                            Self::summarize_chunk_payload_list_compact(&bvh_payloads),
+                            Self::summarize_chunk_payload_list_compact(&frame_payloads),
+                        );
                     }
                 }
             }
