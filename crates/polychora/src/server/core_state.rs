@@ -42,14 +42,38 @@ impl ServerState {
     }
 
     pub(super) fn query_world_subtree(&mut self, bounds: Aabb4i) -> Arc<RegionTreeCore> {
-        if let Err(error) = self.world.prepare_query_bounds(bounds) {
+        let total_start = Instant::now();
+        let prepare_start = Instant::now();
+        let loaded_regions = match self.world.prepare_query_bounds(bounds) {
+            Ok(count) => count,
+            Err(error) => {
+                eprintln!(
+                    "failed to hydrate persisted world bounds {:?}->{:?}: {}",
+                    bounds.min, bounds.max, error
+                );
+                0
+            }
+        };
+        let prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
+
+        let query_start = Instant::now();
+        let subtree = self
+            .world
+            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        let query_ms = query_start.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        if total_ms >= 50.0 {
             eprintln!(
-                "failed to hydrate persisted world bounds {:?}->{:?}: {}",
-                bounds.min, bounds.max, error
+                "[server-world-subtree-slow] bounds={:?}->{:?} loaded_regions={} prepare_ms={:.3} query_ms={:.3} total_ms={:.3}",
+                bounds.min,
+                bounds.max,
+                loaded_regions,
+                prepare_ms,
+                query_ms,
+                total_ms
             );
         }
-        self.world
-            .query_region_core(QueryVolume { bounds }, QueryDetail::Exact)
+        subtree
     }
 
     pub(super) fn world_seed(&self) -> u64 {

@@ -2,8 +2,7 @@ use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
-    VoxelFrameInput, VoxelMutationBatch, VTE_MAX_DENSE_CHUNKS, VTE_REGION_BVH_INVALID_NODE,
-    VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY,
+    VoxelFrameInput, VoxelMutationBatch, VTE_REGION_BVH_INVALID_NODE,
 };
 use polychora::shared::chunk_payload::ChunkPayload;
 use polychora::shared::region_tree::{

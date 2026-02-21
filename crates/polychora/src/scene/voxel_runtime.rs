@@ -199,9 +199,6 @@ impl Scene {
         if let Some(&encoded) = dense_payload_cache.get(payload) {
             return Ok(encoded);
         }
-        if voxel_frame_data.chunk_headers.len() >= VTE_MAX_DENSE_CHUNKS {
-            return Err("dense chunk capacity exceeded".to_string());
-        }
         let dense_materials = payload
             .dense_materials()
             .map_err(|error| format!("dense payload decode failed: {error}"))?;
@@ -271,15 +268,6 @@ impl Scene {
                     });
                     return Ok(());
                 };
-                let leaf_cell_count = leaf.bounds.chunk_cell_count().unwrap_or(0);
-                if voxel_frame_data
-                    .leaf_chunk_entries
-                    .len()
-                    .saturating_add(leaf_cell_count)
-                    > VTE_REGION_LEAF_CHUNK_ENTRY_CAPACITY
-                {
-                    return Err("leaf chunk-entry capacity exceeded".to_string());
-                }
                 let entry_offset = voxel_frame_data.leaf_chunk_entries.len() as u32;
                 let src_indices = chunk_array
                     .decode_dense_indices()
@@ -895,7 +883,6 @@ impl Scene {
             Vec::<GpuVoxelChunkBvhNode>::with_capacity(render_bvh.nodes.len());
         let mut dense_payload_encoded_cache = std::collections::HashMap::<ChunkPayload, u32>::new();
 
-        let mut overflowed = false;
         for leaf in &render_bvh.leaves {
             match &leaf.kind {
                 RenderLeafKind::Uniform(material) => {
@@ -989,11 +976,6 @@ impl Scene {
                                                                     .get(payload)
                                                             {
                                                                 cached_dense_encoded
-                                                            } else if dense_chunk_headers.len()
-                                                                >= VTE_MAX_DENSE_CHUNKS
-                                                            {
-                                                                overflowed = true;
-                                                                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                                             } else {
                                                                 let dense_materials = match payload
                                                                     .dense_materials()
@@ -1077,20 +1059,8 @@ impl Scene {
                                         }
                                     }
                                     leaf_chunk_entries.push(encoded);
-                                    if overflowed {
-                                        break;
-                                    }
-                                }
-                                if overflowed {
-                                    break;
                                 }
                             }
-                            if overflowed {
-                                break;
-                            }
-                        }
-                        if overflowed {
-                            break;
                         }
                     }
 
@@ -1105,17 +1075,6 @@ impl Scene {
                     });
                 }
             }
-            if overflowed {
-                break;
-            }
-        }
-
-        if overflowed {
-            eprintln!(
-                "VTE voxel tree staging overflow; truncated dense chunks={}, leaf entries={}.",
-                dense_chunk_headers.len(),
-                leaf_chunk_entries.len()
-            );
         }
 
         for node in &render_bvh.nodes {
