@@ -30,6 +30,7 @@ pub struct GpuVoxelLeafHeader {
 
 pub struct VoxelFrameInput<'a> {
     pub metadata_generation: u64,
+    pub mutation_base_generation: Option<u64>,
     pub region_bvh_root_index: u32,
     pub chunk_headers: &'a [GpuVoxelChunkHeader],
     pub occupancy_words: &'a [u32],

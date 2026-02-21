@@ -2548,7 +2548,11 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 let region_bvh_nodes = &input.region_bvh_nodes[..vte_region_bvh_node_count];
                 let leaf_chunk_entries = &input.leaf_chunk_entries[..vte_leaf_chunk_entry_count];
                 let macro_words = &input.macro_words[..vte_macro_word_count];
-                if let Some(batch) = input.mutation_batch {
+                let can_apply_mutation_batch = input
+                    .mutation_base_generation
+                    .map(|base| frame.last_voxel_metadata_generation == Some(base))
+                    .unwrap_or(false);
+                if let Some(batch) = input.mutation_batch.filter(|_| can_apply_mutation_batch) {
                     for write in &batch.chunk_header_writes {
                         let Some((dst, src)) =
                             clamp_write_span(write.start, write.values.len(), vte_chunk_count)
@@ -2652,7 +2656,22 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         writer[dst].copy_from_slice(&write.values[src]);
                     }
                 } else {
-                    let dirty = input.dirty_ranges;
+                    if input.mutation_batch.is_some() && !can_apply_mutation_batch {
+                        eprintln!(
+                            "[vte-mutation-fallback-full-upload] frame_slot={} last_gen={:?} mutation_base={:?} target_gen={}",
+                            frame_idx,
+                            frame.last_voxel_metadata_generation,
+                            input.mutation_base_generation,
+                            input.metadata_generation
+                        );
+                    }
+                    // If a frame-in-flight slot missed one or more mutation generations,
+                    // partial delta writes are unsafe; force a full metadata upload.
+                    let dirty = if input.mutation_batch.is_some() && !can_apply_mutation_batch {
+                        None
+                    } else {
+                        input.dirty_ranges
+                    };
 
                     let chunk_headers_dirty = clamp_dirty_range(
                         dirty.and_then(|ranges| ranges.chunk_headers.clone()),

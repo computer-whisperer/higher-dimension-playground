@@ -151,6 +151,15 @@ impl Scene {
             desired_owned = slice_non_empty_region_core_in_bounds(subtree, bounds);
             &desired_owned
         };
+        let collect_previous_start = Instant::now();
+        let previous_core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
+        let collect_previous_ms = collect_previous_start.elapsed().as_secs_f64() * 1000.0;
+        if previous_core.kind == desired_core.kind {
+            return RegionPatchStats {
+                collect_previous_ms,
+                ..RegionPatchStats::default()
+            };
+        }
         let single_chunk_bounds = bounds.min == bounds.max;
         let previous_single_chunk_payload = if single_chunk_bounds {
             self.world_tree.chunk_payload(bounds.min)
@@ -175,6 +184,7 @@ impl Scene {
         }
         let Some(changed_bounds) = changed_bounds else {
             return RegionPatchStats {
+                collect_previous_ms,
                 splice_ms,
                 ..RegionPatchStats::default()
             };
@@ -220,6 +230,7 @@ impl Scene {
             changed_chunks: 1,
             invalidated_cached_chunks,
             queued_updates,
+            collect_previous_ms,
             splice_ms,
             ..RegionPatchStats::default()
         }

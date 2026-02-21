@@ -216,6 +216,7 @@ impl DemoScene {
                 frame_params,
                 VoxelFrameInput {
                     metadata_generation: 0,
+                    mutation_base_generation: None,
                     region_bvh_root_index: VTE_REGION_BVH_INVALID_NODE,
                     chunk_headers: &[],
                     occupancy_words: &[],
@@ -430,6 +431,7 @@ impl DemoScene {
                 frame_params,
                 VoxelFrameInput {
                     metadata_generation: 0,
+                    mutation_base_generation: None,
                     region_bvh_root_index: VTE_REGION_BVH_INVALID_NODE,
                     chunk_headers: &[],
                     occupancy_words: &[],

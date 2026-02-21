@@ -109,6 +109,7 @@ pub enum ScenePreset {
 
 pub struct VoxelFrameData {
     pub metadata_generation: u64,
+    pub mutation_base_generation: Option<u64>,
     pub region_bvh_root_index: u32,
     pub dirty_ranges: VoxelFrameDirtyRanges,
     pub mutation_batch: Option<VoxelMutationBatch>,
@@ -137,6 +138,7 @@ impl VoxelFrameData {
     pub fn as_input(&self) -> VoxelFrameInput<'_> {
         VoxelFrameInput {
             metadata_generation: self.metadata_generation,
+            mutation_base_generation: self.mutation_base_generation,
             region_bvh_root_index: self.region_bvh_root_index,
             chunk_headers: &self.chunk_headers,
             occupancy_words: &self.occupancy_words,
@@ -692,6 +694,7 @@ impl Scene {
             voxel_last_rebuild_failure_signature: None,
             voxel_frame_data: VoxelFrameData {
                 metadata_generation: 0,
+                mutation_base_generation: None,
                 region_bvh_root_index:
                     higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
                 dirty_ranges: VoxelFrameDirtyRanges::default(),
@@ -1202,6 +1205,7 @@ mod tests {
         scene.world_set_voxel(0, 0, 0, 0, VoxelType(3));
         let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
+        assert!(scene.voxel_frame_data.mutation_base_generation.is_none());
     }
 
     #[test]
@@ -1210,6 +1214,7 @@ mod tests {
         scene.world_set_voxel(0, 0, 0, 0, VoxelType(3));
         let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
+        let base_generation = scene.voxel_frame_data.metadata_generation;
 
         scene.world_set_voxel(CHUNK_SIZE as i32, 0, 0, 0, VoxelType(4));
         let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
@@ -1217,6 +1222,10 @@ mod tests {
         let batch = scene.voxel_frame_data.mutation_batch.as_ref();
         assert!(batch.is_some());
         let batch = batch.unwrap();
+        assert_eq!(
+            scene.voxel_frame_data.mutation_base_generation,
+            Some(base_generation)
+        );
         assert!(
             !batch.chunk_header_writes.is_empty()
                 || !batch.occupancy_word_writes.is_empty()
@@ -1257,6 +1266,7 @@ mod tests {
 
         assert!(scene.voxel_pending_render_bvh_mutation_deltas.is_empty());
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
+        assert!(scene.voxel_frame_data.mutation_base_generation.is_none());
         let cpu_root = scene
             .render_bvh_cache
             .as_ref()

@@ -857,8 +857,14 @@ impl Scene {
             old_macro_words_len,
             self.voxel_frame_data.macro_words.len(),
         );
+        let mutation_base_generation = self.voxel_frame_data.metadata_generation;
         self.voxel_frame_data.mutation_batch =
             Self::build_mutation_batch_from_dirty_ranges(&self.voxel_frame_data, &dirty);
+        self.voxel_frame_data.mutation_base_generation =
+            self.voxel_frame_data
+                .mutation_batch
+                .as_ref()
+                .map(|_| mutation_base_generation);
         self.voxel_frame_data.dirty_ranges = dirty;
 
         self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
@@ -1099,6 +1105,7 @@ impl Scene {
     fn clear_voxel_frame_buffers(&mut self) {
         self.voxel_frame_data.region_bvh_root_index =
             higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE;
+        self.voxel_frame_data.mutation_base_generation = None;
         self.voxel_frame_data.dirty_ranges = VoxelFrameDirtyRanges::default();
         self.voxel_frame_data.mutation_batch = None;
         self.voxel_dense_payload_encoded_cache.clear();
@@ -1120,6 +1127,7 @@ impl Scene {
     ) {
         self.voxel_visibility_generation = self.voxel_visibility_generation.wrapping_add(1);
         self.voxel_frame_data.metadata_generation = self.voxel_visibility_generation;
+        self.voxel_frame_data.mutation_base_generation = None;
         if let Some(buffers) = buffers {
             self.voxel_frame_data.region_bvh_root_index = buffers.region_bvh_root_index;
             self.voxel_dense_payload_encoded_cache = buffers.dense_payload_encoded_cache;
