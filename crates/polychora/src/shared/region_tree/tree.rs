@@ -1334,6 +1334,189 @@ fn merge_adjacent_children_once(children: &mut Vec<RegionTreeCore>) -> bool {
     false
 }
 
+/// Merge multiple ChunkArray children of a Branch into a single ChunkArray.
+///
+/// Collects all ChunkArray children, decodes their chunk payloads, and rebuilds
+/// them as one consolidated ChunkArray spanning the combined bounds.  The merged
+/// ChunkArray uses `default_chunk_idx = Some(0)` (Empty) so that positions outside
+/// the original children's bounds are implicitly empty.
+///
+/// Skips consolidation when:
+/// - Fewer than 2 ChunkArray children exist
+/// - The merged bounding box would overlap a non-ChunkArray sibling (violating
+///   the Branch non-overlapping invariant)
+/// - The merged volume exceeds 4× the populated chunk count (too sparse)
+fn consolidate_chunk_array_children(
+    children: &mut Vec<RegionTreeCore>,
+    generator_version_hash: u64,
+) -> bool {
+    let ca_count = children
+        .iter()
+        .filter(|c| matches!(c.kind, RegionNodeKind::ChunkArray(_)))
+        .count();
+    if ca_count < 2 {
+        return false;
+    }
+
+    // Extract ChunkArray children, leaving others in place.
+    let mut ca_children = Vec::with_capacity(ca_count);
+    let mut other_children = Vec::with_capacity(children.len() - ca_count);
+    for child in std::mem::take(children) {
+        if matches!(child.kind, RegionNodeKind::ChunkArray(_)) {
+            ca_children.push(child);
+        } else {
+            other_children.push(child);
+        }
+    }
+
+    // Compute combined bounds and total populated chunk count.
+    let mut combined_bounds = ca_children[0].bounds;
+    let mut total_chunks = 0usize;
+    for ca_child in &ca_children {
+        combined_bounds = merge_aabb(combined_bounds, ca_child.bounds);
+        if let RegionNodeKind::ChunkArray(ca) = &ca_child.kind {
+            if let Some(extents) = ca.bounds.chunk_extents() {
+                total_chunks += extents.iter().copied().product::<usize>();
+            }
+        }
+    }
+
+    // Safety check: the merged AABB must not overlap any non-ChunkArray sibling.
+    // The Branch invariant requires non-overlapping children.  Since the merged
+    // ChunkArray's bounds can be wider than any individual child (it's the AABB
+    // union), it could extend into space occupied by Uniform or other siblings.
+    // If that happens, skip the merge entirely.
+    if other_children
+        .iter()
+        .any(|c| c.bounds.intersects(&combined_bounds))
+    {
+        *children = ca_children;
+        children.extend(other_children);
+        return false;
+    }
+
+    let Some(combined_extents) = combined_bounds.chunk_extents() else {
+        *children = ca_children;
+        children.extend(other_children);
+        return false;
+    };
+    let combined_volume: usize = combined_extents.iter().copied().product();
+    if combined_volume == 0 {
+        *children = ca_children;
+        children.extend(other_children);
+        return false;
+    }
+
+    // Density check: skip if merged volume is much larger than chunk count.
+    // Allow up to 4× overhead (25% density minimum).
+    if combined_volume > total_chunks.saturating_mul(4) {
+        *children = ca_children;
+        children.extend(other_children);
+        return false;
+    }
+
+    // Build palette and dense index array for the merged ChunkArray.
+    let empty_payload = ChunkPayload::Empty;
+    let mut palette: Vec<ChunkPayload> = vec![empty_payload.clone()];
+    let mut palette_map: HashMap<ChunkPayload, u16> = HashMap::new();
+    palette_map.insert(empty_payload, 0u16);
+    let mut dense_indices = vec![0u16; combined_volume];
+
+    for ca_child in &ca_children {
+        let RegionNodeKind::ChunkArray(ca) = &ca_child.kind else {
+            continue;
+        };
+        let Ok(child_indices) = ca.decode_dense_indices() else {
+            // If we can't decode, bail out and restore original children.
+            *children = ca_children;
+            children.extend(other_children);
+            return false;
+        };
+        let Some(child_extents) = ca.bounds.chunk_extents() else {
+            continue;
+        };
+
+        // Iterate all positions in this child's bounds.
+        for w in 0..child_extents[3] {
+            for z in 0..child_extents[2] {
+                for y in 0..child_extents[1] {
+                    for x in 0..child_extents[0] {
+                        let child_linear = linear_cell_index(
+                            [x, y, z, w],
+                            child_extents,
+                        );
+                        let palette_idx = child_indices[child_linear] as usize;
+
+                        // Resolve payload: use default if applicable.
+                        let payload = if let Some(default_idx) = ca.default_chunk_idx {
+                            if palette_idx == default_idx as usize {
+                                continue; // Skip default entries (they stay empty).
+                            }
+                            ca.chunk_palette[palette_idx].clone()
+                        } else {
+                            ca.chunk_palette[palette_idx].clone()
+                        };
+
+                        if payload == ChunkPayload::Empty {
+                            continue;
+                        }
+
+                        // Map child-local coords to combined coords.
+                        let world_pos = [
+                            ca.bounds.min[0] + x as i32,
+                            ca.bounds.min[1] + y as i32,
+                            ca.bounds.min[2] + z as i32,
+                            ca.bounds.min[3] + w as i32,
+                        ];
+                        let combined_local = [
+                            (world_pos[0] - combined_bounds.min[0]) as usize,
+                            (world_pos[1] - combined_bounds.min[1]) as usize,
+                            (world_pos[2] - combined_bounds.min[2]) as usize,
+                            (world_pos[3] - combined_bounds.min[3]) as usize,
+                        ];
+                        let combined_linear = linear_cell_index(
+                            combined_local,
+                            combined_extents,
+                        );
+
+                        // Deduplicate palette entries.
+                        let merged_idx = if let Some(&idx) = palette_map.get(&payload) {
+                            idx
+                        } else {
+                            let idx = palette.len() as u16;
+                            palette_map.insert(payload.clone(), idx);
+                            palette.push(payload);
+                            idx
+                        };
+                        dense_indices[combined_linear] = merged_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the merged ChunkArray.
+    let Ok(merged_ca) = ChunkArrayData::from_dense_indices(
+        combined_bounds,
+        palette,
+        dense_indices,
+        Some(0), // default = Empty
+    ) else {
+        *children = ca_children;
+        children.extend(other_children);
+        return false;
+    };
+
+    // Replace ChunkArray children with the single merged node.
+    *children = other_children;
+    children.push(RegionTreeCore {
+        bounds: combined_bounds,
+        kind: RegionNodeKind::ChunkArray(merged_ca),
+        generator_version_hash,
+    });
+    true
+}
+
 fn normalize_chunk_node(node: &mut RegionTreeCore) {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
         return;
@@ -1364,6 +1547,11 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
             break;
         }
     }
+
+    // Consolidate ChunkArray siblings into a single multi-chunk ChunkArray.
+    // This merges N single-chunk (or small) ChunkArray children that form a dense
+    // cluster into one ChunkArray leaf, drastically reducing BVH node count.
+    consolidate_chunk_array_children(children, node.generator_version_hash);
 
     if children.len() == 1 {
         let child = children.pop().expect("single child");
