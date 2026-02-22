@@ -907,3 +907,127 @@ fn replaying_sliced_non_empty_windows_over_synced_tree_is_semantically_stable() 
         assert_tree_matches_expected_uniform_map(&client_tree, global_bounds, &expected);
     }
 }
+
+/// Regression test: placing two Dense16 blocks in adjacent chunks on a Uniform
+/// platform must preserve both edits after tree normalization (which includes
+/// ChunkArray sibling consolidation).  A previous bug caused
+/// `consolidate_chunk_array_children` to discard Dense16 payloads whose palette
+/// index matched the ChunkArray's `default_chunk_idx`, silently destroying every
+/// voxel edit.
+#[test]
+fn consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
+    let mut tree = RegionChunkTree::new();
+    let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(4),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+
+    // Place a dense block at chunk [3,0,3,0].
+    let mut materials_a = vec![0u16; 4096];
+    materials_a[0] = 9;
+    let payload_a = ChunkPayload::Dense16 {
+        materials: materials_a,
+    };
+    assert!(tree.set_chunk(key(3, 0, 3, 0), Some(payload_a.clone())));
+    assert_eq!(tree.chunk_payload(key(3, 0, 3, 0)), Some(payload_a.clone()));
+
+    // Place a dense block at adjacent chunk [4,0,3,0].
+    let mut materials_b = vec![0u16; 4096];
+    materials_b[0] = 10;
+    let payload_b = ChunkPayload::Dense16 {
+        materials: materials_b,
+    };
+    assert!(tree.set_chunk(key(4, 0, 3, 0), Some(payload_b.clone())));
+
+    // Both edits must survive consolidation.
+    assert_eq!(
+        tree.chunk_payload(key(3, 0, 3, 0)),
+        Some(payload_a),
+        "first edit disappeared after second edit"
+    );
+    assert_eq!(
+        tree.chunk_payload(key(4, 0, 3, 0)),
+        Some(payload_b),
+        "second edit not present"
+    );
+    // Platform Uniform elsewhere must be intact.
+    assert_eq!(
+        tree.chunk_payload(key(0, 0, 0, 0)),
+        Some(ChunkPayload::Uniform(4))
+    );
+}
+
+/// Same scenario via splice (the multiplayer patch path) instead of set_chunk.
+#[test]
+fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
+    let mut tree = RegionChunkTree::new();
+    let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(4),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+
+    // Splice edit A at [3,0,3,0].
+    let mut materials_a = vec![0u16; 4096];
+    materials_a[0] = 9;
+    let payload_a = ChunkPayload::Dense16 {
+        materials: materials_a,
+    };
+    let a_bounds = Aabb4i::new([3, 0, 3, 0], [3, 0, 3, 0]);
+    let a_ca = ChunkArrayData::from_dense_indices(
+        a_bounds,
+        vec![payload_a.clone()],
+        vec![0u16],
+        Some(0),
+    )
+    .unwrap();
+    let a_core = RegionTreeCore {
+        bounds: a_bounds,
+        kind: RegionNodeKind::ChunkArray(a_ca),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(a_bounds, &a_core);
+    assert_eq!(tree.chunk_payload(key(3, 0, 3, 0)), Some(payload_a.clone()));
+
+    // Splice edit B at [4,0,3,0].
+    let mut materials_b = vec![0u16; 4096];
+    materials_b[0] = 10;
+    let payload_b = ChunkPayload::Dense16 {
+        materials: materials_b,
+    };
+    let b_bounds = Aabb4i::new([4, 0, 3, 0], [4, 0, 3, 0]);
+    let b_ca = ChunkArrayData::from_dense_indices(
+        b_bounds,
+        vec![payload_b.clone()],
+        vec![0u16],
+        Some(0),
+    )
+    .unwrap();
+    let b_core = RegionTreeCore {
+        bounds: b_bounds,
+        kind: RegionNodeKind::ChunkArray(b_ca),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(b_bounds, &b_core);
+
+    // Both must survive.
+    assert_eq!(
+        tree.chunk_payload(key(3, 0, 3, 0)),
+        Some(payload_a),
+        "first splice disappeared after second splice"
+    );
+    assert_eq!(
+        tree.chunk_payload(key(4, 0, 3, 0)),
+        Some(payload_b),
+        "second splice not present"
+    );
+    assert_eq!(
+        tree.chunk_payload(key(0, 0, 0, 0)),
+        Some(ChunkPayload::Uniform(4))
+    );
+}

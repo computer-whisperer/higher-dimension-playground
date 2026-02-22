@@ -1447,15 +1447,7 @@ fn consolidate_chunk_array_children(
                         );
                         let palette_idx = child_indices[child_linear] as usize;
 
-                        // Resolve payload: use default if applicable.
-                        let payload = if let Some(default_idx) = ca.default_chunk_idx {
-                            if palette_idx == default_idx as usize {
-                                continue; // Skip default entries (they stay empty).
-                            }
-                            ca.chunk_palette[palette_idx].clone()
-                        } else {
-                            ca.chunk_palette[palette_idx].clone()
-                        };
+                        let payload = ca.chunk_palette[palette_idx].clone();
 
                         if payload == ChunkPayload::Empty {
                             continue;
