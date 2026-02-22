@@ -139,6 +139,10 @@ impl ServerState {
         keep_bounds.unwrap_or_else(|| Aabb4i::new([1, 1, 1, 1], [0, 0, 0, 0]))
     }
 
+    pub(super) fn world_bounds(&self) -> crate::shared::protocol::WorldBounds {
+        self.world.world_bounds()
+    }
+
     pub(super) fn world_seed(&self) -> u64 {
         self.world.world_seed()
     }

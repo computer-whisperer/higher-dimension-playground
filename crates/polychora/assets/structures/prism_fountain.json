@@ -1,0 +1,18 @@
+{
+  "name": "prism_fountain",
+  "description": "A prismarine basin surrounding a tall glass column topped with a beacon matrix light.",
+  "spawn_weight": 1,
+  "ground_offset_y": 1,
+  "fills": [
+    { "min": [-5, -1, -5, -5], "size": [11, 1, 11, 11], "material": 17 },
+    { "min": [-5, 0, -5, -5], "size": [11, 2, 1, 11], "material": 52 },
+    { "min": [-5, 0, 5, -5], "size": [11, 2, 1, 11], "material": 52 },
+    { "min": [-5, 0, -4, -5], "size": [1, 2, 9, 11], "material": 52 },
+    { "min": [5, 0, -4, -5], "size": [1, 2, 9, 11], "material": 52 },
+    { "min": [-4, 0, -4, -5], "size": [9, 2, 9, 1], "material": 52 },
+    { "min": [-4, 0, -4, 5], "size": [9, 2, 9, 1], "material": 52 },
+    { "min": [-4, 0, -4, -4], "size": [9, 1, 9, 9], "material": 23 },
+    { "min": [0, 0, 0, 0], "size": [1, 7, 1, 1], "material": 49 },
+    { "min": [0, 7, 0, 0], "size": [1, 1, 1, 1], "material": 68 }
+  ]
+}

@@ -1209,6 +1209,7 @@ pub(super) fn handle_message(
                         let guard = state.lock().expect("server state lock poisoned");
                         WorldSummary {
                             non_empty_chunks: guard.world_non_empty_chunk_count(),
+                            bounds: guard.world_bounds(),
                         }
                     },
                 },
