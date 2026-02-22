@@ -526,8 +526,9 @@ fn prune_empty_subtrees(core: &mut RegionTreeCore) -> bool {
             if children.is_empty() {
                 core.kind = RegionNodeKind::Empty;
                 false
-            } else if children.len() == 1 && children[0].bounds == core.bounds {
+            } else if children.len() == 1 {
                 let child = children.pop().expect("single child");
+                core.bounds = child.bounds;
                 core.kind = child.kind;
                 true
             } else {
@@ -1345,8 +1346,13 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
         node.kind = RegionNodeKind::Empty;
         return;
     }
-    if children.len() == 1 && children[0].bounds == node.bounds {
+    // Collapse single-child branches by shrink-wrapping bounds to the child.
+    // After splice/clear carves away siblings, the remaining child is typically smaller
+    // than the parent bounds.  Tightening the parent to the child and collapsing removes
+    // degenerate Branch(1) chains that add BVH traversal depth with no spatial benefit.
+    if children.len() == 1 {
         let child = children.pop().expect("single child");
+        node.bounds = child.bounds;
         node.kind = child.kind;
         return;
     }
@@ -1359,8 +1365,9 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
         }
     }
 
-    if children.len() == 1 && children[0].bounds == node.bounds {
+    if children.len() == 1 {
         let child = children.pop().expect("single child");
+        node.bounds = child.bounds;
         node.kind = child.kind;
         return;
     }
@@ -1964,8 +1971,11 @@ fn expand_root_once(root: Box<RegionTreeCore>, key_pos: [i32; 4]) -> Box<RegionT
     // Root expansion introduces an empty sibling placeholder for the out-of-bounds side.
     // Normalize the carried subtree first so placeholder empties from prior expansions
     // do not accumulate off-path.
-    normalize_chunk_node(&mut old_root);
+    // Save bounds before normalize: normalize may collapse Branch(1) chains with
+    // bounds tightening, but we need the pre-normalize extent for geometric expansion
+    // so the while-loop in set_chunk converges (each expansion at least doubles span).
     let old_bounds = old_root.bounds;
+    normalize_chunk_node(&mut old_root);
     let axis = (0..4)
         .find(|axis| {
             key_pos[*axis] < old_bounds.min[*axis] || key_pos[*axis] > old_bounds.max[*axis]

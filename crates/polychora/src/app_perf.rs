@@ -399,6 +399,14 @@ impl App {
         match state.phase {
             PerfSuitePhase::WorldSettle => unreachable!("handled above"),
             PerfSuitePhase::Warmup => {
+                // Dump trees after warmup if requested (world is loaded for this scenario).
+                if std::env::var_os("R4D_PERF_DUMP_TREES").is_some() {
+                    eprintln!(
+                        "\n[perf-suite] tree dump for scenario {}/{} '{}'",
+                        scenario_num, scenario_total, scenario.label,
+                    );
+                    self.scene.dump_render_trees();
+                }
                 state.phase = PerfSuitePhase::Sample;
                 state.frames_remaining = state.sample_frames;
                 state.reset_sample_accumulators();
