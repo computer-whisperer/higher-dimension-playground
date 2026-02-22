@@ -621,6 +621,7 @@ impl App {
         let view_matrix = self.current_view_matrix();
         let backend = self.args.backend.to_render_backend();
         let disable_remote_non_voxel = env_flag_enabled("R4D_DISABLE_REMOTE_NON_VOXEL");
+        let vte_disable_entities = env_flag_enabled("R4D_VTE_DISABLE_ENTITIES");
         let highlight_mode = self.args.edit_highlight_mode;
         let mut hud_player_tags =
             self.remote_player_tags(&view_matrix, look_dir, self.focal_length_xy, aspect);
@@ -905,7 +906,7 @@ impl App {
         self.set_runtime_profile_update_ms(gameplay_update_start.elapsed().as_secs_f64() * 1000.0);
 
         if backend == RenderBackend::VoxelTraversal {
-            let mut vte_non_voxel_instances = if disable_remote_non_voxel {
+            let mut vte_non_voxel_instances = if vte_disable_entities || disable_remote_non_voxel {
                 Vec::new()
             } else {
                 let remote_instances = self.remote_player_instances(preview_time_s);
@@ -919,8 +920,10 @@ impl App {
             let mut preview_overlay_instances: &[common::ModelInstance] = &[];
             if self.vte_overlay_raster_enabled {
                 preview_overlay_instances = std::slice::from_ref(&preview_instance);
-            } else {
+            } else if !vte_disable_entities {
                 // Default: render held-block preview through Stage A entity path.
+                // Skipped when R4D_VTE_DISABLE_ENTITIES is set so the entire non-voxel
+                // BVH query (including preview) is fused off for isolation profiling.
                 vte_non_voxel_instances.push(preview_instance);
             }
             let voxel_build_start = Instant::now();
@@ -970,12 +973,12 @@ impl App {
                 render_submit_start.elapsed().as_secs_f64() * 1000.0,
             );
         } else {
-            let remote_instances = if disable_remote_non_voxel {
+            let remote_instances = if vte_disable_entities || disable_remote_non_voxel {
                 Vec::new()
             } else {
                 self.remote_player_instances(preview_time_s)
             };
-            let entity_instances = if disable_remote_non_voxel {
+            let entity_instances = if vte_disable_entities || disable_remote_non_voxel {
                 Vec::new()
             } else {
                 self.remote_entity_instances()
@@ -984,7 +987,9 @@ impl App {
                 Vec::with_capacity(remote_instances.len() + entity_instances.len() + 1);
             render_instances.extend(remote_instances);
             render_instances.extend(entity_instances);
-            render_instances.push(preview_instance);
+            if !vte_disable_entities {
+                render_instances.push(preview_instance);
+            }
             let render_submit_start = Instant::now();
             self.rcx.as_mut().unwrap().render_tetra_frame(
                 self.device.clone(),

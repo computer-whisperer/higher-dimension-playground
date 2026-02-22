@@ -205,6 +205,21 @@ impl GpuProfiler {
             .saturating_add(entity_tetrahedrons as u64);
     }
 
+    /// Non-destructive snapshot of accumulated per-phase averages.
+    /// Returns Vec of (name, avg_ms, sample_count).
+    pub fn phase_averages_snapshot(&self) -> Vec<(&'static str, f64, usize)> {
+        self.accum
+            .iter()
+            .filter_map(|(name, total_ms, count)| {
+                if *count == 0 {
+                    None
+                } else {
+                    Some((*name, total_ms / *count as f64, *count))
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn print_report(&mut self) {
         println!("=== GPU Profile ({} frames) ===", self.total_frames);
 

@@ -34,6 +34,14 @@ impl App {
         self.teleport_dialog_open = false;
         self.controls_dialog_open = false;
         self.sprint_enabled = false;
+
+        // Apply per-scenario render config overrides (or restore defaults).
+        self.vte_max_trace_steps = scenario
+            .vte_max_trace_steps
+            .unwrap_or(self.perf_suite_default_trace_steps);
+        self.vte_max_trace_distance = scenario
+            .vte_max_trace_distance
+            .unwrap_or(self.perf_suite_default_trace_distance);
     }
 
     pub(super) fn reset_runtime_profile_window(&mut self) {
@@ -97,25 +105,66 @@ impl App {
             rcx.reset_gpu_profile_window();
         }
 
+        // Auto-spawn entities on first scenario's warmup phase (once).
+        if scenario_index == 0 && phase == PerfSuitePhase::Warmup && !self.perf_suite_entities_spawned {
+            self.perf_suite_auto_spawn_entities();
+        }
+
         if announce {
             let scenario = self.perf_suite_scenario(scenario_index);
             let scenario_num = scenario_index + 1;
             let scenario_total = PERF_SUITE_SCENARIOS.len();
             let phase_label = match phase {
+                PerfSuitePhase::WorldSettle => "world-settle",
                 PerfSuitePhase::Warmup => "warmup",
                 PerfSuitePhase::Sample => "sample",
             };
             eprintln!(
-                "[perf-suite] scenario {}/{} '{}': {} {} frames (warmup={} sample={})",
+                "[perf-suite] scenario {}/{} '{}': {} {} frames (warmup={} sample={}) trace_steps={} trace_dist={:.1}",
                 scenario_num,
                 scenario_total,
                 scenario.label,
                 phase_label,
                 frames_remaining,
                 warmup_frames,
-                sample_frames
+                sample_frames,
+                self.vte_max_trace_steps,
+                self.vte_max_trace_distance,
             );
         }
+    }
+
+    fn perf_suite_auto_spawn_entities(&mut self) {
+        let count = self.args.perf_suite_spawn_entities;
+        if count == 0 {
+            return;
+        }
+        self.perf_suite_entities_spawned = true;
+
+        let [cx, cy, cz, cw] = self.camera.position;
+        // Place entities in a grid near camera position.
+        let grid_size = (count as f32).sqrt().ceil() as u32;
+        let spacing = 4.0_f32;
+        let mut spawned = 0u32;
+        for ix in 0..grid_size {
+            for iz in 0..grid_size {
+                if spawned >= count {
+                    break;
+                }
+                let x = cx + (ix as f32 - grid_size as f32 / 2.0) * spacing;
+                let z = cz + (iz as f32 - grid_size as f32 / 2.0) * spacing;
+                let cmd = format!("spawn cube {:.1} {:.1} {:.1} {:.1}", x, cy + 2.0, z, cw);
+                if !self.send_multiplayer_console_command(&cmd) {
+                    eprintln!(
+                        "[perf-suite] entity spawn failed (no active server); spawned {}/{}",
+                        spawned, count
+                    );
+                    return;
+                }
+                spawned += 1;
+            }
+        }
+        eprintln!("[perf-suite] spawned {} entities for BVH testing", spawned);
     }
 
     pub(super) fn perf_suite_report_path(&self) -> PathBuf {
@@ -147,6 +196,18 @@ impl App {
             } else {
                 serde_json::json!(null)
             };
+            let gpu_phases: Vec<serde_json::Value> = result
+                .render_gpu_phases
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name,
+                        "avg_ms": p.avg_ms,
+                        "max_ms": p.max_ms,
+                        "samples": p.samples,
+                    })
+                })
+                .collect();
             scenarios.push(serde_json::json!({
                 "index": result.scenario_index,
                 "label": result.scenario_label,
@@ -158,17 +219,23 @@ impl App {
                     "zw_angle": scenario.zw_angle,
                     "yw_deviation": scenario.yw_deviation,
                 },
+                "render_config": {
+                    "vte_max_trace_steps": result.vte_max_trace_steps,
+                    "vte_max_trace_distance": result.vte_max_trace_distance,
+                },
                 "client_cpu": {
                     "avg_ms": result.client_cpu_avg_ms,
                     "max_ms": result.client_cpu_max_ms,
                     "frames": result.client_cpu_frames,
                 },
                 "render_gpu": render_gpu,
+                "render_gpu.phases": gpu_phases,
             }));
         }
 
+        let singleplayer_world_type = format!("{:?}", self.args.singleplayer_world_type);
         let report = serde_json::json!({
-            "schema": "polychora.perf_suite.v1",
+            "schema": "polychora.perf_suite.v2",
             "generated_unix_seconds": SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -177,8 +244,10 @@ impl App {
             "world_file": self.world_file.to_string_lossy(),
             "render_backend": format!("{:?}", self.args.backend),
             "vte_display_mode": format!("{:?}", self.args.vte_display_mode),
-            "vte_max_trace_steps": self.vte_max_trace_steps,
-            "vte_max_trace_distance": self.vte_max_trace_distance,
+            "vte_max_trace_steps": self.perf_suite_default_trace_steps,
+            "vte_max_trace_distance": self.perf_suite_default_trace_distance,
+            "singleplayer_world_type": singleplayer_world_type,
+            "singleplayer_world_seed": self.args.singleplayer_world_seed,
             "warmup_frames": state.warmup_frames,
             "sample_frames": state.sample_frames,
             "scenario_count": scenarios.len(),
@@ -227,6 +296,48 @@ impl App {
             return;
         }
 
+        // WorldSettle phase: wait for chunk streaming to reach steady state.
+        if state.phase == PerfSuitePhase::WorldSettle {
+            state.settle_total_frames += 1;
+            let patches_this_frame = self.profile_cpu_phase_current.multiplayer_patch_count;
+            if patches_this_frame == 0 {
+                state.settle_stable_count += 1;
+            } else {
+                state.settle_stable_count = 0;
+            }
+            // Log progress every 60 frames.
+            if state.settle_total_frames % 60 == 0 {
+                eprintln!(
+                    "[perf-suite] world-settle: frame {} stable={}/{} (patches_this_frame={})",
+                    state.settle_total_frames,
+                    state.settle_stable_count,
+                    PERF_SUITE_SETTLE_STABLE_FRAMES,
+                    patches_this_frame,
+                );
+            }
+            let settled = state.settle_stable_count >= PERF_SUITE_SETTLE_STABLE_FRAMES
+                || state.settle_total_frames >= PERF_SUITE_SETTLE_MAX_FRAMES;
+            if !settled {
+                self.perf_suite_state = Some(state);
+                return;
+            }
+            let reason = if state.settle_stable_count >= PERF_SUITE_SETTLE_STABLE_FRAMES {
+                "stable"
+            } else {
+                "timeout"
+            };
+            eprintln!(
+                "[perf-suite] world settled ({}) after {} frames ({} stable)",
+                reason, state.settle_total_frames, state.settle_stable_count
+            );
+            // Transition to first scenario warmup.
+            state.phase = PerfSuitePhase::Warmup;
+            state.frames_remaining = state.warmup_frames;
+            self.perf_suite_state = Some(state);
+            self.begin_perf_suite_phase(true);
+            return;
+        }
+
         let client_cpu_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         if state.phase == PerfSuitePhase::Sample {
             state.sample_frame_samples = state.sample_frame_samples.saturating_add(1);
@@ -238,6 +349,24 @@ impl App {
                 state.sample_gpu_samples = state.sample_gpu_samples.saturating_add(1);
                 state.sample_gpu_ms_sum += gpu_ms;
                 state.sample_gpu_ms_max = state.sample_gpu_ms_max.max(gpu_ms);
+
+                // Accumulate per-phase GPU breakdown.
+                for &(name, phase_ms) in rcx.last_gpu_phase_breakdown() {
+                    let phase_ms = phase_ms.max(0.0) as f64;
+                    if let Some(accum) = state.sample_gpu_phases.iter_mut().find(|a| a.name == name)
+                    {
+                        accum.sum_ms += phase_ms;
+                        accum.max_ms = accum.max_ms.max(phase_ms);
+                        accum.samples += 1;
+                    } else {
+                        state.sample_gpu_phases.push(GpuPhaseAccum {
+                            name,
+                            sum_ms: phase_ms,
+                            max_ms: phase_ms,
+                            samples: 1,
+                        });
+                    }
+                }
             }
         }
 
@@ -254,6 +383,7 @@ impl App {
         let scenario_total = PERF_SUITE_SCENARIOS.len();
 
         match state.phase {
+            PerfSuitePhase::WorldSettle => unreachable!("handled above"),
             PerfSuitePhase::Warmup => {
                 state.phase = PerfSuitePhase::Sample;
                 state.frames_remaining = state.sample_frames;
@@ -300,6 +430,20 @@ impl App {
                             state.sample_frame_samples
                         );
                     }
+                    let render_gpu_phases: Vec<GpuPhaseResult> = state
+                        .sample_gpu_phases
+                        .iter()
+                        .map(|a| GpuPhaseResult {
+                            name: a.name,
+                            avg_ms: if a.samples > 0 {
+                                a.sum_ms / a.samples as f64
+                            } else {
+                                0.0
+                            },
+                            max_ms: a.max_ms,
+                            samples: a.samples,
+                        })
+                        .collect();
                     state.results.push(PerfSuiteScenarioResult {
                         scenario_index: state.scenario_index,
                         scenario_label: scenario.label,
@@ -309,6 +453,9 @@ impl App {
                         render_gpu_avg_ms,
                         render_gpu_max_ms,
                         render_gpu_samples: state.sample_gpu_samples,
+                        render_gpu_phases,
+                        vte_max_trace_steps: self.vte_max_trace_steps,
+                        vte_max_trace_distance: self.vte_max_trace_distance,
                     });
                 }
 

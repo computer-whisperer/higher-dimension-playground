@@ -1857,6 +1857,17 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         self.profiler.last_gpu_total_ms
     }
 
+    /// Last frame's per-phase GPU breakdown: Vec of (phase_name, ms).
+    pub fn last_gpu_phase_breakdown(&self) -> &[(&'static str, f32)] {
+        &self.profiler.last_frame_phases
+    }
+
+    /// Non-destructive snapshot of accumulated per-phase GPU averages.
+    /// Returns Vec of (name, avg_ms, sample_count).
+    pub fn gpu_phase_averages(&self) -> Vec<(&'static str, f64, usize)> {
+        self.profiler.phase_averages_snapshot()
+    }
+
     pub fn voxel_buffer_capacities(&self) -> (usize, usize, usize, usize) {
         self.frames_in_flight
             .first()

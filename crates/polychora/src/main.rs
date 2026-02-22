@@ -151,6 +151,11 @@ struct VteRuntimeProfile {
     y_slice_lookup_cache: bool,
 }
 
+/// (max_trace_steps, max_trace_distance) for perf suite render distance tiers.
+const PERF_TIER_LOW: (u32, f32) = (160, 80.0);
+const PERF_TIER_DEFAULT: (u32, f32) = (320, 160.0);
+const PERF_TIER_HIGH: (u32, f32) = (640, 320.0);
+
 #[derive(Copy, Clone)]
 struct PerfSuiteScenario {
     label: &'static str,
@@ -160,13 +165,34 @@ struct PerfSuiteScenario {
     xw_angle: f32,
     zw_angle: f32,
     yw_deviation: f32,
+    vte_max_trace_steps: Option<u32>,
+    vte_max_trace_distance: Option<f32>,
+}
+
+struct GpuPhaseAccum {
+    name: &'static str,
+    sum_ms: f64,
+    max_ms: f64,
+    samples: u32,
+}
+
+struct GpuPhaseResult {
+    name: &'static str,
+    avg_ms: f64,
+    max_ms: f64,
+    samples: u32,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum PerfSuitePhase {
+    /// Wait for world generation/streaming to reach steady state before benchmarking.
+    WorldSettle,
     Warmup,
     Sample,
 }
+
+const PERF_SUITE_SETTLE_STABLE_FRAMES: u32 = 60;
+const PERF_SUITE_SETTLE_MAX_FRAMES: u32 = 600;
 
 struct PerfSuiteState {
     run_started_at: Instant,
@@ -175,12 +201,17 @@ struct PerfSuiteState {
     frames_remaining: u32,
     warmup_frames: u32,
     sample_frames: u32,
+    /// WorldSettle phase: consecutive frames with no multiplayer patches.
+    settle_stable_count: u32,
+    /// WorldSettle phase: total frames elapsed (for hard timeout).
+    settle_total_frames: u32,
     sample_frame_samples: u32,
     sample_client_cpu_ms_sum: f64,
     sample_client_cpu_ms_max: f64,
     sample_gpu_ms_sum: f64,
     sample_gpu_ms_max: f64,
     sample_gpu_samples: u32,
+    sample_gpu_phases: Vec<GpuPhaseAccum>,
     results: Vec<PerfSuiteScenarioResult>,
 }
 
@@ -193,6 +224,9 @@ struct PerfSuiteScenarioResult {
     render_gpu_avg_ms: Option<f64>,
     render_gpu_max_ms: Option<f64>,
     render_gpu_samples: u32,
+    render_gpu_phases: Vec<GpuPhaseResult>,
+    vte_max_trace_steps: u32,
+    vte_max_trace_distance: f32,
 }
 
 impl PerfSuiteState {
@@ -200,16 +234,19 @@ impl PerfSuiteState {
         Self {
             run_started_at: started_at,
             scenario_index: 0,
-            phase: PerfSuitePhase::Warmup,
-            frames_remaining: warmup_frames,
+            phase: PerfSuitePhase::WorldSettle,
+            frames_remaining: 0, // unused during WorldSettle
             warmup_frames,
             sample_frames,
+            settle_stable_count: 0,
+            settle_total_frames: 0,
             sample_frame_samples: 0,
             sample_client_cpu_ms_sum: 0.0,
             sample_client_cpu_ms_max: 0.0,
             sample_gpu_ms_sum: 0.0,
             sample_gpu_ms_max: 0.0,
             sample_gpu_samples: 0,
+            sample_gpu_phases: Vec::new(),
             results: Vec::new(),
         }
     }
@@ -221,55 +258,93 @@ impl PerfSuiteState {
         self.sample_gpu_ms_sum = 0.0;
         self.sample_gpu_ms_max = 0.0;
         self.sample_gpu_samples = 0;
+        self.sample_gpu_phases.clear();
     }
 }
 
-const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 5] = [
-    PerfSuiteScenario {
-        label: "ground-3d",
-        position: [0.0, 8.0, -24.0, -4.0],
-        yaw: 1.25,
-        pitch: -0.15,
-        xw_angle: 0.0,
-        zw_angle: 0.0,
-        yw_deviation: 0.0,
-    },
-    PerfSuiteScenario {
-        label: "ground-4d",
-        position: [0.0, 8.0, -24.0, -4.0],
-        yaw: 1.25,
-        pitch: -0.15,
-        xw_angle: 0.70,
-        zw_angle: 0.95,
-        yw_deviation: 0.0,
-    },
-    PerfSuiteScenario {
-        label: "sky-4d",
-        position: [0.0, 64.0, 0.0, -4.0],
-        yaw: 0.35,
-        pitch: -0.70,
-        xw_angle: 0.90,
-        zw_angle: 0.78,
-        yw_deviation: 0.0,
-    },
-    PerfSuiteScenario {
-        label: "oblique-far",
-        position: [96.0, 20.0, 96.0, -4.0],
-        yaw: -2.35,
-        pitch: -0.22,
-        xw_angle: -0.45,
-        zw_angle: 0.42,
-        yw_deviation: 0.0,
-    },
-    PerfSuiteScenario {
-        label: "ridge-4d",
-        position: [-64.0, 14.0, 32.0, -4.0],
-        yaw: 0.95,
-        pitch: -0.08,
-        xw_angle: 0.46,
-        zw_angle: 0.52,
-        yw_deviation: 0.0,
-    },
+// Base poses for perf suite scenarios (MassivePlatforms seed 1337).
+// Each pose is stamped across 3 render distance tiers.
+const PERF_POSE_PLATFORM_SURFACE: PerfSuiteScenario = PerfSuiteScenario {
+    label: "",
+    position: [0.0, 8.0, -24.0, -4.0],
+    yaw: 1.25,
+    pitch: -0.15,
+    xw_angle: 0.0,
+    zw_angle: 0.0,
+    yw_deviation: 0.0,
+    vte_max_trace_steps: None,
+    vte_max_trace_distance: None,
+};
+
+const PERF_POSE_PLATFORM_4D: PerfSuiteScenario = PerfSuiteScenario {
+    label: "",
+    position: [0.0, 8.0, -24.0, -4.0],
+    yaw: 1.25,
+    pitch: -0.15,
+    xw_angle: 0.70,
+    zw_angle: 0.95,
+    yw_deviation: 0.0,
+    vte_max_trace_steps: None,
+    vte_max_trace_distance: None,
+};
+
+const PERF_POSE_OPEN_SKY: PerfSuiteScenario = PerfSuiteScenario {
+    label: "",
+    position: [0.0, 64.0, 0.0, -4.0],
+    yaw: 0.35,
+    pitch: -0.70,
+    xw_angle: 0.90,
+    zw_angle: 0.78,
+    yw_deviation: 0.0,
+    vte_max_trace_steps: None,
+    vte_max_trace_distance: None,
+};
+
+const PERF_POSE_CORRIDOR: PerfSuiteScenario = PerfSuiteScenario {
+    label: "",
+    position: [96.0, 20.0, 96.0, -4.0],
+    yaw: -2.35,
+    pitch: -0.22,
+    xw_angle: -0.45,
+    zw_angle: 0.42,
+    yw_deviation: 0.0,
+    vte_max_trace_steps: None,
+    vte_max_trace_distance: None,
+};
+
+const PERF_POSE_FAR_OBLIQUE: PerfSuiteScenario = PerfSuiteScenario {
+    label: "",
+    position: [-64.0, 14.0, 32.0, -4.0],
+    yaw: 0.95,
+    pitch: -0.08,
+    xw_angle: 0.46,
+    zw_angle: 0.52,
+    yw_deviation: 0.0,
+    vte_max_trace_steps: None,
+    vte_max_trace_distance: None,
+};
+
+const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 15] = [
+    // platform-surface: standing on platform, 3D-like view
+    PerfSuiteScenario { label: "platform-surface/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_PLATFORM_SURFACE },
+    PerfSuiteScenario { label: "platform-surface/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_PLATFORM_SURFACE },
+    PerfSuiteScenario { label: "platform-surface/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_PLATFORM_SURFACE },
+    // platform-4d: same spot, strong 4D rotation
+    PerfSuiteScenario { label: "platform-4d/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_PLATFORM_4D },
+    PerfSuiteScenario { label: "platform-4d/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_PLATFORM_4D },
+    PerfSuiteScenario { label: "platform-4d/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_PLATFORM_4D },
+    // open-sky: high altitude looking down
+    PerfSuiteScenario { label: "open-sky/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_OPEN_SKY },
+    PerfSuiteScenario { label: "open-sky/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_OPEN_SKY },
+    PerfSuiteScenario { label: "open-sky/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_OPEN_SKY },
+    // corridor: oblique far view between platforms
+    PerfSuiteScenario { label: "corridor/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_CORRIDOR },
+    PerfSuiteScenario { label: "corridor/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_CORRIDOR },
+    PerfSuiteScenario { label: "corridor/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_CORRIDOR },
+    // far-oblique: distant ridge terrain with 4D
+    PerfSuiteScenario { label: "far-oblique/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_FAR_OBLIQUE },
+    PerfSuiteScenario { label: "far-oblique/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_FAR_OBLIQUE },
+    PerfSuiteScenario { label: "far-oblique/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_FAR_OBLIQUE },
 ];
 
 const VTE_SWEEP_PROFILES: [VteRuntimeProfile; 2] = [
@@ -576,6 +651,11 @@ struct Args {
     #[arg(long)]
     perf_suite_report: Option<PathBuf>,
 
+    /// Number of entities to auto-spawn at the start of perf-suite for BVH overhead testing.
+    /// 0 means no entities spawned.
+    #[arg(long, default_value_t = 0)]
+    perf_suite_spawn_entities: u32,
+
     /// Enable client-side audio output (sound effects).
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
     audio: bool,
@@ -752,7 +832,28 @@ fn main() {
     let initial_vte_max_trace_steps = args.vte_max_trace_steps.max(1);
     let initial_vte_max_trace_distance = args.vte_max_trace_distance.max(1.0);
 
-    let world_file = args.world_file.clone();
+    let world_file = if args.perf_suite && args.world_file == PathBuf::from(WORLD_FILE_DEFAULT) {
+        // Perf suite uses a dedicated ephemeral world directory so it never collides
+        // with user save data and always starts with a freshly-generated world.
+        let perf_world =
+            PathBuf::from(format!("saves/perf-suite-{}", args.singleplayer_world_seed));
+        if perf_world.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&perf_world) {
+                eprintln!(
+                    "[perf-suite] warning: failed to clean old world dir {}: {}",
+                    perf_world.display(),
+                    error
+                );
+            }
+        }
+        eprintln!(
+            "[perf-suite] using ephemeral world path: {}",
+            perf_world.display()
+        );
+        perf_world
+    } else {
+        args.world_file.clone()
+    };
     // Determine whether to skip the main menu and go straight to playing.
     // Skip if any CLI arg implies the user wants to play immediately.
     let skip_main_menu = args.load_world
@@ -1063,6 +1164,9 @@ fn main() {
         profile_cpu_phase_window: RuntimeCpuPhaseWindow::default(),
         profile_cpu_phase_current: RuntimeCpuPhaseMetrics::default(),
         perf_suite_state,
+        perf_suite_default_trace_steps: initial_vte_max_trace_steps,
+        perf_suite_default_trace_distance: initial_vte_max_trace_distance,
+        perf_suite_entities_spawned: false,
         world_ready: initial_app_state == AppState::MainMenu,
         vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
         settings_file_path: settings_file_path.clone(),
@@ -1390,6 +1494,9 @@ struct App {
     profile_cpu_phase_window: RuntimeCpuPhaseWindow,
     profile_cpu_phase_current: RuntimeCpuPhaseMetrics,
     perf_suite_state: Option<PerfSuiteState>,
+    perf_suite_default_trace_steps: u32,
+    perf_suite_default_trace_distance: f32,
+    perf_suite_entities_spawned: bool,
     world_ready: bool,
     vte_overlay_raster_enabled: bool,
     settings_file_path: PathBuf,
