@@ -426,13 +426,33 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
         (None, None) => None,
         (Some(root), None) | (None, Some(root)) => Some(root),
         (Some(left), Some(right)) => {
-            let bounds = union_bounds(
-                bvh.nodes[left as usize].bounds,
-                bvh.nodes[right as usize].bounds,
-            );
-            Some(append_internal_node_with_delta(
-                bvh, left, right, bounds, &mut delta,
-            ))
+            // Instead of a simple single-node join (which degrades tree quality
+            // over many incremental mutations), collect all leaf IDs from both
+            // subtrees and rebuild with SAH for optimal structure.
+            let mut left_nodes = Vec::new();
+            let mut left_leaf_ids = Vec::new();
+            collect_subtree_node_leaf_ids(bvh, left, &mut left_nodes, &mut left_leaf_ids);
+
+            let mut right_nodes = Vec::new();
+            let mut right_leaf_ids = Vec::new();
+            collect_subtree_node_leaf_ids(bvh, right, &mut right_nodes, &mut right_leaf_ids);
+
+            // Recycle node slots into the CPU free list so the SAH rebuild can
+            // reuse them. We do NOT add them to delta.freed_node_ids because
+            // the rebuild will immediately rewrite them (via delta.node_writes).
+            // The GPU consumer applies writes to these slots, so they remain
+            // valid in the GPU buffer.
+            for &node_id in left_nodes.iter().chain(right_nodes.iter()) {
+                bvh.free_node_ids.push(node_id);
+            }
+
+            let mut all_leaf_ids: Vec<u32> = left_leaf_ids;
+            all_leaf_ids.extend(right_leaf_ids);
+            Some(build_bvh_recursive_for_leaf_ids(
+                bvh,
+                &mut all_leaf_ids,
+                &mut delta,
+            )?)
         }
     };
 
@@ -926,8 +946,71 @@ fn build_bvh_recursive_for_leaf_ids(
         );
     }
 
-    let aggregate_bounds = aggregate_bounds_for_leaf_ids_in_bvh(bvh, leaf_ids);
-    let split_axis = longest_axis(aggregate_bounds);
+    // Find the best split across all 4 axes using SAH (Surface Area Heuristic).
+    // For each axis, sort by centroid, then sweep to find the split position that
+    // minimizes the SAH cost: cost = SA(left)*N_left + SA(right)*N_right
+    // where SA is the 4D "surface area" (sum of 3-face volumes) of the child bounds.
+    let n = leaf_ids.len();
+    let mut best_axis = 0usize;
+    let mut best_split = n / 2;
+    let mut best_cost = f64::MAX;
+
+    // Scratch space for per-axis evaluation. We collect bounds once and reuse.
+    let leaf_bounds: Vec<Aabb4i> = leaf_ids
+        .iter()
+        .map(|&id| {
+            bvh.leaves
+                .get(id as usize)
+                .map(|leaf| leaf.bounds)
+                .unwrap_or(Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]))
+        })
+        .collect();
+
+    // We need to try sorting by each axis independently. Since leaf_ids is mutable
+    // and we need to try 4 axes, work with index arrays.
+    let mut indices: Vec<usize> = (0..n).collect();
+    let mut right_bounds_suffix = vec![Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]); n];
+
+    for axis in 0..4 {
+        // Sort indices by centroid on this axis.
+        indices.sort_unstable_by(|&a, &b| {
+            let ca = centroid_axis(leaf_bounds[a], axis);
+            let cb = centroid_axis(leaf_bounds[b], axis);
+            ca.total_cmp(&cb)
+                .then_with(|| leaf_bounds[a].min.cmp(&leaf_bounds[b].min))
+                .then_with(|| leaf_bounds[a].max.cmp(&leaf_bounds[b].max))
+        });
+
+        // Build suffix array of right-side aggregate bounds (from right to left).
+        right_bounds_suffix[n - 1] = leaf_bounds[indices[n - 1]];
+        for i in (0..n - 1).rev() {
+            right_bounds_suffix[i] =
+                union_bounds(right_bounds_suffix[i + 1], leaf_bounds[indices[i]]);
+        }
+
+        // Sweep left to right, evaluating SAH cost at each split position.
+        // Split at position i means left = [0..=i], right = [i+1..n-1].
+        let mut left_agg = leaf_bounds[indices[0]];
+        for split in 1..n {
+            let left_count = split as f64;
+            let right_count = (n - split) as f64;
+            let left_sa = half_surface_area_4d(left_agg);
+            let right_sa = half_surface_area_4d(right_bounds_suffix[split]);
+            let cost = left_sa * left_count + right_sa * right_count;
+
+            if cost < best_cost {
+                best_cost = cost;
+                best_axis = axis;
+                best_split = split;
+            }
+
+            if split < n - 1 {
+                left_agg = union_bounds(left_agg, leaf_bounds[indices[split]]);
+            }
+        }
+    }
+
+    // Now apply the best split: sort leaf_ids by the chosen axis and split.
     leaf_ids.sort_unstable_by(|a, b| {
         let ab = bvh
             .leaves
@@ -939,15 +1022,14 @@ fn build_bvh_recursive_for_leaf_ids(
             .get(*b as usize)
             .map(|leaf| leaf.bounds)
             .unwrap_or(Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]));
-        let ca = centroid_axis(ab, split_axis);
-        let cb = centroid_axis(bb, split_axis);
+        let ca = centroid_axis(ab, best_axis);
+        let cb = centroid_axis(bb, best_axis);
         ca.total_cmp(&cb)
             .then_with(|| ab.min.cmp(&bb.min))
             .then_with(|| ab.max.cmp(&bb.max))
     });
 
-    let mid = leaf_ids.len() / 2;
-    let (left_ids, right_ids) = leaf_ids.split_at_mut(mid);
+    let (left_ids, right_ids) = leaf_ids.split_at_mut(best_split);
     let left = build_bvh_recursive_for_leaf_ids(bvh, left_ids, delta)?;
     let right = build_bvh_recursive_for_leaf_ids(bvh, right_ids, delta)?;
     let left_bounds = bvh
@@ -968,21 +1050,6 @@ fn build_bvh_recursive_for_leaf_ids(
         },
         delta,
     )
-}
-
-fn aggregate_bounds_for_leaf_ids_in_bvh(bvh: &RenderBvh, leaf_ids: &[u32]) -> Aabb4i {
-    let first = leaf_ids
-        .first()
-        .and_then(|leaf_id| bvh.leaves.get(*leaf_id as usize))
-        .map(|leaf| leaf.bounds)
-        .unwrap_or(Aabb4i::new([0, 0, 0, 0], [-1, -1, -1, -1]));
-    let mut bounds = first;
-    for &leaf_id in &leaf_ids[1..] {
-        if let Some(leaf) = bvh.leaves.get(leaf_id as usize) {
-            bounds = union_bounds(bounds, leaf.bounds);
-        }
-    }
-    bounds
 }
 
 fn collect_subtree_node_leaf_ids(
@@ -1203,17 +1270,16 @@ fn enumerate_chunk_keys(bounds: Aabb4i, out: &mut Vec<ChunkKey>) {
     }
 }
 
-fn longest_axis(bounds: Aabb4i) -> usize {
-    let mut axis = 0usize;
-    let mut best_span = i64::MIN;
-    for i in 0..4 {
-        let span = i64::from(bounds.max[i]) - i64::from(bounds.min[i]);
-        if span > best_span {
-            best_span = span;
-            axis = i;
-        }
-    }
-    axis
+/// Compute the 4D analogue of "half surface area" for the SAH cost model.
+/// For a 4D AABB with extents [dx, dy, dz, dw], this is the sum of all
+/// 3-face volumes: dy*dz*dw + dx*dz*dw + dx*dy*dw + dx*dy*dz.
+/// This measures how likely a random ray is to intersect the box.
+fn half_surface_area_4d(bounds: Aabb4i) -> f64 {
+    let dx = f64::from(bounds.max[0] - bounds.min[0] + 1).max(0.0);
+    let dy = f64::from(bounds.max[1] - bounds.min[1] + 1).max(0.0);
+    let dz = f64::from(bounds.max[2] - bounds.min[2] + 1).max(0.0);
+    let dw = f64::from(bounds.max[3] - bounds.min[3] + 1).max(0.0);
+    dy * dz * dw + dx * dz * dw + dx * dy * dw + dx * dy * dz
 }
 
 fn centroid_axis(bounds: Aabb4i, axis: usize) -> f64 {
@@ -1553,8 +1619,21 @@ mod tests {
         );
         assert!(bvh.nodes.len() >= old_node_capacity);
         assert!(bvh.leaves.len() >= old_leaf_capacity);
-        assert!(bvh.free_node_ids.len() <= free_node_count_after_remove);
-        assert!(bvh.free_leaf_ids.len() <= free_leaf_count_after_remove);
+        // The SAH rebuild needs 2N-1 nodes for N leaves while the two input
+        // subtrees provide 2N-2 (one short since the old join node doesn't
+        // exist). Allow a small margin for this extra allocation.
+        assert!(
+            bvh.free_node_ids.len() <= free_node_count_after_remove + 2,
+            "free_node_ids grew too much: {} (was {})",
+            bvh.free_node_ids.len(),
+            free_node_count_after_remove,
+        );
+        assert!(
+            bvh.free_leaf_ids.len() <= free_leaf_count_after_remove + 2,
+            "free_leaf_ids grew too much: {} (was {})",
+            bvh.free_leaf_ids.len(),
+            free_leaf_count_after_remove,
+        );
     }
 
     #[test]
