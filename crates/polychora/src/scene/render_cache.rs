@@ -1,4 +1,29 @@
 use super::*;
+use higher_dimension_playground::render::{
+    VTE_LEAF_KIND_UNIFORM, VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY, VTE_REGION_BVH_NODE_FLAG_LEAF,
+};
+
+#[derive(Default)]
+struct RegionDumpStats {
+    total_nodes: usize,
+    empty: usize,
+    uniform: usize,
+    procedural: usize,
+    chunk_array: usize,
+    branch: usize,
+    max_depth: usize,
+}
+
+#[derive(Default)]
+struct GpuBvhDumpStats {
+    internal_count: usize,
+    leaf_count: usize,
+    uniform_leaves: usize,
+    chunk_array_leaves: usize,
+    unknown_leaves: usize,
+    max_depth: usize,
+    sibling_overlaps: usize,
+}
 
 impl Scene {
     fn build_render_region_tree_in_bounds(&self, bounds: Aabb4i) -> RegionChunkTree {
@@ -79,6 +104,266 @@ impl Scene {
             && outer.max[1] >= inner.max[1]
             && outer.max[2] >= inner.max[2]
             && outer.max[3] >= inner.max[3]
+    }
+
+    /// Dump the region cache tree (client-side) and the on-GPU BVH buffer
+    /// structure to stderr for structural analysis.
+    pub fn dump_render_trees(&self) {
+        self.dump_region_cache_tree();
+        self.dump_gpu_bvh();
+    }
+
+    fn dump_region_cache_tree(&self) {
+        fn bounds_size(b: &Aabb4i) -> [i32; 4] {
+            [
+                b.max[0] - b.min[0] + 1,
+                b.max[1] - b.min[1] + 1,
+                b.max[2] - b.min[2] + 1,
+                b.max[3] - b.min[3] + 1,
+            ]
+        }
+
+        eprintln!("\n=== REGION CACHE TREE ===");
+        if let Some(bounds) = self.render_region_cache_bounds {
+            eprintln!(
+                "  cache bounds: {:?} -> {:?}  size: {:?}",
+                bounds.min, bounds.max, bounds_size(&bounds),
+            );
+        }
+        if let Some(cache) = self.render_region_cache.as_ref() {
+            if let Some(root) = cache.root() {
+                let mut stats = RegionDumpStats::default();
+                Self::dump_region_node(root, 0, &mut stats);
+                eprintln!(
+                    "--- region summary: {} nodes (empty={} uniform={} procedural={} chunk_array={} branch={}), max_depth={}",
+                    stats.total_nodes,
+                    stats.empty,
+                    stats.uniform,
+                    stats.procedural,
+                    stats.chunk_array,
+                    stats.branch,
+                    stats.max_depth,
+                );
+            } else {
+                eprintln!("  (empty root)");
+            }
+        } else {
+            eprintln!("  (no region cache)");
+        }
+        eprintln!("=== END REGION CACHE TREE ===\n");
+    }
+
+    fn dump_region_node(
+        node: &RegionTreeCore,
+        depth: usize,
+        stats: &mut RegionDumpStats,
+    ) {
+        fn bounds_size(b: &Aabb4i) -> [i32; 4] {
+            [
+                b.max[0] - b.min[0] + 1,
+                b.max[1] - b.min[1] + 1,
+                b.max[2] - b.min[2] + 1,
+                b.max[3] - b.min[3] + 1,
+            ]
+        }
+
+        let indent = "  ".repeat(depth + 1);
+        let size = bounds_size(&node.bounds);
+        stats.total_nodes += 1;
+        stats.max_depth = stats.max_depth.max(depth);
+
+        match &node.kind {
+            RegionNodeKind::Empty => {
+                stats.empty += 1;
+                // Only print shallow empties to avoid flooding.
+                if depth <= 3 {
+                    eprintln!(
+                        "{}Empty  bounds={:?}->{:?} size={:?}",
+                        indent, node.bounds.min, node.bounds.max, size,
+                    );
+                }
+            }
+            RegionNodeKind::Uniform(mat) => {
+                stats.uniform += 1;
+                eprintln!(
+                    "{}Uniform(mat={})  bounds={:?}->{:?} size={:?}",
+                    indent, mat, node.bounds.min, node.bounds.max, size,
+                );
+            }
+            RegionNodeKind::ProceduralRef(gen) => {
+                stats.procedural += 1;
+                eprintln!(
+                    "{}ProceduralRef(gen={})  bounds={:?}->{:?} size={:?}",
+                    indent, gen.generator_id, node.bounds.min, node.bounds.max, size,
+                );
+            }
+            RegionNodeKind::ChunkArray(_) => {
+                stats.chunk_array += 1;
+                eprintln!(
+                    "{}ChunkArray  bounds={:?}->{:?} size={:?}",
+                    indent, node.bounds.min, node.bounds.max, size,
+                );
+            }
+            RegionNodeKind::Branch(children) => {
+                stats.branch += 1;
+                eprintln!(
+                    "{}Branch({} children)  bounds={:?}->{:?} size={:?}",
+                    indent,
+                    children.len(),
+                    node.bounds.min,
+                    node.bounds.max,
+                    size,
+                );
+                for child in children {
+                    Self::dump_region_node(child, depth + 1, stats);
+                }
+            }
+        }
+    }
+
+    /// Dump the on-GPU BVH buffer structure to stderr.
+    /// Walks `voxel_frame_data.region_bvh_nodes` (the actual GPU-side
+    /// `GpuVoxelChunkBvhNode` array) and `leaf_headers`, showing the tree
+    /// the shader traverses.
+    fn dump_gpu_bvh(&self) {
+        let fd = &self.voxel_frame_data;
+        let nodes = &fd.region_bvh_nodes;
+        let leaves = &fd.leaf_headers;
+        let root_idx = fd.region_bvh_root_index;
+
+        eprintln!("\n=== GPU BVH BUFFER DUMP ===");
+        eprintln!(
+            "  root_index: {}  node_count: {}  leaf_count: {}",
+            if root_idx == VTE_REGION_BVH_INVALID_NODE {
+                "INVALID".to_string()
+            } else {
+                root_idx.to_string()
+            },
+            nodes.len(),
+            leaves.len(),
+        );
+
+        if root_idx == VTE_REGION_BVH_INVALID_NODE || root_idx as usize >= nodes.len() {
+            eprintln!("  (no valid root)");
+            eprintln!("=== END GPU BVH DUMP ===\n");
+            return;
+        }
+
+        let mut stats = GpuBvhDumpStats::default();
+        Self::dump_gpu_bvh_node(nodes, leaves, root_idx, 0, &mut stats);
+
+        eprintln!(
+            "--- gpu bvh summary: {} internal + {} leaves (uniform={} chunk_array={} unknown={}), max_depth={}, sibling_overlaps={}",
+            stats.internal_count,
+            stats.leaf_count,
+            stats.uniform_leaves,
+            stats.chunk_array_leaves,
+            stats.unknown_leaves,
+            stats.max_depth,
+            stats.sibling_overlaps,
+        );
+        eprintln!("=== END GPU BVH DUMP ===\n");
+    }
+
+    fn dump_gpu_bvh_node(
+        nodes: &[GpuVoxelChunkBvhNode],
+        leaves: &[GpuVoxelLeafHeader],
+        node_idx: u32,
+        depth: usize,
+        stats: &mut GpuBvhDumpStats,
+    ) {
+        if node_idx == VTE_REGION_BVH_INVALID_NODE || node_idx as usize >= nodes.len() {
+            return;
+        }
+        let node = &nodes[node_idx as usize];
+        let indent = "  ".repeat(depth + 1);
+        let size = [
+            node.max_chunk_coord[0] - node.min_chunk_coord[0] + 1,
+            node.max_chunk_coord[1] - node.min_chunk_coord[1] + 1,
+            node.max_chunk_coord[2] - node.min_chunk_coord[2] + 1,
+            node.max_chunk_coord[3] - node.min_chunk_coord[3] + 1,
+        ];
+        stats.max_depth = stats.max_depth.max(depth);
+
+        let is_leaf = (node.flags & VTE_REGION_BVH_NODE_FLAG_LEAF) != 0;
+
+        if is_leaf {
+            stats.leaf_count += 1;
+            let leaf_idx = node.leaf_index;
+            let leaf_label = if leaf_idx < leaves.len() as u32 {
+                let lh = &leaves[leaf_idx as usize];
+                if lh.leaf_kind == VTE_LEAF_KIND_UNIFORM {
+                    stats.uniform_leaves += 1;
+                    format!("Uniform(mat={})", lh.uniform_material)
+                } else if lh.leaf_kind == VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY {
+                    stats.chunk_array_leaves += 1;
+                    format!(
+                        "ChunkArray(entry_off={} bounds={:?}->{:?})",
+                        lh.chunk_entry_offset, lh.min_chunk_coord, lh.max_chunk_coord
+                    )
+                } else {
+                    stats.unknown_leaves += 1;
+                    format!("Unknown(kind={})", lh.leaf_kind)
+                }
+            } else {
+                stats.unknown_leaves += 1;
+                format!("INVALID_LEAF(idx={})", leaf_idx)
+            };
+            eprintln!(
+                "{}Leaf[{}->{}] {}  bounds={:?}->{:?} size={:?}",
+                indent,
+                node_idx,
+                leaf_idx,
+                leaf_label,
+                node.min_chunk_coord,
+                node.max_chunk_coord,
+                size,
+            );
+        } else {
+            stats.internal_count += 1;
+            let left = node.left_child;
+            let right = node.right_child;
+
+            // Check sibling overlap.
+            let overlaps = if left != VTE_REGION_BVH_INVALID_NODE
+                && right != VTE_REGION_BVH_INVALID_NODE
+                && (left as usize) < nodes.len()
+                && (right as usize) < nodes.len()
+            {
+                let l = &nodes[left as usize];
+                let r = &nodes[right as usize];
+                let o = l.min_chunk_coord[0] <= r.max_chunk_coord[0]
+                    && l.max_chunk_coord[0] >= r.min_chunk_coord[0]
+                    && l.min_chunk_coord[1] <= r.max_chunk_coord[1]
+                    && l.max_chunk_coord[1] >= r.min_chunk_coord[1]
+                    && l.min_chunk_coord[2] <= r.max_chunk_coord[2]
+                    && l.max_chunk_coord[2] >= r.min_chunk_coord[2]
+                    && l.min_chunk_coord[3] <= r.max_chunk_coord[3]
+                    && l.max_chunk_coord[3] >= r.min_chunk_coord[3];
+                if o {
+                    stats.sibling_overlaps += 1;
+                }
+                o
+            } else {
+                false
+            };
+
+            if depth <= 10 {
+                eprintln!(
+                    "{}Internal[{}] L={} R={}  bounds={:?}->{:?} size={:?}{}",
+                    indent,
+                    node_idx,
+                    left,
+                    right,
+                    node.min_chunk_coord,
+                    node.max_chunk_coord,
+                    size,
+                    if overlaps { "  OVERLAP" } else { "" },
+                );
+            }
+            Self::dump_gpu_bvh_node(nodes, leaves, left, depth + 1, stats);
+            Self::dump_gpu_bvh_node(nodes, leaves, right, depth + 1, stats);
+        }
     }
 
     /// Force a complete render BVH rebuild from the current region cache.

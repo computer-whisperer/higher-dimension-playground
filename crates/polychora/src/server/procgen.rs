@@ -1188,6 +1188,111 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
     out
 }
 
+/// Per-placement chunk data: the chunk-coordinate bounding box and a map of chunk positions
+/// to dense chunks generated from a single structure placement.
+pub struct PlacementChunkData {
+    /// Chunk-coordinate AABB of this placement (may be clipped to query bounds).
+    pub placement_chunk_bounds: Aabb4i,
+    /// chunk_pos -> generated dense chunk (non-empty only, from this one placement).
+    pub chunks: HashMap<[i32; 4], DenseChunk>,
+}
+
+/// Generate per-placement chunk data for all structure placements intersecting `bounds`.
+///
+/// Unlike `generate_structure_chunk_with_keepout` which merges all placements into each chunk,
+/// this returns separate chunk data for each placement. Each placement's chunks contain only
+/// voxels from that single structure, preventing overlap merging.
+///
+/// Mazes are NOT included — they remain on the per-chunk path.
+pub fn generate_structure_placements_for_bounds(
+    world_seed: u64,
+    bounds: Aabb4i,
+    blocked_cells: Option<&HashSet<StructureCell>>,
+) -> Vec<PlacementChunkData> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    let set = structure_set();
+    let placements = collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells);
+
+    let mut results = Vec::with_capacity(placements.len());
+    for placement in placements {
+        let blueprint = &set.blueprints[placement.blueprint_idx];
+        let (placement_world_min, placement_world_max) =
+            blueprint.oriented_world_bounds(placement.origin, placement.orientation);
+
+        // Convert placement world bounds to chunk coordinates
+        let chunk_size = CHUNK_SIZE as i32;
+        let full_chunk_bounds = Aabb4i::new(
+            [
+                placement_world_min[0].div_euclid(chunk_size),
+                placement_world_min[1].div_euclid(chunk_size),
+                placement_world_min[2].div_euclid(chunk_size),
+                placement_world_min[3].div_euclid(chunk_size),
+            ],
+            [
+                placement_world_max[0].div_euclid(chunk_size),
+                placement_world_max[1].div_euclid(chunk_size),
+                placement_world_max[2].div_euclid(chunk_size),
+                placement_world_max[3].div_euclid(chunk_size),
+            ],
+        );
+
+        // Clip to query bounds
+        let clipped = Aabb4i::new(
+            [
+                full_chunk_bounds.min[0].max(bounds.min[0]),
+                full_chunk_bounds.min[1].max(bounds.min[1]),
+                full_chunk_bounds.min[2].max(bounds.min[2]),
+                full_chunk_bounds.min[3].max(bounds.min[3]),
+            ],
+            [
+                full_chunk_bounds.max[0].min(bounds.max[0]),
+                full_chunk_bounds.max[1].min(bounds.max[1]),
+                full_chunk_bounds.max[2].min(bounds.max[2]),
+                full_chunk_bounds.max[3].min(bounds.max[3]),
+            ],
+        );
+        if !clipped.is_valid() {
+            continue;
+        }
+
+        let mut chunks = HashMap::new();
+        for cw in clipped.min[3]..=clipped.max[3] {
+            for cz in clipped.min[2]..=clipped.max[2] {
+                for cy in clipped.min[1]..=clipped.max[1] {
+                    for cx in clipped.min[0]..=clipped.max[0] {
+                        let chunk_min = [
+                            cx * chunk_size,
+                            cy * chunk_size,
+                            cz * chunk_size,
+                            cw * chunk_size,
+                        ];
+                        let mut chunk = dense_chunk_new();
+                        blueprint.place_into_chunk_oriented(
+                            placement.origin,
+                            placement.orientation,
+                            chunk_min,
+                            &mut chunk,
+                        );
+                        if !dense_chunk_is_empty(&chunk) {
+                            chunks.insert([cx, cy, cz, cw], chunk);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !chunks.is_empty() {
+            results.push(PlacementChunkData {
+                placement_chunk_bounds: clipped,
+                chunks,
+            });
+        }
+    }
+    results
+}
+
 fn rotate_offset_xzw(offset: [i32; 4], orientation: u8) -> [i32; 4] {
     const PERMUTATIONS: [[usize; 3]; 6] = [
         [0, 1, 2],
@@ -2146,6 +2251,62 @@ pub fn generate_structure_chunk_with_keepout(
         place_maze_into_chunk(placement, chunk_min, &mut chunk);
     }
 
+    if dense_chunk_is_empty(&chunk) {
+        None
+    } else {
+        Some(chunk)
+    }
+}
+
+/// Returns chunk positions that contain maze content within the given bounds.
+/// This is the maze counterpart of structure_chunk_positions — excludes structures.
+pub fn maze_chunk_positions_for_bounds(
+    world_seed: u64,
+    bounds: Aabb4i,
+) -> Vec<ChunkPos> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    let mut chunk_positions = HashSet::<[i32; 4]>::new();
+    for placement in collect_maze_placements_for_chunk_bounds(world_seed, bounds) {
+        let (maze_min, maze_max) = maze_bounds(placement.origin, placement.shape);
+        let Some(covered_chunks) =
+            intersect_world_bounds_as_chunk_bounds(maze_min, maze_max, bounds)
+        else {
+            continue;
+        };
+        for w in covered_chunks.min[3]..=covered_chunks.max[3] {
+            for z in covered_chunks.min[2]..=covered_chunks.max[2] {
+                for y in covered_chunks.min[1]..=covered_chunks.max[1] {
+                    for x in covered_chunks.min[0]..=covered_chunks.max[0] {
+                        chunk_positions.insert([x, y, z, w]);
+                    }
+                }
+            }
+        }
+    }
+    let mut out: Vec<ChunkPos> = chunk_positions
+        .into_iter()
+        .map(|[x, y, z, w]| ChunkPos::new(x, y, z, w))
+        .collect();
+    out.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+    out
+}
+
+/// Generate maze-only chunk content for a single chunk position (no structures).
+pub fn generate_maze_chunk(
+    world_seed: u64,
+    chunk_pos: ChunkPos,
+) -> Option<DenseChunk> {
+    let (chunk_min, _) = chunk_bounds(chunk_pos);
+    let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_pos);
+    if maze_placements.is_empty() {
+        return None;
+    }
+    let mut chunk = dense_chunk_new();
+    for placement in maze_placements {
+        place_maze_into_chunk(placement, chunk_min, &mut chunk);
+    }
     if dense_chunk_is_empty(&chunk) {
         None
     } else {

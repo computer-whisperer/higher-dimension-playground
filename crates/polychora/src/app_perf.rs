@@ -340,6 +340,10 @@ impl App {
                     elapsed_ms
                 );
             }
+            // Dump region cache + GPU BVH structure if requested.
+            if std::env::var_os("R4D_PERF_DUMP_TREES").is_some() {
+                self.scene.dump_render_trees();
+            }
             // Transition to first scenario warmup.
             state.phase = PerfSuitePhase::Warmup;
             state.frames_remaining = state.warmup_frames;

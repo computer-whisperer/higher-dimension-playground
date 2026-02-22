@@ -1,12 +1,12 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
-use crate::shared::chunk_payload::ChunkPayload;
+use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 use crate::shared::region_tree::{
     chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_VOLUME};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 type DenseChunk = [VoxelType; CHUNK_VOLUME];
@@ -279,22 +279,84 @@ impl MassivePlatformsWorldGenerator {
             platform.cell_w,
             PLATFORM_HASH_SALT_PROCGEN_SEED,
         );
-        let candidates = procgen::structure_chunk_positions_for_bounds_with_keepout(
+
+        // Generate per-placement structure chunk data (each placement isolated).
+        let placement_data = procgen::generate_structure_placements_for_bounds(
             procgen_seed,
             local_query_bounds,
             self.procgen_keepout_cells(),
         );
-        for local_chunk_pos in candidates {
-            let Some(structure_chunk) = procgen::generate_structure_chunk_with_keepout(
-                procgen_seed,
-                local_chunk_pos,
-                self.procgen_keepout_cells(),
-            ) else {
+
+        let platform_material = self.platform_voxel.map(|v| u16::from(v.0));
+
+        let y_offset = platform_y_offset(&platform);
+
+        for placement in placement_data {
+            if placement.chunks.is_empty() {
+                continue;
+            }
+
+            let Some((effective_bounds, palette, indices)) =
+                build_chunk_array_from_placement(
+                    &placement.chunks,
+                    &procgen_frame_offset,
+                    y_offset,
+                    platform_material,
+                )
+            else {
+                continue;
+            };
+
+            let chunk_array = match ChunkArrayData::from_dense_indices(
+                effective_bounds,
+                palette,
+                indices,
+                Some(0), // default = Empty (palette index 0)
+            ) {
+                Ok(ca) => ca,
+                Err(_) => continue,
+            };
+
+            let core = RegionTreeCore {
+                bounds: effective_bounds,
+                kind: RegionNodeKind::ChunkArray(chunk_array),
+                generator_version_hash: 0,
+            };
+            let _ = tree.splice_non_empty_core_in_bounds(effective_bounds, &core);
+        }
+
+        // Mazes still use the per-chunk path.
+        self.insert_maze_chunks_for_platform(
+            procgen_seed,
+            local_query_bounds,
+            &platform,
+            procgen_frame_offset,
+            tree,
+        );
+    }
+
+    fn insert_maze_chunks_for_platform(
+        &self,
+        procgen_seed: u64,
+        local_query_bounds: Aabb4i,
+        platform: &PlatformInstance,
+        procgen_frame_offset: [i32; 3],
+        tree: &mut RegionChunkTree,
+    ) {
+        // Check if there are any maze chunks in these bounds.
+        let maze_positions = procgen::maze_chunk_positions_for_bounds(
+            procgen_seed,
+            local_query_bounds,
+        );
+        for local_chunk_pos in maze_positions {
+            let Some(maze_chunk) =
+                procgen::generate_maze_chunk(procgen_seed, local_chunk_pos)
+            else {
                 continue;
             };
             let chunk_pos = chunk_pos_from_local_to_platform(
                 local_chunk_pos,
-                &platform,
+                platform,
                 procgen_frame_offset,
             );
             let key = chunk_key_from_chunk_pos(chunk_pos);
@@ -303,7 +365,7 @@ impl MassivePlatformsWorldGenerator {
                 .as_ref()
                 .and_then(chunk_from_payload)
                 .unwrap_or_else(empty_dense_chunk);
-            merge_non_air_voxels(&mut merged, &structure_chunk);
+            merge_non_air_voxels(&mut merged, &maze_chunk);
             let payload = payload_from_chunk_compact(&merged);
             let is_same_as_base = base_payload
                 .as_ref()
@@ -604,6 +666,103 @@ fn merge_non_air_voxels(dst: &mut DenseChunk, src: &DenseChunk) {
         }
         dst[idx] = *voxel;
     }
+}
+
+/// Build a ChunkArray from a placement's chunk data.
+///
+/// Converts local chunk positions to world positions, filters out chunks that only contain
+/// the platform material (preserving the Uniform node), computes tight bounds, builds a
+/// deduplicated palette, and returns the data ready for `ChunkArrayData::from_dense_indices`.
+///
+/// Returns `None` if all chunks match the platform uniform or are empty.
+fn build_chunk_array_from_placement(
+    chunks: &HashMap<[i32; 4], DenseChunk>,
+    procgen_frame_offset: &[i32; 3],
+    y_offset: i32,
+    platform_material: Option<u16>,
+) -> Option<(Aabb4i, Vec<ChunkPayload>, Vec<u16>)> {
+    // Convert local chunk positions to world chunk positions, filtering out chunks
+    // that only contain platform material (or air + platform material).
+    let mut world_chunks: Vec<([i32; 4], ChunkPayload)> = Vec::new();
+    for (local_pos, chunk) in chunks {
+        let world_pos = [
+            local_pos[0].saturating_sub(procgen_frame_offset[0]),
+            local_pos[1] + y_offset,
+            local_pos[2].saturating_sub(procgen_frame_offset[1]),
+            local_pos[3].saturating_sub(procgen_frame_offset[2]),
+        ];
+
+        // Check if this chunk only contains voxels matching the platform material.
+        // If so, skip it — the platform Uniform node already covers it.
+        if let Some(plat_mat) = platform_material {
+            let dominated = chunk.iter().all(|v| {
+                v.is_air() || u16::from(v.0) == plat_mat
+            });
+            if dominated {
+                continue;
+            }
+        }
+
+        let payload = payload_from_chunk_compact(chunk);
+        world_chunks.push((world_pos, payload));
+    }
+
+    if world_chunks.is_empty() {
+        return None;
+    }
+
+    // Compute tight bounding box of remaining world chunk positions.
+    let mut tight_min = [i32::MAX; 4];
+    let mut tight_max = [i32::MIN; 4];
+    for (pos, _) in &world_chunks {
+        for axis in 0..4 {
+            tight_min[axis] = tight_min[axis].min(pos[axis]);
+            tight_max[axis] = tight_max[axis].max(pos[axis]);
+        }
+    }
+    let effective_bounds = Aabb4i::new(tight_min, tight_max);
+    if !effective_bounds.is_valid() {
+        return None;
+    }
+
+    // Build deduplicated palette and dense index array.
+    let dims = [
+        (effective_bounds.max[0] - effective_bounds.min[0] + 1) as usize,
+        (effective_bounds.max[1] - effective_bounds.min[1] + 1) as usize,
+        (effective_bounds.max[2] - effective_bounds.min[2] + 1) as usize,
+        (effective_bounds.max[3] - effective_bounds.min[3] + 1) as usize,
+    ];
+    let cell_count = dims[0] * dims[1] * dims[2] * dims[3];
+
+    // Use an empty/air chunk as the default palette entry (index 0).
+    let mut palette: Vec<ChunkPayload> = vec![ChunkPayload::Empty];
+    let mut palette_map: HashMap<ChunkPayload, u16> =
+        HashMap::new();
+    palette_map.insert(ChunkPayload::Empty, 0);
+
+    let mut indices = vec![0u16; cell_count];
+
+    for (pos, payload) in world_chunks {
+        let rel = [
+            (pos[0] - effective_bounds.min[0]) as usize,
+            (pos[1] - effective_bounds.min[1]) as usize,
+            (pos[2] - effective_bounds.min[2]) as usize,
+            (pos[3] - effective_bounds.min[3]) as usize,
+        ];
+        let idx = rel[3] * dims[2] * dims[1] * dims[0]
+            + rel[2] * dims[1] * dims[0]
+            + rel[1] * dims[0]
+            + rel[0];
+
+        let palette_idx = *palette_map.entry(payload.clone()).or_insert_with(|| {
+            let new_idx = palette.len() as u16;
+            palette.push(payload);
+            new_idx
+        });
+        indices[idx] = palette_idx;
+    }
+
+    Some((effective_bounds, palette, indices))
 }
 
 #[cfg(test)]
