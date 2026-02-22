@@ -1,4 +1,6 @@
 use super::*;
+use crate::shared::chunk_payload::ResolvedChunkPayload;
+use crate::shared::voxel::BlockData;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -13,11 +15,11 @@ impl RegionChunkTree {
 
     pub fn from_chunks<I>(chunks: I) -> Self
     where
-        I: IntoIterator<Item = (ChunkKey, ChunkPayload)>,
+        I: IntoIterator<Item = (ChunkKey, ResolvedChunkPayload)>,
     {
         let mut tree = Self::new();
-        for (key, payload) in chunks {
-            let _ = tree.set_chunk(key, Some(payload));
+        for (key, resolved) in chunks {
+            let _ = tree.set_chunk(key, Some(resolved));
         }
         tree
     }
@@ -30,14 +32,14 @@ impl RegionChunkTree {
         self.chunk_payload(key).is_some()
     }
 
-    pub fn chunk_payload(&self, key: ChunkKey) -> Option<ChunkPayload> {
+    pub fn chunk_payload(&self, key: ChunkKey) -> Option<ResolvedChunkPayload> {
         self.root
             .as_ref()
             .and_then(|node| query_chunk_payload_in_node(node, key))
     }
 
-    pub fn set_chunk(&mut self, key: ChunkKey, payload: Option<ChunkPayload>) -> bool {
-        let payload = payload.map(canonicalize_chunk_payload);
+    pub fn set_chunk(&mut self, key: ChunkKey, resolved: Option<ResolvedChunkPayload>) -> bool {
+        let payload = resolved.map(|r| canonicalize_resolved_payload(r));
         if self.root.is_none() {
             let Some(payload) = payload else {
                 return false;
@@ -45,7 +47,7 @@ impl RegionChunkTree {
             let bounds = Aabb4i::new(key, key);
             self.root = Some(Box::new(RegionTreeCore {
                 bounds,
-                kind: kind_from_chunk_value(bounds, Some(payload)),
+                kind: kind_from_resolved_value(bounds, Some(payload)),
                 generator_version_hash: 0,
             }));
             return true;
@@ -114,7 +116,7 @@ impl RegionChunkTree {
             .unwrap_or(0)
     }
 
-    pub fn collect_chunks(&self) -> Vec<(ChunkKey, ChunkPayload)> {
+    pub fn collect_chunks(&self) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
         let mut out = Vec::new();
         if let Some(root) = self.root.as_ref() {
             collect_chunks_from_kind(&root.kind, root.bounds, &mut out);
@@ -122,7 +124,7 @@ impl RegionChunkTree {
         out
     }
 
-    pub fn collect_chunks_in_bounds(&self, bounds: Aabb4i) -> Vec<(ChunkKey, ChunkPayload)> {
+    pub fn collect_chunks_in_bounds(&self, bounds: Aabb4i) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
         if !bounds.is_valid() {
             return Vec::new();
         }
@@ -374,7 +376,7 @@ impl RegionChunkTree {
 pub fn collect_non_empty_chunks_from_core_in_bounds(
     core: &RegionTreeCore,
     bounds: Aabb4i,
-) -> Vec<(ChunkKey, ChunkPayload)> {
+) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
     if !bounds.is_valid() {
         return Vec::new();
     }
@@ -428,7 +430,7 @@ fn slice_node_to_bounds(node: &RegionTreeCore, bounds: Aabb4i) -> Option<RegionT
     let intersection = intersect_aabb(node.bounds, bounds)?;
     let kind = match &node.kind {
         RegionNodeKind::Empty => RegionNodeKind::Empty,
-        RegionNodeKind::Uniform(material) => RegionNodeKind::Uniform(*material),
+        RegionNodeKind::Uniform(block) => RegionNodeKind::Uniform(block.clone()),
         RegionNodeKind::ProceduralRef(generator_ref) => {
             RegionNodeKind::ProceduralRef(generator_ref.clone())
         }
@@ -504,11 +506,12 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
         }
     }
 
-    ChunkArrayData::from_dense_indices(
+    ChunkArrayData::from_dense_indices_with_block_palette(
         intersection,
         chunk_array.chunk_palette.clone(),
         target_indices,
         None,
+        chunk_array.block_palette.clone(),
     )
     .ok()
 }
@@ -516,7 +519,7 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
 fn prune_empty_subtrees(core: &mut RegionTreeCore) -> bool {
     match &mut core.kind {
         RegionNodeKind::Empty => false,
-        RegionNodeKind::Uniform(material) => *material != 0,
+        RegionNodeKind::Uniform(block) => !block.is_air(),
         RegionNodeKind::ProceduralRef(_) => false,
         RegionNodeKind::ChunkArray(chunk_array) => {
             chunk_array_has_non_empty_intersection(chunk_array, chunk_array.bounds)
@@ -559,7 +562,7 @@ fn splice_node_with_non_empty_core(
         {
             return None;
         }
-        (RegionNodeKind::Uniform(existing), RegionNodeKind::Empty) if *existing == 0 => {
+        (RegionNodeKind::Uniform(existing), RegionNodeKind::Empty) if existing.is_air() => {
             return None;
         }
         (RegionNodeKind::ProceduralRef(existing), RegionNodeKind::ProceduralRef(incoming))
@@ -909,7 +912,7 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
     query_bounds: Aabb4i,
-    out: &mut Vec<(ChunkKey, ChunkPayload)>,
+    out: &mut Vec<(ChunkKey, ResolvedChunkPayload)>,
 ) {
     let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
         return;
@@ -917,16 +920,16 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
 
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            if *material == 0 {
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
                 return;
             }
-            let payload = ChunkPayload::Uniform(*material);
+            let resolved = ResolvedChunkPayload::uniform(block.clone());
             for w in intersection.min[3]..=intersection.max[3] {
                 for z in intersection.min[2]..=intersection.max[2] {
                     for y in intersection.min[1]..=intersection.max[1] {
                         for x in intersection.min[0]..=intersection.max[0] {
-                            out.push(([x, y, z, w], payload.clone()));
+                            out.push(([x, y, z, w], resolved.clone()));
                         }
                     }
                 }
@@ -965,7 +968,13 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
                             let Some(payload) = chunk_array.chunk_palette.get(palette_idx) else {
                                 continue;
                             };
-                            out.push(([x, y, z, w], payload.clone()));
+                            out.push((
+                                [x, y, z, w],
+                                ResolvedChunkPayload {
+                                    payload: payload.clone(),
+                                    block_palette: chunk_array.block_palette.clone(),
+                                },
+                            ));
                         }
                     }
                 }
@@ -996,8 +1005,8 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
 
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            if *material == 0 {
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
                 return;
             }
             for w in intersection.min[3]..=intersection.max[3] {
@@ -1062,14 +1071,14 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
 fn set_chunk_recursive(
     node: &mut RegionTreeCore,
     key_pos: [i32; 4],
-    payload: Option<ChunkPayload>,
+    payload: Option<ResolvedChunkPayload>,
 ) -> bool {
     if !node.bounds.contains_chunk(key_pos) {
         return false;
     }
 
     if is_single_chunk_bounds(node.bounds) {
-        let new_kind = kind_from_chunk_value(node.bounds, payload);
+        let new_kind = kind_from_resolved_value(node.bounds, payload);
         if node.kind == new_kind {
             return false;
         }
@@ -1087,7 +1096,7 @@ fn set_chunk_recursive(
 fn set_chunk_recursive_in_branch(
     node: &mut RegionTreeCore,
     key_pos: [i32; 4],
-    payload: Option<ChunkPayload>,
+    payload: Option<ResolvedChunkPayload>,
 ) -> bool {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
         return false;
@@ -1101,7 +1110,7 @@ fn set_chunk_recursive_in_branch(
         let chunk_bounds = Aabb4i::new(key_pos, key_pos);
         children.push(RegionTreeCore {
             bounds: chunk_bounds,
-            kind: kind_from_chunk_value(chunk_bounds, Some(payload)),
+            kind: kind_from_resolved_value(chunk_bounds, Some(payload)),
             generator_version_hash: node.generator_version_hash,
         });
         true
@@ -1118,15 +1127,15 @@ fn set_chunk_recursive_in_branch(
 fn carve_leaf_for_chunk_edit(
     node: &mut RegionTreeCore,
     key_pos: [i32; 4],
-    payload: Option<ChunkPayload>,
+    payload: Option<ResolvedChunkPayload>,
 ) -> bool {
     let chunk_bounds = Aabb4i::new(key_pos, key_pos);
     let source_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
 
     let no_change = match &source_kind {
-        RegionNodeKind::Empty => payload_option_is_semantically_empty(payload.as_ref()),
-        RegionNodeKind::Uniform(material) => {
-            payload_option_matches_uniform(*material, payload.as_ref())
+        RegionNodeKind::Empty => resolved_option_is_semantically_empty(payload.as_ref()),
+        RegionNodeKind::Uniform(block) => {
+            resolved_option_matches_block(block, payload.as_ref())
         }
         RegionNodeKind::ChunkArray(_) => false,
         RegionNodeKind::ProceduralRef(_) => false,
@@ -1140,10 +1149,16 @@ fn carve_leaf_for_chunk_edit(
     let mut children = Vec::with_capacity(9);
     if let RegionNodeKind::ChunkArray(chunk_array) = &source_kind {
         if let Ok(source_indices) = chunk_array.decode_dense_indices() {
-            if payload_option_matches_existing(
-                chunk_array_payload_at_with_dense_indices(chunk_array, &source_indices, key_pos),
-                payload.as_ref(),
-            ) {
+            let existing_resolved = chunk_array_payload_at_with_dense_indices(
+                chunk_array,
+                &source_indices,
+                key_pos,
+            )
+            .map(|p| ResolvedChunkPayload {
+                payload: p,
+                block_palette: chunk_array.block_palette.clone(),
+            });
+            if resolved_option_matches_existing(existing_resolved, payload.as_ref()) {
                 node.kind = source_kind;
                 return false;
             }
@@ -1162,10 +1177,12 @@ fn carve_leaf_for_chunk_edit(
                 });
             }
         } else {
-            if payload_option_matches_existing(
-                chunk_array_payload_at(chunk_array, key_pos),
-                payload.as_ref(),
-            ) {
+            let existing_resolved =
+                chunk_array_payload_at(chunk_array, key_pos).map(|p| ResolvedChunkPayload {
+                    payload: p,
+                    block_palette: chunk_array.block_palette.clone(),
+                });
+            if resolved_option_matches_existing(existing_resolved, payload.as_ref()) {
                 node.kind = source_kind;
                 return false;
             }
@@ -1198,7 +1215,7 @@ fn carve_leaf_for_chunk_edit(
     if let Some(payload) = payload {
         children.push(RegionTreeCore {
             bounds: chunk_bounds,
-            kind: kind_from_chunk_value(chunk_bounds, Some(payload)),
+            kind: kind_from_resolved_value(chunk_bounds, Some(payload)),
             generator_version_hash: node.generator_version_hash,
         });
     }
@@ -1236,7 +1253,7 @@ fn ensure_binary_children(node: &mut RegionTreeCore) {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum AdjacentMergeKind {
-    Uniform(u16),
+    Uniform(BlockData),
     ProceduralRef(GeneratorRef),
 }
 
@@ -1251,7 +1268,7 @@ struct AdjacentMergeGroupKey {
 
 fn adjacent_merge_kind(kind: &RegionNodeKind) -> Option<AdjacentMergeKind> {
     match kind {
-        RegionNodeKind::Uniform(material) => Some(AdjacentMergeKind::Uniform(*material)),
+        RegionNodeKind::Uniform(block) => Some(AdjacentMergeKind::Uniform(block.clone())),
         RegionNodeKind::ProceduralRef(generator_ref) => {
             Some(AdjacentMergeKind::ProceduralRef(generator_ref.clone()))
         }
@@ -1415,14 +1432,39 @@ fn consolidate_chunk_array_children(
         return false;
     }
 
-    // Build palette and dense index array for the merged ChunkArray.
+    // First: merge block_palettes from all children and build per-child remap tables.
+    let mut merged_block_palette = vec![BlockData::AIR];
+    let mut block_palette_map: HashMap<BlockData, u16> = HashMap::new();
+    block_palette_map.insert(BlockData::AIR, 0);
+    let mut child_block_remaps: Vec<Vec<u16>> = Vec::with_capacity(ca_children.len());
+    for ca_child in &ca_children {
+        let RegionNodeKind::ChunkArray(ca) = &ca_child.kind else {
+            child_block_remaps.push(Vec::new());
+            continue;
+        };
+        let mut remap = Vec::with_capacity(ca.block_palette.len());
+        for block in &ca.block_palette {
+            let merged_idx = if let Some(&idx) = block_palette_map.get(block) {
+                idx
+            } else {
+                let idx = merged_block_palette.len() as u16;
+                block_palette_map.insert(block.clone(), idx);
+                merged_block_palette.push(block.clone());
+                idx
+            };
+            remap.push(merged_idx);
+        }
+        child_block_remaps.push(remap);
+    }
+
+    // Build chunk palette and dense index array for the merged ChunkArray.
     let empty_payload = ChunkPayload::Empty;
     let mut palette: Vec<ChunkPayload> = vec![empty_payload.clone()];
     let mut palette_map: HashMap<ChunkPayload, u16> = HashMap::new();
     palette_map.insert(empty_payload, 0u16);
     let mut dense_indices = vec![0u16; combined_volume];
 
-    for ca_child in &ca_children {
+    for (child_idx, ca_child) in ca_children.iter().enumerate() {
         let RegionNodeKind::ChunkArray(ca) = &ca_child.kind else {
             continue;
         };
@@ -1435,6 +1477,7 @@ fn consolidate_chunk_array_children(
         let Some(child_extents) = ca.bounds.chunk_extents() else {
             continue;
         };
+        let block_remap = &child_block_remaps[child_idx];
 
         // Iterate all positions in this child's bounds.
         for w in 0..child_extents[3] {
@@ -1452,6 +1495,9 @@ fn consolidate_chunk_array_children(
                         if payload == ChunkPayload::Empty {
                             continue;
                         }
+
+                        // Remap block palette indices within this payload.
+                        let remapped_payload = remap_chunk_payload_block_indices(&payload, block_remap);
 
                         // Map child-local coords to combined coords.
                         let world_pos = [
@@ -1472,12 +1518,12 @@ fn consolidate_chunk_array_children(
                         );
 
                         // Deduplicate palette entries.
-                        let merged_idx = if let Some(&idx) = palette_map.get(&payload) {
+                        let merged_idx = if let Some(&idx) = palette_map.get(&remapped_payload) {
                             idx
                         } else {
                             let idx = palette.len() as u16;
-                            palette_map.insert(payload.clone(), idx);
-                            palette.push(payload);
+                            palette_map.insert(remapped_payload.clone(), idx);
+                            palette.push(remapped_payload);
                             idx
                         };
                         dense_indices[combined_linear] = merged_idx;
@@ -1488,11 +1534,12 @@ fn consolidate_chunk_array_children(
     }
 
     // Build the merged ChunkArray.
-    let Ok(merged_ca) = ChunkArrayData::from_dense_indices(
+    let Ok(merged_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
         combined_bounds,
         palette,
         dense_indices,
         Some(0), // default = Empty
+        merged_block_palette,
     ) else {
         *children = ca_children;
         children.extend(other_children);
@@ -1596,7 +1643,7 @@ fn project_node_to_bounds(
 
     let kind = match source_kind {
         RegionNodeKind::Empty => RegionNodeKind::Empty,
-        RegionNodeKind::Uniform(material) => RegionNodeKind::Uniform(*material),
+        RegionNodeKind::Uniform(block) => RegionNodeKind::Uniform(block.clone()),
         RegionNodeKind::ProceduralRef(generator_ref) => {
             RegionNodeKind::ProceduralRef(generator_ref.clone())
         }
@@ -1639,7 +1686,10 @@ fn project_node_to_bounds(
     projected
 }
 
-fn query_chunk_payload_in_node(node: &RegionTreeCore, key_pos: [i32; 4]) -> Option<ChunkPayload> {
+fn query_chunk_payload_in_node(
+    node: &RegionTreeCore,
+    key_pos: [i32; 4],
+) -> Option<ResolvedChunkPayload> {
     query_chunk_payload_in_kind(&node.kind, node.bounds, key_pos)
 }
 
@@ -1647,15 +1697,17 @@ fn query_chunk_payload_in_kind(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
     key_pos: [i32; 4],
-) -> Option<ChunkPayload> {
+) -> Option<ResolvedChunkPayload> {
     if !bounds.contains_chunk(key_pos) {
         return None;
     }
     match kind {
         RegionNodeKind::Empty => None,
-        RegionNodeKind::Uniform(material) => Some(ChunkPayload::Uniform(*material)),
+        RegionNodeKind::Uniform(block) => Some(ResolvedChunkPayload::uniform(block.clone())),
         RegionNodeKind::ProceduralRef(_) => None,
-        RegionNodeKind::ChunkArray(chunk_array) => chunk_array_payload_at(chunk_array, key_pos),
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            chunk_array_resolved_payload_at(chunk_array, key_pos)
+        }
         RegionNodeKind::Branch(children) => {
             for child in children {
                 if child.bounds.contains_chunk(key_pos) {
@@ -1665,6 +1717,17 @@ fn query_chunk_payload_in_kind(
             None
         }
     }
+}
+
+fn chunk_array_resolved_payload_at(
+    chunk_array: &ChunkArrayData,
+    key_pos: [i32; 4],
+) -> Option<ResolvedChunkPayload> {
+    let payload = chunk_array_payload_at(chunk_array, key_pos)?;
+    Some(ResolvedChunkPayload {
+        payload,
+        block_palette: chunk_array.block_palette.clone(),
+    })
 }
 
 fn kind_has_non_empty_chunk_intersection(
@@ -1677,7 +1740,7 @@ fn kind_has_non_empty_chunk_intersection(
     }
     match kind {
         RegionNodeKind::Empty => false,
-        RegionNodeKind::Uniform(material) => *material != 0,
+        RegionNodeKind::Uniform(block) => !block.is_air(),
         RegionNodeKind::ProceduralRef(_) => false,
         RegionNodeKind::ChunkArray(chunk_array) => {
             chunk_array_has_non_empty_intersection(chunk_array, query_bounds)
@@ -1691,8 +1754,8 @@ fn kind_has_non_empty_chunk_intersection(
 fn count_non_empty_chunks(kind: &RegionNodeKind, bounds: Aabb4i) -> usize {
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => 0,
-        RegionNodeKind::Uniform(material) => {
-            if *material == 0 {
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
                 0
             } else {
                 bounds.chunk_cell_count().unwrap_or(0)
@@ -1723,17 +1786,17 @@ fn count_non_empty_chunks(kind: &RegionNodeKind, bounds: Aabb4i) -> usize {
 fn collect_chunks_from_kind(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
-    out: &mut Vec<(ChunkKey, ChunkPayload)>,
+    out: &mut Vec<(ChunkKey, ResolvedChunkPayload)>,
 ) {
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            let payload = ChunkPayload::Uniform(*material);
+        RegionNodeKind::Uniform(block) => {
+            let resolved = ResolvedChunkPayload::uniform(block.clone());
             for w in bounds.min[3]..=bounds.max[3] {
                 for z in bounds.min[2]..=bounds.max[2] {
                     for y in bounds.min[1]..=bounds.max[1] {
                         for x in bounds.min[0]..=bounds.max[0] {
-                            out.push(([x, y, z, w], payload.clone()));
+                            out.push(([x, y, z, w], resolved.clone()));
                         }
                     }
                 }
@@ -1765,7 +1828,13 @@ fn collect_chunks_from_kind(
                             else {
                                 continue;
                             };
-                            out.push(([x, y, z, w], payload.clone()));
+                            out.push((
+                                [x, y, z, w],
+                                ResolvedChunkPayload {
+                                    payload: payload.clone(),
+                                    block_palette: chunk_array.block_palette.clone(),
+                                },
+                            ));
                         }
                     }
                 }
@@ -1783,7 +1852,7 @@ fn collect_chunks_from_kind_in_bounds(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
     query_bounds: Aabb4i,
-    out: &mut Vec<(ChunkKey, ChunkPayload)>,
+    out: &mut Vec<(ChunkKey, ResolvedChunkPayload)>,
 ) {
     let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
         return;
@@ -1791,13 +1860,13 @@ fn collect_chunks_from_kind_in_bounds(
 
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(material) => {
-            let payload = ChunkPayload::Uniform(*material);
+        RegionNodeKind::Uniform(block) => {
+            let resolved = ResolvedChunkPayload::uniform(block.clone());
             for w in intersection.min[3]..=intersection.max[3] {
                 for z in intersection.min[2]..=intersection.max[2] {
                     for y in intersection.min[1]..=intersection.max[1] {
                         for x in intersection.min[0]..=intersection.max[0] {
-                            out.push(([x, y, z, w], payload.clone()));
+                            out.push(([x, y, z, w], resolved.clone()));
                         }
                     }
                 }
@@ -1833,7 +1902,13 @@ fn collect_chunks_from_kind_in_bounds(
                             else {
                                 continue;
                             };
-                            out.push(([x, y, z, w], payload.clone()));
+                            out.push((
+                                [x, y, z, w],
+                                ResolvedChunkPayload {
+                                    payload: payload.clone(),
+                                    block_palette: chunk_array.block_palette.clone(),
+                                },
+                            ));
                         }
                     }
                 }
@@ -1927,15 +2002,74 @@ fn chunk_array_has_non_empty_intersection(
     false
 }
 
-fn payload_has_solid_material(payload: &ChunkPayload) -> bool {
-    match payload {
-        ChunkPayload::Empty => false,
-        ChunkPayload::Uniform(material) => *material != 0,
-        ChunkPayload::Dense16 { materials } => materials.iter().any(|m| *m != 0),
-        ChunkPayload::PalettePacked { .. } => payload
-            .dense_materials()
-            .map(|dense| dense.into_iter().any(|m| m != 0))
+#[allow(dead_code)]
+fn resolved_option_is_semantically_empty(resolved: Option<&ResolvedChunkPayload>) -> bool {
+    resolved
+        .map(|r| !r.has_solid_block())
+        .unwrap_or(true)
+}
+
+fn resolved_option_matches_block(
+    block: &BlockData,
+    resolved: Option<&ResolvedChunkPayload>,
+) -> bool {
+    match resolved {
+        Some(r) => {
+            let r = canonicalize_resolved_payload(r.clone());
+            match &r.payload {
+                ChunkPayload::Uniform(idx) => {
+                    let resolved_block = r
+                        .block_palette
+                        .get(*idx as usize)
+                        .cloned()
+                        .unwrap_or(BlockData::AIR);
+                    &resolved_block == block
+                }
+                _ => false,
+            }
+        }
+        None => block.is_air(),
+    }
+}
+
+fn resolved_option_matches_existing(
+    existing: Option<ResolvedChunkPayload>,
+    incoming: Option<&ResolvedChunkPayload>,
+) -> bool {
+    match incoming {
+        Some(incoming) => {
+            let incoming_c = canonicalize_resolved_payload(incoming.clone());
+            match existing {
+                Some(existing) => {
+                    let existing_c = canonicalize_resolved_payload(existing);
+                    resolved_payloads_semantically_equal(&existing_c, &incoming_c)
+                }
+                None => !incoming_c.has_solid_block(),
+            }
+        }
+        None => existing
+            .as_ref()
+            .map(|r| !r.has_solid_block())
             .unwrap_or(true),
+    }
+}
+
+fn resolved_payloads_semantically_equal(a: &ResolvedChunkPayload, b: &ResolvedChunkPayload) -> bool {
+    // Compare by resolving both through their block palettes
+    let a_dense = a.payload.dense_materials();
+    let b_dense = b.payload.dense_materials();
+    match (a_dense, b_dense) {
+        (Ok(ad), Ok(bd)) => {
+            if ad.len() != bd.len() {
+                return false;
+            }
+            ad.iter().zip(bd.iter()).all(|(ai, bi)| {
+                let a_block = a.block_palette.get(*ai as usize).cloned().unwrap_or(BlockData::AIR);
+                let b_block = b.block_palette.get(*bi as usize).cloned().unwrap_or(BlockData::AIR);
+                a_block == b_block
+            })
+        }
+        _ => false,
     }
 }
 
@@ -1963,14 +2097,19 @@ fn non_empty_kinds_semantically_equal_in_bounds(
     collect_non_empty_chunks_from_kind_in_bounds(rhs_kind, rhs_bounds, bounds, &mut rhs_chunks);
     rhs_chunks.sort_unstable_by_key(|(key, _)| *key);
 
-    lhs_chunks == rhs_chunks
+    if lhs_chunks.len() != rhs_chunks.len() {
+        return false;
+    }
+    lhs_chunks.iter().zip(rhs_chunks.iter()).all(|((lk, lp), (rk, rp))| {
+        lk == rk && resolved_payloads_semantically_equal(lp, rp)
+    })
 }
 
 fn chunk_array_palette_non_empty_mask(chunk_array: &ChunkArrayData) -> Vec<bool> {
     chunk_array
         .chunk_palette
         .iter()
-        .map(payload_has_solid_material)
+        .map(|p| payload_has_solid_material_in_context(p, &chunk_array.block_palette))
         .collect()
 }
 
@@ -2002,38 +2141,10 @@ fn chunk_array_payload_at_with_dense_indices(
     chunk_array.chunk_palette.get(palette_idx).cloned()
 }
 
-fn payload_option_is_semantically_empty(payload: Option<&ChunkPayload>) -> bool {
-    payload
-        .map(|payload| !payload_has_solid_material(payload))
-        .unwrap_or(true)
-}
 
-fn payload_option_matches_uniform(material: u16, payload: Option<&ChunkPayload>) -> bool {
-    match payload {
-        Some(payload) => {
-            canonicalize_chunk_payload(payload.clone()) == ChunkPayload::Uniform(material)
-        }
-        None => material == 0,
-    }
-}
-
-fn payload_option_matches_existing(
-    existing: Option<ChunkPayload>,
-    payload: Option<&ChunkPayload>,
-) -> bool {
-    match payload {
-        Some(payload) => {
-            existing.map(canonicalize_chunk_payload)
-                == Some(canonicalize_chunk_payload(payload.clone()))
-        }
-        None => existing
-            .as_ref()
-            .map(|payload| !payload_has_solid_material(payload))
-            .unwrap_or(true),
-    }
-}
-
-fn canonicalize_chunk_payload(payload: ChunkPayload) -> ChunkPayload {
+/// Canonicalize the storage format of a ChunkPayload (opaque palette indices).
+/// Converts Empty → Uniform(0), collapses all-same dense into Uniform.
+fn canonicalize_payload_format(payload: ChunkPayload) -> ChunkPayload {
     let payload = match payload {
         ChunkPayload::Empty => ChunkPayload::Uniform(0),
         other => other,
@@ -2052,24 +2163,106 @@ fn canonicalize_chunk_payload(payload: ChunkPayload) -> ChunkPayload {
     }
 }
 
-fn kind_from_chunk_value(bounds: Aabb4i, value: Option<ChunkPayload>) -> RegionNodeKind {
-    let Some(payload) = value else {
-        return RegionNodeKind::Empty;
-    };
-    match canonicalize_chunk_payload(payload) {
-        ChunkPayload::Uniform(material) => RegionNodeKind::Uniform(material),
-        other => repeated_payload_kind(bounds, other),
+fn canonicalize_resolved_payload(resolved: ResolvedChunkPayload) -> ResolvedChunkPayload {
+    ResolvedChunkPayload {
+        payload: canonicalize_payload_format(resolved.payload),
+        block_palette: resolved.block_palette,
     }
 }
 
-fn repeated_payload_kind(bounds: Aabb4i, payload: ChunkPayload) -> RegionNodeKind {
+fn kind_from_resolved_value(
+    bounds: Aabb4i,
+    value: Option<ResolvedChunkPayload>,
+) -> RegionNodeKind {
+    let Some(resolved) = value else {
+        return RegionNodeKind::Empty;
+    };
+    let resolved = canonicalize_resolved_payload(resolved);
+    match &resolved.payload {
+        ChunkPayload::Uniform(idx) => {
+            let block = resolved
+                .block_palette
+                .get(*idx as usize)
+                .cloned()
+                .unwrap_or(BlockData::AIR);
+            RegionNodeKind::Uniform(block)
+        }
+        _ => repeated_payload_kind_resolved(bounds, resolved),
+    }
+}
+
+fn repeated_payload_kind_resolved(
+    bounds: Aabb4i,
+    resolved: ResolvedChunkPayload,
+) -> RegionNodeKind {
     let Some(cell_count) = bounds.chunk_cell_count() else {
         return RegionNodeKind::Empty;
     };
     let indices = vec![0u16; cell_count];
-    match ChunkArrayData::from_dense_indices(bounds, vec![payload], indices, Some(0)) {
+    match ChunkArrayData::from_dense_indices_with_block_palette(
+        bounds,
+        vec![resolved.payload],
+        indices,
+        Some(0),
+        resolved.block_palette,
+    ) {
         Ok(chunk_array) => RegionNodeKind::ChunkArray(chunk_array),
         Err(_) => RegionNodeKind::Empty,
+    }
+}
+
+/// Remap block-palette indices inside a single `ChunkPayload` using the given remap table.
+/// `remap[old_idx]` gives the new index in the merged block palette.
+fn remap_chunk_payload_block_indices(payload: &ChunkPayload, remap: &[u16]) -> ChunkPayload {
+    match payload {
+        ChunkPayload::Empty => ChunkPayload::Empty,
+        ChunkPayload::Uniform(idx) => {
+            let new_idx = remap.get(*idx as usize).copied().unwrap_or(*idx);
+            ChunkPayload::Uniform(new_idx)
+        }
+        ChunkPayload::Dense16 { materials } => ChunkPayload::Dense16 {
+            materials: materials
+                .iter()
+                .map(|idx| remap.get(*idx as usize).copied().unwrap_or(*idx))
+                .collect(),
+        },
+        ChunkPayload::PalettePacked {
+            palette,
+            bit_width,
+            packed_indices,
+        } => ChunkPayload::PalettePacked {
+            palette: palette
+                .iter()
+                .map(|idx| remap.get(*idx as usize).copied().unwrap_or(*idx))
+                .collect(),
+            bit_width: *bit_width,
+            packed_indices: packed_indices.clone(),
+        },
+    }
+}
+
+fn payload_has_solid_material_in_context(
+    payload: &ChunkPayload,
+    block_palette: &[BlockData],
+) -> bool {
+    match payload {
+        ChunkPayload::Empty => false,
+        ChunkPayload::Uniform(idx) => block_palette
+            .get(*idx as usize)
+            .map(|b| !b.is_air())
+            .unwrap_or(false),
+        ChunkPayload::Dense16 { materials } => materials.iter().any(|idx| {
+            block_palette
+                .get(*idx as usize)
+                .map(|b| !b.is_air())
+                .unwrap_or(false)
+        }),
+        ChunkPayload::PalettePacked { palette, .. } => palette.iter().any(|idx| {
+            block_palette
+                .get(*idx as usize)
+                .map(|b| !b.is_air())
+                .unwrap_or(false)
+        }),
     }
 }
 

@@ -1,7 +1,8 @@
 use super::*;
-use crate::shared::chunk_payload::ChunkPayload;
+use crate::shared::chunk_payload::ResolvedChunkPayload;
+use crate::materials::block_to_material_appearance;
 use crate::shared::region_tree::{chunk_key_from_chunk_pos, RegionChunkTree, RegionTreeCore};
-use crate::shared::voxel::CHUNK_VOLUME;
+use crate::shared::voxel::{BlockData, CHUNK_VOLUME};
 
 pub(super) struct ServerState {
     pub(super) next_object_id: u64,
@@ -167,9 +168,9 @@ impl ServerState {
     pub(super) fn apply_world_voxel_edit(
         &mut self,
         position: [i32; 4],
-        material: VoxelType,
+        block: BlockData,
     ) -> Option<ChunkPos> {
-        self.world.apply_voxel_edit(position, material)
+        self.world.apply_voxel_edit(position, block)
     }
 
     pub(super) fn world_take_dirty_bounds(&mut self) -> Vec<Aabb4i> {
@@ -193,14 +194,20 @@ impl ServerState {
     }
 }
 
-fn dense_chunk_from_payload(payload: ChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
-    let materials = payload.dense_materials().ok()?;
+fn dense_chunk_from_payload(resolved: ResolvedChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    let materials = resolved.payload.dense_materials().ok()?;
     if materials.len() != CHUNK_VOLUME {
         return None;
     }
     let mut chunk = [VoxelType::AIR; CHUNK_VOLUME];
-    for (idx, material) in materials.into_iter().enumerate() {
-        chunk[idx] = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
+    for (idx, palette_idx) in materials.into_iter().enumerate() {
+        let block = resolved
+            .block_palette
+            .get(palette_idx as usize)
+            .cloned()
+            .unwrap_or(BlockData::AIR);
+        let mat = block_to_material_appearance(block.namespace, block.block_type);
+        chunk[idx] = VoxelType(mat);
     }
     Some(chunk)
 }

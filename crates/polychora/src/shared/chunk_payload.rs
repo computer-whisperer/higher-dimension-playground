@@ -1,5 +1,5 @@
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::CHUNK_VOLUME;
+use crate::shared::voxel::{BlockData, CHUNK_VOLUME};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -153,6 +153,9 @@ pub struct ChunkArrayData {
     pub index_codec: ChunkArrayIndexCodec,
     pub index_data: Vec<u8>,
     pub default_chunk_idx: Option<u16>,
+    /// Maps local voxel IDs (u16 values inside ChunkPayload variants) to rich block data.
+    /// `block_palette[0]` is AIR by convention.
+    pub block_palette: Vec<BlockData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,6 +278,22 @@ impl ChunkArrayData {
         dense_indices: Vec<u16>,
         default_chunk_idx: Option<u16>,
     ) -> Result<Self, ChunkArrayCodecError> {
+        Self::from_dense_indices_with_block_palette(
+            bounds,
+            chunk_palette,
+            dense_indices,
+            default_chunk_idx,
+            vec![BlockData::AIR],
+        )
+    }
+
+    pub fn from_dense_indices_with_block_palette(
+        bounds: Aabb4i,
+        chunk_palette: Vec<ChunkPayload>,
+        dense_indices: Vec<u16>,
+        default_chunk_idx: Option<u16>,
+        block_palette: Vec<BlockData>,
+    ) -> Result<Self, ChunkArrayCodecError> {
         let dims = bounds_extents(bounds)?;
         let expected_cells = dims_cell_count(dims)?;
         if dense_indices.len() != expected_cells {
@@ -294,7 +313,48 @@ impl ChunkArrayData {
             index_codec: ChunkArrayIndexCodec::PagedSparseRle,
             index_data,
             default_chunk_idx,
+            block_palette,
         })
+    }
+
+    /// Find or insert a BlockData in the block palette, return its index.
+    pub fn intern_block(&mut self, block: &BlockData) -> u16 {
+        if let Some(idx) = self.block_palette.iter().position(|b| b == block) {
+            return idx as u16;
+        }
+        let idx = self.block_palette.len() as u16;
+        self.block_palette.push(block.clone());
+        idx
+    }
+
+    /// Remap all u16 voxel values in chunk payloads using a translation table.
+    pub fn remap_block_indices(&mut self, remap: &[u16]) {
+        for payload in &mut self.chunk_palette {
+            match payload {
+                ChunkPayload::Empty => {}
+                ChunkPayload::Uniform(ref mut material) => {
+                    if let Some(&new_val) = remap.get(*material as usize) {
+                        *material = new_val;
+                    }
+                }
+                ChunkPayload::Dense16 { ref mut materials } => {
+                    for m in materials.iter_mut() {
+                        if let Some(&new_val) = remap.get(*m as usize) {
+                            *m = new_val;
+                        }
+                    }
+                }
+                ChunkPayload::PalettePacked {
+                    ref mut palette, ..
+                } => {
+                    for p in palette.iter_mut() {
+                        if let Some(&new_val) = remap.get(*p as usize) {
+                            *p = new_val;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn decode_dense_indices(&self) -> Result<Vec<u16>, ChunkArrayCodecError> {
@@ -689,4 +749,211 @@ fn decode_paged_sparse_rle(
     }
 
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// ResolvedChunkPayload — pairs opaque storage with its block palette
+// ---------------------------------------------------------------------------
+
+/// A `ChunkPayload` together with the `block_palette` needed to interpret it.
+///
+/// The `u16` values inside `ChunkPayload` are opaque palette indices into
+/// `block_palette`. This type is the public API boundary for reading and
+/// writing chunks; raw `ChunkPayload` remains an internal storage detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedChunkPayload {
+    pub payload: ChunkPayload,
+    pub block_palette: Vec<BlockData>,
+}
+
+impl ResolvedChunkPayload {
+    /// A chunk uniformly filled with a single block type.
+    pub fn uniform(block: BlockData) -> Self {
+        if block.is_air() {
+            return Self::empty();
+        }
+        Self {
+            payload: ChunkPayload::Uniform(1),
+            block_palette: vec![BlockData::AIR, block],
+        }
+    }
+
+    /// An empty (all-air) chunk.
+    pub fn empty() -> Self {
+        Self {
+            payload: ChunkPayload::Empty,
+            block_palette: vec![BlockData::AIR],
+        }
+    }
+
+    /// True if this chunk contains at least one non-air block.
+    pub fn has_solid_block(&self) -> bool {
+        match &self.payload {
+            ChunkPayload::Empty => false,
+            ChunkPayload::Uniform(idx) => self
+                .block_palette
+                .get(*idx as usize)
+                .map(|b| !b.is_air())
+                .unwrap_or(false),
+            ChunkPayload::Dense16 { materials } => materials.iter().any(|idx| {
+                self.block_palette
+                    .get(*idx as usize)
+                    .map(|b| !b.is_air())
+                    .unwrap_or(false)
+            }),
+            ChunkPayload::PalettePacked { palette, .. } => palette.iter().any(|idx| {
+                self.block_palette
+                    .get(*idx as usize)
+                    .map(|b| !b.is_air())
+                    .unwrap_or(false)
+            }),
+        }
+    }
+
+    /// Resolve the block at a given voxel index (0..CHUNK_VOLUME).
+    pub fn block_at(&self, voxel_idx: usize) -> BlockData {
+        let palette_idx = match &self.payload {
+            ChunkPayload::Empty => 0u16,
+            ChunkPayload::Uniform(idx) => *idx,
+            ChunkPayload::Dense16 { materials } => {
+                materials.get(voxel_idx).copied().unwrap_or(0)
+            }
+            ChunkPayload::PalettePacked { .. } => {
+                match self.payload.dense_materials() {
+                    Ok(dense) => dense.get(voxel_idx).copied().unwrap_or(0),
+                    Err(_) => 0,
+                }
+            }
+        };
+        self.block_palette
+            .get(palette_idx as usize)
+            .cloned()
+            .unwrap_or(BlockData::AIR)
+    }
+
+    /// Expand all voxels to a dense `Vec<BlockData>` of length CHUNK_VOLUME.
+    pub fn dense_blocks(&self) -> Vec<BlockData> {
+        match self.payload.dense_materials() {
+            Ok(indices) => indices
+                .iter()
+                .map(|idx| {
+                    self.block_palette
+                        .get(*idx as usize)
+                        .cloned()
+                        .unwrap_or(BlockData::AIR)
+                })
+                .collect(),
+            Err(_) => vec![BlockData::AIR; CHUNK_VOLUME],
+        }
+    }
+
+    /// If the payload is uniform, return the resolved block.
+    pub fn uniform_block(&self) -> Option<&BlockData> {
+        match &self.payload {
+            ChunkPayload::Uniform(idx) => self.block_palette.get(*idx as usize),
+            ChunkPayload::Empty => self.block_palette.first(),
+            _ => None,
+        }
+    }
+
+    /// Build from a legacy `ChunkPayload` where u16 values are material IDs
+    /// (i.e. `block_type` values with namespace=0).
+    pub fn from_legacy_payload(payload: ChunkPayload) -> Self {
+        match &payload {
+            ChunkPayload::Empty => Self::empty(),
+            ChunkPayload::Uniform(material) => {
+                if *material == 0 {
+                    Self::empty()
+                } else {
+                    Self::uniform(BlockData::simple(0, *material as u32))
+                }
+            }
+            _ => {
+                let Ok(materials) = payload.dense_materials() else {
+                    return Self::empty();
+                };
+                let blocks: Vec<BlockData> = materials
+                    .iter()
+                    .map(|&m| {
+                        if m == 0 {
+                            BlockData::AIR
+                        } else {
+                            BlockData::simple(0, m as u32)
+                        }
+                    })
+                    .collect();
+                Self::from_dense_blocks(&blocks).unwrap_or_else(|_| Self::empty())
+            }
+        }
+    }
+
+    /// Convert to a legacy `ChunkPayload` where u16 values are material IDs.
+    /// Uses `block_to_material_fn` to map each BlockData to a u8 material appearance.
+    pub fn to_legacy_payload(&self, block_to_material_fn: impl Fn(&BlockData) -> u8) -> ChunkPayload {
+        match &self.payload {
+            ChunkPayload::Empty => ChunkPayload::Empty,
+            ChunkPayload::Uniform(idx) => {
+                let block = self
+                    .block_palette
+                    .get(*idx as usize)
+                    .cloned()
+                    .unwrap_or(BlockData::AIR);
+                let mat = block_to_material_fn(&block);
+                ChunkPayload::Uniform(mat as u16)
+            }
+            _ => {
+                let Ok(palette_indices) = self.payload.dense_materials() else {
+                    return ChunkPayload::Empty;
+                };
+                let materials: Vec<u16> = palette_indices
+                    .iter()
+                    .map(|&idx| {
+                        let block = self
+                            .block_palette
+                            .get(idx as usize)
+                            .cloned()
+                            .unwrap_or(BlockData::AIR);
+                        block_to_material_fn(&block) as u16
+                    })
+                    .collect();
+                ChunkPayload::from_dense_materials_compact(&materials)
+                    .unwrap_or(ChunkPayload::Dense16 { materials })
+            }
+        }
+    }
+
+    /// Build from a dense array of BlockData (length must be CHUNK_VOLUME).
+    pub fn from_dense_blocks(blocks: &[BlockData]) -> Result<Self, ChunkPayloadError> {
+        if blocks.len() != CHUNK_VOLUME {
+            return Err(ChunkPayloadError::DenseLengthMismatch {
+                expected: CHUNK_VOLUME,
+                actual: blocks.len(),
+            });
+        }
+
+        // Build block palette and map blocks to palette indices.
+        let mut block_palette = vec![BlockData::AIR];
+        let mut block_to_idx = HashMap::<BlockData, u16>::new();
+        block_to_idx.insert(BlockData::AIR, 0);
+
+        let mut dense_indices = Vec::with_capacity(CHUNK_VOLUME);
+        for block in blocks {
+            let idx = match block_to_idx.get(block) {
+                Some(&idx) => idx,
+                None => {
+                    let idx = block_palette.len() as u16;
+                    block_palette.push(block.clone());
+                    block_to_idx.insert(block.clone(), idx);
+                    idx
+                }
+            };
+            dense_indices.push(idx);
+        }
+
+        let payload = ChunkPayload::from_dense_materials_compact(&dense_indices)?;
+        Ok(Self {
+            payload,
+            block_palette,
+        })
+    }
 }

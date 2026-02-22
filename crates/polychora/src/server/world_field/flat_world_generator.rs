@@ -1,6 +1,6 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
-use crate::shared::chunk_payload::ChunkPayload;
+use crate::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
     chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
@@ -85,7 +85,7 @@ impl FlatWorldGenerator {
         );
         Some(RegionTreeCore {
             bounds: floor_bounds,
-            kind: RegionNodeKind::Uniform(u16::from(material.0)),
+            kind: RegionNodeKind::Uniform(crate::shared::voxel::BlockData::simple(0, material.0 as u32)),
             generator_version_hash: 0,
         })
     }
@@ -127,7 +127,8 @@ impl FlatWorldGenerator {
             let Some(payload) = self.structure_chunk_payload(chunk_pos) else {
                 continue;
             };
-            let _ = tree.set_chunk(chunk_key_from_chunk_pos(chunk_pos), Some(payload));
+            let resolved = ResolvedChunkPayload::from_legacy_payload(payload);
+            let _ = tree.set_chunk(chunk_key_from_chunk_pos(chunk_pos), Some(resolved));
         }
     }
 
@@ -219,6 +220,7 @@ fn merge_non_air_voxels(dst: &mut DenseChunk, src: &DenseChunk) {
 mod tests {
     use super::*;
     use crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
+    use crate::shared::voxel::BlockData;
 
     #[test]
     fn flat_floor_single_chunk_query_returns_uniform_payload() {
@@ -234,7 +236,7 @@ mod tests {
         let bounds = Aabb4i::new([0, FLAT_FLOOR_CHUNK_Y, 0, 0], [0, FLAT_FLOOR_CHUNK_Y, 0, 0]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         assert_eq!(core.bounds, bounds);
-        assert_eq!(core.kind, RegionNodeKind::Uniform(11));
+        assert_eq!(core.kind, RegionNodeKind::Uniform(crate::shared::voxel::BlockData::simple(0, 11)));
     }
 
     #[test]
@@ -258,7 +260,7 @@ mod tests {
         assert!(non_empty
             .iter()
             .all(|(key, payload)| key[1] == FLAT_FLOOR_CHUNK_Y
-                && *payload == ChunkPayload::Uniform(11)));
+                && payload.uniform_block() == Some(&BlockData::simple(0, 11))));
     }
 
     #[test]

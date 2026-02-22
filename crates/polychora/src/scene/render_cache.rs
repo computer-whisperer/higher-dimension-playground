@@ -183,11 +183,11 @@ impl Scene {
                     );
                 }
             }
-            RegionNodeKind::Uniform(mat) => {
+            RegionNodeKind::Uniform(block) => {
                 stats.uniform += 1;
                 eprintln!(
-                    "{}Uniform(mat={})  bounds={:?}->{:?} size={:?}",
-                    indent, mat, node.bounds.min, node.bounds.max, size,
+                    "{}Uniform(ns={},bt={})  bounds={:?}->{:?} size={:?}",
+                    indent, block.namespace, block.block_type, node.bounds.min, node.bounds.max, size,
                 );
             }
             RegionNodeKind::ProceduralRef(gen) => {
@@ -617,7 +617,7 @@ impl Scene {
         &mut self,
         bounds: Aabb4i,
         chunk_key: [i32; 4],
-    ) -> Vec<ChunkPayload> {
+    ) -> Vec<ResolvedChunkPayload> {
         if !bounds.is_valid() {
             return Vec::new();
         }

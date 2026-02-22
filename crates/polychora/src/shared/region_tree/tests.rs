@@ -1,6 +1,7 @@
 use super::*;
-use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
+use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::spatial::Aabb4i;
+use crate::shared::voxel::BlockData;
 use std::collections::HashMap;
 
 fn key(x: i32, y: i32, z: i32, w: i32) -> ChunkKey {
@@ -82,27 +83,45 @@ fn chunk_array_uniform_palette_core(bounds: Aabb4i, materials: &[u16]) -> Region
         .expect("bounds used in tests must be valid");
     assert_eq!(materials.len(), expected_cells);
 
-    let mut palette_materials = Vec::<u16>::new();
-    let mut palette_lookup = HashMap::<u16, u16>::new();
+    // Build block palette: index 0 = AIR, then each unique non-zero material.
+    let mut block_palette = vec![BlockData::AIR];
+    let mut material_to_block_idx = HashMap::<u16, u16>::new();
+    material_to_block_idx.insert(0, 0);
+    for &material in materials {
+        if !material_to_block_idx.contains_key(&material) {
+            let idx = block_palette.len() as u16;
+            block_palette.push(BlockData::simple(0, material as u32));
+            material_to_block_idx.insert(material, idx);
+        }
+    }
+
+    // Build chunk palette: each unique material maps to a ChunkPayload::Uniform(block_idx).
+    let mut chunk_palette_materials = Vec::<u16>::new();
+    let mut chunk_palette_lookup = HashMap::<u16, u16>::new();
     let mut dense_indices = Vec::<u16>::with_capacity(materials.len());
-    for material in materials {
-        let palette_idx = if let Some(existing) = palette_lookup.get(material) {
-            *existing
+    for &material in materials {
+        let chunk_idx = if let Some(&existing) = chunk_palette_lookup.get(&material) {
+            existing
         } else {
-            let next = palette_materials.len() as u16;
-            palette_materials.push(*material);
-            palette_lookup.insert(*material, next);
+            let next = chunk_palette_materials.len() as u16;
+            chunk_palette_materials.push(material);
+            chunk_palette_lookup.insert(material, next);
             next
         };
-        dense_indices.push(palette_idx);
+        dense_indices.push(chunk_idx);
     }
-    let palette_payloads = palette_materials
+    let palette_payloads = chunk_palette_materials
         .into_iter()
-        .map(ChunkPayload::Uniform)
+        .map(|m| ChunkPayload::Uniform(material_to_block_idx[&m]))
         .collect::<Vec<_>>();
-    let chunk_array =
-        ChunkArrayData::from_dense_indices(bounds, palette_payloads, dense_indices, None)
-            .expect("chunk array must build");
+    let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+        bounds,
+        palette_payloads,
+        dense_indices,
+        None,
+        block_palette,
+    )
+    .expect("chunk array must build");
     RegionTreeCore {
         bounds,
         kind: RegionNodeKind::ChunkArray(chunk_array),
@@ -117,12 +136,11 @@ fn assert_tree_matches_expected_uniform_map(
 ) {
     for key in keys_in_bounds(global_bounds) {
         let actual = match tree.chunk_payload(key) {
-            Some(ChunkPayload::Uniform(material)) if material != 0 => Some(material),
-            Some(ChunkPayload::Uniform(0) | ChunkPayload::Empty) | None => None,
-            Some(other) => panic!(
-                "unexpected payload in uniform-map assertion at {:?}: {:?}",
-                key, other
-            ),
+            Some(resolved) => match resolved.uniform_block() {
+                Some(block) if !block.is_air() => Some(block.block_type as u16),
+                _ => None,
+            },
+            None => None,
         };
         let expected_payload = expected.get(&key).copied();
         assert_eq!(
@@ -134,13 +152,12 @@ fn assert_tree_matches_expected_uniform_map(
 
     let sliced = tree.slice_non_empty_core_in_bounds(global_bounds);
     let mut sliced_map = HashMap::<ChunkKey, u16>::new();
-    for (key, payload) in collect_non_empty_chunks_from_core_in_bounds(&sliced, global_bounds) {
-        match payload {
-            ChunkPayload::Uniform(material) if material != 0 => {
-                sliced_map.insert(key, material);
+    for (key, resolved) in collect_non_empty_chunks_from_core_in_bounds(&sliced, global_bounds) {
+        match resolved.uniform_block() {
+            Some(block) if !block.is_air() => {
+                sliced_map.insert(key, block.block_type as u16);
             }
-            ChunkPayload::Uniform(0) | ChunkPayload::Empty => {}
-            other => panic!("unexpected payload in uniform-map assertion: {:?}", other),
+            _ => {}
         }
     }
     assert_eq!(&sliced_map, expected, "slice_non_empty snapshot mismatch");
@@ -194,11 +211,11 @@ fn set_get_remove_single_chunk_roundtrip() {
     let mut tree = RegionChunkTree::new();
     assert!(!tree.has_chunk(key(0, 0, 0, 0)));
 
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(12))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 12)))));
     assert!(tree.has_chunk(key(0, 0, 0, 0)));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(12))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 12))
     );
 
     assert!(tree.remove_chunk(key(0, 0, 0, 0)));
@@ -209,50 +226,50 @@ fn set_get_remove_single_chunk_roundtrip() {
 #[test]
 fn set_chunk_uniform_zero_on_empty_tree_is_explicit_override() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(0))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::empty())));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(0))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::AIR)
     );
 }
 
 #[test]
 fn uniform_merge_and_fragment_behavior_is_stable() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
-    assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7)))));
+    assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7)))));
 
     let root = tree.root().expect("root exists");
-    assert!(matches!(root.kind, RegionNodeKind::Uniform(7)));
+    assert!(matches!(root.kind, RegionNodeKind::Uniform(ref b) if b.block_type == 7));
 
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(9))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(9))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(7))
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 7))
     );
 
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7)))));
     let root = tree.root().expect("root exists");
-    assert!(matches!(root.kind, RegionNodeKind::Uniform(7)));
+    assert!(matches!(root.kind, RegionNodeKind::Uniform(ref b) if b.block_type == 7));
 }
 
 #[test]
 fn non_covering_uniform_children_do_not_fill_parent_gaps() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(11))));
-    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(11))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 11)))));
+    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 11)))));
 
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(11))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 11))
     );
     assert_eq!(
-        tree.chunk_payload(key(2, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(11))
+        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 11))
     );
     assert_eq!(tree.chunk_payload(key(1, 0, 0, 0)), None);
 
@@ -275,7 +292,7 @@ fn adjacent_uniform_children_merge_even_when_branch_partition_is_non_canonical()
     let full_bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
     let full_uniform = RegionTreeCore {
         bounds: full_bounds,
-        kind: RegionNodeKind::Uniform(11),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 11)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -296,7 +313,7 @@ fn adjacent_uniform_children_merge_even_when_branch_partition_is_non_canonical()
 
     let center_uniform = RegionTreeCore {
         bounds: center_bounds,
-        kind: RegionNodeKind::Uniform(11),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 11)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -306,7 +323,7 @@ fn adjacent_uniform_children_merge_even_when_branch_partition_is_non_canonical()
 
     let root = tree.root().expect("root exists");
     assert_eq!(root.bounds, full_bounds);
-    assert!(matches!(root.kind, RegionNodeKind::Uniform(11)));
+    assert!(matches!(root.kind, RegionNodeKind::Uniform(ref b) if b.block_type == 11));
 }
 
 #[test]
@@ -326,8 +343,8 @@ fn randomized_mutations_preserve_non_overlapping_branches() {
             ];
             let payload = match rng.next_u32() % 4 {
                 0 => None,
-                1 => Some(ChunkPayload::Uniform(0)),
-                _ => Some(ChunkPayload::Uniform(((rng.next_u32() % 15) + 1) as u16)),
+                1 => Some(ResolvedChunkPayload::empty()),
+                _ => Some(ResolvedChunkPayload::uniform(BlockData::simple(0, (rng.next_u32() % 15) + 1))),
             };
             let _ = tree.set_chunk(chunk, payload);
         } else {
@@ -337,7 +354,7 @@ fn randomized_mutations_preserve_non_overlapping_branches() {
                 kind: if (rng.next_u32() & 1) == 0 {
                     RegionNodeKind::Empty
                 } else {
-                    RegionNodeKind::Uniform(((rng.next_u32() % 15) + 1) as u16)
+                    RegionNodeKind::Uniform(BlockData::simple(0, (rng.next_u32() % 15) + 1))
                 },
                 generator_version_hash: 0,
             };
@@ -353,64 +370,62 @@ fn randomized_mutations_preserve_non_overlapping_branches() {
 #[test]
 fn splice_non_empty_core_replaces_window_contents() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
-    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 2)))));
+    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
 
     let bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
     let patch_core = RegionTreeCore {
         bounds,
-        kind: RegionNodeKind::Uniform(9),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 9)),
         generator_version_hash: 0,
     };
 
     let changed_bounds = tree.splice_non_empty_core_in_bounds(bounds, &patch_core);
     assert_eq!(changed_bounds, Some(bounds));
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(9))
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(2))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 2))
     );
     assert_eq!(
-        tree.chunk_payload(key(2, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(4))
+        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 4))
     );
 }
 
 #[test]
 fn take_non_empty_core_extracts_and_clears_region() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
-    assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(3))));
-    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 2)))));
+    assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3)))));
+    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
 
     let bounds = Aabb4i::new([1, 0, 0, 0], [2, 0, 0, 0]);
     let extracted = tree.take_non_empty_core_in_bounds(bounds);
     let mut extracted_chunks = collect_non_empty_chunks_from_core_in_bounds(&extracted, bounds);
     extracted_chunks.sort_unstable_by_key(|(key, _)| *key);
-    assert_eq!(
-        extracted_chunks,
-        vec![
-            (key(1, 0, 0, 0), ChunkPayload::Uniform(3)),
-            (key(2, 0, 0, 0), ChunkPayload::Uniform(4)),
-        ]
-    );
+    assert_eq!(extracted_chunks.len(), 2);
+    assert_eq!(extracted_chunks[0].0, key(1, 0, 0, 0));
+    assert_eq!(extracted_chunks[0].1.uniform_block(), Some(&BlockData::simple(0, 3)));
+    assert_eq!(extracted_chunks[1].0, key(2, 0, 0, 0));
+    assert_eq!(extracted_chunks[1].1.uniform_block(), Some(&BlockData::simple(0, 4)));
 
     assert_eq!(tree.chunk_payload(key(1, 0, 0, 0)), None);
     assert_eq!(tree.chunk_payload(key(2, 0, 0, 0)), None);
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(2))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 2))
     );
 }
 
 #[test]
 fn lazy_drop_outside_bounds_respects_budget() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(-8, 0, 0, 0), Some(ChunkPayload::Uniform(6))));
-    assert!(tree.set_chunk(key(8, 0, 0, 0), Some(ChunkPayload::Uniform(7))));
+    assert!(tree.set_chunk(key(-8, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 6)))));
+    assert!(tree.set_chunk(key(8, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7)))));
 
     let keep_bounds = Aabb4i::new([-9, -1, -1, -1], [-7, 1, 1, 1]);
     assert!(tree.lazy_drop_outside_bounds(keep_bounds, 0).is_none());
@@ -423,15 +438,17 @@ fn lazy_drop_outside_bounds_respects_budget() {
 #[test]
 fn slice_preserves_query_bounds() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(2))));
-    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 2)))));
+    assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
 
     let bounds = Aabb4i::new([2, 0, 0, 0], [3, 0, 0, 0]);
     let slice = tree.slice_core_in_bounds(bounds);
     assert_eq!(slice.bounds, bounds);
     let mut chunks = collect_non_empty_chunks_from_core_in_bounds(&slice, bounds);
     chunks.sort_unstable_by_key(|(key, _)| *key);
-    assert_eq!(chunks, vec![(key(2, 0, 0, 0), ChunkPayload::Uniform(4))]);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].0, key(2, 0, 0, 0));
+    assert_eq!(chunks[0].1.uniform_block(), Some(&BlockData::simple(0, 4)));
 }
 
 #[test]
@@ -440,7 +457,7 @@ fn set_chunk_carves_large_uniform_leaf_locally() {
     let bounds = Aabb4i::new([0, 0, 0, 0], [7, 7, 7, 7]);
     let core = RegionTreeCore {
         bounds,
-        kind: RegionNodeKind::Uniform(4),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -448,14 +465,14 @@ fn set_chunk_carves_large_uniform_leaf_locally() {
         Some(bounds)
     );
 
-    assert!(tree.set_chunk(key(3, 4, 2, 5), Some(ChunkPayload::Uniform(9))));
+    assert!(tree.set_chunk(key(3, 4, 2, 5), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))));
     assert_eq!(
-        tree.chunk_payload(key(3, 4, 2, 5)),
-        Some(ChunkPayload::Uniform(9))
+        tree.chunk_payload(key(3, 4, 2, 5)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(4))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 4))
     );
 
     let root = tree.root().expect("root exists");
@@ -482,7 +499,7 @@ fn set_chunk_same_uniform_value_is_noop_without_fragmentation() {
     let bounds = Aabb4i::new([0, 0, 0, 0], [7, 7, 7, 7]);
     let core = RegionTreeCore {
         bounds,
-        kind: RegionNodeKind::Uniform(6),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 6)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -490,9 +507,9 @@ fn set_chunk_same_uniform_value_is_noop_without_fragmentation() {
         Some(bounds)
     );
 
-    assert!(!tree.set_chunk(key(4, 3, 2, 1), Some(ChunkPayload::Uniform(6))));
+    assert!(!tree.set_chunk(key(4, 3, 2, 1), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 6)))));
     let root = tree.root().expect("root exists");
-    assert!(matches!(root.kind, RegionNodeKind::Uniform(6)));
+    assert!(matches!(root.kind, RegionNodeKind::Uniform(ref b) if b.block_type == 6));
 }
 
 #[test]
@@ -514,10 +531,10 @@ fn set_chunk_carves_large_procedural_leaf_locally() {
         Some(bounds)
     );
 
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(12))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 12)))));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(12))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 12))
     );
 
     let root = tree.root().expect("root exists");
@@ -532,7 +549,7 @@ fn set_chunk_carves_large_procedural_leaf_locally() {
     );
     assert!(children.iter().any(|child| {
         child.bounds == Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0])
-            && matches!(child.kind, RegionNodeKind::Uniform(12))
+            && matches!(child.kind, RegionNodeKind::Uniform(ref b) if b.block_type == 12)
     }));
     assert!(children.iter().any(|child| {
         child.bounds != Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0])
@@ -546,7 +563,7 @@ fn splice_identical_partial_uniform_region_is_noop() {
     let root_bounds = Aabb4i::new([0, 0, 0, 0], [31, 7, 31, 7]);
     let root_core = RegionTreeCore {
         bounds: root_bounds,
-        kind: RegionNodeKind::Uniform(2),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 2)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -558,7 +575,7 @@ fn splice_identical_partial_uniform_region_is_noop() {
     let patch_bounds = Aabb4i::new([4, 1, 4, 1], [20, 5, 20, 5]);
     let patch_core = RegionTreeCore {
         bounds: patch_bounds,
-        kind: RegionNodeKind::Uniform(2),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 2)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -568,22 +585,24 @@ fn splice_identical_partial_uniform_region_is_noop() {
 
     let after = tree.root().expect("root");
     assert_eq!(*after, before);
-    assert!(matches!(after.kind, RegionNodeKind::Uniform(2)));
+    assert!(matches!(after.kind, RegionNodeKind::Uniform(ref b) if b.block_type == 2));
 }
 
 #[test]
 fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
     let mut tree = RegionChunkTree::new();
-    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ChunkPayload::Uniform(3))));
-    assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ChunkPayload::Uniform(4))));
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3)))));
+    assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
     let before = tree.root().expect("root").clone();
 
     let patch_bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
-    let patch_chunk_array = ChunkArrayData::from_dense_indices(
+    let block_palette = vec![BlockData::AIR, BlockData::simple(0, 3), BlockData::simple(0, 4)];
+    let patch_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
         patch_bounds,
-        vec![ChunkPayload::Uniform(3), ChunkPayload::Uniform(4)],
+        vec![ChunkPayload::Uniform(1), ChunkPayload::Uniform(2)],
         vec![0, 1],
         None,
+        block_palette,
     )
     .expect("chunk array");
     let patch_core = RegionTreeCore {
@@ -598,12 +617,12 @@ fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
     );
     assert_eq!(tree.root(), Some(&before));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(3))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 3))
     );
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(4))
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 4))
     );
 }
 
@@ -613,7 +632,7 @@ fn overlay_core_applies_explicit_uniform_zero_and_non_zero_leaves() {
     let mut tree = RegionChunkTree::new();
     let base = RegionTreeCore {
         bounds,
-        kind: RegionNodeKind::Uniform(7),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 7)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -628,12 +647,12 @@ fn overlay_core_applies_explicit_uniform_zero_and_non_zero_leaves() {
         kind: RegionNodeKind::Branch(vec![
             RegionTreeCore {
                 bounds: zero_leaf_bounds,
-                kind: RegionNodeKind::Uniform(0),
+                kind: RegionNodeKind::Uniform(BlockData::simple(0, 0)),
                 generator_version_hash: 0,
             },
             RegionTreeCore {
                 bounds: nine_leaf_bounds,
-                kind: RegionNodeKind::Uniform(9),
+                kind: RegionNodeKind::Uniform(BlockData::simple(0, 9)),
                 generator_version_hash: 0,
             },
         ]),
@@ -642,20 +661,20 @@ fn overlay_core_applies_explicit_uniform_zero_and_non_zero_leaves() {
 
     assert!(tree.overlay_core_in_bounds(bounds, &overlay).is_some());
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(7))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 7))
     );
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(0))
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::AIR)
     );
     assert_eq!(
-        tree.chunk_payload(key(2, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(9))
+        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(3, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(7))
+        tree.chunk_payload(key(3, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 7))
     );
 }
 
@@ -665,7 +684,7 @@ fn splice_non_empty_randomized_window_replacements_match_reference_grid() {
     let mut tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
-        kind: RegionNodeKind::Uniform(7),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 7)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -698,7 +717,7 @@ fn splice_non_empty_randomized_window_replacements_match_reference_grid() {
         let patch_core = if materials.iter().all(|m| *m == materials[0]) {
             RegionTreeCore {
                 bounds: patch_bounds,
-                kind: RegionNodeKind::Uniform(materials[0]),
+                kind: RegionNodeKind::Uniform(BlockData::simple(0, materials[0] as u32)),
                 generator_version_hash: 0,
             }
         } else {
@@ -725,7 +744,7 @@ fn overlay_core_randomized_uniform_leaf_layers_match_reference_grid() {
     let mut tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
-        kind: RegionNodeKind::Uniform(5),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 5)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -753,7 +772,7 @@ fn overlay_core_randomized_uniform_leaf_layers_match_reference_grid() {
             };
             leaves.push(RegionTreeCore {
                 bounds: leaf_bounds,
-                kind: RegionNodeKind::Uniform(material),
+                kind: RegionNodeKind::Uniform(BlockData::simple(0, material as u32)),
                 generator_version_hash: 0,
             });
         }
@@ -765,14 +784,14 @@ fn overlay_core_randomized_uniform_leaf_layers_match_reference_grid() {
         let _ = tree.overlay_core_in_bounds(global_bounds, &overlay);
 
         for leaf in leaves {
-            let RegionNodeKind::Uniform(material) = leaf.kind else {
+            let RegionNodeKind::Uniform(ref block) = leaf.kind else {
                 unreachable!("test builds only uniform leaves");
             };
             for key in keys_in_bounds(leaf.bounds) {
-                if material == 0 {
+                if block.is_air() {
                     expected.remove(&key);
                 } else {
-                    expected.insert(key, material);
+                    expected.insert(key, block.block_type as u16);
                 }
             }
         }
@@ -787,7 +806,7 @@ fn splice_non_empty_randomized_negative_coordinate_windows_match_reference_grid(
     let mut tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
-        kind: RegionNodeKind::Uniform(9),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 9)),
         generator_version_hash: 0,
     };
     assert_eq!(
@@ -821,7 +840,7 @@ fn splice_non_empty_randomized_negative_coordinate_windows_match_reference_grid(
         let patch_core = if materials.iter().all(|m| *m == materials[0]) {
             RegionTreeCore {
                 bounds: patch_bounds,
-                kind: RegionNodeKind::Uniform(materials[0]),
+                kind: RegionNodeKind::Uniform(BlockData::simple(0, materials[0] as u32)),
                 generator_version_hash: 0,
             }
         } else {
@@ -848,7 +867,7 @@ fn replaying_sliced_non_empty_windows_over_synced_tree_is_semantically_stable() 
     let mut server_tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
-        kind: RegionNodeKind::Uniform(7),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 7)),
         generator_version_hash: 0,
     };
     let _ = server_tree.splice_non_empty_core_in_bounds(global_bounds, &base_core);
@@ -877,7 +896,7 @@ fn replaying_sliced_non_empty_windows_over_synced_tree_is_semantically_stable() 
         let patch_core = if materials.iter().all(|m| *m == materials[0]) {
             RegionTreeCore {
                 bounds: patch_bounds,
-                kind: RegionNodeKind::Uniform(materials[0]),
+                kind: RegionNodeKind::Uniform(BlockData::simple(0, materials[0] as u32)),
                 generator_version_hash: 0,
             }
         } else {
@@ -920,43 +939,43 @@ fn consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
     let platform_core = RegionTreeCore {
         bounds: platform_bounds,
-        kind: RegionNodeKind::Uniform(4),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
         generator_version_hash: 0,
     };
     tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
 
     // Place a dense block at chunk [3,0,3,0].
-    let mut materials_a = vec![0u16; 4096];
-    materials_a[0] = 9;
-    let payload_a = ChunkPayload::Dense16 {
-        materials: materials_a,
-    };
-    assert!(tree.set_chunk(key(3, 0, 3, 0), Some(payload_a.clone())));
-    assert_eq!(tree.chunk_payload(key(3, 0, 3, 0)), Some(payload_a.clone()));
+    let mut blocks_a = vec![BlockData::AIR; 4096];
+    blocks_a[0] = BlockData::simple(0, 9);
+    let resolved_a = ResolvedChunkPayload::from_dense_blocks(&blocks_a).expect("dense blocks");
+    assert!(tree.set_chunk(key(3, 0, 3, 0), Some(resolved_a.clone())));
+    {
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("chunk must exist");
+        assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
+        assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
+    }
 
     // Place a dense block at adjacent chunk [4,0,3,0].
-    let mut materials_b = vec![0u16; 4096];
-    materials_b[0] = 10;
-    let payload_b = ChunkPayload::Dense16 {
-        materials: materials_b,
-    };
-    assert!(tree.set_chunk(key(4, 0, 3, 0), Some(payload_b.clone())));
+    let mut blocks_b = vec![BlockData::AIR; 4096];
+    blocks_b[0] = BlockData::simple(0, 10);
+    let resolved_b = ResolvedChunkPayload::from_dense_blocks(&blocks_b).expect("dense blocks");
+    assert!(tree.set_chunk(key(4, 0, 3, 0), Some(resolved_b.clone())));
 
     // Both edits must survive consolidation.
-    assert_eq!(
-        tree.chunk_payload(key(3, 0, 3, 0)),
-        Some(payload_a),
-        "first edit disappeared after second edit"
-    );
-    assert_eq!(
-        tree.chunk_payload(key(4, 0, 3, 0)),
-        Some(payload_b),
-        "second edit not present"
-    );
+    {
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("first edit disappeared after second edit");
+        assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
+        assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
+    }
+    {
+        let retrieved_b = tree.chunk_payload(key(4, 0, 3, 0)).expect("second edit not present");
+        assert_eq!(retrieved_b.block_at(0), BlockData::simple(0, 10));
+        assert_eq!(retrieved_b.block_at(1), BlockData::AIR);
+    }
     // Platform Uniform elsewhere must be intact.
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(4))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 4))
     );
 }
 
@@ -967,23 +986,26 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
     let platform_core = RegionTreeCore {
         bounds: platform_bounds,
-        kind: RegionNodeKind::Uniform(4),
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
         generator_version_hash: 0,
     };
     tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
 
     // Splice edit A at [3,0,3,0].
-    let mut materials_a = vec![0u16; 4096];
-    materials_a[0] = 9;
+    // block_palette: [AIR, block_type=9]; Dense16 indices reference this palette.
+    let block_palette_a = vec![BlockData::AIR, BlockData::simple(0, 9)];
+    let mut dense_indices_a = vec![0u16; 4096];
+    dense_indices_a[0] = 1; // block_palette[1] = block_type=9
     let payload_a = ChunkPayload::Dense16 {
-        materials: materials_a,
+        materials: dense_indices_a,
     };
     let a_bounds = Aabb4i::new([3, 0, 3, 0], [3, 0, 3, 0]);
-    let a_ca = ChunkArrayData::from_dense_indices(
+    let a_ca = ChunkArrayData::from_dense_indices_with_block_palette(
         a_bounds,
         vec![payload_a.clone()],
         vec![0u16],
         Some(0),
+        block_palette_a,
     )
     .unwrap();
     let a_core = RegionTreeCore {
@@ -992,20 +1014,26 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
         generator_version_hash: 0,
     };
     tree.splice_non_empty_core_in_bounds(a_bounds, &a_core);
-    assert_eq!(tree.chunk_payload(key(3, 0, 3, 0)), Some(payload_a.clone()));
+    {
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("chunk A must exist after splice");
+        assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
+        assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
+    }
 
     // Splice edit B at [4,0,3,0].
-    let mut materials_b = vec![0u16; 4096];
-    materials_b[0] = 10;
+    let block_palette_b = vec![BlockData::AIR, BlockData::simple(0, 10)];
+    let mut dense_indices_b = vec![0u16; 4096];
+    dense_indices_b[0] = 1; // block_palette[1] = block_type=10
     let payload_b = ChunkPayload::Dense16 {
-        materials: materials_b,
+        materials: dense_indices_b,
     };
     let b_bounds = Aabb4i::new([4, 0, 3, 0], [4, 0, 3, 0]);
-    let b_ca = ChunkArrayData::from_dense_indices(
+    let b_ca = ChunkArrayData::from_dense_indices_with_block_palette(
         b_bounds,
         vec![payload_b.clone()],
         vec![0u16],
         Some(0),
+        block_palette_b,
     )
     .unwrap();
     let b_core = RegionTreeCore {
@@ -1016,18 +1044,18 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     tree.splice_non_empty_core_in_bounds(b_bounds, &b_core);
 
     // Both must survive.
+    {
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("first splice disappeared after second splice");
+        assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
+        assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
+    }
+    {
+        let retrieved_b = tree.chunk_payload(key(4, 0, 3, 0)).expect("second splice not present");
+        assert_eq!(retrieved_b.block_at(0), BlockData::simple(0, 10));
+        assert_eq!(retrieved_b.block_at(1), BlockData::AIR);
+    }
     assert_eq!(
-        tree.chunk_payload(key(3, 0, 3, 0)),
-        Some(payload_a),
-        "first splice disappeared after second splice"
-    );
-    assert_eq!(
-        tree.chunk_payload(key(4, 0, 3, 0)),
-        Some(payload_b),
-        "second splice not present"
-    );
-    assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)),
-        Some(ChunkPayload::Uniform(4))
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 4))
     );
 }

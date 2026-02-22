@@ -6,7 +6,7 @@ use crate::save_v4::{
     self, PersistedEntityRecord, PlayerEntityHint, PlayerRecord, SaveChunkPayloadRequest,
     SaveResult, DEFAULT_REGION_CHUNK_EDGE,
 };
-use crate::shared::chunk_payload::ChunkPayload as FieldChunkPayload;
+use crate::shared::chunk_payload::{ChunkPayload as FieldChunkPayload, ResolvedChunkPayload};
 use crate::shared::protocol::{EntityClass, EntityKind};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -32,7 +32,7 @@ struct LegacySidecarEntity {
     mob: Option<serde_json::Value>,
 }
 
-fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], FieldChunkPayload)> {
+fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], ResolvedChunkPayload)> {
     fn payload_from_legacy_chunk(chunk: &LegacyChunk) -> FieldChunkPayload {
         if chunk.is_empty() {
             return FieldChunkPayload::Empty;
@@ -50,13 +50,13 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], FieldChunkPa
         }
     }
 
-    let mut chunk_payloads: Vec<([i32; 4], FieldChunkPayload)> = world
+    let mut chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)> = world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
                 [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                payload_from_legacy_chunk(chunk),
+                ResolvedChunkPayload::from_legacy_payload(payload_from_legacy_chunk(chunk)),
             )
         })
         .collect();
@@ -65,7 +65,7 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], FieldChunkPa
 }
 
 fn all_block_regions_from_chunk_payloads(
-    chunk_payloads: &[([i32; 4], FieldChunkPayload)],
+    chunk_payloads: &[([i32; 4], ResolvedChunkPayload)],
     region_chunk_edge: i32,
 ) -> HashSet<[i32; 4]> {
     chunk_payloads
@@ -172,7 +172,7 @@ pub fn migrate_legacy_world_to_v4(
 
 fn verify_v3_migration_equivalence(
     output_root: &Path,
-    expected_chunk_payloads: Vec<([i32; 4], FieldChunkPayload)>,
+    expected_chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
     expected_entities: &[PersistedEntityRecord],
     expected_players: &[PlayerRecord],
     expected_world_seed: u64,

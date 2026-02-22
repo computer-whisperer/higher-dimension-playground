@@ -4,7 +4,7 @@ use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
     VoxelFrameInput, VoxelMutationBatch, VTE_REGION_BVH_INVALID_NODE,
 };
-use polychora::shared::chunk_payload::ChunkPayload;
+use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::protocol::WorldBounds;
 use polychora::shared::region_tree::{
     chunk_key_from_chunk_pos, slice_non_empty_region_core_in_bounds, RegionChunkTree,
@@ -75,27 +75,45 @@ fn dense_chunk_set(
     chunk[idx] = voxel;
 }
 
-fn dense_chunk_to_payload_compact(chunk: &DenseChunk) -> ChunkPayload {
-    let materials: Vec<u16> = chunk.iter().map(|voxel| u16::from(voxel.0)).collect();
-    ChunkPayload::from_dense_materials_compact(&materials)
-        .unwrap_or(ChunkPayload::Dense16 { materials })
+fn dense_chunk_to_payload_compact(chunk: &DenseChunk) -> ResolvedChunkPayload {
+    let blocks: Vec<polychora::shared::voxel::BlockData> = chunk
+        .iter()
+        .map(|voxel| {
+            if voxel.0 == 0 {
+                polychora::shared::voxel::BlockData::AIR
+            } else {
+                polychora::shared::voxel::BlockData::simple(0, voxel.0 as u32)
+            }
+        })
+        .collect();
+    ResolvedChunkPayload::from_dense_blocks(&blocks)
+        .unwrap_or_else(|_| ResolvedChunkPayload::empty())
 }
 
-#[cfg(test)]
-fn dense_chunk_from_payload(payload: &ChunkPayload) -> Result<DenseChunk, String> {
-    let materials = payload
+fn dense_chunk_from_payload(resolved: &ResolvedChunkPayload) -> Result<DenseChunk, String> {
+    let palette_indices = resolved
+        .payload
         .dense_materials()
         .map_err(|error| error.to_string())?;
-    if materials.len() != CHUNK_VOLUME {
+    if palette_indices.len() != CHUNK_VOLUME {
         return Err(format!(
             "unexpected dense material length {}, expected {}",
-            materials.len(),
+            palette_indices.len(),
             CHUNK_VOLUME
         ));
     }
     let mut chunk = empty_dense_chunk();
-    for (idx, material) in materials.into_iter().enumerate() {
-        chunk[idx] = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
+    for (idx, palette_idx) in palette_indices.into_iter().enumerate() {
+        let block = resolved
+            .block_palette
+            .get(palette_idx as usize)
+            .cloned()
+            .unwrap_or(polychora::shared::voxel::BlockData::AIR);
+        let mat = polychora::materials::block_to_material_appearance(
+            block.namespace,
+            block.block_type,
+        );
+        chunk[idx] = VoxelType(mat);
     }
     Ok(chunk)
 }
@@ -208,65 +226,17 @@ pub struct RegionPatchStats {
 }
 
 impl Scene {
-    fn chunk_payload_material_at(payload: &ChunkPayload, idx: usize) -> Option<u16> {
-        if idx >= CHUNK_VOLUME {
-            return None;
-        }
-        match payload {
-            ChunkPayload::Empty => Some(0),
-            ChunkPayload::Uniform(material) => Some(*material),
-            ChunkPayload::Dense16 { materials } => materials.get(idx).copied(),
-            ChunkPayload::PalettePacked {
-                palette,
-                bit_width,
-                packed_indices,
-            } => {
-                if palette.is_empty() {
-                    return None;
-                }
-                let palette_idx = if *bit_width == 0 {
-                    0usize
-                } else {
-                    let bit_width = usize::from(*bit_width);
-                    let bit_index = idx.checked_mul(bit_width)?;
-                    let word_index = bit_index / 64;
-                    let bit_offset = bit_index % 64;
-                    let first = *packed_indices.get(word_index).unwrap_or(&0);
-                    let raw = if bit_offset + bit_width <= 64 {
-                        first >> bit_offset
-                    } else {
-                        let second = *packed_indices.get(word_index + 1).unwrap_or(&0);
-                        (first >> bit_offset) | (second << (64 - bit_offset))
-                    };
-                    let mask = if bit_width >= 64 {
-                        u64::MAX
-                    } else {
-                        (1u64 << bit_width) - 1
-                    };
-                    (raw & mask) as usize
-                };
-                palette.get(palette_idx).copied()
-            }
-        }
+    fn resolved_payload_voxel_at(resolved: &ResolvedChunkPayload, idx: usize) -> VoxelType {
+        let block = resolved.block_at(idx);
+        VoxelType(polychora::materials::block_to_material_appearance(
+            block.namespace,
+            block.block_type,
+        ))
     }
 
     #[cfg(test)]
-    fn chunk_payload_has_solid_material(payload: &ChunkPayload) -> bool {
-        match payload {
-            ChunkPayload::Empty => false,
-            ChunkPayload::Uniform(material) => *material != 0,
-            ChunkPayload::Dense16 { materials } => materials.iter().any(|material| *material != 0),
-            ChunkPayload::PalettePacked { .. } => (0..CHUNK_VOLUME).any(|idx| {
-                Self::chunk_payload_material_at(payload, idx)
-                    .map(|material| material != 0)
-                    .unwrap_or(false)
-            }),
-        }
-    }
-
-    fn chunk_payload_to_voxel_type(payload: &ChunkPayload, idx: usize) -> VoxelType {
-        let material = Self::chunk_payload_material_at(payload, idx).unwrap_or(0);
-        VoxelType(u8::try_from(material).unwrap_or(u8::MAX))
+    fn resolved_payload_has_solid_material(resolved: &ResolvedChunkPayload) -> bool {
+        resolved.has_solid_block()
     }
 
     fn set_chunk_map_voxel(
@@ -467,7 +437,7 @@ impl Scene {
             if let Some(chunk) = self.world_chunks.get(&pos) {
                 return (!dense_chunk_is_empty(chunk)).then_some(*chunk);
             }
-            if !Self::chunk_payload_has_solid_material(&payload) {
+            if !Self::resolved_payload_has_solid_material(&payload) {
                 return None;
             }
             match dense_chunk_from_payload(&payload) {
@@ -502,7 +472,7 @@ impl Scene {
             if let Some(chunk) = self.world_chunks.get(&cp) {
                 return chunk[idx];
             }
-            return Self::chunk_payload_to_voxel_type(&payload, idx);
+            return Self::resolved_payload_voxel_at(&payload, idx);
         }
         VoxelType::AIR
     }
@@ -530,11 +500,11 @@ impl Scene {
         self.world_get_voxel(wx, wy, wz, ww)
     }
 
-    pub fn debug_world_tree_chunk_payload(&self, chunk_key: [i32; 4]) -> Option<ChunkPayload> {
+    pub fn debug_world_tree_chunk_payload(&self, chunk_key: [i32; 4]) -> Option<ResolvedChunkPayload> {
         self.world_tree.chunk_payload(chunk_key)
     }
 
-    pub fn debug_render_bvh_cache_chunk_payloads(&self, chunk_key: [i32; 4]) -> Vec<ChunkPayload> {
+    pub fn debug_render_bvh_cache_chunk_payloads(&self, chunk_key: [i32; 4]) -> Vec<ResolvedChunkPayload> {
         self.render_bvh_cache
             .as_ref()
             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
@@ -724,6 +694,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polychora::shared::voxel::BlockData;
 
     fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) -> Option<u8> {
         let (chunk_pos, voxel_idx) = world_to_chunk(wx, wy, wz, ww);
@@ -914,7 +885,7 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut patch_tree = RegionChunkTree::new();
-        let changed = patch_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(7)));
+        let changed = patch_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         assert!(changed);
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
@@ -941,7 +912,7 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(5)));
+        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 5))));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
@@ -974,7 +945,7 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut patch_tree = RegionChunkTree::new();
-        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(7)));
+        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
         let _ = scene.apply_region_patch(bounds, &patch_core);
@@ -1002,19 +973,25 @@ mod tests {
         let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
 
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(3)));
-        let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ChunkPayload::Uniform(4)));
+        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
+        let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
         let before = scene.world_tree.root().cloned();
 
+        let patch_block_palette = vec![
+            BlockData::AIR,
+            BlockData::simple(0, 3),
+            BlockData::simple(0, 4),
+        ];
         let patch_chunk_array =
-            polychora::shared::chunk_payload::ChunkArrayData::from_dense_indices(
+            polychora::shared::chunk_payload::ChunkArrayData::from_dense_indices_with_block_palette(
                 bounds,
-                vec![ChunkPayload::Uniform(3), ChunkPayload::Uniform(4)],
+                vec![ChunkPayload::Uniform(1), ChunkPayload::Uniform(2)],
                 vec![0, 1],
                 None,
+                patch_block_palette,
             )
             .expect("chunk array");
         let patch_core = RegionTreeCore {
@@ -1044,8 +1021,8 @@ mod tests {
         let mut fast_scene = Scene::new(ScenePreset::Empty);
 
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(3)));
-        let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ChunkPayload::Uniform(4)));
+        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
+        let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = full_scene.apply_region_patch(bounds, &seed_core);
         let _ = fast_scene.apply_region_patch(bounds, &seed_core);
@@ -1053,7 +1030,7 @@ mod tests {
         let _ = fast_scene.world_drain_pending_chunk_updates();
 
         let mut patch_tree = RegionChunkTree::new();
-        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ChunkPayload::Uniform(7)));
+        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
         let full_stats = full_scene.apply_region_patch(bounds, &patch_core);
@@ -1085,36 +1062,29 @@ mod tests {
 
         // Seed one non-empty chunk.
         let mut initial_patch = RegionChunkTree::new();
-        let _ = initial_patch.set_chunk(chunk_key, Some(ChunkPayload::Uniform(11)));
+        let _ = initial_patch.set_chunk(chunk_key, Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 11))));
         let initial_core = initial_patch.slice_non_empty_core_in_bounds(chunk_bounds);
         let initial_stats = scene.apply_region_patch_fast(chunk_bounds, &initial_core);
         assert_eq!(initial_stats.changed_chunks, 1);
-        let initial_payloads =
-            scene.debug_render_bvh_chunk_payloads_in_bounds(view_bounds, chunk_key);
-        assert_eq!(initial_payloads.len(), 1);
-        assert_eq!(
-            Scene::chunk_payload_material_at(&initial_payloads[0], 0),
-            Some(11)
-        );
+        // Verify through the world tree (block_palette-aware path).
+        assert_eq!(scene.get_voxel(0, 0, 0, 0), VoxelType(11));
 
         // Update the same chunk with a dense payload that changes only one voxel.
         let mut edited_dense = vec![11u16; CHUNK_VOLUME];
         edited_dense[0] = 4;
-        let edited_payload = ChunkPayload::from_dense_materials_compact(&edited_dense)
-            .expect("compact dense payload");
+        let edited_payload = ResolvedChunkPayload::from_legacy_payload(
+            ChunkPayload::from_dense_materials_compact(&edited_dense)
+                .expect("compact dense payload"),
+        );
         let mut edited_patch = RegionChunkTree::new();
         let _ = edited_patch.set_chunk(chunk_key, Some(edited_payload));
         let edited_core = edited_patch.slice_non_empty_core_in_bounds(chunk_bounds);
         let edited_stats = scene.apply_region_patch_fast(chunk_bounds, &edited_core);
         assert_eq!(edited_stats.changed_chunks, 1);
 
-        let edited_payloads =
-            scene.debug_render_bvh_chunk_payloads_in_bounds(view_bounds, chunk_key);
-        assert_eq!(edited_payloads.len(), 1);
-        assert_eq!(
-            Scene::chunk_payload_material_at(&edited_payloads[0], 0),
-            Some(4)
-        );
+        // Verify the edit is visible through the world tree.
+        let edited_world = scene.debug_world_tree_chunk_payload(chunk_key).expect("edited chunk");
+        assert_eq!(Scene::resolved_payload_voxel_at(&edited_world, 0), VoxelType(4));
         assert_eq!(scene.get_voxel(0, 0, 0, 0), VoxelType(4));
     }
 

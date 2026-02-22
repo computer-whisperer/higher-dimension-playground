@@ -4,7 +4,8 @@ use higher_dimension_playground::render::{
     OVERLAY_EDGE_TAG_REGION_EMPTY, OVERLAY_EDGE_TAG_REGION_PROCEDURAL,
     OVERLAY_EDGE_TAG_REGION_UNIFORM, OVERLAY_EDGE_TAG_TARGET,
 };
-use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
+use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
+use polychora::shared::voxel::BlockData;
 use polychora::shared::region_tree::{
     collect_non_empty_chunks_from_core_in_bounds, RegionNodeKind, RegionTreeCore,
 };
@@ -48,7 +49,7 @@ fn region_tree_diag_kind(kind: &RegionNodeKind) -> RegionTreeDiagKind {
     match kind {
         RegionNodeKind::Branch(_) => RegionTreeDiagKind::Branch,
         RegionNodeKind::Empty => RegionTreeDiagKind::Empty,
-        RegionNodeKind::Uniform(material) => RegionTreeDiagKind::Uniform(*material),
+        RegionNodeKind::Uniform(block) => RegionTreeDiagKind::Uniform(block.block_type as u16),
         RegionNodeKind::ChunkArray(_) => RegionTreeDiagKind::ChunkArray,
         RegionNodeKind::ProceduralRef(_) => RegionTreeDiagKind::ProceduralRef,
     }
@@ -234,22 +235,29 @@ fn collect_region_tree_bounds_hierarchy(
     }
 }
 
-fn chunk_payload_has_non_empty_material(payload: &ChunkPayload) -> bool {
+fn chunk_payload_has_non_empty_block(payload: &ChunkPayload, block_palette: &[BlockData]) -> bool {
+    let idx_is_solid = |idx: u16| {
+        block_palette
+            .get(idx as usize)
+            .map(|b| !b.is_air())
+            .unwrap_or(false)
+    };
     match payload {
         ChunkPayload::Empty => false,
-        ChunkPayload::Uniform(material) => *material != 0,
-        ChunkPayload::Dense16 { materials } => materials.iter().any(|material| *material != 0),
+        ChunkPayload::Uniform(idx) => idx_is_solid(*idx),
+        ChunkPayload::Dense16 { materials } => materials.iter().any(|idx| idx_is_solid(*idx)),
         ChunkPayload::PalettePacked { .. } => payload
             .dense_materials()
-            .map(|materials| materials.into_iter().any(|material| material != 0))
+            .map(|indices| indices.into_iter().any(|idx| idx_is_solid(idx)))
             .unwrap_or(true),
     }
 }
 
 fn chunk_array_has_non_empty_content(chunk_array: &ChunkArrayData) -> bool {
+    let bp = &chunk_array.block_palette;
     if let Some(default_chunk_idx) = chunk_array.default_chunk_idx {
         if let Some(default_payload) = chunk_array.chunk_palette.get(default_chunk_idx as usize) {
-            if chunk_payload_has_non_empty_material(default_payload) {
+            if chunk_payload_has_non_empty_block(default_payload, bp) {
                 return true;
             }
         } else {
@@ -265,7 +273,7 @@ fn chunk_array_has_non_empty_content(chunk_array: &ChunkArrayData) -> bool {
         chunk_array
             .chunk_palette
             .get(palette_idx as usize)
-            .map(chunk_payload_has_non_empty_material)
+            .map(|p| chunk_payload_has_non_empty_block(p, bp))
             .unwrap_or(true)
     })
 }
@@ -273,7 +281,7 @@ fn chunk_array_has_non_empty_content(chunk_array: &ChunkArrayData) -> bool {
 fn region_tree_node_has_non_empty_content(node: &RegionTreeCore) -> bool {
     match &node.kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => false,
-        RegionNodeKind::Uniform(material) => *material != 0,
+        RegionNodeKind::Uniform(block) => !block.is_air(),
         RegionNodeKind::ChunkArray(chunk_array) => chunk_array_has_non_empty_content(chunk_array),
         RegionNodeKind::Branch(children) => {
             children.iter().any(region_tree_node_has_non_empty_content)
@@ -391,26 +399,38 @@ fn zero_dense_chunk_materials() -> Vec<u16> {
     vec![0u16; polychora::shared::voxel::CHUNK_VOLUME]
 }
 
-fn dense_materials_from_payload_or_zero(payload: Option<ChunkPayload>) -> Vec<u16> {
-    let Some(payload) = payload else {
+fn dense_materials_from_payload_or_zero(resolved: Option<ResolvedChunkPayload>) -> Vec<u16> {
+    let Some(resolved) = resolved else {
         return zero_dense_chunk_materials();
     };
-    let Ok(materials) = payload.dense_materials() else {
+    let Ok(palette_indices) = resolved.payload.dense_materials() else {
         return zero_dense_chunk_materials();
     };
-    if materials.len() == polychora::shared::voxel::CHUNK_VOLUME {
-        materials
-    } else {
-        zero_dense_chunk_materials()
+    if palette_indices.len() != polychora::shared::voxel::CHUNK_VOLUME {
+        return zero_dense_chunk_materials();
     }
+    palette_indices
+        .iter()
+        .map(|&idx| {
+            let block = resolved
+                .block_palette
+                .get(idx as usize)
+                .cloned()
+                .unwrap_or(polychora::shared::voxel::BlockData::AIR);
+            u16::from(polychora::materials::block_to_material_appearance(
+                block.namespace,
+                block.block_type,
+            ))
+        })
+        .collect()
 }
 
 fn dense_materials_from_region_core_chunk(core: &RegionTreeCore, chunk: [i32; 4]) -> Vec<u16> {
     let bounds = Aabb4i::new(chunk, chunk);
     let chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
-    for (key, payload) in chunks {
+    for (key, resolved) in chunks {
         if key == chunk {
-            return dense_materials_from_payload_or_zero(Some(payload));
+            return dense_materials_from_payload_or_zero(Some(resolved));
         }
     }
     zero_dense_chunk_materials()
@@ -464,18 +484,29 @@ fn sanitize_remote_scale(scale: f32, fallback: f32) -> f32 {
     }
 }
 
-fn summarize_payload_compact(payload: Option<&ChunkPayload>) -> String {
-    match payload {
-        None => "None".to_string(),
-        Some(ChunkPayload::Empty) => "Empty".to_string(),
-        Some(ChunkPayload::Uniform(material)) => format!("Uniform({material})"),
-        Some(ChunkPayload::Dense16 { materials }) => {
-            let non_empty = materials.iter().filter(|material| **material != 0).count();
+fn summarize_payload_compact(resolved: Option<&ResolvedChunkPayload>) -> String {
+    let Some(resolved) = resolved else {
+        return "None".to_string();
+    };
+    match &resolved.payload {
+        ChunkPayload::Empty => "Empty".to_string(),
+        ChunkPayload::Uniform(idx) => {
+            let block = resolved.block_palette.get(*idx as usize);
+            match block {
+                Some(b) if b.is_air() => "Uniform(air)".to_string(),
+                Some(b) => format!("Uniform({}:{})", b.namespace, b.block_type),
+                None => format!("Uniform(idx={})", idx),
+            }
+        }
+        ChunkPayload::Dense16 { materials } => {
+            let non_empty = materials.iter().filter(|idx| {
+                resolved.block_palette.get(**idx as usize).map(|b| !b.is_air()).unwrap_or(false)
+            }).count();
             format!("Dense16(nz={non_empty})")
         }
-        Some(ChunkPayload::PalettePacked {
+        ChunkPayload::PalettePacked {
             palette, bit_width, ..
-        }) => format!(
+        } => format!(
             "PalettePacked(palette={},bits={})",
             palette.len(),
             bit_width
@@ -483,16 +514,16 @@ fn summarize_payload_compact(payload: Option<&ChunkPayload>) -> String {
     }
 }
 
-fn summarize_payloads_compact(payloads: &[ChunkPayload]) -> String {
+fn summarize_payloads_compact(payloads: &[ResolvedChunkPayload]) -> String {
     if payloads.is_empty() {
         return "[]".to_string();
     }
     let mut out = String::from("[");
-    for (idx, payload) in payloads.iter().take(3).enumerate() {
+    for (idx, resolved) in payloads.iter().take(3).enumerate() {
         if idx > 0 {
             out.push_str(", ");
         }
-        out.push_str(&summarize_payload_compact(Some(payload)));
+        out.push_str(&summarize_payload_compact(Some(resolved)));
     }
     if payloads.len() > 3 {
         out.push_str(", ...");
@@ -916,8 +947,7 @@ impl App {
             .debug_render_bvh_chunk_payloads_in_bounds(render_bounds, chunk);
         let render_dense_variants: Vec<Vec<u16>> = render_payloads
             .iter()
-            .cloned()
-            .map(|payload| dense_materials_from_payload_or_zero(Some(payload)))
+            .map(|resolved| dense_materials_from_payload_or_zero(Some(resolved.clone())))
             .collect();
         let render_dense = render_dense_variants
             .first()
@@ -931,7 +961,7 @@ impl App {
         let frame_dense_variants: Vec<Vec<u16>> = frame_payloads
             .iter()
             .cloned()
-            .map(|payload| dense_materials_from_payload_or_zero(Some(payload)))
+            .map(|payload| dense_materials_from_payload_or_zero(Some(ResolvedChunkPayload::from_legacy_payload(payload))))
             .collect();
         let frame_dense = frame_dense_variants
             .first()
@@ -1414,7 +1444,12 @@ impl App {
             if let Some(key) = patch_single_chunk_key {
                 let world_after = self.scene.debug_world_tree_chunk_payload(key);
                 let render_cache_payloads = self.scene.debug_render_bvh_cache_chunk_payloads(key);
-                let frame_payloads = self.scene.debug_voxel_frame_chunk_payloads(key);
+                let frame_payloads: Vec<ResolvedChunkPayload> = self
+                    .scene
+                    .debug_voxel_frame_chunk_payloads(key)
+                    .into_iter()
+                    .map(ResolvedChunkPayload::from_legacy_payload)
+                    .collect();
                 eprintln!(
                     "[edit-sync-patch] key={:?} patch={} world_before={} world_after={} render_cache={} frame={} pending_dirty={} pending_deltas={}",
                     key,
@@ -1634,7 +1669,8 @@ impl App {
         }
 
         if let Some(client) = self.multiplayer.as_ref() {
-            client.send(MultiplayerClientMessage::SetVoxel { position, material });
+            let block = polychora::shared::voxel::BlockData::simple(0, material as u32);
+            client.send(MultiplayerClientMessage::SetVoxel { position, block });
         }
     }
 

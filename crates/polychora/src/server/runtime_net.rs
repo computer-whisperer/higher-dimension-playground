@@ -357,17 +357,29 @@ fn zero_dense_chunk_materials() -> Vec<u16> {
     vec![0u16; voxel::CHUNK_VOLUME]
 }
 
-fn dense_materials_from_chunk_payload(
-    payload: &crate::shared::chunk_payload::ChunkPayload,
+fn dense_materials_from_resolved_payload(
+    resolved: &crate::shared::chunk_payload::ResolvedChunkPayload,
 ) -> Vec<u16> {
-    let Ok(materials) = payload.dense_materials() else {
+    let Ok(palette_indices) = resolved.payload.dense_materials() else {
         return zero_dense_chunk_materials();
     };
-    if materials.len() == voxel::CHUNK_VOLUME {
-        materials
-    } else {
-        zero_dense_chunk_materials()
+    if palette_indices.len() != voxel::CHUNK_VOLUME {
+        return zero_dense_chunk_materials();
     }
+    palette_indices
+        .iter()
+        .map(|&idx| {
+            let block = resolved
+                .block_palette
+                .get(idx as usize)
+                .cloned()
+                .unwrap_or(voxel::BlockData::AIR);
+            u16::from(crate::materials::block_to_material_appearance(
+                block.namespace,
+                block.block_type,
+            ))
+        })
+        .collect()
 }
 
 fn dense_materials_from_region_core_chunk(
@@ -379,9 +391,9 @@ fn dense_materials_from_region_core_chunk(
         core,
         chunk_bounds,
     );
-    for (key, payload) in chunks {
+    for (key, resolved) in chunks {
         if key == chunk_key {
-            return dense_materials_from_chunk_payload(&payload);
+            return dense_materials_from_resolved_payload(&resolved);
         }
     }
     zero_dense_chunk_materials()
@@ -514,9 +526,9 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
 fn apply_authoritative_voxel_edit(
     state: &mut ServerState,
     position: [i32; 4],
-    material: VoxelType,
+    block: BlockData,
 ) -> Option<ChunkPos> {
-    state.apply_world_voxel_edit(position, material)
+    state.apply_world_voxel_edit(position, block)
 }
 
 fn flush_world_dirty_updates(state: &SharedState) -> usize {
@@ -568,7 +580,7 @@ pub(super) fn apply_creeper_explosion(
                             blast_center[3] + dw,
                         ];
                         if let Some(chunk_pos) =
-                            apply_authoritative_voxel_edit(state, pos, VoxelType::AIR)
+                            apply_authoritative_voxel_edit(state, pos, BlockData::AIR)
                         {
                             changed_chunks.insert(chunk_pos);
                         }
@@ -1239,11 +1251,10 @@ pub(super) fn handle_message(
                 start,
             );
         }
-        ClientMessage::SetVoxel { position, material } => {
-            let requested_voxel = VoxelType(material);
+        ClientMessage::SetVoxel { position, block } => {
             let _changed_chunk = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                apply_authoritative_voxel_edit(&mut guard, position, requested_voxel)
+                apply_authoritative_voxel_edit(&mut guard, position, block)
             };
         }
         ClientMessage::SpawnEntity {

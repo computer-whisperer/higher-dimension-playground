@@ -237,14 +237,23 @@ impl Scene {
     }
 
     fn count_non_empty_chunks_in_core(core: &RegionTreeCore) -> usize {
-        fn payload_has_non_empty_material(payload: &ChunkPayload) -> bool {
+        fn payload_has_non_empty_block(
+            payload: &ChunkPayload,
+            block_palette: &[polychora::shared::voxel::BlockData],
+        ) -> bool {
+            let idx_is_solid = |idx: u16| {
+                block_palette
+                    .get(idx as usize)
+                    .map(|b| !b.is_air())
+                    .unwrap_or(false)
+            };
             match payload {
                 ChunkPayload::Empty => false,
-                ChunkPayload::Uniform(material) => *material != 0,
-                ChunkPayload::Dense16 { materials } => materials.iter().any(|m| *m != 0),
+                ChunkPayload::Uniform(idx) => idx_is_solid(*idx),
+                ChunkPayload::Dense16 { materials } => materials.iter().any(|idx| idx_is_solid(*idx)),
                 ChunkPayload::PalettePacked { .. } => payload
                     .dense_materials()
-                    .map(|dense| dense.into_iter().any(|m| m != 0))
+                    .map(|indices| indices.into_iter().any(|idx| idx_is_solid(idx)))
                     .unwrap_or(true),
             }
         }
@@ -252,8 +261,8 @@ impl Scene {
         fn recurse(core: &RegionTreeCore) -> usize {
             match &core.kind {
                 RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => 0,
-                RegionNodeKind::Uniform(material) => {
-                    if *material == 0 {
+                RegionNodeKind::Uniform(block) => {
+                    if block.is_air() {
                         0
                     } else {
                         core.bounds.chunk_cell_count().unwrap_or(0)
@@ -263,10 +272,11 @@ impl Scene {
                     let Ok(indices) = chunk_array.decode_dense_indices() else {
                         return 0;
                     };
+                    let bp = &chunk_array.block_palette;
                     let palette_non_empty: Vec<bool> = chunk_array
                         .chunk_palette
                         .iter()
-                        .map(payload_has_non_empty_material)
+                        .map(|p| payload_has_non_empty_block(p, bp))
                         .collect();
                     indices
                         .into_iter()

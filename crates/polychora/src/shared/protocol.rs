@@ -1,5 +1,6 @@
 use crate::shared::region_tree::RegionTreeCore;
 use crate::shared::spatial::Aabb4i;
+use crate::shared::voxel::BlockData;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,7 +71,7 @@ pub enum ClientMessage {
     },
     SetVoxel {
         position: [i32; 4],
-        material: u8,
+        block: BlockData,
     },
     SpawnEntity {
         kind: EntityKind,

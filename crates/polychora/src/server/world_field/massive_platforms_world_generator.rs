@@ -1,11 +1,11 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
-use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
+use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
     RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, BlockData, ChunkPos, VoxelType, CHUNK_VOLUME};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -231,7 +231,7 @@ impl MassivePlatformsWorldGenerator {
         self.for_each_platform_bounds_intersecting_query(bounds, |platform_bounds| {
             let core = RegionTreeCore {
                 bounds: platform_bounds,
-                kind: RegionNodeKind::Uniform(u16::from(material.0)),
+                kind: RegionNodeKind::Uniform(crate::shared::voxel::BlockData::simple(0, material.0 as u32)),
                 generator_version_hash: 0,
             };
             let _ = tree.splice_non_empty_core_in_bounds(platform_bounds, &core);
@@ -296,7 +296,7 @@ impl MassivePlatformsWorldGenerator {
                 continue;
             }
 
-            let Some((effective_bounds, palette, indices)) =
+            let Some((effective_bounds, palette, indices, block_palette)) =
                 build_chunk_array_from_placement(
                     &placement.chunks,
                     &procgen_frame_offset,
@@ -307,11 +307,12 @@ impl MassivePlatformsWorldGenerator {
                 continue;
             };
 
-            let chunk_array = match ChunkArrayData::from_dense_indices(
+            let chunk_array = match ChunkArrayData::from_dense_indices_with_block_palette(
                 effective_bounds,
                 palette,
                 indices,
                 Some(0), // default = Empty (palette index 0)
+                block_palette,
             ) {
                 Ok(ca) => ca,
                 Err(_) => continue,
@@ -356,7 +357,7 @@ impl MassivePlatformsWorldGenerator {
                 continue;
             }
 
-            let Some((effective_bounds, palette, indices)) =
+            let Some((effective_bounds, palette, indices, block_palette)) =
                 build_chunk_array_from_placement(
                     &placement.chunks,
                     &procgen_frame_offset,
@@ -367,11 +368,12 @@ impl MassivePlatformsWorldGenerator {
                 continue;
             };
 
-            let chunk_array = match ChunkArrayData::from_dense_indices(
+            let chunk_array = match ChunkArrayData::from_dense_indices_with_block_palette(
                 effective_bounds,
                 palette,
                 indices,
                 Some(0), // default = Empty (palette index 0)
+                block_palette,
             ) {
                 Ok(ca) => ca,
                 Err(_) => continue,
@@ -632,22 +634,27 @@ fn payload_from_chunk_compact(chunk: &DenseChunk) -> ChunkPayload {
 }
 
 #[cfg(test)]
-fn canonicalize_payload(payload: ChunkPayload) -> ChunkPayload {
-    let payload = match payload {
-        ChunkPayload::Empty => ChunkPayload::Uniform(0),
-        other => other,
-    };
-    let Ok(dense) = payload.dense_materials() else {
-        return payload;
+fn canonicalize_payload(resolved: ResolvedChunkPayload) -> ResolvedChunkPayload {
+    let Ok(dense) = resolved.payload.dense_materials() else {
+        return resolved;
     };
     if dense.is_empty() {
-        return payload;
+        return resolved;
     }
     let first = dense[0];
     if dense.iter().all(|material| *material == first) {
-        ChunkPayload::Uniform(first)
+        let block = resolved
+            .block_palette
+            .get(first as usize)
+            .cloned()
+            .unwrap_or(BlockData::AIR);
+        if block.is_air() {
+            ResolvedChunkPayload::empty()
+        } else {
+            ResolvedChunkPayload::uniform(block)
+        }
     } else {
-        payload
+        resolved
     }
 }
 
@@ -663,7 +670,7 @@ fn build_chunk_array_from_placement(
     procgen_frame_offset: &[i32; 3],
     y_offset: i32,
     platform_material: Option<u16>,
-) -> Option<(Aabb4i, Vec<ChunkPayload>, Vec<u16>)> {
+) -> Option<(Aabb4i, Vec<ChunkPayload>, Vec<u16>, Vec<BlockData>)> {
     // Convert local chunk positions to world chunk positions, filtering out chunks
     // that only contain platform material (or air + platform material).
     let mut world_chunks: Vec<([i32; 4], ChunkPayload)> = Vec::new();
@@ -745,7 +752,75 @@ fn build_chunk_array_from_placement(
         indices[idx] = palette_idx;
     }
 
-    Some((effective_bounds, palette, indices))
+    // Build block_palette from the distinct material IDs used across all chunk payloads.
+    // Each ChunkPayload was built with raw material IDs as u16 values by payload_from_chunk_compact.
+    // We need to remap those to proper block_palette indices.
+    let mut block_palette = vec![BlockData::AIR];
+    let mut mat_to_block_idx: HashMap<u16, u16> = HashMap::new();
+    mat_to_block_idx.insert(0, 0); // AIR -> index 0
+
+    // Collect all distinct material IDs from all chunk payloads.
+    for entry in &palette {
+        match entry {
+            ChunkPayload::Uniform(mat) => {
+                mat_to_block_idx.entry(*mat).or_insert_with(|| {
+                    let idx = block_palette.len() as u16;
+                    block_palette.push(BlockData::simple(0, *mat as u32));
+                    idx
+                });
+            }
+            ChunkPayload::Dense16 { materials } => {
+                for mat in materials {
+                    mat_to_block_idx.entry(*mat).or_insert_with(|| {
+                        let idx = block_palette.len() as u16;
+                        block_palette.push(BlockData::simple(0, *mat as u32));
+                        idx
+                    });
+                }
+            }
+            ChunkPayload::PalettePacked { palette: pal, .. } => {
+                for mat in pal {
+                    mat_to_block_idx.entry(*mat).or_insert_with(|| {
+                        let idx = block_palette.len() as u16;
+                        block_palette.push(BlockData::simple(0, *mat as u32));
+                        idx
+                    });
+                }
+            }
+            ChunkPayload::Empty => {}
+        }
+    }
+
+    // Remap all chunk payloads from raw material IDs to block_palette indices.
+    let remapped_palette: Vec<ChunkPayload> = palette
+        .into_iter()
+        .map(|entry| match entry {
+            ChunkPayload::Uniform(mat) => {
+                ChunkPayload::Uniform(*mat_to_block_idx.get(&mat).unwrap_or(&mat))
+            }
+            ChunkPayload::Dense16 { materials } => ChunkPayload::Dense16 {
+                materials: materials
+                    .iter()
+                    .map(|mat| *mat_to_block_idx.get(mat).unwrap_or(mat))
+                    .collect(),
+            },
+            ChunkPayload::PalettePacked {
+                palette: pal,
+                bit_width,
+                packed_indices,
+            } => ChunkPayload::PalettePacked {
+                palette: pal
+                    .iter()
+                    .map(|mat| *mat_to_block_idx.get(mat).unwrap_or(mat))
+                    .collect(),
+                bit_width,
+                packed_indices,
+            },
+            other => other,
+        })
+        .collect();
+
+    Some((effective_bounds, remapped_palette, indices, block_palette))
 }
 
 #[cfg(test)]
@@ -754,7 +829,7 @@ mod tests {
     use crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
     use std::collections::HashMap;
 
-    fn payload_at_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Option<ChunkPayload> {
+    fn payload_at_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Option<ResolvedChunkPayload> {
         let bounds = Aabb4i::new(chunk_key, chunk_key);
         collect_non_empty_chunks_from_core_in_bounds(core, bounds)
             .into_iter()

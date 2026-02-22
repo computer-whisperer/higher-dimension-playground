@@ -1,11 +1,14 @@
 use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
-use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
+use crate::materials::block_to_material_appearance;
+use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::protocol::WorldBounds;
 use crate::shared::region_tree::{
     chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{world_to_chunk, BaseWorldKind, ChunkPos, VoxelType, CHUNK_VOLUME};
+use crate::shared::voxel::{
+    world_to_chunk, BaseWorldKind, BlockData, ChunkPos, VoxelType, CHUNK_VOLUME,
+};
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -109,7 +112,7 @@ impl<F> PassthroughWorldOverlay<F> {
     pub fn mark_dirty_chunk(&mut self, chunk_pos: ChunkPos) {
         let _ = self.dirty_chunks.set_chunk(
             chunk_key_from_chunk_pos(chunk_pos),
-            Some(ChunkPayload::Uniform(1)),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 1))),
         );
     }
 
@@ -309,7 +312,7 @@ fn build_server_world_field(
 impl PassthroughWorldOverlay<ServerWorldField> {
     pub fn from_chunk_payloads(
         base_kind: BaseWorldKind,
-        chunk_payloads: impl IntoIterator<Item = ([i32; 4], ChunkPayload)>,
+        chunk_payloads: impl IntoIterator<Item = ([i32; 4], ResolvedChunkPayload)>,
         world_seed: u64,
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
@@ -390,7 +393,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         Ok(loaded_regions)
     }
 
-    fn query_virgin_chunk_payload(&self, chunk_pos: ChunkPos) -> Option<ChunkPayload> {
+    fn query_virgin_chunk_payload(&self, chunk_pos: ChunkPos) -> Option<ResolvedChunkPayload> {
         let key = chunk_key_from_chunk_pos(chunk_pos);
         let bounds = Aabb4i::new(key, key);
         let core = self
@@ -426,7 +429,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     pub fn apply_voxel_edit(
         &mut self,
         position: [i32; 4],
-        material: VoxelType,
+        block: BlockData,
     ) -> Option<ChunkPos> {
         let (chunk_pos, voxel_index) =
             world_to_chunk(position[0], position[1], position[2], position[3]);
@@ -441,28 +444,30 @@ impl PassthroughWorldOverlay<ServerWorldField> {
 
         let override_payload = self.override_chunks.chunk_payload(chunk_key);
         let virgin_payload = self.query_virgin_chunk_payload(chunk_pos);
-        let mut working_chunk = override_payload
-            .as_ref()
-            .and_then(chunk_from_payload)
-            .or_else(|| virgin_payload.as_ref().and_then(chunk_from_payload))
-            .unwrap_or_else(empty_dense_chunk);
+        let current = override_payload.as_ref().or(virgin_payload.as_ref());
 
-        if working_chunk[voxel_index] == material {
+        let current_block = current
+            .map(|r| r.block_at(voxel_index))
+            .unwrap_or(BlockData::AIR);
+        if current_block == block {
             return None;
         }
 
-        working_chunk[voxel_index] = material;
-        let should_remove_override =
-            if let Some(virgin_chunk) = virgin_payload.as_ref().and_then(chunk_from_payload) {
-                chunks_equal(&working_chunk, &virgin_chunk)
-            } else {
-                virgin_payload.is_none() && dense_chunk_is_empty(&working_chunk)
-            };
+        let mut blocks = current
+            .map(|r| r.dense_blocks())
+            .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+        blocks[voxel_index] = block;
+
+        let should_remove_override = if let Some(virgin) = virgin_payload.as_ref() {
+            blocks == virgin.dense_blocks()
+        } else {
+            blocks.iter().all(|b| b.is_air())
+        };
 
         let desired_payload = if should_remove_override {
             None
         } else {
-            Some(payload_from_chunk_compact(&working_chunk))
+            ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
         };
         let previous_payload = self.override_chunks.chunk_payload(chunk_key);
         let changed_by_api = self
@@ -524,7 +529,10 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         dirty_chunk_positions.sort_unstable();
         let dirty_chunk_payloads = dirty_chunk_positions
             .into_iter()
-            .map(|chunk_pos| (chunk_pos, self.override_chunks.chunk_payload(chunk_pos)))
+            .map(|chunk_pos| {
+                let resolved = self.override_chunks.chunk_payload(chunk_pos);
+                (chunk_pos, resolved)
+            })
             .collect::<Vec<_>>();
 
         let result = {
@@ -588,16 +596,25 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     }
 }
 
-fn chunk_payload_from_core(core: &RegionTreeCore, key_pos: [i32; 4]) -> Option<ChunkPayload> {
+fn chunk_payload_from_core(
+    core: &RegionTreeCore,
+    key_pos: [i32; 4],
+) -> Option<ResolvedChunkPayload> {
     if !core.bounds.contains_chunk(key_pos) {
         return None;
     }
 
     match &core.kind {
         RegionNodeKind::Empty => None,
-        RegionNodeKind::Uniform(material) => Some(ChunkPayload::Uniform(*material)),
+        RegionNodeKind::Uniform(block) => Some(ResolvedChunkPayload::uniform(block.clone())),
         RegionNodeKind::ProceduralRef(_) => None,
-        RegionNodeKind::ChunkArray(chunk_array) => chunk_array_payload_at(chunk_array, key_pos),
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            let payload = chunk_array_payload_at(chunk_array, key_pos)?;
+            Some(ResolvedChunkPayload {
+                payload,
+                block_palette: chunk_array.block_palette.clone(),
+            })
+        }
         RegionNodeKind::Branch(children) => children
             .iter()
             .find(|child| child.bounds.contains_chunk(key_pos))
@@ -627,10 +644,10 @@ fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
 }
 
 fn payload_to_effective_chunk(
-    payload: ChunkPayload,
+    resolved: ResolvedChunkPayload,
     preserve_explicit_empty_chunk: bool,
 ) -> Option<[VoxelType; CHUNK_VOLUME]> {
-    let chunk = chunk_from_payload(&payload)?;
+    let chunk = chunk_from_payload(&resolved)?;
     if preserve_explicit_empty_chunk || !dense_chunk_is_empty(&chunk) {
         Some(chunk)
     } else {
@@ -638,20 +655,35 @@ fn payload_to_effective_chunk(
     }
 }
 
-fn payload_from_chunk_compact(chunk: &[VoxelType; CHUNK_VOLUME]) -> ChunkPayload {
-    let materials: Vec<u16> = chunk.iter().map(|voxel| u16::from(voxel.0)).collect();
-    ChunkPayload::from_dense_materials_compact(&materials)
-        .unwrap_or(ChunkPayload::Dense16 { materials })
+fn payload_from_chunk_compact(chunk: &[VoxelType; CHUNK_VOLUME]) -> ResolvedChunkPayload {
+    let blocks: Vec<BlockData> = chunk
+        .iter()
+        .map(|voxel| {
+            if voxel.0 == 0 {
+                BlockData::AIR
+            } else {
+                BlockData::simple(0, voxel.0 as u32)
+            }
+        })
+        .collect();
+    ResolvedChunkPayload::from_dense_blocks(&blocks)
+        .unwrap_or_else(|_| ResolvedChunkPayload::empty())
 }
 
-fn chunk_from_payload(payload: &ChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
-    let materials = payload.dense_materials().ok()?;
-    if materials.len() != CHUNK_VOLUME {
+fn chunk_from_payload(resolved: &ResolvedChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    let palette_indices = resolved.payload.dense_materials().ok()?;
+    if palette_indices.len() != CHUNK_VOLUME {
         return None;
     }
     let mut chunk = empty_dense_chunk();
-    for (idx, material) in materials.into_iter().enumerate() {
-        chunk[idx] = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
+    for (idx, palette_idx) in palette_indices.into_iter().enumerate() {
+        let block = resolved
+            .block_palette
+            .get(palette_idx as usize)
+            .cloned()
+            .unwrap_or(BlockData::AIR);
+        let mat = block_to_material_appearance(block.namespace, block.block_type);
+        chunk[idx] = VoxelType(mat);
     }
     Some(chunk)
 }
@@ -679,11 +711,22 @@ mod tests {
         let Some(payload) = chunk_payload_from_core(core, chunk_key) else {
             return vec![0u16; CHUNK_VOLUME];
         };
-        let Ok(materials) = payload.dense_materials() else {
+        let Ok(materials) = payload.payload.dense_materials() else {
             return vec![0u16; CHUNK_VOLUME];
         };
         if materials.len() == CHUNK_VOLUME {
+            // Resolve palette indices to material IDs through block_palette
             materials
+                .iter()
+                .map(|&idx| {
+                    let air = BlockData::AIR;
+                    let block = payload
+                        .block_palette
+                        .get(idx as usize)
+                        .unwrap_or(&air);
+                    block_to_material_appearance(block.namespace, block.block_type) as u16
+                })
+                .collect()
         } else {
             vec![0u16; CHUNK_VOLUME]
         }
@@ -745,14 +788,14 @@ mod tests {
     fn overlay_dirty_bounds_drain_returns_touched_chunk_once() {
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::Empty,
-            Vec::<([i32; 4], ChunkPayload)>::new(),
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             123,
             false,
             HashSet::new(),
         );
 
-        let changed_a = overlay.apply_voxel_edit([0, 0, 0, 0], VoxelType(3));
-        let changed_b = overlay.apply_voxel_edit([1, 0, 0, 0], VoxelType(4));
+        let changed_a = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 3));
+        let changed_b = overlay.apply_voxel_edit([1, 0, 0, 0], BlockData::simple(0, 4));
         assert_eq!(changed_a, Some(ChunkPos::new(0, 0, 0, 0)));
         assert_eq!(changed_b, Some(ChunkPos::new(0, 0, 0, 0)));
 
@@ -765,15 +808,15 @@ mod tests {
     fn overlay_dirty_bounds_drain_tracks_multiple_chunks_sorted() {
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::Empty,
-            Vec::<([i32; 4], ChunkPayload)>::new(),
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             123,
             false,
             HashSet::new(),
         );
 
-        let _ = overlay.apply_voxel_edit([0, 0, 0, 0], VoxelType(1));
-        let _ = overlay.apply_voxel_edit([8, 0, 0, 0], VoxelType(1));
-        let _ = overlay.apply_voxel_edit([0, 8, 0, 0], VoxelType(1));
+        let _ = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 1));
+        let _ = overlay.apply_voxel_edit([8, 0, 0, 0], BlockData::simple(0, 1));
+        let _ = overlay.apply_voxel_edit([0, 8, 0, 0], BlockData::simple(0, 1));
 
         let dirty = overlay.take_dirty_bounds();
         assert_eq!(
@@ -786,13 +829,13 @@ mod tests {
     fn overlay_clear_dirty_clears_overlay_dirty_chunks() {
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::Empty,
-            Vec::<([i32; 4], ChunkPayload)>::new(),
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             123,
             false,
             HashSet::new(),
         );
 
-        let _ = overlay.apply_voxel_edit([0, 0, 0, 0], VoxelType(5));
+        let _ = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 5));
         overlay.clear_dirty();
         assert!(overlay.take_dirty_bounds().is_empty());
     }
@@ -803,7 +846,7 @@ mod tests {
             BaseWorldKind::FlatFloor {
                 material: VoxelType(11),
             },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             777,
             false,
             HashSet::new(),
@@ -821,7 +864,7 @@ mod tests {
         let virgin_chunk_before = chunk_from_payload(&virgin_payload_before).expect("virgin chunk");
         assert!(virgin_chunk_before[voxel_idx].is_solid());
 
-        let changed = overlay.apply_voxel_edit([0, -1, 0, 0], VoxelType::AIR);
+        let changed = overlay.apply_voxel_edit([0, -1, 0, 0], BlockData::AIR);
         assert_eq!(changed, Some(chunk_pos));
 
         let effective_after = overlay
@@ -847,7 +890,7 @@ mod tests {
             BaseWorldKind::FlatFloor {
                 material: VoxelType(11),
             },
-            vec![(chunk_key, ChunkPayload::Uniform(0))],
+            vec![(chunk_key, ResolvedChunkPayload::empty())],
             991,
             false,
             HashSet::new(),
@@ -876,7 +919,7 @@ mod tests {
             BaseWorldKind::MassivePlatforms {
                 material: VoxelType(11),
             },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             1337,
             false,
             HashSet::new(),
@@ -899,7 +942,7 @@ mod tests {
             BaseWorldKind::MassivePlatforms {
                 material: VoxelType(11),
             },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             1337,
             true,
             HashSet::new(),
@@ -910,7 +953,7 @@ mod tests {
         let chunk_key = chunk_key_from_chunk_pos(chunk_pos);
         let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
         assert_eq!(
-            overlay.apply_voxel_edit(edit_pos, VoxelType(5)),
+            overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 5)),
             Some(chunk_pos)
         );
 

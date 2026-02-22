@@ -20,7 +20,7 @@ fn describe_sample_ray_hit_for_hud(hit: &DebugRayBvhNodeHit) -> String {
             .saturating_sub(hit.bounds.min[3])
             .saturating_add(1),
     ];
-    match hit.kind {
+    match &hit.kind {
         DebugRayBvhNodeKind::Internal => format!(
             "kind=Internal bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
             hit.bounds.min[0],
@@ -37,9 +37,9 @@ fn describe_sample_ray_hit_for_hud(hit: &DebugRayBvhNodeHit) -> String {
             span[3],
             hit.t_enter,
         ),
-        DebugRayBvhNodeKind::LeafUniform { material } => format!(
-            "kind=LeafUniform material={} bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
-            material,
+        DebugRayBvhNodeKind::LeafUniform { block } => format!(
+            "kind=LeafUniform block={}:{} bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
+            block.namespace, block.block_type,
             hit.bounds.min[0],
             hit.bounds.min[1],
             hit.bounds.min[2],
@@ -74,7 +74,7 @@ fn describe_sample_ray_hit_for_hud(hit: &DebugRayBvhNodeHit) -> String {
 }
 
 fn overlay_edge_tag_for_sample_ray_hit(hit: &DebugRayBvhNodeHit) -> u32 {
-    match hit.kind {
+    match &hit.kind {
         DebugRayBvhNodeKind::Internal => OVERLAY_EDGE_TAG_REGION_BRANCH,
         DebugRayBvhNodeKind::LeafUniform { .. } => OVERLAY_EDGE_TAG_REGION_UNIFORM,
         DebugRayBvhNodeKind::LeafChunkArray => OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,

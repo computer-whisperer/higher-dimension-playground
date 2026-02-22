@@ -1,5 +1,91 @@
 // Material metadata system for Polychora 4D voxel game
 
+// Namespace IDs
+pub const NAMESPACE_POLYCHORA: u32 = 0;
+
+// Block type IDs (polychora namespace, matching legacy VoxelType u8 values)
+pub const BLOCK_AIR: u32 = 0;
+pub const BLOCK_RED: u32 = 1;
+pub const BLOCK_ORANGE: u32 = 2;
+pub const BLOCK_YELLOW_GREEN: u32 = 3;
+pub const BLOCK_GREEN: u32 = 4;
+pub const BLOCK_CYAN: u32 = 5;
+pub const BLOCK_BLUE: u32 = 6;
+pub const BLOCK_PURPLE: u32 = 7;
+pub const BLOCK_MAGENTA: u32 = 8;
+pub const BLOCK_RAINBOW: u32 = 9;
+pub const BLOCK_BROWN: u32 = 10;
+pub const BLOCK_GRID_FLOOR: u32 = 11;
+pub const BLOCK_WHITE: u32 = 12;
+pub const BLOCK_LIGHT: u32 = 13;
+pub const BLOCK_MIRROR: u32 = 14;
+pub const BLOCK_LAVA_VEINED_BASALT: u32 = 15;
+pub const BLOCK_CRYSTAL_LATTICE: u32 = 16;
+pub const BLOCK_MARBLE: u32 = 17;
+pub const BLOCK_OXIDIZED_METAL: u32 = 18;
+pub const BLOCK_BIO_SPORE_MOSS: u32 = 19;
+pub const BLOCK_VOID_MIRROR: u32 = 20;
+pub const BLOCK_AVATAR_MARKER: u32 = 21;
+pub const BLOCK_HOLOGRAPHIC_LAMINATE: u32 = 22;
+pub const BLOCK_TIDAL_GLASS: u32 = 23;
+pub const BLOCK_CIRCUIT_WEAVE: u32 = 24;
+pub const BLOCK_AURORA_STONE: u32 = 25;
+pub const BLOCK_HAZARD_CHEVRONS: u32 = 26;
+pub const BLOCK_STONE: u32 = 27;
+pub const BLOCK_COBBLESTONE: u32 = 28;
+pub const BLOCK_DIRT: u32 = 29;
+pub const BLOCK_COARSE_DIRT: u32 = 30;
+pub const BLOCK_OAK_PLANKS: u32 = 31;
+pub const BLOCK_SPRUCE_PLANKS: u32 = 32;
+pub const BLOCK_LOG_BARK: u32 = 33;
+pub const BLOCK_LOG_END_RINGS: u32 = 34;
+pub const BLOCK_SAND: u32 = 35;
+pub const BLOCK_GRAVEL: u32 = 36;
+pub const BLOCK_CLAY: u32 = 37;
+pub const BLOCK_GRASS_BLOCK: u32 = 38;
+pub const BLOCK_SNOW: u32 = 39;
+pub const BLOCK_ICE: u32 = 40;
+pub const BLOCK_COAL_ORE: u32 = 41;
+pub const BLOCK_IRON_ORE: u32 = 42;
+pub const BLOCK_GOLD_ORE: u32 = 43;
+pub const BLOCK_DIAMOND_ORE: u32 = 44;
+pub const BLOCK_REDSTONE_ORE: u32 = 45;
+pub const BLOCK_BIRCH_PLANKS: u32 = 46;
+pub const BLOCK_BRICKS: u32 = 47;
+pub const BLOCK_SANDSTONE: u32 = 48;
+pub const BLOCK_GLASS: u32 = 49;
+pub const BLOCK_GLOWSTONE: u32 = 50;
+pub const BLOCK_OBSIDIAN: u32 = 51;
+pub const BLOCK_PRISMARINE: u32 = 52;
+pub const BLOCK_TERRACOTTA: u32 = 53;
+pub const BLOCK_WOOL_WHITE: u32 = 54;
+pub const BLOCK_BASALT_TILES: u32 = 55;
+pub const BLOCK_COPPER_WEAVE: u32 = 56;
+pub const BLOCK_NEBULA_STRATA: u32 = 57;
+pub const BLOCK_STARFORGED_CORE: u32 = 58;
+pub const BLOCK_CRYO_CIRCUIT: u32 = 59;
+pub const BLOCK_SMOKED_GLASS: u32 = 60;
+pub const BLOCK_IVORY_MARBLE: u32 = 61;
+pub const BLOCK_RUNIC_ALLOY: u32 = 62;
+pub const BLOCK_HYPERPHASE_GEL: u32 = 63;
+pub const BLOCK_SINGULARITY_CORE: u32 = 64;
+pub const BLOCK_CHRONO_BLOOM: u32 = 65;
+pub const BLOCK_TESSERACT_WEAVE: u32 = 66;
+pub const BLOCK_EVENTIDE_ALLOY: u32 = 67;
+pub const BLOCK_BEACON_MATRIX: u32 = 68;
+
+/// Resolve (namespace, block_type) to a GPU material appearance index (u8).
+///
+/// For the core polychora namespace, block_type maps 1:1 to the legacy material ID.
+/// Unknown blocks fall back to material 1 (Red).
+pub fn block_to_material_appearance(namespace: u32, block_type: u32) -> u8 {
+    if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
+        block_type as u8
+    } else {
+        1 // fallback to Red
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MaterialCategory {
     Basic,    // Simple colored blocks

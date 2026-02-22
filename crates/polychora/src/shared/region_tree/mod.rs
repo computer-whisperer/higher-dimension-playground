@@ -1,6 +1,6 @@
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::ChunkPos;
+use crate::shared::voxel::{BlockData, ChunkPos};
 use serde::{Deserialize, Serialize};
 
 pub type ChunkKey = [i32; 4];
@@ -32,7 +32,7 @@ pub struct RegionTreeCore {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RegionNodeKind {
     Empty,
-    Uniform(u16),
+    Uniform(BlockData),
     ProceduralRef(GeneratorRef),
     ChunkArray(ChunkArrayData),
     Branch(Vec<RegionTreeCore>),

@@ -1462,7 +1462,7 @@ mod tests {
     fn test_server_state_with_world() -> ServerState {
         let world = ServerWorldOverlay::from_chunk_payloads(
             crate::shared::voxel::BaseWorldKind::Empty,
-            Vec::<([i32; 4], crate::shared::chunk_payload::ChunkPayload)>::new(),
+            Vec::<([i32; 4], crate::shared::chunk_payload::ResolvedChunkPayload)>::new(),
             0,
             false,
             HashSet::new(),
@@ -1471,7 +1471,7 @@ mod tests {
     }
 
     fn set_solid_voxel(state: &mut ServerState, x: i32, y: i32, z: i32, w: i32) {
-        let _ = state.apply_world_voxel_edit([x, y, z, w], VoxelType(1));
+        let _ = state.apply_world_voxel_edit([x, y, z, w], BlockData::simple(0, 1));
     }
 
     #[test]

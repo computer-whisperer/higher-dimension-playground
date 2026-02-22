@@ -1,17 +1,21 @@
 use super::*;
-use polychora::shared::chunk_payload::ChunkPayload;
+use polychora::materials::block_to_material_appearance;
+use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
+use polychora::shared::voxel::BlockData;
 use polychora::shared::render_tree::{
     RenderBvh, RenderBvhChunkMutationDelta, RenderBvhNodeKind, RenderLeaf, RenderLeafKind,
 };
+
 use std::time::Instant;
 
 fn pack_dense_materials_words(
-    dense_materials: &[u16],
+    dense_palette_indices: &[u16],
+    block_palette: &[BlockData],
     occupancy_words: &mut [u32; OCCUPANCY_WORDS_PER_CHUNK],
     material_words: &mut [u32; MATERIAL_WORDS_PER_CHUNK],
     macro_words: &mut [u32; MACRO_WORDS_PER_CHUNK],
 ) -> (u32, bool, [i32; 4], [i32; 4]) {
-    debug_assert_eq!(dense_materials.len(), CHUNK_VOLUME);
+    debug_assert_eq!(dense_palette_indices.len(), CHUNK_VOLUME);
 
     occupancy_words.fill(0);
     material_words.fill(0);
@@ -21,14 +25,19 @@ fn pack_dense_materials_words(
     let mut solid_local_min = [i32::MAX; 4];
     let mut solid_local_max = [i32::MIN; 4];
 
-    for (voxel_idx, material) in dense_materials.iter().copied().enumerate() {
+    for (voxel_idx, &palette_idx) in dense_palette_indices.iter().enumerate() {
+        let block = block_palette
+            .get(palette_idx as usize)
+            .cloned()
+            .unwrap_or(BlockData::AIR);
+        let mat_u8 = block_to_material_appearance(block.namespace, block.block_type);
+
         let mat_word_idx = voxel_idx / 4;
         let mat_shift = ((voxel_idx & 3) * 8) as u32;
-        let mat_u8 = u8::try_from(material).unwrap_or(u8::MAX);
         material_words[mat_word_idx] &= !(0xFFu32 << mat_shift);
         material_words[mat_word_idx] |= u32::from(mat_u8) << mat_shift;
 
-        if material == 0 {
+        if mat_u8 == 0 {
             continue;
         }
 
@@ -73,18 +82,29 @@ fn pack_dense_materials_words(
 }
 
 impl Scene {
-    fn summarize_chunk_payload_compact(payload: Option<&ChunkPayload>) -> String {
-        match payload {
-            None => "None".to_string(),
-            Some(ChunkPayload::Empty) => "Empty".to_string(),
-            Some(ChunkPayload::Uniform(material)) => format!("Uniform({material})"),
-            Some(ChunkPayload::Dense16 { materials }) => {
-                let non_empty = materials.iter().filter(|material| **material != 0).count();
+    fn summarize_chunk_payload_compact(resolved: Option<&ResolvedChunkPayload>) -> String {
+        let Some(resolved) = resolved else {
+            return "None".to_string();
+        };
+        match &resolved.payload {
+            ChunkPayload::Empty => "Empty".to_string(),
+            ChunkPayload::Uniform(idx) => {
+                let block = resolved.block_palette.get(*idx as usize);
+                match block {
+                    Some(b) if b.is_air() => "Uniform(air)".to_string(),
+                    Some(b) => format!("Uniform({}:{})", b.namespace, b.block_type),
+                    None => format!("Uniform(idx={})", idx),
+                }
+            }
+            ChunkPayload::Dense16 { materials } => {
+                let non_empty = materials.iter().filter(|idx| {
+                    resolved.block_palette.get(**idx as usize).map(|b| !b.is_air()).unwrap_or(false)
+                }).count();
                 format!("Dense16(nz={non_empty})")
             }
-            Some(ChunkPayload::PalettePacked {
+            ChunkPayload::PalettePacked {
                 palette, bit_width, ..
-            }) => format!(
+            } => format!(
                 "PalettePacked(palette={},bits={})",
                 palette.len(),
                 bit_width
@@ -92,16 +112,16 @@ impl Scene {
         }
     }
 
-    fn summarize_chunk_payload_list_compact(payloads: &[ChunkPayload]) -> String {
+    fn summarize_chunk_payload_list_compact(payloads: &[ResolvedChunkPayload]) -> String {
         if payloads.is_empty() {
             return "[]".to_string();
         }
         let mut out = String::from("[");
-        for (idx, payload) in payloads.iter().take(3).enumerate() {
+        for (idx, resolved) in payloads.iter().take(3).enumerate() {
             if idx > 0 {
                 out.push_str(", ");
             }
-            out.push_str(&Self::summarize_chunk_payload_compact(Some(payload)));
+            out.push_str(&Self::summarize_chunk_payload_compact(Some(resolved)));
         }
         if payloads.len() > 3 {
             out.push_str(", ...");
@@ -195,17 +215,18 @@ impl Scene {
         voxel_frame_data: &mut VoxelFrameData,
         dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
         payload: &ChunkPayload,
+        block_palette: &[BlockData],
     ) -> Result<u32, String> {
         if let Some(&encoded) = dense_payload_cache.get(payload) {
             return Ok(encoded);
         }
-        let dense_materials = payload
+        let dense_palette_indices = payload
             .dense_materials()
             .map_err(|error| format!("dense payload decode failed: {error}"))?;
-        if dense_materials.len() != CHUNK_VOLUME {
+        if dense_palette_indices.len() != CHUNK_VOLUME {
             return Err(format!(
                 "dense payload voxel count {} != {}",
-                dense_materials.len(),
+                dense_palette_indices.len(),
                 CHUNK_VOLUME
             ));
         }
@@ -213,7 +234,7 @@ impl Scene {
         let mut mat = [0u32; MATERIAL_WORDS_PER_CHUNK];
         let mut mac = [0u32; MACRO_WORDS_PER_CHUNK];
         let (_solid_count, is_full, solid_local_min, solid_local_max) =
-            pack_dense_materials_words(&dense_materials, &mut occ, &mut mat, &mut mac);
+            pack_dense_materials_words(&dense_palette_indices, block_palette, &mut occ, &mut mat, &mut mac);
         let chunk_index = voxel_frame_data.chunk_headers.len() as u32;
         let occ_offset = voxel_frame_data.occupancy_words.len() as u32;
         let mat_offset = voxel_frame_data.material_words.len() as u32;
@@ -245,12 +266,13 @@ impl Scene {
         leaf: &RenderLeaf,
     ) -> Result<(), String> {
         match &leaf.kind {
-            RenderLeafKind::Uniform(material) => {
+            RenderLeafKind::Uniform(block) => {
+                let mat = block_to_material_appearance(block.namespace, block.block_type);
                 voxel_frame_data.leaf_headers.push(GpuVoxelLeafHeader {
                     min_chunk_coord: leaf.bounds.min,
                     max_chunk_coord: leaf.bounds.max,
                     leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
-                    uniform_material: u32::from(*material),
+                    uniform_material: u32::from(mat),
                     chunk_entry_offset: 0,
                     _padding: 0,
                 });
@@ -302,18 +324,25 @@ impl Scene {
                                         || "chunk-array palette out of bounds".to_string(),
                                     )?;
                                 let encoded = match payload {
-                                    ChunkPayload::Empty | ChunkPayload::Uniform(0) => {
+                                    ChunkPayload::Empty => {
                                         higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                     }
-                                    ChunkPayload::Uniform(material) => {
-                                        higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
-                                            | u32::from(*material)
+                                    ChunkPayload::Uniform(idx) => {
+                                        let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
+                                        let mat = block_to_material_appearance(block.namespace, block.block_type);
+                                        if mat == 0 {
+                                            higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
+                                        } else {
+                                            higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                                | u32::from(mat)
+                                        }
                                     }
                                     dense_payload => {
                                         Self::append_dense_payload_encoded(
                                             voxel_frame_data,
                                             dense_payload_cache,
                                             dense_payload,
+                                            &chunk_array.block_palette,
                                         )?
                                     }
                                 };
@@ -566,17 +595,24 @@ impl Scene {
                             .get(palette_index)
                             .ok_or_else(|| "chunk-array palette out of bounds".to_string())?;
                         let encoded_entry = match payload {
-                            ChunkPayload::Empty | ChunkPayload::Uniform(0) => {
+                            ChunkPayload::Empty => {
                                 higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                             }
-                            ChunkPayload::Uniform(material) => {
-                                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
-                                    | u32::from(*material)
+                            ChunkPayload::Uniform(idx) => {
+                                let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
+                                let mat = block_to_material_appearance(block.namespace, block.block_type);
+                                if mat == 0 {
+                                    higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
+                                } else {
+                                    higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                        | u32::from(mat)
+                                }
                             }
                             dense_payload => Self::append_dense_payload_encoded(
                                 voxel_frame_data,
                                 dense_payload_cache,
                                 dense_payload,
+                                &chunk_array.block_palette,
                             )?,
                         };
                         encoded.push(encoded_entry);
@@ -794,12 +830,13 @@ impl Scene {
                 }
 
                 match &leaf.kind {
-                    RenderLeafKind::Uniform(material) => {
+                    RenderLeafKind::Uniform(block) => {
+                        let mat = block_to_material_appearance(block.namespace, block.block_type);
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
                             min_chunk_coord: leaf.bounds.min,
                             max_chunk_coord: leaf.bounds.max,
                             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
-                            uniform_material: u32::from(*material),
+                            uniform_material: u32::from(mat),
                             chunk_entry_offset: 0,
                             _padding: 0,
                         };
@@ -891,12 +928,13 @@ impl Scene {
 
         for leaf in &render_bvh.leaves {
             match &leaf.kind {
-                RenderLeafKind::Uniform(material) => {
+                RenderLeafKind::Uniform(block) => {
+                    let mat = block_to_material_appearance(block.namespace, block.block_type);
                     leaf_headers.push(GpuVoxelLeafHeader {
                         min_chunk_coord: leaf.bounds.min,
                         max_chunk_coord: leaf.bounds.max,
                         leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
-                        uniform_material: u32::from(*material),
+                        uniform_material: u32::from(mat),
                         chunk_entry_offset: 0,
                         _padding: 0,
                     });
@@ -969,12 +1007,15 @@ impl Scene {
                                                         ChunkPayload::Empty => {
                                                             higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                                         }
-                                                        ChunkPayload::Uniform(0) => {
-                                                            higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
-                                                        }
-                                                        ChunkPayload::Uniform(material) => {
-                                                            higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
-                                                                | u32::from(*material)
+                                                        ChunkPayload::Uniform(idx) => {
+                                                            let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
+                                                            let mat = block_to_material_appearance(block.namespace, block.block_type);
+                                                            if mat == 0 {
+                                                                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
+                                                            } else {
+                                                                higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                                                    | u32::from(mat)
+                                                            }
                                                         }
                                                         _ => {
                                                             if let Some(&cached_dense_encoded) =
@@ -1005,6 +1046,7 @@ impl Scene {
                                                                     let (_solid_count, is_full, solid_local_min, solid_local_max) =
                                                                         pack_dense_materials_words(
                                                                             &dense_materials,
+                                                                            &chunk_array.block_palette,
                                                                             &mut occ,
                                                                             &mut mat,
                                                                             &mut mac,
@@ -1376,7 +1418,11 @@ impl Scene {
                             .as_ref()
                             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, key))
                             .unwrap_or_default();
-                        let frame_payloads = self.debug_voxel_frame_chunk_payloads(key);
+                        let frame_payloads: Vec<ResolvedChunkPayload> = self
+                            .debug_voxel_frame_chunk_payloads(key)
+                            .into_iter()
+                            .map(ResolvedChunkPayload::from_legacy_payload)
+                            .collect();
                         eprintln!(
                             "[edit-sync-render] key={:?} root={:?}->{:?} writes(nodes={},leaves={},freed_nodes={},freed_leaves={}) world={} cache={} bvh={} frame={}",
                             key,
