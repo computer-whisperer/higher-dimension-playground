@@ -2293,6 +2293,68 @@ pub fn maze_chunk_positions_for_bounds(
     out
 }
 
+/// Generate per-placement maze chunk data for all maze placements intersecting `bounds`.
+///
+/// Each maze placement returns its own set of chunks, allowing the caller to build
+/// one ChunkArray per maze rather than inserting chunks one at a time.
+pub fn generate_maze_placements_for_bounds(
+    world_seed: u64,
+    bounds: Aabb4i,
+) -> Vec<PlacementChunkData> {
+    if !bounds.is_valid() {
+        return Vec::new();
+    }
+    let placements = collect_maze_placements_for_chunk_bounds(world_seed, bounds);
+    let chunk_size = CHUNK_SIZE as i32;
+
+    let mut results = Vec::with_capacity(placements.len());
+    for placement in placements {
+        let (maze_min, maze_max) = maze_bounds(placement.origin, placement.shape);
+        let Some(covered_chunks) =
+            intersect_world_bounds_as_chunk_bounds(maze_min, maze_max, bounds)
+        else {
+            continue;
+        };
+
+        let mut chunks = HashMap::new();
+        for cw in covered_chunks.min[3]..=covered_chunks.max[3] {
+            for cz in covered_chunks.min[2]..=covered_chunks.max[2] {
+                for cy in covered_chunks.min[1]..=covered_chunks.max[1] {
+                    for cx in covered_chunks.min[0]..=covered_chunks.max[0] {
+                        let chunk_min = [
+                            cx * chunk_size,
+                            cy * chunk_size,
+                            cz * chunk_size,
+                            cw * chunk_size,
+                        ];
+                        let mut chunk = dense_chunk_new();
+                        place_maze_into_chunk(
+                            MazePlacement {
+                                origin: placement.origin,
+                                layout_seed: placement.layout_seed,
+                                shape: placement.shape,
+                            },
+                            chunk_min,
+                            &mut chunk,
+                        );
+                        if !dense_chunk_is_empty(&chunk) {
+                            chunks.insert([cx, cy, cz, cw], chunk);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !chunks.is_empty() {
+            results.push(PlacementChunkData {
+                placement_chunk_bounds: covered_chunks,
+                chunks,
+            });
+        }
+    }
+    results
+}
+
 /// Generate maze-only chunk content for a single chunk position (no structures).
 pub fn generate_maze_chunk(
     world_seed: u64,

@@ -2,7 +2,7 @@ use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 use crate::shared::region_tree::{
-    chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
+    RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_VOLUME};
@@ -343,40 +343,46 @@ impl MassivePlatformsWorldGenerator {
         procgen_frame_offset: [i32; 3],
         tree: &mut RegionChunkTree,
     ) {
-        // Check if there are any maze chunks in these bounds.
-        let maze_positions = procgen::maze_chunk_positions_for_bounds(
+        let placement_data = procgen::generate_maze_placements_for_bounds(
             procgen_seed,
             local_query_bounds,
         );
-        for local_chunk_pos in maze_positions {
-            let Some(maze_chunk) =
-                procgen::generate_maze_chunk(procgen_seed, local_chunk_pos)
+
+        let platform_material = self.platform_voxel.map(|v| u16::from(v.0));
+        let y_offset = platform_y_offset(platform);
+
+        for placement in placement_data {
+            if placement.chunks.is_empty() {
+                continue;
+            }
+
+            let Some((effective_bounds, palette, indices)) =
+                build_chunk_array_from_placement(
+                    &placement.chunks,
+                    &procgen_frame_offset,
+                    y_offset,
+                    platform_material,
+                )
             else {
                 continue;
             };
-            let chunk_pos = chunk_pos_from_local_to_platform(
-                local_chunk_pos,
-                platform,
-                procgen_frame_offset,
-            );
-            let key = chunk_key_from_chunk_pos(chunk_pos);
-            let base_payload = tree.chunk_payload(key);
-            let mut merged = base_payload
-                .as_ref()
-                .and_then(chunk_from_payload)
-                .unwrap_or_else(empty_dense_chunk);
-            merge_non_air_voxels(&mut merged, &maze_chunk);
-            let payload = payload_from_chunk_compact(&merged);
-            let is_same_as_base = base_payload
-                .as_ref()
-                .map(|base| {
-                    canonicalize_payload(base.clone()) == canonicalize_payload(payload.clone())
-                })
-                .unwrap_or(false);
-            if is_same_as_base {
-                continue;
-            }
-            let _ = tree.set_chunk(key, Some(payload));
+
+            let chunk_array = match ChunkArrayData::from_dense_indices(
+                effective_bounds,
+                palette,
+                indices,
+                Some(0), // default = Empty (palette index 0)
+            ) {
+                Ok(ca) => ca,
+                Err(_) => continue,
+            };
+
+            let core = RegionTreeCore {
+                bounds: effective_bounds,
+                kind: RegionNodeKind::ChunkArray(chunk_array),
+                generator_version_hash: 0,
+            };
+            let _ = tree.splice_non_empty_core_in_bounds(effective_bounds, &core);
         }
     }
 
@@ -524,6 +530,7 @@ fn platform_y_offset(platform: &PlatformInstance) -> i32 {
     platform.bounds.max[1] + 1
 }
 
+#[cfg(test)]
 fn chunk_pos_from_local_to_platform(
     local: ChunkPos,
     platform: &PlatformInstance,
@@ -624,6 +631,7 @@ fn payload_from_chunk_compact(chunk: &DenseChunk) -> ChunkPayload {
         .unwrap_or(ChunkPayload::Dense16 { materials })
 }
 
+#[cfg(test)]
 fn canonicalize_payload(payload: ChunkPayload) -> ChunkPayload {
     let payload = match payload {
         ChunkPayload::Empty => ChunkPayload::Uniform(0),
@@ -640,31 +648,6 @@ fn canonicalize_payload(payload: ChunkPayload) -> ChunkPayload {
         ChunkPayload::Uniform(first)
     } else {
         payload
-    }
-}
-
-fn chunk_from_payload(payload: &ChunkPayload) -> Option<DenseChunk> {
-    let materials = payload.dense_materials().ok()?;
-    if materials.len() != CHUNK_VOLUME {
-        return None;
-    }
-    let mut chunk = empty_dense_chunk();
-    for (idx, material) in materials.into_iter().enumerate() {
-        chunk[idx] = VoxelType(u8::try_from(material).unwrap_or(u8::MAX));
-    }
-    Some(chunk)
-}
-
-fn empty_dense_chunk() -> DenseChunk {
-    [VoxelType::AIR; CHUNK_VOLUME]
-}
-
-fn merge_non_air_voxels(dst: &mut DenseChunk, src: &DenseChunk) {
-    for (idx, voxel) in src.iter().enumerate() {
-        if voxel.is_air() {
-            continue;
-        }
-        dst[idx] = *voxel;
     }
 }
 
