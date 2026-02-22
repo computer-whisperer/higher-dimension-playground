@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 const STRUCTURE_CELL_SIZE: i32 = 32;
 const STRUCTURE_CELL_JITTER: i32 = 10;
 const STRUCTURE_SPAWN_NUMERATOR: u64 = 1;
-const STRUCTURE_SPAWN_DENOMINATOR: u64 = 48;
+const STRUCTURE_SPAWN_DENOMINATOR: u64 = 480;
 const STRUCTURE_ORIGIN_EXCLUSION_RADIUS: i32 = 16;
 const STRUCTURE_HASH_SALT: u64 = 0x9f07_c9ab_33f2_3a11;
 const STRUCTURE_PICK_SALT: u64 = 0x2d99_1f4e_47ba_8c6d;
@@ -585,7 +585,7 @@ static STRUCTURE_SET: OnceLock<StructureSet> = OnceLock::new();
 
 fn structure_set() -> &'static StructureSet {
     STRUCTURE_SET.get_or_init(|| {
-        let sources: [(&str, &[u8]); 20] = [
+        let sources: [(&str, &[u8]); 26] = [
             (
                 "cross_shrine.json",
                 &include_bytes!("../../assets/structures/cross_shrine.json")[..],
@@ -665,6 +665,30 @@ fn structure_set() -> &'static StructureSet {
             (
                 "orthoplex_nexus.json",
                 &include_bytes!("../../assets/structures/orthoplex_nexus.json")[..],
+            ),
+            (
+                "ore_cairn.json",
+                &include_bytes!("../../assets/structures/ore_cairn.json")[..],
+            ),
+            (
+                "frozen_spire.json",
+                &include_bytes!("../../assets/structures/frozen_spire.json")[..],
+            ),
+            (
+                "moss_ruins.json",
+                &include_bytes!("../../assets/structures/moss_ruins.json")[..],
+            ),
+            (
+                "sandstone_obelisk.json",
+                &include_bytes!("../../assets/structures/sandstone_obelisk.json")[..],
+            ),
+            (
+                "prism_fountain.json",
+                &include_bytes!("../../assets/structures/prism_fountain.json")[..],
+            ),
+            (
+                "hypercube_frame.json",
+                &include_bytes!("../../assets/structures/hypercube_frame.json")[..],
             ),
         ];
 
@@ -2426,9 +2450,9 @@ mod tests {
         let mut found_non_empty = false;
         let (min_y, max_y) = structure_chunk_y_bounds();
 
-        for x in -8..=8 {
-            for z in -8..=8 {
-                for w in -8..=8 {
+        for x in -25..=25 {
+            for z in -25..=25 {
+                for w in -25..=25 {
                     for y in min_y..=max_y {
                         if generate_structure_chunk(1337, ChunkPos::new(x, y, z, w)).is_some() {
                             found_non_empty = true;
@@ -2540,9 +2564,9 @@ mod tests {
         let (min_y, max_y) = structure_chunk_y_bounds();
         let mut found_spanning = false;
 
-        'scan: for x in -12..=12 {
-            for z in -12..=12 {
-                for w in -12..=12 {
+        'scan: for x in -35..=35 {
+            for z in -35..=35 {
+                for w in -35..=35 {
                     for y in min_y..=max_y {
                         let left = ChunkPos::new(x, y, z, w);
                         let right = ChunkPos::new(x + 1, y, z, w);
@@ -2623,9 +2647,9 @@ mod tests {
         let seed = 0x2a19_6e8d_0cb4_7fd1u64;
         let (min_y, max_y) = structure_chunk_y_bounds();
         let mut target = None::<(ChunkPos, StructureCell)>;
-        'search: for x in -10..=10 {
-            for z in -10..=10 {
-                for w in -10..=10 {
+        'search: for x in -30..=30 {
+            for z in -30..=30 {
+                for w in -30..=30 {
                     for y in min_y..=max_y {
                         let pos = ChunkPos::new(x, y, z, w);
                         if generate_structure_chunk(seed, pos).is_none() {
@@ -2734,9 +2758,9 @@ mod tests {
         let (min_y, max_y) = structure_chunk_y_bounds();
 
         let mut target_chunk = None;
-        'search: for x in -10..=10 {
-            for z in -10..=10 {
-                for w in -10..=10 {
+        'search: for x in -30..=30 {
+            for z in -30..=30 {
+                for w in -30..=30 {
                     for y in min_y..=max_y {
                         let chunk_pos = ChunkPos::new(x, y, z, w);
                         let cells = structure_cells_affecting_chunk(seed, chunk_pos);
