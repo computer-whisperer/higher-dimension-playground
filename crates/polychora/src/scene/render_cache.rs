@@ -81,6 +81,17 @@ impl Scene {
             && outer.max[3] >= inner.max[3]
     }
 
+    /// Force a complete render BVH rebuild from the current region cache.
+    /// This discards all incremental mutation state and reconstructs a fresh
+    /// optimal tree, useful for profiling BVH quality degradation.
+    pub fn force_render_bvh_rebuild(&mut self) {
+        if let Some(bounds) = self.render_bvh_cache_bounds {
+            self.rebuild_render_bvh_from_region_cache(bounds);
+            self.voxel_pending_render_bvh_rebuild = true;
+            self.voxel_pending_render_bvh_mutation_deltas.clear();
+        }
+    }
+
     pub(crate) fn ensure_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
         if !bounds.is_valid() {
             self.render_region_cache_bounds = None;

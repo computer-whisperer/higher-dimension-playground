@@ -330,6 +330,16 @@ impl App {
                 "[perf-suite] world settled ({}) after {} frames ({} stable)",
                 reason, state.settle_total_frames, state.settle_stable_count
             );
+            // Force a complete render BVH rebuild if requested.
+            if self.args.perf_suite_rebuild_bvh {
+                let start = Instant::now();
+                self.scene.force_render_bvh_rebuild();
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                eprintln!(
+                    "[perf-suite] forced render BVH rebuild in {:.2}ms",
+                    elapsed_ms
+                );
+            }
             // Transition to first scenario warmup.
             state.phase = PerfSuitePhase::Warmup;
             state.frames_remaining = state.warmup_frames;

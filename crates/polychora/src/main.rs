@@ -656,6 +656,12 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     perf_suite_spawn_entities: u32,
 
+    /// Force a complete render BVH rebuild after world settle, before benchmarking.
+    /// Produces a fresh optimal tree, useful for measuring BVH quality degradation
+    /// from incremental mutation deltas during world streaming.
+    #[arg(long, action = ArgAction::Set, default_value_t = false)]
+    perf_suite_rebuild_bvh: bool,
+
     /// Enable client-side audio output (sound effects).
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
     audio: bool,
