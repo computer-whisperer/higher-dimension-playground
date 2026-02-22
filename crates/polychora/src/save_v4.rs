@@ -3,7 +3,9 @@ use crate::migration::legacy_voxel::{Chunk as LegacyChunk, RegionChunkWorld};
 use crate::shared::chunk_payload::{
     ChunkArrayData, ChunkArrayIndexCodec, ChunkPayload as FieldChunkPayload, ResolvedChunkPayload,
 };
-use crate::shared::protocol::{EntityClass, EntityKind};
+use crate::shared::protocol::Entity;
+#[cfg(test)]
+use crate::shared::protocol::EntityPose;
 use crate::shared::region_tree::{slice_region_core_in_bounds, RegionNodeKind, RegionTreeCore};
 use crate::shared::spatial::Aabb4i;
 #[cfg(test)]
@@ -38,7 +40,7 @@ pub const PAYLOAD_FILE_VERSION: u32 = 1;
 pub const DATA_FILE_VERSION: u32 = 1;
 pub const CHUNK_PAYLOAD_BLOB_VERSION: u16 = 1;
 pub const CHUNK_ARRAY_BLOB_VERSION: u16 = 2;
-pub const ENTITY_BLOB_VERSION: u16 = 1;
+pub const ENTITY_BLOB_VERSION: u16 = 2;
 pub const DEFAULT_REGION_CHUNK_EDGE: i32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,16 +208,9 @@ pub struct ChunkArrayBlob {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PersistedEntityRecord {
     pub entity_id: u64,
-    pub class: EntityClass,
-    pub kind: EntityKind,
-    pub position: [f32; 4],
-    pub orientation: [f32; 4],
-    pub velocity: [f32; 4],
-    pub scale: f32,
-    pub material: u8,
+    pub entity: Entity,
     pub display_name: Option<String>,
     pub tags: Vec<String>,
-    pub payload: Vec<u8>,
     pub last_saved_ms: u64,
 }
 
@@ -401,7 +396,7 @@ pub fn all_entity_regions(
         .iter()
         .map(|entity| {
             region_from_chunk(
-                chunk_from_world_position(entity.position),
+                chunk_from_world_position(entity.entity.pose.position),
                 region_chunk_edge,
             )
         })
@@ -982,7 +977,7 @@ fn save_state_internal(
 
     let mut entities_by_chunk = HashMap::<[i32; 4], Vec<PersistedEntityRecord>>::new();
     for entity in effective_entities {
-        let chunk = chunk_from_world_position(entity.position);
+        let chunk = chunk_from_world_position(entity.entity.pose.position);
         entities_by_chunk.entry(chunk).or_default().push(entity);
     }
     for entities in entities_by_chunk.values_mut() {
@@ -1180,14 +1175,14 @@ fn resolve_entities_for_save(
 
     let mut merged = HashMap::<u64, PersistedEntityRecord>::new();
     for entity in loaded_entities {
-        let chunk = chunk_from_world_position(entity.position);
+        let chunk = chunk_from_world_position(entity.entity.pose.position);
         let region = region_from_chunk(chunk, DEFAULT_REGION_CHUNK_EDGE);
         if !dirty_entity_regions.contains(&region) {
             merged.insert(entity.entity_id, entity);
         }
     }
     for entity in current_entities {
-        let chunk = chunk_from_world_position(entity.position);
+        let chunk = chunk_from_world_position(entity.entity.pose.position);
         let region = region_from_chunk(chunk, DEFAULT_REGION_CHUNK_EDGE);
         if dirty_entity_regions.contains(&region) {
             merged.insert(entity.entity_id, entity.clone());
@@ -1753,7 +1748,7 @@ fn collect_entities_from_node_filtered(
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             for entity in blob.entities {
                 let region = region_from_chunk(
-                    chunk_from_world_position(entity.position),
+                    chunk_from_world_position(entity.entity.pose.position),
                     DEFAULT_REGION_CHUNK_EDGE,
                 );
                 if include_region_for_filter(region, region_filter, include_matches) {
@@ -3142,19 +3137,23 @@ mod tests {
             .sum()
     }
 
-    fn test_entity(entity_id: u64, position: [f32; 4], payload: Vec<u8>) -> PersistedEntityRecord {
+    fn test_entity(entity_id: u64, position: [f32; 4], data: Vec<u8>) -> PersistedEntityRecord {
+        use crate::shared::entity_types::ENTITY_TEST_ROTOR;
         PersistedEntityRecord {
             entity_id,
-            class: EntityClass::Accent,
-            kind: EntityKind::TestRotor,
-            position,
-            orientation: [0.0, 0.0, 1.0, 0.0],
-            velocity: [0.0, 0.0, 0.0, 0.0],
-            scale: 1.0,
-            material: 7,
+            entity: Entity {
+                namespace: ENTITY_TEST_ROTOR.0,
+                entity_type: ENTITY_TEST_ROTOR.1,
+                pose: EntityPose {
+                    position,
+                    orientation: [0.0, 0.0, 1.0, 0.0],
+                    velocity: [0.0, 0.0, 0.0, 0.0],
+                    scale: 1.0,
+                },
+                data,
+            },
             display_name: None,
             tags: vec!["persist".to_string()],
-            payload,
             last_saved_ms: now_unix_ms(),
         }
     }
@@ -3180,16 +3179,19 @@ mod tests {
 
         let entities = vec![PersistedEntityRecord {
             entity_id: 42,
-            class: EntityClass::Accent,
-            kind: EntityKind::TestRotor,
-            position: [2.0, 3.0, 4.0, 5.0],
-            orientation: [0.0, 0.0, 1.0, 0.0],
-            velocity: [0.1, 0.2, 0.3, 0.4],
-            scale: 0.75,
-            material: 9,
+            entity: Entity {
+                namespace: 0,
+                entity_type: 2,
+                pose: EntityPose {
+                    position: [2.0, 3.0, 4.0, 5.0],
+                    orientation: [0.0, 0.0, 1.0, 0.0],
+                    velocity: [0.1, 0.2, 0.3, 0.4],
+                    scale: 0.75,
+                },
+                data: vec![1, 2, 3, 4],
+            },
             display_name: Some("spin".to_string()),
             tags: vec!["demo".to_string()],
-            payload: vec![1, 2, 3, 4],
             last_saved_ms: now_ms,
         }];
         let players = vec![PlayerRecord {
@@ -3371,12 +3373,12 @@ mod tests {
         loaded_entities.sort_unstable_by_key(|entity| entity.entity_id);
         assert_eq!(loaded_entities.len(), 2);
         assert_eq!(loaded_entities[0].entity_id, 1);
-        assert_eq!(loaded_entities[0].payload, vec![9]);
+        assert_eq!(loaded_entities[0].entity.data, vec![9]);
         assert_eq!(loaded_entities[1].entity_id, 2);
-        assert_eq!(loaded_entities[1].payload, vec![2]);
+        assert_eq!(loaded_entities[1].entity.data, vec![2]);
         assert_eq!(
             region_from_chunk(
-                chunk_from_world_position(loaded_entities[1].position),
+                chunk_from_world_position(loaded_entities[1].entity.pose.position),
                 DEFAULT_REGION_CHUNK_EDGE,
             ),
             region_from_chunk(entity_b_chunk, DEFAULT_REGION_CHUNK_EDGE)
@@ -3813,8 +3815,8 @@ mod tests {
 
         let entities = vec![crate::migration::save_v3::PersistedEntityRecord {
             entity_id: 99,
-            class: EntityClass::Accent,
-            kind: EntityKind::TestCube,
+            class: crate::migration::save_v3::EntityClass::Accent,
+            kind: crate::migration::save_v3::EntityKind::TestCube,
             position: [1.0, 2.0, 3.0, 4.0],
             orientation: [0.0, 0.0, 1.0, 0.0],
             velocity: [0.0, 0.0, 0.0, 0.0],

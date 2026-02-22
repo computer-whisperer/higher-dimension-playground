@@ -7,7 +7,9 @@ use crate::save_v4::{
     SaveResult, DEFAULT_REGION_CHUNK_EDGE,
 };
 use crate::shared::chunk_payload::{ChunkPayload as FieldChunkPayload, ResolvedChunkPayload};
-use crate::shared::protocol::{EntityClass, EntityKind};
+use crate::migration::save_v3::{EntityClass, EntityKind};
+use crate::shared::entity_types;
+use crate::shared::protocol::{Entity, EntityPose};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
@@ -30,6 +32,18 @@ struct LegacySidecarEntity {
     material: u8,
     display_name: Option<String>,
     mob: Option<serde_json::Value>,
+}
+
+fn entity_kind_to_type_key(kind: EntityKind) -> (u32, u32) {
+    match kind {
+        EntityKind::PlayerAvatar => entity_types::ENTITY_PLAYER_AVATAR,
+        EntityKind::TestCube => entity_types::ENTITY_TEST_CUBE,
+        EntityKind::TestRotor => entity_types::ENTITY_TEST_ROTOR,
+        EntityKind::TestDrifter => entity_types::ENTITY_TEST_DRIFTER,
+        EntityKind::MobSeeker => entity_types::ENTITY_MOB_SEEKER,
+        EntityKind::MobCreeper4d => entity_types::ENTITY_MOB_CREEPER4D,
+        EntityKind::MobPhaseSpider => entity_types::ENTITY_MOB_PHASE_SPIDER,
+    }
 }
 
 fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], ResolvedChunkPayload)> {
@@ -102,18 +116,22 @@ pub fn load_legacy_sidecar_entities(
         } else {
             Vec::new()
         };
+        let (namespace, entity_type) = entity_kind_to_type_key(entity.kind);
         out.push(PersistedEntityRecord {
             entity_id: next_entity_id,
-            class: entity.class,
-            kind: entity.kind,
-            position: entity.position,
-            orientation: entity.orientation,
-            velocity: [0.0, 0.0, 0.0, 0.0],
-            scale: entity.scale,
-            material: entity.material,
+            entity: Entity {
+                namespace,
+                entity_type,
+                pose: EntityPose {
+                    position: entity.position,
+                    orientation: entity.orientation,
+                    velocity: [0.0, 0.0, 0.0, 0.0],
+                    scale: entity.scale,
+                },
+                data: payload,
+            },
             display_name: entity.display_name,
             tags: Vec::new(),
-            payload,
             last_saved_ms: now_ms,
         });
         next_entity_id = next_entity_id.saturating_add(1);
@@ -284,19 +302,25 @@ pub fn migrate_v3_save_to_v4(
 
     let entities: Vec<PersistedEntityRecord> = entities
         .into_iter()
-        .map(|entity| PersistedEntityRecord {
-            entity_id: entity.entity_id,
-            class: entity.class,
-            kind: entity.kind,
-            position: entity.position,
-            orientation: entity.orientation,
-            velocity: entity.velocity,
-            scale: entity.scale,
-            material: entity.material,
-            display_name: entity.display_name,
-            tags: entity.tags,
-            payload: entity.payload,
-            last_saved_ms: entity.last_saved_ms,
+        .map(|entity| {
+            let (namespace, entity_type) = entity_kind_to_type_key(entity.kind);
+            PersistedEntityRecord {
+                entity_id: entity.entity_id,
+                entity: Entity {
+                    namespace,
+                    entity_type,
+                    pose: EntityPose {
+                        position: entity.position,
+                        orientation: entity.orientation,
+                        velocity: entity.velocity,
+                        scale: entity.scale,
+                    },
+                    data: entity.payload,
+                },
+                display_name: entity.display_name,
+                tags: entity.tags,
+                last_saved_ms: entity.last_saved_ms,
+            }
         })
         .collect();
     let players: Vec<PlayerRecord> = players

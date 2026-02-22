@@ -1,6 +1,5 @@
 use crate::migration::legacy_voxel::{Chunk, RegionChunkWorld};
 use crate::migration::legacy_world_io::load_world;
-use crate::shared::protocol::{EntityClass, EntityKind};
 use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
@@ -8,6 +7,25 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+// Legacy types for v3 save format deserialization
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum EntityClass {
+    Player,
+    Accent,
+    Mob,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum EntityKind {
+    PlayerAvatar,
+    TestCube,
+    TestRotor,
+    TestDrifter,
+    MobSeeker,
+    MobCreeper4d,
+    MobPhaseSpider,
+}
 
 const MANIFEST_FILE: &str = "manifest.json";
 const INDEX_DIR: &str = "index";

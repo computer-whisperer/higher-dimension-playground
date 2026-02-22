@@ -5,7 +5,7 @@ use polychora::migration::legacy_world_io::{load_world, save_world};
 use polychora::migration::save_v3;
 use polychora::save_v4;
 use polychora::save_v4_migration;
-use polychora::shared::protocol::{EntityClass, EntityKind};
+use polychora::shared::entity_types::{self, EntityCategory};
 use polychora::shared::voxel::{BaseWorldKind, VoxelType};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -625,24 +625,19 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let mut entity_payload_bytes = 0usize;
     let mut entity_tag_count = 0usize;
     for entity in &entities {
-        match entity.class {
-            EntityClass::Player => entity_class_counts[0] += 1,
-            EntityClass::Accent => entity_class_counts[1] += 1,
-            EntityClass::Mob => entity_class_counts[2] += 1,
+        let category = entity_types::category_for(entity.entity.namespace, entity.entity.entity_type);
+        match category {
+            EntityCategory::Player => entity_class_counts[0] += 1,
+            EntityCategory::Accent => entity_class_counts[1] += 1,
+            EntityCategory::Mob => entity_class_counts[2] += 1,
         }
-        let kind_label = match entity.kind {
-            EntityKind::PlayerAvatar => "player_avatar",
-            EntityKind::TestCube => "test_cube",
-            EntityKind::TestRotor => "test_rotor",
-            EntityKind::TestDrifter => "test_drifter",
-            EntityKind::MobSeeker => "mob_seeker",
-            EntityKind::MobCreeper4d => "mob_creeper4d",
-            EntityKind::MobPhaseSpider => "mob_phase_spider",
-        };
+        let type_name = entity_types::lookup(entity.entity.namespace, entity.entity.entity_type)
+            .map(|e| e.canonical_name)
+            .unwrap_or("unknown");
         *entity_kind_counts
-            .entry(kind_label.to_string())
+            .entry(type_name.to_string())
             .or_insert(0) += 1;
-        entity_payload_bytes += entity.payload.len();
+        entity_payload_bytes += entity.entity.data.len();
         entity_tag_count += entity.tags.len();
     }
 

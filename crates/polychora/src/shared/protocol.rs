@@ -3,49 +3,94 @@ use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::BlockData;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EntityKind {
-    PlayerAvatar,
-    TestCube,
-    TestRotor,
-    TestDrifter,
-    MobSeeker,
-    MobCreeper4d,
-    MobPhaseSpider,
-}
+// ---------------------------------------------------------------------------
+// Entity pose — spatial state shared by all entities
+// ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EntityClass {
-    Player,
-    Accent,
-    Mob,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EntitySnapshot {
-    pub entity_id: u64,
-    pub class: EntityClass,
-    pub kind: EntityKind,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EntityPose {
     pub position: [f32; 4],
     pub orientation: [f32; 4],
     pub velocity: [f32; 4],
     pub scale: f32,
-    pub material: u8,
+}
+
+impl Default for EntityPose {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 4],
+            orientation: [0.0, 0.0, 1.0, 0.0],
+            velocity: [0.0; 4],
+            scale: 1.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entity — namespace + type + pose + opaque data
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Entity {
+    pub namespace: u32,
+    pub entity_type: u32,
+    pub pose: EntityPose,
+    pub data: Vec<u8>,
+}
+
+impl Entity {
+    pub fn simple(namespace: u32, entity_type: u32) -> Self {
+        Self {
+            namespace,
+            entity_type,
+            pose: EntityPose::default(),
+            data: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Item / ItemStack
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Item {
+    pub namespace: u32,
+    pub item_type: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ItemStack {
+    pub item: Item,
+    pub count: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Wire types — entity replication
+// ---------------------------------------------------------------------------
+
+/// Full entity state sent when an entity first enters a client's interest.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EntitySnapshot {
+    pub entity_id: u64,
+    pub entity: Entity,
     pub owner_client_id: Option<u64>,
     pub display_name: Option<String>,
     pub last_update_ms: u64,
 }
 
+/// Pose-only update sent every tick for visible entities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EntityTransform {
     pub entity_id: u64,
-    pub position: [f32; 4],
-    pub orientation: [f32; 4],
-    pub velocity: [f32; 4],
-    pub scale: f32,
-    pub material: u8,
+    pub pose: EntityPose,
     pub last_update_ms: u64,
 }
+
+// ---------------------------------------------------------------------------
+// World metadata
+// ---------------------------------------------------------------------------
 
 /// Per-axis hard collision boundaries. `None` means unbounded in that direction.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -59,6 +104,10 @@ pub struct WorldSummary {
     pub non_empty_chunks: usize,
     pub bounds: WorldBounds,
 }
+
+// ---------------------------------------------------------------------------
+// Client → Server messages
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -74,11 +123,11 @@ pub enum ClientMessage {
         block: BlockData,
     },
     SpawnEntity {
-        kind: EntityKind,
+        entity_type_namespace: u32,
+        entity_type: u32,
         position: [f32; 4],
         orientation: [f32; 4],
         scale: f32,
-        material: u8,
     },
     ConsoleCommand {
         command: String,
@@ -97,6 +146,10 @@ pub enum ClientMessage {
         nonce: u64,
     },
 }
+
+// ---------------------------------------------------------------------------
+// Server → Client messages
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMessage {
@@ -153,3 +206,4 @@ pub enum ServerMessage {
         source_entity_id: Option<u64>,
     },
 }
+
