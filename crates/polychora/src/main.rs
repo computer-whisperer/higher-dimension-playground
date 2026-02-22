@@ -64,6 +64,29 @@ const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
 const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
+
+fn default_hotbar_slots() -> [Option<polychora::shared::protocol::ItemStack>; 9] {
+    use polychora::shared::protocol::ItemStack;
+    [
+        Some(ItemStack::block(0, 3, 1)),
+        Some(ItemStack::block(0, 27, 1)),
+        Some(ItemStack::block(0, 28, 1)),
+        Some(ItemStack::block(0, 29, 1)),
+        Some(ItemStack::block(0, 31, 1)),
+        Some(ItemStack::block(0, 12, 1)),
+        Some(ItemStack::block(0, 13, 1)),
+        Some(ItemStack::block(0, 1, 1)),
+        Some(ItemStack::block(0, 4, 1)),
+    ]
+}
+
+fn block_material_from_slot(slot: &Option<polychora::shared::protocol::ItemStack>) -> u8 {
+    slot.as_ref()
+        .and_then(|stack| stack.block_type_key())
+        .map(|(_ns, bt)| bt as u8)
+        .unwrap_or(BLOCK_EDIT_PLACE_MATERIAL_DEFAULT)
+        .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
+}
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
 const FOOTSTEP_DISTANCE_WALK: f32 = 3.50;
 const FOOTSTEP_DISTANCE_SPRINT: f32 = 2.40;
@@ -1034,7 +1057,7 @@ fn main() {
         focal_length_zw: 1.0,
         zw_angle_color_shift_enabled: initial_zw_angle_color_shift_enabled,
         zw_angle_color_shift_strength: initial_zw_angle_color_shift_strength,
-        place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
+        selected_block_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
         world_file,
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
@@ -1049,7 +1072,7 @@ fn main() {
         vte_max_trace_distance: initial_vte_max_trace_distance,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
-        hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
+        hotbar_slots: default_hotbar_slots(),
         hotbar_selected_index: 0,
         inventory_open: false,
         teleport_dialog_open: false,
@@ -1178,6 +1201,7 @@ fn main() {
         settings_file_path: settings_file_path.clone(),
         settings_last_saved: app_settings::PersistedSettings::default(),
         settings_last_save_attempt: Instant::now(),
+        waila_target: None,
     };
 
     if let Some(settings) = loaded_settings.as_ref() {
@@ -1392,7 +1416,7 @@ struct App {
     focal_length_zw: f32,
     zw_angle_color_shift_enabled: bool,
     zw_angle_color_shift_strength: f32,
-    place_material: u8,
+    selected_block_material: u8, // cached from hotbar_slots; derived, not persisted
     world_file: PathBuf,
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
@@ -1407,7 +1431,7 @@ struct App {
     vte_max_trace_distance: f32,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
-    hotbar_slots: [u8; 9],
+    hotbar_slots: [Option<polychora::shared::protocol::ItemStack>; 9],
     hotbar_selected_index: usize,
     inventory_open: bool,
     teleport_dialog_open: bool,
@@ -1508,6 +1532,7 @@ struct App {
     settings_file_path: PathBuf,
     settings_last_saved: app_settings::PersistedSettings,
     settings_last_save_attempt: Instant,
+    waila_target: Option<WailaTarget>,
 }
 
 #[derive(Copy, Clone)]
@@ -1536,15 +1561,34 @@ struct RemotePlayerState {
 
 #[derive(Clone)]
 struct RemoteEntityState {
-    kind: multiplayer::EntityKind,
+    entity_type_ns: u32,
+    entity_type: u32,
     position: [f32; 4],
     orientation: [f32; 4],
     velocity: [f32; 4],
     scale: f32,
-    material: u8,
     render_position: [f32; 4],
     render_orientation: [f32; 4],
     last_received_at: Instant,
+    data: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+enum WailaTarget {
+    Block {
+        coords: [i32; 4],
+        material_id: u8,
+    },
+    Entity {
+        entity_id: u64,
+        entity_type_ns: u32,
+        entity_type: u32,
+        position: [f32; 4],
+        orientation: [f32; 4],
+        scale: f32,
+        data: Vec<u8>,
+        distance: f32,
+    },
 }
 
 const REMOTE_ENTITY_POSITION_SMOOTH_HZ: f32 = 12.0;

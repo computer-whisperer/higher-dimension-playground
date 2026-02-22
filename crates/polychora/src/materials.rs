@@ -566,6 +566,15 @@ pub fn material_name(id: u8) -> &'static str {
         .unwrap_or("Unknown")
 }
 
+/// Get the category label of a material by ID
+pub fn material_category_label(id: u8) -> &'static str {
+    MATERIALS
+        .iter()
+        .find(|m| m.id == id)
+        .map(|m| m.category.label())
+        .unwrap_or("Unknown")
+}
+
 /// Get the color of a material by ID (RGB)
 pub fn material_color(id: u8) -> [u8; 3] {
     MATERIALS

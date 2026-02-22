@@ -180,7 +180,6 @@ pub struct RenderOptions {
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
     pub hud_player_tags: Vec<HudPlayerTag>,
-    pub waila_text: Option<String>,
     pub egui_paint: Option<EguiPaintData>,
 }
 
@@ -221,7 +220,6 @@ impl Default for RenderOptions {
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
             hud_player_tags: Vec::new(),
-            waila_text: None,
             egui_paint: None,
         }
     }

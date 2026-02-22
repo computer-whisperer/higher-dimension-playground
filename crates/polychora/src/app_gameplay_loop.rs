@@ -194,12 +194,13 @@ impl App {
                             self.hotbar_selected_index = (self.hotbar_selected_index + 8) % 9;
                         }
                     }
-                    self.place_material = self.hotbar_slots[self.hotbar_selected_index];
+                    self.selected_block_material =
+                        block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
                     eprintln!(
                         "Hotbar slot {} selected: material {} ({})",
                         self.hotbar_selected_index + 1,
-                        self.place_material,
-                        materials::material_name(self.place_material),
+                        self.selected_block_material,
+                        materials::material_name(self.selected_block_material),
                     );
                 }
             }
@@ -379,12 +380,13 @@ impl App {
             if let Some(digit) = self.input.take_place_material_digit() {
                 if digit >= 1 && digit <= 9 {
                     self.hotbar_selected_index = (digit - 1) as usize;
-                    self.place_material = self.hotbar_slots[self.hotbar_selected_index];
+                    self.selected_block_material =
+                        block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
                     eprintln!(
                         "Hotbar slot {} selected: material {} ({})",
                         digit,
-                        self.place_material,
-                        materials::material_name(self.place_material),
+                        self.selected_block_material,
+                        materials::material_name(self.selected_block_material),
                     );
                 }
             }
@@ -529,8 +531,13 @@ impl App {
                         let material = self.scene.get_voxel(x, y, z, w).0;
                         let clamped = material
                             .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
-                        self.place_material = clamped;
-                        self.hotbar_slots[self.hotbar_selected_index] = clamped;
+                        self.selected_block_material = clamped;
+                        self.hotbar_slots[self.hotbar_selected_index] =
+                            Some(polychora::shared::protocol::ItemStack::block(
+                                0,
+                                clamped as u32,
+                                1,
+                            ));
                         eprintln!(
                             "Picked voxel material {} ({}) from ({x}, {y}, {z}, {w})",
                             clamped,
@@ -561,13 +568,13 @@ impl App {
                         if let Some([x, y, z, w]) = placed {
                             eprintln!(
                                 "Placed voxel material {} at ({x}, {y}, {z}, {w})",
-                                self.place_material
+                                self.selected_block_material
                             );
                             self.play_spatial_sound_voxel(SoundEffect::Place, [x, y, z, w], 1.0);
                             self.send_multiplayer_voxel_update(
                                 now,
                                 [x, y, z, w],
-                                self.place_material,
+                                self.selected_block_material,
                             );
                         }
                     }
@@ -611,7 +618,7 @@ impl App {
             .unwrap_or_else(|| self.args.width.max(1) as f32 / self.args.height.max(1) as f32);
         let preview_instance = build_place_preview_instance(
             &self.camera,
-            self.place_material,
+            self.selected_block_material,
             preview_time_s,
             self.control_scheme,
             aspect,
@@ -684,20 +691,96 @@ impl App {
             })
             .map(describe_sample_ray_hit_for_hud);
 
-        // WAILA: show targeted block name below crosshair
-        let waila_text = if !self.menu_open && self.mouse_grabbed && !self.args.no_hud {
+        // WAILA: combined block + entity targeting
+        self.waila_target = if !self.menu_open && self.mouse_grabbed && !self.args.no_hud {
+            let entity_hit = find_targeted_entity(
+                self.camera.position,
+                look_dir,
+                edit_reach,
+                &self.remote_entities,
+                &self.remote_players,
+            );
             let waila_targets =
                 self.scene
                     .block_edit_targets(self.camera.position, look_dir, edit_reach);
-            if let Some([x, y, z, w]) = waila_targets.hit_voxel {
+            let block_target = waila_targets.hit_voxel.and_then(|[x, y, z, w]| {
                 let voxel = self.scene.get_voxel(x, y, z, w);
                 if voxel.0 != 0 {
-                    Some(materials::material_name(voxel.0).to_string())
+                    // Estimate block distance for comparison with entity hits
+                    let block_center = [
+                        x as f32 + 0.5,
+                        y as f32 + 0.5,
+                        z as f32 + 0.5,
+                        w as f32 + 0.5,
+                    ];
+                    let block_dist = distance4(self.camera.position, block_center);
+                    Some((WailaTarget::Block {
+                        coords: [x, y, z, w],
+                        material_id: voxel.0,
+                    }, block_dist))
                 } else {
                     None
                 }
-            } else {
-                None
+            });
+
+            match (&entity_hit, &block_target) {
+                (Some(eh), Some((_, bd))) if eh.distance < *bd => {
+                    // Entity is closer — build entity target
+                    if let Some(ent) = self.remote_entities.get(&eh.entity_id) {
+                        Some(WailaTarget::Entity {
+                            entity_id: eh.entity_id,
+                            entity_type_ns: ent.entity_type_ns,
+                            entity_type: ent.entity_type,
+                            position: ent.render_position,
+                            orientation: ent.render_orientation,
+                            scale: ent.scale,
+                            data: ent.data.clone(),
+                            distance: eh.distance,
+                        })
+                    } else if let Some(player) = self.remote_players.get(&eh.entity_id) {
+                        Some(WailaTarget::Entity {
+                            entity_id: eh.entity_id,
+                            entity_type_ns: 0,
+                            entity_type: 0,
+                            position: player.render_position,
+                            orientation: player.render_look,
+                            scale: 1.0,
+                            data: Vec::new(),
+                            distance: eh.distance,
+                        })
+                    } else {
+                        block_target.map(|(t, _)| t)
+                    }
+                }
+                (Some(eh), None) => {
+                    if let Some(ent) = self.remote_entities.get(&eh.entity_id) {
+                        Some(WailaTarget::Entity {
+                            entity_id: eh.entity_id,
+                            entity_type_ns: ent.entity_type_ns,
+                            entity_type: ent.entity_type,
+                            position: ent.render_position,
+                            orientation: ent.render_orientation,
+                            scale: ent.scale,
+                            data: ent.data.clone(),
+                            distance: eh.distance,
+                        })
+                    } else if let Some(player) = self.remote_players.get(&eh.entity_id) {
+                        Some(WailaTarget::Entity {
+                            entity_id: eh.entity_id,
+                            entity_type_ns: 0,
+                            entity_type: 0,
+                            position: player.render_position,
+                            orientation: player.render_look,
+                            scale: 1.0,
+                            data: Vec::new(),
+                            distance: eh.distance,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                (_, Some((target, _))) => Some(target.clone()),
+                (None, None) => None,
             }
         } else {
             None
@@ -891,7 +974,6 @@ impl App {
             } else {
                 hud_player_tags
             },
-            waila_text,
             egui_paint,
             ..Default::default()
         };

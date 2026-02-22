@@ -4434,7 +4434,6 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 render_options.hud_target_hit_voxel,
                 render_options.hud_target_hit_face,
                 &render_options.hud_player_tags,
-                render_options.waila_text.as_deref(),
             );
             line_render_count += hud_line_count;
             hud_vertex_count = hud_quad_count;

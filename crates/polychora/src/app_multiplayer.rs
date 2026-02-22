@@ -584,8 +584,9 @@ impl App {
         entity: multiplayer::EntitySnapshot,
         received_at: Instant,
     ) {
-        let normalized_look = sanitize_remote_orientation(entity.orientation, [0.0, 0.0, 1.0, 0.0]);
-        let sanitized_position = sanitize_remote_position(entity.position, [0.0; 4]);
+        let normalized_look =
+            sanitize_remote_orientation(entity.entity.pose.orientation, [0.0, 0.0, 1.0, 0.0]);
+        let sanitized_position = sanitize_remote_position(entity.entity.pose.position, [0.0; 4]);
         let player_name = entity.display_name.clone().unwrap_or_else(|| {
             entity
                 .owner_client_id
@@ -594,7 +595,8 @@ impl App {
         });
         if let Some(existing) = self.remote_players.get_mut(&entity.entity_id) {
             let previous_position = existing.position;
-            let next_position = sanitize_remote_position(entity.position, existing.position);
+            let next_position =
+                sanitize_remote_position(entity.entity.pose.position, existing.position);
 
             existing.owner_client_id = entity.owner_client_id;
             existing.name = player_name;
@@ -602,8 +604,10 @@ impl App {
             existing.look = normalized_look;
             existing.last_update_ms = entity.last_update_ms;
             existing.last_received_at = received_at;
-            existing.velocity =
-                sanitize_remote_velocity(entity.velocity, REMOTE_PLAYER_MAX_PREDICTED_SPEED);
+            existing.velocity = sanitize_remote_velocity(
+                entity.entity.pose.velocity,
+                REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+            );
 
             if distance4(previous_position, next_position) > REMOTE_PLAYER_TELEPORT_SNAP_DISTANCE {
                 existing.render_position = existing.position;
@@ -625,7 +629,7 @@ impl App {
                 render_position: sanitized_position,
                 render_look: normalized_look,
                 velocity: sanitize_remote_velocity(
-                    entity.velocity,
+                    entity.entity.pose.velocity,
                     REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                 ),
                 last_received_at: received_at,
@@ -1529,40 +1533,52 @@ impl App {
                 );
             }
             multiplayer::ServerMessage::Pong { .. } => {}
-            multiplayer::ServerMessage::EntitySpawned { entity } => match entity.class {
-                multiplayer::EntityClass::Player => {
-                    self.remote_entities.remove(&entity.entity_id);
-                    if entity.owner_client_id == self.multiplayer_self_id {
-                        self.remote_players.remove(&entity.entity_id);
-                    } else {
-                        self.upsert_remote_player_entity(entity, received_at);
+            multiplayer::ServerMessage::EntitySpawned { entity } => {
+                let category = multiplayer::entity_types::category_for(
+                    entity.entity.namespace,
+                    entity.entity.entity_type,
+                );
+                match category {
+                    multiplayer::entity_types::EntityCategory::Player => {
+                        self.remote_entities.remove(&entity.entity_id);
+                        if entity.owner_client_id == self.multiplayer_self_id {
+                            self.remote_players.remove(&entity.entity_id);
+                        } else {
+                            self.upsert_remote_player_entity(entity, received_at);
+                        }
+                    }
+                    multiplayer::entity_types::EntityCategory::Accent
+                    | multiplayer::entity_types::EntityCategory::Mob => {
+                        let fallback_orientation = [0.0, 0.0, 1.0, 0.0];
+                        let sanitized_position =
+                            sanitize_remote_position(entity.entity.pose.position, [0.0; 4]);
+                        let sanitized_orientation = sanitize_remote_orientation(
+                            entity.entity.pose.orientation,
+                            fallback_orientation,
+                        );
+                        let sanitized_scale =
+                            sanitize_remote_scale(entity.entity.pose.scale, 1.0);
+                        self.remote_entities.insert(
+                            entity.entity_id,
+                            RemoteEntityState {
+                                entity_type_ns: entity.entity.namespace,
+                                entity_type: entity.entity.entity_type,
+                                position: sanitized_position,
+                                orientation: sanitized_orientation,
+                                velocity: sanitize_remote_velocity(
+                                    entity.entity.pose.velocity,
+                                    REMOTE_PLAYER_MAX_PREDICTED_SPEED,
+                                ),
+                                scale: sanitized_scale,
+                                render_position: sanitized_position,
+                                render_orientation: sanitized_orientation,
+                                last_received_at: received_at,
+                                data: entity.entity.data.clone(),
+                            },
+                        );
                     }
                 }
-                multiplayer::EntityClass::Accent | multiplayer::EntityClass::Mob => {
-                    let fallback_orientation = [0.0, 0.0, 1.0, 0.0];
-                    let sanitized_position = sanitize_remote_position(entity.position, [0.0; 4]);
-                    let sanitized_orientation =
-                        sanitize_remote_orientation(entity.orientation, fallback_orientation);
-                    let sanitized_scale = sanitize_remote_scale(entity.scale, 1.0);
-                    self.remote_entities.insert(
-                        entity.entity_id,
-                        RemoteEntityState {
-                            kind: entity.kind,
-                            position: sanitized_position,
-                            orientation: sanitized_orientation,
-                            velocity: sanitize_remote_velocity(
-                                entity.velocity,
-                                REMOTE_PLAYER_MAX_PREDICTED_SPEED,
-                            ),
-                            scale: sanitized_scale,
-                            material: entity.material,
-                            render_position: sanitized_position,
-                            render_orientation: sanitized_orientation,
-                            last_received_at: received_at,
-                        },
-                    );
-                }
-            },
+            }
             multiplayer::ServerMessage::EntityDestroyed { entity_id } => {
                 self.remote_players.remove(&entity_id);
                 self.remote_entities.remove(&entity_id);
@@ -1572,15 +1588,15 @@ impl App {
                     if let Some(player) = self.remote_players.get_mut(&transform.entity_id) {
                         let previous_position = player.position;
                         let next_position =
-                            sanitize_remote_position(transform.position, player.position);
+                            sanitize_remote_position(transform.pose.position, player.position);
                         let normalized_look =
-                            sanitize_remote_orientation(transform.orientation, player.look);
+                            sanitize_remote_orientation(transform.pose.orientation, player.look);
                         player.position = next_position;
                         player.look = normalized_look;
                         player.last_update_ms = transform.last_update_ms;
                         player.last_received_at = received_at;
                         player.velocity = sanitize_remote_velocity(
-                            transform.velocity,
+                            transform.pose.velocity,
                             REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                         );
                         if distance4(previous_position, next_position)
@@ -1595,17 +1611,17 @@ impl App {
                     }
                     if let Some(existing) = self.remote_entities.get_mut(&transform.entity_id) {
                         existing.position =
-                            sanitize_remote_position(transform.position, existing.position);
+                            sanitize_remote_position(transform.pose.position, existing.position);
                         existing.orientation = sanitize_remote_orientation(
-                            transform.orientation,
+                            transform.pose.orientation,
                             existing.orientation,
                         );
                         existing.velocity = sanitize_remote_velocity(
-                            transform.velocity,
+                            transform.pose.velocity,
                             REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                         );
-                        existing.scale = sanitize_remote_scale(transform.scale, existing.scale);
-                        existing.material = transform.material;
+                        existing.scale =
+                            sanitize_remote_scale(transform.pose.scale, existing.scale);
                         existing.last_received_at = received_at;
                     }
                 }
@@ -1708,6 +1724,7 @@ impl App {
     }
 
     pub(super) fn remote_entity_instances(&self) -> Vec<common::ModelInstance> {
+        use multiplayer::entity_types::*;
         let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
         ids.sort_unstable();
         let mut instances = Vec::with_capacity(ids.len() * 18);
@@ -1719,18 +1736,20 @@ impl App {
                 {
                     continue;
                 }
-                match entity.kind {
-                    multiplayer::EntityKind::PlayerAvatar => {}
-                    multiplayer::EntityKind::TestCube => {
+                let type_key = (entity.entity_type_ns, entity.entity_type);
+                let mat = base_material_for(entity.entity_type_ns, entity.entity_type);
+                match type_key {
+                    ENTITY_PLAYER_AVATAR => {}
+                    ENTITY_TEST_CUBE => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         instances.push(build_centered_model_instance(
                             entity.render_position,
                             &basis,
                             [entity.scale; 4],
-                            [entity.material as u32; 8],
+                            [mat as u32; 8],
                         ));
                     }
-                    multiplayer::EntityKind::TestRotor => {
+                    ENTITY_TEST_ROTOR => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         instances.push(build_centered_model_instance(
                             entity.render_position,
@@ -1742,18 +1761,18 @@ impl App {
                                 entity.scale * 0.82,
                             ],
                             [
-                                entity.material as u32,
-                                entity.material as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(1)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(1)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(1)) as u32,
+                                mat as u32,
+                                mat as u32,
+                                mat as u32,
+                                (mat.saturating_add(1)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(1)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(1)) as u32,
                             ],
                         ));
                     }
-                    multiplayer::EntityKind::TestDrifter => {
+                    ENTITY_TEST_DRIFTER => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         instances.push(build_centered_model_instance(
                             entity.render_position,
@@ -1765,18 +1784,18 @@ impl App {
                                 entity.scale * 1.05,
                             ],
                             [
-                                (entity.material.saturating_add(2)) as u32,
-                                entity.material as u32,
-                                entity.material as u32,
-                                entity.material as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                entity.material as u32,
-                                entity.material as u32,
+                                (mat.saturating_add(2)) as u32,
+                                mat as u32,
+                                mat as u32,
+                                mat as u32,
+                                mat as u32,
+                                (mat.saturating_add(2)) as u32,
+                                mat as u32,
+                                mat as u32,
                             ],
                         ));
                     }
-                    multiplayer::EntityKind::MobSeeker => {
+                    ENTITY_MOB_SEEKER => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         let speed = remote_entity_speed_xzw(entity);
                         let stride = (speed / 3.6).clamp(0.0, 1.35);
@@ -1801,14 +1820,14 @@ impl App {
                                 entity.scale * 0.56,
                             ],
                             [
-                                entity.material as u32,
-                                (entity.material.saturating_add(1)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(3)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(4)) as u32,
-                                entity.material as u32,
+                                mat as u32,
+                                (mat.saturating_add(1)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(3)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(4)) as u32,
+                                mat as u32,
                             ],
                         ));
 
@@ -1824,14 +1843,14 @@ impl App {
                                 entity.scale * 0.26,
                             ],
                             [
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(pulse_bias)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(pulse_bias)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(pulse_bias)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(pulse_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(pulse_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(pulse_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(pulse_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(pulse_bias)) as u32,
                             ],
                         ));
 
@@ -1851,14 +1870,14 @@ impl App {
                                     entity.scale * scales[3],
                                 ],
                                 [
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(bias)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(2)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(bias)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(2)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(bias)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(2)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(bias)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(2)) as u32,
                                 ],
                             ));
                         }
@@ -1888,19 +1907,19 @@ impl App {
                                     entity.scale * 0.16,
                                 ],
                                 [
-                                    (entity.material.saturating_add(1)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(3)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(1)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(3)) as u32,
-                                    entity.material as u32,
+                                    (mat.saturating_add(1)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(3)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(1)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(3)) as u32,
+                                    mat as u32,
                                 ],
                             ));
                         }
                     }
-                    multiplayer::EntityKind::MobCreeper4d => {
+                    ENTITY_MOB_CREEPER4D => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         let speed = remote_entity_speed_xzw(entity);
                         let stride = (speed / 3.2).clamp(0.0, 1.45);
@@ -1924,14 +1943,14 @@ impl App {
                                 entity.scale * 0.98,
                             ],
                             [
-                                (entity.material.saturating_add(3)) as u32,
-                                (entity.material.saturating_add(1)) as u32,
-                                (entity.material.saturating_add(4)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(5)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(4)) as u32,
-                                entity.material as u32,
+                                (mat.saturating_add(3)) as u32,
+                                (mat.saturating_add(1)) as u32,
+                                (mat.saturating_add(4)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(5)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(4)) as u32,
+                                mat as u32,
                             ],
                         ));
 
@@ -1950,14 +1969,14 @@ impl App {
                                 entity.scale * 0.58,
                             ],
                             [
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(charge_bias)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(charge_bias)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(charge_bias)) as u32,
-                                (entity.material.saturating_add(2)) as u32,
-                                (entity.material.saturating_add(charge_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(charge_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(charge_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(charge_bias)) as u32,
+                                (mat.saturating_add(2)) as u32,
+                                (mat.saturating_add(charge_bias)) as u32,
                             ],
                         ));
 
@@ -1973,14 +1992,14 @@ impl App {
                                 entity.scale * 0.40,
                             ],
                             [
-                                (entity.material.saturating_add(6)) as u32,
-                                (entity.material.saturating_add(3)) as u32,
-                                (entity.material.saturating_add(6)) as u32,
-                                (entity.material.saturating_add(3)) as u32,
-                                (entity.material.saturating_add(6)) as u32,
-                                (entity.material.saturating_add(3)) as u32,
-                                (entity.material.saturating_add(6)) as u32,
-                                (entity.material.saturating_add(3)) as u32,
+                                (mat.saturating_add(6)) as u32,
+                                (mat.saturating_add(3)) as u32,
+                                (mat.saturating_add(6)) as u32,
+                                (mat.saturating_add(3)) as u32,
+                                (mat.saturating_add(6)) as u32,
+                                (mat.saturating_add(3)) as u32,
+                                (mat.saturating_add(6)) as u32,
+                                (mat.saturating_add(3)) as u32,
                             ],
                         ));
 
@@ -2009,19 +2028,19 @@ impl App {
                                     entity.scale * 0.24,
                                 ],
                                 [
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(1)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(2)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(1)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(2)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(1)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(2)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(1)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(2)) as u32,
                                 ],
                             ));
                         }
                     }
-                    multiplayer::EntityKind::MobPhaseSpider => {
+                    ENTITY_MOB_PHASE_SPIDER => {
                         let basis = orthonormal_basis_from_forward(entity.render_orientation);
                         let anim_t = entity.last_received_at.elapsed().as_secs_f32() * 6.0
                             + entity_id as f32 * 0.23;
@@ -2041,14 +2060,14 @@ impl App {
                                 entity.scale * 0.96,
                             ],
                             [
-                                (entity.material.saturating_add(2)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(4)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(3)) as u32,
-                                entity.material as u32,
-                                (entity.material.saturating_add(5)) as u32,
-                                entity.material as u32,
+                                (mat.saturating_add(2)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(4)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(3)) as u32,
+                                mat as u32,
+                                (mat.saturating_add(5)) as u32,
+                                mat as u32,
                             ],
                         ));
 
@@ -2064,14 +2083,14 @@ impl App {
                                 entity.scale * 0.32,
                             ],
                             [
-                                (entity.material.saturating_add(7)) as u32,
-                                (entity.material.saturating_add(9)) as u32,
-                                (entity.material.saturating_add(8)) as u32,
-                                (entity.material.saturating_add(9)) as u32,
-                                (entity.material.saturating_add(7)) as u32,
-                                (entity.material.saturating_add(9)) as u32,
-                                (entity.material.saturating_add(8)) as u32,
-                                (entity.material.saturating_add(9)) as u32,
+                                (mat.saturating_add(7)) as u32,
+                                (mat.saturating_add(9)) as u32,
+                                (mat.saturating_add(8)) as u32,
+                                (mat.saturating_add(9)) as u32,
+                                (mat.saturating_add(7)) as u32,
+                                (mat.saturating_add(9)) as u32,
+                                (mat.saturating_add(8)) as u32,
+                                (mat.saturating_add(9)) as u32,
                             ],
                         ));
 
@@ -2131,17 +2150,27 @@ impl App {
                                     entity.scale * axis_scale[3],
                                 ],
                                 [
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(material_bias)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(material_bias)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(material_bias)) as u32,
-                                    entity.material as u32,
-                                    (entity.material.saturating_add(material_bias)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(material_bias)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(material_bias)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(material_bias)) as u32,
+                                    mat as u32,
+                                    (mat.saturating_add(material_bias)) as u32,
                                 ],
                             ));
                         }
+                    }
+                    _ => {
+                        // Unknown entity type — render as a generic colored cube.
+                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
+                        instances.push(build_centered_model_instance(
+                            entity.render_position,
+                            &basis,
+                            [entity.scale; 4],
+                            [mat as u32; 8],
+                        ));
                     }
                 }
             }

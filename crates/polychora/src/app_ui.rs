@@ -120,7 +120,7 @@ impl App {
                 );
                 ui.add(
                     egui::Slider::new(
-                        &mut self.place_material,
+                        &mut self.selected_block_material,
                         BLOCK_EDIT_PLACE_MATERIAL_MIN..=BLOCK_EDIT_PLACE_MATERIAL_MAX,
                     )
                     .text("Place Material"),
@@ -332,7 +332,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
                     for i in 0..9 {
-                        let material_id = self.hotbar_slots[i];
+                        let material_id = block_material_from_slot(&self.hotbar_slots[i]);
                         let [r, g, b] = materials::material_color(material_id);
                         let is_selected = i == self.hotbar_selected_index;
 
@@ -776,6 +776,7 @@ impl App {
                     self.draw_egui_dev_console(ctx, &mut console_command, &mut close_console);
                 }
                 self.draw_egui_hotbar(ctx);
+                self.draw_egui_waila(ctx);
             }
         });
 
@@ -806,8 +807,9 @@ impl App {
             self.grab_mouse(&window);
         }
         if let Some(material_id) = inventory_pick {
-            self.hotbar_slots[self.hotbar_selected_index] = material_id;
-            self.place_material = material_id;
+            self.hotbar_slots[self.hotbar_selected_index] =
+                Some(polychora::shared::protocol::ItemStack::block(0, material_id as u32, 1));
+            self.selected_block_material = material_id;
             eprintln!(
                 "Inventory: set hotbar slot {} to material {} ({})",
                 self.hotbar_selected_index + 1,
@@ -921,5 +923,248 @@ impl App {
             texture_updates,
             meshes,
         })
+    }
+
+    fn draw_egui_waila(&self, ctx: &egui::Context) {
+        let target = match &self.waila_target {
+            Some(t) => t,
+            None => return,
+        };
+
+        let screen_rect = ctx.content_rect();
+        let panel_x = screen_rect.width() / 2.0;
+        let panel_y = 30.0;
+
+        egui::Area::new(egui::Id::new("waila_panel"))
+            .fixed_pos(egui::pos2(panel_x, panel_y))
+            .pivot(egui::Align2::CENTER_TOP)
+            .interactable(false)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgba_unmultiplied(15, 15, 22, 190))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        match target {
+                            WailaTarget::Block { coords, material_id } => {
+                                self.draw_waila_block(ui, *coords, *material_id);
+                            }
+                            WailaTarget::Entity {
+                                entity_id,
+                                entity_type_ns,
+                                entity_type,
+                                position,
+                                orientation,
+                                scale,
+                                data,
+                                distance,
+                            } => {
+                                self.draw_waila_entity(
+                                    ui,
+                                    *entity_id,
+                                    *entity_type_ns,
+                                    *entity_type,
+                                    *position,
+                                    *orientation,
+                                    *scale,
+                                    data,
+                                    *distance,
+                                );
+                            }
+                        }
+                    });
+            });
+    }
+
+    fn draw_waila_block(&self, ui: &mut egui::Ui, coords: [i32; 4], material_id: u8) {
+        let name = materials::material_name(material_id);
+        let category = materials::material_category_label(material_id);
+        let [r, g, b] = materials::material_color(material_id);
+
+        // Header row: icon + name + category + ID
+        ui.horizontal(|ui| {
+            let icon_size = 28.0;
+            let (icon_rect, _) =
+                ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
+
+            if let (Some(sheet), Some(tex_id)) =
+                (&self.material_icon_sheet, self.material_icons_texture_id)
+            {
+                if let Some([u0, v0, u1, v1]) = sheet.uv_rect(material_id) {
+                    ui.painter().image(
+                        tex_id,
+                        icon_rect,
+                        egui::Rect::from_min_max(
+                            egui::pos2(u0, v0),
+                            egui::pos2(u1, v1),
+                        ),
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    ui.painter()
+                        .rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                }
+            } else {
+                ui.painter()
+                    .rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
+            }
+
+            ui.label(
+                egui::RichText::new(name)
+                    .strong()
+                    .size(15.0)
+                    .color(egui::Color32::from_rgb(240, 240, 240)),
+            );
+            ui.label(
+                egui::RichText::new(format!("{} #{}", category, material_id))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(160, 160, 170)),
+            );
+        });
+
+        // Coordinates
+        ui.label(
+            egui::RichText::new(format!(
+                "[{}, {}, {}, {}]",
+                coords[0], coords[1], coords[2], coords[3]
+            ))
+            .monospace()
+            .size(11.0)
+            .color(egui::Color32::from_rgb(140, 145, 160)),
+        );
+    }
+
+    fn draw_waila_entity(
+        &self,
+        ui: &mut egui::Ui,
+        entity_id: u64,
+        entity_type_ns: u32,
+        entity_type: u32,
+        position: [f32; 4],
+        orientation: [f32; 4],
+        scale: f32,
+        data: &[u8],
+        distance: f32,
+    ) {
+        use polychora::shared::entity_types;
+
+        let entry = entity_types::lookup(entity_type_ns, entity_type);
+        let canonical_name = entry
+            .map(|e| e.canonical_name)
+            .unwrap_or("unknown");
+        let category = entry
+            .map(|e| format!("{:?}", e.category))
+            .unwrap_or_else(|| "Unknown".to_string());
+        let base_material = entity_types::base_material_for(entity_type_ns, entity_type);
+        let [r, g, b] = materials::material_color(base_material);
+
+        // Check if this is a player
+        let player_name = self
+            .remote_players
+            .get(&entity_id)
+            .map(|p| p.name.clone());
+
+        // Header row: icon + name + category + distance
+        ui.horizontal(|ui| {
+            let icon_size = 28.0;
+            let (icon_rect, _) =
+                ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
+
+            if let (Some(sheet), Some(tex_id)) =
+                (&self.material_icon_sheet, self.material_icons_texture_id)
+            {
+                if let Some([u0, v0, u1, v1]) = sheet.uv_rect(base_material) {
+                    ui.painter().image(
+                        tex_id,
+                        icon_rect,
+                        egui::Rect::from_min_max(
+                            egui::pos2(u0, v0),
+                            egui::pos2(u1, v1),
+                        ),
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    ui.painter()
+                        .rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                }
+            } else {
+                ui.painter()
+                    .rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
+            }
+
+            let display_name = if let Some(ref pname) = player_name {
+                format!("{} ({})", canonical_name, pname)
+            } else {
+                canonical_name.to_string()
+            };
+
+            ui.label(
+                egui::RichText::new(display_name)
+                    .strong()
+                    .size(15.0)
+                    .color(egui::Color32::from_rgb(240, 240, 240)),
+            );
+            ui.label(
+                egui::RichText::new(format!("{} {:.1}m", category, distance))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(160, 160, 170)),
+            );
+        });
+
+        let info_color = egui::Color32::from_rgb(140, 145, 160);
+        let info_size = 11.0;
+
+        // Entity ID + type
+        ui.label(
+            egui::RichText::new(format!("id: {}  type: {}:{}", entity_id, entity_type_ns, entity_type))
+                .monospace()
+                .size(info_size)
+                .color(info_color),
+        );
+
+        // Position
+        ui.label(
+            egui::RichText::new(format!(
+                "pos: [{:.1}, {:.1}, {:.1}, {:.1}]",
+                position[0], position[1], position[2], position[3]
+            ))
+            .monospace()
+            .size(info_size)
+            .color(info_color),
+        );
+
+        // Orientation + scale
+        ui.label(
+            egui::RichText::new(format!(
+                "ori: [{:.2}, {:.2}, {:.2}, {:.2}]  scale: {:.2}",
+                orientation[0], orientation[1], orientation[2], orientation[3], scale
+            ))
+            .monospace()
+            .size(info_size)
+            .color(info_color),
+        );
+
+        // Mob archetype
+        if let Some(entry) = entry {
+            if let Some(archetype) = entry.mob_archetype {
+                ui.label(
+                    egui::RichText::new(format!("archetype: {:?}", archetype))
+                        .monospace()
+                        .size(info_size)
+                        .color(info_color),
+                );
+            }
+        }
+
+        // CBOR data decode
+        if let Some(decoded) = format_cbor_for_display(data) {
+            ui.label(
+                egui::RichText::new(format!("data: {}", decoded))
+                    .monospace()
+                    .size(info_size)
+                    .color(egui::Color32::from_rgb(160, 170, 140)),
+            );
+        }
     }
 }

@@ -747,3 +747,175 @@ pub(super) fn build_remote_player_avatar_instances(
 
     instances
 }
+
+// ---------------------------------------------------------------------------
+// Entity hit-testing for WAILA
+// ---------------------------------------------------------------------------
+
+pub(super) struct EntityHitResult {
+    pub entity_id: u64,
+    pub distance: f32,
+}
+
+const ENTITY_HIT_BASE_RADIUS: f32 = 0.6;
+
+pub(super) fn find_targeted_entity(
+    camera_pos: [f32; 4],
+    look_dir: [f32; 4],
+    max_distance: f32,
+    entities: &HashMap<u64, RemoteEntityState>,
+    players: &HashMap<u64, RemotePlayerState>,
+) -> Option<EntityHitResult> {
+    let mut best: Option<EntityHitResult> = None;
+
+    for (&eid, ent) in entities {
+        let diff = [
+            ent.render_position[0] - camera_pos[0],
+            ent.render_position[1] - camera_pos[1],
+            ent.render_position[2] - camera_pos[2],
+            ent.render_position[3] - camera_pos[3],
+        ];
+        let t = dot4(diff, look_dir);
+        if t <= 0.0 || t > max_distance {
+            continue;
+        }
+        let perp_sq = dot4(diff, diff) - t * t;
+        let radius = ent.scale * ENTITY_HIT_BASE_RADIUS;
+        if perp_sq > radius * radius {
+            continue;
+        }
+        if best.as_ref().map_or(true, |b| t < b.distance) {
+            best = Some(EntityHitResult {
+                entity_id: eid,
+                distance: t,
+            });
+        }
+    }
+
+    for (&eid, player) in players {
+        let diff = [
+            player.render_position[0] - camera_pos[0],
+            player.render_position[1] - camera_pos[1],
+            player.render_position[2] - camera_pos[2],
+            player.render_position[3] - camera_pos[3],
+        ];
+        let t = dot4(diff, look_dir);
+        if t <= 0.0 || t > max_distance {
+            continue;
+        }
+        let perp_sq = dot4(diff, diff) - t * t;
+        let radius = ENTITY_HIT_BASE_RADIUS; // players use scale 1.0
+        if perp_sq > radius * radius {
+            continue;
+        }
+        if best.as_ref().map_or(true, |b| t < b.distance) {
+            best = Some(EntityHitResult {
+                entity_id: eid,
+                distance: t,
+            });
+        }
+    }
+
+    best
+}
+
+// ---------------------------------------------------------------------------
+// CBOR display decoder for WAILA
+// ---------------------------------------------------------------------------
+
+pub(super) fn format_cbor_for_display(data: &[u8]) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    match ciborium::from_reader::<ciborium::Value, _>(data) {
+        Ok(value) => {
+            let mut out = String::new();
+            format_cbor_value(&value, &mut out, 0, 2);
+            if out.is_empty() {
+                None
+            } else {
+                Some(out)
+            }
+        }
+        Err(_) => {
+            // Fall back to hex dump
+            let hex: String = data
+                .iter()
+                .take(32)
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if data.len() > 32 {
+                Some(format!("{} ... ({} bytes)", hex, data.len()))
+            } else {
+                Some(hex)
+            }
+        }
+    }
+}
+
+fn format_cbor_value(value: &ciborium::Value, out: &mut String, depth: usize, max_depth: usize) {
+    use std::fmt::Write;
+    if depth > max_depth {
+        out.push_str("...");
+        return;
+    }
+    match value {
+        ciborium::Value::Integer(i) => {
+            let _ = write!(out, "{}", i128::from(*i));
+        }
+        ciborium::Value::Float(f) => {
+            let _ = write!(out, "{:.3}", f);
+        }
+        ciborium::Value::Text(s) => {
+            let truncated: String = s.chars().take(64).collect();
+            let _ = write!(out, "\"{}\"", truncated);
+            if s.len() > 64 {
+                out.push_str("...");
+            }
+        }
+        ciborium::Value::Bool(b) => {
+            let _ = write!(out, "{}", b);
+        }
+        ciborium::Value::Null => out.push_str("null"),
+        ciborium::Value::Bytes(b) => {
+            let _ = write!(out, "<{} bytes>", b.len());
+        }
+        ciborium::Value::Array(arr) => {
+            out.push('[');
+            let limit = 8;
+            for (i, item) in arr.iter().take(limit).enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                format_cbor_value(item, out, depth + 1, max_depth);
+            }
+            if arr.len() > limit {
+                let _ = write!(out, ", ... +{}", arr.len() - limit);
+            }
+            out.push(']');
+        }
+        ciborium::Value::Map(map) => {
+            out.push('{');
+            let limit = 6;
+            for (i, (k, v)) in map.iter().take(limit).enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                format_cbor_value(k, out, depth + 1, max_depth);
+                out.push_str(": ");
+                format_cbor_value(v, out, depth + 1, max_depth);
+            }
+            if map.len() > limit {
+                let _ = write!(out, ", ... +{}", map.len() - limit);
+            }
+            out.push('}');
+        }
+        ciborium::Value::Tag(tag, inner) => {
+            let _ = write!(out, "tag({})", tag);
+            out.push(' ');
+            format_cbor_value(inner, out, depth + 1, max_depth);
+        }
+        _ => out.push_str("?"),
+    }
+}
