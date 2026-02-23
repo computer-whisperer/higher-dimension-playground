@@ -592,9 +592,7 @@ mod tests {
     use polychora::content_registry::ContentRegistry;
 
     fn test_registry() -> ContentRegistry {
-        let mut reg = ContentRegistry::new();
-        polychora::builtin_content::register_builtin_content(&mut reg);
-        reg
+        polychora::plugin_loader::create_full_registry()
     }
 
     fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) -> Option<u8> {

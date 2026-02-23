@@ -679,9 +679,7 @@ mod tests {
     use crate::shared::voxel::BaseWorldKind;
 
     fn test_registry() -> Arc<ContentRegistry> {
-        let mut registry = ContentRegistry::new();
-        crate::builtin_content::register_builtin_content(&mut registry);
-        Arc::new(registry)
+        Arc::new(crate::plugin_loader::create_full_registry())
     }
 
     fn dense_materials_from_core_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Vec<u16> {

@@ -624,11 +624,7 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let mut entity_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut entity_payload_bytes = 0usize;
     let mut entity_tag_count = 0usize;
-    let content_registry = {
-        let mut reg = polychora::content_registry::ContentRegistry::new();
-        polychora::builtin_content::register_builtin_content(&mut reg);
-        reg
-    };
+    let content_registry = polychora::plugin_loader::create_full_registry();
     for entity in &entities {
         let category = content_registry.entity_category(entity.entity.namespace, entity.entity.entity_type);
         match category {
@@ -637,7 +633,7 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
             EntityCategory::Mob => entity_class_counts[2] += 1,
         }
         let type_name = content_registry.entity_lookup(entity.entity.namespace, entity.entity.entity_type)
-            .map(|e| e.canonical_name)
+            .map(|e| e.canonical_name.as_str())
             .unwrap_or("unknown");
         *entity_kind_counts
             .entry(type_name.to_string())

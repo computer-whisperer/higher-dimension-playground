@@ -849,9 +849,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn test_registry() -> Arc<ContentRegistry> {
-        let mut registry = ContentRegistry::new();
-        crate::builtin_content::register_builtin_content(&mut registry);
-        Arc::new(registry)
+        Arc::new(crate::plugin_loader::create_full_registry())
     }
 
     fn payload_at_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Option<ResolvedChunkPayload> {

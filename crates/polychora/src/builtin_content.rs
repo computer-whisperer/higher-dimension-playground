@@ -1,228 +1,142 @@
 use crate::content_registry::{ContentRegistry, EntityEntry};
-use polychora_plugin_api::block::BlockCategory;
-use polychora_plugin_api::entity::{
-    EntityCategory, MobArchetype, MobArchetypeDefaults, MobLocomotionMode,
-};
+use polychora_plugin_api::entity::EntityCategory;
+use polychora_plugin_api::texture::builtin_textures;
 
-/// Register all built-in blocks, entities, and legacy remap tables.
+/// The namespace ID used by the polychora-content WASM plugin.
+/// Must match `polychora-content/src/lib.rs::NAMESPACE`.
+pub const CONTENT_PLUGIN_NAMESPACE: u32 = 0x706f6c79; // "poly" in ASCII
+
+/// Register engine-internal content (Air block, Player entity, texture
+/// mappings) and legacy remap tables.
 ///
-/// Phase 1: keeps namespace 0 and legacy block_type IDs (1-68) identical to
-/// the old `MATERIALS` array.  Material tokens are forced to match the old
-/// procedural shader IDs so the GPU pipeline is unchanged.
-///
-/// Phase 2 will migrate first-party content to a random-ID namespace.
+/// The 68 gameplay blocks and 6 non-player entities are now declared by the
+/// `polychora-content` WASM plugin.  This function only registers:
+/// - Namespace 0 procedural texture mappings (tex_id → shader case)
+/// - Player entity (namespace 0 internal)
+/// - Legacy remap tables for save compatibility
 pub fn register_builtin_content(registry: &mut ContentRegistry) {
-    register_builtin_blocks(registry);
-    register_builtin_entities(registry);
+    register_builtin_texture_mappings(registry);
+    register_player_entity(registry);
+    register_legacy_remaps(registry);
 }
 
-fn register_builtin_blocks(registry: &mut ContentRegistry) {
-    // Macro to reduce repetition.  Each call registers a block at
-    // namespace 0 with the legacy block_type == forced material token.
-    macro_rules! block {
-        ($bt:expr, $name:expr, $cat:expr, [$r:expr, $g:expr, $b:expr]) => {
-            registry.register_block_with_token(0, $bt, $name, $cat, [$r, $g, $b], $bt as u16);
-        };
+/// Namespace 0 procedural texture mappings: (0, texture_id) → shader case.
+fn register_builtin_texture_mappings(registry: &mut ContentRegistry) {
+    for &(tex_id, material_token) in &builtin_textures::ALL_TEXTURE_MAPPINGS {
+        registry.register_texture_token(0, tex_id, material_token);
     }
-
-    use BlockCategory::*;
-
-    // Basic colored blocks (1-8)
-    block!(1,  "Red",           Basic,   [255, 0, 0]);
-    block!(2,  "Orange",        Basic,   [255, 200, 0]);
-    block!(3,  "Yellow-Green",  Basic,   [128, 255, 0]);
-    block!(4,  "Green",         Basic,   [0, 255, 51]);
-    block!(5,  "Cyan",          Basic,   [0, 255, 255]);
-    block!(6,  "Blue",          Basic,   [0, 51, 255]);
-    block!(7,  "Purple",        Basic,   [128, 0, 255]);
-    block!(8,  "Magenta",       Basic,   [255, 0, 204]);
-
-    // Special materials (9-14)
-    block!(9,  "Rainbow",       Special, [180, 180, 180]);
-    block!(10, "Brown",         Basic,   [139, 69, 20]);
-    block!(11, "Grid Floor",    Special, [115, 120, 125]);
-    block!(12, "White",         Basic,   [255, 255, 255]);
-    block!(13, "Light",         Light,   [255, 255, 220]);
-    block!(14, "Mirror",        Special, [220, 220, 230]);
-
-    // Animated/special materials (15-26)
-    block!(15, "Lava-Veined Basalt",      Special,  [140, 55, 20]);
-    block!(16, "Crystal Lattice",         Special,  [130, 180, 220]);
-    block!(17, "Marble",                  Building, [210, 214, 224]);
-    block!(18, "Oxidized Metal",          Special,  [130, 100, 80]);
-    block!(19, "Bio-Spore Moss",          Special,  [30, 80, 35]);
-    block!(20, "Void Mirror",             Special,  [20, 30, 55]);
-    block!(21, "Avatar Marker",           Special,  [50, 58, 85]);
-    block!(22, "Holographic Laminate",    Special,  [40, 100, 170]);
-    block!(23, "Tidal Glass",             Glass,    [25, 75, 140]);
-    block!(24, "Circuit Weave",           Special,  [50, 130, 80]);
-    block!(25, "Aurora Stone",            Special,  [65, 40, 100]);
-    block!(26, "Hazard Chevrons",         Special,  [180, 120, 20]);
-
-    // Natural materials (27-30)
-    block!(27, "Stone",         Natural, [125, 128, 133]);
-    block!(28, "Cobblestone",   Natural, [115, 117, 120]);
-    block!(29, "Dirt",          Natural, [110, 77, 46]);
-    block!(30, "Coarse Dirt",   Natural, [105, 74, 43]);
-
-    // Wood materials (31-34)
-    block!(31, "Oak Planks",     Wood, [153, 117, 61]);
-    block!(32, "Spruce Planks",  Wood, [97, 68, 36]);
-    block!(33, "Log Bark",       Wood, [77, 53, 28]);
-    block!(34, "Log End Rings",  Wood, [145, 112, 62]);
-
-    // New natural materials (35-40)
-    block!(35, "Sand",          Natural, [237, 201, 175]);
-    block!(36, "Gravel",        Natural, [131, 126, 126]);
-    block!(37, "Clay",          Natural, [160, 166, 179]);
-    block!(38, "Grass Block",   Natural, [115, 162, 75]);
-    block!(39, "Snow",          Natural, [248, 248, 255]);
-    block!(40, "Ice",           Glass,   [145, 180, 240]);
-
-    // Ore materials (41-45)
-    block!(41, "Coal Ore",      Ore, [85, 85, 85]);
-    block!(42, "Iron Ore",      Ore, [200, 155, 140]);
-    block!(43, "Gold Ore",      Ore, [255, 215, 0]);
-    block!(44, "Diamond Ore",   Ore, [90, 220, 220]);
-    block!(45, "Redstone Ore",  Ore, [200, 50, 50]);
-
-    // Additional wood and building materials (46-48)
-    block!(46, "Birch Planks",  Wood,     [216, 205, 163]);
-    block!(47, "Bricks",        Building, [150, 97, 83]);
-    block!(48, "Sandstone",     Building, [228, 208, 168]);
-
-    // Glass and light materials (49-51)
-    block!(49, "Glass",         Glass,   [200, 220, 230]);
-    block!(50, "Glowstone",     Light,   [255, 200, 100]);
-    block!(51, "Obsidian",      Natural, [20, 18, 29]);
-
-    // Special decorative materials (52-54)
-    block!(52, "Prismarine",    Building, [99, 171, 158]);
-    block!(53, "Terracotta",    Building, [152, 94, 67]);
-    block!(54, "Wool (White)",  Building, [233, 236, 236]);
-
-    // Advanced structural materials (55-62)
-    block!(55, "Basalt Tiles",  Building, [68, 70, 76]);
-    block!(56, "Copper Weave",  Special,  [168, 105, 72]);
-    block!(57, "Nebula Strata", Special,  [69, 78, 126]);
-    block!(58, "Starforged Core", Light,  [255, 236, 168]);
-    block!(59, "Cryo Circuit",  Special,  [118, 188, 206]);
-    block!(60, "Smoked Glass",  Glass,    [78, 98, 115]);
-    block!(61, "Ivory Marble",  Building, [226, 228, 232]);
-    block!(62, "Runic Alloy",   Special,  [140, 146, 158]);
-
-    // Volumetric animated materials (63-68)
-    block!(63, "Hyperphase Gel",    Glass,   [102, 208, 255]);
-    block!(64, "Singularity Core",  Light,   [255, 168, 110]);
-    block!(65, "Chrono Bloom",      Special, [146, 255, 164]);
-    block!(66, "Tesseract Weave",   Special, [170, 132, 255]);
-    block!(67, "Eventide Alloy",    Special, [112, 130, 168]);
-    block!(68, "Beacon Matrix",     Light,   [255, 248, 196]);
 }
 
-fn register_builtin_entities(registry: &mut ContentRegistry) {
+/// Player entity stays as namespace 0 engine internal (not part of any plugin).
+fn register_player_entity(registry: &mut ContentRegistry) {
     registry.register_entity(EntityEntry {
         namespace: 0,
         entity_type: 0,
         category: EntityCategory::Player,
-        canonical_name: "player",
-        aliases: &["player", "avatar"],
+        canonical_name: "player".into(),
+        aliases: vec!["player".into(), "avatar".into()],
         default_scale: 1.0,
         base_material_token: 0,
         mob_archetype: None,
         mob_defaults: None,
     });
+}
 
-    registry.register_entity(EntityEntry {
-        namespace: 0,
-        entity_type: 1,
-        category: EntityCategory::Accent,
-        canonical_name: "cube",
-        aliases: &["cube", "testcube"],
-        default_scale: 0.50,
-        base_material_token: 7,
-        mob_archetype: None,
-        mob_defaults: None,
-    });
+/// Legacy remap tables: old (0, N) IDs → new (CONTENT_NS, random_id).
+///
+/// Old saves store block/entity types as (namespace=0, block_type=1..68).
+/// After Phase 2, these blocks live in the polychora-content namespace with
+/// random type IDs.  The remap tables translate old IDs on load.
+fn register_legacy_remaps(registry: &mut ContentRegistry) {
+    let ns = CONTENT_PLUGIN_NAMESPACE;
 
-    registry.register_entity(EntityEntry {
-        namespace: 0,
-        entity_type: 2,
-        category: EntityCategory::Accent,
-        canonical_name: "rotor",
-        aliases: &["rotor", "testrotor"],
-        default_scale: 0.54,
-        base_material_token: 12,
-        mob_archetype: None,
-        mob_defaults: None,
-    });
+    // Block remaps: (0, 1) → (ns, BLOCK_RED), (0, 2) → (ns, BLOCK_ORANGE), ...
+    const LEGACY_BLOCK_REMAP: [(u32, u32); 68] = [
+        (1,  0x9d5288f1), // Red
+        (2,  0x5b0dbb41), // Orange
+        (3,  0xe453dd32), // Yellow-Green
+        (4,  0xb0ee89ae), // Green
+        (5,  0xae574f7a), // Cyan
+        (6,  0xf2acf72f), // Blue
+        (7,  0xec98d2c1), // Purple
+        (8,  0x6c941cf0), // Magenta
+        (9,  0xa3cd59bf), // Rainbow
+        (10, 0x4139d32c), // Brown
+        (11, 0xc45ed1f0), // Grid Floor
+        (12, 0x21ce5dd2), // White
+        (13, 0x1bbb2599), // Light
+        (14, 0xb9488d99), // Mirror
+        (15, 0x4a578a8e), // Lava-Veined Basalt
+        (16, 0xd5e7ce8a), // Crystal Lattice
+        (17, 0x5a15544d), // Marble
+        (18, 0x246d3f31), // Oxidized Metal
+        (19, 0xeaf61a26), // Bio-Spore Moss
+        (20, 0x4b982ef8), // Void Mirror
+        (21, 0xedd1dfb2), // Avatar Marker
+        (22, 0x29db3ad0), // Holographic Laminate
+        (23, 0x714ff3d7), // Tidal Glass
+        (24, 0x57294739), // Circuit Weave
+        (25, 0x8412b293), // Aurora Stone
+        (26, 0xb2bc372f), // Hazard Chevrons
+        (27, 0xe58842de), // Stone
+        (28, 0x6d65a441), // Cobblestone
+        (29, 0x39a3b2e9), // Dirt
+        (30, 0x6ec42e08), // Coarse Dirt
+        (31, 0x6af30553), // Oak Planks
+        (32, 0x45a240ae), // Spruce Planks
+        (33, 0xbb9099a4), // Log Bark
+        (34, 0x5458a885), // Log End Rings
+        (35, 0xc3aa7efe), // Sand
+        (36, 0xffc89849), // Gravel
+        (37, 0xbefcfad8), // Clay
+        (38, 0xb5e5a5ab), // Grass Block
+        (39, 0x22476f57), // Snow
+        (40, 0xabf00273), // Ice
+        (41, 0xb28defe3), // Coal Ore
+        (42, 0x3bcfbe01), // Iron Ore
+        (43, 0x98bd6407), // Gold Ore
+        (44, 0xcaa80dd4), // Diamond Ore
+        (45, 0x4eabedcb), // Redstone Ore
+        (46, 0x39d4beef), // Birch Planks
+        (47, 0x8656af72), // Bricks
+        (48, 0x7123fdf7), // Sandstone
+        (49, 0x551b4cf3), // Glass
+        (50, 0xfce66fa2), // Glowstone
+        (51, 0xb3d70628), // Obsidian
+        (52, 0xc02b61c4), // Prismarine
+        (53, 0x9e944239), // Terracotta
+        (54, 0x4838b326), // Wool (White)
+        (55, 0xbf42e12f), // Basalt Tiles
+        (56, 0x6304317f), // Copper Weave
+        (57, 0xe7c524a5), // Nebula Strata
+        (58, 0xd4b032cc), // Starforged Core
+        (59, 0xd6a7ee39), // Cryo Circuit
+        (60, 0x1e51f30d), // Smoked Glass
+        (61, 0x4aa2e4f9), // Ivory Marble
+        (62, 0xe261a7ab), // Runic Alloy
+        (63, 0x1837b8a3), // Hyperphase Gel
+        (64, 0xde177b4e), // Singularity Core
+        (65, 0x60c187fc), // Chrono Bloom
+        (66, 0x76b2bc5b), // Tesseract Weave
+        (67, 0x548aaa9e), // Eventide Alloy
+        (68, 0x20f1bc81), // Beacon Matrix
+    ];
 
-    registry.register_entity(EntityEntry {
-        namespace: 0,
-        entity_type: 3,
-        category: EntityCategory::Accent,
-        canonical_name: "drifter",
-        aliases: &["drifter", "testdrifter"],
-        default_scale: 0.48,
-        base_material_token: 17,
-        mob_archetype: None,
-        mob_defaults: None,
-    });
+    for &(legacy_bt, new_bt) in &LEGACY_BLOCK_REMAP {
+        registry.register_legacy_block_remap((0, legacy_bt), (ns, new_bt));
+    }
 
-    registry.register_entity(EntityEntry {
-        namespace: 0,
-        entity_type: 10,
-        category: EntityCategory::Mob,
-        canonical_name: "seeker",
-        aliases: &["seeker", "mobseeker"],
-        default_scale: 0.62,
-        base_material_token: 3,
-        mob_archetype: Some(MobArchetype::Seeker),
-        mob_defaults: Some(MobArchetypeDefaults {
-            move_speed: 3.0,
-            preferred_distance: 2.6,
-            tangent_weight: 0.72,
-            locomotion: MobLocomotionMode::Walking,
-        }),
-    });
+    // Entity remaps: (0, 1) → (ns, ENTITY_CUBE), etc.
+    const LEGACY_ENTITY_REMAP: [(u32, u32); 6] = [
+        (1,  0x776b1b69), // cube
+        (2,  0x71790134), // rotor
+        (3,  0x433824fe), // drifter
+        (10, 0xa974d75b), // seeker
+        (11, 0x3dc5fd3d), // creeper
+        (12, 0x4af27f80), // phase_spider
+    ];
 
-    registry.register_entity(EntityEntry {
-        namespace: 0,
-        entity_type: 11,
-        category: EntityCategory::Mob,
-        canonical_name: "creeper",
-        aliases: &["creeper", "4dcreeper", "mobcreeper4d"],
-        default_scale: 0.78,
-        base_material_token: 6,
-        mob_archetype: Some(MobArchetype::Creeper4d),
-        mob_defaults: Some(MobArchetypeDefaults {
-            move_speed: 2.55,
-            preferred_distance: 3.8,
-            tangent_weight: 0.92,
-            locomotion: MobLocomotionMode::Walking,
-        }),
-    });
-
-    registry.register_entity(EntityEntry {
-        namespace: 0,
-        entity_type: 12,
-        category: EntityCategory::Mob,
-        canonical_name: "phase_spider",
-        aliases: &[
-            "phase_spider",
-            "phasespider",
-            "phase-spider",
-            "spider",
-            "mobphasespider",
-        ],
-        default_scale: 0.86,
-        base_material_token: 9,
-        mob_archetype: Some(MobArchetype::PhaseSpider),
-        mob_defaults: Some(MobArchetypeDefaults {
-            move_speed: 3.1,
-            preferred_distance: 2.4,
-            tangent_weight: 0.95,
-            locomotion: MobLocomotionMode::Flying,
-        }),
-    });
+    for &(legacy_et, new_et) in &LEGACY_ENTITY_REMAP {
+        registry.register_legacy_entity_remap((0, legacy_et), (ns, new_et));
+    }
 }

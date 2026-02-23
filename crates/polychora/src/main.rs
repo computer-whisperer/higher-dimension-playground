@@ -911,11 +911,7 @@ fn main() {
         );
     }
 
-    let content_registry = {
-        let mut reg = polychora::content_registry::ContentRegistry::new();
-        polychora::builtin_content::register_builtin_content(&mut reg);
-        Arc::new(reg)
-    };
+    let content_registry = Arc::new(polychora::plugin_loader::create_full_registry());
 
     let multiplayer = if let Some(server) = args.server.as_ref() {
         let server_addr = normalize_server_addr(server);

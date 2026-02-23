@@ -6,6 +6,7 @@ members = [
     "crates/polychora",
     "crates/polychora-plugin-api",
 ]
+exclude = ["crates/polychora-content"]
 default-members = ["crates/polychora"]
 
 [package]

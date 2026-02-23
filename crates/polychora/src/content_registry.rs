@@ -2,6 +2,7 @@ use polychora_plugin_api::block::BlockCategory;
 use polychora_plugin_api::entity::{
     EntityCategory, MobArchetype, MobArchetypeDefaults, MobLocomotionMode,
 };
+use polychora_plugin_api::texture::TextureRef;
 use std::collections::HashMap;
 
 /// Bit 15 of a material token: when set, bits [14:0] index into the GPU texture
@@ -16,7 +17,7 @@ pub const MATERIAL_TOKEN_TEXTURE_POOL_FLAG: u16 = 1 << 15;
 pub struct BlockEntry {
     pub namespace: u32,
     pub block_type: u32,
-    pub name: &'static str,
+    pub name: String,
     pub category: BlockCategory,
     pub color: [u8; 3],
     /// GPU material token (u16) assigned at registration time.
@@ -32,8 +33,8 @@ pub struct EntityEntry {
     pub namespace: u32,
     pub entity_type: u32,
     pub category: EntityCategory,
-    pub canonical_name: &'static str,
-    pub aliases: &'static [&'static str],
+    pub canonical_name: String,
+    pub aliases: Vec<String>,
     pub default_scale: f32,
     pub base_material_token: u16,
     pub mob_archetype: Option<MobArchetype>,
@@ -81,6 +82,9 @@ pub struct ContentRegistry {
     // Name lookup: normalized canonical name / alias → (namespace, entity_type)
     entity_name_index: HashMap<String, (u32, u32)>,
 
+    // Texture registry: (namespace, texture_id) → material_token
+    texture_tokens: HashMap<(u32, u32), u16>,
+
     // Legacy remap: old (namespace, block_type) → new (namespace, block_type)
     legacy_block_remap: HashMap<(u32, u32), (u32, u32)>,
     // Legacy remap: old (namespace, entity_type) → new (namespace, entity_type)
@@ -96,6 +100,7 @@ impl ContentRegistry {
             next_procedural_token: 1, // 0 = air
             entities: HashMap::new(),
             entity_name_index: HashMap::new(),
+            texture_tokens: HashMap::new(),
             legacy_block_remap: HashMap::new(),
             legacy_entity_remap: HashMap::new(),
         };
@@ -105,7 +110,7 @@ impl ContentRegistry {
             BlockEntry {
                 namespace: 0,
                 block_type: 0,
-                name: "Air",
+                name: "Air".into(),
                 category: BlockCategory::Special,
                 color: [0, 0, 0],
                 material_token: 0,
@@ -124,7 +129,7 @@ impl ContentRegistry {
         &mut self,
         namespace: u32,
         block_type: u32,
-        name: &'static str,
+        name: impl Into<String>,
         category: BlockCategory,
         color: [u8; 3],
     ) -> u16 {
@@ -134,7 +139,7 @@ impl ContentRegistry {
         let entry = BlockEntry {
             namespace,
             block_type,
-            name,
+            name: name.into(),
             category,
             color,
             material_token: token,
@@ -154,11 +159,12 @@ impl ContentRegistry {
         &mut self,
         namespace: u32,
         block_type: u32,
-        name: &'static str,
+        name: impl Into<String>,
         category: BlockCategory,
         color: [u8; 3],
         forced_token: u16,
     ) {
+        let name = name.into();
         if let Some(&existing) = self.token_to_block.get(&forced_token) {
             if existing != (namespace, block_type) {
                 panic!(
@@ -191,12 +197,37 @@ impl ContentRegistry {
     pub fn register_entity(&mut self, entry: EntityEntry) {
         let key = (entry.namespace, entry.entity_type);
         // Index canonical name and aliases
-        let normalized_canonical = normalize_token(entry.canonical_name);
+        let normalized_canonical = normalize_token(&entry.canonical_name);
         self.entity_name_index.insert(normalized_canonical, key);
-        for alias in entry.aliases {
+        for alias in &entry.aliases {
             self.entity_name_index.insert(normalize_token(alias), key);
         }
         self.entities.insert(key, entry);
+    }
+
+    // -----------------------------------------------------------------------
+    // Texture token registration
+    // -----------------------------------------------------------------------
+
+    /// Register a mapping from (namespace, texture_id) to a GPU material token.
+    ///
+    /// # Panics
+    /// Panics if the same (namespace, texture_id) is already mapped to a different token.
+    pub fn register_texture_token(&mut self, namespace: u32, texture_id: u32, material_token: u16) {
+        if let Some(&existing) = self.texture_tokens.get(&(namespace, texture_id)) {
+            if existing != material_token {
+                panic!(
+                    "texture ({}, {}) already mapped to token {}, cannot remap to {}",
+                    namespace, texture_id, existing, material_token,
+                );
+            }
+        }
+        self.texture_tokens.insert((namespace, texture_id), material_token);
+    }
+
+    /// Resolve a `TextureRef` to its GPU material token.
+    pub fn resolve_texture_token(&self, tex: &TextureRef) -> Option<u16> {
+        self.texture_tokens.get(&(tex.namespace, tex.texture_id)).copied()
     }
 
     // -----------------------------------------------------------------------
@@ -215,48 +246,53 @@ impl ContentRegistry {
     // Block lookups
     // -----------------------------------------------------------------------
 
+    /// Look up a block entry, transparently resolving through legacy remaps
+    /// if the direct key is not found.
+    fn resolve_block_entry(&self, namespace: u32, block_type: u32) -> Option<&BlockEntry> {
+        self.blocks.get(&(namespace, block_type)).or_else(|| {
+            self.legacy_block_remap
+                .get(&(namespace, block_type))
+                .and_then(|remapped| self.blocks.get(remapped))
+        })
+    }
+
     /// Get the full block entry by (namespace, block_type).
     pub fn block_entry(&self, namespace: u32, block_type: u32) -> Option<&BlockEntry> {
-        self.blocks.get(&(namespace, block_type))
+        self.resolve_block_entry(namespace, block_type)
     }
 
     /// Resolve (namespace, block_type) → GPU material token.
     /// Replacement for `materials::block_to_material_token`.
     pub fn block_material_token(&self, namespace: u32, block_type: u32) -> u16 {
-        self.blocks
-            .get(&(namespace, block_type))
+        self.resolve_block_entry(namespace, block_type)
             .map(|e| e.material_token)
             .unwrap_or(1) // fallback to Red
     }
 
     /// Get block name by (namespace, block_type).
-    pub fn block_name(&self, namespace: u32, block_type: u32) -> &'static str {
-        self.blocks
-            .get(&(namespace, block_type))
-            .map(|e| e.name)
+    pub fn block_name(&self, namespace: u32, block_type: u32) -> &str {
+        self.resolve_block_entry(namespace, block_type)
+            .map(|e| e.name.as_str())
             .unwrap_or("Unknown")
     }
 
     /// Get block color by (namespace, block_type).
     pub fn block_color(&self, namespace: u32, block_type: u32) -> [u8; 3] {
-        self.blocks
-            .get(&(namespace, block_type))
+        self.resolve_block_entry(namespace, block_type)
             .map(|e| e.color)
             .unwrap_or([128, 128, 128])
     }
 
     /// Get block category label by (namespace, block_type).
     pub fn block_category_label(&self, namespace: u32, block_type: u32) -> &'static str {
-        self.blocks
-            .get(&(namespace, block_type))
+        self.resolve_block_entry(namespace, block_type)
             .map(|e| e.category.label())
             .unwrap_or("Unknown")
     }
 
     /// Get block category by (namespace, block_type).
     pub fn block_category(&self, namespace: u32, block_type: u32) -> Option<BlockCategory> {
-        self.blocks
-            .get(&(namespace, block_type))
+        self.resolve_block_entry(namespace, block_type)
             .map(|e| e.category)
     }
 
@@ -265,11 +301,11 @@ impl ContentRegistry {
     // -----------------------------------------------------------------------
 
     /// Get material name by token. Replacement for `materials::material_name`.
-    pub fn material_name_by_token(&self, token: u16) -> &'static str {
+    pub fn material_name_by_token(&self, token: u16) -> &str {
         self.token_to_block
             .get(&token)
             .and_then(|key| self.blocks.get(key))
-            .map(|e| e.name)
+            .map(|e| e.name.as_str())
             .unwrap_or("Unknown")
     }
 
@@ -327,9 +363,19 @@ impl ContentRegistry {
     // Entity lookups
     // -----------------------------------------------------------------------
 
+    /// Look up an entity entry, transparently resolving through legacy remaps
+    /// if the direct key is not found.
+    fn resolve_entity_entry(&self, namespace: u32, entity_type: u32) -> Option<&EntityEntry> {
+        self.entities.get(&(namespace, entity_type)).or_else(|| {
+            self.legacy_entity_remap
+                .get(&(namespace, entity_type))
+                .and_then(|remapped| self.entities.get(remapped))
+        })
+    }
+
     /// Lookup entity by (namespace, entity_type).
     pub fn entity_lookup(&self, namespace: u32, entity_type: u32) -> Option<&EntityEntry> {
-        self.entities.get(&(namespace, entity_type))
+        self.resolve_entity_entry(namespace, entity_type)
     }
 
     /// Lookup entity by name (canonical or alias, case-insensitive).
@@ -342,26 +388,24 @@ impl ContentRegistry {
 
     /// Get entity category.
     pub fn entity_category(&self, namespace: u32, entity_type: u32) -> EntityCategory {
-        self.entities
-            .get(&(namespace, entity_type))
+        self.resolve_entity_entry(namespace, entity_type)
             .map(|e| e.category)
             .unwrap_or(EntityCategory::Accent)
     }
 
     /// Get the base material token for an entity.
     pub fn entity_base_material_token(&self, namespace: u32, entity_type: u32) -> u16 {
-        self.entities
-            .get(&(namespace, entity_type))
+        self.resolve_entity_entry(namespace, entity_type)
             .map(|e| e.base_material_token)
             .unwrap_or(7) // fallback to Purple
     }
 
     /// Get all spawnable entity canonical names.
-    pub fn spawnable_entity_names(&self) -> Vec<&'static str> {
+    pub fn spawnable_entity_names(&self) -> Vec<&str> {
         self.entities
             .values()
             .filter(|e| e.is_spawnable())
-            .map(|e| e.canonical_name)
+            .map(|e| e.canonical_name.as_str())
             .collect()
     }
 
@@ -418,13 +462,33 @@ fn normalize_token(token: &str) -> String {
 mod tests {
     use super::*;
     use crate::builtin_content;
+    use crate::plugin_loader;
+    use crate::shared::wasm::{WasmExecutionLimits, WasmRuntime};
 
-    #[test]
-    fn builtin_blocks_match_legacy_materials() {
+    /// Build a fully-populated registry: builtin (Air, Player, textures, remaps)
+    /// + polychora-content WASM plugin (68 blocks, 6 entities).
+    fn full_registry() -> ContentRegistry {
         let mut registry = ContentRegistry::new();
         builtin_content::register_builtin_content(&mut registry);
 
-        // Verify all 68 blocks are registered
+        let runtime = WasmRuntime::new().expect("wasm runtime");
+        let plugin = plugin_loader::load_plugin(
+            &runtime,
+            include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH")),
+            WasmExecutionLimits::default(),
+        )
+        .expect("load polychora-content plugin");
+        plugin_loader::populate_registry_from_plugin(&mut registry, &plugin)
+            .expect("populate registry from plugin");
+
+        registry
+    }
+
+    #[test]
+    fn plugin_blocks_match_legacy_materials() {
+        let registry = full_registry();
+
+        // Verify all 68 blocks are registered (from plugin)
         assert_eq!(registry.block_count(), 68);
 
         // Verify specific lookups match the old MATERIALS data
@@ -439,7 +503,7 @@ mod tests {
         assert_eq!(registry.material_color_by_token(58), [255, 236, 168]);
         assert_eq!(registry.material_color_by_token(68), [255, 248, 196]);
 
-        // Verify block_to_material_token equivalence for legacy namespace 0
+        // Verify block_to_material_token equivalence
         for token in 1u16..=68 {
             let (ns, bt) = registry.token_to_block[&token];
             assert_eq!(registry.block_material_token(ns, bt), token);
@@ -447,18 +511,16 @@ mod tests {
     }
 
     #[test]
-    fn builtin_entities_match_legacy() {
-        let mut registry = ContentRegistry::new();
-        builtin_content::register_builtin_content(&mut registry);
+    fn plugin_entities_match_legacy() {
+        let registry = full_registry();
 
-        // Player avatar
+        // Player avatar (engine internal, namespace 0)
         let player = registry.entity_lookup(0, 0).unwrap();
-        assert_eq!(player.canonical_name, "player");
+        assert_eq!(player.canonical_name.as_str(), "player");
         assert_eq!(player.category, EntityCategory::Player);
 
-        // Seeker mob
+        // Seeker mob (from plugin)
         let seeker = registry.entity_lookup_by_name("seeker").unwrap();
-        assert_eq!(seeker.entity_type, 10);
         assert_eq!(seeker.mob_archetype, Some(MobArchetype::Seeker));
 
         // Spawnable names should include all non-player entities
@@ -471,15 +533,14 @@ mod tests {
 
     #[test]
     fn legacy_remap_works() {
-        let mut registry = ContentRegistry::new();
-        builtin_content::register_builtin_content(&mut registry);
+        let registry = full_registry();
 
-        // In the current implementation, legacy (0, N) maps to (0, N) since
-        // we keep namespace 0 IDs identical for Phase 1 compatibility.
-        // The remap tables exist for future namespace migration.
+        // Legacy (0, 27) → (CONTENT_NS, BLOCK_STONE) → "Stone" with token 27
         let (ns, bt) = registry.resolve_legacy_block(0, 27);
         assert_eq!(registry.block_name(ns, bt), "Stone");
+        assert_eq!(registry.block_material_token(ns, bt), 27);
 
+        // Legacy (0, 10) → (CONTENT_NS, ENTITY_SEEKER) → "seeker"
         let (ns, et) = registry.resolve_legacy_entity(0, 10);
         let entry = registry.entity_lookup(ns, et).unwrap();
         assert_eq!(entry.canonical_name, "seeker");
@@ -487,13 +548,82 @@ mod tests {
 
     #[test]
     fn unknown_lookups_return_defaults() {
-        let mut registry = ContentRegistry::new();
-        builtin_content::register_builtin_content(&mut registry);
+        let registry = full_registry();
 
         assert_eq!(registry.block_material_token(999, 999), 1); // Red fallback
         assert_eq!(registry.block_name(999, 999), "Unknown");
         assert_eq!(registry.block_color(999, 999), [128, 128, 128]);
         assert_eq!(registry.entity_category(999, 999), EntityCategory::Accent);
         assert_eq!(registry.entity_base_material_token(999, 999), 7);
+    }
+
+    #[test]
+    fn texture_registry_resolves() {
+        let registry = full_registry();
+        use polychora_plugin_api::texture::{builtin_textures, TextureRef};
+
+        // TEX_STONE should resolve to material token 27
+        let tex = TextureRef { namespace: 0, texture_id: builtin_textures::TEX_STONE };
+        assert_eq!(registry.resolve_texture_token(&tex), Some(27));
+
+        // TEX_RED should resolve to material token 1
+        let tex = TextureRef { namespace: 0, texture_id: builtin_textures::TEX_RED };
+        assert_eq!(registry.resolve_texture_token(&tex), Some(1));
+
+        // Unknown texture returns None
+        let tex = TextureRef { namespace: 99, texture_id: 0xdeadbeef };
+        assert_eq!(registry.resolve_texture_token(&tex), None);
+    }
+
+    #[test]
+    fn entity_base_material_tokens_match_legacy() {
+        let registry = full_registry();
+        // These exact token values must match the old hardcoded base_material
+        // values from the static ENTITY_TYPES registry.  The color-matching
+        // approach in find_closest_material_token must produce these results.
+        let expected: &[(&str, u16)] = &[
+            ("cube", 7),     // Purple
+            ("rotor", 12),   // White
+            ("drifter", 17), // Marble
+            ("seeker", 3),   // Yellow-Green
+            ("creeper", 6),  // Blue
+            ("phase_spider", 9), // Rainbow
+        ];
+        for &(name, expected_token) in expected {
+            let entry = registry.entity_lookup_by_name(name)
+                .unwrap_or_else(|| panic!("entity '{}' not found", name));
+            assert_eq!(
+                entry.base_material_token, expected_token,
+                "entity '{}': expected material token {}, got {}",
+                name, expected_token, entry.base_material_token,
+            );
+        }
+    }
+
+    #[test]
+    fn entity_aliases_include_legacy_names() {
+        let registry = full_registry();
+        // Verify that all legacy aliases still resolve correctly
+        let expected: &[(&str, &str)] = &[
+            ("testcube", "cube"),
+            ("testrotor", "rotor"),
+            ("testdrifter", "drifter"),
+            ("mobseeker", "seeker"),
+            ("4dcreeper", "creeper"),
+            ("mobcreeper4d", "creeper"),
+            ("spider", "phase_spider"),
+            ("phase-spider", "phase_spider"),
+            ("phasespider", "phase_spider"),
+            ("mobphasespider", "phase_spider"),
+        ];
+        for &(alias, canonical) in expected {
+            let entry = registry.entity_lookup_by_name(alias)
+                .unwrap_or_else(|| panic!("alias '{}' not found", alias));
+            assert_eq!(
+                entry.canonical_name, canonical,
+                "alias '{}': expected canonical '{}', got '{}'",
+                alias, canonical, entry.canonical_name,
+            );
+        }
     }
 }

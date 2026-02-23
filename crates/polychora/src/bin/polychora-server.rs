@@ -54,11 +54,7 @@ impl WorldGeneratorArg {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    let content_registry = {
-        let mut reg = polychora::content_registry::ContentRegistry::new();
-        polychora::builtin_content::register_builtin_content(&mut reg);
-        Arc::new(reg)
-    };
+    let content_registry = Arc::new(polychora::plugin_loader::create_full_registry());
     let config = RuntimeConfig {
         bind: args.bind,
         world_file: args.world_file,

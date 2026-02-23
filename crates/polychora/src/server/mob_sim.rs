@@ -1466,9 +1466,7 @@ mod tests {
     use crate::content_registry::ContentRegistry;
 
     fn test_registry() -> Arc<ContentRegistry> {
-        let mut registry = ContentRegistry::new();
-        crate::builtin_content::register_builtin_content(&mut registry);
-        Arc::new(registry)
+        Arc::new(crate::plugin_loader::create_full_registry())
     }
 
     fn test_server_state_with_world() -> ServerState {
@@ -1480,9 +1478,7 @@ mod tests {
             HashSet::new(),
             test_registry(),
         );
-        let mut registry = crate::content_registry::ContentRegistry::new();
-        crate::builtin_content::register_builtin_content(&mut registry);
-        ServerState::new(world, 1, false, false, Instant::now(), Arc::new(registry))
+        ServerState::new(world, 1, false, false, Instant::now(), test_registry())
     }
 
     fn set_solid_voxel(state: &mut ServerState, x: i32, y: i32, z: i32, w: i32) {

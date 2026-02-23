@@ -1365,9 +1365,7 @@ fn build_world_leaf_descriptors_from_payloads(
 
 #[cfg(test)]
 fn test_content_registry() -> crate::content_registry::ContentRegistry {
-    let mut reg = crate::content_registry::ContentRegistry::new();
-    crate::builtin_content::register_builtin_content(&mut reg);
-    reg
+    crate::plugin_loader::create_full_registry()
 }
 
 #[cfg(test)]

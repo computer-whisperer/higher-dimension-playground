@@ -589,7 +589,7 @@ impl App {
                                 ui.painter().text(
                                     text_pos,
                                     egui::Align2::CENTER_BOTTOM,
-                                    entry.name,
+                                    &entry.name,
                                     egui::FontId::proportional(10.0),
                                     egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
                                 );
@@ -988,7 +988,7 @@ impl App {
 
     fn draw_waila_block(&self, ui: &mut egui::Ui, coords: [i32; 4], block: &polychora::shared::voxel::BlockData) {
         let entry = self.content_registry.block_entry(block.namespace, block.block_type);
-        let name = entry.map(|e| e.name).unwrap_or("Unknown");
+        let name = entry.map(|e| e.name.as_str()).unwrap_or("Unknown");
         let category = entry.map(|e| e.category.label()).unwrap_or("Unknown");
         let [r, g, b] = entry.map(|e| e.color).unwrap_or([128, 128, 128]);
         let material_id = entry.map(|e| e.material_token as u8).unwrap_or(1);
@@ -1060,7 +1060,7 @@ impl App {
     ) {
         let entry = self.content_registry.entity_lookup(entity_type_ns, entity_type);
         let canonical_name = entry
-            .map(|e| e.canonical_name)
+            .map(|e| e.canonical_name.as_str())
             .unwrap_or("unknown");
         let category = entry
             .map(|e| format!("{:?}", e.category))

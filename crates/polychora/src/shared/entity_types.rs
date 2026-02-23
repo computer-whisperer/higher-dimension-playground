@@ -34,13 +34,16 @@ impl EntityTypeEntry {
 // Well-known entity type constants: (namespace, entity_type)
 // ---------------------------------------------------------------------------
 
+/// Namespace ID for polychora-content plugin entities.
+const CONTENT_NS: u32 = 0x706f6c79; // "poly"
+
 pub const ENTITY_PLAYER_AVATAR: (u32, u32) = (0, 0);
-pub const ENTITY_TEST_CUBE: (u32, u32) = (0, 1);
-pub const ENTITY_TEST_ROTOR: (u32, u32) = (0, 2);
-pub const ENTITY_TEST_DRIFTER: (u32, u32) = (0, 3);
-pub const ENTITY_MOB_SEEKER: (u32, u32) = (0, 10);
-pub const ENTITY_MOB_CREEPER4D: (u32, u32) = (0, 11);
-pub const ENTITY_MOB_PHASE_SPIDER: (u32, u32) = (0, 12);
+pub const ENTITY_TEST_CUBE: (u32, u32) = (CONTENT_NS, 0x776b1b69);
+pub const ENTITY_TEST_ROTOR: (u32, u32) = (CONTENT_NS, 0x71790134);
+pub const ENTITY_TEST_DRIFTER: (u32, u32) = (CONTENT_NS, 0x433824fe);
+pub const ENTITY_MOB_SEEKER: (u32, u32) = (CONTENT_NS, 0xa974d75b);
+pub const ENTITY_MOB_CREEPER4D: (u32, u32) = (CONTENT_NS, 0x3dc5fd3d);
+pub const ENTITY_MOB_PHASE_SPIDER: (u32, u32) = (CONTENT_NS, 0x4af27f80);
 
 // ---------------------------------------------------------------------------
 // Static registry
@@ -59,8 +62,8 @@ pub const ENTITY_TYPES: &[EntityTypeEntry] = &[
         mob_defaults: None,
     },
     EntityTypeEntry {
-        namespace: 0,
-        entity_type: 1,
+        namespace: CONTENT_NS,
+        entity_type: 0x776b1b69,
         category: EntityCategory::Accent,
         canonical_name: "cube",
         aliases: &["cube", "testcube"],
@@ -70,8 +73,8 @@ pub const ENTITY_TYPES: &[EntityTypeEntry] = &[
         mob_defaults: None,
     },
     EntityTypeEntry {
-        namespace: 0,
-        entity_type: 2,
+        namespace: CONTENT_NS,
+        entity_type: 0x71790134,
         category: EntityCategory::Accent,
         canonical_name: "rotor",
         aliases: &["rotor", "testrotor"],
@@ -81,8 +84,8 @@ pub const ENTITY_TYPES: &[EntityTypeEntry] = &[
         mob_defaults: None,
     },
     EntityTypeEntry {
-        namespace: 0,
-        entity_type: 3,
+        namespace: CONTENT_NS,
+        entity_type: 0x433824fe,
         category: EntityCategory::Accent,
         canonical_name: "drifter",
         aliases: &["drifter", "testdrifter"],
@@ -92,8 +95,8 @@ pub const ENTITY_TYPES: &[EntityTypeEntry] = &[
         mob_defaults: None,
     },
     EntityTypeEntry {
-        namespace: 0,
-        entity_type: 10,
+        namespace: CONTENT_NS,
+        entity_type: 0xa974d75b,
         category: EntityCategory::Mob,
         canonical_name: "seeker",
         aliases: &["seeker", "mobseeker"],
@@ -108,8 +111,8 @@ pub const ENTITY_TYPES: &[EntityTypeEntry] = &[
         }),
     },
     EntityTypeEntry {
-        namespace: 0,
-        entity_type: 11,
+        namespace: CONTENT_NS,
+        entity_type: 0x3dc5fd3d,
         category: EntityCategory::Mob,
         canonical_name: "creeper",
         aliases: &["creeper", "4dcreeper", "mobcreeper4d"],
@@ -124,8 +127,8 @@ pub const ENTITY_TYPES: &[EntityTypeEntry] = &[
         }),
     },
     EntityTypeEntry {
-        namespace: 0,
-        entity_type: 12,
+        namespace: CONTENT_NS,
+        entity_type: 0x4af27f80,
         category: EntityCategory::Mob,
         canonical_name: "phase_spider",
         aliases: &[
