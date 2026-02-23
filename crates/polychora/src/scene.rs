@@ -589,6 +589,13 @@ impl Scene {
 mod tests {
     use super::*;
     use polychora::shared::voxel::BlockData;
+    use polychora::content_registry::ContentRegistry;
+
+    fn test_registry() -> ContentRegistry {
+        let mut reg = ContentRegistry::new();
+        polychora::builtin_content::register_builtin_content(&mut reg);
+        reg
+    }
 
     fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) -> Option<u8> {
         let (chunk_pos, voxel_idx) = world_to_chunk(wx, wy, wz, ww);
@@ -1079,7 +1086,7 @@ mod tests {
     fn voxel_frame_snapshot_path_clears_mutation_batch() {
         let mut scene = Scene::new(ScenePreset::Empty);
         scene.world_set_block(0, 0, 0, 0, BlockData::simple(0, 3));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_registry());
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
         assert!(scene.voxel_frame_data.mutation_base_generation.is_none());
     }
@@ -1088,12 +1095,12 @@ mod tests {
     fn voxel_frame_delta_path_emits_mutation_batch() {
         let mut scene = Scene::new(ScenePreset::Empty);
         scene.world_set_block(0, 0, 0, 0, BlockData::simple(0, 3));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_registry());
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
         let base_generation = scene.voxel_frame_data.metadata_generation;
 
         scene.world_set_block(CHUNK_SIZE as i32, 0, 0, 0, BlockData::simple(0, 4));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_registry());
 
         let batch = scene.voxel_frame_data.mutation_batch.as_ref();
         assert!(batch.is_some());
@@ -1117,7 +1124,7 @@ mod tests {
     fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
         let mut scene = Scene::new(ScenePreset::Empty);
         scene.world_set_block(0, 0, 0, 0, BlockData::simple(0, 3));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_registry());
 
         let frame_root = scene.voxel_frame_data.region_bvh_root_index;
         assert_ne!(frame_root, VTE_REGION_BVH_INVALID_NODE);
@@ -1138,7 +1145,7 @@ mod tests {
             });
         scene.voxel_cached_visibility_bounds = None;
 
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0);
+        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_registry());
 
         assert!(scene.voxel_pending_render_bvh_mutation_deltas.is_empty());
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
@@ -1156,7 +1163,7 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Flat);
         let cam = [0.0, 2.0, 0.0, 0.0];
 
-        let _ = scene.build_voxel_frame_data(cam, [0.0, 0.0, 1.0, 0.0], 96.0);
+        let _ = scene.build_voxel_frame_data(cam, [0.0, 0.0, 1.0, 0.0], 96.0, &test_registry());
 
         let edit_voxel = [0, -1, 0, 0];
         let before_world =
@@ -1169,7 +1176,8 @@ mod tests {
             edit_voxel[2],
             edit_voxel[3],
         );
-        let before_mat = polychora::materials::block_to_material_token(
+        let reg = test_registry();
+        let before_mat = reg.block_material_token(
             before_world.namespace,
             before_world.block_type,
         ) as u8;
@@ -1182,7 +1190,7 @@ mod tests {
             edit_voxel[3],
             BlockData::AIR,
         );
-        let _ = scene.build_voxel_frame_data(cam, [0.0, 0.0, 1.0, 0.0], 96.0);
+        let _ = scene.build_voxel_frame_data(cam, [0.0, 0.0, 1.0, 0.0], 96.0, &test_registry());
 
         let after_world =
             scene.get_block_data(edit_voxel[0], edit_voxel[1], edit_voxel[2], edit_voxel[3]);

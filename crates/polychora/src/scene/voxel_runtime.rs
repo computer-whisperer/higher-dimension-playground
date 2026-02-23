@@ -1,5 +1,5 @@
 use super::*;
-use polychora::materials::block_to_material_token;
+use polychora::content_registry::ContentRegistry;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::voxel::BlockData;
 use polychora::shared::render_tree::{
@@ -15,6 +15,7 @@ fn pack_dense_materials_words(
     material_words: &mut [u32; MATERIAL_WORDS_PER_CHUNK],
     orientation_words: &mut [u32; ORIENTATION_WORDS_PER_CHUNK],
     macro_words: &mut [u32; MACRO_WORDS_PER_CHUNK],
+    content_registry: &ContentRegistry,
 ) -> (u32, bool, [i32; 4], [i32; 4]) {
     debug_assert_eq!(dense_palette_indices.len(), CHUNK_VOLUME);
 
@@ -32,7 +33,7 @@ fn pack_dense_materials_words(
             .get(palette_idx as usize)
             .cloned()
             .unwrap_or(BlockData::AIR);
-        let mat_u16 = block_to_material_token(block.namespace, block.block_type);
+        let mat_u16 = content_registry.block_material_token(block.namespace, block.block_type);
 
         let mat_word_idx = voxel_idx / 2;
         let mat_shift = ((voxel_idx & 1) * 16) as u32;
@@ -223,6 +224,7 @@ impl Scene {
         dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
         payload: &ChunkPayload,
         block_palette: &[BlockData],
+        content_registry: &ContentRegistry,
     ) -> Result<u32, String> {
         if let Some(&encoded) = dense_payload_cache.get(payload) {
             return Ok(encoded);
@@ -242,7 +244,7 @@ impl Scene {
         let mut ori = [0u32; ORIENTATION_WORDS_PER_CHUNK];
         let mut mac = [0u32; MACRO_WORDS_PER_CHUNK];
         let (_solid_count, is_full, solid_local_min, solid_local_max) =
-            pack_dense_materials_words(&dense_palette_indices, block_palette, &mut occ, &mut mat, &mut ori, &mut mac);
+            pack_dense_materials_words(&dense_palette_indices, block_palette, &mut occ, &mut mat, &mut ori, &mut mac, content_registry);
         let chunk_index = voxel_frame_data.chunk_headers.len() as u32;
         let occ_offset = voxel_frame_data.occupancy_words.len() as u32;
         let mat_offset = voxel_frame_data.material_words.len() as u32;
@@ -469,6 +471,7 @@ impl Scene {
         voxel_frame_data: &mut VoxelFrameData,
         dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
         leaf: &RenderLeaf,
+        content_registry: &ContentRegistry,
     ) -> Result<Vec<u32>, String> {
         let RenderLeafKind::VoxelChunkArray(chunk_array) = &leaf.kind else {
             return Ok(Vec::new());
@@ -516,7 +519,7 @@ impl Scene {
                             }
                             ChunkPayload::Uniform(idx) => {
                                 let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
-                                let mat = block_to_material_token(block.namespace, block.block_type);
+                                let mat = content_registry.block_material_token(block.namespace, block.block_type);
                                 if mat == 0 {
                                     higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                 } else {
@@ -530,6 +533,7 @@ impl Scene {
                                 dense_payload_cache,
                                 dense_payload,
                                 &chunk_array.block_palette,
+                                content_registry,
                             )?,
                         };
                         encoded.push(encoded_entry);
@@ -666,6 +670,7 @@ impl Scene {
         &mut self,
         deltas: &[RenderBvhChunkMutationDelta],
         bounds: Aabb4i,
+        content_registry: &ContentRegistry,
     ) -> Result<(), String> {
         if !bounds.is_valid() {
             return Ok(());
@@ -749,7 +754,7 @@ impl Scene {
 
                 match &leaf.kind {
                     RenderLeafKind::Uniform(block) => {
-                        let mat = block_to_material_token(block.namespace, block.block_type);
+                        let mat = content_registry.block_material_token(block.namespace, block.block_type);
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
                             min_chunk_coord: leaf.bounds.min,
                             max_chunk_coord: leaf.bounds.max,
@@ -765,6 +770,7 @@ impl Scene {
                             &mut self.voxel_frame_data,
                             &mut self.voxel_dense_payload_encoded_cache,
                             leaf,
+                            content_registry,
                         )?;
                         let span = Self::allocate_leaf_entry_span(
                             free_spans,
@@ -838,6 +844,7 @@ impl Scene {
 
     fn build_voxel_frame_buffers_from_render_bvh(
         render_bvh: &RenderBvh,
+        content_registry: &ContentRegistry,
     ) -> Option<VoxelFrameDataBuffers> {
         let mut dense_chunk_headers = Vec::<GpuVoxelChunkHeader>::new();
         let mut occupancy_words = Vec::<u32>::new();
@@ -853,7 +860,7 @@ impl Scene {
         for leaf in &render_bvh.leaves {
             match &leaf.kind {
                 RenderLeafKind::Uniform(block) => {
-                    let mat = block_to_material_token(block.namespace, block.block_type);
+                    let mat = content_registry.block_material_token(block.namespace, block.block_type);
                     leaf_headers.push(GpuVoxelLeafHeader {
                         min_chunk_coord: leaf.bounds.min,
                         max_chunk_coord: leaf.bounds.max,
@@ -933,7 +940,7 @@ impl Scene {
                                                         }
                                                         ChunkPayload::Uniform(idx) => {
                                                             let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
-                                                            let mat = block_to_material_token(block.namespace, block.block_type);
+                                                            let mat = content_registry.block_material_token(block.namespace, block.block_type);
                                                             if mat == 0 {
                                                                 higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                                             } else {
@@ -978,6 +985,7 @@ impl Scene {
                                                                             &mut mat,
                                                                             &mut ori,
                                                                             &mut mac,
+                                                                            content_registry,
                                                                         );
                                                                     let chunk_index =
                                                                         dense_chunk_headers.len() as u32;
@@ -1135,6 +1143,7 @@ impl Scene {
         cam_pos: [f32; 4],
         _cam_forward: [f32; 4],
         max_trace_distance: f32,
+        content_registry: &ContentRegistry,
     ) -> &VoxelFrameData {
         const SCENE_RESIDENCY_RADIUS_MULTIPLIER: i32 = 2;
         const SCENE_RESIDENCY_EXTRA_CHUNKS: i32 = 2;
@@ -1252,7 +1261,7 @@ impl Scene {
                         cpu_root,
                     );
                     if let Some(buffers) =
-                        Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
+                        Self::build_voxel_frame_buffers_from_render_bvh(render_bvh, content_registry)
                     {
                         self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
                         if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
@@ -1287,7 +1296,7 @@ impl Scene {
                 let mut apply_error: Option<String> = None;
                 if let Some(render_bvh) = self.render_bvh_cache.take() {
                     match self
-                        .apply_render_bvh_mutation_deltas_to_voxel_frame_data(&deltas, scene_bounds)
+                        .apply_render_bvh_mutation_deltas_to_voxel_frame_data(&deltas, scene_bounds, content_registry)
                     {
                         Ok(()) => {
                             apply_ok = true;
@@ -1322,7 +1331,7 @@ impl Scene {
                             cpu_root,
                         );
                         if let Some(buffers) =
-                            Self::build_voxel_frame_buffers_from_render_bvh(render_bvh)
+                            Self::build_voxel_frame_buffers_from_render_bvh(render_bvh, content_registry)
                         {
                             self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
                         } else {
@@ -1383,9 +1392,9 @@ impl Scene {
     }
 
     /// Prime voxel frame metadata around the current spawn/camera position.
-    pub fn preload_spawn_chunks(&mut self, spawn_pos: [f32; 4], max_trace_distance: f32) {
+    pub fn preload_spawn_chunks(&mut self, spawn_pos: [f32; 4], max_trace_distance: f32, content_registry: &ContentRegistry) {
         let start = Instant::now();
-        let _ = self.build_voxel_frame_data(spawn_pos, [0.0, 0.0, 1.0, 0.0], max_trace_distance);
+        let _ = self.build_voxel_frame_data(spawn_pos, [0.0, 0.0, 1.0, 0.0], max_trace_distance, content_registry);
         eprintln!(
             "Preloaded render-tree voxel metadata in {:.2} ms",
             start.elapsed().as_secs_f64() * 1000.0

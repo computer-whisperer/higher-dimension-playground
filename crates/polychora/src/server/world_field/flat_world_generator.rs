@@ -1,5 +1,5 @@
 use super::{QueryDetail, QueryVolume, WorldField};
-use crate::materials::block_to_material_token;
+use crate::content_registry::ContentRegistry;
 use crate::server::procgen;
 use crate::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
@@ -12,12 +12,23 @@ use std::sync::Arc;
 
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 
-#[derive(Debug)]
 pub struct FlatWorldGenerator {
     flat_floor_voxel: Option<BlockData>,
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<procgen::StructureCell>,
+    content_registry: Arc<ContentRegistry>,
+}
+
+impl std::fmt::Debug for FlatWorldGenerator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlatWorldGenerator")
+            .field("flat_floor_voxel", &self.flat_floor_voxel)
+            .field("world_seed", &self.world_seed)
+            .field("procgen_structures", &self.procgen_structures)
+            .field("blocked_cells", &self.blocked_cells)
+            .finish()
+    }
 }
 
 impl FlatWorldGenerator {
@@ -27,12 +38,14 @@ impl FlatWorldGenerator {
         world_seed: u64,
         procgen_structures: bool,
         blocked_cells: HashSet<procgen::StructureCell>,
+        content_registry: Arc<ContentRegistry>,
     ) -> Self {
         Self {
             flat_floor_voxel: floor_voxel_from_base_kind(base_kind),
             world_seed,
             procgen_structures,
             blocked_cells,
+            content_registry,
         }
     }
 
@@ -49,7 +62,7 @@ impl FlatWorldGenerator {
             return None;
         }
         self.flat_floor_voxel.as_ref().map(|material| {
-            ChunkPayload::Uniform(block_to_material_token(material.namespace, material.block_type))
+            ChunkPayload::Uniform(self.content_registry.block_material_token(material.namespace, material.block_type))
         })
     }
 
@@ -60,7 +73,7 @@ impl FlatWorldGenerator {
         self.flat_floor_voxel
             .as_ref()
             .map(|material| {
-                let mat = block_to_material_token(material.namespace, material.block_type);
+                let mat = self.content_registry.block_material_token(material.namespace, material.block_type);
                 [mat; CHUNK_VOLUME]
             })
             .unwrap_or([0u16; CHUNK_VOLUME])
@@ -218,6 +231,12 @@ mod tests {
     use crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
     use crate::shared::voxel::BlockData;
 
+    fn test_registry() -> Arc<ContentRegistry> {
+        let mut registry = ContentRegistry::new();
+        crate::builtin_content::register_builtin_content(&mut registry);
+        Arc::new(registry)
+    }
+
     #[test]
     fn flat_floor_single_chunk_query_returns_uniform_payload() {
         let generator = FlatWorldGenerator::from_chunk_payloads(
@@ -228,6 +247,7 @@ mod tests {
             123,
             false,
             HashSet::new(),
+            test_registry(),
         );
         let bounds = Aabb4i::new([0, FLAT_FLOOR_CHUNK_Y, 0, 0], [0, FLAT_FLOOR_CHUNK_Y, 0, 0]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -245,6 +265,7 @@ mod tests {
             123,
             false,
             HashSet::new(),
+            test_registry(),
         );
         let bounds = Aabb4i::new([-2, -3, -1, -2], [2, 1, 3, 2]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -267,6 +288,7 @@ mod tests {
             123,
             false,
             HashSet::new(),
+            test_registry(),
         );
         let bounds = Aabb4i::new([-2, -3, -1, -2], [2, 1, 3, 2]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);

@@ -134,7 +134,12 @@ pub(super) fn run_cpu_render(_scene_preset: ScenePreset, args: &Args) {
 
     eprintln!("CPU render: {}x{}", params.width, params.height);
     let start = Instant::now();
-    let img = cpu_render::cpu_render(&instances, &model_tets, &params);
+    let content_registry = {
+        let mut reg = polychora::content_registry::ContentRegistry::new();
+        polychora::builtin_content::register_builtin_content(&mut reg);
+        reg
+    };
+    let img = cpu_render::cpu_render(&instances, &model_tets, &params, &content_registry);
     let elapsed = start.elapsed();
     eprintln!("CPU render done in {:.2}s", elapsed.as_secs_f32());
 

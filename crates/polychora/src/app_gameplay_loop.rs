@@ -200,7 +200,7 @@ impl App {
                         "Hotbar slot {} selected: {} ({})",
                         self.hotbar_selected_index + 1,
                         self.selected_block.block_type,
-                        materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
+                        self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
                     );
                 }
             }
@@ -386,7 +386,7 @@ impl App {
                         "Hotbar slot {} selected: {} ({})",
                         digit,
                         self.selected_block.block_type,
-                        materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
+                        self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
                     );
                 }
             }
@@ -540,7 +540,7 @@ impl App {
                             eprintln!(
                                 "Picked voxel {} ({}) from ({x}, {y}, {z}, {w})",
                                 self.selected_block.block_type,
-                                materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
+                                self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
                             );
                         }
                     }
@@ -569,7 +569,7 @@ impl App {
                             eprintln!(
                                 "Placed voxel {} ({}) at ({x}, {y}, {z}, {w})",
                                 self.selected_block.block_type,
-                                materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
+                                self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
                             );
                             self.play_spatial_sound_voxel(SoundEffect::Place, [x, y, z, w], 1.0);
                             self.send_multiplayer_voxel_update(
@@ -623,6 +623,7 @@ impl App {
             preview_time_s,
             self.control_scheme,
             aspect,
+            &self.content_registry,
         );
 
         // Build view matrix and scene
@@ -1014,6 +1015,7 @@ impl App {
                 self.camera.position,
                 look_dir,
                 self.vte_max_trace_distance,
+                &self.content_registry,
             );
             let voxel_build_elapsed_ms = voxel_build_start.elapsed().as_secs_f64() * 1000.0;
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::content_registry::ContentRegistry;
 use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::entity_types::EntityCategory;
 use crate::shared::region_tree::{chunk_key_from_chunk_pos, RegionChunkTree, RegionTreeCore};
@@ -18,6 +19,7 @@ pub(super) struct ServerState {
     pub(super) client_world_interest_bounds: HashMap<u64, Aabb4i>,
     pub(super) client_visible_entities: HashMap<u64, HashSet<u64>>,
     pub(super) cpu_profile: ServerCpuProfile,
+    pub(super) content_registry: Arc<ContentRegistry>,
 }
 
 impl ServerState {
@@ -27,6 +29,7 @@ impl ServerState {
         mob_nav_debug: bool,
         mob_nav_simple_steer: bool,
         start: Instant,
+        content_registry: Arc<ContentRegistry>,
     ) -> Self {
         Self {
             next_object_id,
@@ -42,6 +45,7 @@ impl ServerState {
             client_world_interest_bounds: HashMap::new(),
             client_visible_entities: HashMap::new(),
             cpu_profile: ServerCpuProfile::new(start),
+            content_registry,
         }
     }
 

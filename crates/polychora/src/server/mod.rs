@@ -33,7 +33,7 @@ use self::types::{
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
 use crate::shared::entity_types::{
-    self, EntityCategory, MobArchetype, MobLocomotionMode,
+    EntityCategory, MobArchetype, MobLocomotionMode,
     ENTITY_PLAYER_AVATAR,
 };
 use crate::shared::protocol::{
@@ -310,6 +310,7 @@ fn initialize_state(
         config.procgen_structures,
         HashSet::new(),
         crate::save_v4::now_unix_ms(),
+        config.content_registry.clone(),
     )?;
     let runtime_world_seed = initial_world.world_seed();
     let next_object_id = initial_world.persisted_next_entity_id().max(1);
@@ -335,6 +336,7 @@ fn initialize_state(
         mob_nav_debug,
         mob_nav_simple_steer,
         start,
+        config.content_registry.clone(),
     )));
 
     let entity_interest_radius_chunks = config.procgen_far_chunk_radius.max(1)

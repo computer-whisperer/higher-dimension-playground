@@ -1,0 +1,12 @@
+[package]
+name = "polychora-plugin-api"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+std = ["serde/std", "postcard/use-std"]
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }

@@ -1,40 +1,7 @@
-use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// Entity category
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EntityCategory {
-    Player,
-    Accent,
-    Mob,
-}
-
-// ---------------------------------------------------------------------------
-// Mob archetype — behavioural tag for AI dispatch
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MobArchetype {
-    Seeker,
-    Creeper4d,
-    PhaseSpider,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum MobLocomotionMode {
-    Walking,
-    Flying,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MobArchetypeDefaults {
-    pub move_speed: f32,
-    pub preferred_distance: f32,
-    pub tangent_weight: f32,
-    pub locomotion: MobLocomotionMode,
-}
+// Re-export core entity types from the plugin API crate.
+pub use polychora_plugin_api::entity::{
+    EntityCategory, MobArchetype, MobArchetypeDefaults, MobLocomotionMode,
+};
 
 // ---------------------------------------------------------------------------
 // Entity type registry entry
@@ -192,12 +159,14 @@ fn normalize_token(token: &str) -> String {
         .collect()
 }
 
+#[deprecated(note = "use ContentRegistry::entity_lookup() instead")]
 pub fn lookup(namespace: u32, entity_type: u32) -> Option<&'static EntityTypeEntry> {
     ENTITY_TYPES
         .iter()
         .find(|entry| entry.namespace == namespace && entry.entity_type == entity_type)
 }
 
+#[deprecated(note = "use ContentRegistry::entity_lookup_by_name() instead")]
 pub fn lookup_by_name(name: &str) -> Option<&'static EntityTypeEntry> {
     let normalized = normalize_token(name);
     ENTITY_TYPES.iter().find(|entry| {
@@ -208,12 +177,15 @@ pub fn lookup_by_name(name: &str) -> Option<&'static EntityTypeEntry> {
     })
 }
 
+#[deprecated(note = "use ContentRegistry::entity_category() instead")]
+#[allow(deprecated)]
 pub fn category_for(namespace: u32, entity_type: u32) -> EntityCategory {
     lookup(namespace, entity_type)
         .map(|entry| entry.category)
         .unwrap_or(EntityCategory::Accent) // unknown types default to Accent
 }
 
+#[deprecated(note = "use ContentRegistry::mob_archetype_defaults() instead")]
 pub fn mob_archetype_defaults(archetype: MobArchetype) -> MobArchetypeDefaults {
     for entry in ENTITY_TYPES {
         if entry.mob_archetype == Some(archetype) {
@@ -231,12 +203,15 @@ pub fn mob_archetype_defaults(archetype: MobArchetype) -> MobArchetypeDefaults {
     }
 }
 
+#[deprecated(note = "use ContentRegistry::entity_base_material_token() instead")]
+#[allow(deprecated)]
 pub fn base_material_for(namespace: u32, entity_type: u32) -> u8 {
     lookup(namespace, entity_type)
         .map(|entry| entry.base_material)
         .unwrap_or(7)
 }
 
+#[deprecated(note = "use ContentRegistry::spawnable_entity_names() instead")]
 pub fn spawnable_names() -> Vec<&'static str> {
     ENTITY_TYPES
         .iter()

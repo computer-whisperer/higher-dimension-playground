@@ -4,6 +4,7 @@ members = [
     "crates/demo",
     "crates/exr-converter",
     "crates/polychora",
+    "crates/polychora-plugin-api",
 ]
 default-members = ["crates/polychora"]
 

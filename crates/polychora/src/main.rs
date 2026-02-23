@@ -911,6 +911,12 @@ fn main() {
         );
     }
 
+    let content_registry = {
+        let mut reg = polychora::content_registry::ContentRegistry::new();
+        polychora::builtin_content::register_builtin_content(&mut reg);
+        Arc::new(reg)
+    };
+
     let multiplayer = if let Some(server) = args.server.as_ref() {
         let server_addr = normalize_server_addr(server);
         let player_name = args
@@ -943,6 +949,7 @@ fn main() {
             &args,
             world_file.clone(),
             initial_singleplayer_world_generator,
+            content_registry.clone(),
         );
         match MultiplayerClient::connect_local(runtime_config, player_name.clone()) {
             Ok(client) => {
@@ -1087,6 +1094,7 @@ fn main() {
         menu_selection: 0,
         egui_ctx: egui::Context::default(),
         egui_winit_state: None,
+        content_registry: content_registry.clone(),
         material_icon_sheet: None,
         material_icons_texture_id: None,
         multiplayer,
@@ -1431,6 +1439,7 @@ struct App {
     menu_selection: usize,
     egui_ctx: egui::Context,
     egui_winit_state: Option<egui_winit::State>,
+    content_registry: Arc<polychora::content_registry::ContentRegistry>,
     material_icon_sheet: Option<material_icons::MaterialIconSheet>,
     material_icons_texture_id: Option<egui::TextureId>,
     multiplayer: Option<MultiplayerClient>,

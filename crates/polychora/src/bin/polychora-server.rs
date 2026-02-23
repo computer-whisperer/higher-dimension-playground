@@ -1,6 +1,7 @@
 use clap::Parser;
 use polychora::server::{run_tcp_server, RuntimeConfig, WorldGeneratorKind};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -53,6 +54,11 @@ impl WorldGeneratorArg {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
+    let content_registry = {
+        let mut reg = polychora::content_registry::ContentRegistry::new();
+        polychora::builtin_content::register_builtin_content(&mut reg);
+        Arc::new(reg)
+    };
     let config = RuntimeConfig {
         bind: args.bind,
         world_file: args.world_file,
@@ -67,6 +73,7 @@ fn main() -> std::io::Result<()> {
         procgen_keepout_from_existing_world: args.procgen_keepout_from_existing_world,
         procgen_keepout_padding_chunks: args.procgen_keepout_padding_chunks,
         world_seed: args.world_seed,
+        content_registry,
     };
     run_tcp_server(&config)
 }

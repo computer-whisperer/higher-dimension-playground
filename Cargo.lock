@@ -2520,6 +2520,7 @@ dependencies = [
  "higher-dimension-playground",
  "image",
  "ndarray",
+ "polychora-plugin-api",
  "postcard",
  "rodio",
  "serde",
@@ -2529,6 +2530,14 @@ dependencies = [
  "wasmtime",
  "wat",
  "winit",
+]
+
+[[package]]
+name = "polychora-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
 ]
 
 [[package]]

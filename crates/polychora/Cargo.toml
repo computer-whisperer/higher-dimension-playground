@@ -31,6 +31,7 @@ ciborium = "0.2"
 crc32fast = "1.4"
 sha2 = "0.10"
 wasmtime = "28"
+polychora-plugin-api = { path = "../polychora-plugin-api", features = ["std"] }
 
 [dev-dependencies]
 wat = "1"

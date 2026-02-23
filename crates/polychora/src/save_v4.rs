@@ -1364,15 +1364,22 @@ fn build_world_leaf_descriptors_from_payloads(
 }
 
 #[cfg(test)]
+fn test_content_registry() -> crate::content_registry::ContentRegistry {
+    let mut reg = crate::content_registry::ContentRegistry::new();
+    crate::builtin_content::register_builtin_content(&mut reg);
+    reg
+}
+
+#[cfg(test)]
 fn chunk_payloads_to_voxel_world(
     base_world_kind: BaseWorldKind,
     chunk_payloads: &[([i32; 4], ResolvedChunkPayload)],
 ) -> io::Result<RegionChunkWorld> {
-    use crate::materials::block_to_material_token;
+    let reg = test_content_registry();
     let mut world = RegionChunkWorld::new_with_base(base_world_kind);
     for (chunk_pos, resolved) in chunk_payloads {
         let legacy = resolved.to_legacy_payload(|block| {
-            block_to_material_token(block.namespace, block.block_type) as u8
+            reg.block_material_token(block.namespace, block.block_type) as u8
         });
         let chunk = legacy_chunk_from_field_chunk_payload(&legacy)?;
         world.insert_chunk(
@@ -3441,8 +3448,9 @@ mod tests {
             load_world_chunk_payloads_for_regions(&root, &region_filter).expect("load chunks");
         assert_eq!(loaded_chunk_payloads.len(), 1);
         assert_eq!(loaded_chunk_payloads[0].0, chunk_a);
+        let reg = test_content_registry();
         let legacy_payload = loaded_chunk_payloads[0].1.to_legacy_payload(|block| {
-            crate::materials::block_to_material_token(block.namespace, block.block_type) as u8
+            reg.block_material_token(block.namespace, block.block_type) as u8
         });
         let chunk = legacy_chunk_from_field_chunk_payload(&legacy_payload)
             .expect("decode chunk payload");

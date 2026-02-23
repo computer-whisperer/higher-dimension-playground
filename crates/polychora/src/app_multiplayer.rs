@@ -399,7 +399,10 @@ fn zero_dense_chunk_materials() -> Vec<u16> {
     vec![0u16; polychora::shared::voxel::CHUNK_VOLUME]
 }
 
-fn dense_materials_from_payload_or_zero(resolved: Option<ResolvedChunkPayload>) -> Vec<u16> {
+fn dense_materials_from_payload_or_zero(
+    resolved: Option<ResolvedChunkPayload>,
+    content_registry: &polychora::content_registry::ContentRegistry,
+) -> Vec<u16> {
     let Some(resolved) = resolved else {
         return zero_dense_chunk_materials();
     };
@@ -417,7 +420,7 @@ fn dense_materials_from_payload_or_zero(resolved: Option<ResolvedChunkPayload>) 
                 .get(idx as usize)
                 .cloned()
                 .unwrap_or(polychora::shared::voxel::BlockData::AIR);
-            polychora::materials::block_to_material_token(
+            content_registry.block_material_token(
                 block.namespace,
                 block.block_type,
             )
@@ -425,12 +428,16 @@ fn dense_materials_from_payload_or_zero(resolved: Option<ResolvedChunkPayload>) 
         .collect()
 }
 
-fn dense_materials_from_region_core_chunk(core: &RegionTreeCore, chunk: [i32; 4]) -> Vec<u16> {
+fn dense_materials_from_region_core_chunk(
+    core: &RegionTreeCore,
+    chunk: [i32; 4],
+    content_registry: &polychora::content_registry::ContentRegistry,
+) -> Vec<u16> {
     let bounds = Aabb4i::new(chunk, chunk);
     let chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
     for (key, resolved) in chunks {
         if key == chunk {
-            return dense_materials_from_payload_or_zero(Some(resolved));
+            return dense_materials_from_payload_or_zero(Some(resolved), content_registry);
         }
     }
     zero_dense_chunk_materials()
@@ -942,7 +949,7 @@ impl App {
         }
 
         let world_dense =
-            dense_materials_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk));
+            dense_materials_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk), &self.content_registry);
         let render_bounds = self
             .multiplayer_last_world_request_bounds
             .unwrap_or_else(|| Aabb4i::new(chunk, chunk));
@@ -951,7 +958,7 @@ impl App {
             .debug_render_bvh_chunk_payloads_in_bounds(render_bounds, chunk);
         let render_dense_variants: Vec<Vec<u16>> = render_payloads
             .iter()
-            .map(|resolved| dense_materials_from_payload_or_zero(Some(resolved.clone())))
+            .map(|resolved| dense_materials_from_payload_or_zero(Some(resolved.clone()), &self.content_registry))
             .collect();
         let render_dense = render_dense_variants
             .first()
@@ -965,7 +972,7 @@ impl App {
         let frame_dense_variants: Vec<Vec<u16>> = frame_payloads
             .iter()
             .cloned()
-            .map(|payload| dense_materials_from_payload_or_zero(Some(ResolvedChunkPayload::from_legacy_payload(payload))))
+            .map(|payload| dense_materials_from_payload_or_zero(Some(ResolvedChunkPayload::from_legacy_payload(payload)), &self.content_registry))
             .collect();
         let frame_dense = frame_dense_variants
             .first()
@@ -992,7 +999,7 @@ impl App {
             if !authoritative_bounds.contains_chunk(chunk) {
                 continue;
             }
-            let patch_dense = dense_materials_from_region_core_chunk(patch, chunk);
+            let patch_dense = dense_materials_from_region_core_chunk(patch, chunk, &self.content_registry);
             let patch_match = patch_dense == dense_materials;
             if newest_overlap_seq.is_none() {
                 newest_overlap_seq = Some(*seq);
@@ -1534,7 +1541,7 @@ impl App {
             }
             multiplayer::ServerMessage::Pong { .. } => {}
             multiplayer::ServerMessage::EntitySpawned { entity } => {
-                let category = multiplayer::entity_types::category_for(
+                let category = self.content_registry.entity_category(
                     entity.entity.namespace,
                     entity.entity.entity_type,
                 );
@@ -1736,7 +1743,7 @@ impl App {
                     continue;
                 }
                 let type_key = (entity.entity_type_ns, entity.entity_type);
-                let mat = base_material_for(entity.entity_type_ns, entity.entity_type);
+                let mat = self.content_registry.entity_base_material_token(entity.entity_type_ns, entity.entity_type);
                 match type_key {
                     ENTITY_PLAYER_AVATAR => {}
                     ENTITY_TEST_CUBE => {
@@ -1808,7 +1815,7 @@ impl App {
                             &basis,
                             [0.0, 0.06 + bob, 0.0, 0.0],
                         );
-                        let pulse_bias = if pulse > 0.66 { 8u8 } else { 6u8 };
+                        let pulse_bias: u16 = if pulse > 0.66 { 8 } else { 6 };
                         instances.push(build_centered_model_instance(
                             core_center,
                             &basis,
@@ -1853,9 +1860,9 @@ impl App {
                             ],
                         ));
 
-                        let fin_specs = [
-                            ([0.0, 0.18, 0.05, 0.34], [0.14, 0.30, 0.44, 0.12], 5u8),
-                            ([0.0, 0.18, 0.05, -0.34], [0.14, 0.30, 0.44, 0.12], 5u8),
+                        let fin_specs: [([f32; 4], [f32; 4], u16); 2] = [
+                            ([0.0, 0.18, 0.05, 0.34], [0.14, 0.30, 0.44, 0.12], 5),
+                            ([0.0, 0.18, 0.05, -0.34], [0.14, 0.30, 0.44, 0.12], 5),
                         ];
                         for (offset, scales, bias) in fin_specs {
                             let fin_center = offset_point_along_basis(core_center, &basis, offset);
@@ -1926,7 +1933,7 @@ impl App {
                             * (2.4 + stride * 4.2)
                             + entity_id as f32 * 0.29;
                         let charge = ((anim_t * 0.8).sin() * 0.5 + 0.5).powf(1.8);
-                        let charge_bias = if charge > 0.70 { 9u8 } else { 7u8 };
+                        let charge_bias: u16 = if charge > 0.70 { 9 } else { 7 };
                         let body_center = offset_point_along_basis(
                             entity.render_position,
                             &basis,
@@ -2095,46 +2102,46 @@ impl App {
 
                         let splay = 0.12 * anim_t.sin();
                         let leg_y = -0.16 + 0.04 * (anim_t * 1.5).cos();
-                        let leg_specs = [
+                        let leg_specs: [([f32; 4], [f32; 4], u16); 8] = [
                             (
                                 [0.56 + splay, leg_y, 0.42, 0.20],
                                 [0.72, 0.08, 0.14, 0.18],
-                                1u8,
+                                1,
                             ),
                             (
                                 [0.56 + splay, leg_y, -0.42, -0.20],
                                 [0.72, 0.08, 0.14, 0.18],
-                                2u8,
+                                2,
                             ),
                             (
                                 [-0.56 - splay, leg_y, 0.42, -0.20],
                                 [0.72, 0.08, 0.14, 0.18],
-                                3u8,
+                                3,
                             ),
                             (
                                 [-0.56 - splay, leg_y, -0.42, 0.20],
                                 [0.72, 0.08, 0.14, 0.18],
-                                4u8,
+                                4,
                             ),
                             (
                                 [0.20, leg_y, 0.52 + splay, 0.56],
                                 [0.16, 0.08, 0.72, 0.18],
-                                5u8,
+                                5,
                             ),
                             (
                                 [-0.20, leg_y, -0.52 - splay, -0.56],
                                 [0.16, 0.08, 0.72, 0.18],
-                                6u8,
+                                6,
                             ),
                             (
                                 [0.20, leg_y, -0.52 - splay, 0.56],
                                 [0.16, 0.08, 0.72, 0.18],
-                                7u8,
+                                7,
                             ),
                             (
                                 [-0.20, leg_y, 0.52 + splay, -0.56],
                                 [0.16, 0.08, 0.72, 0.18],
-                                8u8,
+                                8,
                             ),
                         ];
                         for (offset, axis_scale, material_bias) in leg_specs {

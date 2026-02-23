@@ -193,7 +193,7 @@ impl App {
             self.main_menu_player_name.trim().to_string()
         };
         let config =
-            build_singleplayer_runtime_config(&self.args, world_file.clone(), world_generator);
+            build_singleplayer_runtime_config(&self.args, world_file.clone(), world_generator, self.content_registry.clone());
         match MultiplayerClient::connect_local(config, player_name.clone()) {
             Ok(client) => {
                 eprintln!(
@@ -296,7 +296,7 @@ impl App {
 
         // Pre-load chunks around spawn position
         self.scene
-            .preload_spawn_chunks(self.camera.position, self.vte_max_trace_distance);
+            .preload_spawn_chunks(self.camera.position, self.vte_max_trace_distance, &self.content_registry);
 
         if !self.perf_suite_active() {
             self.grab_mouse(window);
@@ -443,6 +443,7 @@ impl App {
                 self.menu_camera.position,
                 self.menu_camera.look_direction(),
                 self.vte_max_trace_distance,
+                &self.content_registry,
             );
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),

@@ -34,7 +34,7 @@ impl App {
             "Hotbar slot {} material: {} ({})",
             self.hotbar_selected_index + 1,
             self.selected_block.block_type,
-            materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
+            self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
         );
     }
 
@@ -53,7 +53,7 @@ impl App {
             "Hotbar slot {} material: {} ({})",
             self.hotbar_selected_index + 1,
             self.selected_block.block_type,
-            materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
+            self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
         );
     }
 

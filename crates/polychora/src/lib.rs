@@ -1,3 +1,5 @@
+pub mod builtin_content;
+pub mod content_registry;
 pub mod legacy_migration;
 pub mod materials;
 pub mod migration;

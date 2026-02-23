@@ -5,7 +5,7 @@ use polychora::migration::legacy_world_io::{load_world, save_world};
 use polychora::migration::save_v3;
 use polychora::save_v4;
 use polychora::save_v4_migration;
-use polychora::shared::entity_types::{self, EntityCategory};
+use polychora::shared::entity_types::EntityCategory;
 use polychora::shared::voxel::{BaseWorldKind, BlockData};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -624,14 +624,19 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let mut entity_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut entity_payload_bytes = 0usize;
     let mut entity_tag_count = 0usize;
+    let content_registry = {
+        let mut reg = polychora::content_registry::ContentRegistry::new();
+        polychora::builtin_content::register_builtin_content(&mut reg);
+        reg
+    };
     for entity in &entities {
-        let category = entity_types::category_for(entity.entity.namespace, entity.entity.entity_type);
+        let category = content_registry.entity_category(entity.entity.namespace, entity.entity.entity_type);
         match category {
             EntityCategory::Player => entity_class_counts[0] += 1,
             EntityCategory::Accent => entity_class_counts[1] += 1,
             EntityCategory::Mob => entity_class_counts[2] += 1,
         }
-        let type_name = entity_types::lookup(entity.entity.namespace, entity.entity.entity_type)
+        let type_name = content_registry.entity_lookup(entity.entity.namespace, entity.entity.entity_type)
             .map(|e| e.canonical_name)
             .unwrap_or("unknown");
         *entity_kind_counts

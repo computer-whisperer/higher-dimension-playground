@@ -341,7 +341,7 @@ impl App {
                     ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
                     for i in 0..9 {
                         let material_id = block_material_from_slot(&self.hotbar_slots[i]);
-                        let [r, g, b] = materials::material_color(material_id);
+                        let [r, g, b] = self.content_registry.material_color_by_token(material_id as u16);
                         let is_selected = i == self.hotbar_selected_index;
 
                         let (rect, _response) = ui.allocate_exact_size(
@@ -408,7 +408,7 @@ impl App {
                         );
 
                         // Material name (bottom center, small text)
-                        let name = materials::material_name(material_id);
+                        let name = self.content_registry.material_name_by_token(material_id as u16);
                         let label_pos = rect.center_bottom() + egui::vec2(0.0, -3.0);
                         ui.painter().text(
                             label_pos,
@@ -541,12 +541,13 @@ impl App {
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
-                            for (idx, mat) in materials::MATERIALS.iter().enumerate() {
+                            for (idx, entry) in self.content_registry.all_blocks_ordered().enumerate() {
                                 if idx > 0 && idx % items_per_row == 0 {
                                     ui.end_row();
                                 }
-                                let [r, g, b] = mat.color;
+                                let [r, g, b] = entry.color;
                                 let mat_color = egui::Color32::from_rgb(r, g, b);
+                                let token = entry.material_token as u8;
 
                                 let (rect, response) = ui.allocate_exact_size(
                                     egui::vec2(cell_size, cell_size),
@@ -566,7 +567,7 @@ impl App {
                                 if let (Some(sheet), Some(tex_id)) =
                                     (&self.material_icon_sheet, self.material_icons_texture_id)
                                 {
-                                    if let Some([u0, v0, u1, v1]) = sheet.uv_rect(mat.id) {
+                                    if let Some([u0, v0, u1, v1]) = sheet.uv_rect(token) {
                                         ui.painter().image(
                                             tex_id,
                                             icon_rect,
@@ -588,7 +589,7 @@ impl App {
                                 ui.painter().text(
                                     text_pos,
                                     egui::Align2::CENTER_BOTTOM,
-                                    mat.name,
+                                    entry.name,
                                     egui::FontId::proportional(10.0),
                                     egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
                                 );
@@ -596,7 +597,7 @@ impl App {
                                 ui.painter().text(
                                     category_pos,
                                     egui::Align2::CENTER_TOP,
-                                    mat.category.label(),
+                                    entry.category.label(),
                                     egui::FontId::proportional(8.0),
                                     egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220),
                                 );
@@ -611,7 +612,7 @@ impl App {
                                 }
 
                                 if response.clicked() {
-                                    *inventory_pick = Some(mat.id);
+                                    *inventory_pick = Some(token);
                                 }
                             }
                         });
@@ -822,7 +823,7 @@ impl App {
                 "Inventory: set hotbar slot {} to material {} ({})",
                 self.hotbar_selected_index + 1,
                 material_id,
-                materials::material_name(material_id),
+                self.content_registry.material_name_by_token(material_id as u16),
             );
         }
         if close_teleport {
@@ -986,10 +987,11 @@ impl App {
     }
 
     fn draw_waila_block(&self, ui: &mut egui::Ui, coords: [i32; 4], block: &polychora::shared::voxel::BlockData) {
-        let name = materials::block_name(block.namespace, block.block_type);
-        let category = materials::block_category_label(block.namespace, block.block_type);
-        let [r, g, b] = materials::block_color(block.namespace, block.block_type);
-        let material_id = polychora::materials::block_to_material_token(block.namespace, block.block_type) as u8;
+        let entry = self.content_registry.block_entry(block.namespace, block.block_type);
+        let name = entry.map(|e| e.name).unwrap_or("Unknown");
+        let category = entry.map(|e| e.category.label()).unwrap_or("Unknown");
+        let [r, g, b] = entry.map(|e| e.color).unwrap_or([128, 128, 128]);
+        let material_id = entry.map(|e| e.material_token as u8).unwrap_or(1);
 
         // Header row: icon + name + category + ID
         ui.horizontal(|ui| {
@@ -1056,17 +1058,15 @@ impl App {
         data: &[u8],
         distance: f32,
     ) {
-        use polychora::shared::entity_types;
-
-        let entry = entity_types::lookup(entity_type_ns, entity_type);
+        let entry = self.content_registry.entity_lookup(entity_type_ns, entity_type);
         let canonical_name = entry
             .map(|e| e.canonical_name)
             .unwrap_or("unknown");
         let category = entry
             .map(|e| format!("{:?}", e.category))
             .unwrap_or_else(|| "Unknown".to_string());
-        let base_material = entity_types::base_material_for(entity_type_ns, entity_type);
-        let [r, g, b] = materials::material_color(base_material);
+        let base_material_token = self.content_registry.entity_base_material_token(entity_type_ns, entity_type);
+        let [r, g, b] = self.content_registry.material_color_by_token(base_material_token);
 
         // Check if this is a player
         let player_name = self
@@ -1083,7 +1083,7 @@ impl App {
             if let (Some(sheet), Some(tex_id)) =
                 (&self.material_icon_sheet, self.material_icons_texture_id)
             {
-                if let Some([u0, v0, u1, v1]) = sheet.uv_rect(base_material) {
+                if let Some([u0, v0, u1, v1]) = sheet.uv_rect(base_material_token as u8) {
                     ui.painter().image(
                         tex_id,
                         icon_rect,

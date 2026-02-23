@@ -104,6 +104,7 @@ pub(super) fn build_singleplayer_runtime_config(
     args: &Args,
     world_file: PathBuf,
     world_generator: polychora::server::WorldGeneratorKind,
+    content_registry: std::sync::Arc<polychora::content_registry::ContentRegistry>,
 ) -> polychora::server::RuntimeConfig {
     polychora::server::RuntimeConfig {
         bind: "127.0.0.1:0".to_string(),
@@ -119,6 +120,7 @@ pub(super) fn build_singleplayer_runtime_config(
         procgen_keepout_from_existing_world: args.singleplayer_procgen_keepout_from_existing_world,
         procgen_keepout_padding_chunks: args.singleplayer_procgen_keepout_padding_chunks,
         world_seed: args.singleplayer_world_seed,
+        content_registry,
     }
 }
 
@@ -517,8 +519,9 @@ pub(super) fn build_place_preview_instance(
     time_s: f32,
     control_scheme: ControlScheme,
     aspect: f32,
+    content_registry: &polychora::content_registry::ContentRegistry,
 ) -> common::ModelInstance {
-    let material_token = polychora::materials::block_to_material_token(block.namespace, block.block_type);
+    let material_token = content_registry.block_material_token(block.namespace, block.block_type);
     let preview_material = material_token as u32 | PREVIEW_MATERIAL_FLAG;
     let (right, up, view_z, view_w) = match control_scheme {
         ControlScheme::IntuitiveUpright => camera.view_basis_upright(),

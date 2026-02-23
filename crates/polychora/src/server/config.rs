@@ -1,7 +1,8 @@
+use crate::content_registry::ContentRegistry;
 use crate::shared::protocol::{ClientMessage, ServerMessage};
 use crate::shared::voxel::{BaseWorldKind, BlockData};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WorldGeneratorKind {
@@ -37,10 +38,11 @@ pub struct RuntimeConfig {
     pub procgen_keepout_from_existing_world: bool,
     pub procgen_keepout_padding_chunks: i32,
     pub world_seed: u64,
+    pub content_registry: Arc<ContentRegistry>,
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
+impl RuntimeConfig {
+    pub fn with_defaults(content_registry: Arc<ContentRegistry>) -> Self {
         Self {
             bind: "0.0.0.0:4000".to_string(),
             world_file: PathBuf::from("saves/world"),
@@ -55,6 +57,7 @@ impl Default for RuntimeConfig {
             procgen_keepout_from_existing_world: true,
             procgen_keepout_padding_chunks: 1,
             world_seed: 1337,
+            content_registry,
         }
     }
 }

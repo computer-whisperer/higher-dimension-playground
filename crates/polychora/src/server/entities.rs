@@ -1,5 +1,6 @@
+use crate::content_registry::ContentRegistry;
 use crate::shared::entity_types::{
-    self, EntityCategory, ENTITY_TEST_CUBE, ENTITY_TEST_DRIFTER, ENTITY_TEST_ROTOR,
+    EntityCategory, ENTITY_TEST_CUBE, ENTITY_TEST_DRIFTER, ENTITY_TEST_ROTOR,
 };
 use crate::shared::protocol::{Entity, EntitySnapshot};
 use std::collections::HashMap;
@@ -41,16 +42,16 @@ pub struct EntityState {
 }
 
 impl EntityState {
-    fn category(&self) -> EntityCategory {
-        entity_types::category_for(self.entity.namespace, self.entity.entity_type)
+    fn category(&self, registry: &ContentRegistry) -> EntityCategory {
+        registry.entity_category(self.entity.namespace, self.entity.entity_type)
     }
 
     fn type_key(&self) -> (u32, u32) {
         (self.entity.namespace, self.entity.entity_type)
     }
 
-    fn simulate(&mut self, now_ms: u64) -> bool {
-        if self.category() != EntityCategory::Accent {
+    fn simulate(&mut self, now_ms: u64, registry: &ContentRegistry) -> bool {
+        if self.category(registry) != EntityCategory::Accent {
             return false;
         }
         let previous_position = self.entity.pose.position;
@@ -177,10 +178,10 @@ impl EntityStore {
         self.entities.remove(&entity_id).is_some()
     }
 
-    pub fn simulate(&mut self, now_ms: u64) -> Vec<EntityId> {
+    pub fn simulate(&mut self, now_ms: u64, registry: &ContentRegistry) -> Vec<EntityId> {
         let mut moved = Vec::new();
         for entity in self.entities.values_mut() {
-            if entity.simulate(now_ms) {
+            if entity.simulate(now_ms, registry) {
                 moved.push(entity.entity_id);
             }
         }

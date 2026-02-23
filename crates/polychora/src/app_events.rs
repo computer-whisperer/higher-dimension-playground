@@ -60,6 +60,7 @@ impl ApplicationHandler for App {
                 self.device.clone(),
                 self.queue.clone(),
                 self.instance.clone(),
+                &self.content_registry,
             ) {
                 eprintln!(
                     "Generated material icon sprite sheet ({}x{}) in {:.2}s",

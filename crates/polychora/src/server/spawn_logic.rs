@@ -1,4 +1,5 @@
 use super::*;
+use crate::content_registry::{ContentRegistry, EntityEntry};
 
 pub(super) fn sanitize_player_name(name: &str, client_id: u64) -> String {
     let trimmed = name.trim();
@@ -29,15 +30,16 @@ pub(super) fn parse_spawn_vec4(args: &[&str]) -> Option<[f32; 4]> {
     Some([x, y, z, w])
 }
 
-pub(super) fn spawn_usage_string() -> String {
-    let names = entity_types::spawnable_names().join("|");
+pub(super) fn spawn_usage_string(registry: &ContentRegistry) -> String {
+    let names = registry.spawnable_entity_names().join("|");
     format!("Usage: /spawn <{names}> [x y z w]")
 }
 
-pub(super) fn entity_type_entry_for_token(
+pub(super) fn entity_type_entry_for_token<'a>(
     token: &str,
-) -> Option<&'static entity_types::EntityTypeEntry> {
-    entity_types::lookup_by_name(token).filter(|entry| entry.is_spawnable())
+    registry: &'a ContentRegistry,
+) -> Option<&'a EntityEntry> {
+    registry.entity_lookup_by_name(token).filter(|entry| entry.is_spawnable())
 }
 
 pub(super) fn default_spawn_pose_for_client(

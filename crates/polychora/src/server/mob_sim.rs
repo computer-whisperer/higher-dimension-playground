@@ -1224,7 +1224,7 @@ fn simulate_mobs(
         };
         let pos = snapshot.entity.pose.position;
         let scl = snapshot.entity.pose.scale;
-        let locomotion = entity_types::mob_archetype_defaults(mob.archetype).locomotion;
+        let locomotion = state.content_registry.mob_archetype_defaults(mob.archetype).locomotion;
         let nearest_target = nearest_position_to(pos, &player_positions);
         let navigation_target = match mob.archetype {
             MobArchetype::Seeker => nearest_target,
@@ -1446,7 +1446,7 @@ pub(super) fn tick_entity_simulation_window(
     let mut queued_player_modifiers = Vec::new();
     let mut sim_steps = 0usize;
     while *next_sim_ms <= now_ms && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
-        state.entity_store.simulate(*next_sim_ms);
+        state.entity_store.simulate(*next_sim_ms, &state.content_registry);
         let (mut step_explosions, mut step_player_modifiers) = simulate_mobs(state, *next_sim_ms);
         queued_explosions.append(&mut step_explosions);
         queued_player_modifiers.append(&mut step_player_modifiers);
@@ -1462,6 +1462,14 @@ pub(super) fn tick_entity_simulation_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use crate::content_registry::ContentRegistry;
+
+    fn test_registry() -> Arc<ContentRegistry> {
+        let mut registry = ContentRegistry::new();
+        crate::builtin_content::register_builtin_content(&mut registry);
+        Arc::new(registry)
+    }
 
     fn test_server_state_with_world() -> ServerState {
         let world = ServerWorldOverlay::from_chunk_payloads(
@@ -1470,8 +1478,11 @@ mod tests {
             0,
             false,
             HashSet::new(),
+            test_registry(),
         );
-        ServerState::new(world, 1, false, false, Instant::now())
+        let mut registry = crate::content_registry::ContentRegistry::new();
+        crate::builtin_content::register_builtin_content(&mut registry);
+        ServerState::new(world, 1, false, false, Instant::now(), Arc::new(registry))
     }
 
     fn set_solid_voxel(state: &mut ServerState, x: i32, y: i32, z: i32, w: i32) {

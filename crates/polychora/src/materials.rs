@@ -2,6 +2,10 @@
 // Named constants and the `block_to_material_token` function form a registry;
 // individual items may not be referenced directly but exist for clarity.
 #![allow(dead_code)]
+#![allow(deprecated)] // Internal uses of deprecated functions within the compat shim
+
+// Re-export BlockCategory as MaterialCategory for backward compatibility.
+pub use polychora_plugin_api::block::BlockCategory as MaterialCategory;
 
 // Namespace IDs
 pub const NAMESPACE_POLYCHORA: u32 = 0;
@@ -87,6 +91,7 @@ pub const MATERIAL_TOKEN_TEXTURE_POOL_FLAG: u16 = 1 << 15;
 /// material ID (0-68).  Unknown blocks fall back to material 1 (Red).
 ///
 /// Encoding: bit 15 = mode (0 = procedural, 1 = texture-pool), bits [14:0] = index.
+#[deprecated(note = "use ContentRegistry::block_material_token() instead")]
 pub fn block_to_material_token(namespace: u32, block_type: u32) -> u16 {
     if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
         block_type as u16
@@ -95,43 +100,8 @@ pub fn block_to_material_token(namespace: u32, block_type: u32) -> u16 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum MaterialCategory {
-    Basic,    // Simple colored blocks
-    Natural,  // Dirt, stone, sand, gravel
-    Wood,     // Planks, logs
-    Ore,      // Ores and minerals
-    Building, // Bricks, concrete, sandstone
-    Glass,    // Transparent/translucent
-    Light,    // Emissive/light sources
-    Special,  // Mirrors, animated, effects
-}
-
-impl MaterialCategory {
-    pub fn label(self) -> &'static str {
-        match self {
-            MaterialCategory::Basic => "Basic",
-            MaterialCategory::Natural => "Natural",
-            MaterialCategory::Wood => "Wood",
-            MaterialCategory::Ore => "Ore",
-            MaterialCategory::Building => "Building",
-            MaterialCategory::Glass => "Glass",
-            MaterialCategory::Light => "Light",
-            MaterialCategory::Special => "Special",
-        }
-    }
-
-    pub const ALL: [MaterialCategory; 8] = [
-        MaterialCategory::Basic,
-        MaterialCategory::Natural,
-        MaterialCategory::Wood,
-        MaterialCategory::Ore,
-        MaterialCategory::Building,
-        MaterialCategory::Glass,
-        MaterialCategory::Light,
-        MaterialCategory::Special,
-    ];
-}
+// MaterialCategory is now re-exported from polychora_plugin_api::block::BlockCategory above.
+// The ALL constant and label() method are defined there identically.
 
 pub struct MaterialInfo {
     pub id: u8,
@@ -567,6 +537,7 @@ pub const MATERIALS: &[MaterialInfo] = &[
 ];
 
 /// Get the name of a material by ID
+#[deprecated(note = "use ContentRegistry::material_name_by_token() instead")]
 pub fn material_name(id: u8) -> &'static str {
     MATERIALS
         .iter()
@@ -576,6 +547,7 @@ pub fn material_name(id: u8) -> &'static str {
 }
 
 /// Get the category label of a material by ID
+#[deprecated(note = "use ContentRegistry::material_category_label_by_token() instead")]
 pub fn material_category_label(id: u8) -> &'static str {
     MATERIALS
         .iter()
@@ -585,6 +557,7 @@ pub fn material_category_label(id: u8) -> &'static str {
 }
 
 /// Get the color of a material by ID (RGB)
+#[deprecated(note = "use ContentRegistry::material_color_by_token() instead")]
 pub fn material_color(id: u8) -> [u8; 3] {
     MATERIALS
         .iter()
@@ -594,6 +567,7 @@ pub fn material_color(id: u8) -> [u8; 3] {
 }
 
 /// Get the name of a block by namespace and block type.
+#[deprecated(note = "use ContentRegistry::block_name() instead")]
 pub fn block_name(namespace: u32, block_type: u32) -> &'static str {
     if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
         material_name(block_type as u8)
@@ -603,6 +577,7 @@ pub fn block_name(namespace: u32, block_type: u32) -> &'static str {
 }
 
 /// Get the category label of a block by namespace and block type.
+#[deprecated(note = "use ContentRegistry::block_category_label() instead")]
 pub fn block_category_label(namespace: u32, block_type: u32) -> &'static str {
     if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
         material_category_label(block_type as u8)
@@ -612,6 +587,7 @@ pub fn block_category_label(namespace: u32, block_type: u32) -> &'static str {
 }
 
 /// Get the color of a block by namespace and block type (RGB).
+#[deprecated(note = "use ContentRegistry::block_color() instead")]
 pub fn block_color(namespace: u32, block_type: u32) -> [u8; 3] {
     if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
         material_color(block_type as u8)

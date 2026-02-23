@@ -359,6 +359,7 @@ fn zero_dense_chunk_materials() -> Vec<u16> {
 
 fn dense_materials_from_resolved_payload(
     resolved: &crate::shared::chunk_payload::ResolvedChunkPayload,
+    registry: &crate::content_registry::ContentRegistry,
 ) -> Vec<u16> {
     let Ok(palette_indices) = resolved.payload.dense_materials() else {
         return zero_dense_chunk_materials();
@@ -374,7 +375,7 @@ fn dense_materials_from_resolved_payload(
                 .get(idx as usize)
                 .cloned()
                 .unwrap_or(voxel::BlockData::AIR);
-            crate::materials::block_to_material_token(
+            registry.block_material_token(
                 block.namespace,
                 block.block_type,
             )
@@ -385,6 +386,7 @@ fn dense_materials_from_resolved_payload(
 fn dense_materials_from_region_core_chunk(
     core: &crate::shared::region_tree::RegionTreeCore,
     chunk_key: [i32; 4],
+    registry: &crate::content_registry::ContentRegistry,
 ) -> Vec<u16> {
     let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
     let chunks = crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds(
@@ -393,7 +395,7 @@ fn dense_materials_from_region_core_chunk(
     );
     for (key, resolved) in chunks {
         if key == chunk_key {
-            return dense_materials_from_resolved_payload(&resolved);
+            return dense_materials_from_resolved_payload(&resolved, registry);
         }
     }
     zero_dense_chunk_materials()
@@ -420,7 +422,8 @@ fn handle_world_chunk_sample_request(
     let dense_materials = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let subtree = guard.query_world_subtree(chunk_bounds);
-        dense_materials_from_region_core_chunk(subtree.as_ref(), chunk)
+        let registry = guard.content_registry.clone();
+        dense_materials_from_region_core_chunk(subtree.as_ref(), chunk, &registry)
     };
 
     send_to_client(
@@ -1033,7 +1036,11 @@ fn spawn_entity_from_request(
     if (namespace, entity_type) == ENTITY_PLAYER_AVATAR {
         return Err("player entities are server-managed and cannot be spawned".to_string());
     }
-    let Some(entry) = entity_types::lookup(namespace, entity_type) else {
+    let registry = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard.content_registry.clone()
+    };
+    let Some(entry) = registry.entity_lookup(namespace, entity_type) else {
         return Err(format!(
             "entity type ({namespace}, {entity_type}) is not registered"
         ));
@@ -1120,11 +1127,15 @@ fn handle_console_spawn_command(
     args: &[&str],
     start: Instant,
 ) -> Result<(), String> {
+    let registry = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard.content_registry.clone()
+    };
     if args.is_empty() {
-        return Err(spawn_usage_string());
+        return Err(spawn_usage_string(&registry));
     }
-    let Some(entry) = entity_type_entry_for_token(args[0]) else {
-        let available = entity_types::spawnable_names().join(", ");
+    let Some(entry) = entity_type_entry_for_token(args[0], &registry) else {
+        let available = registry.spawnable_entity_names().join(", ");
         return Err(format!(
             "unknown spawn kind '{}'; available kinds: {available}",
             args[0]
@@ -1135,7 +1146,7 @@ fn handle_console_spawn_command(
         let guard = state.lock().expect("server state lock poisoned");
         default_spawn_pose_for_client(&guard, client_id)
     };
-    let parse_usage = || spawn_usage_string();
+    let parse_usage = || spawn_usage_string(&registry);
     let position = match args.len() {
         1 => default_position,
         5 => {
@@ -1455,7 +1466,7 @@ fn spawn_mob_entity(
     guard
         .entity_store
         .spawn(allocated_id, entity, now_ms);
-    let defaults = entity_types::mob_archetype_defaults(archetype);
+    let defaults = guard.content_registry.mob_archetype_defaults(archetype);
     let phase_offset = persisted_mob
         .as_ref()
         .map(|mob| mob.phase_offset)
