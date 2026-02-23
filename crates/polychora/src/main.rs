@@ -61,7 +61,6 @@ const MOUSE_SENSITIVITY: f32 = 0.002;
 const BLOCK_EDIT_REACH_DEFAULT: f32 = 8.0;
 const BLOCK_EDIT_REACH_MIN: f32 = 1.0;
 const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
-const BLOCK_EDIT_PLACE_MATERIAL_DEFAULT: u8 = 3;
 const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
 const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
 
@@ -83,9 +82,14 @@ fn default_hotbar_slots() -> [Option<polychora::shared::protocol::ItemStack>; 9]
 fn block_material_from_slot(slot: &Option<polychora::shared::protocol::ItemStack>) -> u8 {
     slot.as_ref()
         .and_then(|stack| stack.block_type_key())
-        .map(|(_ns, bt)| bt as u8)
-        .unwrap_or(BLOCK_EDIT_PLACE_MATERIAL_DEFAULT)
-        .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
+        .map(|(_ns, bt)| (bt as u8).clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX))
+        .unwrap_or(3)
+}
+
+fn block_data_from_slot(slot: &Option<polychora::shared::protocol::ItemStack>) -> polychora::shared::voxel::BlockData {
+    slot.as_ref()
+        .and_then(|stack| stack.to_block_data())
+        .unwrap_or_else(|| polychora::shared::voxel::BlockData::simple(0, 3))
 }
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
 const FOOTSTEP_DISTANCE_WALK: f32 = 3.50;
@@ -1057,7 +1061,7 @@ fn main() {
         focal_length_zw: 1.0,
         zw_angle_color_shift_enabled: initial_zw_angle_color_shift_enabled,
         zw_angle_color_shift_strength: initial_zw_angle_color_shift_strength,
-        selected_block_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
+        selected_block: polychora::shared::voxel::BlockData::simple(0, 3),
         world_file,
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
@@ -1416,7 +1420,7 @@ struct App {
     focal_length_zw: f32,
     zw_angle_color_shift_enabled: bool,
     zw_angle_color_shift_strength: f32,
-    selected_block_material: u8, // cached from hotbar_slots; derived, not persisted
+    selected_block: polychora::shared::voxel::BlockData, // cached from hotbar_slots; derived, not persisted
     world_file: PathBuf,
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
@@ -1577,7 +1581,7 @@ struct RemoteEntityState {
 enum WailaTarget {
     Block {
         coords: [i32; 4],
-        material_id: u8,
+        block: polychora::shared::voxel::BlockData,
     },
     Entity {
         entity_id: u64,

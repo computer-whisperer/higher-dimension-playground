@@ -1,6 +1,6 @@
 pub mod world;
 
-pub use polychora::shared::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
+pub use polychora::shared::voxel::{ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
 
 /// The 8 cubic cells (3-faces) of a tesseract, with their cell IDs matching
 /// the order from `Hypercube::<4>::generate_k_faces_3()`.

@@ -1,8 +1,8 @@
 use super::*;
 use crate::shared::chunk_payload::ResolvedChunkPayload;
-use crate::materials::block_to_material_appearance;
+use crate::shared::entity_types::EntityCategory;
 use crate::shared::region_tree::{chunk_key_from_chunk_pos, RegionChunkTree, RegionTreeCore};
-use crate::shared::voxel::{BlockData, CHUNK_VOLUME};
+use crate::shared::voxel::BlockData;
 
 pub(super) struct ServerState {
     pub(super) next_object_id: u64,
@@ -84,10 +84,9 @@ impl ServerState {
     pub(super) fn mob_nav_cached_chunk_at(
         &self,
         chunk_pos: ChunkPos,
-    ) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    ) -> Option<ResolvedChunkPayload> {
         self.mob_nav_chunk_cache
             .chunk_payload(chunk_key_from_chunk_pos(chunk_pos))
-            .and_then(dense_chunk_from_payload)
     }
 
     pub(super) fn evict_far_mob_nav_cache_chunks(
@@ -116,7 +115,7 @@ impl ServerState {
             let Some(snapshot) = self.entity_store.snapshot(player.entity_id) else {
                 continue;
             };
-            let center = world_chunk_from_position(snapshot.position);
+            let center = world_chunk_from_position(snapshot.entity.pose.position);
             let player_keep = Aabb4i::new(
                 [
                     center[0] - radius,
@@ -152,7 +151,7 @@ impl ServerState {
         self.world.non_empty_chunk_count()
     }
 
-    pub(super) fn world_chunk_at(&self, chunk_pos: ChunkPos) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    pub(super) fn world_chunk_at(&self, chunk_pos: ChunkPos) -> Option<ResolvedChunkPayload> {
         self.world.chunk_at(chunk_pos)
     }
 
@@ -160,7 +159,7 @@ impl ServerState {
         &self,
         chunk_pos: ChunkPos,
         preserve_explicit_empty_chunk: bool,
-    ) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    ) -> Option<ResolvedChunkPayload> {
         self.world
             .effective_chunk(chunk_pos, preserve_explicit_empty_chunk)
     }
@@ -192,24 +191,6 @@ impl ServerState {
     ) -> Option<Aabb4i> {
         self.client_world_interest_bounds.insert(client_id, bounds)
     }
-}
-
-fn dense_chunk_from_payload(resolved: ResolvedChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
-    let materials = resolved.payload.dense_materials().ok()?;
-    if materials.len() != CHUNK_VOLUME {
-        return None;
-    }
-    let mut chunk = [VoxelType::AIR; CHUNK_VOLUME];
-    for (idx, palette_idx) in materials.into_iter().enumerate() {
-        let block = resolved
-            .block_palette
-            .get(palette_idx as usize)
-            .cloned()
-            .unwrap_or(BlockData::AIR);
-        let mat = block_to_material_appearance(block.namespace, block.block_type);
-        chunk[idx] = VoxelType(mat);
-    }
-    Some(chunk)
 }
 
 fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
@@ -257,7 +238,7 @@ pub(super) fn allocate_or_reserve_server_object_id(
 pub(super) fn upsert_entity_record(
     state: &mut ServerState,
     entity_id: u64,
-    class: EntityClass,
+    category: EntityCategory,
     owner_client_id: Option<u64>,
     display_name: Option<String>,
     persistent: bool,
@@ -269,7 +250,7 @@ pub(super) fn upsert_entity_record(
         .entry(entity_id)
         .or_insert(EntityRecord {
             entity_id,
-            class,
+            category,
             owner_client_id,
             display_name: display_name_for_insert,
             persistent,
@@ -277,10 +258,10 @@ pub(super) fn upsert_entity_record(
             lifecycle: EntityLifecycle::Live,
             despawned_at_ms: None,
         });
-    record.class = class;
+    record.category = category;
     record.owner_client_id = owner_client_id;
     record.persistent = persistent;
-    if display_name.is_some() || class != EntityClass::Player {
+    if display_name.is_some() || category != EntityCategory::Player {
         record.display_name = display_name;
     }
     if record.lifecycle == EntityLifecycle::Despawned {
@@ -317,14 +298,16 @@ pub(super) fn summarize_entity_records(state: &ServerState) -> EntityRecordSumma
                 if record.owner_client_id.is_some() {
                     summary.live_owned = summary.live_owned.saturating_add(1);
                 }
-                match record.class {
-                    EntityClass::Player => {
+                match record.category {
+                    EntityCategory::Player => {
                         summary.live_players = summary.live_players.saturating_add(1)
                     }
-                    EntityClass::Accent => {
+                    EntityCategory::Accent => {
                         summary.live_accents = summary.live_accents.saturating_add(1)
                     }
-                    EntityClass::Mob => summary.live_mobs = summary.live_mobs.saturating_add(1),
+                    EntityCategory::Mob => {
+                        summary.live_mobs = summary.live_mobs.saturating_add(1)
+                    }
                 }
             }
             EntityLifecycle::Despawned => {

@@ -20,34 +20,40 @@ impl App {
     }
 
     pub(super) fn cycle_hotbar_material_prev(&mut self) {
-        let slot = &mut self.hotbar_slots[self.hotbar_selected_index];
-        *slot = if *slot <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
+        use polychora::shared::protocol::ItemStack;
+        let current = block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+        let next = if current <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
             BLOCK_EDIT_PLACE_MATERIAL_MAX
         } else {
-            slot.saturating_sub(1)
+            current.saturating_sub(1)
         };
-        self.place_material = *slot;
+        self.hotbar_slots[self.hotbar_selected_index] =
+            Some(ItemStack::block(0, next as u32, 1));
+        self.selected_block = block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
         eprintln!(
             "Hotbar slot {} material: {} ({})",
             self.hotbar_selected_index + 1,
-            self.place_material,
-            materials::material_name(self.place_material),
+            self.selected_block.block_type,
+            materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
         );
     }
 
     pub(super) fn cycle_hotbar_material_next(&mut self) {
-        let slot = &mut self.hotbar_slots[self.hotbar_selected_index];
-        *slot = if *slot >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
+        use polychora::shared::protocol::ItemStack;
+        let current = block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+        let next = if current >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
             BLOCK_EDIT_PLACE_MATERIAL_MIN
         } else {
-            slot.saturating_add(1)
+            current.saturating_add(1)
         };
-        self.place_material = *slot;
+        self.hotbar_slots[self.hotbar_selected_index] =
+            Some(ItemStack::block(0, next as u32, 1));
+        self.selected_block = block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
         eprintln!(
             "Hotbar slot {} material: {} ({})",
             self.hotbar_selected_index + 1,
-            self.place_material,
-            materials::material_name(self.place_material),
+            self.selected_block.block_type,
+            materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
         );
     }
 

@@ -81,36 +81,6 @@ impl Scene {
         };
         self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
 
-        let mut stale_positions = Vec::<ChunkPos>::new();
-        for &pos in self.world_chunks.keys() {
-            if changed_bounds.contains_chunk(chunk_key_from_chunk_pos(pos)) {
-                stale_positions.push(pos);
-            }
-        }
-        let mut invalidated_cached_chunks = 0usize;
-        let mut queued_updates = 0usize;
-        for pos in stale_positions {
-            if self.world_chunks.remove(&pos).is_some() {
-                invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
-            }
-            if self.world_queue_chunk_update(pos) {
-                queued_updates = queued_updates.saturating_add(1);
-            }
-        }
-        let orphaned_after_splice: Vec<ChunkPos> = self
-            .world_chunks
-            .keys()
-            .copied()
-            .filter(|pos| !self.world_tree.has_chunk(chunk_key_from_chunk_pos(*pos)))
-            .collect();
-        for pos in orphaned_after_splice {
-            if self.world_chunks.remove(&pos).is_some() {
-                invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
-            }
-            if self.world_queue_chunk_update(pos) {
-                queued_updates = queued_updates.saturating_add(1);
-            }
-        }
         self.mark_voxel_scene_region_dirty(changed_bounds);
         if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE
             && desired_non_empty > 0
@@ -126,8 +96,8 @@ impl Scene {
             changed_chunks: 1,
             previous_total_chunks,
             desired_total_chunks,
-            invalidated_cached_chunks,
-            queued_updates,
+            invalidated_cached_chunks: 0,
+            queued_updates: 0,
             collect_previous_ms,
             splice_ms,
             collect_desired_ms,
@@ -191,45 +161,14 @@ impl Scene {
         };
         self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
 
-        let mut stale_positions = Vec::<ChunkPos>::new();
-        for &pos in self.world_chunks.keys() {
-            if changed_bounds.contains_chunk(chunk_key_from_chunk_pos(pos)) {
-                stale_positions.push(pos);
-            }
-        }
-        let mut invalidated_cached_chunks = 0usize;
-        let mut queued_updates = 0usize;
-        for pos in stale_positions {
-            if self.world_chunks.remove(&pos).is_some() {
-                invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
-            }
-            if self.world_queue_chunk_update(pos) {
-                queued_updates = queued_updates.saturating_add(1);
-            }
-        }
-        let orphaned_after_splice: Vec<ChunkPos> = self
-            .world_chunks
-            .keys()
-            .copied()
-            .filter(|pos| !self.world_tree.has_chunk(chunk_key_from_chunk_pos(*pos)))
-            .collect();
-        for pos in orphaned_after_splice {
-            if self.world_chunks.remove(&pos).is_some() {
-                invalidated_cached_chunks = invalidated_cached_chunks.saturating_add(1);
-            }
-            if self.world_queue_chunk_update(pos) {
-                queued_updates = queued_updates.saturating_add(1);
-            }
-        }
-
         self.mark_voxel_scene_region_dirty(changed_bounds);
         if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE {
             self.voxel_pending_render_bvh_rebuild = true;
         }
         RegionPatchStats {
             changed_chunks: 1,
-            invalidated_cached_chunks,
-            queued_updates,
+            invalidated_cached_chunks: 0,
+            queued_updates: 0,
             collect_previous_ms,
             splice_ms,
             ..RegionPatchStats::default()

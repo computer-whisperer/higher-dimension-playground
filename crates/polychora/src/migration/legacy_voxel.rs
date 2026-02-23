@@ -1,14 +1,31 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::shared::voxel::{
-    world_to_chunk, BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME,
+    world_to_chunk, BaseWorldKind, ChunkPos, CHUNK_SIZE, CHUNK_VOLUME,
 };
+
+/// Legacy voxel type used by the old save format (v1/v2 .v4dw files).
+/// Wraps a raw u8 material ID; only used during migration.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub struct LegacyVoxel(pub u8);
+
+impl LegacyVoxel {
+    pub const AIR: Self = Self(0);
+    #[inline]
+    pub fn is_air(self) -> bool {
+        self.0 == 0
+    }
+    #[inline]
+    pub fn is_solid(self) -> bool {
+        self.0 != 0
+    }
+}
 
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 
 #[derive(Clone, Debug)]
 pub struct Chunk {
-    pub voxels: Box<[VoxelType; CHUNK_VOLUME]>,
+    pub voxels: Box<[LegacyVoxel; CHUNK_VOLUME]>,
     pub solid_count: u32,
     pub dirty: bool,
 }
@@ -16,13 +33,13 @@ pub struct Chunk {
 impl Chunk {
     pub fn new() -> Self {
         Self {
-            voxels: Box::new([VoxelType::AIR; CHUNK_VOLUME]),
+            voxels: Box::new([LegacyVoxel::AIR; CHUNK_VOLUME]),
             solid_count: 0,
             dirty: true,
         }
     }
 
-    pub fn new_filled(voxel: VoxelType) -> Self {
+    pub fn new_filled(voxel: LegacyVoxel) -> Self {
         let solid_count = if voxel.is_solid() {
             CHUNK_VOLUME as u32
         } else {
@@ -41,11 +58,11 @@ impl Chunk {
         w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE + y * CHUNK_SIZE + x
     }
 
-    pub fn get(&self, x: usize, y: usize, z: usize, w: usize) -> VoxelType {
+    pub fn get(&self, x: usize, y: usize, z: usize, w: usize) -> LegacyVoxel {
         self.voxels[Self::local_index(x, y, z, w)]
     }
 
-    pub fn set(&mut self, x: usize, y: usize, z: usize, w: usize, v: VoxelType) {
+    pub fn set(&mut self, x: usize, y: usize, z: usize, w: usize, v: LegacyVoxel) {
         let idx = Self::local_index(x, y, z, w);
         let old = self.voxels[idx];
         if old == v {
@@ -81,10 +98,10 @@ impl RegionChunkWorld {
     }
 
     pub fn new_with_base(base_kind: BaseWorldKind) -> Self {
-        let flat_floor_chunk = match base_kind {
+        let flat_floor_chunk = match &base_kind {
             BaseWorldKind::FlatFloor { material }
             | BaseWorldKind::MassivePlatforms { material } => {
-                Self::build_flat_floor_chunk(material)
+                Self::build_flat_floor_chunk(LegacyVoxel(material.block_type as u8))
             }
             BaseWorldKind::Empty => Chunk::new(),
         };
@@ -104,7 +121,7 @@ impl RegionChunkWorld {
         }
     }
 
-    fn build_flat_floor_chunk(material: VoxelType) -> Chunk {
+    fn build_flat_floor_chunk(material: LegacyVoxel) -> Chunk {
         let mut chunk = Chunk::new();
         if material.is_air() {
             chunk.dirty = false;
@@ -137,10 +154,10 @@ impl RegionChunkWorld {
         }
     }
 
-    fn base_voxel_at(&self, pos: ChunkPos, idx: usize) -> VoxelType {
+    fn base_voxel_at(&self, pos: ChunkPos, idx: usize) -> LegacyVoxel {
         self.base_chunk_for_pos(pos)
             .map(|chunk| chunk.voxels[idx])
-            .unwrap_or(VoxelType::AIR)
+            .unwrap_or(LegacyVoxel::AIR)
     }
 
     fn clone_base_chunk_or_empty(&self, pos: ChunkPos) -> Chunk {
@@ -158,7 +175,7 @@ impl RegionChunkWorld {
         }
     }
 
-    fn set_chunk_voxel(chunk: &mut Chunk, idx: usize, v: VoxelType) {
+    fn set_chunk_voxel(chunk: &mut Chunk, idx: usize, v: LegacyVoxel) {
         let old = chunk.voxels[idx];
         if old == v {
             return;
@@ -173,7 +190,7 @@ impl RegionChunkWorld {
     }
 
     pub fn base_kind(&self) -> BaseWorldKind {
-        self.base_kind
+        self.base_kind.clone()
     }
 
     pub fn insert_chunk(&mut self, pos: ChunkPos, mut chunk: Chunk) {
@@ -187,7 +204,7 @@ impl RegionChunkWorld {
         self.queue_chunk_update(pos);
     }
 
-    pub fn set_voxel(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, v: VoxelType) {
+    pub fn set_voxel(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, v: LegacyVoxel) {
         let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
         if self.chunks.contains_key(&cp) {
             {
@@ -247,7 +264,7 @@ impl RegionChunkWorld {
         }
     }
 
-    pub fn get_voxel(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> VoxelType {
+    pub fn get_voxel(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> LegacyVoxel {
         let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
         match self.chunks.get(&cp) {
             Some(chunk) => chunk.voxels[idx],

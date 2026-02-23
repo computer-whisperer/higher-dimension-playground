@@ -3,7 +3,7 @@
 // Namespace IDs
 pub const NAMESPACE_POLYCHORA: u32 = 0;
 
-// Block type IDs (polychora namespace, matching legacy VoxelType u8 values)
+// Block type IDs (polychora namespace, matching legacy material u8 values)
 pub const BLOCK_AIR: u32 = 0;
 pub const BLOCK_RED: u32 = 1;
 pub const BLOCK_ORANGE: u32 = 2;
@@ -74,13 +74,19 @@ pub const BLOCK_TESSERACT_WEAVE: u32 = 66;
 pub const BLOCK_EVENTIDE_ALLOY: u32 = 67;
 pub const BLOCK_BEACON_MATRIX: u32 = 68;
 
-/// Resolve (namespace, block_type) to a GPU material appearance index (u8).
+/// Bit 15 of a material token: when set, bits [14:0] index into the GPU texture
+/// pool instead of the procedural `sampleMaterial()` switch.
+pub const MATERIAL_TOKEN_TEXTURE_POOL_FLAG: u16 = 1 << 15;
+
+/// Resolve (namespace, block_type) to a GPU material token (u16).
 ///
-/// For the core polychora namespace, block_type maps 1:1 to the legacy material ID.
-/// Unknown blocks fall back to material 1 (Red).
-pub fn block_to_material_appearance(namespace: u32, block_type: u32) -> u8 {
+/// For the core polychora namespace, block_type maps 1:1 to the legacy procedural
+/// material ID (0-68).  Unknown blocks fall back to material 1 (Red).
+///
+/// Encoding: bit 15 = mode (0 = procedural, 1 = texture-pool), bits [14:0] = index.
+pub fn block_to_material_token(namespace: u32, block_type: u32) -> u16 {
     if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
-        block_type as u8
+        block_type as u16
     } else {
         1 // fallback to Red
     }
@@ -582,6 +588,33 @@ pub fn material_color(id: u8) -> [u8; 3] {
         .find(|m| m.id == id)
         .map(|m| m.color)
         .unwrap_or([128, 128, 128])
+}
+
+/// Get the name of a block by namespace and block type.
+pub fn block_name(namespace: u32, block_type: u32) -> &'static str {
+    if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
+        material_name(block_type as u8)
+    } else {
+        "Unknown"
+    }
+}
+
+/// Get the category label of a block by namespace and block type.
+pub fn block_category_label(namespace: u32, block_type: u32) -> &'static str {
+    if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
+        material_category_label(block_type as u8)
+    } else {
+        "Unknown"
+    }
+}
+
+/// Get the color of a block by namespace and block type (RGB).
+pub fn block_color(namespace: u32, block_type: u32) -> [u8; 3] {
+    if namespace == NAMESPACE_POLYCHORA && block_type <= MAX_MATERIAL_ID as u32 {
+        material_color(block_type as u8)
+    } else {
+        [128, 128, 128]
+    }
 }
 
 #[cfg(test)]

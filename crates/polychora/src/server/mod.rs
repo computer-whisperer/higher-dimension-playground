@@ -21,26 +21,27 @@ use self::runtime_net::{
     handle_message, remove_client, spawn_client_thread, start_broadcast_thread,
 };
 use self::spawn_logic::{
-    default_spawn_pose_for_client, env_flag_enabled, mob_archetype_defaults,
-    parse_spawn_material_id, parse_spawn_vec4, phase_spider_next_phase_deadline,
-    sanitize_player_name, spawn_usage_string, spawnable_entity_spec_for_kind,
-    spawnable_entity_spec_for_token,
+    default_spawn_pose_for_client, entity_type_entry_for_token, env_flag_enabled,
+    parse_spawn_vec4, phase_spider_next_phase_deadline,
+    sanitize_player_name, spawn_usage_string,
 };
 use self::types::{
     ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityLifecycle, EntityRecord,
-    EntityRecordSummary, LiveReplicationFrame, MobArchetype, MobArchetypeDefaults,
-    MobLocomotionMode, MobNavCell, MobNavPathResult, MobNavigationState, MobState,
-    PersistedMobEntry, PlayerState, QueuedExplosionEvent, QueuedPlayerMovementModifier,
-    SpawnableEntitySpec, SPAWNABLE_ENTITY_SPECS,
+    EntityRecordSummary, LiveReplicationFrame, MobNavCell, MobNavPathResult,
+    MobNavigationState, MobState, PersistedMobEntry, PlayerState, QueuedExplosionEvent,
+    QueuedPlayerMovementModifier,
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
-use crate::materials;
+use crate::shared::entity_types::{
+    self, EntityCategory, MobArchetype, MobLocomotionMode,
+    ENTITY_PLAYER_AVATAR,
+};
 use crate::shared::protocol::{
-    ClientMessage, EntityClass, EntityKind, EntitySnapshot, EntityTransform, ServerMessage,
-    WorldBounds, WorldSummary,
+    ClientMessage, Entity, EntityPose, EntitySnapshot, EntityTransform, ServerMessage, WorldBounds,
+    WorldSummary,
 };
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{self, BlockData, ChunkPos, VoxelType, CHUNK_SIZE};
+use crate::shared::voxel::{self, BlockData, ChunkPos, CHUNK_SIZE};
 use std::cmp::Reverse;
 use std::collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet};
 use std::io::{self, BufWriter, Read, Write};
@@ -93,21 +94,16 @@ fn entity_snapshot_from_record(
     record: &EntityRecord,
 ) -> Option<(EntitySnapshot, [i32; 4])> {
     let mut snapshot = state.entity_store.snapshot(record.entity_id)?;
-    snapshot.class = record.class;
     snapshot.owner_client_id = record.owner_client_id;
     snapshot.display_name = record.display_name.clone();
-    let chunk = world_chunk_from_position(snapshot.position);
+    let chunk = world_chunk_from_position(snapshot.entity.pose.position);
     Some((snapshot, chunk))
 }
 
 fn entity_transform_from_snapshot(snapshot: &EntitySnapshot) -> EntityTransform {
     EntityTransform {
         entity_id: snapshot.entity_id,
-        position: snapshot.position,
-        orientation: snapshot.orientation,
-        velocity: snapshot.velocity,
-        scale: snapshot.scale,
-        material: snapshot.material,
+        pose: snapshot.entity.pose.clone(),
         last_update_ms: snapshot.last_update_ms,
     }
 }
@@ -122,8 +118,8 @@ fn collect_live_replication_frame(state: &ServerState) -> LiveReplicationFrame {
 
     let mut frame = LiveReplicationFrame::default();
     for record in live_records {
-        match record.class {
-            EntityClass::Player => {
+        match record.category {
+            EntityCategory::Player => {
                 let Some(client_id) = record.owner_client_id else {
                     continue;
                 };
@@ -139,7 +135,7 @@ fn collect_live_replication_frame(state: &ServerState) -> LiveReplicationFrame {
                 frame.player_entities.push(snapshot);
                 frame.player_chunks.push((client_id, chunk));
             }
-            EntityClass::Accent | EntityClass::Mob => {
+            EntityCategory::Accent | EntityCategory::Mob => {
                 if let Some((snapshot, chunk)) = entity_snapshot_from_record(state, record) {
                     frame.non_player_entities.push((snapshot, chunk));
                 }

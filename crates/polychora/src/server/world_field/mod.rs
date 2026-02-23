@@ -1,5 +1,4 @@
 use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
-use crate::materials::block_to_material_appearance;
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::protocol::WorldBounds;
 use crate::shared::region_tree::{
@@ -7,7 +6,7 @@ use crate::shared::region_tree::{
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{
-    world_to_chunk, BaseWorldKind, BlockData, ChunkPos, VoxelType, CHUNK_VOLUME,
+    world_to_chunk, BaseWorldKind, BlockData, ChunkPos, CHUNK_VOLUME,
 };
 use std::collections::HashSet;
 use std::io;
@@ -318,7 +317,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
     ) -> Self {
         let field =
-            build_server_world_field(base_kind, world_seed, procgen_structures, blocked_cells);
+            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, blocked_cells);
         Self {
             field,
             override_chunks: RegionChunkTree::from_chunks(chunk_payloads),
@@ -343,7 +342,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         let base_world_kind = metadata.global.base_world_kind.to_runtime();
         let runtime_world_seed = metadata.global.world_seed;
         let field = build_server_world_field(
-            base_world_kind,
+            base_world_kind.clone(),
             runtime_world_seed,
             procgen_structures,
             blocked_cells,
@@ -543,7 +542,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             save_v4::save_state_from_chunk_payload_patch(
                 &stream.root,
                 SaveChunkPayloadPatchRequest {
-                    base_world_kind: self.base_world_kind,
+                    base_world_kind: self.base_world_kind.clone(),
                     dirty_chunk_payloads,
                     world_seed: self.world_seed,
                     next_entity_id: next_entity_id.max(stream.next_entity_id).max(1),
@@ -574,25 +573,24 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         Ok(Some(result))
     }
 
-    pub fn chunk_at(&self, chunk_pos: ChunkPos) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    pub fn chunk_at(&self, chunk_pos: ChunkPos) -> Option<ResolvedChunkPayload> {
         self.override_chunks
             .chunk_payload(chunk_key_from_chunk_pos(chunk_pos))
-            .and_then(|payload| chunk_from_payload(&payload))
     }
 
     pub fn effective_chunk(
         &self,
         chunk_pos: ChunkPos,
         preserve_explicit_empty_chunk: bool,
-    ) -> Option<[VoxelType; CHUNK_VOLUME]> {
+    ) -> Option<ResolvedChunkPayload> {
         if let Some(payload) = self
             .override_chunks
             .chunk_payload(chunk_key_from_chunk_pos(chunk_pos))
         {
-            return payload_to_effective_chunk(payload, preserve_explicit_empty_chunk);
+            return resolved_to_effective(payload, preserve_explicit_empty_chunk);
         }
         let virgin_payload = self.query_virgin_chunk_payload(chunk_pos)?;
-        payload_to_effective_chunk(virgin_payload, preserve_explicit_empty_chunk)
+        resolved_to_effective(virgin_payload, preserve_explicit_empty_chunk)
     }
 }
 
@@ -643,61 +641,27 @@ fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
     coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
-fn payload_to_effective_chunk(
+fn resolved_to_effective(
     resolved: ResolvedChunkPayload,
     preserve_explicit_empty_chunk: bool,
-) -> Option<[VoxelType; CHUNK_VOLUME]> {
-    let chunk = chunk_from_payload(&resolved)?;
-    if preserve_explicit_empty_chunk || !dense_chunk_is_empty(&chunk) {
-        Some(chunk)
+) -> Option<ResolvedChunkPayload> {
+    if preserve_explicit_empty_chunk {
+        Some(resolved)
     } else {
-        None
-    }
-}
-
-fn payload_from_chunk_compact(chunk: &[VoxelType; CHUNK_VOLUME]) -> ResolvedChunkPayload {
-    let blocks: Vec<BlockData> = chunk
-        .iter()
-        .map(|voxel| {
-            if voxel.0 == 0 {
-                BlockData::AIR
-            } else {
-                BlockData::simple(0, voxel.0 as u32)
+        // Filter out all-air payloads
+        match &resolved.payload {
+            ChunkPayload::Empty => None,
+            ChunkPayload::Uniform(idx) => {
+                let is_air = resolved
+                    .block_palette
+                    .get(*idx as usize)
+                    .map(|b| b.is_air())
+                    .unwrap_or(true);
+                if is_air { None } else { Some(resolved) }
             }
-        })
-        .collect();
-    ResolvedChunkPayload::from_dense_blocks(&blocks)
-        .unwrap_or_else(|_| ResolvedChunkPayload::empty())
-}
-
-fn chunk_from_payload(resolved: &ResolvedChunkPayload) -> Option<[VoxelType; CHUNK_VOLUME]> {
-    let palette_indices = resolved.payload.dense_materials().ok()?;
-    if palette_indices.len() != CHUNK_VOLUME {
-        return None;
+            _ => Some(resolved),
+        }
     }
-    let mut chunk = empty_dense_chunk();
-    for (idx, palette_idx) in palette_indices.into_iter().enumerate() {
-        let block = resolved
-            .block_palette
-            .get(palette_idx as usize)
-            .cloned()
-            .unwrap_or(BlockData::AIR);
-        let mat = block_to_material_appearance(block.namespace, block.block_type);
-        chunk[idx] = VoxelType(mat);
-    }
-    Some(chunk)
-}
-
-fn empty_dense_chunk() -> [VoxelType; CHUNK_VOLUME] {
-    [VoxelType::AIR; CHUNK_VOLUME]
-}
-
-fn dense_chunk_is_empty(chunk: &[VoxelType; CHUNK_VOLUME]) -> bool {
-    chunk.iter().all(|voxel| voxel.is_air())
-}
-
-fn chunks_equal(a: &[VoxelType; CHUNK_VOLUME], b: &[VoxelType; CHUNK_VOLUME]) -> bool {
-    a[..] == b[..]
 }
 
 pub type ServerWorldOverlay = PassthroughWorldOverlay<ServerWorldField>;
@@ -705,6 +669,7 @@ pub type ServerWorldOverlay = PassthroughWorldOverlay<ServerWorldField>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::materials::block_to_material_token;
     use crate::shared::voxel::BaseWorldKind;
 
     fn dense_materials_from_core_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Vec<u16> {
@@ -724,7 +689,7 @@ mod tests {
                         .block_palette
                         .get(idx as usize)
                         .unwrap_or(&air);
-                    block_to_material_appearance(block.namespace, block.block_type) as u16
+                    block_to_material_token(block.namespace, block.block_type)
                 })
                 .collect()
         } else {
@@ -733,7 +698,7 @@ mod tests {
     }
 
     fn sample_virgin_chunk_dense(
-        base_kind: BaseWorldKind,
+        base_kind: &BaseWorldKind,
         world_seed: u64,
         procgen_structures: bool,
         chunk_key: [i32; 4],
@@ -748,14 +713,14 @@ mod tests {
     }
 
     fn sample_virgin_chunk_dense_with_query_bounds(
-        base_kind: BaseWorldKind,
+        base_kind: &BaseWorldKind,
         world_seed: u64,
         procgen_structures: bool,
         chunk_key: [i32; 4],
         query_bounds: Aabb4i,
     ) -> Vec<u16> {
         let field =
-            build_server_world_field(base_kind, world_seed, procgen_structures, HashSet::new());
+            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, HashSet::new());
         assert!(query_bounds.contains_chunk(chunk_key));
         let core = field.query_region_core(
             QueryVolume {
@@ -844,7 +809,7 @@ mod tests {
     fn overlay_edit_does_not_mutate_virgin_field() {
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::FlatFloor {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             777,
@@ -861,8 +826,7 @@ mod tests {
             .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let virgin_payload_before =
             chunk_payload_from_core(virgin_before.as_ref(), chunk_key).expect("virgin payload");
-        let virgin_chunk_before = chunk_from_payload(&virgin_payload_before).expect("virgin chunk");
-        assert!(virgin_chunk_before[voxel_idx].is_solid());
+        assert!(!virgin_payload_before.block_at(voxel_idx).is_air());
 
         let changed = overlay.apply_voxel_edit([0, -1, 0, 0], BlockData::AIR);
         assert_eq!(changed, Some(chunk_pos));
@@ -870,15 +834,14 @@ mod tests {
         let effective_after = overlay
             .effective_chunk(chunk_pos, true)
             .expect("effective override chunk");
-        assert_eq!(effective_after[voxel_idx], VoxelType::AIR);
+        assert!(effective_after.block_at(voxel_idx).is_air());
 
         let virgin_after = overlay
             .field()
             .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let virgin_payload_after =
             chunk_payload_from_core(virgin_after.as_ref(), chunk_key).expect("virgin payload");
-        let virgin_chunk_after = chunk_from_payload(&virgin_payload_after).expect("virgin chunk");
-        assert!(virgin_chunk_after[voxel_idx].is_solid());
+        assert!(!virgin_payload_after.block_at(voxel_idx).is_air());
     }
 
     #[test]
@@ -888,7 +851,7 @@ mod tests {
         let bounds = Aabb4i::new(chunk_key, chunk_key);
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::FlatFloor {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             vec![(chunk_key, ResolvedChunkPayload::empty())],
             991,
@@ -899,16 +862,14 @@ mod tests {
         let composed = overlay.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let composed_payload =
             chunk_payload_from_core(composed.as_ref(), chunk_key).expect("composed payload");
-        let composed_chunk = chunk_from_payload(&composed_payload).expect("composed chunk");
-        assert!(composed_chunk[voxel_idx].is_air());
+        assert!(composed_payload.block_at(voxel_idx).is_air());
 
         let virgin = overlay
             .field()
             .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let virgin_payload =
             chunk_payload_from_core(virgin.as_ref(), chunk_key).expect("virgin payload");
-        let virgin_chunk = chunk_from_payload(&virgin_payload).expect("virgin chunk");
-        assert!(virgin_chunk[voxel_idx].is_solid());
+        assert!(!virgin_payload.block_at(voxel_idx).is_air());
 
         overlay.clear_dirty();
     }
@@ -917,7 +878,7 @@ mod tests {
     fn overlay_query_preserves_generator_leaf_expansion_beyond_request_bounds() {
         let overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             1337,
@@ -940,7 +901,7 @@ mod tests {
     fn overlay_edit_is_visible_when_generator_returns_expanded_platform_leaf() {
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
             1337,
@@ -964,10 +925,10 @@ mod tests {
             QueryDetail::Exact,
         );
         if let Some(payload) = chunk_payload_from_core(queried.as_ref(), chunk_key) {
-            let chunk = chunk_from_payload(&payload).expect("edited dense chunk");
+            let block = payload.block_at(voxel_idx);
             assert_eq!(
-                chunk[voxel_idx],
-                VoxelType(5),
+                block,
+                BlockData::simple(0, 5),
                 "expanded-bounds overlay query returned wrong edited voxel value",
             );
         }
@@ -985,14 +946,14 @@ mod tests {
         ];
         let world_kinds = [
             BaseWorldKind::FlatFloor {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
         ];
 
-        for base_kind in world_kinds {
+        for base_kind in &world_kinds {
             for chunk_key in observed_chunks {
                 let baseline = sample_virgin_chunk_dense(base_kind, 0xD1A6_2026, true, chunk_key);
                 for sample_idx in 0..16 {
@@ -1018,15 +979,15 @@ mod tests {
         ];
         let world_kinds = [
             BaseWorldKind::FlatFloor {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
         ];
         let query_radii = [0i32, 1, 2, 4, 8, 16];
 
-        for base_kind in world_kinds {
+        for base_kind in &world_kinds {
             for chunk_key in observed_chunks {
                 let baseline = sample_virgin_chunk_dense(base_kind, 0xD1A6_2026, true, chunk_key);
                 for radius in query_radii {

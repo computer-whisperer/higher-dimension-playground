@@ -513,15 +513,13 @@ pub(super) fn stable_name_hash(name: &str) -> u32 {
 
 pub(super) fn build_place_preview_instance(
     camera: &Camera4D,
-    selected_material: u8,
+    block: &polychora::shared::voxel::BlockData,
     time_s: f32,
     control_scheme: ControlScheme,
     aspect: f32,
 ) -> common::ModelInstance {
-    let preview_material = selected_material
-        .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX)
-        as u32
-        | PREVIEW_MATERIAL_FLAG;
+    let material_token = polychora::materials::block_to_material_token(block.namespace, block.block_type);
+    let preview_material = material_token as u32 | PREVIEW_MATERIAL_FLAG;
     let (right, up, view_z, view_w) = match control_scheme {
         ControlScheme::IntuitiveUpright => camera.view_basis_upright(),
         ControlScheme::LookTransport | ControlScheme::RotorFree => camera.view_basis_look_frame(),

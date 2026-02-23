@@ -1,15 +1,20 @@
 use super::{QueryDetail, QueryVolume, WorldField};
+use crate::materials::block_to_material_token;
 use crate::server::procgen;
-use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
+use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
+#[cfg(test)]
+use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::region_tree::{
     RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{BaseWorldKind, BlockData, ChunkPos, VoxelType, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_VOLUME};
+#[cfg(test)]
+use crate::shared::voxel::ChunkPos;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-type DenseChunk = [VoxelType; CHUNK_VOLUME];
+type DenseChunk = [u16; CHUNK_VOLUME];
 
 // Poisson-disk grid cell sizes.
 const POISSON_CELL_XZW: i32 = 48;
@@ -48,7 +53,7 @@ struct PlatformInstance {
 
 #[derive(Debug)]
 pub struct MassivePlatformsWorldGenerator {
-    platform_voxel: Option<VoxelType>,
+    platform_voxel: Option<BlockData>,
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<procgen::StructureCell>,
@@ -85,7 +90,7 @@ impl MassivePlatformsWorldGenerator {
         cz: i32,
         cw: i32,
     ) -> Option<Aabb4i> {
-        let material = self.platform_voxel?;
+        let material = self.platform_voxel.as_ref()?;
         if material.is_air() {
             return None;
         }
@@ -225,13 +230,14 @@ impl MassivePlatformsWorldGenerator {
     }
 
     fn insert_platform_uniform_nodes(&self, bounds: Aabb4i, tree: &mut RegionChunkTree) {
-        let Some(material) = self.platform_voxel else {
+        let Some(material) = self.platform_voxel.as_ref() else {
             return;
         };
+        let material = material.clone();
         self.for_each_platform_bounds_intersecting_query(bounds, |platform_bounds| {
             let core = RegionTreeCore {
                 bounds: platform_bounds,
-                kind: RegionNodeKind::Uniform(crate::shared::voxel::BlockData::simple(0, material.0 as u32)),
+                kind: RegionNodeKind::Uniform(material.clone()),
                 generator_version_hash: 0,
             };
             let _ = tree.splice_non_empty_core_in_bounds(platform_bounds, &core);
@@ -287,7 +293,7 @@ impl MassivePlatformsWorldGenerator {
             self.procgen_keepout_cells(),
         );
 
-        let platform_material = self.platform_voxel.map(|v| u16::from(v.0));
+        let platform_material = self.platform_voxel.as_ref().map(|v| block_to_material_token(v.namespace, v.block_type));
 
         let y_offset = platform_y_offset(&platform);
 
@@ -349,7 +355,7 @@ impl MassivePlatformsWorldGenerator {
             local_query_bounds,
         );
 
-        let platform_material = self.platform_voxel.map(|v| u16::from(v.0));
+        let platform_material = self.platform_voxel.as_ref().map(|v| block_to_material_token(v.namespace, v.block_type));
         let y_offset = platform_y_offset(platform);
 
         for placement in placement_data {
@@ -419,7 +425,7 @@ impl WorldField for MassivePlatformsWorldGenerator {
     }
 }
 
-fn platform_voxel_from_base_kind(base_kind: BaseWorldKind) -> Option<VoxelType> {
+fn platform_voxel_from_base_kind(base_kind: BaseWorldKind) -> Option<BlockData> {
     match base_kind {
         BaseWorldKind::MassivePlatforms { material } if !material.is_air() => Some(material),
         BaseWorldKind::MassivePlatforms { .. }
@@ -628,7 +634,7 @@ fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
 }
 
 fn payload_from_chunk_compact(chunk: &DenseChunk) -> ChunkPayload {
-    let materials: Vec<u16> = chunk.iter().map(|voxel| u16::from(voxel.0)).collect();
+    let materials: Vec<u16> = chunk.to_vec();
     ChunkPayload::from_dense_materials_compact(&materials)
         .unwrap_or(ChunkPayload::Dense16 { materials })
 }
@@ -685,8 +691,8 @@ fn build_chunk_array_from_placement(
         // Check if this chunk only contains voxels matching the platform material.
         // If so, skip it — the platform Uniform node already covers it.
         if let Some(plat_mat) = platform_material {
-            let dominated = chunk.iter().all(|v| {
-                v.is_air() || u16::from(v.0) == plat_mat
+            let dominated = chunk.iter().all(|&v| {
+                v == 0 || v == plat_mat
             });
             if dominated {
                 continue;
@@ -852,7 +858,7 @@ mod tests {
     fn find_platform_chunk_key(seed: u64) -> [i32; 4] {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             seed,
@@ -885,7 +891,7 @@ mod tests {
     fn invalid_bounds_query_returns_empty() {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             7,
@@ -902,7 +908,7 @@ mod tests {
     fn massive_platform_world_contains_large_uniform_nodes() {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             1337,
@@ -926,7 +932,7 @@ mod tests {
     fn origin_anchor_platform_exists_with_air_above_spawn() {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             1337,
@@ -944,7 +950,7 @@ mod tests {
     fn origin_anchor_platform_can_host_procgen_structure_chunks() {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             1337,
@@ -1004,7 +1010,7 @@ mod tests {
     fn procgen_structure_spawning_reaches_multiple_y_levels() {
         let seeded = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             1337,
@@ -1013,7 +1019,7 @@ mod tests {
         );
         let no_procgen = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             1337,
@@ -1130,7 +1136,7 @@ mod tests {
     fn procgen_chunks_are_anchored_to_some_platform_volume() {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             1337,
@@ -1139,7 +1145,7 @@ mod tests {
         );
         let no_procgen = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             1337,
@@ -1218,7 +1224,7 @@ mod tests {
         let seed = 0xD1A6_2026;
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             seed,

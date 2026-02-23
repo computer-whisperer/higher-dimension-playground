@@ -1,5 +1,5 @@
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::voxel::{ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -74,11 +74,11 @@ const MAZE_CEILING_MATERIAL: u8 = 60;
 const MAZE_WALL_MATERIAL: u8 = 62;
 const MAZE_GATE_FRAME_MATERIAL: u8 = 51;
 const MAZE_BEACON_MATERIAL: u8 = 67;
-type DenseChunk = [VoxelType; CHUNK_VOLUME];
+type DenseChunk = [u16; CHUNK_VOLUME];
 
 #[inline]
 fn dense_chunk_new() -> DenseChunk {
-    [VoxelType::AIR; CHUNK_VOLUME]
+    [0u16; CHUNK_VOLUME]
 }
 
 #[inline]
@@ -88,16 +88,16 @@ fn dense_chunk_set(
     y: usize,
     z: usize,
     w: usize,
-    voxel: VoxelType,
+    material: u16,
 ) {
     let idx =
         w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE + y * CHUNK_SIZE + x;
-    chunk[idx] = voxel;
+    chunk[idx] = material;
 }
 
 #[inline]
 fn dense_chunk_is_empty(chunk: &DenseChunk) -> bool {
-    chunk.iter().all(|voxel| voxel.is_air())
+    chunk.iter().all(|&v| v == 0)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -189,7 +189,7 @@ impl StructureBlueprint {
         };
 
         for fill in &parsed.fills {
-            if fill.material == VoxelType::AIR.0 {
+            if fill.material == 0 {
                 continue;
             }
             if fill.size.iter().any(|size| *size <= 0) {
@@ -207,7 +207,7 @@ impl StructureBlueprint {
         }
 
         for voxel in &parsed.voxels {
-            if voxel.material == VoxelType::AIR.0 {
+            if voxel.material == 0 {
                 continue;
             }
             include_point(voxel.offset);
@@ -379,7 +379,7 @@ impl StructureBlueprint {
         chunk: &mut DenseChunk,
     ) {
         for fill in &self.fills {
-            if fill.material == VoxelType::AIR.0 {
+            if fill.material == 0 {
                 continue;
             }
 
@@ -419,7 +419,7 @@ impl StructureBlueprint {
                 continue;
             }
 
-            let voxel = VoxelType(fill.material);
+            let material = fill.material as u16;
             for wx in loop_min[0]..=loop_max[0] {
                 for wy in loop_min[1]..=loop_max[1] {
                     for wz in loop_min[2]..=loop_max[2] {
@@ -428,7 +428,7 @@ impl StructureBlueprint {
                             let ly = (wy - chunk_min[1]) as usize;
                             let lz = (wz - chunk_min[2]) as usize;
                             let lw = (ww - chunk_min[3]) as usize;
-                            dense_chunk_set(chunk, lx, ly, lz, lw, voxel);
+                            dense_chunk_set(chunk, lx, ly, lz, lw, material);
                         }
                     }
                 }
@@ -436,7 +436,7 @@ impl StructureBlueprint {
         }
 
         for voxel in &self.voxels {
-            if voxel.material == VoxelType::AIR.0 {
+            if voxel.material == 0 {
                 continue;
             }
 
@@ -462,7 +462,7 @@ impl StructureBlueprint {
             let ly = (wy - chunk_min[1]) as usize;
             let lz = (wz - chunk_min[2]) as usize;
             let lw = (ww - chunk_min[3]) as usize;
-            dense_chunk_set(chunk, lx, ly, lz, lw, VoxelType(voxel.material));
+            dense_chunk_set(chunk, lx, ly, lz, lw, voxel.material as u16);
         }
     }
 
@@ -474,7 +474,7 @@ impl StructureBlueprint {
         chunk_max: [i32; 4],
     ) -> bool {
         for fill in &self.fills {
-            if fill.material == VoxelType::AIR.0 {
+            if fill.material == 0 {
                 continue;
             }
 
@@ -513,7 +513,7 @@ impl StructureBlueprint {
         }
 
         for voxel in &self.voxels {
-            if voxel.material == VoxelType::AIR.0 {
+            if voxel.material == 0 {
                 continue;
             }
 
@@ -2217,7 +2217,7 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                     let ly = (wy - chunk_min[1]) as usize;
                     let lz = (wz - chunk_min[2]) as usize;
                     let lw = (ww - chunk_min[3]) as usize;
-                    dense_chunk_set(chunk, lx, ly, lz, lw, VoxelType(material));
+                    dense_chunk_set(chunk, lx, ly, lz, lw, material as u16);
                 }
             }
         }
@@ -2714,14 +2714,11 @@ mod tests {
             find_chunk_with_maze(seed).expect("expected to find at least one maze chunk");
         let chunk = generate_structure_chunk(seed, chunk_pos)
             .expect("maze placement should generate chunk");
-        let has_maze_material = chunk.iter().any(|voxel| {
-            matches!(
-                voxel.0,
-                MAZE_CEILING_MATERIAL
-                    | MAZE_WALL_MATERIAL
-                    | MAZE_GATE_FRAME_MATERIAL
-                    | MAZE_BEACON_MATERIAL
-            )
+        let has_maze_material = chunk.iter().any(|&mat| {
+            mat == MAZE_CEILING_MATERIAL as u16
+                || mat == MAZE_WALL_MATERIAL as u16
+                || mat == MAZE_GATE_FRAME_MATERIAL as u16
+                || mat == MAZE_BEACON_MATERIAL as u16
         });
         assert!(
             has_maze_material,

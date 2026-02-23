@@ -1,6 +1,6 @@
-use crate::migration::legacy_voxel::{Chunk, RegionChunkWorld};
+use crate::migration::legacy_voxel::{Chunk, LegacyVoxel, RegionChunkWorld};
 use crate::migration::legacy_world_io::load_world;
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, BlockData, ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -93,14 +93,14 @@ pub enum PersistedBaseWorldKind {
 }
 
 impl PersistedBaseWorldKind {
-    pub fn from_runtime(base: BaseWorldKind) -> Self {
+    pub fn from_runtime(base: &BaseWorldKind) -> Self {
         match base {
             BaseWorldKind::Empty => Self::Empty,
             BaseWorldKind::FlatFloor { material } => Self::FlatFloor {
-                material: material.0,
+                material: material.block_type as u8,
             },
             BaseWorldKind::MassivePlatforms { material } => Self::MassivePlatforms {
-                material: material.0,
+                material: material.block_type as u8,
             },
         }
     }
@@ -109,11 +109,11 @@ impl PersistedBaseWorldKind {
         match self {
             PersistedBaseWorldKind::Empty => BaseWorldKind::Empty,
             PersistedBaseWorldKind::FlatFloor { material } => BaseWorldKind::FlatFloor {
-                material: VoxelType(material),
+                material: BlockData::simple(0, material as u32),
             },
             PersistedBaseWorldKind::MassivePlatforms { material } => {
                 BaseWorldKind::MassivePlatforms {
-                    material: VoxelType(material),
+                    material: BlockData::simple(0, material as u32),
                 }
             }
         }
@@ -613,7 +613,7 @@ pub fn save_state(root: &Path, request: SaveRequest<'_>) -> io::Result<SaveResul
     )?;
 
     let next_global = GlobalPayload {
-        base_world_kind: PersistedBaseWorldKind::from_runtime(request.world.base_kind()),
+        base_world_kind: PersistedBaseWorldKind::from_runtime(&request.world.base_kind()),
         world_seed: request.world_seed,
         next_entity_id: request.next_entity_id,
         next_data_file_id: manifest.active_data_file_id.saturating_add(1),
@@ -776,7 +776,7 @@ fn init_empty_save_root(
     )?;
 
     let initial_global = GlobalPayload {
-        base_world_kind: PersistedBaseWorldKind::from_runtime(base_world_kind),
+        base_world_kind: PersistedBaseWorldKind::from_runtime(&base_world_kind),
         world_seed,
         next_entity_id: 1,
         next_data_file_id: 2,
@@ -934,8 +934,8 @@ fn chunk_from_payload(payload: &ChunkPayload) -> io::Result<Chunk> {
     let mut chunk = Chunk::new();
     chunk.solid_count = 0;
     for (idx, &value) in payload.voxels.iter().enumerate() {
-        chunk.voxels[idx] = VoxelType(value);
-        if value != VoxelType::AIR.0 {
+        chunk.voxels[idx] = LegacyVoxel(value);
+        if value != LegacyVoxel::AIR.0 {
             chunk.solid_count = chunk.solid_count.saturating_add(1);
         }
     }
@@ -1215,10 +1215,10 @@ mod tests {
         let now_ms = now_unix_ms();
 
         let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-            material: VoxelType(11),
+            material: BlockData::simple(0, 11),
         });
-        world.set_voxel(1, 1, 1, 1, VoxelType(3));
-        world.set_voxel(40, 2, -5, 17, VoxelType(7));
+        world.set_voxel(1, 1, 1, 1, LegacyVoxel(3));
+        world.set_voxel(40, 2, -5, 17, LegacyVoxel(7));
 
         let entities = vec![PersistedEntityRecord {
             entity_id: 42,
@@ -1270,8 +1270,8 @@ mod tests {
         assert_eq!(loaded.global.next_entity_id, 1000);
         assert_eq!(loaded.players.players.len(), 1);
         assert_eq!(loaded.entities.len(), 1);
-        assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), VoxelType(3));
-        assert_eq!(loaded.world.get_voxel(40, 2, -5, 17), VoxelType(7));
+        assert_eq!(loaded.world.get_voxel(1, 1, 1, 1), LegacyVoxel(3));
+        assert_eq!(loaded.world.get_voxel(40, 2, -5, 17), LegacyVoxel(7));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1283,7 +1283,7 @@ mod tests {
         let output_root = root.join("migrated-v3");
 
         let mut world = RegionChunkWorld::new();
-        world.set_voxel(2, 2, 2, 2, VoxelType(9));
+        world.set_voxel(2, 2, 2, 2, LegacyVoxel(9));
         {
             let mut writer = BufWriter::new(File::create(&legacy_world).expect("create legacy"));
             crate::migration::legacy_world_io::save_world(&world, &mut writer)
@@ -1298,7 +1298,7 @@ mod tests {
 
         let loaded = load_state(&output_root).expect("load migrated");
         assert_eq!(loaded.global.world_seed, 777);
-        assert_eq!(loaded.world.get_voxel(2, 2, 2, 2), VoxelType(9));
+        assert_eq!(loaded.world.get_voxel(2, 2, 2, 2), LegacyVoxel(9));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1310,9 +1310,9 @@ mod tests {
         let empty_regions = HashSet::new();
 
         let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-            material: VoxelType(11),
+            material: BlockData::simple(0, 11),
         });
-        world.set_voxel(8, 8, 8, 8, VoxelType(3));
+        world.set_voxel(8, 8, 8, 8, LegacyVoxel(3));
 
         save_state(
             &root,
@@ -1356,7 +1356,7 @@ mod tests {
 
         let loaded = load_state(&root).expect("load state");
         assert_eq!(loaded.global.custom_global_payload, payload);
-        assert_eq!(loaded.world.get_voxel(8, 8, 8, 8), VoxelType(0));
+        assert_eq!(loaded.world.get_voxel(8, 8, 8, 8), LegacyVoxel(0));
         assert!(loaded
             .index
             .leaves

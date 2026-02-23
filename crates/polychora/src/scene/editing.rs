@@ -56,8 +56,8 @@ impl Scene {
         }
 
         let mut last_empty_voxel = None;
-        let v0 = self.world_get_voxel(cell[0], cell[1], cell[2], cell[3]);
-        if v0.is_solid() {
+        let v0 = self.get_block_data(cell[0], cell[1], cell[2], cell[3]);
+        if !v0.is_air() {
             return Some(VoxelRayHit {
                 solid_voxel: cell,
                 last_empty_voxel,
@@ -81,8 +81,8 @@ impl Scene {
             cell[axis] += step[axis];
             t_max[axis] += t_delta[axis];
 
-            let voxel = self.world_get_voxel(cell[0], cell[1], cell[2], cell[3]);
-            if voxel.is_solid() {
+            let voxel = self.get_block_data(cell[0], cell[1], cell[2], cell[3]);
+            if !voxel.is_air() {
                 return Some(VoxelRayHit {
                     solid_voxel: cell,
                     last_empty_voxel,
@@ -104,7 +104,7 @@ impl Scene {
     ) -> Option<[i32; 4]> {
         let hit = self.trace_first_solid_voxel(ray_origin, ray_direction, max_distance)?;
         let [x, y, z, w] = hit.solid_voxel;
-        self.world_set_voxel(x, y, z, w, VoxelType::AIR);
+        self.world_set_block(x, y, z, w, BlockData::AIR);
         Some(hit.solid_voxel)
     }
 
@@ -187,7 +187,7 @@ impl Scene {
         ray_origin: [f32; 4],
         ray_direction: [f32; 4],
         max_distance: f32,
-        material: VoxelType,
+        material: BlockData,
     ) -> Option<[i32; 4]> {
         if material.is_air() {
             return None;
@@ -195,10 +195,10 @@ impl Scene {
         let hit = self.trace_first_solid_voxel(ray_origin, ray_direction, max_distance)?;
         let target = hit.last_empty_voxel?;
         let [x, y, z, w] = target;
-        if self.world_get_voxel(x, y, z, w).is_solid() {
+        if !self.get_block_data(x, y, z, w).is_air() {
             return None;
         }
-        self.world_set_voxel(x, y, z, w, material);
+        self.world_set_block(x, y, z, w, material);
         Some(target)
     }
 }

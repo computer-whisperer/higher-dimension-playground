@@ -417,10 +417,10 @@ fn dense_materials_from_payload_or_zero(resolved: Option<ResolvedChunkPayload>) 
                 .get(idx as usize)
                 .cloned()
                 .unwrap_or(polychora::shared::voxel::BlockData::AIR);
-            u16::from(polychora::materials::block_to_material_appearance(
+            polychora::materials::block_to_material_token(
                 block.namespace,
                 block.block_type,
-            ))
+            )
         })
         .collect()
 }
@@ -1678,14 +1678,13 @@ impl App {
         &mut self,
         _now: Instant,
         position: [i32; 4],
-        material: u8,
+        block: polychora::shared::voxel::BlockData,
     ) {
         if self.multiplayer.is_none() {
             return;
         }
 
         if let Some(client) = self.multiplayer.as_ref() {
-            let block = polychora::shared::voxel::BlockData::simple(0, material as u32);
             client.send(MultiplayerClientMessage::SetVoxel { position, block });
         }
     }

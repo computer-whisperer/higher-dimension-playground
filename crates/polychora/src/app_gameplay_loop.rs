@@ -194,13 +194,13 @@ impl App {
                             self.hotbar_selected_index = (self.hotbar_selected_index + 8) % 9;
                         }
                     }
-                    self.selected_block_material =
-                        block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+                    self.selected_block =
+                        block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
                     eprintln!(
-                        "Hotbar slot {} selected: material {} ({})",
+                        "Hotbar slot {} selected: {} ({})",
                         self.hotbar_selected_index + 1,
-                        self.selected_block_material,
-                        materials::material_name(self.selected_block_material),
+                        self.selected_block.block_type,
+                        materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
                     );
                 }
             }
@@ -380,13 +380,13 @@ impl App {
             if let Some(digit) = self.input.take_place_material_digit() {
                 if digit >= 1 && digit <= 9 {
                     self.hotbar_selected_index = (digit - 1) as usize;
-                    self.selected_block_material =
-                        block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+                    self.selected_block =
+                        block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
                     eprintln!(
-                        "Hotbar slot {} selected: material {} ({})",
+                        "Hotbar slot {} selected: {} ({})",
                         digit,
-                        self.selected_block_material,
-                        materials::material_name(self.selected_block_material),
+                        self.selected_block.block_type,
+                        materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
                     );
                 }
             }
@@ -528,21 +528,21 @@ impl App {
                         .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
                         .hit_voxel
                     {
-                        let material = self.scene.get_voxel(x, y, z, w).0;
-                        let clamped = material
-                            .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
-                        self.selected_block_material = clamped;
-                        self.hotbar_slots[self.hotbar_selected_index] =
-                            Some(polychora::shared::protocol::ItemStack::block(
-                                0,
-                                clamped as u32,
-                                1,
-                            ));
-                        eprintln!(
-                            "Picked voxel material {} ({}) from ({x}, {y}, {z}, {w})",
-                            clamped,
-                            materials::material_name(clamped),
-                        );
+                        let picked = self.scene.get_block_data(x, y, z, w);
+                        if !picked.is_air() {
+                            self.hotbar_slots[self.hotbar_selected_index] =
+                                Some(polychora::shared::protocol::ItemStack::block(
+                                    picked.namespace,
+                                    picked.block_type,
+                                    1,
+                                ));
+                            self.selected_block = picked;
+                            eprintln!(
+                                "Picked voxel {} ({}) from ({x}, {y}, {z}, {w})",
+                                self.selected_block.block_type,
+                                materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
+                            );
+                        }
                     }
                 }
                 if remove_requested || place_requested {
@@ -557,7 +557,7 @@ impl App {
                             self.send_multiplayer_voxel_update(
                                 now,
                                 [x, y, z, w],
-                                voxel::VoxelType::AIR.0,
+                                polychora::shared::voxel::BlockData::AIR,
                             );
                         }
                     } else if place_requested {
@@ -567,14 +567,15 @@ impl App {
                             .place_voxel;
                         if let Some([x, y, z, w]) = placed {
                             eprintln!(
-                                "Placed voxel material {} at ({x}, {y}, {z}, {w})",
-                                self.selected_block_material
+                                "Placed voxel {} ({}) at ({x}, {y}, {z}, {w})",
+                                self.selected_block.block_type,
+                                materials::block_name(self.selected_block.namespace, self.selected_block.block_type),
                             );
                             self.play_spatial_sound_voxel(SoundEffect::Place, [x, y, z, w], 1.0);
                             self.send_multiplayer_voxel_update(
                                 now,
                                 [x, y, z, w],
-                                self.selected_block_material,
+                                self.selected_block.clone(),
                             );
                         }
                     }
@@ -618,7 +619,7 @@ impl App {
             .unwrap_or_else(|| self.args.width.max(1) as f32 / self.args.height.max(1) as f32);
         let preview_instance = build_place_preview_instance(
             &self.camera,
-            self.selected_block_material,
+            &self.selected_block,
             preview_time_s,
             self.control_scheme,
             aspect,
@@ -704,8 +705,8 @@ impl App {
                 self.scene
                     .block_edit_targets(self.camera.position, look_dir, edit_reach);
             let block_target = waila_targets.hit_voxel.and_then(|[x, y, z, w]| {
-                let voxel = self.scene.get_voxel(x, y, z, w);
-                if voxel.0 != 0 {
+                let block = self.scene.get_block_data(x, y, z, w);
+                if !block.is_air() {
                     // Estimate block distance for comparison with entity hits
                     let block_center = [
                         x as f32 + 0.5,
@@ -716,7 +717,7 @@ impl App {
                     let block_dist = distance4(self.camera.position, block_center);
                     Some((WailaTarget::Block {
                         coords: [x, y, z, w],
-                        material_id: voxel.0,
+                        block,
                     }, block_dist))
                 } else {
                     None

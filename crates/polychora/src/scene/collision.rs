@@ -52,7 +52,7 @@ impl Scene {
             for y in lo[1]..=hi[1] {
                 for z in lo[2]..=hi[2] {
                     for w in lo[3]..=hi[3] {
-                        if self.world_get_voxel(x, y, z, w).is_solid() {
+                        if !self.get_block_data(x, y, z, w).is_air() {
                             return true;
                         }
                     }

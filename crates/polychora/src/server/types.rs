@@ -1,31 +1,11 @@
-use crate::shared::protocol::{EntityClass, EntityKind, EntitySnapshot, EntityTransform};
-use crate::shared::voxel::{VoxelType, CHUNK_VOLUME};
+use crate::shared::chunk_payload::ResolvedChunkPayload;
+use crate::shared::entity_types::{EntityCategory, MobArchetype};
+use crate::shared::protocol::{EntitySnapshot, EntityTransform};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub(super) struct PlayerState {
     pub(super) entity_id: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum MobArchetype {
-    Seeker,
-    Creeper4d,
-    PhaseSpider,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MobLocomotionMode {
-    Walking,
-    Flying,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct MobArchetypeDefaults {
-    pub(super) move_speed: f32,
-    pub(super) preferred_distance: f32,
-    pub(super) tangent_weight: f32,
-    pub(super) locomotion: MobLocomotionMode,
 }
 
 pub(super) type MobNavCell = [i32; 4];
@@ -79,7 +59,7 @@ pub(super) enum EntityLifecycle {
 #[derive(Clone, Debug)]
 pub(super) struct EntityRecord {
     pub(super) entity_id: u64,
-    pub(super) class: EntityClass,
+    pub(super) category: EntityCategory,
     pub(super) owner_client_id: Option<u64>,
     pub(super) display_name: Option<String>,
     pub(super) persistent: bool,
@@ -129,83 +109,9 @@ pub(super) struct QueuedPlayerMovementModifier {
     pub(super) source_entity_id: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) struct SpawnableEntitySpec {
-    pub(super) kind: EntityKind,
-    pub(super) class: EntityClass,
-    pub(super) mob_archetype: Option<MobArchetype>,
-    pub(super) canonical_name: &'static str,
-    pub(super) aliases: &'static [&'static str],
-    pub(super) default_scale: f32,
-    pub(super) default_material: u8,
-}
-
-pub(super) const SPAWNABLE_ENTITY_SPECS: &[SpawnableEntitySpec] = &[
-    SpawnableEntitySpec {
-        kind: EntityKind::TestCube,
-        class: EntityClass::Accent,
-        mob_archetype: None,
-        canonical_name: "cube",
-        aliases: &["cube", "testcube"],
-        default_scale: 0.50,
-        default_material: 12,
-    },
-    SpawnableEntitySpec {
-        kind: EntityKind::TestRotor,
-        class: EntityClass::Accent,
-        mob_archetype: None,
-        canonical_name: "rotor",
-        aliases: &["rotor", "testrotor"],
-        default_scale: 0.54,
-        default_material: 8,
-    },
-    SpawnableEntitySpec {
-        kind: EntityKind::TestDrifter,
-        class: EntityClass::Accent,
-        mob_archetype: None,
-        canonical_name: "drifter",
-        aliases: &["drifter", "testdrifter"],
-        default_scale: 0.48,
-        default_material: 15,
-    },
-    SpawnableEntitySpec {
-        kind: EntityKind::MobSeeker,
-        class: EntityClass::Mob,
-        mob_archetype: Some(MobArchetype::Seeker),
-        canonical_name: "seeker",
-        aliases: &["seeker", "mobseeker"],
-        default_scale: 0.62,
-        default_material: 24,
-    },
-    SpawnableEntitySpec {
-        kind: EntityKind::MobCreeper4d,
-        class: EntityClass::Mob,
-        mob_archetype: Some(MobArchetype::Creeper4d),
-        canonical_name: "creeper",
-        aliases: &["creeper", "4dcreeper", "mobcreeper4d"],
-        default_scale: 0.78,
-        default_material: 19,
-    },
-    SpawnableEntitySpec {
-        kind: EntityKind::MobPhaseSpider,
-        class: EntityClass::Mob,
-        mob_archetype: Some(MobArchetype::PhaseSpider),
-        canonical_name: "phase_spider",
-        aliases: &[
-            "phase_spider",
-            "phasespider",
-            "phase-spider",
-            "spider",
-            "mobphasespider",
-        ],
-        default_scale: 0.86,
-        default_material: 62,
-    },
-];
-
 #[derive(Clone, Debug)]
 pub(super) enum CollisionChunkCacheEntry {
-    Explicit([VoxelType; CHUNK_VOLUME]),
+    Explicit(ResolvedChunkPayload),
     ExplicitEmpty,
-    Effective(Option<[VoxelType; CHUNK_VOLUME]>),
+    Effective(Option<ResolvedChunkPayload>),
 }

@@ -13,6 +13,19 @@ struct MobSteeringCommand {
     speed_factor: f32,
 }
 
+fn resolved_payload_is_all_air(payload: &crate::shared::chunk_payload::ResolvedChunkPayload) -> bool {
+    use crate::shared::chunk_payload::ChunkPayload;
+    match &payload.payload {
+        ChunkPayload::Empty => true,
+        ChunkPayload::Uniform(idx) => payload
+            .block_palette
+            .get(*idx as usize)
+            .map(|b| b.is_air())
+            .unwrap_or(true),
+        _ => false,
+    }
+}
+
 fn sample_effective_voxel_for_collision(
     state: &ServerState,
     cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
@@ -20,49 +33,49 @@ fn sample_effective_voxel_for_collision(
     wy: i32,
     wz: i32,
     ww: i32,
-) -> VoxelType {
+) -> bool {
     let (chunk_pos, voxel_index) = voxel::world_to_chunk(wx, wy, wz, ww);
     if let Some(entry) = cache.get(&chunk_pos) {
         return match entry {
-            CollisionChunkCacheEntry::Explicit(chunk) => chunk[voxel_index],
-            CollisionChunkCacheEntry::ExplicitEmpty => VoxelType::AIR,
-            CollisionChunkCacheEntry::Effective(chunk) => chunk
+            CollisionChunkCacheEntry::Explicit(payload) => !payload.block_at(voxel_index).is_air(),
+            CollisionChunkCacheEntry::ExplicitEmpty => false,
+            CollisionChunkCacheEntry::Effective(payload) => payload
                 .as_ref()
-                .map(|chunk| chunk[voxel_index])
-                .unwrap_or(VoxelType::AIR),
+                .map(|p| !p.block_at(voxel_index).is_air())
+                .unwrap_or(false),
         };
     }
 
-    if let Some(chunk_data) = state.world_chunk_at(chunk_pos) {
-        if chunk_data.iter().all(|voxel| voxel.is_air()) {
+    if let Some(payload) = state.world_chunk_at(chunk_pos) {
+        if resolved_payload_is_all_air(&payload) {
             cache.insert(chunk_pos, CollisionChunkCacheEntry::ExplicitEmpty);
-            return VoxelType::AIR;
+            return false;
         }
-        let voxel = chunk_data[voxel_index];
-        cache.insert(chunk_pos, CollisionChunkCacheEntry::Explicit(chunk_data));
-        return voxel;
+        let is_solid = !payload.block_at(voxel_index).is_air();
+        cache.insert(chunk_pos, CollisionChunkCacheEntry::Explicit(payload));
+        return is_solid;
     }
 
-    if let Some(chunk_data) = state.mob_nav_cached_chunk_at(chunk_pos) {
-        if chunk_data.iter().all(|voxel| voxel.is_air()) {
+    if let Some(payload) = state.mob_nav_cached_chunk_at(chunk_pos) {
+        if resolved_payload_is_all_air(&payload) {
             cache.insert(chunk_pos, CollisionChunkCacheEntry::ExplicitEmpty);
-            return VoxelType::AIR;
+            return false;
         }
-        let voxel = chunk_data[voxel_index];
-        cache.insert(chunk_pos, CollisionChunkCacheEntry::Explicit(chunk_data));
-        return voxel;
+        let is_solid = !payload.block_at(voxel_index).is_air();
+        cache.insert(chunk_pos, CollisionChunkCacheEntry::Explicit(payload));
+        return is_solid;
     }
 
     let effective_chunk = state.world_effective_chunk(chunk_pos, false);
-    let voxel = effective_chunk
+    let is_solid = effective_chunk
         .as_ref()
-        .map(|chunk| chunk[voxel_index])
-        .unwrap_or(VoxelType::AIR);
+        .map(|p| !p.block_at(voxel_index).is_air())
+        .unwrap_or(false);
     cache.insert(
         chunk_pos,
         CollisionChunkCacheEntry::Effective(effective_chunk),
     );
-    voxel
+    is_solid
 }
 
 fn mob_collides_at(
@@ -127,7 +140,7 @@ fn mob_collides_at_with_bounds(
         for y in lo[1]..=hi[1] {
             for z in lo[2]..=hi[2] {
                 for w in lo[3]..=hi[3] {
-                    if sample_effective_voxel_for_collision(state, cache, x, y, z, w).is_solid() {
+                    if sample_effective_voxel_for_collision(state, cache, x, y, z, w) {
                         return true;
                     }
                 }
@@ -289,7 +302,7 @@ fn mob_nav_cell_is_walkable(
         return false;
     }
     if locomotion == MobLocomotionMode::Walking {
-        let support = sample_effective_voxel_for_collision(
+        let has_support = sample_effective_voxel_for_collision(
             state,
             cache,
             cell[0],
@@ -297,7 +310,7 @@ fn mob_nav_cell_is_walkable(
             cell[2],
             cell[3],
         );
-        if !support.is_solid() {
+        if !has_support {
             return false;
         }
     }
@@ -1192,7 +1205,7 @@ fn simulate_mobs(
         .players
         .values()
         .filter_map(|player| state.entity_store.snapshot(player.entity_id))
-        .map(|snapshot| snapshot.position)
+        .map(|snapshot| snapshot.entity.pose.position)
         .collect();
 
     let mut stale = Vec::new();
@@ -1209,8 +1222,10 @@ fn simulate_mobs(
             stale.push(mob.entity_id);
             continue;
         };
-        let locomotion = mob_archetype_defaults(mob.archetype).locomotion;
-        let nearest_target = nearest_position_to(snapshot.position, &player_positions);
+        let pos = snapshot.entity.pose.position;
+        let scl = snapshot.entity.pose.scale;
+        let locomotion = entity_types::mob_archetype_defaults(mob.archetype).locomotion;
+        let nearest_target = nearest_position_to(pos, &player_positions);
         let navigation_target = match mob.archetype {
             MobArchetype::Seeker => nearest_target,
             MobArchetype::Creeper4d => nearest_target.map(|target| {
@@ -1225,11 +1240,11 @@ fn simulate_mobs(
         };
         if mob.archetype == MobArchetype::Creeper4d {
             let should_detonate = player_positions.iter().any(|player_position| {
-                distance4_sq(snapshot.position, *player_position).sqrt()
+                distance4_sq(pos, *player_position).sqrt()
                     <= CREEPER_EXPLOSION_TRIGGER_DISTANCE
             });
             if should_detonate {
-                detonations.push((mob.entity_id, snapshot.position));
+                detonations.push((mob.entity_id, pos));
                 continue;
             }
         }
@@ -1240,15 +1255,15 @@ fn simulate_mobs(
             mob.archetype,
             locomotion,
             state.mob_nav_debug,
-            snapshot.position,
-            snapshot.scale,
+            pos,
+            scl,
             navigation_target,
             now_ms,
         );
         let steering = match mob.archetype {
             MobArchetype::Seeker => simulate_seeker_step(
                 &mob,
-                snapshot.position,
+                pos,
                 target_position,
                 path_following,
                 state.mob_nav_simple_steer,
@@ -1256,7 +1271,7 @@ fn simulate_mobs(
             ),
             MobArchetype::Creeper4d => simulate_creeper_step(
                 &mob,
-                snapshot.position,
+                pos,
                 target_position,
                 path_following,
                 state.mob_nav_simple_steer,
@@ -1264,7 +1279,7 @@ fn simulate_mobs(
             ),
             MobArchetype::PhaseSpider => simulate_phase_spider_step(
                 &mob,
-                snapshot.position,
+                pos,
                 target_position,
                 path_following,
                 state.mob_nav_simple_steer,
@@ -1273,7 +1288,7 @@ fn simulate_mobs(
         };
         let (next_position, next_forward) = integrate_mob_steering_step(
             &mob,
-            snapshot.position,
+            pos,
             steering,
             locomotion,
             now_ms,
@@ -1281,33 +1296,33 @@ fn simulate_mobs(
         );
         let mut final_position = apply_mob_locomotion_post_collision(
             state,
-            snapshot.position,
+            pos,
             next_position,
-            snapshot.scale,
+            scl,
             locomotion,
         );
         let mut final_forward = next_forward;
         if mob.archetype == MobArchetype::PhaseSpider && now_ms >= mob.next_phase_ms {
-            let attempted = distance4_sq(snapshot.position, next_position).sqrt();
-            let resolved = distance4_sq(snapshot.position, final_position).sqrt();
+            let attempted = distance4_sq(pos, next_position).sqrt();
+            let resolved = distance4_sq(pos, final_position).sqrt();
             let blocked =
                 attempted > 0.12 && resolved + PHASE_SPIDER_BLOCKED_PROGRESS_EPSILON < attempted;
             let should_phase = nearest_target.is_some() && (path_following || blocked);
             if should_phase {
                 if let Some(phase_position) = attempt_phase_spider_blink(
                     state,
-                    snapshot.position,
+                    pos,
                     next_forward,
-                    snapshot.scale,
+                    scl,
                     mob.phase_offset,
                     now_ms,
                 ) {
                     final_forward = normalize4_or_default(
                         [
-                            phase_position[0] - snapshot.position[0],
-                            phase_position[1] - snapshot.position[1],
-                            phase_position[2] - snapshot.position[2],
-                            phase_position[3] - snapshot.position[3],
+                            phase_position[0] - pos[0],
+                            phase_position[1] - pos[1],
+                            phase_position[2] - pos[2],
+                            phase_position[3] - pos[3],
                         ],
                         next_forward,
                     );
@@ -1439,7 +1454,7 @@ pub(super) fn tick_entity_simulation_window(
                 .map(|record| {
                     record.lifecycle == EntityLifecycle::Live
                         && record.persistent
-                        && record.class == EntityClass::Accent
+                        && record.category == EntityCategory::Accent
                 })
                 .unwrap_or(false)
         });

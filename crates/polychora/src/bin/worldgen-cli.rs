@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand};
 use polychora::legacy_migration;
-use polychora::migration::legacy_voxel::RegionChunkWorld;
+use polychora::migration::legacy_voxel::{LegacyVoxel, RegionChunkWorld};
 use polychora::migration::legacy_world_io::{load_world, save_world};
 use polychora::migration::save_v3;
 use polychora::save_v4;
 use polychora::save_v4_migration;
 use polychora::shared::entity_types::{self, EntityCategory};
-use polychora::shared::voxel::{BaseWorldKind, VoxelType};
+use polychora::shared::voxel::{BaseWorldKind, BlockData};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -148,7 +148,7 @@ fn fill_hypercube(
     world: &mut RegionChunkWorld,
     min: [i32; 4],
     size: [i32; 4],
-    material: VoxelType,
+    material: LegacyVoxel,
 ) {
     for x in min[0]..(min[0] + size[0]) {
         for y in min[1]..(min[1] + size[1]) {
@@ -170,7 +170,7 @@ fn generate_demo_cube_layout_world() -> RegionChunkWorld {
             for z in 0..2 {
                 for w in 0..2 {
                     let base = [x * 4 - 2, y * 4 - 2, z * 4 - 2, w * 4 - 2];
-                    let material = VoxelType((texture_rot % 5) + 1);
+                    let material = LegacyVoxel((texture_rot % 5) + 1);
                     fill_hypercube(&mut world, base, [2, 2, 2, 2], material);
                     texture_rot = (texture_rot + 1) % 5;
                 }
@@ -179,7 +179,7 @@ fn generate_demo_cube_layout_world() -> RegionChunkWorld {
     }
 
     // Central bright cube
-    fill_hypercube(&mut world, [0, 0, 0, 0], [2, 2, 2, 2], VoxelType(13));
+    fill_hypercube(&mut world, [0, 0, 0, 0], [2, 2, 2, 2], LegacyVoxel(13));
     world
 }
 
@@ -260,13 +260,13 @@ fn print_world_stats(label: &str, stats: &WorldStats) {
     } else {
         println!("  version: unknown/non-V4DW");
     }
-    match stats.base_kind {
+    match &stats.base_kind {
         BaseWorldKind::Empty => println!("  base: empty"),
         BaseWorldKind::FlatFloor { material } => {
-            println!("  base: flat-floor (material {})", material.0)
+            println!("  base: flat-floor (material {})", material.block_type)
         }
         BaseWorldKind::MassivePlatforms { material } => {
-            println!("  base: massive-platforms (material {})", material.0)
+            println!("  base: massive-platforms (material {})", material.block_type)
         }
     }
     println!(
@@ -751,7 +751,7 @@ fn main() {
     let result = match cli.command {
         Command::Flat { material, output } => {
             let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-                material: VoxelType(material),
+                material: BlockData::simple(0, material as u32),
             });
             save_world_to_file(&world, &output).map(|_| {
                 println!("Saved world to {}", output.display());
@@ -773,7 +773,7 @@ fn main() {
         } => {
             let world_result: io::Result<RegionChunkWorld> = match base.as_str() {
                 "flat" => Ok(RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-                    material: VoxelType(base_material),
+                    material: BlockData::simple(0, base_material as u32),
                 })),
                 "empty" => Ok(RegionChunkWorld::new()),
                 other => Err(io::Error::new(
@@ -784,7 +784,7 @@ fn main() {
             world_result.and_then(|mut world| {
                 parse_chunk_bound("--min", &min).and_then(|min_arr| {
                     parse_chunk_bound("--size", &size).and_then(|size_arr| {
-                        fill_hypercube(&mut world, min_arr, size_arr, VoxelType(material));
+                        fill_hypercube(&mut world, min_arr, size_arr, LegacyVoxel(material));
                         save_world_to_file(&world, &output).map(|_| {
                             println!("Saved world to {}", output.display());
                         })

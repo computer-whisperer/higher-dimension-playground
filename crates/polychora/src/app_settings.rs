@@ -91,8 +91,8 @@ pub(super) struct PersistedSettings {
     pub focal_length_zw: f32,
     pub zw_angle_color_shift_enabled: bool,
     pub zw_angle_color_shift_strength: f32,
-    pub place_material: u8,
-    pub hotbar_slots: [u8; 9],
+    pub place_material: u8, // legacy name kept for JSON compat
+    pub hotbar_slots: [u8; 9], // legacy format kept for JSON compat
     pub hotbar_selected_index: usize,
     pub render_width: u32,
     pub render_height: u32,
@@ -121,7 +121,7 @@ impl Default for PersistedSettings {
             focal_length_zw: 1.0,
             zw_angle_color_shift_enabled: true,
             zw_angle_color_shift_strength: ZW_ANGLE_COLOR_SHIFT_STRENGTH_DEFAULT,
-            place_material: BLOCK_EDIT_PLACE_MATERIAL_DEFAULT,
+            place_material: 3,
             hotbar_slots: [3, 27, 28, 29, 31, 12, 13, 1, 4],
             hotbar_selected_index: 0,
             render_width: DEFAULT_RENDER_WIDTH,
@@ -371,9 +371,13 @@ impl App {
         self.info_panel_mode = settings.info_panel_mode.into();
         self.focal_length_xy = settings.focal_length_xy;
         self.focal_length_zw = settings.focal_length_zw;
-        self.place_material = settings.place_material;
-        self.hotbar_slots = settings.hotbar_slots;
+        for (i, &mat) in settings.hotbar_slots.iter().enumerate() {
+            self.hotbar_slots[i] =
+                Some(polychora::shared::protocol::ItemStack::block(0, mat as u32, 1));
+        }
         self.hotbar_selected_index = settings.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX);
+        self.selected_block =
+            block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
         self.main_menu_server_address = settings.main_menu_server_address;
         if self.args.player_name.is_none() {
             self.main_menu_player_name = settings.main_menu_player_name;
@@ -397,8 +401,14 @@ impl App {
             focal_length_zw: self.focal_length_zw,
             zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
             zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
-            place_material: self.place_material,
-            hotbar_slots: self.hotbar_slots,
+            place_material: self.selected_block.block_type as u8,
+            hotbar_slots: {
+                let mut slots = [3u8; 9];
+                for (i, slot) in self.hotbar_slots.iter().enumerate() {
+                    slots[i] = block_material_from_slot(slot);
+                }
+                slots
+            },
             hotbar_selected_index: self.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX),
             render_width: self.args.width,
             render_height: self.args.height,

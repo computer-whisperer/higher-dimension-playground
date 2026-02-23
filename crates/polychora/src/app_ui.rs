@@ -118,13 +118,21 @@ impl App {
                     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
                     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
                 );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.selected_block_material,
-                        BLOCK_EDIT_PLACE_MATERIAL_MIN..=BLOCK_EDIT_PLACE_MATERIAL_MAX,
-                    )
-                    .text("Place Material"),
-                );
+                {
+                    let mut mat_id = self.selected_block.block_type as u8;
+                    let response = ui.add(
+                        egui::Slider::new(
+                            &mut mat_id,
+                            BLOCK_EDIT_PLACE_MATERIAL_MIN..=BLOCK_EDIT_PLACE_MATERIAL_MAX,
+                        )
+                        .text("Place Material"),
+                    );
+                    if response.changed() {
+                        self.selected_block = polychora::shared::voxel::BlockData::simple(0, mat_id as u32);
+                        self.hotbar_slots[self.hotbar_selected_index] =
+                            Some(polychora::shared::protocol::ItemStack::block(0, mat_id as u32, 1));
+                    }
+                }
                 ui.add(
                     egui::Slider::new(&mut self.audio.master_volume, 0.0..=2.0)
                         .text("Master Volume")
@@ -809,7 +817,7 @@ impl App {
         if let Some(material_id) = inventory_pick {
             self.hotbar_slots[self.hotbar_selected_index] =
                 Some(polychora::shared::protocol::ItemStack::block(0, material_id as u32, 1));
-            self.selected_block_material = material_id;
+            self.selected_block = polychora::shared::voxel::BlockData::simple(0, material_id as u32);
             eprintln!(
                 "Inventory: set hotbar slot {} to material {} ({})",
                 self.hotbar_selected_index + 1,
@@ -947,8 +955,8 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         match target {
-                            WailaTarget::Block { coords, material_id } => {
-                                self.draw_waila_block(ui, *coords, *material_id);
+                            WailaTarget::Block { coords, block } => {
+                                self.draw_waila_block(ui, *coords, block);
                             }
                             WailaTarget::Entity {
                                 entity_id,
@@ -977,10 +985,11 @@ impl App {
             });
     }
 
-    fn draw_waila_block(&self, ui: &mut egui::Ui, coords: [i32; 4], material_id: u8) {
-        let name = materials::material_name(material_id);
-        let category = materials::material_category_label(material_id);
-        let [r, g, b] = materials::material_color(material_id);
+    fn draw_waila_block(&self, ui: &mut egui::Ui, coords: [i32; 4], block: &polychora::shared::voxel::BlockData) {
+        let name = materials::block_name(block.namespace, block.block_type);
+        let category = materials::block_category_label(block.namespace, block.block_type);
+        let [r, g, b] = materials::block_color(block.namespace, block.block_type);
+        let material_id = polychora::materials::block_to_material_token(block.namespace, block.block_type) as u8;
 
         // Header row: icon + name + category + ID
         ui.horizontal(|ui| {

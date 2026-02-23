@@ -1,5 +1,5 @@
 use crate::shared::protocol::{ClientMessage, ServerMessage};
-use crate::shared::voxel::{BaseWorldKind, VoxelType};
+use crate::shared::voxel::{BaseWorldKind, BlockData};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -13,10 +13,10 @@ impl WorldGeneratorKind {
     pub fn default_base_world_kind(self) -> BaseWorldKind {
         match self {
             WorldGeneratorKind::FlatFloor => BaseWorldKind::FlatFloor {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
             WorldGeneratorKind::MassivePlatforms => BaseWorldKind::MassivePlatforms {
-                material: VoxelType(11),
+                material: BlockData::simple(0, 11),
             },
         }
     }

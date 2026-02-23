@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
-use crate::migration::legacy_voxel::{Chunk, RegionChunkWorld};
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, VoxelType, CHUNK_VOLUME};
+use crate::migration::legacy_voxel::{Chunk, LegacyVoxel, RegionChunkWorld};
+use crate::shared::voxel::{BaseWorldKind, BlockData, ChunkPos, CHUNK_VOLUME};
 
 const MAGIC: &[u8; 4] = b"V4DW";
 const VERSION_V1: u32 = 1;
@@ -20,7 +20,7 @@ pub fn save_world<W: Write>(world: &RegionChunkWorld, writer: &mut W) -> io::Res
     writer.write_all(MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
 
-    write_base_kind(world.base_kind(), writer)?;
+    write_base_kind(&world.base_kind(), writer)?;
 
     let mut overrides: Vec<_> = world
         .chunks
@@ -56,12 +56,12 @@ pub fn save_world<W: Write>(world: &RegionChunkWorld, writer: &mut W) -> io::Res
     Ok(())
 }
 
-fn write_base_kind<W: Write>(base_kind: BaseWorldKind, writer: &mut W) -> io::Result<()> {
+fn write_base_kind<W: Write>(base_kind: &BaseWorldKind, writer: &mut W) -> io::Result<()> {
     match base_kind {
         BaseWorldKind::Empty => writer.write_all(&[BASE_KIND_EMPTY])?,
         BaseWorldKind::FlatFloor { material } | BaseWorldKind::MassivePlatforms { material } => {
             writer.write_all(&[BASE_KIND_FLAT_FLOOR])?;
-            writer.write_all(&[material.0])?;
+            writer.write_all(&[material.block_type as u8])?;
         }
     }
     Ok(())
@@ -76,7 +76,7 @@ fn read_base_kind<R: Read>(reader: &mut R) -> io::Result<BaseWorldKind> {
             let mut material = [0u8; 1];
             reader.read_exact(&mut material)?;
             Ok(BaseWorldKind::FlatFloor {
-                material: VoxelType(material[0]),
+                material: BlockData::simple(0, material[0] as u32),
             })
         }
         _ => Err(io::Error::new(
@@ -155,7 +155,7 @@ fn write_chunk<W: Write>(chunk: &Chunk, writer: &mut W) -> io::Result<()> {
     Ok(())
 }
 
-fn rle_encode(voxels: &[VoxelType; CHUNK_VOLUME]) -> Vec<(VoxelType, usize)> {
+fn rle_encode(voxels: &[LegacyVoxel; CHUNK_VOLUME]) -> Vec<(LegacyVoxel, usize)> {
     let mut runs = Vec::new();
     let mut current = voxels[0];
     let mut length = 1usize;
@@ -267,14 +267,14 @@ fn read_chunk<R: Read>(reader: &mut R) -> io::Result<Chunk> {
         ENCODING_UNIFORM => {
             let mut val = [0u8; 1];
             reader.read_exact(&mut val)?;
-            Ok(Chunk::new_filled(VoxelType(val[0])))
+            Ok(Chunk::new_filled(LegacyVoxel(val[0])))
         }
         ENCODING_RLE => {
             let mut buf2 = [0u8; 2];
             reader.read_exact(&mut buf2)?;
             let run_count = u16::from_le_bytes(buf2) as usize;
 
-            let mut voxels = Box::new([VoxelType::AIR; CHUNK_VOLUME]);
+            let mut voxels = Box::new([LegacyVoxel::AIR; CHUNK_VOLUME]);
             let mut pos = 0;
             let mut solid_count = 0u32;
 
@@ -283,7 +283,7 @@ fn read_chunk<R: Read>(reader: &mut R) -> io::Result<Chunk> {
                 reader.read_exact(&mut val)?;
                 reader.read_exact(&mut buf2)?;
                 let length = u16::from_le_bytes(buf2) as usize;
-                let vt = VoxelType(val[0]);
+                let vt = LegacyVoxel(val[0]);
 
                 if pos + length > CHUNK_VOLUME {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "RLE overflow"));
@@ -314,10 +314,10 @@ fn read_chunk<R: Read>(reader: &mut R) -> io::Result<Chunk> {
         ENCODING_RAW => {
             let mut bytes = vec![0u8; CHUNK_VOLUME];
             reader.read_exact(&mut bytes)?;
-            let mut voxels = Box::new([VoxelType::AIR; CHUNK_VOLUME]);
+            let mut voxels = Box::new([LegacyVoxel::AIR; CHUNK_VOLUME]);
             let mut solid_count = 0u32;
             for (i, &b) in bytes.iter().enumerate() {
-                voxels[i] = VoxelType(b);
+                voxels[i] = LegacyVoxel(b);
                 if b != 0 {
                     solid_count += 1;
                 }
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn round_trip_uniform_chunk() {
         let mut world = RegionChunkWorld::new();
-        let chunk = Chunk::new_filled(VoxelType(3));
+        let chunk = Chunk::new_filled(LegacyVoxel(3));
         world.insert_chunk(ChunkPos::new(1, -2, 3, 0), chunk);
 
         let mut buf = Vec::new();
@@ -386,9 +386,9 @@ mod tests {
     fn round_trip_mixed_chunk() {
         let mut world = RegionChunkWorld::new();
         let mut chunk = Chunk::new();
-        chunk.set(0, 0, 0, 0, VoxelType(1));
-        chunk.set(7, 7, 7, 7, VoxelType(5));
-        chunk.set(3, 2, 1, 4, VoxelType(10));
+        chunk.set(0, 0, 0, 0, LegacyVoxel(1));
+        chunk.set(7, 7, 7, 7, LegacyVoxel(5));
+        chunk.set(3, 2, 1, 4, LegacyVoxel(10));
         world.insert_chunk(ChunkPos::new(0, 0, 0, 0), chunk);
 
         let mut buf = Vec::new();
@@ -405,13 +405,13 @@ mod tests {
     #[test]
     fn round_trip_flat_floor_base_with_overrides() {
         let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-            material: VoxelType(11),
+            material: BlockData::simple(0, 11),
         });
 
         // Place a floating block.
-        world.set_voxel(3, 2, 1, 0, VoxelType(7));
+        world.set_voxel(3, 2, 1, 0, LegacyVoxel(7));
         // Carve one floor voxel.
-        world.set_voxel(0, -1, 0, 0, VoxelType::AIR);
+        world.set_voxel(0, -1, 0, 0, LegacyVoxel::AIR);
 
         let mut buf = Vec::new();
         save_world(&world, &mut buf).unwrap();
@@ -420,19 +420,19 @@ mod tests {
         assert_eq!(
             loaded.base_kind(),
             BaseWorldKind::FlatFloor {
-                material: VoxelType(11)
+                material: BlockData::simple(0, 11)
             }
         );
-        assert_eq!(loaded.get_voxel(8, -1, 8, 8), VoxelType(11));
-        assert_eq!(loaded.get_voxel(3, 2, 1, 0), VoxelType(7));
-        assert_eq!(loaded.get_voxel(0, -1, 0, 0), VoxelType::AIR);
+        assert_eq!(loaded.get_voxel(8, -1, 8, 8), LegacyVoxel(11));
+        assert_eq!(loaded.get_voxel(3, 2, 1, 0), LegacyVoxel(7));
+        assert_eq!(loaded.get_voxel(0, -1, 0, 0), LegacyVoxel::AIR);
     }
 
     #[test]
     fn load_v1_legacy_world() {
         let mut world = RegionChunkWorld::new();
         let mut chunk = Chunk::new();
-        chunk.set(1, 2, 3, 4, VoxelType(9));
+        chunk.set(1, 2, 3, 4, LegacyVoxel(9));
         world.insert_chunk(ChunkPos::new(-1, 0, 2, 0), chunk);
 
         let mut buf = Vec::new();
@@ -440,6 +440,6 @@ mod tests {
         let loaded = load_world(&mut &buf[..]).unwrap();
 
         assert_eq!(loaded.base_kind(), BaseWorldKind::Empty);
-        assert_eq!(loaded.get_voxel(-7, 2, 19, 4), VoxelType(9));
+        assert_eq!(loaded.get_voxel(-7, 2, 19, 4), LegacyVoxel(9));
     }
 }

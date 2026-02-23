@@ -142,23 +142,6 @@ impl BlockData {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct VoxelType(pub u8);
-
-impl VoxelType {
-    pub const AIR: Self = Self(0);
-
-    #[inline]
-    pub fn is_air(self) -> bool {
-        self.0 == 0
-    }
-
-    #[inline]
-    pub fn is_solid(self) -> bool {
-        self.0 != 0
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkPos {
     pub x: i32,
@@ -174,11 +157,11 @@ impl ChunkPos {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BaseWorldKind {
     Empty,
-    FlatFloor { material: VoxelType },
-    MassivePlatforms { material: VoxelType },
+    FlatFloor { material: BlockData },
+    MassivePlatforms { material: BlockData },
 }
 
 #[inline]
