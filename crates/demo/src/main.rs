@@ -221,6 +221,7 @@ impl DemoScene {
                     chunk_headers: &[],
                     occupancy_words: &[],
                     material_words: &[],
+                    orientation_words: &[],
                     macro_words: &[],
                     region_bvh_nodes: &[],
                     leaf_headers: &[],
@@ -228,6 +229,8 @@ impl DemoScene {
                     mutation_batch: None,
                     dirty_ranges: None,
                 },
+                &instances,
+                &[],
             );
         } else {
             rcx.render_tetra_frame(
@@ -436,6 +439,7 @@ impl DemoScene {
                     chunk_headers: &[],
                     occupancy_words: &[],
                     material_words: &[],
+                    orientation_words: &[],
                     macro_words: &[],
                     region_bvh_nodes: &[],
                     leaf_headers: &[],
@@ -443,6 +447,8 @@ impl DemoScene {
                     mutation_batch: None,
                     dirty_ranges: None,
                 },
+                &instances,
+                &[],
             );
         } else {
             rcx.render_tetra_frame(

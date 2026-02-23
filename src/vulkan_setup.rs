@@ -45,6 +45,9 @@ pub fn vulkan_setup(
         shader_int64: true,
         shader_int8: true,
         shader_draw_parameters: true,
+        // Required for texture pool: partially-bound descriptor arrays of sampled 3D textures.
+        descriptor_binding_partially_bound: true,
+        runtime_descriptor_array: true,
         ..Default::default()
     };
 

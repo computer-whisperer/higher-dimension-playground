@@ -8,10 +8,12 @@ mod hud;
 mod overlay;
 mod pipelines;
 mod profiler;
+mod texture_pool;
 mod types;
 mod vte;
 
 use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers, VoxelBufferCapacities};
+use self::texture_pool::TexturePool;
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
@@ -51,7 +53,8 @@ use vulkano::descriptor_set::allocator::{
     StandardDescriptorSetAllocatorCreateInfo,
 };
 use vulkano::descriptor_set::layout::{
-    DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType,
+    DescriptorBindingFlags, DescriptorSetLayout, DescriptorSetLayoutBinding,
+    DescriptorSetLayoutCreateInfo, DescriptorType,
 };
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, Queue};
@@ -761,13 +764,13 @@ fn vte_cpu_sample_voxel_in_chunk(
             return None;
         }
     }
-    let material_idx = header.material_word_offset + (local_idx >> 2);
+    let material_idx = header.material_word_offset + (local_idx >> 1);
     let material_idx = material_idx as usize;
     if material_idx >= material_word_count as usize || material_idx >= material_words.len() {
         return None;
     }
     let material_word = material_words[material_idx];
-    let material = (material_word >> ((local_idx & 3) * 8)) & 0xFF;
+    let material = (material_word >> ((local_idx & 1) * 16)) & 0xFFFF;
     if material != 0 {
         Some(material)
     } else {
@@ -1436,6 +1439,7 @@ pub struct RenderContext {
     vte_entity_diag_prev_used_non_voxel: Option<usize>,
     vte_entity_diag_prev_tets_non_voxel: Option<usize>,
     drop_next_profile_sample: bool,
+    texture_pool: TexturePool,
 }
 
 impl RenderContext {
@@ -2513,6 +2517,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         let mut vte_leaf_chunk_entry_count: usize = 0;
         let mut vte_occupancy_word_count: usize = 0;
         let mut vte_material_word_count: usize = 0;
+        let mut vte_orientation_word_count: usize = 0;
         let mut vte_macro_word_count: usize = 0;
         let mut vte_visible_lod_counts = [0u32; 3];
         let mut vte_visible_chunk_min = [0; 4];
@@ -2538,6 +2543,10 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 .max(ceil_div(
                     input.material_words.len(),
                     vte::VTE_MATERIAL_WORDS_PER_CHUNK,
+                ))
+                .max(ceil_div(
+                    input.orientation_words.len(),
+                    vte::VTE_ORIENTATION_WORDS_PER_CHUNK,
                 ))
                 .max(ceil_div(
                     input.macro_words.len(),
@@ -2570,6 +2579,10 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 .material_words
                 .len()
                 .min(vte_buffer_caps.material_words());
+            vte_orientation_word_count = input
+                .orientation_words
+                .len()
+                .min(vte_buffer_caps.orientation_words());
             vte_macro_word_count = input.macro_words.len().min(vte_buffer_caps.macro_words());
             vte_visible_lod_counts[0] = vte_leaf_count as u32;
 
@@ -2579,10 +2592,11 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 || input.leaf_chunk_entries.len() > vte_leaf_chunk_entry_count
                 || input.occupancy_words.len() > vte_occupancy_word_count
                 || input.material_words.len() > vte_material_word_count
+                || input.orientation_words.len() > vte_orientation_word_count
                 || input.macro_words.len() > vte_macro_word_count
             {
                 eprintln!(
-                    "VTE input truncated to capacities: dense_chunks {}->{}, leaves {}->{}, bvh_nodes {}->{}, leaf_entries {}->{}, occ_words {}->{}, mat_words {}->{}, macro_words {}->{}",
+                    "VTE input truncated to capacities: dense_chunks {}->{}, leaves {}->{}, bvh_nodes {}->{}, leaf_entries {}->{}, occ_words {}->{}, mat_words {}->{}, ori_words {}->{}, macro_words {}->{}",
                     input.chunk_headers.len(),
                     vte_chunk_count,
                     input.leaf_headers.len(),
@@ -2595,6 +2609,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     vte_occupancy_word_count,
                     input.material_words.len(),
                     vte_material_word_count,
+                    input.orientation_words.len(),
+                    vte_orientation_word_count,
                     input.macro_words.len(),
                     vte_macro_word_count
                 );
@@ -2611,6 +2627,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 let chunk_headers = &input.chunk_headers[..vte_chunk_count];
                 let occupancy_words = &input.occupancy_words[..vte_occupancy_word_count];
                 let material_words = &input.material_words[..vte_material_word_count];
+                let orientation_words = &input.orientation_words[..vte_orientation_word_count];
                 let leaf_headers = &input.leaf_headers[..vte_leaf_count];
                 let region_bvh_nodes = &input.region_bvh_nodes[..vte_region_bvh_node_count];
                 let leaf_chunk_entries = &input.leaf_chunk_entries[..vte_leaf_chunk_entry_count];
@@ -2661,6 +2678,22 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         let mut writer = frame
                             .live_buffers
                             .voxel_material_words_buffer
+                            .write()
+                            .unwrap();
+                        writer[dst].copy_from_slice(&write.values[src]);
+                    }
+
+                    for write in &batch.orientation_word_writes {
+                        let Some((dst, src)) = clamp_write_span(
+                            write.start,
+                            write.values.len(),
+                            vte_orientation_word_count,
+                        ) else {
+                            continue;
+                        };
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_orientation_words_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2784,6 +2817,22 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&material_words[range]);
+                    }
+
+                    let orientation_words_dirty = clamp_dirty_range(
+                        dirty.and_then(|ranges| ranges.orientation_words.clone()),
+                        vte_orientation_word_count,
+                    )
+                    .or_else(|| {
+                        (vte_orientation_word_count > 0).then_some(0..vte_orientation_word_count)
+                    });
+                    if let Some(range) = orientation_words_dirty {
+                        let mut writer = frame
+                            .live_buffers
+                            .voxel_orientation_words_buffer
+                            .write()
+                            .unwrap();
+                        writer[range.clone()].copy_from_slice(&orientation_words[range]);
                     }
 
                     let leaf_headers_dirty = clamp_dirty_range(
@@ -2963,7 +3012,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 debug_flags,
                 world_bvh_diag_seed: vte_world_bvh_ray_diag_seed,
                 world_bvh_diag_sample_count: vte_world_bvh_ray_diag_sample_count,
-                _world_bvh_diag_padding0: 0,
+                orientation_word_count: vte_orientation_word_count as u32,
                 _world_bvh_diag_padding1: 0,
                 visible_chunk_min_x: vte_visible_chunk_min[0],
                 visible_chunk_min_y: vte_visible_chunk_min[1],
@@ -3315,6 +3364,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             .live_buffers
                             .descriptor_set
                             .clone(),
+                        self.texture_pool.descriptor_set().clone(),
                     ],
                 )
                 .unwrap();
@@ -4503,6 +4553,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     .live_buffers
                                     .descriptor_set
                                     .clone(),
+                                self.texture_pool.descriptor_set().clone(),
                             ],
                         )
                         .unwrap();

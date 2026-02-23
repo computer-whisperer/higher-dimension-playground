@@ -10,7 +10,8 @@ pub struct GpuVoxelChunkHeader {
     pub macro_word_offset: u32,
     pub solid_local_min: [i32; 4],
     pub solid_local_max: [i32; 4],
-    pub _padding: [u32; 2],
+    pub orientation_word_offset: u32,
+    pub _padding: u32,
 }
 
 impl GpuVoxelChunkHeader {
@@ -25,7 +26,7 @@ pub struct GpuVoxelLeafHeader {
     pub leaf_kind: u32,
     pub uniform_material: u32,
     pub chunk_entry_offset: u32,
-    pub _padding: u32,
+    pub uniform_orientation: u32,
 }
 
 pub struct VoxelFrameInput<'a> {
@@ -35,6 +36,7 @@ pub struct VoxelFrameInput<'a> {
     pub chunk_headers: &'a [GpuVoxelChunkHeader],
     pub occupancy_words: &'a [u32],
     pub material_words: &'a [u32],
+    pub orientation_words: &'a [u32],
     pub macro_words: &'a [u32],
     pub region_bvh_nodes: &'a [GpuVoxelChunkBvhNode],
     pub leaf_headers: &'a [GpuVoxelLeafHeader],
@@ -48,6 +50,7 @@ pub struct VoxelFrameDirtyRanges {
     pub chunk_headers: Option<Range<usize>>,
     pub occupancy_words: Option<Range<usize>>,
     pub material_words: Option<Range<usize>>,
+    pub orientation_words: Option<Range<usize>>,
     pub macro_words: Option<Range<usize>>,
     pub region_bvh_nodes: Option<Range<usize>>,
     pub leaf_headers: Option<Range<usize>>,
@@ -59,6 +62,7 @@ pub struct VoxelMutationBatch {
     pub chunk_header_writes: Vec<VoxelChunkHeaderRangeWrite>,
     pub occupancy_word_writes: Vec<VoxelU32RangeWrite>,
     pub material_word_writes: Vec<VoxelU32RangeWrite>,
+    pub orientation_word_writes: Vec<VoxelU32RangeWrite>,
     pub macro_word_writes: Vec<VoxelU32RangeWrite>,
     pub region_bvh_node_writes: Vec<VoxelChunkBvhNodeRangeWrite>,
     pub leaf_header_writes: Vec<VoxelLeafHeaderRangeWrite>,
@@ -108,7 +112,7 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) debug_flags: u32,
     pub(super) world_bvh_diag_seed: u32,
     pub(super) world_bvh_diag_sample_count: u32,
-    pub(super) _world_bvh_diag_padding0: u32,
+    pub(super) orientation_word_count: u32,
     pub(super) _world_bvh_diag_padding1: u32,
     pub(super) visible_chunk_min_x: i32,
     pub(super) visible_chunk_min_y: i32,
@@ -240,7 +244,8 @@ pub(super) struct VteFirstMismatch {
 
 pub const VTE_MAX_DENSE_CHUNKS: usize = 12_288;
 pub(super) const VTE_OCCUPANCY_WORDS_PER_CHUNK: usize = 128; // 8^4 / 32
-pub(super) const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 1_024; // 8^4 / 4 packed u8
+pub(super) const VTE_MATERIAL_WORDS_PER_CHUNK: usize = 2_048; // 8^4 / 2 packed u16
+pub(super) const VTE_ORIENTATION_WORDS_PER_CHUNK: usize = 2_048; // 8^4 / 2 packed u16
 pub(super) const VTE_MACRO_WORDS_PER_CHUNK: usize = 8; // (8/2)^4 / 32
 pub const VTE_REGION_BVH_NODE_CAPACITY: usize = 32_768;
 pub const VTE_REGION_LEAF_CAPACITY: usize = 16_384;

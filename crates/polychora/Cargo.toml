@@ -27,6 +27,7 @@ postcard = { version = "1", features = ["use-std"] }
 egui = "0.33.3"
 egui-winit = { version = "0.33.3", default-features = false, features = ["links", "wayland", "x11"] }
 rodio = "0.20"
+ciborium = "0.2"
 crc32fast = "1.4"
 sha2 = "0.10"
 wasmtime = "28"

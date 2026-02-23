@@ -8,14 +8,6 @@ pub(super) fn sanitize_player_name(name: &str, client_id: u64) -> String {
     trimmed.chars().take(32).collect()
 }
 
-fn normalize_spawn_token(token: &str) -> String {
-    token
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect()
-}
-
 pub(super) fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .ok()
@@ -24,18 +16,6 @@ pub(super) fn env_flag_enabled(name: &str) -> bool {
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false)
-}
-
-pub(super) fn parse_spawn_material_id(token: &str) -> Option<u8> {
-    if let Ok(id) = token.parse::<u8>() {
-        if (1..=materials::MAX_MATERIAL_ID).contains(&id) {
-            return Some(id);
-        }
-    }
-    let normalized = normalize_spawn_token(token);
-    materials::MATERIALS.iter().find_map(|material| {
-        (normalize_spawn_token(material.name) == normalized).then_some(material.id)
-    })
 }
 
 pub(super) fn parse_spawn_vec4(args: &[&str]) -> Option<[f32; 4]> {
@@ -50,28 +30,14 @@ pub(super) fn parse_spawn_vec4(args: &[&str]) -> Option<[f32; 4]> {
 }
 
 pub(super) fn spawn_usage_string() -> String {
-    let names = SPAWNABLE_ENTITY_SPECS
-        .iter()
-        .map(|spec| spec.canonical_name)
-        .collect::<Vec<_>>()
-        .join("|");
-    format!("Usage: /spawn <{names}> [x y z w] [material-id|material-name]")
+    let names = entity_types::spawnable_names().join("|");
+    format!("Usage: /spawn <{names}> [x y z w]")
 }
 
-pub(super) fn spawnable_entity_spec_for_token(token: &str) -> Option<SpawnableEntitySpec> {
-    let normalized = normalize_spawn_token(token);
-    SPAWNABLE_ENTITY_SPECS.iter().copied().find(|spec| {
-        spec.aliases
-            .iter()
-            .any(|alias| normalize_spawn_token(alias) == normalized)
-    })
-}
-
-pub(super) fn spawnable_entity_spec_for_kind(kind: EntityKind) -> Option<SpawnableEntitySpec> {
-    SPAWNABLE_ENTITY_SPECS
-        .iter()
-        .copied()
-        .find(|spec| spec.kind == kind)
+pub(super) fn entity_type_entry_for_token(
+    token: &str,
+) -> Option<&'static entity_types::EntityTypeEntry> {
+    entity_types::lookup_by_name(token).filter(|entry| entry.is_spawnable())
 }
 
 pub(super) fn default_spawn_pose_for_client(
@@ -84,37 +50,14 @@ pub(super) fn default_spawn_pose_for_client(
     let Some(snapshot) = state.entity_store.snapshot(player.entity_id) else {
         return ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]);
     };
-    let look = normalize4_or_default(snapshot.orientation, [0.0, 0.0, 1.0, 0.0]);
+    let look = normalize4_or_default(snapshot.entity.pose.orientation, [0.0, 0.0, 1.0, 0.0]);
     let position = [
-        snapshot.position[0] + look[0] * 3.0,
-        snapshot.position[1] + look[1] * 3.0,
-        snapshot.position[2] + look[2] * 3.0,
-        snapshot.position[3] + look[3] * 3.0,
+        snapshot.entity.pose.position[0] + look[0] * 3.0,
+        snapshot.entity.pose.position[1] + look[1] * 3.0,
+        snapshot.entity.pose.position[2] + look[2] * 3.0,
+        snapshot.entity.pose.position[3] + look[3] * 3.0,
     ];
     (position, look)
-}
-
-pub(super) fn mob_archetype_defaults(archetype: MobArchetype) -> MobArchetypeDefaults {
-    match archetype {
-        MobArchetype::Seeker => MobArchetypeDefaults {
-            move_speed: 3.0,
-            preferred_distance: 2.6,
-            tangent_weight: 0.72,
-            locomotion: MobLocomotionMode::Walking,
-        },
-        MobArchetype::Creeper4d => MobArchetypeDefaults {
-            move_speed: 2.55,
-            preferred_distance: 3.8,
-            tangent_weight: 0.92,
-            locomotion: MobLocomotionMode::Walking,
-        },
-        MobArchetype::PhaseSpider => MobArchetypeDefaults {
-            move_speed: 3.1,
-            preferred_distance: 2.4,
-            tangent_weight: 0.95,
-            locomotion: MobLocomotionMode::Flying,
-        },
-    }
 }
 
 pub(super) fn phase_spider_next_phase_deadline(

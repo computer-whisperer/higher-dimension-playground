@@ -458,6 +458,7 @@ pub(super) struct LiveBuffers {
     pub(super) voxel_chunk_headers_buffer: Subbuffer<[GpuVoxelChunkHeader]>,
     pub(super) voxel_occupancy_words_buffer: Subbuffer<[u32]>,
     pub(super) voxel_material_words_buffer: Subbuffer<[u32]>,
+    pub(super) voxel_orientation_words_buffer: Subbuffer<[u32]>,
     pub(super) voxel_leaf_headers_buffer: Subbuffer<[vte::GpuVoxelLeafHeader]>,
     pub(super) voxel_region_bvh_nodes_buffer: Subbuffer<[vte::GpuVoxelChunkBvhNode]>,
     pub(super) voxel_leaf_chunk_entries_buffer: Subbuffer<[u32]>,
@@ -506,6 +507,11 @@ impl VoxelBufferCapacities {
     pub(super) fn material_words(self) -> usize {
         self.dense_chunks
             .saturating_mul(vte::VTE_MATERIAL_WORDS_PER_CHUNK)
+    }
+
+    pub(super) fn orientation_words(self) -> usize {
+        self.dense_chunks
+            .saturating_mul(vte::VTE_ORIENTATION_WORDS_PER_CHUNK)
     }
 
     pub(super) fn macro_words(self) -> usize {
@@ -623,6 +629,21 @@ impl LiveBuffers {
                 ..Default::default()
             },
             vec![0u32; voxel_caps.material_words()],
+        )
+        .unwrap();
+
+        let voxel_orientation_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; voxel_caps.orientation_words()],
         )
         .unwrap();
 
@@ -748,6 +769,7 @@ impl LiveBuffers {
                 WriteDescriptorSet::buffer(10, vte_first_mismatch_buffer.clone()),
                 WriteDescriptorSet::buffer(11, voxel_macro_words_buffer.clone()),
                 WriteDescriptorSet::buffer(12, vte_world_bvh_ray_diag_buffer.clone()),
+                WriteDescriptorSet::buffer(13, voxel_orientation_words_buffer.clone()),
             ],
             [],
         )
@@ -759,6 +781,7 @@ impl LiveBuffers {
             voxel_chunk_headers_buffer,
             voxel_occupancy_words_buffer,
             voxel_material_words_buffer,
+            voxel_orientation_words_buffer,
             voxel_leaf_headers_buffer,
             voxel_region_bvh_nodes_buffer,
             voxel_leaf_chunk_entries_buffer,
@@ -791,7 +814,7 @@ impl LiveBuffers {
                 ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
             },
         );
-        for binding in 2..=12u32 {
+        for binding in 2..=13u32 {
             bindings.insert(
                 binding,
                 DescriptorSetLayoutBinding {

@@ -1,5 +1,5 @@
 use super::*;
-use polychora::materials::block_to_material_appearance;
+use polychora::materials::block_to_material_token;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::voxel::BlockData;
 use polychora::shared::render_tree::{
@@ -13,12 +13,14 @@ fn pack_dense_materials_words(
     block_palette: &[BlockData],
     occupancy_words: &mut [u32; OCCUPANCY_WORDS_PER_CHUNK],
     material_words: &mut [u32; MATERIAL_WORDS_PER_CHUNK],
+    orientation_words: &mut [u32; ORIENTATION_WORDS_PER_CHUNK],
     macro_words: &mut [u32; MACRO_WORDS_PER_CHUNK],
 ) -> (u32, bool, [i32; 4], [i32; 4]) {
     debug_assert_eq!(dense_palette_indices.len(), CHUNK_VOLUME);
 
     occupancy_words.fill(0);
     material_words.fill(0);
+    orientation_words.fill(0);
     macro_words.fill(0);
 
     let mut solid_count = 0u32;
@@ -30,14 +32,19 @@ fn pack_dense_materials_words(
             .get(palette_idx as usize)
             .cloned()
             .unwrap_or(BlockData::AIR);
-        let mat_u8 = block_to_material_appearance(block.namespace, block.block_type);
+        let mat_u16 = block_to_material_token(block.namespace, block.block_type);
 
-        let mat_word_idx = voxel_idx / 4;
-        let mat_shift = ((voxel_idx & 3) * 8) as u32;
-        material_words[mat_word_idx] &= !(0xFFu32 << mat_shift);
-        material_words[mat_word_idx] |= u32::from(mat_u8) << mat_shift;
+        let mat_word_idx = voxel_idx / 2;
+        let mat_shift = ((voxel_idx & 1) * 16) as u32;
+        material_words[mat_word_idx] &= !(0xFFFFu32 << mat_shift);
+        material_words[mat_word_idx] |= u32::from(mat_u16) << mat_shift;
 
-        if mat_u8 == 0 {
+        // Pack orientation (u16) the same way as material tokens: 2 per u32
+        let orient_u16 = block.orientation.0;
+        orientation_words[mat_word_idx] &= !(0xFFFFu32 << mat_shift);
+        orientation_words[mat_word_idx] |= u32::from(orient_u16) << mat_shift;
+
+        if mat_u16 == 0 {
             continue;
         }
 
@@ -232,15 +239,18 @@ impl Scene {
         }
         let mut occ = [0u32; OCCUPANCY_WORDS_PER_CHUNK];
         let mut mat = [0u32; MATERIAL_WORDS_PER_CHUNK];
+        let mut ori = [0u32; ORIENTATION_WORDS_PER_CHUNK];
         let mut mac = [0u32; MACRO_WORDS_PER_CHUNK];
         let (_solid_count, is_full, solid_local_min, solid_local_max) =
-            pack_dense_materials_words(&dense_palette_indices, block_palette, &mut occ, &mut mat, &mut mac);
+            pack_dense_materials_words(&dense_palette_indices, block_palette, &mut occ, &mut mat, &mut ori, &mut mac);
         let chunk_index = voxel_frame_data.chunk_headers.len() as u32;
         let occ_offset = voxel_frame_data.occupancy_words.len() as u32;
         let mat_offset = voxel_frame_data.material_words.len() as u32;
+        let ori_offset = voxel_frame_data.orientation_words.len() as u32;
         let mac_offset = voxel_frame_data.macro_words.len() as u32;
         voxel_frame_data.occupancy_words.extend_from_slice(&occ);
         voxel_frame_data.material_words.extend_from_slice(&mat);
+        voxel_frame_data.orientation_words.extend_from_slice(&ori);
         voxel_frame_data.macro_words.extend_from_slice(&mac);
         let mut flags = 0u32;
         if is_full {
@@ -253,7 +263,8 @@ impl Scene {
             macro_word_offset: mac_offset,
             solid_local_min,
             solid_local_max,
-            _padding: [0; 2],
+            orientation_word_offset: ori_offset,
+            _padding: 0,
         });
         let encoded = chunk_index.saturating_add(1);
         dense_payload_cache.insert(payload.clone(), encoded);
@@ -267,14 +278,14 @@ impl Scene {
     ) -> Result<(), String> {
         match &leaf.kind {
             RenderLeafKind::Uniform(block) => {
-                let mat = block_to_material_appearance(block.namespace, block.block_type);
+                let mat = block_to_material_token(block.namespace, block.block_type);
                 voxel_frame_data.leaf_headers.push(GpuVoxelLeafHeader {
                     min_chunk_coord: leaf.bounds.min,
                     max_chunk_coord: leaf.bounds.max,
                     leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
                     uniform_material: u32::from(mat),
                     chunk_entry_offset: 0,
-                    _padding: 0,
+                    uniform_orientation: u32::from(block.orientation.0),
                 });
             }
             RenderLeafKind::VoxelChunkArray(chunk_array) => {
@@ -286,7 +297,7 @@ impl Scene {
                             higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                         uniform_material: 0,
                         chunk_entry_offset: 0,
-                        _padding: 0,
+                        uniform_orientation: 0,
                     });
                     return Ok(());
                 };
@@ -329,11 +340,12 @@ impl Scene {
                                     }
                                     ChunkPayload::Uniform(idx) => {
                                         let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
-                                        let mat = block_to_material_appearance(block.namespace, block.block_type);
+                                        let mat = block_to_material_token(block.namespace, block.block_type);
                                         if mat == 0 {
                                             higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                         } else {
                                             higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                                | (u32::from(block.orientation.0) << 16)
                                                 | u32::from(mat)
                                         }
                                     }
@@ -358,7 +370,7 @@ impl Scene {
                     leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                     uniform_material: 0,
                     chunk_entry_offset: entry_offset,
-                    _padding: 0,
+                    uniform_orientation: 0,
                 });
             }
         }
@@ -372,7 +384,7 @@ impl Scene {
             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
             uniform_material: 0,
             chunk_entry_offset: 0,
-            _padding: 0,
+            uniform_orientation: 0,
         }
     }
 
@@ -413,6 +425,9 @@ impl Scene {
         }
         if !voxel_frame_data.material_words.is_empty() {
             dirty.material_words = Some(0..voxel_frame_data.material_words.len());
+        }
+        if !voxel_frame_data.orientation_words.is_empty() {
+            dirty.orientation_words = Some(0..voxel_frame_data.orientation_words.len());
         }
         if !voxel_frame_data.macro_words.is_empty() {
             dirty.macro_words = Some(0..voxel_frame_data.macro_words.len());
@@ -515,6 +530,12 @@ impl Scene {
             batch.material_word_writes.push(write);
         }
         if let Some(write) = Self::u32_range_write_from_dirty(
+            &voxel_frame_data.orientation_words,
+            dirty.orientation_words.clone(),
+        ) {
+            batch.orientation_word_writes.push(write);
+        }
+        if let Some(write) = Self::u32_range_write_from_dirty(
             &voxel_frame_data.macro_words,
             dirty.macro_words.clone(),
         ) {
@@ -542,6 +563,7 @@ impl Scene {
         let has_ops = !batch.chunk_header_writes.is_empty()
             || !batch.occupancy_word_writes.is_empty()
             || !batch.material_word_writes.is_empty()
+            || !batch.orientation_word_writes.is_empty()
             || !batch.macro_word_writes.is_empty()
             || !batch.region_bvh_node_writes.is_empty()
             || !batch.leaf_header_writes.is_empty()
@@ -600,11 +622,12 @@ impl Scene {
                             }
                             ChunkPayload::Uniform(idx) => {
                                 let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
-                                let mat = block_to_material_appearance(block.namespace, block.block_type);
+                                let mat = block_to_material_token(block.namespace, block.block_type);
                                 if mat == 0 {
                                     higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                 } else {
                                     higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                        | (u32::from(block.orientation.0) << 16)
                                         | u32::from(mat)
                                 }
                             }
@@ -761,6 +784,7 @@ impl Scene {
         let old_chunk_headers_len = self.voxel_frame_data.chunk_headers.len();
         let old_occupancy_words_len = self.voxel_frame_data.occupancy_words.len();
         let old_material_words_len = self.voxel_frame_data.material_words.len();
+        let old_orientation_words_len = self.voxel_frame_data.orientation_words.len();
         let old_macro_words_len = self.voxel_frame_data.macro_words.len();
         let mut dirty = VoxelFrameDirtyRanges::default();
         let mut current_root = if self.voxel_frame_data.region_bvh_root_index
@@ -831,14 +855,14 @@ impl Scene {
 
                 match &leaf.kind {
                     RenderLeafKind::Uniform(block) => {
-                        let mat = block_to_material_appearance(block.namespace, block.block_type);
+                        let mat = block_to_material_token(block.namespace, block.block_type);
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
                             min_chunk_coord: leaf.bounds.min,
                             max_chunk_coord: leaf.bounds.max,
                             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
                             uniform_material: u32::from(mat),
                             chunk_entry_offset: 0,
-                            _padding: 0,
+                            uniform_orientation: u32::from(block.orientation.0),
                         };
                         Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                     }
@@ -864,7 +888,7 @@ impl Scene {
                                 higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                             uniform_material: 0,
                             chunk_entry_offset: span.start as u32,
-                            _padding: 0,
+                            uniform_orientation: 0,
                         };
                         Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                     }
@@ -888,6 +912,11 @@ impl Scene {
             &mut dirty.material_words,
             old_material_words_len,
             self.voxel_frame_data.material_words.len(),
+        );
+        Self::mark_appended_tail(
+            &mut dirty.orientation_words,
+            old_orientation_words_len,
+            self.voxel_frame_data.orientation_words.len(),
         );
         Self::mark_appended_tail(
             &mut dirty.macro_words,
@@ -919,6 +948,7 @@ impl Scene {
         let mut dense_chunk_headers = Vec::<GpuVoxelChunkHeader>::new();
         let mut occupancy_words = Vec::<u32>::new();
         let mut material_words = Vec::<u32>::new();
+        let mut orientation_words = Vec::<u32>::new();
         let mut macro_words = Vec::<u32>::new();
         let mut leaf_headers = Vec::<GpuVoxelLeafHeader>::with_capacity(render_bvh.leaves.len());
         let mut leaf_chunk_entries = Vec::<u32>::new();
@@ -929,14 +959,14 @@ impl Scene {
         for leaf in &render_bvh.leaves {
             match &leaf.kind {
                 RenderLeafKind::Uniform(block) => {
-                    let mat = block_to_material_appearance(block.namespace, block.block_type);
+                    let mat = block_to_material_token(block.namespace, block.block_type);
                     leaf_headers.push(GpuVoxelLeafHeader {
                         min_chunk_coord: leaf.bounds.min,
                         max_chunk_coord: leaf.bounds.max,
                         leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
                         uniform_material: u32::from(mat),
                         chunk_entry_offset: 0,
-                        _padding: 0,
+                        uniform_orientation: u32::from(block.orientation.0),
                     });
                 }
                 RenderLeafKind::VoxelChunkArray(chunk_array) => {
@@ -947,7 +977,7 @@ impl Scene {
                             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                             uniform_material: 0,
                             chunk_entry_offset: 0,
-                            _padding: 0,
+                            uniform_orientation: 0,
                         });
                         continue;
                     };
@@ -1009,11 +1039,12 @@ impl Scene {
                                                         }
                                                         ChunkPayload::Uniform(idx) => {
                                                             let block = chunk_array.block_palette.get(*idx as usize).cloned().unwrap_or(BlockData::AIR);
-                                                            let mat = block_to_material_appearance(block.namespace, block.block_type);
+                                                            let mat = block_to_material_token(block.namespace, block.block_type);
                                                             if mat == 0 {
                                                                 higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                                             } else {
                                                                 higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
+                                                                    | (u32::from(block.orientation.0) << 16)
                                                                     | u32::from(mat)
                                                             }
                                                         }
@@ -1041,6 +1072,8 @@ impl Scene {
                                                                         OCCUPANCY_WORDS_PER_CHUNK];
                                                                     let mut mat = [0u32;
                                                                         MATERIAL_WORDS_PER_CHUNK];
+                                                                    let mut ori = [0u32;
+                                                                        ORIENTATION_WORDS_PER_CHUNK];
                                                                     let mut mac = [0u32;
                                                                         MACRO_WORDS_PER_CHUNK];
                                                                     let (_solid_count, is_full, solid_local_min, solid_local_max) =
@@ -1049,6 +1082,7 @@ impl Scene {
                                                                             &chunk_array.block_palette,
                                                                             &mut occ,
                                                                             &mut mat,
+                                                                            &mut ori,
                                                                             &mut mac,
                                                                         );
                                                                     let chunk_index =
@@ -1057,12 +1091,16 @@ impl Scene {
                                                                         occupancy_words.len() as u32;
                                                                     let mat_offset =
                                                                         material_words.len() as u32;
+                                                                    let ori_offset =
+                                                                        orientation_words.len() as u32;
                                                                     let mac_offset =
                                                                         macro_words.len() as u32;
                                                                     occupancy_words
                                                                         .extend_from_slice(&occ);
                                                                     material_words
                                                                         .extend_from_slice(&mat);
+                                                                    orientation_words
+                                                                        .extend_from_slice(&ori);
                                                                     macro_words
                                                                         .extend_from_slice(&mac);
                                                                     let mut flags = 0u32;
@@ -1081,7 +1119,9 @@ impl Scene {
                                                                                 mac_offset,
                                                                             solid_local_min,
                                                                             solid_local_max,
-                                                                            _padding: [0; 2],
+                                                                            orientation_word_offset:
+                                                                                ori_offset,
+                                                                            _padding: 0,
                                                                         },
                                                                     );
                                                                     let encoded_dense =
@@ -1119,7 +1159,7 @@ impl Scene {
                             higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                         uniform_material: 0,
                         chunk_entry_offset: entry_offset,
-                        _padding: 0,
+                        uniform_orientation: 0,
                     });
                 }
             }
@@ -1137,6 +1177,7 @@ impl Scene {
             chunk_headers: dense_chunk_headers,
             occupancy_words,
             material_words,
+            orientation_words,
             macro_words,
             region_bvh_nodes,
             leaf_headers,
@@ -1156,6 +1197,7 @@ impl Scene {
         self.voxel_frame_data.chunk_headers.clear();
         self.voxel_frame_data.occupancy_words.clear();
         self.voxel_frame_data.material_words.clear();
+        self.voxel_frame_data.orientation_words.clear();
         self.voxel_frame_data.macro_words.clear();
         self.voxel_frame_data.region_bvh_nodes.clear();
         self.voxel_frame_data.leaf_headers.clear();
@@ -1176,6 +1218,7 @@ impl Scene {
             self.voxel_frame_data.chunk_headers = buffers.chunk_headers;
             self.voxel_frame_data.occupancy_words = buffers.occupancy_words;
             self.voxel_frame_data.material_words = buffers.material_words;
+            self.voxel_frame_data.orientation_words = buffers.orientation_words;
             self.voxel_frame_data.macro_words = buffers.macro_words;
             self.voxel_frame_data.region_bvh_nodes = buffers.region_bvh_nodes;
             self.voxel_frame_data.leaf_headers = buffers.leaf_headers;

@@ -275,6 +275,14 @@ impl RenderContext {
 
         let live_descriptor_set_layout = LiveBuffers::create_descriptor_set_layout(device.clone());
 
+        let texture_pool = TexturePool::new(
+            device.clone(),
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            descriptor_set_allocator.clone(),
+            queue.clone(),
+        );
+
         // We must now create a **pipeline layout** object, which describes the locations and
         // types of descriptor sets and push constants used by the shaders in the pipeline.
         //
@@ -291,6 +299,7 @@ impl RenderContext {
                     one_time_descriptor_set_layout.clone(),
                     sized_descriptor_set_layout.clone(),
                     live_descriptor_set_layout.clone(),
+                    texture_pool.descriptor_set_layout().clone(),
                 ]),
                 push_constant_ranges: vec![PushConstantRange {
                     stages: ShaderStages::COMPUTE,
@@ -687,6 +696,7 @@ impl RenderContext {
             vte_entity_diag_prev_used_non_voxel: None,
             vte_entity_diag_prev_tets_non_voxel: None,
             drop_next_profile_sample: false,
+            texture_pool,
         }
     }
 }

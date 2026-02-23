@@ -2,6 +2,10 @@
 
 import types;
 
+// Texture pool: runtime 3D textures accessible by index.
+[[vk::binding(0, 3)]] SamplerState texturePoolSampler;
+[[vk::binding(1, 3)]] Texture3D<float4> texturePool[256];
+
 MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTicksMs)
 {
     const float basicLuminance = 0.001;
@@ -19,6 +23,15 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
     mat.luminance = basicLuminance;
     mat.integrationWeight = 1.0;
 
+    // Bit 15 selects texture-pool mode; bits [14:0] are the pool index.
+    bool isTexturePool = (baseTextureId & 0x8000u) != 0u;
+    if (isTexturePool)
+    {
+        uint poolIndex = baseTextureId & 0x7FFFu;
+        mat.albedo = texturePool[min(poolIndex, 255u)].SampleLevel(texturePoolSampler, p4.xyz, 0.0);
+        mat.luminance = basicLuminance;
+    }
+    else
     switch (baseTextureId)
     {
     case 1:

@@ -179,7 +179,7 @@ struct VoxelFrameMeta
     uint debugFlags;
     uint worldBvhDiagSeed;
     uint worldBvhDiagSampleCount;
-    uint worldBvhDiagPadding0;
+    uint orientationWordCount;
     uint worldBvhDiagPadding1;
     int visibleChunkMinX;
     int visibleChunkMinY;
@@ -205,7 +205,7 @@ struct VoxelChunkHeader
     uint macroWordOffset;
     int4 solidLocalMin;
     int4 solidLocalMax;
-    uint padding0;
+    uint orientationWordOffset;
     uint padding1;
 }
 
@@ -226,7 +226,7 @@ struct VoxelLeafHeader
     uint leafKind;
     uint uniformMaterial;
     uint chunkEntryOffset;
-    uint padding0;
+    uint uniformOrientation;
 }
 
 // Set 0: OneTimeBuffers
@@ -251,6 +251,7 @@ struct VoxelLeafHeader
 [[vk::binding(10, 2)]] RWStructuredBuffer<uint> vteFirstMismatchRecord;
 [[vk::binding(11, 2)]] StructuredBuffer<uint> voxelMacroWords;
 [[vk::binding(12, 2)]] RWStructuredBuffer<uint> vteWorldBvhRayDiagBuffer;
+[[vk::binding(13, 2)]] StructuredBuffer<uint> voxelOrientationWords;
 
 void incrementCompareStat(uint statIndex)
 {
@@ -1261,11 +1262,41 @@ float4 estimateVoxelHitNormal(float4 hitPos, float4 rayDir)
     return normal;
 }
 
-float4 voxelMaterialSampleCoords(float4 hitPos, float4 rayDir, float4 hitNormal)
+// 4D axis permutation lookup table — matches PERMUTATIONS from voxel.rs.
+// Each uint4 gives [output_axis_0_source, ..., output_axis_3_source].
+static const uint4 PERM_LUT[24] = {
+    uint4(0, 1, 2, 3), uint4(0, 1, 3, 2), uint4(0, 2, 1, 3), uint4(0, 2, 3, 1),
+    uint4(0, 3, 1, 2), uint4(0, 3, 2, 1), uint4(1, 0, 2, 3), uint4(1, 0, 3, 2),
+    uint4(1, 2, 0, 3), uint4(1, 2, 3, 0), uint4(1, 3, 0, 2), uint4(1, 3, 2, 0),
+    uint4(2, 0, 1, 3), uint4(2, 0, 3, 1), uint4(2, 1, 0, 3), uint4(2, 1, 3, 0),
+    uint4(2, 3, 0, 1), uint4(2, 3, 1, 0), uint4(3, 0, 1, 2), uint4(3, 0, 2, 1),
+    uint4(3, 1, 0, 2), uint4(3, 1, 2, 0), uint4(3, 2, 0, 1), uint4(3, 2, 1, 0),
+};
+
+// Apply a TesseractOrientation (encoded as permutation_index * 16 + sign_bits) to a 4D position.
+float4 applyTesseractOrientation(float4 pos, uint orientation)
+{
+    if (orientation == 0u) return pos;
+    uint permIdx = orientation / 16u;
+    uint signBits = orientation % 16u;
+    uint4 perm = PERM_LUT[min(permIdx, 23u)];
+    float4 src = pos;
+    float4 r;
+    r.x = ((signBits & 1u) != 0u) ? -src[perm.x] : src[perm.x];
+    r.y = ((signBits & 2u) != 0u) ? -src[perm.y] : src[perm.y];
+    r.z = ((signBits & 4u) != 0u) ? -src[perm.z] : src[perm.z];
+    r.w = ((signBits & 8u) != 0u) ? -src[perm.w] : src[perm.w];
+    return r;
+}
+
+float4 voxelMaterialSampleCoords(float4 hitPos, float4 rayDir, float4 hitNormal, uint orientation)
 {
     // Sample from the entered voxel, then map the hit hyperface to 3D local
     // coordinates by dropping the normal axis.
     float4 local = frac(hitPos + rayDir * 1e-4);
+
+    // Apply block orientation to local coordinates (centered on voxel).
+    local = applyTesseractOrientation(local - 0.5, orientation) + 0.5;
 
     float4 absN = abs(hitNormal);
     uint axis = 0u;
@@ -1622,7 +1653,7 @@ uint findUniformMaterialAtChunk(int4 chunkCoord, uint lodLevel, VoxelFrameMeta m
     uint encoded = lookupLeafChunkEntry(leaf, chunkCoord, meta);
     if ((encoded & LEAF_CHUNK_ENTRY_UNIFORM_FLAG) != 0u)
     {
-        return encoded & (~LEAF_CHUNK_ENTRY_UNIFORM_FLAG);
+        return encoded & 0xFFFFu;
     }
     return 0u;
 }
@@ -1942,9 +1973,11 @@ bool sampleVoxelInChunk(
     int4 chunkMin,
     VoxelChunkHeader h,
     VoxelFrameMeta meta,
-    out uint materialId)
+    out uint materialId,
+    out uint orientation)
 {
     materialId = 0;
+    orientation = 0;
     int4 local = voxelCoord - chunkMin;
     uint localIdx = computeLocalIndex(local);
 
@@ -1962,13 +1995,22 @@ bool sampleVoxelInChunk(
         }
     }
 
-    uint materialIdx = h.materialWordOffset + (localIdx >> 2);
+    uint materialIdx = h.materialWordOffset + (localIdx >> 1);
     if (materialIdx >= meta.materialWordCount)
     {
         return false;
     }
     uint materialWord = voxelMaterialWords[materialIdx];
-    materialId = (materialWord >> ((localIdx & 3u) * 8u)) & 0xFFu;
+    uint shift = (localIdx & 1u) * 16u;
+    materialId = (materialWord >> shift) & 0xFFFFu;
+
+    uint orientIdx = h.orientationWordOffset + (localIdx >> 1);
+    if (orientIdx < meta.orientationWordCount)
+    {
+        uint orientWord = voxelOrientationWords[orientIdx];
+        orientation = (orientWord >> shift) & 0xFFFFu;
+    }
+
     return materialId != 0;
 }
 
@@ -2017,11 +2059,13 @@ bool traceVoxelsInChunk(
     VoxelFrameMeta meta,
     inout uint remainingVoxelSteps,
     out uint hitMaterial,
+    out uint hitOrientation,
     out float4 hitPos,
     out int4 hitChunkCoord)
 {
     const float EPS = 1e-6;
     hitMaterial = 0;
+    hitOrientation = 0;
     hitPos = float4(0.0, 0.0, 0.0, 0.0);
     hitChunkCoord = int4(0, 0, 0, 0);
     float intervalEps = max(EPS, max(abs(tEnter), abs(tExit)) * 1e-7);
@@ -2152,7 +2196,8 @@ bool traceVoxelsInChunk(
             if (macroHasSolid)
             {
                 uint materialId = 0;
-                if (sampleVoxelInChunk(voxelCoord, chunkMin, h, meta, materialId))
+                uint orientId = 0;
+                if (sampleVoxelInChunk(voxelCoord, chunkMin, h, meta, materialId, orientId))
                 {
                     float hitT = tTraceStart + localT;
                     if (firstVoxelInInterval)
@@ -2162,6 +2207,7 @@ bool traceVoxelsInChunk(
                         hitT = tStart;
                     }
                     hitMaterial = materialId;
+                    hitOrientation = orientId;
                     hitPos = rayOrigin + rayDir * hitT;
                     hitChunkCoord = chunkCoord;
                     return true;
@@ -2193,6 +2239,7 @@ bool traceVoxelRayReferenceVisible(
     out uint pathHash)
 {
     uint hitLod = 0u;
+    uint hitOrient = 0u;
     uint missReason = MISS_REASON_NONE;
     uint debugFlags = 0u;
     uint chunkSteps = 0u;
@@ -2205,6 +2252,7 @@ bool traceVoxelRayReferenceVisible(
         meta,
         0u,
         hitMaterial,
+        hitOrient,
         hitPos,
         hitChunkCoord,
         hitLod,
@@ -2224,6 +2272,7 @@ bool traceVoxelRayDDA(
     VoxelFrameMeta meta,
     uint targetLodLevel,
     out uint hitMaterial,
+    out uint hitOrientation,
     out float4 hitPos,
     out int4 hitChunkCoord,
     out uint hitLodLevel,
@@ -2237,6 +2286,7 @@ bool traceVoxelRayDDA(
     out uint outPathHash)
 {
     hitMaterial = 0u;
+    hitOrientation = 0u;
     hitPos = float4(0.0, 0.0, 0.0, 0.0);
     hitChunkCoord = int4(0, 0, 0, 0);
     hitLodLevel = targetLodLevel;
@@ -2476,6 +2526,7 @@ bool traceVoxelRayDDA(
                 float probeT = min(nodeExit, hitT + probeEps);
                 float4 probePos = rayOrigin + rayDir * probeT;
                 hitMaterial = uniformMaterial;
+                hitOrientation = leaf.uniformOrientation;
                 hitPos = rayOrigin + rayDir * hitT;
                 hitChunkCoord = int4(
                     entryChunkCoord(probePos.x, rayDir.x),
@@ -2589,10 +2640,12 @@ bool traceVoxelRayDDA(
                 uint encoded = lookupLeafChunkEntry(leaf, chunkCoord, meta);
                 if ((encoded & LEAF_CHUNK_ENTRY_UNIFORM_FLAG) != 0u)
                 {
-                    uint uniformMaterial = encoded & (~LEAF_CHUNK_ENTRY_UNIFORM_FLAG);
+                    uint uniformMaterial = encoded & 0xFFFFu;
+                    uint uniformChunkOrientation = (encoded >> 16u) & 0x7FFFu;
                     if (uniformMaterial != 0u)
                     {
                         hitMaterial = uniformMaterial;
+                        hitOrientation = uniformChunkOrientation;
                         hitPos = rayOrigin + rayDir * currentT;
                         hitChunkCoord = chunkCoord;
                         hitLodLevel = targetLodLevel;
@@ -2611,6 +2664,7 @@ bool traceVoxelRayDDA(
                     {
                         VoxelChunkHeader h = voxelChunkHeaders[chunkIndex];
                         uint chunkMaterial = 0u;
+                        uint chunkOrientation = 0u;
                         float4 chunkHitPos = float4(0.0, 0.0, 0.0, 0.0);
                         int4 chunkHitChunkCoord = int4(0, 0, 0, 0);
                         float tEnter = currentT;
@@ -2641,10 +2695,12 @@ bool traceVoxelRayDDA(
                                 meta,
                                 remainingVoxelSteps,
                                 chunkMaterial,
+                                chunkOrientation,
                                 chunkHitPos,
                                 chunkHitChunkCoord))
                             {
                                 hitMaterial = chunkMaterial;
+                                hitOrientation = chunkOrientation;
                                 hitPos = chunkHitPos;
                                 hitChunkCoord = chunkHitChunkCoord;
                                 hitLodLevel = targetLodLevel;
@@ -2703,6 +2759,7 @@ bool traceVoxelRayDDAWithLodRings(
     float4 rayDir,
     VoxelFrameMeta meta,
     out uint hitMaterial,
+    out uint hitOrientation,
     out float4 hitPos,
     out int4 hitChunkCoord,
     out uint hitLodLevel,
@@ -2721,6 +2778,7 @@ bool traceVoxelRayDDAWithLodRings(
         meta,
         0u,
         hitMaterial,
+        hitOrientation,
         hitPos,
         hitChunkCoord,
         hitLodLevel,
@@ -2833,6 +2891,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
         float maxEntityDistance = max(1.0, meta.maxTraceDistance);
         bool evaluateEntityTetra = wd.totalNumTetrahedrons > 0u;
         uint hitMaterial = 0u;
+        uint hitOrientation = 0u;
         float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
         int4 hitChunkCoord = int4(0, 0, 0, 0);
         uint hitLodLevel = 0u;
@@ -2852,6 +2911,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
                 worldDirection,
                 meta,
                 hitMaterial,
+                hitOrientation,
                 hitPos,
                 hitChunkCoord,
                 hitLodLevel,
@@ -3145,7 +3205,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     MaterialProperties mat = sampleMaterial(
                         hitMaterial,
-                        voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
+                        voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal, hitOrientation),
                         wd.timeTicksMs);
                     float3 litColor = shadeVoxelMaterial(mat, hitNormal);
                     float3 highlighted = shadeHighlightedVoxelSample(
@@ -3178,7 +3238,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
                     MaterialProperties mat = sampleMaterial(
                         hitMaterial,
-                        voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
+                        voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal, hitOrientation),
                         wd.timeTicksMs);
                     float w = max(1e-4, mat.integrationWeight);
                     float hitBrightnessScale = (hitMaterial == MATERIAL_ID_GROUND)
@@ -3261,6 +3321,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
     );
 
     uint hitMaterial = 0;
+    uint hitOrientation = 0;
     float4 hitPos = float4(0.0, 0.0, 0.0, 0.0);
     int4 hitChunkCoord = int4(0, 0, 0, 0);
     uint hitLodLevel = 0u;
@@ -3277,6 +3338,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
         worldDirection,
         meta,
         hitMaterial,
+        hitOrientation,
         hitPos,
         hitChunkCoord,
         hitLodLevel,
@@ -3826,7 +3888,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             MaterialProperties mat = sampleMaterial(
                 hitMaterial,
-                voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
+                voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal, hitOrientation),
                 wd.timeTicksMs);
             float3 litColor = shadeVoxelMaterial(mat, hitNormal);
             outColor = shadeHighlightedVoxelSample(
@@ -3844,7 +3906,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
             MaterialProperties mat = sampleMaterial(
                 hitMaterial,
-                voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal),
+                voxelMaterialSampleCoords(hitPos, worldDirection, hitNormal, hitOrientation),
                 wd.timeTicksMs);
             outColor = shadeVoxelMaterial(mat, hitNormal);
             outColor = maybeApplyLodTint(outColor, hitLodLevel, meta);

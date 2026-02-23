@@ -374,10 +374,10 @@ fn dense_materials_from_resolved_payload(
                 .get(idx as usize)
                 .cloned()
                 .unwrap_or(voxel::BlockData::AIR);
-            u16::from(crate::materials::block_to_material_appearance(
+            crate::materials::block_to_material_token(
                 block.namespace,
                 block.block_type,
-            ))
+            )
         })
         .collect()
 }
@@ -480,9 +480,6 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
         Some(prev) => subtract_bounds(prev, bounds),
         None => Vec::new(),
     };
-    // Interest diff is computed from requested AABBs only. WorldSubtreePatch
-    // payloads may extend beyond these AABBs to preserve canonical tree leaves;
-    // requested bounds still define the authoritative "must be present" volume.
     let removed_count = removed_bounds.len();
     let added_count = added_bounds.len();
 
@@ -625,11 +622,13 @@ pub(super) fn apply_explosion_impulse(
         let Some(snapshot) = state.entity_store.snapshot(record.entity_id) else {
             continue;
         };
+        let pos = snapshot.entity.pose.position;
+        let orient = snapshot.entity.pose.orientation;
         let offset = [
-            snapshot.position[0] - center[0],
-            snapshot.position[1] - center[1],
-            snapshot.position[2] - center[2],
-            snapshot.position[3] - center[3],
+            pos[0] - center[0],
+            pos[1] - center[1],
+            pos[2] - center[2],
+            pos[3] - center[3],
         ];
         let distance_sq = offset[0] * offset[0]
             + offset[1] * offset[1]
@@ -655,15 +654,15 @@ pub(super) fn apply_explosion_impulse(
                 offset[3] / distance,
             ]
         } else {
-            normalize4_or_default(snapshot.orientation, [1.0, 0.0, 0.0, 0.0])
+            normalize4_or_default(orient, [1.0, 0.0, 0.0, 0.0])
         };
         let next_position = [
-            snapshot.position[0] + outward[0] * push_distance,
-            snapshot.position[1] + outward[1] * push_distance,
-            snapshot.position[2] + outward[2] * push_distance,
-            snapshot.position[3] + outward[3] * push_distance,
+            pos[0] + outward[0] * push_distance,
+            pos[1] + outward[1] * push_distance,
+            pos[2] + outward[2] * push_distance,
+            pos[3] + outward[3] * push_distance,
         ];
-        let next_orientation = normalize4_or_default(outward, snapshot.orientation);
+        let next_orientation = normalize4_or_default(outward, orient);
         pending_impulses.push((
             record.entity_id,
             next_position,
@@ -678,11 +677,13 @@ pub(super) fn apply_explosion_impulse(
         let Some(snapshot) = state.entity_store.snapshot(player.entity_id) else {
             continue;
         };
+        let pos = snapshot.entity.pose.position;
+        let orient = snapshot.entity.pose.orientation;
         let offset = [
-            snapshot.position[0] - center[0],
-            snapshot.position[1] - center[1],
-            snapshot.position[2] - center[2],
-            snapshot.position[3] - center[3],
+            pos[0] - center[0],
+            pos[1] - center[1],
+            pos[2] - center[2],
+            pos[3] - center[3],
         ];
         let distance_sq = offset[0] * offset[0]
             + offset[1] * offset[1]
@@ -708,7 +709,7 @@ pub(super) fn apply_explosion_impulse(
                 offset[3] / distance,
             ]
         } else {
-            normalize4_or_default(snapshot.orientation, [1.0, 0.0, 0.0, 0.0])
+            normalize4_or_default(orient, [1.0, 0.0, 0.0, 0.0])
         };
         let delta_position = [
             outward[0] * push_distance,
@@ -942,46 +943,51 @@ fn install_or_update_player(
         std::f32::consts::FRAC_1_SQRT_2,
     ];
     let mut spawned_now = false;
+
+    let make_player_entity = |pos: [f32; 4], orient: [f32; 4]| -> Entity {
+        Entity {
+            namespace: ENTITY_PLAYER_AVATAR.0,
+            entity_type: ENTITY_PLAYER_AVATAR.1,
+            pose: EntityPose {
+                position: pos,
+                orientation: orient,
+                velocity: [0.0; 4],
+                scale: 1.0,
+            },
+            data: Vec::new(),
+        }
+    };
+
     let entity_id = match guard.players.entry(client_id) {
         Entry::Occupied(entry) => entry.get().entity_id,
         Entry::Vacant(entry) => {
             spawned_now = true;
             let entity_id = client_id;
             entry.insert(PlayerState { entity_id });
-            guard.entity_store.spawn(
-                entity_id,
-                EntityClass::Player,
-                EntityKind::PlayerAvatar,
+            let entity = make_player_entity(
                 position.unwrap_or([0.0, 0.0, 0.0, 0.0]),
                 look.unwrap_or(default_orientation),
-                1.0,
-                0,
-                now,
             );
+            guard.entity_store.spawn(entity_id, entity, now);
             entity_id
         }
     };
 
     if guard.entity_store.snapshot(entity_id).is_none() {
         spawned_now = true;
-        guard.entity_store.spawn(
-            entity_id,
-            EntityClass::Player,
-            EntityKind::PlayerAvatar,
+        let entity = make_player_entity(
             position.unwrap_or([0.0, 0.0, 0.0, 0.0]),
             look.unwrap_or(default_orientation),
-            1.0,
-            0,
-            now,
         );
+        guard.entity_store.spawn(entity_id, entity, now);
     }
 
     let current = guard
         .entity_store
         .snapshot(entity_id)
         .expect("player entity should exist in store");
-    let target_position = position.unwrap_or(current.position);
-    let target_orientation = look.unwrap_or(current.orientation);
+    let target_position = position.unwrap_or(current.entity.pose.position);
+    let target_orientation = look.unwrap_or(current.entity.pose.orientation);
     let _ =
         guard
             .entity_store
@@ -1001,16 +1007,12 @@ fn install_or_update_player(
         .entity_store
         .snapshot(entity_id)
         .expect("updated player entity should exist in store");
-    snapshot.class = EntityClass::Player;
-    snapshot.kind = EntityKind::PlayerAvatar;
-    snapshot.scale = 1.0;
-    snapshot.material = 0;
     snapshot.owner_client_id = Some(client_id);
     snapshot.display_name = Some(player_name.clone());
     upsert_entity_record(
         &mut guard,
         entity_id,
-        EntityClass::Player,
+        EntityCategory::Player,
         Some(client_id),
         Some(player_name),
         false,
@@ -1021,19 +1023,27 @@ fn install_or_update_player(
 
 fn spawn_entity_from_request(
     state: &SharedState,
-    kind: EntityKind,
+    namespace: u32,
+    entity_type: u32,
     position: [f32; 4],
     orientation: [f32; 4],
     scale: f32,
-    material: u8,
     start: Instant,
 ) -> Result<EntitySnapshot, String> {
-    if kind == EntityKind::PlayerAvatar {
+    if (namespace, entity_type) == ENTITY_PLAYER_AVATAR {
         return Err("player entities are server-managed and cannot be spawned".to_string());
     }
-    let Some(spec) = spawnable_entity_spec_for_kind(kind) else {
-        return Err(format!("entity kind {:?} is not spawnable", kind));
+    let Some(entry) = entity_types::lookup(namespace, entity_type) else {
+        return Err(format!(
+            "entity type ({namespace}, {entity_type}) is not registered"
+        ));
     };
+    if !entry.is_spawnable() {
+        return Err(format!(
+            "entity type '{}' is not spawnable",
+            entry.canonical_name
+        ));
+    }
 
     let spawn_position = [
         if position[0].is_finite() {
@@ -1067,43 +1077,41 @@ fn spawn_entity_from_request(
     } else {
         0.5
     };
-    let spawn_material = material.clamp(1, materials::MAX_MATERIAL_ID);
 
-    let entity = match (spec.class, spec.mob_archetype) {
-        (EntityClass::Mob, Some(archetype)) => spawn_mob_entity(
+    let entity_data = Entity {
+        namespace,
+        entity_type,
+        pose: EntityPose {
+            position: spawn_position,
+            orientation: spawn_orientation,
+            velocity: [0.0; 4],
+            scale: spawn_scale,
+        },
+        data: Vec::new(),
+    };
+
+    let snapshot = match (entry.category, entry.mob_archetype) {
+        (EntityCategory::Mob, Some(archetype)) => spawn_mob_entity(
             state,
-            kind,
+            entity_data,
             archetype,
-            spawn_position,
-            spawn_orientation,
-            spawn_scale,
-            spawn_material,
             None,
             true,
             None,
             None,
             start,
         ),
-        (EntityClass::Accent, None) => spawn_entity(
-            state,
-            kind,
-            spawn_position,
-            spawn_orientation,
-            spawn_scale,
-            spawn_material,
-            None,
-            true,
-            None,
-            start,
-        ),
-        (class, archetype) => {
+        (EntityCategory::Accent, None) => {
+            spawn_entity(state, entity_data, None, true, None, start)
+        }
+        (category, archetype) => {
             return Err(format!(
-                "spawn spec for {:?} is invalid (class={:?}, archetype={:?})",
-                kind, class, archetype
+                "spawn spec for '{}' is invalid (category={:?}, archetype={:?})",
+                entry.canonical_name, category, archetype
             ));
         }
     };
-    Ok(entity)
+    Ok(snapshot)
 }
 
 fn handle_console_spawn_command(
@@ -1115,12 +1123,8 @@ fn handle_console_spawn_command(
     if args.is_empty() {
         return Err(spawn_usage_string());
     }
-    let Some(spec) = spawnable_entity_spec_for_token(args[0]) else {
-        let available = SPAWNABLE_ENTITY_SPECS
-            .iter()
-            .map(|spec| spec.canonical_name)
-            .collect::<Vec<_>>()
-            .join(", ");
+    let Some(entry) = entity_type_entry_for_token(args[0]) else {
+        let available = entity_types::spawnable_names().join(", ");
         return Err(format!(
             "unknown spawn kind '{}'; available kinds: {available}",
             args[0]
@@ -1132,39 +1136,24 @@ fn handle_console_spawn_command(
         default_spawn_pose_for_client(&guard, client_id)
     };
     let parse_usage = || spawn_usage_string();
-    let (position, material_id) = match args.len() {
-        1 => (default_position, spec.default_material),
-        2 => {
-            let Some(material_id) = parse_spawn_material_id(args[1]) else {
-                return Err(format!("unknown material '{}'", args[1]));
-            };
-            (default_position, material_id)
-        }
+    let position = match args.len() {
+        1 => default_position,
         5 => {
             let Some(position) = parse_spawn_vec4(&args[1..5]) else {
                 return Err(parse_usage());
             };
-            (position, spec.default_material)
-        }
-        6 => {
-            let Some(position) = parse_spawn_vec4(&args[1..5]) else {
-                return Err(parse_usage());
-            };
-            let Some(material_id) = parse_spawn_material_id(args[5]) else {
-                return Err(format!("unknown material '{}'", args[5]));
-            };
-            (position, material_id)
+            position
         }
         _ => return Err(parse_usage()),
     };
 
     let _ = spawn_entity_from_request(
         state,
-        spec.kind,
+        entry.namespace,
+        entry.entity_type,
         position,
         default_orientation,
-        spec.default_scale,
-        material_id,
+        entry.default_scale,
         start,
     )?;
     Ok(())
@@ -1258,19 +1247,19 @@ pub(super) fn handle_message(
             };
         }
         ClientMessage::SpawnEntity {
-            kind,
+            entity_type_namespace,
+            entity_type,
             position,
             orientation,
             scale,
-            material,
         } => {
             if let Err(message) = spawn_entity_from_request(
                 state,
-                kind,
+                entity_type_namespace,
+                entity_type,
                 position,
                 orientation,
                 scale,
-                material,
                 start,
             ) {
                 send_to_client(state, client_id, ServerMessage::Error { message });
@@ -1425,11 +1414,7 @@ pub(super) fn spawn_client_thread(
 
 fn spawn_entity(
     state: &SharedState,
-    kind: EntityKind,
-    position: [f32; 4],
-    orientation: [f32; 4],
-    scale: f32,
-    material: u8,
+    entity: Entity,
     display_name: Option<String>,
     persistent: bool,
     persisted_entity_id: Option<EntityId>,
@@ -1438,20 +1423,11 @@ fn spawn_entity(
     let mut guard = state.lock().expect("server state lock poisoned");
     let allocated_id = allocate_or_reserve_server_object_id(&mut guard, persisted_entity_id);
     let now_ms = monotonic_ms(start);
-    let entity_id = guard.entity_store.spawn(
-        allocated_id,
-        EntityClass::Accent,
-        kind,
-        position,
-        orientation,
-        scale,
-        material,
-        now_ms,
-    );
+    guard.entity_store.spawn(allocated_id, entity, now_ms);
     upsert_entity_record(
         &mut guard,
-        entity_id,
-        EntityClass::Accent,
+        allocated_id,
+        EntityCategory::Accent,
         None,
         display_name,
         persistent,
@@ -1459,18 +1435,14 @@ fn spawn_entity(
     );
     guard
         .entity_store
-        .snapshot(entity_id)
+        .snapshot(allocated_id)
         .expect("spawned entity should exist in store")
 }
 
 fn spawn_mob_entity(
     state: &SharedState,
-    kind: EntityKind,
+    entity: Entity,
     archetype: MobArchetype,
-    position: [f32; 4],
-    orientation: [f32; 4],
-    scale: f32,
-    material: u8,
     display_name: Option<String>,
     persistent: bool,
     persisted_mob: Option<PersistedMobEntry>,
@@ -1480,21 +1452,14 @@ fn spawn_mob_entity(
     let mut guard = state.lock().expect("server state lock poisoned");
     let allocated_id = allocate_or_reserve_server_object_id(&mut guard, persisted_entity_id);
     let now_ms = monotonic_ms(start);
-    let entity_id = guard.entity_store.spawn(
-        allocated_id,
-        EntityClass::Mob,
-        kind,
-        position,
-        orientation,
-        scale,
-        material,
-        now_ms,
-    );
-    let defaults = mob_archetype_defaults(archetype);
+    guard
+        .entity_store
+        .spawn(allocated_id, entity, now_ms);
+    let defaults = entity_types::mob_archetype_defaults(archetype);
     let phase_offset = persisted_mob
         .as_ref()
         .map(|mob| mob.phase_offset)
-        .unwrap_or_else(|| ((entity_id as f32) * 0.73).rem_euclid(std::f32::consts::TAU));
+        .unwrap_or_else(|| ((allocated_id as f32) * 0.73).rem_euclid(std::f32::consts::TAU));
     let move_speed = persisted_mob
         .as_ref()
         .map(|mob| mob.move_speed)
@@ -1510,13 +1475,13 @@ fn spawn_mob_entity(
         .map(|mob| mob.tangent_weight)
         .unwrap_or(defaults.tangent_weight)
         .clamp(0.0, 2.0);
-    let initial_phase_tick_seed = (entity_id as u32).wrapping_mul(7477);
+    let initial_phase_tick_seed = (allocated_id as u32).wrapping_mul(7477);
     let next_phase_ms =
         phase_spider_next_phase_deadline(now_ms, phase_offset, initial_phase_tick_seed);
     guard.mobs.insert(
-        entity_id,
+        allocated_id,
         MobState {
-            entity_id,
+            entity_id: allocated_id,
             archetype,
             phase_offset,
             move_speed,
@@ -1528,8 +1493,8 @@ fn spawn_mob_entity(
     );
     upsert_entity_record(
         &mut guard,
-        entity_id,
-        EntityClass::Mob,
+        allocated_id,
+        EntityCategory::Mob,
         None,
         display_name,
         persistent,
@@ -1537,6 +1502,6 @@ fn spawn_mob_entity(
     );
     guard
         .entity_store
-        .snapshot(entity_id)
+        .snapshot(allocated_id)
         .expect("spawned mob entity should exist in store")
 }
