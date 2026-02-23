@@ -1,4 +1,7 @@
-// Material metadata system for Polychora 4D voxel game
+// Material metadata system for Polychora 4D voxel game.
+// Named constants and the `block_to_material_token` function form a registry;
+// individual items may not be referenced directly but exist for clarity.
+#![allow(dead_code)]
 
 // Namespace IDs
 pub const NAMESPACE_POLYCHORA: u32 = 0;

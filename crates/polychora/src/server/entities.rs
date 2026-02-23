@@ -4,21 +4,9 @@ use crate::shared::entity_types::{
 use crate::shared::protocol::{Entity, EntitySnapshot};
 use std::collections::HashMap;
 
-pub type EntityId = u64;
+use super::normalize4_or_default;
 
-fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
-    let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
-    if len_sq <= 1e-8 || !len_sq.is_finite() {
-        return fallback;
-    }
-    let inv_len = len_sq.sqrt().recip();
-    [
-        v[0] * inv_len,
-        v[1] * inv_len,
-        v[2] * inv_len,
-        v[3] * inv_len,
-    ]
-}
+pub type EntityId = u64;
 
 pub fn update_entity_motion(
     entity: &mut Entity,
@@ -80,7 +68,7 @@ impl EntityState {
                     self.home_position[2] + 0.18 * phase_a.cos(),
                     self.home_position[3] + 0.18 * phase_b.sin(),
                 ],
-                normalize4_with_fallback(
+                normalize4_or_default(
                     [
                         phase_a.cos(),
                         0.35 * phase_b.cos(),
@@ -101,7 +89,7 @@ impl EntityState {
                     self.home_position[2] + 0.36 * phase.sin(),
                     self.home_position[3] + 0.24 * (phase * 1.3).cos(),
                 ],
-                normalize4_with_fallback(
+                normalize4_or_default(
                     [
                         -phase.sin(),
                         0.25 * wobble.cos(),
@@ -122,7 +110,7 @@ impl EntityState {
                     self.home_position[2] + 0.34 * (phase_a * 1.4).cos(),
                     self.home_position[3] + 0.42 * phase_b.sin(),
                 ],
-                normalize4_with_fallback(
+                normalize4_or_default(
                     [
                         (phase_a * 1.4).sin(),
                         -0.35 * phase_b.sin(),
@@ -212,7 +200,7 @@ impl EntityStore {
         update_entity_motion(
             &mut entity.entity,
             position,
-            normalize4_with_fallback(orientation, [0.0, 0.0, 1.0, 0.0]),
+            normalize4_or_default(orientation, [0.0, 0.0, 1.0, 0.0]),
             now_ms,
             &mut entity.last_update_ms,
         );

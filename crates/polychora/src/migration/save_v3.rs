@@ -207,8 +207,8 @@ pub struct BlockBlob {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistedEntityRecord {
     pub entity_id: u64,
-    pub class: EntityClass,
-    pub kind: EntityKind,
+    pub(crate) class: EntityClass,
+    pub(crate) kind: EntityKind,
     pub position: [f32; 4],
     pub orientation: [f32; 4],
     pub velocity: [f32; 4],

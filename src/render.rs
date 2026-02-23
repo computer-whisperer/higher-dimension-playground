@@ -18,7 +18,7 @@ use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_p
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
-    push_text_quads, text_width_px, HudResources, HudVertex, LineVertex, OverlayLine,
+    push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine,
     HUD_VERTEX_CAPACITY,
 };
 use self::pipelines::{ComputePipelineContext, PresentPipelineContext};

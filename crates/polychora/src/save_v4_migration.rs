@@ -23,6 +23,7 @@ struct LegacySidecarBlob {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)] // Fields retained for deserialization of legacy sidecar JSON
 struct LegacySidecarEntity {
     class: EntityClass,
     kind: EntityKind,

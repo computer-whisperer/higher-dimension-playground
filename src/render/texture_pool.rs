@@ -1,3 +1,6 @@
+// Texture pool scaffolding — methods will be wired in the next project phase.
+#![allow(dead_code)]
+
 use super::*;
 
 /// Maximum number of 3D textures that can be in the pool simultaneously.

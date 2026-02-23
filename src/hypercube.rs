@@ -1,12 +1,10 @@
 use common::{binomial, factorial, generate_combinations, generate_permutations};
 use std::marker::PhantomData;
 
-#[allow(dead_code)]
 pub struct Hypercube<const D: usize, T: From<usize>> {
     phantom_data: PhantomData<T>,
 }
 
-#[allow(dead_code)]
 impl<const D: usize, T: From<usize> + Copy + Default> Hypercube<D, T> {
     pub fn generate_vertices() -> Vec<[T; D]> {
         (0..(1 << D))

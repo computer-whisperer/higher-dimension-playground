@@ -19,12 +19,6 @@ import materials;
 [[vk::binding(8, 1)]] RWStructuredBuffer<uint> tileTetIndices;
 
 static const uint MAX_TETS_PER_TILE = 8192;
-static const uint WORKING_FLAG_VTE_COLLAPSED = 1u << 0u;
-
-bool isVteCollapsed(WorkingData workingData)
-{
-    return (workingData.padding[0] & WORKING_FLAG_VTE_COLLAPSED) != 0u;
-}
 
 // Set 2: LiveBuffers
 [[vk::binding(0, 2)]] StructuredBuffer<ModelInstance> instances;

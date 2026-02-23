@@ -466,78 +466,6 @@ impl StructureBlueprint {
         }
     }
 
-    fn writes_any_voxel_in_chunk_oriented(
-        &self,
-        origin: [i32; 4],
-        orientation: u8,
-        chunk_min: [i32; 4],
-        chunk_max: [i32; 4],
-    ) -> bool {
-        for fill in &self.fills {
-            if fill.material == 0 {
-                continue;
-            }
-
-            let fill_min_rotated = rotate_offset_xzw(fill.min, orientation);
-            let fill_max_local = [
-                fill.min[0] + fill.size[0] - 1,
-                fill.min[1] + fill.size[1] - 1,
-                fill.min[2] + fill.size[2] - 1,
-                fill.min[3] + fill.size[3] - 1,
-            ];
-            let fill_max_rotated = rotate_offset_xzw(fill_max_local, orientation);
-            let fill_world_min = [
-                origin[0] + fill_min_rotated[0].min(fill_max_rotated[0]),
-                origin[1] + fill_min_rotated[1].min(fill_max_rotated[1]),
-                origin[2] + fill_min_rotated[2].min(fill_max_rotated[2]),
-                origin[3] + fill_min_rotated[3].min(fill_max_rotated[3]),
-            ];
-            let fill_world_max = [
-                origin[0] + fill_min_rotated[0].max(fill_max_rotated[0]),
-                origin[1] + fill_min_rotated[1].max(fill_max_rotated[1]),
-                origin[2] + fill_min_rotated[2].max(fill_max_rotated[2]),
-                origin[3] + fill_min_rotated[3].max(fill_max_rotated[3]),
-            ];
-
-            let mut intersects = true;
-            for axis in 0..4 {
-                if fill_world_max[axis] < chunk_min[axis] || fill_world_min[axis] > chunk_max[axis]
-                {
-                    intersects = false;
-                    break;
-                }
-            }
-            if intersects {
-                return true;
-            }
-        }
-
-        for voxel in &self.voxels {
-            if voxel.material == 0 {
-                continue;
-            }
-
-            let rotated = rotate_offset_xzw(voxel.offset, orientation);
-            let wx = origin[0] + rotated[0];
-            let wy = origin[1] + rotated[1];
-            let wz = origin[2] + rotated[2];
-            let ww = origin[3] + rotated[3];
-            if wx >= chunk_min[0]
-                && wx <= chunk_max[0]
-                && wy >= chunk_min[1]
-                && wy <= chunk_max[1]
-                && wz >= chunk_min[2]
-                && wz <= chunk_max[2]
-                && ww >= chunk_min[3]
-                && ww <= chunk_max[3]
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
     fn oriented_world_bounds(&self, origin: [i32; 4], orientation: u8) -> ([i32; 4], [i32; 4]) {
         let x_vals = [self.min_offset[0], self.max_offset[0]];
         let y_vals = [self.min_offset[1], self.max_offset[1]];
@@ -751,6 +679,7 @@ pub fn structure_chunk_y_bounds() -> (i32, i32) {
     )
 }
 
+#[cfg(test)]
 pub fn structure_chunk_y_bounds_for_scale(chunk_scale: i32) -> (i32, i32) {
     let (min_chunk_y, max_chunk_y) = structure_chunk_y_bounds();
     let scale = chunk_scale.max(1);
@@ -1188,11 +1117,9 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
     out
 }
 
-/// Per-placement chunk data: the chunk-coordinate bounding box and a map of chunk positions
-/// to dense chunks generated from a single structure placement.
+/// Per-placement chunk data: a map of chunk positions to dense chunks generated from a single
+/// structure placement.
 pub struct PlacementChunkData {
-    /// Chunk-coordinate AABB of this placement (may be clipped to query bounds).
-    pub placement_chunk_bounds: Aabb4i,
     /// chunk_pos -> generated dense chunk (non-empty only, from this one placement).
     pub chunks: HashMap<[i32; 4], DenseChunk>,
 }
@@ -1284,10 +1211,7 @@ pub fn generate_structure_placements_for_bounds(
         }
 
         if !chunks.is_empty() {
-            results.push(PlacementChunkData {
-                placement_chunk_bounds: clipped,
-                chunks,
-            });
+            results.push(PlacementChunkData { chunks });
         }
     }
     results
@@ -1396,6 +1320,7 @@ fn placement_allowed(
         .unwrap_or(true)
 }
 
+#[cfg(test)]
 pub fn structure_cells_affecting_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Vec<StructureCell> {
     let mut unique = HashSet::new();
     for placement in collect_structure_placements_for_chunk(world_seed, chunk_pos) {
@@ -2260,6 +2185,7 @@ pub fn generate_structure_chunk_with_keepout(
 
 /// Returns chunk positions that contain maze content within the given bounds.
 /// This is the maze counterpart of structure_chunk_positions — excludes structures.
+#[cfg(test)]
 pub fn maze_chunk_positions_for_bounds(
     world_seed: u64,
     bounds: Aabb4i,
@@ -2346,16 +2272,14 @@ pub fn generate_maze_placements_for_bounds(
         }
 
         if !chunks.is_empty() {
-            results.push(PlacementChunkData {
-                placement_chunk_bounds: covered_chunks,
-                chunks,
-            });
+            results.push(PlacementChunkData { chunks });
         }
     }
     results
 }
 
 /// Generate maze-only chunk content for a single chunk position (no structures).
+#[cfg(test)]
 pub fn generate_maze_chunk(
     world_seed: u64,
     chunk_pos: ChunkPos,
@@ -2381,6 +2305,7 @@ pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<
     generate_structure_chunk_with_keepout(world_seed, chunk_pos, None)
 }
 
+#[cfg(test)]
 pub fn structure_chunk_has_content_with_keepout(
     world_seed: u64,
     chunk_pos: ChunkPos,
@@ -2395,12 +2320,9 @@ pub fn structure_chunk_has_content_with_keepout(
                 return false;
             }
             let blueprint = &set.blueprints[placement.blueprint_idx];
-            blueprint.writes_any_voxel_in_chunk_oriented(
-                placement.origin,
-                placement.orientation,
-                chunk_min,
-                chunk_max,
-            )
+            let (bp_min, bp_max) =
+                blueprint.oriented_world_bounds(placement.origin, placement.orientation);
+            (0..4).all(|a| bp_max[a] >= chunk_min[a] && bp_min[a] <= chunk_max[a])
         });
     if has_structure {
         return true;
@@ -2414,6 +2336,7 @@ pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool
     structure_chunk_has_content_with_keepout(world_seed, chunk_pos, None)
 }
 
+#[cfg(test)]
 pub fn structure_chunk_has_content_for_scale_with_keepout(
     world_seed: u64,
     chunk_pos: ChunkPos,

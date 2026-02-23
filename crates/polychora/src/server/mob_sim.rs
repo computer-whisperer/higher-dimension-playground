@@ -1446,18 +1446,7 @@ pub(super) fn tick_entity_simulation_window(
     let mut queued_player_modifiers = Vec::new();
     let mut sim_steps = 0usize;
     while *next_sim_ms <= now_ms && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
-        let moved_entities = state.entity_store.simulate(*next_sim_ms);
-        let _persistent_accent_motion = moved_entities.iter().any(|entity_id| {
-            state
-                .entity_records
-                .get(entity_id)
-                .map(|record| {
-                    record.lifecycle == EntityLifecycle::Live
-                        && record.persistent
-                        && record.category == EntityCategory::Accent
-                })
-                .unwrap_or(false)
-        });
+        state.entity_store.simulate(*next_sim_ms);
         let (mut step_explosions, mut step_player_modifiers) = simulate_mobs(state, *next_sim_ms);
         queued_explosions.append(&mut step_explosions);
         queued_player_modifiers.append(&mut step_player_modifiers);

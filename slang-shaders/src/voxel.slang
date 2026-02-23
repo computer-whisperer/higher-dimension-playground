@@ -18,10 +18,6 @@ static const uint CHUNK_FLAG_FULL = 1u << 0u;
 static const uint STAGE_B_MODE_INTEGRAL = 0u;
 static const uint STAGE_B_MODE_SLICE = 1u;
 static const uint STAGE_B_MODE_THICK_SLICE = 2u;
-static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
-static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
-static const uint WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT = 1u << 1u;
-static const uint WORKING_ZW_SHIFT_STRENGTH_SHIFT = 8u;
 static const uint HIGHLIGHT_FLAG_HIT_VOXEL = 1u << 0u;
 static const uint HIGHLIGHT_FLAG_PLACE_VOXEL = 1u << 1u;
 static const uint MATERIAL_ID_GROUND = 11u;
@@ -1718,22 +1714,6 @@ uint argMin4(float4 v)
 float min3(float3 v)
 {
     return min(v.x, min(v.y, v.z));
-}
-
-uint argMin3(float3 v)
-{
-    uint axis = 0u;
-    float best = v.x;
-    if (v.y < best)
-    {
-        best = v.y;
-        axis = 1u;
-    }
-    if (v.z < best)
-    {
-        axis = 2u;
-    }
-    return axis;
 }
 
 int stepSign(float d)

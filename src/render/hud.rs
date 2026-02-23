@@ -341,24 +341,6 @@ pub(super) fn push_text_quads(
     }
 }
 
-pub(super) fn text_width_px(atlas: &FontAtlas, text: &str, pixel_size: f32) -> f32 {
-    let scale = pixel_size / 32.0;
-    let mut width = 0.0f32;
-    for ch in text.chars() {
-        if ch == '\n' {
-            break;
-        }
-        let idx = ch as usize;
-        if idx >= 128 {
-            continue;
-        }
-        if let Some(glyph) = atlas.glyphs[idx].as_ref() {
-            width += glyph.advance_px * scale;
-        }
-    }
-    width
-}
-
 pub(super) fn push_filled_rect_quads(
     quads: &mut Vec<HudVertex>,
     atlas: &FontAtlas,

@@ -183,3 +183,20 @@ struct BVHNode
 // Constants for BVH traversal
 static const uint BVH_INVALID_INDEX = 0xFFFFFFFF;
 static const uint BVH_STACK_SIZE = 64;
+
+// Shared rendering mode and flag constants
+static const uint STAGE_B_MODE_DEBUG_COMPARE = 3u;
+static const uint STAGE_B_MODE_DEBUG_INTEGRAL = 4u;
+static const uint WORKING_FLAG_VTE_COLLAPSED = 1u << 0u;
+static const uint WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT = 1u << 1u;
+static const uint WORKING_ZW_SHIFT_STRENGTH_SHIFT = 8u;
+
+bool isVteCollapsed(WorkingData wd)
+{
+    return (wd.padding[0] & WORKING_FLAG_VTE_COLLAPSED) != 0u;
+}
+
+bool zwAngleColorShiftEnabled(WorkingData wd)
+{
+    return (wd.padding[0] & WORKING_FLAG_ZW_ANGLE_COLOR_SHIFT) != 0u;
+}

@@ -1,6 +1,5 @@
 use ndarray::Array2;
 
-#[allow(dead_code)]
 pub fn scale_matrix_4d(scale: f32) -> Array2<f32> {
     Array2::from_shape_vec(
         (5, 5),
@@ -12,7 +11,6 @@ pub fn scale_matrix_4d(scale: f32) -> Array2<f32> {
     .unwrap()
 }
 
-#[allow(dead_code)]
 pub fn scale_matrix_4d_elementwise(x: f32, y: f32, z: f32, w: f32) -> Array2<f32> {
     Array2::from_shape_vec(
         (5, 5),
@@ -24,7 +22,6 @@ pub fn scale_matrix_4d_elementwise(x: f32, y: f32, z: f32, w: f32) -> Array2<f32
     .unwrap()
 }
 
-#[allow(dead_code)]
 pub fn translate_matrix_4d(x: f32, y: f32, z: f32, w: f32) -> Array2<f32> {
     Array2::from_shape_vec(
         (5, 5),
@@ -36,21 +33,6 @@ pub fn translate_matrix_4d(x: f32, y: f32, z: f32, w: f32) -> Array2<f32> {
     .unwrap()
 }
 
-#[allow(dead_code)]
-pub fn rotation_matrix_4d_rotate_1(angle: f32) -> Array2<f32> {
-    let cos_theta = angle.cos();
-    let sin_theta = angle.sin();
-    Array2::from_shape_vec(
-        (5, 5),
-        vec![
-            cos_theta, 0.0, -sin_theta, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, sin_theta, 0.0,
-            cos_theta, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ],
-    )
-    .unwrap()
-}
-
-#[allow(dead_code)]
 pub fn rotation_matrix_one_angle(
     dims: usize,
     dim_from: usize,
@@ -69,7 +51,6 @@ pub fn rotation_matrix_one_angle(
     mat
 }
 
-#[allow(dead_code)]
 pub fn double_rotation_matrix_4d(
     plane1: [usize; 2],
     angle1: f32,

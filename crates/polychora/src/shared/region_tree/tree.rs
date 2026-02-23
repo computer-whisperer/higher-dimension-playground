@@ -2002,7 +2002,6 @@ fn chunk_array_has_non_empty_intersection(
     false
 }
 
-#[allow(dead_code)]
 fn resolved_option_is_semantically_empty(resolved: Option<&ResolvedChunkPayload>) -> bool {
     resolved
         .map(|r| !r.has_solid_block())

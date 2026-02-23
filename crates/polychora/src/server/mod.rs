@@ -427,7 +427,3 @@ pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    // Intentionally empty for now.
-}

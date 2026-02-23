@@ -524,14 +524,6 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     vte_thick_half_width: u32,
 
-    /// Deprecated no-op: y-slice fastpath is now always enabled on normal VTE path.
-    #[arg(long, action = ArgAction::Set, default_value_t = true, hide = true)]
-    vte_y_slice_fastpath: bool,
-
-    /// Deprecated no-op: chunk solid clipping is now always enabled.
-    #[arg(long, action = ArgAction::Set, default_value_t = true, hide = true)]
-    vte_chunk_solid_clip: bool,
-
     /// Enable y-slice direct chunk-lookup table in Stage A.
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
     vte_y_slice_lookup_cache: bool,
@@ -1226,16 +1218,6 @@ fn main() {
     }
     if app.vte_compare_slice_only_enabled {
         eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
-    }
-    if !app.args.vte_y_slice_fastpath {
-        eprintln!(
-            "Ignoring deprecated --vte-y-slice-fastpath=false; y-slice fastpath is always enabled."
-        );
-    }
-    if !app.args.vte_chunk_solid_clip {
-        eprintln!(
-            "Ignoring deprecated --vte-chunk-solid-clip=false; chunk solid clipping is always enabled."
-        );
     }
     if !app.vte_y_slice_lookup_cache_enabled {
         eprintln!(
