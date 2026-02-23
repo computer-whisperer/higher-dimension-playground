@@ -372,8 +372,9 @@ impl App {
         self.focal_length_xy = settings.focal_length_xy;
         self.focal_length_zw = settings.focal_length_zw;
         for (i, &mat) in settings.hotbar_slots.iter().enumerate() {
+            let block = self.content_registry.block_data_for_token(mat as u16);
             self.hotbar_slots[i] =
-                Some(polychora::shared::protocol::ItemStack::block(0, mat as u32, 1));
+                Some(polychora::shared::protocol::ItemStack::block(block.namespace, block.block_type, 1));
         }
         self.hotbar_selected_index = settings.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX);
         self.selected_block =
@@ -401,11 +402,11 @@ impl App {
             focal_length_zw: self.focal_length_zw,
             zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
             zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
-            place_material: self.selected_block.block_type as u8,
+            place_material: polychora::content_registry::material_token_from_block_data(&self.selected_block),
             hotbar_slots: {
                 let mut slots = [3u8; 9];
                 for (i, slot) in self.hotbar_slots.iter().enumerate() {
-                    slots[i] = block_material_from_slot(slot);
+                    slots[i] = block_material_from_slot(slot, &self.content_registry);
                 }
                 slots
             },

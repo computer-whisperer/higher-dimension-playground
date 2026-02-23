@@ -57,28 +57,6 @@ impl FlatWorldGenerator {
         }
     }
 
-    fn base_payload_for_chunk_y(&self, chunk_y: i32) -> Option<ChunkPayload> {
-        if chunk_y != FLAT_FLOOR_CHUNK_Y {
-            return None;
-        }
-        self.flat_floor_voxel.as_ref().map(|material| {
-            ChunkPayload::Uniform(self.content_registry.block_material_token(material.namespace, material.block_type))
-        })
-    }
-
-    fn base_dense_chunk_for_chunk_y(&self, chunk_y: i32) -> [u16; CHUNK_VOLUME] {
-        if chunk_y != FLAT_FLOOR_CHUNK_Y {
-            return [0u16; CHUNK_VOLUME];
-        }
-        self.flat_floor_voxel
-            .as_ref()
-            .map(|material| {
-                let mat = self.content_registry.block_material_token(material.namespace, material.block_type);
-                [mat; CHUNK_VOLUME]
-            })
-            .unwrap_or([0u16; CHUNK_VOLUME])
-    }
-
     fn floor_core_for_bounds(&self, bounds: Aabb4i) -> Option<RegionTreeCore> {
         let material = self.flat_floor_voxel.as_ref()?;
         if !bounds.is_valid()
@@ -108,7 +86,7 @@ impl FlatWorldGenerator {
         })
     }
 
-    fn structure_chunk_payload(&self, chunk_pos: ChunkPos) -> Option<ChunkPayload> {
+    fn structure_chunk_payload(&self, chunk_pos: ChunkPos) -> Option<ResolvedChunkPayload> {
         if !self.procgen_structures {
             return None;
         }
@@ -117,19 +95,32 @@ impl FlatWorldGenerator {
             chunk_pos,
             self.procgen_keepout_cells(),
         )?;
-        let mut merged = self.base_dense_chunk_for_chunk_y(chunk_pos.y);
-        merge_non_air_u16(&mut merged, &structure_chunk);
-        let payload = payload_from_u16_chunk_compact(&merged);
-        let base_payload = self.base_payload_for_chunk_y(chunk_pos.y);
-        if base_payload
-            .as_ref()
-            .map(|base| canonicalize_payload(base.clone()) == canonicalize_payload(payload.clone()))
-            .unwrap_or(false)
-        {
-            None
+
+        // Build palette: start with procgen palette, add floor material if needed.
+        let mut palette = procgen::block_palette().to_vec();
+        let floor_idx = if chunk_pos.y == FLAT_FLOOR_CHUNK_Y {
+            self.flat_floor_voxel
+                .as_ref()
+                .map(|block| procgen::intern_block_into_palette(&mut palette, block))
         } else {
-            Some(payload)
+            None
+        };
+
+        let base = floor_idx
+            .map(|idx| [idx; CHUNK_VOLUME])
+            .unwrap_or([0u16; CHUNK_VOLUME]);
+        let mut merged = base;
+        merge_non_air_u16(&mut merged, &structure_chunk);
+
+        if merged == base {
+            return None;
         }
+
+        let payload = payload_from_u16_chunk_compact(&merged);
+        Some(ResolvedChunkPayload {
+            payload,
+            block_palette: palette,
+        })
     }
 
     fn insert_procgen_chunks_for_bounds(&self, bounds: Aabb4i, tree: &mut RegionChunkTree) {
@@ -142,10 +133,9 @@ impl FlatWorldGenerator {
             self.procgen_keepout_cells(),
         );
         for chunk_pos in candidates {
-            let Some(payload) = self.structure_chunk_payload(chunk_pos) else {
+            let Some(resolved) = self.structure_chunk_payload(chunk_pos) else {
                 continue;
             };
-            let resolved = ResolvedChunkPayload::from_legacy_payload(payload);
             let _ = tree.set_chunk(chunk_key_from_chunk_pos(chunk_pos), Some(resolved));
         }
     }
@@ -198,25 +188,6 @@ fn payload_from_u16_chunk_compact(chunk: &[u16; CHUNK_VOLUME]) -> ChunkPayload {
         .unwrap_or(ChunkPayload::Dense16 { materials })
 }
 
-fn canonicalize_payload(payload: ChunkPayload) -> ChunkPayload {
-    let payload = match payload {
-        ChunkPayload::Empty => ChunkPayload::Uniform(0),
-        other => other,
-    };
-    let Ok(dense) = payload.dense_materials() else {
-        return payload;
-    };
-    if dense.is_empty() {
-        return payload;
-    }
-    let first = dense[0];
-    if dense.iter().all(|material| *material == first) {
-        ChunkPayload::Uniform(first)
-    } else {
-        payload
-    }
-}
-
 fn merge_non_air_u16(dst: &mut [u16; CHUNK_VOLUME], src: &[u16; CHUNK_VOLUME]) {
     for (idx, &material) in src.iter().enumerate() {
         if material != 0 {
@@ -235,11 +206,17 @@ mod tests {
         Arc::new(crate::plugin_loader::create_full_registry())
     }
 
+    fn grid_floor_block() -> BlockData {
+        use polychora_plugin_api::content_ids;
+        BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_GRID_FLOOR)
+    }
+
     #[test]
     fn flat_floor_single_chunk_query_returns_uniform_payload() {
+        let floor = grid_floor_block();
         let generator = FlatWorldGenerator::from_chunk_payloads(
             BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, 11),
+                material: floor.clone(),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             123,
@@ -250,14 +227,15 @@ mod tests {
         let bounds = Aabb4i::new([0, FLAT_FLOOR_CHUNK_Y, 0, 0], [0, FLAT_FLOOR_CHUNK_Y, 0, 0]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         assert_eq!(core.bounds, bounds);
-        assert_eq!(core.kind, RegionNodeKind::Uniform(crate::shared::voxel::BlockData::simple(0, 11)));
+        assert_eq!(core.kind, RegionNodeKind::Uniform(floor));
     }
 
     #[test]
     fn flat_floor_multi_chunk_query_emits_only_floor_slice() {
+        let floor = grid_floor_block();
         let generator = FlatWorldGenerator::from_chunk_payloads(
             BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, 11),
+                material: floor.clone(),
             },
             Vec::<([i32; 4], ChunkPayload)>::new(),
             123,
@@ -275,7 +253,7 @@ mod tests {
         assert!(non_empty
             .iter()
             .all(|(key, payload)| key[1] == FLAT_FLOOR_CHUNK_Y
-                && payload.uniform_block() == Some(&BlockData::simple(0, 11))));
+                && payload.uniform_block() == Some(&floor)));
     }
 
     #[test]

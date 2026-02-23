@@ -13,7 +13,9 @@ use polychora::shared::region_tree::{
 use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
 use polychora::shared::spatial::Aabb4i;
 use polychora::shared::voxel::{world_to_chunk, BlockData};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::time::Instant;
 
 mod collision;
@@ -38,12 +40,12 @@ const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
 const COLLISION_BINARY_STEPS: usize = 14;
 const FLAT_FLOOR_CHUNK_Y: i32 = -1;
 const FLAT_PRESET_FLOOR_MATERIAL_BLOCK: BlockData = BlockData {
-    namespace: 0,
-    block_type: 11,
+    namespace: polychora_plugin_api::content_ids::CONTENT_NS,
+    block_type: polychora_plugin_api::content_ids::BLOCK_GRID_FLOOR,
     orientation: polychora::shared::voxel::TesseractOrientation::IDENTITY,
     extra_data: Vec::new(),
 };
-const SHOWCASE_MATERIALS: [u8; 37] = [
+const SHOWCASE_MATERIAL_TOKENS: [u8; 37] = [
     15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50, 55,
     56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
 ];
@@ -200,7 +202,7 @@ impl Scene {
     }
 
     fn place_material_showcase(chunks: &mut HashMap<ChunkPos, Vec<BlockData>>, origin: [i32; 4]) {
-        for (idx, material) in SHOWCASE_MATERIALS.iter().copied().enumerate() {
+        for (idx, token) in SHOWCASE_MATERIAL_TOKENS.iter().copied().enumerate() {
             let col = (idx % 6) as i32;
             let row = (idx / 6) as i32;
             let min = [
@@ -209,7 +211,7 @@ impl Scene {
                 origin[2] + row * 4,
                 origin[3],
             ];
-            Self::fill_hypercube(chunks, min, 2, BlockData::simple(0, material as u32));
+            Self::fill_hypercube(chunks, min, 2, polychora::content_registry::block_data_from_material_token(token));
         }
     }
 
@@ -255,20 +257,27 @@ impl Scene {
                 return RegionChunkTree::from_chunks(tree_entries.into_iter());
             }
             ScenePreset::DemoCubes => {
+                // Cycle through the first 5 block tokens for variety
                 let mut texture_rot = 0u8;
                 for x in 0..2 {
                     for y in 0..2 {
                         for z in 0..2 {
                             for w in 0..2 {
                                 let base = [x * 4 - 2, y * 4 - 2, z * 4 - 2, w * 4 - 2];
-                                let block = BlockData::simple(0, ((texture_rot % 5) + 1) as u32);
+                                let token = (texture_rot % 5) + 1;
+                                let block = polychora::content_registry::block_data_from_material_token(token);
                                 Self::fill_hypercube(&mut chunks, base, 2, block);
                                 texture_rot = (texture_rot + 1) % 5;
                             }
                         }
                     }
                 }
-                Self::fill_hypercube(&mut chunks, [0, 0, 0, 0], 2, BlockData::simple(0, 13));
+                Self::fill_hypercube(
+                    &mut chunks,
+                    [0, 0, 0, 0],
+                    2,
+                    polychora::content_registry::block_data_from_material_token(13), // LIGHT
+                );
             }
         };
 
@@ -969,10 +978,14 @@ mod tests {
         // Update the same chunk with a dense payload that changes only one voxel.
         let mut edited_dense = vec![11u16; CHUNK_VOLUME];
         edited_dense[0] = 4;
-        let edited_payload = ResolvedChunkPayload::from_legacy_payload(
-            ChunkPayload::from_dense_materials_compact(&edited_dense)
+        // Use a trivial identity palette (index N → BlockData::simple(0, N))
+        // since this test checks patch mechanics, not content identity.
+        let test_palette: Vec<BlockData> = (0..=11u32).map(|i| BlockData::simple(0, i)).collect();
+        let edited_payload = ResolvedChunkPayload {
+            payload: ChunkPayload::from_dense_materials_compact(&edited_dense)
                 .expect("compact dense payload"),
-        );
+            block_palette: test_palette,
+        };
         let mut edited_patch = RegionChunkTree::new();
         let _ = edited_patch.set_chunk(chunk_key, Some(edited_payload));
         let edited_core = edited_patch.slice_non_empty_core_in_bounds(chunk_bounds);

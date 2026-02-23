@@ -306,7 +306,10 @@ impl MassivePlatformsWorldGenerator {
             self.procgen_keepout_cells(),
         );
 
-        let platform_material = self.platform_voxel.as_ref().map(|v| self.content_registry.block_material_token(v.namespace, v.block_type));
+        let platform_material = self.platform_voxel.as_ref().map(|v| {
+            let mut pal = procgen::block_palette().to_vec();
+            procgen::intern_block_into_palette(&mut pal, v)
+        });
 
         let y_offset = platform_y_offset(&platform);
 
@@ -368,7 +371,10 @@ impl MassivePlatformsWorldGenerator {
             local_query_bounds,
         );
 
-        let platform_material = self.platform_voxel.as_ref().map(|v| self.content_registry.block_material_token(v.namespace, v.block_type));
+        let platform_material = self.platform_voxel.as_ref().map(|v| {
+            let mut pal = procgen::block_palette().to_vec();
+            procgen::intern_block_into_palette(&mut pal, v)
+        });
         let y_offset = platform_y_offset(platform);
 
         for placement in placement_data {
@@ -771,75 +777,14 @@ fn build_chunk_array_from_placement(
         indices[idx] = palette_idx;
     }
 
-    // Build block_palette from the distinct material IDs used across all chunk payloads.
-    // Each ChunkPayload was built with raw material IDs as u16 values by payload_from_chunk_compact.
-    // We need to remap those to proper block_palette indices.
-    let mut block_palette = vec![BlockData::AIR];
-    let mut mat_to_block_idx: HashMap<u16, u16> = HashMap::new();
-    mat_to_block_idx.insert(0, 0); // AIR -> index 0
-
-    // Collect all distinct material IDs from all chunk payloads.
-    for entry in &palette {
-        match entry {
-            ChunkPayload::Uniform(mat) => {
-                mat_to_block_idx.entry(*mat).or_insert_with(|| {
-                    let idx = block_palette.len() as u16;
-                    block_palette.push(BlockData::simple(0, *mat as u32));
-                    idx
-                });
-            }
-            ChunkPayload::Dense16 { materials } => {
-                for mat in materials {
-                    mat_to_block_idx.entry(*mat).or_insert_with(|| {
-                        let idx = block_palette.len() as u16;
-                        block_palette.push(BlockData::simple(0, *mat as u32));
-                        idx
-                    });
-                }
-            }
-            ChunkPayload::PalettePacked { palette: pal, .. } => {
-                for mat in pal {
-                    mat_to_block_idx.entry(*mat).or_insert_with(|| {
-                        let idx = block_palette.len() as u16;
-                        block_palette.push(BlockData::simple(0, *mat as u32));
-                        idx
-                    });
-                }
-            }
-            ChunkPayload::Empty => {}
-        }
-    }
-
-    // Remap all chunk payloads from raw material IDs to block_palette indices.
-    let remapped_palette: Vec<ChunkPayload> = palette
-        .into_iter()
-        .map(|entry| match entry {
-            ChunkPayload::Uniform(mat) => {
-                ChunkPayload::Uniform(*mat_to_block_idx.get(&mat).unwrap_or(&mat))
-            }
-            ChunkPayload::Dense16 { materials } => ChunkPayload::Dense16 {
-                materials: materials
-                    .iter()
-                    .map(|mat| *mat_to_block_idx.get(mat).unwrap_or(mat))
-                    .collect(),
-            },
-            ChunkPayload::PalettePacked {
-                palette: pal,
-                bit_width,
-                packed_indices,
-            } => ChunkPayload::PalettePacked {
-                palette: pal
-                    .iter()
-                    .map(|mat| *mat_to_block_idx.get(mat).unwrap_or(mat))
-                    .collect(),
-                bit_width,
-                packed_indices,
-            },
-            other => other,
-        })
+    // The u16 values in the ChunkPayloads are procgen palette indices.
+    // Resolve them to BlockData using the procgen block palette.
+    let procgen_pal = procgen::block_palette();
+    let block_palette: Vec<BlockData> = (0..procgen_pal.len())
+        .map(|i| procgen_pal[i].clone())
         .collect();
 
-    Some((effective_bounds, remapped_palette, indices, block_palette))
+    Some((effective_bounds, palette, indices, block_palette))
 }
 
 #[cfg(test)]

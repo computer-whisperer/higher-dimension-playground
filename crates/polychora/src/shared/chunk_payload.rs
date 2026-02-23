@@ -767,6 +767,34 @@ pub struct ResolvedChunkPayload {
 }
 
 impl ResolvedChunkPayload {
+    /// Wrap a raw `ChunkPayload` (whose u16 indices are material tokens)
+    /// by building a block palette from material-token → BlockData mapping.
+    pub fn from_payload_with_token_palette(
+        payload: ChunkPayload,
+        registry: &crate::content_registry::ContentRegistry,
+    ) -> Self {
+        let max_token = registry.max_material_token();
+        let palette: Vec<BlockData> = (0..=max_token)
+            .map(|t| registry.block_data_for_token(t))
+            .collect();
+        Self {
+            payload,
+            block_palette: palette,
+        }
+    }
+
+    /// Wrap a raw `ChunkPayload` using the static material-token mapping.
+    /// Suitable for debug/diagnostic code that doesn't have a ContentRegistry.
+    pub fn from_payload_with_static_palette(payload: ChunkPayload) -> Self {
+        let palette: Vec<BlockData> = (0..=68u8)
+            .map(crate::content_registry::block_data_from_material_token)
+            .collect();
+        Self {
+            payload,
+            block_palette: palette,
+        }
+    }
+
     /// A chunk uniformly filled with a single block type.
     pub fn uniform(block: BlockData) -> Self {
         if block.is_air() {
@@ -783,6 +811,36 @@ impl ResolvedChunkPayload {
         Self {
             payload: ChunkPayload::Empty,
             block_palette: vec![BlockData::AIR],
+        }
+    }
+
+    /// Remap palette indices to material tokens via a callback.
+    /// Returns a new `ChunkPayload` where each u16 index is replaced by the
+    /// result of `block_to_token` applied to the corresponding palette block.
+    pub fn to_material_token_payload(
+        &self,
+        block_to_token: impl Fn(&BlockData) -> u8,
+    ) -> ChunkPayload {
+        let remap = |idx: u16| -> u16 {
+            self.block_palette
+                .get(idx as usize)
+                .map(|b| block_to_token(b) as u16)
+                .unwrap_or(0)
+        };
+        match &self.payload {
+            ChunkPayload::Empty => ChunkPayload::Empty,
+            ChunkPayload::Uniform(idx) => ChunkPayload::Uniform(remap(*idx)),
+            ChunkPayload::Dense16 { materials } => ChunkPayload::Dense16 {
+                materials: materials.iter().map(|&idx| remap(idx)).collect(),
+            },
+            ChunkPayload::PalettePacked { .. } => {
+                match self.payload.dense_materials() {
+                    Ok(dense) => ChunkPayload::Dense16 {
+                        materials: dense.iter().map(|&idx| remap(idx)).collect(),
+                    },
+                    Err(_) => ChunkPayload::Empty,
+                }
+            }
         }
     }
 
@@ -853,72 +911,6 @@ impl ResolvedChunkPayload {
             ChunkPayload::Uniform(idx) => self.block_palette.get(*idx as usize),
             ChunkPayload::Empty => self.block_palette.first(),
             _ => None,
-        }
-    }
-
-    /// Build from a legacy `ChunkPayload` where u16 values are material IDs
-    /// (i.e. `block_type` values with namespace=0).
-    pub fn from_legacy_payload(payload: ChunkPayload) -> Self {
-        match &payload {
-            ChunkPayload::Empty => Self::empty(),
-            ChunkPayload::Uniform(material) => {
-                if *material == 0 {
-                    Self::empty()
-                } else {
-                    Self::uniform(BlockData::simple(0, *material as u32))
-                }
-            }
-            _ => {
-                let Ok(materials) = payload.dense_materials() else {
-                    return Self::empty();
-                };
-                let blocks: Vec<BlockData> = materials
-                    .iter()
-                    .map(|&m| {
-                        if m == 0 {
-                            BlockData::AIR
-                        } else {
-                            BlockData::simple(0, m as u32)
-                        }
-                    })
-                    .collect();
-                Self::from_dense_blocks(&blocks).unwrap_or_else(|_| Self::empty())
-            }
-        }
-    }
-
-    /// Convert to a legacy `ChunkPayload` where u16 values are material IDs.
-    /// Uses `block_to_material_fn` to map each BlockData to a u8 material appearance.
-    pub fn to_legacy_payload(&self, block_to_material_fn: impl Fn(&BlockData) -> u8) -> ChunkPayload {
-        match &self.payload {
-            ChunkPayload::Empty => ChunkPayload::Empty,
-            ChunkPayload::Uniform(idx) => {
-                let block = self
-                    .block_palette
-                    .get(*idx as usize)
-                    .cloned()
-                    .unwrap_or(BlockData::AIR);
-                let mat = block_to_material_fn(&block);
-                ChunkPayload::Uniform(mat as u16)
-            }
-            _ => {
-                let Ok(palette_indices) = self.payload.dense_materials() else {
-                    return ChunkPayload::Empty;
-                };
-                let materials: Vec<u16> = palette_indices
-                    .iter()
-                    .map(|&idx| {
-                        let block = self
-                            .block_palette
-                            .get(idx as usize)
-                            .cloned()
-                            .unwrap_or(BlockData::AIR);
-                        block_to_material_fn(&block) as u16
-                    })
-                    .collect();
-                ChunkPayload::from_dense_materials_compact(&materials)
-                    .unwrap_or(ChunkPayload::Dense16 { materials })
-            }
         }
     }
 

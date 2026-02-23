@@ -4,11 +4,11 @@
   "spawn_weight": 1,
   "ground_offset_y": 0,
   "fills": [
-    { "min": [-4, 0, -4, -4], "size": [9, 1, 9, 9], "material": 17 },
-    { "min": [-3, 1, -3, -3], "size": [1, 4, 1, 1], "material": 33 },
-    { "min": [3, 1, 3, 3], "size": [1, 5, 1, 1], "material": 33 },
-    { "min": [3, 1, -3, 3], "size": [1, 4, 1, 1], "material": 33 },
-    { "min": [-3, 1, 3, -3], "size": [1, 6, 1, 1], "material": 33 },
-    { "min": [0, 1, 0, 0], "size": [1, 7, 1, 1], "material": 31 }
+    { "min": [-4, 0, -4, -4], "size": [9, 1, 9, 9], "block": {"namespace": 1886350457, "block_type": 1511347277} },
+    { "min": [-3, 1, -3, -3], "size": [1, 4, 1, 1], "block": {"namespace": 1886350457, "block_type": 3146815908} },
+    { "min": [3, 1, 3, 3], "size": [1, 5, 1, 1], "block": {"namespace": 1886350457, "block_type": 3146815908} },
+    { "min": [3, 1, -3, 3], "size": [1, 4, 1, 1], "block": {"namespace": 1886350457, "block_type": 3146815908} },
+    { "min": [-3, 1, 3, -3], "size": [1, 6, 1, 1], "block": {"namespace": 1886350457, "block_type": 3146815908} },
+    { "min": [0, 1, 0, 0], "size": [1, 7, 1, 1], "block": {"namespace": 1886350457, "block_type": 1794311507} }
   ]
 }

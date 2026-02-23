@@ -66,30 +66,41 @@ const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
 
 fn default_hotbar_slots() -> [Option<polychora::shared::protocol::ItemStack>; 9] {
     use polychora::shared::protocol::ItemStack;
+    use polychora_plugin_api::content_ids::*;
     [
-        Some(ItemStack::block(0, 3, 1)),
-        Some(ItemStack::block(0, 27, 1)),
-        Some(ItemStack::block(0, 28, 1)),
-        Some(ItemStack::block(0, 29, 1)),
-        Some(ItemStack::block(0, 31, 1)),
-        Some(ItemStack::block(0, 12, 1)),
-        Some(ItemStack::block(0, 13, 1)),
-        Some(ItemStack::block(0, 1, 1)),
-        Some(ItemStack::block(0, 4, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_YELLOW_GREEN, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_COBBLESTONE, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_OAK_PLANKS, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_WHITE, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_LIGHT, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_RED, 1)),
+        Some(ItemStack::block(CONTENT_NS, BLOCK_GREEN, 1)),
     ]
 }
 
-fn block_material_from_slot(slot: &Option<polychora::shared::protocol::ItemStack>) -> u8 {
+fn block_material_from_slot(
+    slot: &Option<polychora::shared::protocol::ItemStack>,
+    registry: &polychora::content_registry::ContentRegistry,
+) -> u8 {
     slot.as_ref()
         .and_then(|stack| stack.block_type_key())
-        .map(|(_ns, bt)| (bt as u8).clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX))
+        .map(|(ns, bt)| {
+            registry
+                .block_material_token(ns, bt)
+                .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN as u16, BLOCK_EDIT_PLACE_MATERIAL_MAX as u16)
+                as u8
+        })
         .unwrap_or(3)
 }
 
 fn block_data_from_slot(slot: &Option<polychora::shared::protocol::ItemStack>) -> polychora::shared::voxel::BlockData {
     slot.as_ref()
         .and_then(|stack| stack.to_block_data())
-        .unwrap_or_else(|| polychora::shared::voxel::BlockData::simple(0, 3))
+        .unwrap_or_else(|| {
+            polychora::content_registry::block_data_from_material_token(3) // YELLOW_GREEN
+        })
 }
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
 const FOOTSTEP_DISTANCE_WALK: f32 = 3.50;
@@ -1056,7 +1067,7 @@ fn main() {
         focal_length_zw: 1.0,
         zw_angle_color_shift_enabled: initial_zw_angle_color_shift_enabled,
         zw_angle_color_shift_strength: initial_zw_angle_color_shift_strength,
-        selected_block: polychora::shared::voxel::BlockData::simple(0, 3),
+        selected_block: polychora::content_registry::block_data_from_material_token(3),
         world_file,
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,

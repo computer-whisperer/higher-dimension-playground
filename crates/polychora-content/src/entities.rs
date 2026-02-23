@@ -1,15 +1,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
+use polychora_plugin_api::content_ids::*;
 use polychora_plugin_api::entity::EntityCategory;
 use polychora_plugin_api::manifest::EntityDeclaration;
-
-// Random entity type IDs for the polychora-content namespace.
-pub const ENTITY_CUBE: u32         = 0x776b1b69;
-pub const ENTITY_ROTOR: u32        = 0x71790134;
-pub const ENTITY_DRIFTER: u32      = 0x433824fe;
-pub const ENTITY_SEEKER: u32       = 0xa974d75b;
-pub const ENTITY_CREEPER: u32      = 0x3dc5fd3d;
-pub const ENTITY_PHASE_SPIDER: u32 = 0x4af27f80;
 
 /// 6 entity declarations (all non-player entities).
 /// Player entity stays in namespace 0 as an engine internal.

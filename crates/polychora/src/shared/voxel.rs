@@ -27,6 +27,10 @@ pub struct TesseractOrientation(pub u16);
 impl TesseractOrientation {
     pub const IDENTITY: Self = Self(0);
 
+    pub fn identity() -> Self {
+        Self::IDENTITY
+    }
+
     pub fn is_valid(self) -> bool {
         self.0 < 384
     }
@@ -116,7 +120,9 @@ impl TesseractOrientation {
 pub struct BlockData {
     pub namespace: u32,
     pub block_type: u32,
+    #[serde(default = "TesseractOrientation::identity")]
     pub orientation: TesseractOrientation,
+    #[serde(default)]
     pub extra_data: Vec<u8>,
 }
 

@@ -1,6 +1,7 @@
 use crate::content_registry::ContentRegistry;
 use crate::shared::protocol::{ClientMessage, ServerMessage};
 use crate::shared::voxel::{BaseWorldKind, BlockData};
+use polychora_plugin_api::content_ids;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 
@@ -14,10 +15,10 @@ impl WorldGeneratorKind {
     pub fn default_base_world_kind(self) -> BaseWorldKind {
         match self {
             WorldGeneratorKind::FlatFloor => BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, 11),
+                material: BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_GRID_FLOOR),
             },
             WorldGeneratorKind::MassivePlatforms => BaseWorldKind::MassivePlatforms {
-                material: BlockData::simple(0, 11),
+                material: BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_GRID_FLOOR),
             },
         }
     }

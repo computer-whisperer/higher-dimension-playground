@@ -119,7 +119,8 @@ impl App {
                     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
                 );
                 {
-                    let mut mat_id = self.selected_block.block_type as u8;
+                    let mut mat_id = polychora::content_registry::material_token_from_block_data(&self.selected_block);
+                    if mat_id == 0 { mat_id = BLOCK_EDIT_PLACE_MATERIAL_MIN; }
                     let response = ui.add(
                         egui::Slider::new(
                             &mut mat_id,
@@ -128,9 +129,10 @@ impl App {
                         .text("Place Material"),
                     );
                     if response.changed() {
-                        self.selected_block = polychora::shared::voxel::BlockData::simple(0, mat_id as u32);
+                        let block = self.content_registry.block_data_for_token(mat_id as u16);
+                        self.selected_block = block.clone();
                         self.hotbar_slots[self.hotbar_selected_index] =
-                            Some(polychora::shared::protocol::ItemStack::block(0, mat_id as u32, 1));
+                            Some(polychora::shared::protocol::ItemStack::block(block.namespace, block.block_type, 1));
                     }
                 }
                 ui.add(
@@ -340,7 +342,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
                     for i in 0..9 {
-                        let material_id = block_material_from_slot(&self.hotbar_slots[i]);
+                        let material_id = block_material_from_slot(&self.hotbar_slots[i], &self.content_registry);
                         let [r, g, b] = self.content_registry.material_color_by_token(material_id as u16);
                         let is_selected = i == self.hotbar_selected_index;
 
@@ -816,9 +818,10 @@ impl App {
             self.grab_mouse(&window);
         }
         if let Some(material_id) = inventory_pick {
+            let block = self.content_registry.block_data_for_token(material_id as u16);
             self.hotbar_slots[self.hotbar_selected_index] =
-                Some(polychora::shared::protocol::ItemStack::block(0, material_id as u32, 1));
-            self.selected_block = polychora::shared::voxel::BlockData::simple(0, material_id as u32);
+                Some(polychora::shared::protocol::ItemStack::block(block.namespace, block.block_type, 1));
+            self.selected_block = block;
             eprintln!(
                 "Inventory: set hotbar slot {} to material {} ({})",
                 self.hotbar_selected_index + 1,
@@ -1034,6 +1037,21 @@ impl App {
             );
         });
 
+        let info_color = egui::Color32::from_rgb(140, 145, 160);
+        let info_size = 11.0;
+
+        // Namespace and type ID (raw values from world data)
+        let ns_label = self.content_registry.namespace_label(block.namespace);
+        ui.label(
+            egui::RichText::new(format!(
+                "ns: {:#010x} ({})  type: {:#010x}",
+                block.namespace, ns_label, block.block_type
+            ))
+            .monospace()
+            .size(info_size)
+            .color(info_color),
+        );
+
         // Coordinates
         ui.label(
             egui::RichText::new(format!(
@@ -1041,8 +1059,8 @@ impl App {
                 coords[0], coords[1], coords[2], coords[3]
             ))
             .monospace()
-            .size(11.0)
-            .color(egui::Color32::from_rgb(140, 145, 160)),
+            .size(info_size)
+            .color(info_color),
         );
     }
 
@@ -1124,12 +1142,16 @@ impl App {
         let info_color = egui::Color32::from_rgb(140, 145, 160);
         let info_size = 11.0;
 
-        // Entity ID + type
+        // Entity ID + namespace/type (raw values from wire)
+        let ns_label = self.content_registry.namespace_label(entity_type_ns);
         ui.label(
-            egui::RichText::new(format!("id: {}  type: {}:{}", entity_id, entity_type_ns, entity_type))
-                .monospace()
-                .size(info_size)
-                .color(info_color),
+            egui::RichText::new(format!(
+                "id: {}  ns: {:#010x} ({})  type: {:#010x}",
+                entity_id, entity_type_ns, ns_label, entity_type
+            ))
+            .monospace()
+            .size(info_size)
+            .color(info_color),
         );
 
         // Position

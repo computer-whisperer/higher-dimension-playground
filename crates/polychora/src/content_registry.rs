@@ -1,9 +1,118 @@
+use crate::shared::voxel::BlockData;
 use polychora_plugin_api::block::BlockCategory;
+use polychora_plugin_api::content_ids;
 use polychora_plugin_api::entity::{
     EntityCategory, MobArchetype, MobArchetypeDefaults, MobLocomotionMode,
 };
 use polychora_plugin_api::texture::TextureRef;
 use std::collections::HashMap;
+
+// ---------------------------------------------------------------------------
+// Static material-token ↔ BlockData mapping
+// ---------------------------------------------------------------------------
+//
+// Material tokens (u8/u16, 1-indexed) correspond to the registration order
+// of blocks in the polychora-content plugin.  Token 0 = air.
+// This table enables conversion without needing a ContentRegistry instance.
+
+const TOKEN_TO_BLOCK_TYPE: [u32; 68] = [
+    content_ids::BLOCK_RED,                // token 1
+    content_ids::BLOCK_ORANGE,             // token 2
+    content_ids::BLOCK_YELLOW_GREEN,       // token 3
+    content_ids::BLOCK_GREEN,              // token 4
+    content_ids::BLOCK_CYAN,               // token 5
+    content_ids::BLOCK_BLUE,               // token 6
+    content_ids::BLOCK_PURPLE,             // token 7
+    content_ids::BLOCK_MAGENTA,            // token 8
+    content_ids::BLOCK_RAINBOW,            // token 9
+    content_ids::BLOCK_BROWN,              // token 10
+    content_ids::BLOCK_GRID_FLOOR,         // token 11
+    content_ids::BLOCK_WHITE,              // token 12
+    content_ids::BLOCK_LIGHT,              // token 13
+    content_ids::BLOCK_MIRROR,             // token 14
+    content_ids::BLOCK_LAVA_VEINED_BASALT, // token 15
+    content_ids::BLOCK_CRYSTAL_LATTICE,    // token 16
+    content_ids::BLOCK_MARBLE,             // token 17
+    content_ids::BLOCK_OXIDIZED_METAL,     // token 18
+    content_ids::BLOCK_BIO_SPORE_MOSS,     // token 19
+    content_ids::BLOCK_VOID_MIRROR,        // token 20
+    content_ids::BLOCK_AVATAR_MARKER,      // token 21
+    content_ids::BLOCK_HOLOGRAPHIC_LAMINATE, // token 22
+    content_ids::BLOCK_TIDAL_GLASS,        // token 23
+    content_ids::BLOCK_CIRCUIT_WEAVE,      // token 24
+    content_ids::BLOCK_AURORA_STONE,       // token 25
+    content_ids::BLOCK_HAZARD_CHEVRONS,    // token 26
+    content_ids::BLOCK_STONE,              // token 27
+    content_ids::BLOCK_COBBLESTONE,        // token 28
+    content_ids::BLOCK_DIRT,               // token 29
+    content_ids::BLOCK_COARSE_DIRT,        // token 30
+    content_ids::BLOCK_OAK_PLANKS,         // token 31
+    content_ids::BLOCK_SPRUCE_PLANKS,      // token 32
+    content_ids::BLOCK_LOG_BARK,           // token 33
+    content_ids::BLOCK_LOG_END_RINGS,      // token 34
+    content_ids::BLOCK_SAND,               // token 35
+    content_ids::BLOCK_GRAVEL,             // token 36
+    content_ids::BLOCK_CLAY,               // token 37
+    content_ids::BLOCK_GRASS_BLOCK,        // token 38
+    content_ids::BLOCK_SNOW,               // token 39
+    content_ids::BLOCK_ICE,                // token 40
+    content_ids::BLOCK_COAL_ORE,           // token 41
+    content_ids::BLOCK_IRON_ORE,           // token 42
+    content_ids::BLOCK_GOLD_ORE,           // token 43
+    content_ids::BLOCK_DIAMOND_ORE,        // token 44
+    content_ids::BLOCK_REDSTONE_ORE,       // token 45
+    content_ids::BLOCK_BIRCH_PLANKS,       // token 46
+    content_ids::BLOCK_BRICKS,             // token 47
+    content_ids::BLOCK_SANDSTONE,          // token 48
+    content_ids::BLOCK_GLASS,              // token 49
+    content_ids::BLOCK_GLOWSTONE,          // token 50
+    content_ids::BLOCK_OBSIDIAN,           // token 51
+    content_ids::BLOCK_PRISMARINE,         // token 52
+    content_ids::BLOCK_TERRACOTTA,         // token 53
+    content_ids::BLOCK_WOOL_WHITE,         // token 54
+    content_ids::BLOCK_BASALT_TILES,       // token 55
+    content_ids::BLOCK_COPPER_WEAVE,       // token 56
+    content_ids::BLOCK_NEBULA_STRATA,      // token 57
+    content_ids::BLOCK_STARFORGED_CORE,    // token 58
+    content_ids::BLOCK_CRYO_CIRCUIT,       // token 59
+    content_ids::BLOCK_SMOKED_GLASS,       // token 60
+    content_ids::BLOCK_IVORY_MARBLE,       // token 61
+    content_ids::BLOCK_RUNIC_ALLOY,        // token 62
+    content_ids::BLOCK_HYPERPHASE_GEL,     // token 63
+    content_ids::BLOCK_SINGULARITY_CORE,   // token 64
+    content_ids::BLOCK_CHRONO_BLOOM,       // token 65
+    content_ids::BLOCK_TESSERACT_WEAVE,    // token 66
+    content_ids::BLOCK_EVENTIDE_ALLOY,     // token 67
+    content_ids::BLOCK_BEACON_MATRIX,      // token 68
+];
+
+/// Convert a material token (0 = air, 1–68 = blocks) to its `BlockData`.
+/// Uses the fixed polychora-content registration order.
+pub fn block_data_from_material_token(token: u8) -> BlockData {
+    if token == 0 {
+        return BlockData::AIR;
+    }
+    let idx = (token as usize).wrapping_sub(1);
+    TOKEN_TO_BLOCK_TYPE
+        .get(idx)
+        .map(|&bt| BlockData::simple(content_ids::CONTENT_NS, bt))
+        .unwrap_or(BlockData::AIR)
+}
+
+/// Convert a `BlockData` back to its material token (0 if unknown/air).
+pub fn material_token_from_block_data(block: &BlockData) -> u8 {
+    if block.is_air() {
+        return 0;
+    }
+    if block.namespace != content_ids::CONTENT_NS {
+        return 0;
+    }
+    TOKEN_TO_BLOCK_TYPE
+        .iter()
+        .position(|&bt| bt == block.block_type)
+        .map(|idx| (idx + 1) as u8)
+        .unwrap_or(0)
+}
 
 /// Bit 15 of a material token: when set, bits [14:0] index into the GPU texture
 /// pool instead of the procedural `sampleMaterial()` switch.
@@ -89,6 +198,9 @@ pub struct ContentRegistry {
     legacy_block_remap: HashMap<(u32, u32), (u32, u32)>,
     // Legacy remap: old (namespace, entity_type) → new (namespace, entity_type)
     legacy_entity_remap: HashMap<(u32, u32), (u32, u32)>,
+
+    // Namespace ID → human-readable name (for WAILA display)
+    namespace_names: HashMap<u32, String>,
 }
 
 impl ContentRegistry {
@@ -103,6 +215,7 @@ impl ContentRegistry {
             texture_tokens: HashMap::new(),
             legacy_block_remap: HashMap::new(),
             legacy_entity_remap: HashMap::new(),
+            namespace_names: HashMap::from([(0, "engine".into())]),
         };
         // Air is always token 0 at (0, 0)
         registry.blocks.insert(
@@ -334,6 +447,13 @@ impl ContentRegistry {
             .and_then(|key| self.blocks.get(key))
     }
 
+    /// Convert a material token to a `BlockData` with proper namespace and block type.
+    pub fn block_data_for_token(&self, token: u16) -> BlockData {
+        self.block_entry_by_token(token)
+            .map(|entry| BlockData::simple(entry.namespace, entry.block_type))
+            .unwrap_or(BlockData::AIR)
+    }
+
     // -----------------------------------------------------------------------
     // Iteration / counts
     // -----------------------------------------------------------------------
@@ -447,6 +567,23 @@ impl ContentRegistry {
             .get(&(namespace, entity_type))
             .copied()
             .unwrap_or((namespace, entity_type))
+    }
+
+    // -----------------------------------------------------------------------
+    // Namespace metadata
+    // -----------------------------------------------------------------------
+
+    /// Register a human-readable name for a namespace ID.
+    pub fn register_namespace_name(&mut self, namespace: u32, name: impl Into<String>) {
+        self.namespace_names.insert(namespace, name.into());
+    }
+
+    /// Get a human-readable label for a namespace ID.
+    pub fn namespace_label(&self, namespace: u32) -> &str {
+        self.namespace_names
+            .get(&namespace)
+            .map(|s| s.as_str())
+            .unwrap_or("unknown")
     }
 }
 

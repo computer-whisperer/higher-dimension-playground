@@ -4,20 +4,20 @@
   "spawn_weight": 2,
   "ground_offset_y": 0,
   "fills": [
-    { "min": [-3, 0, -3, -3], "size": [7, 1, 7, 7], "material": 39 },
-    { "min": [-1, 0, -1, -1], "size": [3, 1, 3, 3], "material": 39 },
-    { "min": [0, 1, 0, 0], "size": [1, 8, 1, 1], "material": 40 }
+    { "min": [-3, 0, -3, -3], "size": [7, 1, 7, 7], "block": {"namespace": 1886350457, "block_type": 575106903} },
+    { "min": [-1, 0, -1, -1], "size": [3, 1, 3, 3], "block": {"namespace": 1886350457, "block_type": 575106903} },
+    { "min": [0, 1, 0, 0], "size": [1, 8, 1, 1], "block": {"namespace": 1886350457, "block_type": 2884633203} }
   ],
   "voxels": [
-    { "offset": [-1, 1, 0, 0], "material": 40 },
-    { "offset": [1, 1, 0, 0], "material": 40 },
-    { "offset": [0, 1, -1, 0], "material": 40 },
-    { "offset": [0, 1, 1, 0], "material": 40 },
-    { "offset": [0, 1, 0, -1], "material": 40 },
-    { "offset": [0, 1, 0, 1], "material": 40 },
-    { "offset": [0, 3, 0, 0], "material": 23 },
-    { "offset": [0, 4, 0, 0], "material": 23 },
-    { "offset": [0, 5, 0, 0], "material": 23 },
-    { "offset": [0, 8, 0, 0], "material": 50 }
+    { "offset": [-1, 1, 0, 0], "block": {"namespace": 1886350457, "block_type": 2884633203} },
+    { "offset": [1, 1, 0, 0], "block": {"namespace": 1886350457, "block_type": 2884633203} },
+    { "offset": [0, 1, -1, 0], "block": {"namespace": 1886350457, "block_type": 2884633203} },
+    { "offset": [0, 1, 1, 0], "block": {"namespace": 1886350457, "block_type": 2884633203} },
+    { "offset": [0, 1, 0, -1], "block": {"namespace": 1886350457, "block_type": 2884633203} },
+    { "offset": [0, 1, 0, 1], "block": {"namespace": 1886350457, "block_type": 2884633203} },
+    { "offset": [0, 3, 0, 0], "block": {"namespace": 1886350457, "block_type": 1901065175} },
+    { "offset": [0, 4, 0, 0], "block": {"namespace": 1886350457, "block_type": 1901065175} },
+    { "offset": [0, 5, 0, 0], "block": {"namespace": 1886350457, "block_type": 1901065175} },
+    { "offset": [0, 8, 0, 0], "block": {"namespace": 1886350457, "block_type": 4242960290} }
   ]
 }

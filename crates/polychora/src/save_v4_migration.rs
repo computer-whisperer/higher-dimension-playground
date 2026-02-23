@@ -10,6 +10,7 @@ use crate::shared::chunk_payload::{ChunkPayload as FieldChunkPayload, ResolvedCh
 use crate::migration::save_v3::{EntityClass, EntityKind};
 use crate::shared::entity_types;
 use crate::shared::protocol::{Entity, EntityPose};
+use crate::shared::voxel::BlockData;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
@@ -47,6 +48,45 @@ fn entity_kind_to_type_key(kind: EntityKind) -> (u32, u32) {
     }
 }
 
+/// Build a legacy block palette for resolving old material tokens (u16) → BlockData.
+/// Index 0 = air; indices 1..68 correspond to the polychora-content blocks in registration order.
+fn build_legacy_block_palette() -> Vec<BlockData> {
+    use polychora_plugin_api::content_ids::*;
+    let ordered: &[u32] = &[
+        BLOCK_RED, BLOCK_ORANGE, BLOCK_YELLOW_GREEN, BLOCK_GREEN,
+        BLOCK_CYAN, BLOCK_BLUE, BLOCK_PURPLE, BLOCK_MAGENTA,
+        BLOCK_RAINBOW, BLOCK_BROWN, BLOCK_GRID_FLOOR, BLOCK_WHITE,
+        BLOCK_LIGHT, BLOCK_MIRROR, BLOCK_LAVA_VEINED_BASALT, BLOCK_CRYSTAL_LATTICE,
+        BLOCK_MARBLE, BLOCK_OXIDIZED_METAL, BLOCK_BIO_SPORE_MOSS, BLOCK_VOID_MIRROR,
+        BLOCK_AVATAR_MARKER, BLOCK_HOLOGRAPHIC_LAMINATE, BLOCK_TIDAL_GLASS, BLOCK_CIRCUIT_WEAVE,
+        BLOCK_AURORA_STONE, BLOCK_HAZARD_CHEVRONS, BLOCK_STONE, BLOCK_COBBLESTONE,
+        BLOCK_DIRT, BLOCK_COARSE_DIRT, BLOCK_OAK_PLANKS, BLOCK_SPRUCE_PLANKS,
+        BLOCK_LOG_BARK, BLOCK_LOG_END_RINGS, BLOCK_SAND, BLOCK_GRAVEL,
+        BLOCK_CLAY, BLOCK_GRASS_BLOCK, BLOCK_SNOW, BLOCK_ICE,
+        BLOCK_COAL_ORE, BLOCK_IRON_ORE, BLOCK_GOLD_ORE, BLOCK_DIAMOND_ORE,
+        BLOCK_REDSTONE_ORE, BLOCK_BIRCH_PLANKS, BLOCK_BRICKS, BLOCK_SANDSTONE,
+        BLOCK_GLASS, BLOCK_GLOWSTONE, BLOCK_OBSIDIAN, BLOCK_PRISMARINE,
+        BLOCK_TERRACOTTA, BLOCK_WOOL_WHITE, BLOCK_BASALT_TILES, BLOCK_COPPER_WEAVE,
+        BLOCK_NEBULA_STRATA, BLOCK_STARFORGED_CORE, BLOCK_CRYO_CIRCUIT, BLOCK_SMOKED_GLASS,
+        BLOCK_IVORY_MARBLE, BLOCK_RUNIC_ALLOY, BLOCK_HYPERPHASE_GEL, BLOCK_SINGULARITY_CORE,
+        BLOCK_CHRONO_BLOOM, BLOCK_TESSERACT_WEAVE, BLOCK_EVENTIDE_ALLOY, BLOCK_BEACON_MATRIX,
+    ];
+    let mut palette = vec![BlockData::AIR]; // index 0 = air
+    for &block_type in ordered {
+        palette.push(BlockData::simple(CONTENT_NS, block_type));
+    }
+    palette
+}
+
+/// Resolve a legacy ChunkPayload (where u16 values are raw material tokens) into a
+/// ResolvedChunkPayload with a proper block palette.
+fn resolve_legacy_payload(payload: FieldChunkPayload, palette: &[BlockData]) -> ResolvedChunkPayload {
+    ResolvedChunkPayload {
+        payload,
+        block_palette: palette.to_vec(),
+    }
+}
+
 fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], ResolvedChunkPayload)> {
     fn payload_from_legacy_chunk(chunk: &LegacyChunk) -> FieldChunkPayload {
         if chunk.is_empty() {
@@ -65,13 +105,14 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], ResolvedChun
         }
     }
 
+    let legacy_palette = build_legacy_block_palette();
     let mut chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)> = world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
                 [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                ResolvedChunkPayload::from_legacy_payload(payload_from_legacy_chunk(chunk)),
+                resolve_legacy_payload(payload_from_legacy_chunk(chunk), &legacy_palette),
             )
         })
         .collect();
@@ -256,11 +297,37 @@ fn verify_v3_migration_equivalence(
 
     let mut loaded_chunk_payloads = loaded.world_chunk_payloads;
     loaded_chunk_payloads.sort_unstable_by_key(|(pos, _)| *pos);
-    if expected_chunk_payloads != loaded_chunk_payloads {
+    // Compare semantically: palettes may differ structurally after save/load round-trip
+    // (the save process compacts palettes), so compare resolved blocks instead.
+    if expected_chunk_payloads.len() != loaded_chunk_payloads.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "v3->v4 migration mismatch: world chunk payloads differ",
+            format!(
+                "v3->v4 migration mismatch: chunk count expected={} got={}",
+                expected_chunk_payloads.len(),
+                loaded_chunk_payloads.len()
+            ),
         ));
+    }
+    for (expected, loaded) in expected_chunk_payloads.iter().zip(loaded_chunk_payloads.iter()) {
+        if expected.0 != loaded.0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "v3->v4 migration mismatch: chunk position expected={:?} got={:?}",
+                    expected.0, loaded.0
+                ),
+            ));
+        }
+        if expected.1.dense_blocks() != loaded.1.dense_blocks() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "v3->v4 migration mismatch: chunk blocks differ at position {:?}",
+                    expected.0
+                ),
+            ));
+        }
     }
 
     Ok(())

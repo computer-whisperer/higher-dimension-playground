@@ -94,6 +94,8 @@ pub fn populate_registry_from_plugin(
         return Err(PluginLoadError::ReservedNamespace(ns));
     }
 
+    registry.register_namespace_name(ns, &plugin.name);
+
     // Register blocks
     for block in &plugin.manifest.blocks {
         let material_token = registry

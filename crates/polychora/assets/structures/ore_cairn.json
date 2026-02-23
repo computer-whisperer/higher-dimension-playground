@@ -4,22 +4,22 @@
   "spawn_weight": 3,
   "ground_offset_y": 0,
   "fills": [
-    { "min": [-2, 0, -2, -2], "size": [5, 2, 5, 5], "material": 27 },
-    { "min": [-1, 2, -1, -1], "size": [3, 2, 3, 3], "material": 27 },
-    { "min": [0, 4, 0, 0], "size": [1, 1, 1, 1], "material": 27 }
+    { "min": [-2, 0, -2, -2], "size": [5, 2, 5, 5], "block": {"namespace": 1886350457, "block_type": 3850912478} },
+    { "min": [-1, 2, -1, -1], "size": [3, 2, 3, 3], "block": {"namespace": 1886350457, "block_type": 3850912478} },
+    { "min": [0, 4, 0, 0], "size": [1, 1, 1, 1], "block": {"namespace": 1886350457, "block_type": 3850912478} }
   ],
   "voxels": [
-    { "offset": [-2, 0, -2, 0], "material": 41 },
-    { "offset": [2, 0, 1, -1], "material": 41 },
-    { "offset": [0, 0, -2, 2], "material": 41 },
-    { "offset": [1, 1, 2, 0], "material": 41 },
-    { "offset": [-2, 1, 0, -2], "material": 41 },
-    { "offset": [-1, 2, -1, 0], "material": 42 },
-    { "offset": [1, 2, 0, -1], "material": 42 },
-    { "offset": [0, 2, 1, 1], "material": 42 },
-    { "offset": [-1, 3, 0, 0], "material": 42 },
-    { "offset": [1, 3, -1, 1], "material": 43 },
-    { "offset": [0, 3, 1, -1], "material": 43 },
-    { "offset": [0, 4, 0, 0], "material": 44 }
+    { "offset": [-2, 0, -2, 0], "block": {"namespace": 1886350457, "block_type": 2995646435} },
+    { "offset": [2, 0, 1, -1], "block": {"namespace": 1886350457, "block_type": 2995646435} },
+    { "offset": [0, 0, -2, 2], "block": {"namespace": 1886350457, "block_type": 2995646435} },
+    { "offset": [1, 1, 2, 0], "block": {"namespace": 1886350457, "block_type": 2995646435} },
+    { "offset": [-2, 1, 0, -2], "block": {"namespace": 1886350457, "block_type": 2995646435} },
+    { "offset": [-1, 2, -1, 0], "block": {"namespace": 1886350457, "block_type": 1003470337} },
+    { "offset": [1, 2, 0, -1], "block": {"namespace": 1886350457, "block_type": 1003470337} },
+    { "offset": [0, 2, 1, 1], "block": {"namespace": 1886350457, "block_type": 1003470337} },
+    { "offset": [-1, 3, 0, 0], "block": {"namespace": 1886350457, "block_type": 1003470337} },
+    { "offset": [1, 3, -1, 1], "block": {"namespace": 1886350457, "block_type": 2562548743} },
+    { "offset": [0, 3, 1, -1], "block": {"namespace": 1886350457, "block_type": 2562548743} },
+    { "offset": [0, 4, 0, 0], "block": {"namespace": 1886350457, "block_type": 3400011220} }
   ]
 }

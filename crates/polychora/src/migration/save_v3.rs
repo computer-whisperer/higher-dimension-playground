@@ -1,6 +1,6 @@
 use crate::migration::legacy_voxel::{Chunk, LegacyVoxel, RegionChunkWorld};
 use crate::migration::legacy_world_io::load_world;
-use crate::shared::voxel::{BaseWorldKind, BlockData, ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -97,10 +97,10 @@ impl PersistedBaseWorldKind {
         match base {
             BaseWorldKind::Empty => Self::Empty,
             BaseWorldKind::FlatFloor { material } => Self::FlatFloor {
-                material: material.block_type as u8,
+                material: crate::content_registry::material_token_from_block_data(material),
             },
             BaseWorldKind::MassivePlatforms { material } => Self::MassivePlatforms {
-                material: material.block_type as u8,
+                material: crate::content_registry::material_token_from_block_data(material),
             },
         }
     }
@@ -109,11 +109,11 @@ impl PersistedBaseWorldKind {
         match self {
             PersistedBaseWorldKind::Empty => BaseWorldKind::Empty,
             PersistedBaseWorldKind::FlatFloor { material } => BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, material as u32),
+                material: crate::content_registry::block_data_from_material_token(material),
             },
             PersistedBaseWorldKind::MassivePlatforms { material } => {
                 BaseWorldKind::MassivePlatforms {
-                    material: BlockData::simple(0, material as u32),
+                    material: crate::content_registry::block_data_from_material_token(material),
                 }
             }
         }
@@ -1192,6 +1192,7 @@ fn fsync_directory(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::voxel::BlockData;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_UNIQUIFIER: AtomicU64 = AtomicU64::new(0);

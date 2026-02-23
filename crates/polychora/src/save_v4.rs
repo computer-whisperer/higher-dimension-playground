@@ -93,10 +93,10 @@ impl PersistedBaseWorldKind {
         match base {
             BaseWorldKind::Empty => Self::Empty,
             BaseWorldKind::FlatFloor { material } => Self::FlatFloor {
-                material: material.block_type as u8,
+                material: crate::content_registry::material_token_from_block_data(material),
             },
             BaseWorldKind::MassivePlatforms { material } => Self::MassivePlatforms {
-                material: material.block_type as u8,
+                material: crate::content_registry::material_token_from_block_data(material),
             },
         }
     }
@@ -105,11 +105,11 @@ impl PersistedBaseWorldKind {
         match self {
             PersistedBaseWorldKind::Empty => BaseWorldKind::Empty,
             PersistedBaseWorldKind::FlatFloor { material } => BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, material as u32),
+                material: crate::content_registry::block_data_from_material_token(material),
             },
             PersistedBaseWorldKind::MassivePlatforms { material } => {
                 BaseWorldKind::MassivePlatforms {
-                    material: BlockData::simple(0, material as u32),
+                    material: crate::content_registry::block_data_from_material_token(material),
                 }
             }
         }
@@ -723,7 +723,7 @@ fn save_state_from_world(root: &Path, request: SaveWorldRequest<'_>) -> io::Resu
         .map(|(&chunk_pos, chunk)| {
             (
                 [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                ResolvedChunkPayload::from_legacy_payload(
+                ResolvedChunkPayload::from_payload_with_static_palette(
                     field_chunk_payload_from_legacy_chunk(chunk),
                 ),
             )
@@ -1376,7 +1376,7 @@ fn chunk_payloads_to_voxel_world(
     let reg = test_content_registry();
     let mut world = RegionChunkWorld::new_with_base(base_world_kind);
     for (chunk_pos, resolved) in chunk_payloads {
-        let legacy = resolved.to_legacy_payload(|block| {
+        let legacy = resolved.to_material_token_payload(|block| {
             reg.block_material_token(block.namespace, block.block_type) as u8
         });
         let chunk = legacy_chunk_from_field_chunk_payload(&legacy)?;
@@ -3447,7 +3447,7 @@ mod tests {
         assert_eq!(loaded_chunk_payloads.len(), 1);
         assert_eq!(loaded_chunk_payloads[0].0, chunk_a);
         let reg = test_content_registry();
-        let legacy_payload = loaded_chunk_payloads[0].1.to_legacy_payload(|block| {
+        let legacy_payload = loaded_chunk_payloads[0].1.to_material_token_payload(|block| {
             reg.block_material_token(block.namespace, block.block_type) as u8
         });
         let chunk = legacy_chunk_from_field_chunk_payload(&legacy_payload)
@@ -3672,7 +3672,7 @@ mod tests {
             .map(|(&chunk_pos, chunk)| {
                 (
                     [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
-                    ResolvedChunkPayload::from_legacy_payload(
+                    ResolvedChunkPayload::from_payload_with_static_palette(
                         field_chunk_payload_from_legacy_chunk(chunk),
                     ),
                 )
@@ -3818,8 +3818,9 @@ mod tests {
         let now_ms = now_unix_ms();
         let empty_regions = HashSet::new();
 
+        let grid_floor = crate::content_registry::block_data_from_material_token(11);
         let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-            material: BlockData::simple(0, 11),
+            material: grid_floor,
         });
         world.set_voxel(4, 1, 2, -3, LegacyVoxel(8));
 

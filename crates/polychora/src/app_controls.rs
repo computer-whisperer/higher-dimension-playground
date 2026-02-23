@@ -20,16 +20,16 @@ impl App {
     }
 
     pub(super) fn cycle_hotbar_material_prev(&mut self) {
-        use polychora::shared::protocol::ItemStack;
-        let current = block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+        let current = block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index], &self.content_registry);
         let next = if current <= BLOCK_EDIT_PLACE_MATERIAL_MIN {
             BLOCK_EDIT_PLACE_MATERIAL_MAX
         } else {
             current.saturating_sub(1)
         };
+        let block = self.content_registry.block_data_for_token(next as u16);
+        self.selected_block = block.clone();
         self.hotbar_slots[self.hotbar_selected_index] =
-            Some(ItemStack::block(0, next as u32, 1));
-        self.selected_block = block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+            Some(polychora::shared::protocol::ItemStack::block(block.namespace, block.block_type, 1));
         eprintln!(
             "Hotbar slot {} material: {} ({})",
             self.hotbar_selected_index + 1,
@@ -39,16 +39,16 @@ impl App {
     }
 
     pub(super) fn cycle_hotbar_material_next(&mut self) {
-        use polychora::shared::protocol::ItemStack;
-        let current = block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+        let current = block_material_from_slot(&self.hotbar_slots[self.hotbar_selected_index], &self.content_registry);
         let next = if current >= BLOCK_EDIT_PLACE_MATERIAL_MAX {
             BLOCK_EDIT_PLACE_MATERIAL_MIN
         } else {
             current.saturating_add(1)
         };
+        let block = self.content_registry.block_data_for_token(next as u16);
+        self.selected_block = block.clone();
         self.hotbar_slots[self.hotbar_selected_index] =
-            Some(ItemStack::block(0, next as u32, 1));
-        self.selected_block = block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+            Some(polychora::shared::protocol::ItemStack::block(block.namespace, block.block_type, 1));
         eprintln!(
             "Hotbar slot {} material: {} ({})",
             self.hotbar_selected_index + 1,

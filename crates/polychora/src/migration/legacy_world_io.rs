@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
 use crate::migration::legacy_voxel::{Chunk, LegacyVoxel, RegionChunkWorld};
-use crate::shared::voxel::{BaseWorldKind, BlockData, ChunkPos, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, ChunkPos, CHUNK_VOLUME};
 
 const MAGIC: &[u8; 4] = b"V4DW";
 const VERSION_V1: u32 = 1;
@@ -61,7 +61,7 @@ fn write_base_kind<W: Write>(base_kind: &BaseWorldKind, writer: &mut W) -> io::R
         BaseWorldKind::Empty => writer.write_all(&[BASE_KIND_EMPTY])?,
         BaseWorldKind::FlatFloor { material } | BaseWorldKind::MassivePlatforms { material } => {
             writer.write_all(&[BASE_KIND_FLAT_FLOOR])?;
-            writer.write_all(&[material.block_type as u8])?;
+            writer.write_all(&[crate::content_registry::material_token_from_block_data(material)])?;
         }
     }
     Ok(())
@@ -76,7 +76,7 @@ fn read_base_kind<R: Read>(reader: &mut R) -> io::Result<BaseWorldKind> {
             let mut material = [0u8; 1];
             reader.read_exact(&mut material)?;
             Ok(BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, material[0] as u32),
+                material: crate::content_registry::block_data_from_material_token(material[0]),
             })
         }
         _ => Err(io::Error::new(
@@ -404,8 +404,9 @@ mod tests {
 
     #[test]
     fn round_trip_flat_floor_base_with_overrides() {
+        let grid_floor = crate::content_registry::block_data_from_material_token(11);
         let mut world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-            material: BlockData::simple(0, 11),
+            material: grid_floor.clone(),
         });
 
         // Place a floating block.
@@ -420,7 +421,7 @@ mod tests {
         assert_eq!(
             loaded.base_kind(),
             BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, 11)
+                material: grid_floor,
             }
         );
         assert_eq!(loaded.get_voxel(8, -1, 8, 8), LegacyVoxel(11));

@@ -4,34 +4,30 @@
   "spawn_weight": 1,
   "ground_offset_y": 1,
   "fills": [
-    { "min": [-1, 0, -1, -1], "size": [3, 3, 3, 3], "material": 61 },
-
-    { "min": [-12, 1, 0, 0], "size": [11, 1, 1, 1], "material": 62 },
-    { "min": [2, 1, 0, 0], "size": [11, 1, 1, 1], "material": 62 },
-    { "min": [0, 1, -12, 0], "size": [1, 1, 11, 1], "material": 62 },
-    { "min": [0, 1, 2, 0], "size": [1, 1, 11, 1], "material": 62 },
-    { "min": [0, 1, 0, -12], "size": [1, 1, 1, 11], "material": 62 },
-    { "min": [0, 1, 0, 2], "size": [1, 1, 1, 11], "material": 62 },
-
-    { "min": [0, -4, 0, 0], "size": [1, 4, 1, 1], "material": 55 },
-    { "min": [0, 3, 0, 0], "size": [1, 9, 1, 1], "material": 58 },
-
-    { "min": [-14, 0, -1, -1], "size": [3, 3, 3, 3], "material": 56 },
-    { "min": [12, 0, -1, -1], "size": [3, 3, 3, 3], "material": 56 },
-    { "min": [-1, 0, -14, -1], "size": [3, 3, 3, 3], "material": 57 },
-    { "min": [-1, 0, 12, -1], "size": [3, 3, 3, 3], "material": 57 },
-    { "min": [-1, 0, -1, -14], "size": [3, 3, 3, 3], "material": 60 },
-    { "min": [-1, 0, -1, 12], "size": [3, 3, 3, 3], "material": 60 },
-
-    { "min": [-2, 11, -2, -2], "size": [5, 1, 5, 5], "material": 61 }
+    { "min": [-1, 0, -1, -1], "size": [3, 3, 3, 3], "block": {"namespace": 1886350457, "block_type": 1252189433} },
+    { "min": [-12, 1, 0, 0], "size": [11, 1, 1, 1], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [2, 1, 0, 0], "size": [11, 1, 1, 1], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [0, 1, -12, 0], "size": [1, 1, 11, 1], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [0, 1, 2, 0], "size": [1, 1, 11, 1], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [0, 1, 0, -12], "size": [1, 1, 1, 11], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [0, 1, 0, 2], "size": [1, 1, 1, 11], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [0, -4, 0, 0], "size": [1, 4, 1, 1], "block": {"namespace": 1886350457, "block_type": 3208831279} },
+    { "min": [0, 3, 0, 0], "size": [1, 9, 1, 1], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "min": [-14, 0, -1, -1], "size": [3, 3, 3, 3], "block": {"namespace": 1886350457, "block_type": 1661219199} },
+    { "min": [12, 0, -1, -1], "size": [3, 3, 3, 3], "block": {"namespace": 1886350457, "block_type": 1661219199} },
+    { "min": [-1, 0, -14, -1], "size": [3, 3, 3, 3], "block": {"namespace": 1886350457, "block_type": 3888456869} },
+    { "min": [-1, 0, 12, -1], "size": [3, 3, 3, 3], "block": {"namespace": 1886350457, "block_type": 3888456869} },
+    { "min": [-1, 0, -1, -14], "size": [3, 3, 3, 3], "block": {"namespace": 1886350457, "block_type": 508687117} },
+    { "min": [-1, 0, -1, 12], "size": [3, 3, 3, 3], "block": {"namespace": 1886350457, "block_type": 508687117} },
+    { "min": [-2, 11, -2, -2], "size": [5, 1, 5, 5], "block": {"namespace": 1886350457, "block_type": 1252189433} }
   ],
   "voxels": [
-    { "offset": [-13, 1, 0, 0], "material": 58 },
-    { "offset": [13, 1, 0, 0], "material": 58 },
-    { "offset": [0, 1, -13, 0], "material": 58 },
-    { "offset": [0, 1, 13, 0], "material": 58 },
-    { "offset": [0, 1, 0, -13], "material": 58 },
-    { "offset": [0, 1, 0, 13], "material": 58 },
-    { "offset": [0, 12, 0, 0], "material": 58 }
+    { "offset": [-13, 1, 0, 0], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [13, 1, 0, 0], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [0, 1, -13, 0], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [0, 1, 13, 0], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [0, 1, 0, -13], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [0, 1, 0, 13], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [0, 12, 0, 0], "block": {"namespace": 1886350457, "block_type": 3568317132} }
   ]
 }

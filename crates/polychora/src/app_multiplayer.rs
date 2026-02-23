@@ -972,7 +972,7 @@ impl App {
         let frame_dense_variants: Vec<Vec<u16>> = frame_payloads
             .iter()
             .cloned()
-            .map(|payload| dense_materials_from_payload_or_zero(Some(ResolvedChunkPayload::from_legacy_payload(payload)), &self.content_registry))
+            .map(|payload| dense_materials_from_payload_or_zero(Some(ResolvedChunkPayload::from_payload_with_token_palette(payload, &self.content_registry)), &self.content_registry))
             .collect();
         let frame_dense = frame_dense_variants
             .first()
@@ -1459,7 +1459,7 @@ impl App {
                     .scene
                     .debug_voxel_frame_chunk_payloads(key)
                     .into_iter()
-                    .map(ResolvedChunkPayload::from_legacy_payload)
+                    .map(|p| ResolvedChunkPayload::from_payload_with_token_palette(p, &self.content_registry))
                     .collect();
                 eprintln!(
                     "[edit-sync-patch] key={:?} patch={} world_before={} world_after={} render_cache={} frame={} pending_dirty={} pending_deltas={}",

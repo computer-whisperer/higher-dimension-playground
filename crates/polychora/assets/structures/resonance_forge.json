@@ -4,25 +4,23 @@
   "spawn_weight": 1,
   "ground_offset_y": 0,
   "fills": [
-    { "min": [-9, 0, -9, -9], "size": [19, 1, 19, 19], "material": 55 },
-    { "min": [-7, 1, -7, -7], "size": [15, 1, 15, 15], "material": 61 },
-
-    { "min": [-9, 1, -9, -9], "size": [1, 8, 19, 19], "material": 62 },
-    { "min": [9, 1, -9, -9], "size": [1, 8, 19, 19], "material": 62 },
-    { "min": [-9, 1, -9, -9], "size": [19, 8, 1, 19], "material": 62 },
-    { "min": [-9, 1, 9, -9], "size": [19, 8, 1, 19], "material": 62 },
-    { "min": [-9, 1, -9, -9], "size": [19, 8, 19, 1], "material": 62 },
-    { "min": [-9, 1, -9, 9], "size": [19, 8, 19, 1], "material": 62 },
-
-    { "min": [-4, 2, -4, -4], "size": [9, 1, 9, 9], "material": 56 },
-    { "min": [-2, 3, -2, -2], "size": [5, 1, 5, 5], "material": 57 },
-    { "min": [-1, 4, -1, -1], "size": [3, 2, 3, 3], "material": 60 },
-    { "min": [0, 6, 0, 0], "size": [1, 3, 1, 1], "material": 58 }
+    { "min": [-9, 0, -9, -9], "size": [19, 1, 19, 19], "block": {"namespace": 1886350457, "block_type": 3208831279} },
+    { "min": [-7, 1, -7, -7], "size": [15, 1, 15, 15], "block": {"namespace": 1886350457, "block_type": 1252189433} },
+    { "min": [-9, 1, -9, -9], "size": [1, 8, 19, 19], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [9, 1, -9, -9], "size": [1, 8, 19, 19], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [-9, 1, -9, -9], "size": [19, 8, 1, 19], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [-9, 1, 9, -9], "size": [19, 8, 1, 19], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [-9, 1, -9, -9], "size": [19, 8, 19, 1], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [-9, 1, -9, 9], "size": [19, 8, 19, 1], "block": {"namespace": 1886350457, "block_type": 3798050731} },
+    { "min": [-4, 2, -4, -4], "size": [9, 1, 9, 9], "block": {"namespace": 1886350457, "block_type": 1661219199} },
+    { "min": [-2, 3, -2, -2], "size": [5, 1, 5, 5], "block": {"namespace": 1886350457, "block_type": 3888456869} },
+    { "min": [-1, 4, -1, -1], "size": [3, 2, 3, 3], "block": {"namespace": 1886350457, "block_type": 508687117} },
+    { "min": [0, 6, 0, 0], "size": [1, 3, 1, 1], "block": {"namespace": 1886350457, "block_type": 3568317132} }
   ],
   "voxels": [
-    { "offset": [-5, 4, -5, -5], "material": 58 },
-    { "offset": [5, 4, -5, -5], "material": 58 },
-    { "offset": [-5, 4, 5, 5], "material": 58 },
-    { "offset": [5, 4, 5, 5], "material": 58 }
+    { "offset": [-5, 4, -5, -5], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [5, 4, -5, -5], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [-5, 4, 5, 5], "block": {"namespace": 1886350457, "block_type": 3568317132} },
+    { "offset": [5, 4, 5, 5], "block": {"namespace": 1886350457, "block_type": 3568317132} }
   ]
 }

@@ -6,7 +6,7 @@ use polychora::migration::save_v3;
 use polychora::save_v4;
 use polychora::save_v4_migration;
 use polychora::shared::entity_types::EntityCategory;
-use polychora::shared::voxel::{BaseWorldKind, BlockData};
+use polychora::shared::voxel::BaseWorldKind;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -752,7 +752,7 @@ fn main() {
     let result = match cli.command {
         Command::Flat { material, output } => {
             let world = RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-                material: BlockData::simple(0, material as u32),
+                material: polychora::content_registry::block_data_from_material_token(material),
             });
             save_world_to_file(&world, &output).map(|_| {
                 println!("Saved world to {}", output.display());
@@ -774,7 +774,7 @@ fn main() {
         } => {
             let world_result: io::Result<RegionChunkWorld> = match base.as_str() {
                 "flat" => Ok(RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-                    material: BlockData::simple(0, base_material as u32),
+                    material: polychora::content_registry::block_data_from_material_token(base_material),
                 })),
                 "empty" => Ok(RegionChunkWorld::new()),
                 other => Err(io::Error::new(

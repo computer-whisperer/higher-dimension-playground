@@ -101,7 +101,7 @@ impl RegionChunkWorld {
         let flat_floor_chunk = match &base_kind {
             BaseWorldKind::FlatFloor { material }
             | BaseWorldKind::MassivePlatforms { material } => {
-                Self::build_flat_floor_chunk(LegacyVoxel(material.block_type as u8))
+                Self::build_flat_floor_chunk(LegacyVoxel(crate::content_registry::material_token_from_block_data(material)))
             }
             BaseWorldKind::Empty => Chunk::new(),
         };

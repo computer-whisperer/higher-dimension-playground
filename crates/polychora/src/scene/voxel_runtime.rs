@@ -1367,7 +1367,7 @@ impl Scene {
                         let frame_payloads: Vec<ResolvedChunkPayload> = self
                             .debug_voxel_frame_chunk_payloads(key)
                             .into_iter()
-                            .map(ResolvedChunkPayload::from_legacy_payload)
+                            .map(ResolvedChunkPayload::from_payload_with_static_palette)
                             .collect();
                         eprintln!(
                             "[edit-sync-render] key={:?} root={:?}->{:?} writes(nodes={},leaves={},freed_nodes={},freed_leaves={}) world={} cache={} bvh={} frame={}",

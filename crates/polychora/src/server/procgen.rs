@@ -1,6 +1,7 @@
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::voxel::{BlockData, ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
 use flate2::read::GzDecoder;
+use polychora_plugin_api::content_ids;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -69,11 +70,6 @@ const MAZE_WORLD_Y_BASE: i32 = 0;
 const MAZE_WORLD_Y_JITTER: i32 = 8;
 const MAZE_MAX_HALF_SPAN_XZW: i32 = (MAZE_GRID_XZW_CELLS_MAX * MAZE_STRIDE + 1) / 2;
 const MAZE_LAYOUT_CACHE_CAPACITY: usize = 96;
-const MAZE_FLOOR_MATERIAL: u8 = 55;
-const MAZE_CEILING_MATERIAL: u8 = 60;
-const MAZE_WALL_MATERIAL: u8 = 62;
-const MAZE_GATE_FRAME_MATERIAL: u8 = 51;
-const MAZE_BEACON_MATERIAL: u8 = 67;
 type DenseChunk = [u16; CHUNK_VOLUME];
 
 #[inline]
@@ -121,14 +117,18 @@ struct StructureBlueprintFile {
 struct StructureFill {
     min: [i32; 4],
     size: [i32; 4],
-    material: u8,
+    block: BlockData,
+    #[serde(skip)]
+    palette_idx: u16,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StructureVoxel {
     offset: [i32; 4],
-    material: u8,
+    block: BlockData,
+    #[serde(skip)]
+    palette_idx: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +148,12 @@ struct StructureSet {
     max_abs_offset_xzw: i32,
     min_world_y: i32,
     max_world_y: i32,
+    block_palette: Vec<BlockData>,
+    maze_floor_idx: u16,
+    maze_ceiling_idx: u16,
+    maze_wall_idx: u16,
+    maze_gate_frame_idx: u16,
+    maze_beacon_idx: u16,
 }
 
 fn default_spawn_weight() -> u32 {
@@ -189,7 +195,7 @@ impl StructureBlueprint {
         };
 
         for fill in &parsed.fills {
-            if fill.material == 0 {
+            if fill.block.is_air() {
                 continue;
             }
             if fill.size.iter().any(|size| *size <= 0) {
@@ -207,7 +213,7 @@ impl StructureBlueprint {
         }
 
         for voxel in &parsed.voxels {
-            if voxel.material == 0 {
+            if voxel.block.is_air() {
                 continue;
             }
             include_point(voxel.offset);
@@ -379,7 +385,7 @@ impl StructureBlueprint {
         chunk: &mut DenseChunk,
     ) {
         for fill in &self.fills {
-            if fill.material == 0 {
+            if fill.palette_idx == 0 {
                 continue;
             }
 
@@ -419,7 +425,7 @@ impl StructureBlueprint {
                 continue;
             }
 
-            let material = fill.material as u16;
+            let material = fill.palette_idx;
             for wx in loop_min[0]..=loop_max[0] {
                 for wy in loop_min[1]..=loop_max[1] {
                     for wz in loop_min[2]..=loop_max[2] {
@@ -436,7 +442,7 @@ impl StructureBlueprint {
         }
 
         for voxel in &self.voxels {
-            if voxel.material == 0 {
+            if voxel.palette_idx == 0 {
                 continue;
             }
 
@@ -462,7 +468,7 @@ impl StructureBlueprint {
             let ly = (wy - chunk_min[1]) as usize;
             let lz = (wz - chunk_min[2]) as usize;
             let lw = (ww - chunk_min[3]) as usize;
-            dense_chunk_set(chunk, lx, ly, lz, lw, voxel.material as u16);
+            dense_chunk_set(chunk, lx, ly, lz, lw, voxel.palette_idx);
         }
     }
 
@@ -507,6 +513,23 @@ impl StructureSet {
         }
         self.blueprints.len().saturating_sub(1)
     }
+}
+
+fn intern_block(
+    palette: &mut Vec<BlockData>,
+    index: &mut HashMap<BlockData, u16>,
+    block: &BlockData,
+) -> u16 {
+    if block.is_air() {
+        return 0;
+    }
+    if let Some(&idx) = index.get(block) {
+        return idx;
+    }
+    let idx = palette.len() as u16;
+    palette.push(block.clone());
+    index.insert(block.clone(), idx);
+    idx
 }
 
 static STRUCTURE_SET: OnceLock<StructureSet> = OnceLock::new();
@@ -620,10 +643,30 @@ fn structure_set() -> &'static StructureSet {
             ),
         ];
 
-        let blueprints: Vec<_> = sources
+        let mut blueprints: Vec<_> = sources
             .iter()
             .map(|(name, source)| StructureBlueprint::from_embedded_source(name, source))
             .collect();
+
+        // Build the shared block palette and assign palette indices.
+        let mut block_palette = vec![BlockData::AIR];
+        let mut block_to_idx = HashMap::new();
+        block_to_idx.insert(BlockData::AIR, 0u16);
+        for blueprint in &mut blueprints {
+            for fill in &mut blueprint.fills {
+                fill.palette_idx = intern_block(&mut block_palette, &mut block_to_idx, &fill.block);
+            }
+            for voxel in &mut blueprint.voxels {
+                voxel.palette_idx = intern_block(&mut block_palette, &mut block_to_idx, &voxel.block);
+            }
+        }
+
+        // Intern maze materials.
+        let maze_floor_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_BASALT_TILES));
+        let maze_ceiling_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_SMOKED_GLASS));
+        let maze_wall_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_RUNIC_ALLOY));
+        let maze_gate_frame_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_OBSIDIAN));
+        let maze_beacon_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_EVENTIDE_ALLOY));
 
         let total_weight = blueprints
             .iter()
@@ -663,6 +706,12 @@ fn structure_set() -> &'static StructureSet {
             max_abs_offset_xzw,
             min_world_y,
             max_world_y,
+            block_palette,
+            maze_floor_idx,
+            maze_ceiling_idx,
+            maze_wall_idx,
+            maze_gate_frame_idx,
+            maze_beacon_idx,
         }
     })
 }
@@ -1918,7 +1967,7 @@ fn collect_maze_placements_for_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Ve
     placements
 }
 
-fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &mut DenseChunk) {
+fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &mut DenseChunk, set: &StructureSet) {
     let chunk_max = [
         chunk_min[0] + CHUNK_SIZE as i32 - 1,
         chunk_min[1] + CHUNK_SIZE as i32 - 1,
@@ -1959,10 +2008,10 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                     let uz = wz - maze_min[2];
                     let uw = ww - maze_min[3];
 
-                    let material = if uy == 0 {
-                        Some(MAZE_FLOOR_MATERIAL)
+                    let material: Option<u16> = if uy == 0 {
+                        Some(set.maze_floor_idx)
                     } else if uy == shape.span[1] - 1 {
-                        Some(MAZE_CEILING_MATERIAL)
+                        Some(set.maze_ceiling_idx)
                     } else {
                         let on_x_neg = ux == 0;
                         let on_x_pos = ux == shape.span[0] - 1;
@@ -2049,7 +2098,7 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                             if gate_open {
                                 None
                             } else {
-                                Some(MAZE_GATE_FRAME_MATERIAL)
+                                Some(set.maze_gate_frame_idx)
                             }
                         } else {
                             let wall_x = ux % MAZE_STRIDE == 0;
@@ -2065,12 +2114,12 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                                     && uz == center_u[2]
                                     && uw == center_u[3]
                                 {
-                                    Some(MAZE_BEACON_MATERIAL)
+                                    Some(set.maze_beacon_idx)
                                 } else {
                                     None
                                 }
                             } else if wall_count > 1 {
-                                Some(MAZE_WALL_MATERIAL)
+                                Some(set.maze_wall_idx)
                             } else if wall_x {
                                 if !wall_y && !wall_z && !wall_w {
                                     let left = ux / MAZE_STRIDE - 1;
@@ -2081,10 +2130,10 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                                     if topology.edge_open([left, cy, cz, cw], [right, cy, cz, cw]) {
                                         None
                                     } else {
-                                        Some(MAZE_WALL_MATERIAL)
+                                        Some(set.maze_wall_idx)
                                     }
                                 } else {
-                                    Some(MAZE_WALL_MATERIAL)
+                                    Some(set.maze_wall_idx)
                                 }
                             } else if wall_y {
                                 if !wall_x && !wall_z && !wall_w {
@@ -2097,10 +2146,10 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                                     {
                                         None
                                     } else {
-                                        Some(MAZE_WALL_MATERIAL)
+                                        Some(set.maze_wall_idx)
                                     }
                                 } else {
-                                    Some(MAZE_WALL_MATERIAL)
+                                    Some(set.maze_wall_idx)
                                 }
                             } else if wall_z {
                                 if !wall_x && !wall_y && !wall_w {
@@ -2112,10 +2161,10 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                                     if topology.edge_open([cx, cy, near, cw], [cx, cy, far, cw]) {
                                         None
                                     } else {
-                                        Some(MAZE_WALL_MATERIAL)
+                                        Some(set.maze_wall_idx)
                                     }
                                 } else {
-                                    Some(MAZE_WALL_MATERIAL)
+                                    Some(set.maze_wall_idx)
                                 }
                             } else if !wall_x && !wall_y && !wall_z {
                                 let near = uw / MAZE_STRIDE - 1;
@@ -2126,10 +2175,10 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                                 if topology.edge_open([cx, cy, cz, near], [cx, cy, cz, far]) {
                                     None
                                 } else {
-                                    Some(MAZE_WALL_MATERIAL)
+                                    Some(set.maze_wall_idx)
                                 }
                             } else {
-                                Some(MAZE_WALL_MATERIAL)
+                                Some(set.maze_wall_idx)
                             }
                         }
                     };
@@ -2142,7 +2191,7 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
                     let ly = (wy - chunk_min[1]) as usize;
                     let lz = (wz - chunk_min[2]) as usize;
                     let lw = (ww - chunk_min[3]) as usize;
-                    dense_chunk_set(chunk, lx, ly, lz, lw, material as u16);
+                    dense_chunk_set(chunk, lx, ly, lz, lw, material);
                 }
             }
         }
@@ -2173,7 +2222,7 @@ pub fn generate_structure_chunk_with_keepout(
         );
     }
     for placement in maze_placements {
-        place_maze_into_chunk(placement, chunk_min, &mut chunk);
+        place_maze_into_chunk(placement, chunk_min, &mut chunk, set);
     }
 
     if dense_chunk_is_empty(&chunk) {
@@ -2181,6 +2230,26 @@ pub fn generate_structure_chunk_with_keepout(
     } else {
         Some(chunk)
     }
+}
+
+/// Get the block palette used by procgen DenseChunks.
+/// Palette index 0 = AIR; indices 1..N map to the corresponding BlockData.
+pub fn block_palette() -> &'static [BlockData] {
+    &structure_set().block_palette
+}
+
+/// Intern a block into a palette, returning its palette index.
+/// If the block already exists in the palette, returns the existing index.
+pub fn intern_block_into_palette(palette: &mut Vec<BlockData>, block: &BlockData) -> u16 {
+    if block.is_air() {
+        return 0;
+    }
+    if let Some(idx) = palette.iter().position(|b| b == block) {
+        return idx as u16;
+    }
+    let idx = palette.len() as u16;
+    palette.push(block.clone());
+    idx
 }
 
 /// Returns chunk positions that contain maze content within the given bounds.
@@ -2262,6 +2331,7 @@ pub fn generate_maze_placements_for_bounds(
                             },
                             chunk_min,
                             &mut chunk,
+                            structure_set(),
                         );
                         if !dense_chunk_is_empty(&chunk) {
                             chunks.insert([cx, cy, cz, cw], chunk);
@@ -2291,7 +2361,7 @@ pub fn generate_maze_chunk(
     }
     let mut chunk = dense_chunk_new();
     for placement in maze_placements {
-        place_maze_into_chunk(placement, chunk_min, &mut chunk);
+        place_maze_into_chunk(placement, chunk_min, &mut chunk, structure_set());
     }
     if dense_chunk_is_empty(&chunk) {
         None
@@ -2637,12 +2707,14 @@ mod tests {
             find_chunk_with_maze(seed).expect("expected to find at least one maze chunk");
         let chunk = generate_structure_chunk(seed, chunk_pos)
             .expect("maze placement should generate chunk");
-        let has_maze_material = chunk.iter().any(|&mat| {
-            mat == MAZE_CEILING_MATERIAL as u16
-                || mat == MAZE_WALL_MATERIAL as u16
-                || mat == MAZE_GATE_FRAME_MATERIAL as u16
-                || mat == MAZE_BEACON_MATERIAL as u16
-        });
+        let set = structure_set();
+        let maze_indices = [
+            set.maze_ceiling_idx,
+            set.maze_wall_idx,
+            set.maze_gate_frame_idx,
+            set.maze_beacon_idx,
+        ];
+        let has_maze_material = chunk.iter().any(|&mat| maze_indices.contains(&mat));
         assert!(
             has_maze_material,
             "expected generated chunk to contain procedural maze materials"
