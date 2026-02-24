@@ -70,6 +70,7 @@ pub fn cpu_render(
     model_tets: &[ModelTetrahedron],
     params: &CpuRenderParams,
     content_registry: &polychora::content_registry::ContentRegistry,
+    material_resolver: &polychora::content_registry::MaterialResolver,
 ) -> image::RgbaImage {
     let projected = clip_and_project(instances, model_tets, params);
     eprintln!(
@@ -127,6 +128,7 @@ pub fn cpu_render(
                 theta_min,
                 theta_max,
                 content_registry,
+                material_resolver,
             );
 
             if alpha_frac > 1e-6 {
@@ -495,6 +497,7 @@ fn rasterize_pixel(
     theta_min: f32,
     theta_max: f32,
     content_registry: &polychora::content_registry::ContentRegistry,
+    material_resolver: &polychora::content_registry::MaterialResolver,
 ) -> ([f32; 3], f32) {
     let mut zw_lines: Vec<ZWLine> = Vec::new();
     let point = [ndc_x, ndc_y];
@@ -604,7 +607,7 @@ fn rasterize_pixel(
         return ([0.0; 3], 0.0);
     }
 
-    render_zw_lines_simple(&zw_lines, theta_min, theta_max, sun_view_dir, content_registry)
+    render_zw_lines_simple(&zw_lines, theta_min, theta_max, sun_view_dir, content_registry, material_resolver)
 }
 
 // ─── ZW line rendering ──────────────────────────────────────────────
@@ -615,6 +618,7 @@ fn render_zw_lines_simple(
     theta_max: f32,
     sun_view_dir: &[f32; 4],
     content_registry: &polychora::content_registry::ContentRegistry,
+    material_resolver: &polychora::content_registry::MaterialResolver,
 ) -> ([f32; 3], f32) {
     let angle_step = (theta_max - theta_min) / DEPTH_FACTOR as f32;
 
@@ -676,7 +680,7 @@ fn render_zw_lines_simple(
                 lines[j].tex[0][3] * (1.0 - val) + lines[j].tex[1][3] * val,
             ];
             let (albedo, luminance) =
-                sample_material(lines[j].material_id, [tex[0], tex[1], tex[2], tex[3]], content_registry);
+                sample_material(lines[j].material_id, [tex[0], tex[1], tex[2], tex[3]], content_registry, material_resolver);
             let normal = lines[j].normal;
 
             // Two-sided Lambert diffuse
@@ -727,7 +731,7 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-fn sample_material(id: u32, tex_pos: [f32; 4], content_registry: &polychora::content_registry::ContentRegistry) -> ([f32; 3], f32) {
+fn sample_material(id: u32, tex_pos: [f32; 4], content_registry: &polychora::content_registry::ContentRegistry, material_resolver: &polychora::content_registry::MaterialResolver) -> ([f32; 3], f32) {
     const TAU: f32 = 6.283_185_5;
     let basic_lum = 0.001;
     let p = [
@@ -848,8 +852,11 @@ fn sample_material(id: u32, tex_pos: [f32; 4], content_registry: &polychora::con
             )
         }
         _ => {
-            let [r, g, b] = content_registry.material_color_by_token(id.min(u16::MAX as u32) as u16);
-            ([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], 0.0)
+            let color = material_resolver
+                .block_for_gpu_token(id.min(u16::MAX as u32) as u16)
+                .map(|(ns, bt)| content_registry.block_color(ns, bt))
+                .unwrap_or([128, 128, 128]);
+            ([color[0] as f32 / 255.0, color[1] as f32 / 255.0, color[2] as f32 / 255.0], 0.0)
         }
     }
 }

@@ -395,62 +395,59 @@ fn bounds_contains_chunk(bounds: Aabb4i, chunk: [i32; 4]) -> bool {
         && chunk[3] <= bounds.max[3]
 }
 
-fn zero_dense_chunk_materials() -> Vec<u16> {
-    vec![0u16; polychora::shared::voxel::CHUNK_VOLUME]
+fn zero_dense_chunk_blocks() -> Vec<polychora::shared::voxel::BlockData> {
+    vec![polychora::shared::voxel::BlockData::AIR; polychora::shared::voxel::CHUNK_VOLUME]
 }
 
-fn dense_materials_from_payload_or_zero(
+fn dense_blocks_from_payload_or_zero(
     resolved: Option<ResolvedChunkPayload>,
-    content_registry: &polychora::content_registry::ContentRegistry,
-) -> Vec<u16> {
+) -> Vec<polychora::shared::voxel::BlockData> {
     let Some(resolved) = resolved else {
-        return zero_dense_chunk_materials();
+        return zero_dense_chunk_blocks();
     };
     let Ok(palette_indices) = resolved.payload.dense_materials() else {
-        return zero_dense_chunk_materials();
+        return zero_dense_chunk_blocks();
     };
     if palette_indices.len() != polychora::shared::voxel::CHUNK_VOLUME {
-        return zero_dense_chunk_materials();
+        return zero_dense_chunk_blocks();
     }
     palette_indices
         .iter()
         .map(|&idx| {
-            let block = resolved
+            resolved
                 .block_palette
                 .get(idx as usize)
                 .cloned()
-                .unwrap_or(polychora::shared::voxel::BlockData::AIR);
-            content_registry.block_material_token(
-                block.namespace,
-                block.block_type,
-            )
+                .unwrap_or(polychora::shared::voxel::BlockData::AIR)
         })
         .collect()
 }
 
-fn dense_materials_from_region_core_chunk(
+fn dense_blocks_from_region_core_chunk(
     core: &RegionTreeCore,
     chunk: [i32; 4],
-    content_registry: &polychora::content_registry::ContentRegistry,
-) -> Vec<u16> {
+) -> Vec<polychora::shared::voxel::BlockData> {
     let bounds = Aabb4i::new(chunk, chunk);
     let chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
     for (key, resolved) in chunks {
         if key == chunk {
-            return dense_materials_from_payload_or_zero(Some(resolved), content_registry);
+            return dense_blocks_from_payload_or_zero(Some(resolved));
         }
     }
-    zero_dense_chunk_materials()
+    zero_dense_chunk_blocks()
 }
 
-fn dense_materials_hash(materials: &[u16]) -> u64 {
+fn dense_blocks_hash(blocks: &[polychora::shared::voxel::BlockData]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    materials.hash(&mut hasher);
+    for b in blocks {
+        b.namespace.hash(&mut hasher);
+        b.block_type.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
-fn dense_materials_non_zero_count(materials: &[u16]) -> usize {
-    materials.iter().filter(|m| **m != 0).count()
+fn dense_blocks_non_air_count(blocks: &[polychora::shared::voxel::BlockData]) -> usize {
+    blocks.iter().filter(|b| !b.is_air()).count()
 }
 
 fn sanitize_remote_velocity(mut velocity: [f32; 4], max_speed: f32) -> [f32; 4] {
@@ -932,60 +929,60 @@ impl App {
         &mut self,
         request_id: u64,
         chunk: [i32; 4],
-        dense_materials: Vec<u16>,
+        dense_blocks: Vec<polychora::shared::voxel::BlockData>,
     ) {
         if !self.multiplayer_chunk_sample_diag_enabled {
             return;
         }
-        if dense_materials.len() != polychora::shared::voxel::CHUNK_VOLUME {
+        if dense_blocks.len() != polychora::shared::voxel::CHUNK_VOLUME {
             eprintln!(
                 "[client-chunk-sample-diag] invalid dense response: request_id={} chunk={:?} len={} expected={}",
                 request_id,
                 chunk,
-                dense_materials.len(),
+                dense_blocks.len(),
                 polychora::shared::voxel::CHUNK_VOLUME
             );
             return;
         }
 
         let world_dense =
-            dense_materials_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk), &self.content_registry);
+            dense_blocks_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk));
         let render_bounds = self
             .multiplayer_last_world_request_bounds
             .unwrap_or_else(|| Aabb4i::new(chunk, chunk));
         let render_payloads = self
             .scene
             .debug_render_bvh_chunk_payloads_in_bounds(render_bounds, chunk);
-        let render_dense_variants: Vec<Vec<u16>> = render_payloads
+        let render_dense_variants: Vec<Vec<polychora::shared::voxel::BlockData>> = render_payloads
             .iter()
-            .map(|resolved| dense_materials_from_payload_or_zero(Some(resolved.clone()), &self.content_registry))
+            .map(|resolved| dense_blocks_from_payload_or_zero(Some(resolved.clone())))
             .collect();
         let render_dense = render_dense_variants
             .first()
             .cloned()
-            .unwrap_or_else(zero_dense_chunk_materials);
+            .unwrap_or_else(zero_dense_chunk_blocks);
         let render_conflict = render_dense_variants
             .iter()
             .skip(1)
             .any(|dense| *dense != render_dense);
         let frame_payloads = self.scene.debug_voxel_frame_chunk_payloads(chunk);
-        let frame_dense_variants: Vec<Vec<u16>> = frame_payloads
+        let frame_dense_variants: Vec<Vec<polychora::shared::voxel::BlockData>> = frame_payloads
             .iter()
             .cloned()
-            .map(|payload| dense_materials_from_payload_or_zero(Some(ResolvedChunkPayload::from_payload_with_token_palette(payload, &self.content_registry)), &self.content_registry))
+            .map(|payload| dense_blocks_from_payload_or_zero(Some(ResolvedChunkPayload::from_payload_with_token_palette(payload, &self.material_resolver))))
             .collect();
         let frame_dense = frame_dense_variants
             .first()
             .cloned()
-            .unwrap_or_else(zero_dense_chunk_materials);
+            .unwrap_or_else(zero_dense_chunk_blocks);
         let frame_conflict = frame_dense_variants
             .iter()
             .skip(1)
             .any(|dense| *dense != frame_dense);
 
-        let world_match = world_dense == dense_materials;
-        let render_match = render_dense == dense_materials;
-        let frame_match = frame_dense == dense_materials;
+        let world_match = world_dense == dense_blocks;
+        let render_match = render_dense == dense_blocks;
+        let frame_match = frame_dense == dense_blocks;
 
         let mut overlap_count = 0usize;
         let mut overlap_mismatch_count = 0usize;
@@ -999,8 +996,8 @@ impl App {
             if !authoritative_bounds.contains_chunk(chunk) {
                 continue;
             }
-            let patch_dense = dense_materials_from_region_core_chunk(patch, chunk, &self.content_registry);
-            let patch_match = patch_dense == dense_materials;
+            let patch_dense = dense_blocks_from_region_core_chunk(patch, chunk);
+            let patch_match = patch_dense == dense_blocks;
             if newest_overlap_seq.is_none() {
                 newest_overlap_seq = Some(*seq);
                 newest_overlap_match = Some(patch_match);
@@ -1022,19 +1019,19 @@ impl App {
                 "[client-chunk-sample-diag] request_id={} chunk={:?} server(hash={},nz={}) world(match={},hash={},nz={}) render(match={},hash={},nz={},payloads={},conflict={}) frame(match={},hash={},nz={},payloads={},conflict={}) patch_overlaps={} patch_mismatches={} newest_patch_seq={:?} newest_patch_match={:?}",
                 request_id,
                 chunk,
-                dense_materials_hash(&dense_materials),
-                dense_materials_non_zero_count(&dense_materials),
+                dense_blocks_hash(&dense_blocks),
+                dense_blocks_non_air_count(&dense_blocks),
                 world_match,
-                dense_materials_hash(&world_dense),
-                dense_materials_non_zero_count(&world_dense),
+                dense_blocks_hash(&world_dense),
+                dense_blocks_non_air_count(&world_dense),
                 render_match,
-                dense_materials_hash(&render_dense),
-                dense_materials_non_zero_count(&render_dense),
+                dense_blocks_hash(&render_dense),
+                dense_blocks_non_air_count(&render_dense),
                 render_payloads.len(),
                 render_conflict,
                 frame_match,
-                dense_materials_hash(&frame_dense),
-                dense_materials_non_zero_count(&frame_dense),
+                dense_blocks_hash(&frame_dense),
+                dense_blocks_non_air_count(&frame_dense),
                 frame_payloads.len(),
                 frame_conflict,
                 overlap_count,
@@ -1459,7 +1456,7 @@ impl App {
                     .scene
                     .debug_voxel_frame_chunk_payloads(key)
                     .into_iter()
-                    .map(|p| ResolvedChunkPayload::from_payload_with_token_palette(p, &self.content_registry))
+                    .map(|p| ResolvedChunkPayload::from_payload_with_token_palette(p, &self.material_resolver))
                     .collect();
                 eprintln!(
                     "[edit-sync-patch] key={:?} patch={} world_before={} world_after={} render_cache={} frame={} pending_dirty={} pending_deltas={}",
@@ -1531,12 +1528,12 @@ impl App {
             multiplayer::ServerMessage::WorldChunkSampleResponse {
                 request_id,
                 chunk,
-                dense_materials,
+                dense_blocks,
             } => {
                 self.handle_multiplayer_chunk_sample_diag_response(
                     request_id,
                     chunk,
-                    dense_materials,
+                    dense_blocks,
                 );
             }
             multiplayer::ServerMessage::Pong { .. } => {}
@@ -1743,7 +1740,20 @@ impl App {
                     continue;
                 }
                 let type_key = (entity.entity_type_ns, entity.entity_type);
-                let mat = self.content_registry.entity_base_material_token(entity.entity_type_ns, entity.entity_type);
+                // Resolve entity texture palette to GPU material tokens.
+                let gpu_mats: [u32; 10] = {
+                    let textures = self.content_registry
+                        .entity_lookup(entity.entity_type_ns, entity.entity_type)
+                        .map(|e| &e.model_textures[..])
+                        .unwrap_or(&[]);
+                    let mut mats = [7u32; 10]; // fallback to Purple for all slots
+                    for (i, t) in textures.iter().enumerate().take(10) {
+                        mats[i] = self.material_resolver
+                            .resolve_texture(t.namespace, t.texture_id)
+                            .unwrap_or(7) as u32;
+                    }
+                    mats
+                };
                 match type_key {
                     ENTITY_PLAYER_AVATAR => {}
                     ENTITY_TEST_CUBE => {
@@ -1752,7 +1762,7 @@ impl App {
                             entity.render_position,
                             &basis,
                             [entity.scale; 4],
-                            [mat as u32; 8],
+                            [gpu_mats[0]; 8],
                         ));
                     }
                     ENTITY_TEST_ROTOR => {
@@ -1767,14 +1777,14 @@ impl App {
                                 entity.scale * 0.82,
                             ],
                             [
-                                mat as u32,
-                                mat as u32,
-                                mat as u32,
-                                (mat.saturating_add(1)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(1)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(1)) as u32,
+                                gpu_mats[0],
+                                gpu_mats[0],
+                                gpu_mats[0],
+                                gpu_mats[1],
+                                gpu_mats[0],
+                                gpu_mats[1],
+                                gpu_mats[0],
+                                gpu_mats[1],
                             ],
                         ));
                     }
@@ -1790,14 +1800,14 @@ impl App {
                                 entity.scale * 1.05,
                             ],
                             [
-                                (mat.saturating_add(2)) as u32,
-                                mat as u32,
-                                mat as u32,
-                                mat as u32,
-                                mat as u32,
-                                (mat.saturating_add(2)) as u32,
-                                mat as u32,
-                                mat as u32,
+                                gpu_mats[2],
+                                gpu_mats[0],
+                                gpu_mats[0],
+                                gpu_mats[0],
+                                gpu_mats[0],
+                                gpu_mats[2],
+                                gpu_mats[0],
+                                gpu_mats[0],
                             ],
                         ));
                     }
@@ -1815,7 +1825,7 @@ impl App {
                             &basis,
                             [0.0, 0.06 + bob, 0.0, 0.0],
                         );
-                        let pulse_bias: u16 = if pulse > 0.66 { 8 } else { 6 };
+                        let pulse_bias: usize = if pulse > 0.66 { 8 } else { 6 };
                         instances.push(build_centered_model_instance(
                             core_center,
                             &basis,
@@ -1826,14 +1836,14 @@ impl App {
                                 entity.scale * 0.56,
                             ],
                             [
-                                mat as u32,
-                                (mat.saturating_add(1)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(3)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(4)) as u32,
-                                mat as u32,
+                                gpu_mats[0],
+                                gpu_mats[1],
+                                gpu_mats[2],
+                                gpu_mats[0],
+                                gpu_mats[3],
+                                gpu_mats[0],
+                                gpu_mats[4],
+                                gpu_mats[0],
                             ],
                         ));
 
@@ -1849,18 +1859,18 @@ impl App {
                                 entity.scale * 0.26,
                             ],
                             [
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(pulse_bias)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(pulse_bias)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(pulse_bias)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(pulse_bias)) as u32,
+                                gpu_mats[2],
+                                gpu_mats[pulse_bias],
+                                gpu_mats[2],
+                                gpu_mats[pulse_bias],
+                                gpu_mats[2],
+                                gpu_mats[pulse_bias],
+                                gpu_mats[2],
+                                gpu_mats[pulse_bias],
                             ],
                         ));
 
-                        let fin_specs: [([f32; 4], [f32; 4], u16); 2] = [
+                        let fin_specs: [([f32; 4], [f32; 4], usize); 2] = [
                             ([0.0, 0.18, 0.05, 0.34], [0.14, 0.30, 0.44, 0.12], 5),
                             ([0.0, 0.18, 0.05, -0.34], [0.14, 0.30, 0.44, 0.12], 5),
                         ];
@@ -1876,14 +1886,14 @@ impl App {
                                     entity.scale * scales[3],
                                 ],
                                 [
-                                    mat as u32,
-                                    (mat.saturating_add(bias)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(2)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(bias)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(2)) as u32,
+                                    gpu_mats[0],
+                                    gpu_mats[bias],
+                                    gpu_mats[0],
+                                    gpu_mats[2],
+                                    gpu_mats[0],
+                                    gpu_mats[bias],
+                                    gpu_mats[0],
+                                    gpu_mats[2],
                                 ],
                             ));
                         }
@@ -1913,14 +1923,14 @@ impl App {
                                     entity.scale * 0.16,
                                 ],
                                 [
-                                    (mat.saturating_add(1)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(3)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(1)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(3)) as u32,
-                                    mat as u32,
+                                    gpu_mats[1],
+                                    gpu_mats[0],
+                                    gpu_mats[3],
+                                    gpu_mats[0],
+                                    gpu_mats[1],
+                                    gpu_mats[0],
+                                    gpu_mats[3],
+                                    gpu_mats[0],
                                 ],
                             ));
                         }
@@ -1933,7 +1943,7 @@ impl App {
                             * (2.4 + stride * 4.2)
                             + entity_id as f32 * 0.29;
                         let charge = ((anim_t * 0.8).sin() * 0.5 + 0.5).powf(1.8);
-                        let charge_bias: u16 = if charge > 0.70 { 9 } else { 7 };
+                        let charge_bias: usize = if charge > 0.70 { 9 } else { 7 };
                         let body_center = offset_point_along_basis(
                             entity.render_position,
                             &basis,
@@ -1949,14 +1959,14 @@ impl App {
                                 entity.scale * 0.98,
                             ],
                             [
-                                (mat.saturating_add(3)) as u32,
-                                (mat.saturating_add(1)) as u32,
-                                (mat.saturating_add(4)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(5)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(4)) as u32,
-                                mat as u32,
+                                gpu_mats[3],
+                                gpu_mats[1],
+                                gpu_mats[4],
+                                gpu_mats[0],
+                                gpu_mats[5],
+                                gpu_mats[2],
+                                gpu_mats[4],
+                                gpu_mats[0],
                             ],
                         ));
 
@@ -1975,14 +1985,14 @@ impl App {
                                 entity.scale * 0.58,
                             ],
                             [
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(charge_bias)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(charge_bias)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(charge_bias)) as u32,
-                                (mat.saturating_add(2)) as u32,
-                                (mat.saturating_add(charge_bias)) as u32,
+                                gpu_mats[2],
+                                gpu_mats[charge_bias],
+                                gpu_mats[2],
+                                gpu_mats[charge_bias],
+                                gpu_mats[2],
+                                gpu_mats[charge_bias],
+                                gpu_mats[2],
+                                gpu_mats[charge_bias],
                             ],
                         ));
 
@@ -1998,14 +2008,14 @@ impl App {
                                 entity.scale * 0.40,
                             ],
                             [
-                                (mat.saturating_add(6)) as u32,
-                                (mat.saturating_add(3)) as u32,
-                                (mat.saturating_add(6)) as u32,
-                                (mat.saturating_add(3)) as u32,
-                                (mat.saturating_add(6)) as u32,
-                                (mat.saturating_add(3)) as u32,
-                                (mat.saturating_add(6)) as u32,
-                                (mat.saturating_add(3)) as u32,
+                                gpu_mats[6],
+                                gpu_mats[3],
+                                gpu_mats[6],
+                                gpu_mats[3],
+                                gpu_mats[6],
+                                gpu_mats[3],
+                                gpu_mats[6],
+                                gpu_mats[3],
                             ],
                         ));
 
@@ -2034,14 +2044,14 @@ impl App {
                                     entity.scale * 0.24,
                                 ],
                                 [
-                                    mat as u32,
-                                    (mat.saturating_add(1)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(2)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(1)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(2)) as u32,
+                                    gpu_mats[0],
+                                    gpu_mats[1],
+                                    gpu_mats[0],
+                                    gpu_mats[2],
+                                    gpu_mats[0],
+                                    gpu_mats[1],
+                                    gpu_mats[0],
+                                    gpu_mats[2],
                                 ],
                             ));
                         }
@@ -2066,14 +2076,14 @@ impl App {
                                 entity.scale * 0.96,
                             ],
                             [
-                                (mat.saturating_add(2)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(4)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(3)) as u32,
-                                mat as u32,
-                                (mat.saturating_add(5)) as u32,
-                                mat as u32,
+                                gpu_mats[2],
+                                gpu_mats[0],
+                                gpu_mats[4],
+                                gpu_mats[0],
+                                gpu_mats[3],
+                                gpu_mats[0],
+                                gpu_mats[5],
+                                gpu_mats[0],
                             ],
                         ));
 
@@ -2089,20 +2099,20 @@ impl App {
                                 entity.scale * 0.32,
                             ],
                             [
-                                (mat.saturating_add(7)) as u32,
-                                (mat.saturating_add(9)) as u32,
-                                (mat.saturating_add(8)) as u32,
-                                (mat.saturating_add(9)) as u32,
-                                (mat.saturating_add(7)) as u32,
-                                (mat.saturating_add(9)) as u32,
-                                (mat.saturating_add(8)) as u32,
-                                (mat.saturating_add(9)) as u32,
+                                gpu_mats[7],
+                                gpu_mats[9],
+                                gpu_mats[8],
+                                gpu_mats[9],
+                                gpu_mats[7],
+                                gpu_mats[9],
+                                gpu_mats[8],
+                                gpu_mats[9],
                             ],
                         ));
 
                         let splay = 0.12 * anim_t.sin();
                         let leg_y = -0.16 + 0.04 * (anim_t * 1.5).cos();
-                        let leg_specs: [([f32; 4], [f32; 4], u16); 8] = [
+                        let leg_specs: [([f32; 4], [f32; 4], usize); 8] = [
                             (
                                 [0.56 + splay, leg_y, 0.42, 0.20],
                                 [0.72, 0.08, 0.14, 0.18],
@@ -2156,14 +2166,14 @@ impl App {
                                     entity.scale * axis_scale[3],
                                 ],
                                 [
-                                    mat as u32,
-                                    (mat.saturating_add(material_bias)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(material_bias)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(material_bias)) as u32,
-                                    mat as u32,
-                                    (mat.saturating_add(material_bias)) as u32,
+                                    gpu_mats[0],
+                                    gpu_mats[material_bias],
+                                    gpu_mats[0],
+                                    gpu_mats[material_bias],
+                                    gpu_mats[0],
+                                    gpu_mats[material_bias],
+                                    gpu_mats[0],
+                                    gpu_mats[material_bias],
                                 ],
                             ));
                         }
@@ -2175,7 +2185,7 @@ impl App {
                             entity.render_position,
                             &basis,
                             [entity.scale; 4],
-                            [mat as u32; 8],
+                            [gpu_mats[0]; 8],
                         ));
                     }
                 }

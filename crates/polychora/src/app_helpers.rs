@@ -519,9 +519,9 @@ pub(super) fn build_place_preview_instance(
     time_s: f32,
     control_scheme: ControlScheme,
     aspect: f32,
-    content_registry: &polychora::content_registry::ContentRegistry,
+    material_resolver: &polychora::content_registry::MaterialResolver,
 ) -> common::ModelInstance {
-    let material_token = content_registry.block_material_token(block.namespace, block.block_type);
+    let material_token = material_resolver.resolve_block(block.namespace, block.block_type);
     let preview_material = material_token as u32 | PREVIEW_MATERIAL_FLAG;
     let (right, up, view_z, view_w) = match control_scheme {
         ControlScheme::IntuitiveUpright => camera.view_basis_upright(),

@@ -38,6 +38,12 @@ pub struct EntityDeclaration {
     pub category: EntityCategory,
     pub default_scale: f32,
     pub base_material_color: [u8; 3],
+    /// Explicit texture palette for entity model parts.
+    /// Each entry maps a palette slot to a specific texture.
+    /// Rendering code indexes into this palette instead of using
+    /// base_material_token + saturating_add(N).
+    #[serde(default)]
+    pub model_textures: Vec<TextureRef>,
 }
 
 /// An item type declared by a plugin.
@@ -87,6 +93,7 @@ mod tests {
                 category: EntityCategory::Mob,
                 default_scale: 1.5,
                 base_material_color: [10, 20, 30],
+                model_textures: vec![],
             }],
             items: vec![ItemDeclaration {
                 type_id: 0x12345678,

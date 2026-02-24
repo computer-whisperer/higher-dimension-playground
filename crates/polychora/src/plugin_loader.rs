@@ -113,12 +113,12 @@ pub fn populate_registry_from_plugin(
             block.category,
             block.color_hint,
             material_token,
+            block.texture.clone(),
         );
     }
 
     // Register entities
     for entity in &plugin.manifest.entities {
-        let base_material_token = find_closest_material_token(registry, &entity.base_material_color);
         let (mob_archetype, mob_defaults) = resolve_mob_metadata(&entity.name, entity.category);
 
         // Build aliases: canonical name + common variants
@@ -142,34 +142,13 @@ pub fn populate_registry_from_plugin(
             canonical_name: entity.name.clone(),
             aliases,
             default_scale: entity.default_scale,
-            base_material_token,
+            model_textures: entity.model_textures.clone(),
             mob_archetype,
             mob_defaults,
         });
     }
 
     Ok(())
-}
-
-/// Find the material token whose registered block color is closest to the given
-/// color (Euclidean distance in RGB space).
-fn find_closest_material_token(registry: &ContentRegistry, color: &[u8; 3]) -> u16 {
-    let mut best_token = 7u16; // fallback: Purple
-    let mut best_dist = u32::MAX;
-
-    for block in registry.all_blocks_ordered() {
-        let c = block.color;
-        let dr = color[0] as i32 - c[0] as i32;
-        let dg = color[1] as i32 - c[1] as i32;
-        let db = color[2] as i32 - c[2] as i32;
-        let dist = (dr * dr + dg * dg + db * db) as u32;
-        if dist < best_dist {
-            best_dist = dist;
-            best_token = block.material_token;
-        }
-    }
-
-    best_token
 }
 
 /// Resolve mob archetype and defaults for known first-party entity names.

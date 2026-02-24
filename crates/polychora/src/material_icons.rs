@@ -1,4 +1,4 @@
-use polychora::content_registry::ContentRegistry;
+use polychora::content_registry::{ContentRegistry, MaterialResolver};
 use common::{MatN, ModelInstance};
 use higher_dimension_playground::render::{
     FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
@@ -91,14 +91,14 @@ pub struct MaterialIconSheet {
     pub width: u32,
     /// Height of the sprite sheet in pixels
     pub height: u32,
-    /// Map from material ID to its UV rectangle [u_min, v_min, u_max, v_max]
-    uv_rects: HashMap<u8, [f32; 4]>,
+    /// Map from (namespace, block_type) to its UV rectangle [u_min, v_min, u_max, v_max]
+    uv_rects: HashMap<(u32, u32), [f32; 4]>,
 }
 
 impl MaterialIconSheet {
-    /// Get the UV rectangle for a material ID, or None if not found.
-    pub fn uv_rect(&self, material_id: u8) -> Option<[f32; 4]> {
-        self.uv_rects.get(&material_id).copied()
+    /// Get the UV rectangle for a block by (namespace, block_type), or None if not found.
+    pub fn uv_rect(&self, namespace: u32, block_type: u32) -> Option<[f32; 4]> {
+        self.uv_rects.get(&(namespace, block_type)).copied()
     }
 }
 
@@ -109,6 +109,7 @@ pub fn generate_material_icon_sheet_gpu(
     queue: Arc<Queue>,
     instance: Arc<Instance>,
     content_registry: &ContentRegistry,
+    material_resolver: &MaterialResolver,
 ) -> Option<MaterialIconSheet> {
     let num_materials = content_registry.block_count() as u32;
     let rows = (num_materials + SHEET_COLUMNS - 1) / SHEET_COLUMNS;
@@ -131,7 +132,7 @@ pub fn generate_material_icon_sheet_gpu(
     for (idx, entry) in content_registry.all_blocks_ordered().enumerate() {
         let col = (idx as u32) % SHEET_COLUMNS;
         let row = (idx as u32) / SHEET_COLUMNS;
-        let token = entry.material_token;
+        let token = material_resolver.resolve_block(entry.namespace, entry.block_type);
 
         let model_instance = [ModelInstance {
             model_transform: MatN::<5>::identity(),
@@ -185,7 +186,7 @@ pub fn generate_material_icon_sheet_gpu(
         let v_min = dst_y as f32 / sheet_h as f32;
         let u_max = (dst_x + ICON_SIZE) as f32 / sheet_w as f32;
         let v_max = (dst_y + ICON_SIZE) as f32 / sheet_h as f32;
-        uv_rects.insert(token as u8, [u_min, v_min, u_max, v_max]);
+        uv_rects.insert((entry.namespace, entry.block_type), [u_min, v_min, u_max, v_max]);
     }
 
     Some(MaterialIconSheet {

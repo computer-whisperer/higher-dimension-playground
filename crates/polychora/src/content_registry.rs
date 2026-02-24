@@ -15,7 +15,11 @@ use std::collections::HashMap;
 // of blocks in the polychora-content plugin.  Token 0 = air.
 // This table enables conversion without needing a ContentRegistry instance.
 
-const TOKEN_TO_BLOCK_TYPE: [u32; 68] = [
+/// Number of legacy material tokens (1-based, excluding air).
+/// Used by settings persistence for clamping saved token values.
+pub const LEGACY_MATERIAL_TOKEN_COUNT: u8 = 68;
+
+const TOKEN_TO_BLOCK_TYPE: [u32; LEGACY_MATERIAL_TOKEN_COUNT as usize] = [
     content_ids::BLOCK_RED,                // token 1
     content_ids::BLOCK_ORANGE,             // token 2
     content_ids::BLOCK_YELLOW_GREEN,       // token 3
@@ -119,6 +123,85 @@ pub fn material_token_from_block_data(block: &BlockData) -> u8 {
 pub const MATERIAL_TOKEN_TEXTURE_POOL_FLAG: u16 = 1 << 15;
 
 // ---------------------------------------------------------------------------
+// MaterialResolver — render-owned GPU token resolution
+// ---------------------------------------------------------------------------
+
+/// Render-system-owned resolver that maps block identifiers and texture
+/// references to ephemeral GPU material tokens (u16).
+///
+/// Built once at startup from a fully-populated `ContentRegistry`.  All
+/// rendering code should use this instead of querying `ContentRegistry`
+/// directly for material tokens.
+#[derive(Clone, Debug)]
+pub struct MaterialResolver {
+    /// (namespace, block_type) → GPU u16 material token
+    block_to_gpu: HashMap<(u32, u32), u16>,
+    /// (namespace, texture_id) → GPU u16 material token
+    texture_to_gpu: HashMap<(u32, u32), u16>,
+    /// Reverse: GPU u16 → (namespace, block_type), for diagnostics
+    gpu_to_block: HashMap<u16, (u32, u32)>,
+}
+
+impl MaterialResolver {
+    /// Build a `MaterialResolver` from a fully-populated `ContentRegistry`.
+    pub fn from_registry(registry: &ContentRegistry) -> Self {
+        let mut block_to_gpu = HashMap::new();
+        let mut gpu_to_block = HashMap::new();
+        for (&key, entry) in &registry.blocks {
+            block_to_gpu.insert(key, entry.material_token);
+            gpu_to_block.insert(entry.material_token, key);
+        }
+        // Also register blocks reachable via legacy remaps
+        for (&old_key, &new_key) in &registry.legacy_block_remap {
+            if let Some(entry) = registry.blocks.get(&new_key) {
+                block_to_gpu.entry(old_key).or_insert(entry.material_token);
+            }
+        }
+        let texture_to_gpu = registry.texture_tokens.clone();
+        Self {
+            block_to_gpu,
+            texture_to_gpu,
+            gpu_to_block,
+        }
+    }
+
+    /// Resolve (namespace, block_type) → GPU material token.
+    /// Returns 1 (Red) as fallback for unknown blocks.
+    #[inline]
+    pub fn resolve_block(&self, namespace: u32, block_type: u32) -> u16 {
+        self.block_to_gpu
+            .get(&(namespace, block_type))
+            .copied()
+            .unwrap_or(1)
+    }
+
+    /// Resolve a `TextureRef` → GPU material token.
+    #[inline]
+    pub fn resolve_texture(&self, namespace: u32, texture_id: u32) -> Option<u16> {
+        self.texture_to_gpu.get(&(namespace, texture_id)).copied()
+    }
+
+    /// Reverse lookup: GPU token → (namespace, block_type).
+    pub fn block_for_gpu_token(&self, token: u16) -> Option<(u32, u32)> {
+        self.gpu_to_block.get(&token).copied()
+    }
+
+    /// Build a palette mapping GPU material token indices to `BlockData`.
+    ///
+    /// Index 0 = Air, indices 1..=max are populated from the reverse token map.
+    /// Used by diagnostic code that works with raw `ChunkPayload` u16 indices.
+    pub fn build_token_palette(&self) -> Vec<BlockData> {
+        use crate::shared::voxel::BlockData;
+        let max_token = self.gpu_to_block.keys().copied().max().unwrap_or(0) as usize;
+        let mut palette = vec![BlockData::AIR; max_token + 1];
+        for (&token, &(ns, bt)) in &self.gpu_to_block {
+            palette[token as usize] = BlockData::simple(ns, bt);
+        }
+        palette
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Block entry
 // ---------------------------------------------------------------------------
 
@@ -129,7 +212,10 @@ pub struct BlockEntry {
     pub name: String,
     pub category: BlockCategory,
     pub color: [u8; 3],
+    /// Stable texture reference for this block.
+    pub texture: TextureRef,
     /// GPU material token (u16) assigned at registration time.
+    /// Internal to render system; use MaterialResolver for GPU lookups.
     pub material_token: u16,
 }
 
@@ -145,7 +231,9 @@ pub struct EntityEntry {
     pub canonical_name: String,
     pub aliases: Vec<String>,
     pub default_scale: f32,
-    pub base_material_token: u16,
+    /// Explicit texture palette for entity model parts.
+    /// Rendering code resolves each TextureRef to a GPU token at draw time.
+    pub model_textures: Vec<TextureRef>,
     pub mob_archetype: Option<MobArchetype>,
     pub mob_defaults: Option<MobArchetypeDefaults>,
 }
@@ -226,6 +314,7 @@ impl ContentRegistry {
                 name: "Air".into(),
                 category: BlockCategory::Special,
                 color: [0, 0, 0],
+                texture: TextureRef { namespace: 0, texture_id: 0 },
                 material_token: 0,
             },
         );
@@ -255,6 +344,7 @@ impl ContentRegistry {
             name: name.into(),
             category,
             color,
+            texture: TextureRef { namespace: 0, texture_id: 0 },
             material_token: token,
         };
         self.blocks.insert((namespace, block_type), entry);
@@ -263,8 +353,8 @@ impl ContentRegistry {
         token
     }
 
-    /// Register a block with a specific (forced) material token.
-    /// Used for builtin content that must match existing GPU shader IDs.
+    /// Register a block with a specific (forced) material token and texture reference.
+    /// Used for plugin content whose textures have been resolved to GPU tokens.
     ///
     /// # Panics
     /// Panics if `forced_token` is already assigned to a different block.
@@ -276,6 +366,7 @@ impl ContentRegistry {
         category: BlockCategory,
         color: [u8; 3],
         forced_token: u16,
+        texture: TextureRef,
     ) {
         let name = name.into();
         if let Some(&existing) = self.token_to_block.get(&forced_token) {
@@ -292,6 +383,7 @@ impl ContentRegistry {
             name,
             category,
             color,
+            texture,
             material_token: forced_token,
         };
         self.blocks.insert((namespace, block_type), entry);
@@ -375,7 +467,8 @@ impl ContentRegistry {
     }
 
     /// Resolve (namespace, block_type) → GPU material token.
-    /// Replacement for `materials::block_to_material_token`.
+    /// Deprecated: use `MaterialResolver::resolve_block()` instead.
+    #[deprecated(note = "use MaterialResolver::resolve_block() instead")]
     pub fn block_material_token(&self, namespace: u32, block_type: u32) -> u16 {
         self.resolve_block_entry(namespace, block_type)
             .map(|e| e.material_token)
@@ -411,9 +504,12 @@ impl ContentRegistry {
 
     // -----------------------------------------------------------------------
     // Material-token-based lookups (reverse: token → block info)
+    // Deprecated: use block_name/block_color/block_entry via (namespace, block_type) instead.
+    // These methods are retained for migration code and CPU render fallback.
     // -----------------------------------------------------------------------
 
-    /// Get material name by token. Replacement for `materials::material_name`.
+    /// Get material name by token.
+    #[deprecated(note = "use block_name(namespace, block_type) instead")]
     pub fn material_name_by_token(&self, token: u16) -> &str {
         self.token_to_block
             .get(&token)
@@ -422,7 +518,8 @@ impl ContentRegistry {
             .unwrap_or("Unknown")
     }
 
-    /// Get material color by token. Replacement for `materials::material_color`.
+    /// Get material color by token.
+    #[deprecated(note = "use block_color(namespace, block_type) instead")]
     pub fn material_color_by_token(&self, token: u16) -> [u8; 3] {
         self.token_to_block
             .get(&token)
@@ -432,6 +529,7 @@ impl ContentRegistry {
     }
 
     /// Get material category label by token.
+    #[deprecated(note = "use block_category_label(namespace, block_type) instead")]
     pub fn material_category_label_by_token(&self, token: u16) -> &'static str {
         self.token_to_block
             .get(&token)
@@ -441,6 +539,7 @@ impl ContentRegistry {
     }
 
     /// Get the block entry for a material token.
+    #[deprecated(note = "use block_entry(namespace, block_type) instead")]
     pub fn block_entry_by_token(&self, token: u16) -> Option<&BlockEntry> {
         self.token_to_block
             .get(&token)
@@ -448,6 +547,8 @@ impl ContentRegistry {
     }
 
     /// Convert a material token to a `BlockData` with proper namespace and block type.
+    #[deprecated(note = "use block_data_from_material_token() for migration code")]
+    #[allow(deprecated)]
     pub fn block_data_for_token(&self, token: u16) -> BlockData {
         self.block_entry_by_token(token)
             .map(|entry| BlockData::simple(entry.namespace, entry.block_type))
@@ -471,6 +572,7 @@ impl ContentRegistry {
     }
 
     /// Maximum material token assigned so far.
+    #[deprecated(note = "use block_count() instead")]
     pub fn max_material_token(&self) -> u16 {
         if self.next_procedural_token > 0 {
             self.next_procedural_token - 1
@@ -511,13 +613,6 @@ impl ContentRegistry {
         self.resolve_entity_entry(namespace, entity_type)
             .map(|e| e.category)
             .unwrap_or(EntityCategory::Accent)
-    }
-
-    /// Get the base material token for an entity.
-    pub fn entity_base_material_token(&self, namespace: u32, entity_type: u32) -> u16 {
-        self.resolve_entity_entry(namespace, entity_type)
-            .map(|e| e.base_material_token)
-            .unwrap_or(7) // fallback to Purple
     }
 
     /// Get all spawnable entity canonical names.
@@ -622,28 +717,32 @@ mod tests {
     }
 
     #[test]
-    fn plugin_blocks_match_legacy_materials() {
+    fn plugin_blocks_registered_correctly() {
         let registry = full_registry();
+        let resolver = MaterialResolver::from_registry(&registry);
 
         // Verify all 68 blocks are registered (from plugin)
         assert_eq!(registry.block_count(), 68);
 
-        // Verify specific lookups match the old MATERIALS data
-        assert_eq!(registry.material_name_by_token(1), "Red");
-        assert_eq!(registry.material_name_by_token(27), "Stone");
-        assert_eq!(registry.material_name_by_token(35), "Sand");
-        assert_eq!(registry.material_name_by_token(68), "Beacon Matrix");
+        // Verify specific block lookups via MaterialResolver reverse mapping
+        let check_name = |token: u16, expected_name: &str| {
+            let (ns, bt) = resolver.block_for_gpu_token(token)
+                .unwrap_or_else(|| panic!("token {} not in resolver", token));
+            assert_eq!(registry.block_name(ns, bt), expected_name);
+            assert_eq!(resolver.resolve_block(ns, bt), token);
+        };
 
-        assert_eq!(registry.material_color_by_token(1), [255, 0, 0]);
-        assert_eq!(registry.material_color_by_token(12), [255, 255, 255]);
-        assert_eq!(registry.material_color_by_token(35), [237, 201, 175]);
-        assert_eq!(registry.material_color_by_token(58), [255, 236, 168]);
-        assert_eq!(registry.material_color_by_token(68), [255, 248, 196]);
+        check_name(1, "Red");
+        check_name(12, "White");
+        check_name(27, "Stone");
+        check_name(35, "Sand");
+        check_name(68, "Beacon Matrix");
 
-        // Verify block_to_material_token equivalence
+        // Verify round-trip for all 68 blocks
         for token in 1u16..=68 {
-            let (ns, bt) = registry.token_to_block[&token];
-            assert_eq!(registry.block_material_token(ns, bt), token);
+            let (ns, bt) = resolver.block_for_gpu_token(token)
+                .unwrap_or_else(|| panic!("token {} not in resolver", token));
+            assert_eq!(resolver.resolve_block(ns, bt), token);
         }
     }
 
@@ -671,11 +770,12 @@ mod tests {
     #[test]
     fn legacy_remap_works() {
         let registry = full_registry();
+        let resolver = MaterialResolver::from_registry(&registry);
 
         // Legacy (0, 27) → (CONTENT_NS, BLOCK_STONE) → "Stone" with token 27
         let (ns, bt) = registry.resolve_legacy_block(0, 27);
         assert_eq!(registry.block_name(ns, bt), "Stone");
-        assert_eq!(registry.block_material_token(ns, bt), 27);
+        assert_eq!(resolver.resolve_block(ns, bt), 27);
 
         // Legacy (0, 10) → (CONTENT_NS, ENTITY_SEEKER) → "seeker"
         let (ns, et) = registry.resolve_legacy_entity(0, 10);
@@ -686,12 +786,12 @@ mod tests {
     #[test]
     fn unknown_lookups_return_defaults() {
         let registry = full_registry();
+        let resolver = MaterialResolver::from_registry(&registry);
 
-        assert_eq!(registry.block_material_token(999, 999), 1); // Red fallback
+        assert_eq!(resolver.resolve_block(999, 999), 1); // Red fallback
         assert_eq!(registry.block_name(999, 999), "Unknown");
         assert_eq!(registry.block_color(999, 999), [128, 128, 128]);
         assert_eq!(registry.entity_category(999, 999), EntityCategory::Accent);
-        assert_eq!(registry.entity_base_material_token(999, 999), 7);
     }
 
     #[test]
@@ -713,28 +813,22 @@ mod tests {
     }
 
     #[test]
-    fn entity_base_material_tokens_match_legacy() {
+    fn entity_model_textures_declared() {
         let registry = full_registry();
-        // These exact token values must match the old hardcoded base_material
-        // values from the static ENTITY_TYPES registry.  The color-matching
-        // approach in find_closest_material_token must produce these results.
-        let expected: &[(&str, u16)] = &[
-            ("cube", 7),     // Purple
-            ("rotor", 12),   // White
-            ("drifter", 17), // Marble
-            ("seeker", 3),   // Yellow-Green
-            ("creeper", 6),  // Blue
-            ("phase_spider", 9), // Rainbow
-        ];
-        for &(name, expected_token) in expected {
+        // Every non-player entity should have at least one model texture.
+        let expected_entities = ["cube", "rotor", "drifter", "seeker", "creeper", "phase_spider"];
+        for name in expected_entities {
             let entry = registry.entity_lookup_by_name(name)
                 .unwrap_or_else(|| panic!("entity '{}' not found", name));
-            assert_eq!(
-                entry.base_material_token, expected_token,
-                "entity '{}': expected material token {}, got {}",
-                name, expected_token, entry.base_material_token,
+            assert!(
+                !entry.model_textures.is_empty(),
+                "entity '{}' should have model_textures declared",
+                name,
             );
         }
+        // Player has no model textures (rendered as avatar mesh)
+        let player = registry.entity_lookup(0, 0).unwrap();
+        assert!(player.model_textures.is_empty());
     }
 
     #[test]

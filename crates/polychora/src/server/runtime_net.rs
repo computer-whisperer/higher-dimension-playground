@@ -353,41 +353,35 @@ fn send_empty_world_subtree_patch_to_client(state: &SharedState, client_id: u64,
     );
 }
 
-fn zero_dense_chunk_materials() -> Vec<u16> {
-    vec![0u16; voxel::CHUNK_VOLUME]
+fn zero_dense_chunk_blocks() -> Vec<voxel::BlockData> {
+    vec![voxel::BlockData::AIR; voxel::CHUNK_VOLUME]
 }
 
-fn dense_materials_from_resolved_payload(
+fn dense_blocks_from_resolved_payload(
     resolved: &crate::shared::chunk_payload::ResolvedChunkPayload,
-    registry: &crate::content_registry::ContentRegistry,
-) -> Vec<u16> {
+) -> Vec<voxel::BlockData> {
     let Ok(palette_indices) = resolved.payload.dense_materials() else {
-        return zero_dense_chunk_materials();
+        return zero_dense_chunk_blocks();
     };
     if palette_indices.len() != voxel::CHUNK_VOLUME {
-        return zero_dense_chunk_materials();
+        return zero_dense_chunk_blocks();
     }
     palette_indices
         .iter()
         .map(|&idx| {
-            let block = resolved
+            resolved
                 .block_palette
                 .get(idx as usize)
                 .cloned()
-                .unwrap_or(voxel::BlockData::AIR);
-            registry.block_material_token(
-                block.namespace,
-                block.block_type,
-            )
+                .unwrap_or(voxel::BlockData::AIR)
         })
         .collect()
 }
 
-fn dense_materials_from_region_core_chunk(
+fn dense_blocks_from_region_core_chunk(
     core: &crate::shared::region_tree::RegionTreeCore,
     chunk_key: [i32; 4],
-    registry: &crate::content_registry::ContentRegistry,
-) -> Vec<u16> {
+) -> Vec<voxel::BlockData> {
     let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
     let chunks = crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds(
         core,
@@ -395,10 +389,10 @@ fn dense_materials_from_region_core_chunk(
     );
     for (key, resolved) in chunks {
         if key == chunk_key {
-            return dense_materials_from_resolved_payload(&resolved, registry);
+            return dense_blocks_from_resolved_payload(&resolved);
         }
     }
-    zero_dense_chunk_materials()
+    zero_dense_chunk_blocks()
 }
 
 fn handle_world_chunk_sample_request(
@@ -419,11 +413,10 @@ fn handle_world_chunk_sample_request(
         return;
     }
 
-    let dense_materials = {
+    let dense_blocks = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let subtree = guard.query_world_subtree(chunk_bounds);
-        let registry = guard.content_registry.clone();
-        dense_materials_from_region_core_chunk(subtree.as_ref(), chunk, &registry)
+        dense_blocks_from_region_core_chunk(subtree.as_ref(), chunk)
     };
 
     send_to_client(
@@ -432,7 +425,7 @@ fn handle_world_chunk_sample_request(
         ServerMessage::WorldChunkSampleResponse {
             request_id,
             chunk,
-            dense_materials,
+            dense_blocks,
         },
     );
 }

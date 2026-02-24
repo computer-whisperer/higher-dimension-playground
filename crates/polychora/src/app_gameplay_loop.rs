@@ -623,7 +623,7 @@ impl App {
             preview_time_s,
             self.control_scheme,
             aspect,
-            &self.content_registry,
+            &self.material_resolver,
         );
 
         // Build view matrix and scene
@@ -1015,7 +1015,7 @@ impl App {
                 self.camera.position,
                 look_dir,
                 self.vte_max_trace_distance,
-                &self.content_registry,
+                &self.material_resolver,
             );
             let voxel_build_elapsed_ms = voxel_build_start.elapsed().as_secs_f64() * 1000.0;
 

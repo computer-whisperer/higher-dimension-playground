@@ -180,7 +180,7 @@ pub enum ServerMessage {
     WorldChunkSampleResponse {
         request_id: u64,
         chunk: [i32; 4],
-        dense_materials: Vec<u16>,
+        dense_blocks: Vec<BlockData>,
     },
     Pong {
         nonce: u64,

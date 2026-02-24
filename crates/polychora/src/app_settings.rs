@@ -156,11 +156,11 @@ impl PersistedSettings {
             ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
             ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
         );
-        self.place_material = self
-            .place_material
-            .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
+        // Clamp legacy material token values to valid range
+        let max_token = polychora::content_registry::LEGACY_MATERIAL_TOKEN_COUNT;
+        self.place_material = self.place_material.clamp(1, max_token);
         for slot in &mut self.hotbar_slots {
-            *slot = (*slot).clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN, BLOCK_EDIT_PLACE_MATERIAL_MAX);
+            *slot = (*slot).clamp(1, max_token);
         }
         self.hotbar_selected_index = self.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX);
         self.render_width = self.render_width.clamp(128, 3840);
@@ -372,7 +372,7 @@ impl App {
         self.focal_length_xy = settings.focal_length_xy;
         self.focal_length_zw = settings.focal_length_zw;
         for (i, &mat) in settings.hotbar_slots.iter().enumerate() {
-            let block = self.content_registry.block_data_for_token(mat as u16);
+            let block = polychora::content_registry::block_data_from_material_token(mat);
             self.hotbar_slots[i] =
                 Some(polychora::shared::protocol::ItemStack::block(block.namespace, block.block_type, 1));
         }
@@ -406,7 +406,8 @@ impl App {
             hotbar_slots: {
                 let mut slots = [3u8; 9];
                 for (i, slot) in self.hotbar_slots.iter().enumerate() {
-                    slots[i] = block_material_from_slot(slot, &self.content_registry);
+                    let block = block_data_from_slot(slot);
+                    slots[i] = polychora::content_registry::material_token_from_block_data(&block);
                 }
                 slots
             },

@@ -296,7 +296,7 @@ impl App {
 
         // Pre-load chunks around spawn position
         self.scene
-            .preload_spawn_chunks(self.camera.position, self.vte_max_trace_distance, &self.content_registry);
+            .preload_spawn_chunks(self.camera.position, self.vte_max_trace_distance, &self.material_resolver);
 
         if !self.perf_suite_active() {
             self.grab_mouse(window);
@@ -443,7 +443,7 @@ impl App {
                 self.menu_camera.position,
                 self.menu_camera.look_direction(),
                 self.vte_max_trace_distance,
-                &self.content_registry,
+                &self.material_resolver,
             );
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),

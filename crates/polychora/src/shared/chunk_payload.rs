@@ -771,12 +771,9 @@ impl ResolvedChunkPayload {
     /// by building a block palette from material-token → BlockData mapping.
     pub fn from_payload_with_token_palette(
         payload: ChunkPayload,
-        registry: &crate::content_registry::ContentRegistry,
+        resolver: &crate::content_registry::MaterialResolver,
     ) -> Self {
-        let max_token = registry.max_material_token();
-        let palette: Vec<BlockData> = (0..=max_token)
-            .map(|t| registry.block_data_for_token(t))
-            .collect();
+        let palette = resolver.build_token_palette();
         Self {
             payload,
             block_palette: palette,

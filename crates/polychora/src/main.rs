@@ -17,7 +17,6 @@ mod camera;
 mod cpu_render;
 mod input;
 mod material_icons;
-mod materials;
 mod multiplayer;
 mod scene;
 mod voxel;
@@ -61,9 +60,6 @@ const MOUSE_SENSITIVITY: f32 = 0.002;
 const BLOCK_EDIT_REACH_DEFAULT: f32 = 8.0;
 const BLOCK_EDIT_REACH_MIN: f32 = 1.0;
 const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
-const BLOCK_EDIT_PLACE_MATERIAL_MIN: u8 = 1;
-const BLOCK_EDIT_PLACE_MATERIAL_MAX: u8 = materials::MAX_MATERIAL_ID;
-
 fn default_hotbar_slots() -> [Option<polychora::shared::protocol::ItemStack>; 9] {
     use polychora::shared::protocol::ItemStack;
     use polychora_plugin_api::content_ids::*;
@@ -80,26 +76,14 @@ fn default_hotbar_slots() -> [Option<polychora::shared::protocol::ItemStack>; 9]
     ]
 }
 
-fn block_material_from_slot(
-    slot: &Option<polychora::shared::protocol::ItemStack>,
-    registry: &polychora::content_registry::ContentRegistry,
-) -> u8 {
-    slot.as_ref()
-        .and_then(|stack| stack.block_type_key())
-        .map(|(ns, bt)| {
-            registry
-                .block_material_token(ns, bt)
-                .clamp(BLOCK_EDIT_PLACE_MATERIAL_MIN as u16, BLOCK_EDIT_PLACE_MATERIAL_MAX as u16)
-                as u8
-        })
-        .unwrap_or(3)
-}
-
 fn block_data_from_slot(slot: &Option<polychora::shared::protocol::ItemStack>) -> polychora::shared::voxel::BlockData {
     slot.as_ref()
         .and_then(|stack| stack.to_block_data())
         .unwrap_or_else(|| {
-            polychora::content_registry::block_data_from_material_token(3) // YELLOW_GREEN
+            polychora::shared::voxel::BlockData::simple(
+                polychora_plugin_api::content_ids::CONTENT_NS,
+                polychora_plugin_api::content_ids::BLOCK_YELLOW_GREEN,
+            )
         })
 }
 const SPRINT_SPEED_MULTIPLIER: f32 = 1.8;
@@ -1067,7 +1051,10 @@ fn main() {
         focal_length_zw: 1.0,
         zw_angle_color_shift_enabled: initial_zw_angle_color_shift_enabled,
         zw_angle_color_shift_strength: initial_zw_angle_color_shift_strength,
-        selected_block: polychora::content_registry::block_data_from_material_token(3),
+        selected_block: polychora::shared::voxel::BlockData::simple(
+            polychora_plugin_api::content_ids::CONTENT_NS,
+            polychora_plugin_api::content_ids::BLOCK_YELLOW_GREEN,
+        ),
         world_file,
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
@@ -1102,6 +1089,7 @@ fn main() {
         egui_ctx: egui::Context::default(),
         egui_winit_state: None,
         content_registry: content_registry.clone(),
+        material_resolver: polychora::content_registry::MaterialResolver::from_registry(&content_registry),
         material_icon_sheet: None,
         material_icons_texture_id: None,
         multiplayer,
@@ -1447,6 +1435,7 @@ struct App {
     egui_ctx: egui::Context,
     egui_winit_state: Option<egui_winit::State>,
     content_registry: Arc<polychora::content_registry::ContentRegistry>,
+    material_resolver: polychora::content_registry::MaterialResolver,
     material_icon_sheet: Option<material_icons::MaterialIconSheet>,
     material_icons_texture_id: Option<egui::TextureId>,
     multiplayer: Option<MultiplayerClient>,
