@@ -35,7 +35,6 @@ use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField
 use crate::shared::entity_types::{
     EntityCategory, MobLocomotionMode,
     ENTITY_PLAYER_AVATAR,
-    ENTITY_MOB_SEEKER, ENTITY_MOB_CREEPER4D, ENTITY_MOB_PHASE_SPIDER,
 };
 use crate::shared::protocol::{
     ClientMessage, Entity, EntityPose, EntitySnapshot, EntityTransform, ServerMessage, WorldBounds,
