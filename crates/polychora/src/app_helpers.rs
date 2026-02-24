@@ -105,6 +105,7 @@ pub(super) fn build_singleplayer_runtime_config(
     world_file: PathBuf,
     world_generator: polychora::server::WorldGeneratorKind,
     content_registry: std::sync::Arc<polychora::content_registry::ContentRegistry>,
+    wasm_manager: Option<polychora::shared::wasm::WasmPluginManager>,
 ) -> polychora::server::RuntimeConfig {
     polychora::server::RuntimeConfig {
         bind: "127.0.0.1:0".to_string(),
@@ -121,6 +122,7 @@ pub(super) fn build_singleplayer_runtime_config(
         procgen_keepout_padding_chunks: args.singleplayer_procgen_keepout_padding_chunks,
         world_seed: args.singleplayer_world_seed,
         content_registry,
+        wasm_manager,
     }
 }
 

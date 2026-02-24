@@ -906,7 +906,14 @@ fn main() {
         );
     }
 
-    let content_registry = Arc::new(polychora::plugin_loader::create_full_registry());
+    // Build content registry; also construct a WASM plugin manager when we'll
+    // run an integrated server so mob steering can be evaluated via WASM.
+    let (content_registry, wasm_manager) = if start_with_integrated_singleplayer {
+        let (reg, mgr) = polychora::plugin_loader::create_full_registry_with_wasm();
+        (Arc::new(reg), Some(mgr))
+    } else {
+        (Arc::new(polychora::plugin_loader::create_full_registry()), None)
+    };
 
     let multiplayer = if let Some(server) = args.server.as_ref() {
         let server_addr = normalize_server_addr(server);
@@ -941,6 +948,7 @@ fn main() {
             world_file.clone(),
             initial_singleplayer_world_generator,
             content_registry.clone(),
+            wasm_manager,
         );
         match MultiplayerClient::connect_local(runtime_config, player_name.clone()) {
             Ok(client) => {

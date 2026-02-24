@@ -3,10 +3,16 @@
 /// Each opcode identifies a specific host↔guest call via
 /// `polychora_call(opcode, in_ptr, in_len, out_ptr, out_cap) -> i32`.
 ///
-/// Stubbed for Phase 1; will be fleshed out in Phase 2.
+/// On success the return value is the number of bytes written to the output
+/// buffer. On failure the return value is a negative `ABI_ERR_*` constant.
 
 pub const OP_GET_MANIFEST: u32 = 0x0010;
 pub const OP_GET_TEXTURES: u32 = 0x0011;
 pub const OP_MOB_STEERING: u32 = 0x0100;
 pub const OP_MOB_SPECIAL_ABILITY: u32 = 0x0101;
 pub const OP_BLOCK_INTERACT: u32 = 0x0200;
+
+/// ABI error codes returned by `polychora_call`.
+pub const ABI_ERR_UNKNOWN_OPCODE: i32 = -1;
+pub const ABI_ERR_SERIALIZE: i32 = -2;
+pub const ABI_ERR_OUTPUT_TOO_LARGE: i32 = -3;

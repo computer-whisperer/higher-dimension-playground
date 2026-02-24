@@ -753,6 +753,7 @@ pub(super) fn start_broadcast_thread(
     save_interval_secs: u64,
     start: Instant,
     shutdown: Arc<AtomicBool>,
+    mut wasm_manager: Option<crate::shared::wasm::WasmPluginManager>,
 ) {
     let interval = Duration::from_secs_f64(1.0 / tick_hz.max(0.1) as f64);
     let save_interval = Duration::from_secs(save_interval_secs.max(1));
@@ -779,6 +780,7 @@ pub(super) fn start_broadcast_thread(
                 );
                 let (explosion_events, player_movement_modifiers) = tick_entity_simulation_window(
                     &mut guard,
+                    &mut wasm_manager,
                     now,
                     &mut next_entity_sim_ms,
                     entity_sim_step_ms,

@@ -1,5 +1,78 @@
 use super::runtime_net::{apply_creeper_explosion, apply_explosion_impulse};
 use super::*;
+use crate::shared::wasm::{WasmPluginManager, WasmPluginSlot};
+use polychora_plugin_api::mob_abi::{
+    MobAbilityCheck, MobAbilityResult, MobSteeringInput, MobSteeringOutput,
+};
+use polychora_plugin_api::opcodes::{OP_MOB_SPECIAL_ABILITY, OP_MOB_STEERING};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Maximum number of WASM failures to log per opcode before going silent.
+const WASM_FAILURE_LOG_LIMIT: u32 = 5;
+
+static WASM_STEERING_FAILURES: AtomicU32 = AtomicU32::new(0);
+static WASM_ABILITY_FAILURES: AtomicU32 = AtomicU32::new(0);
+
+fn log_wasm_failure(counter: &AtomicU32, opcode_name: &str) {
+    let prev = counter.fetch_add(1, Ordering::Relaxed);
+    if prev < WASM_FAILURE_LOG_LIMIT {
+        eprintln!(
+            "[wasm-fallback] {} call failed (#{}) — using native fallback",
+            opcode_name,
+            prev + 1
+        );
+        if prev + 1 == WASM_FAILURE_LOG_LIMIT {
+            eprintln!(
+                "[wasm-fallback] suppressing further {} failure messages",
+                opcode_name
+            );
+        }
+    }
+}
+
+fn sanitize_direction(d: [f32; 4]) -> Option<[f32; 4]> {
+    if d.iter().all(|v| v.is_finite()) {
+        Some(d)
+    } else {
+        None
+    }
+}
+
+fn wasm_mob_steering(
+    manager: &mut WasmPluginManager,
+    input: &MobSteeringInput,
+) -> Option<MobSteeringCommand> {
+    let input_bytes = postcard::to_allocvec(input).ok()?;
+    let result = manager
+        .call_slot(WasmPluginSlot::MobSteering, OP_MOB_STEERING as i32, &input_bytes)
+        .ok()??;
+    let output: MobSteeringOutput = postcard::from_bytes(&result.invocation.output).ok()?;
+    let desired_direction = sanitize_direction(output.desired_direction)?;
+    let speed_factor = if output.speed_factor.is_finite() {
+        output.speed_factor.clamp(0.0, 10.0)
+    } else {
+        return None;
+    };
+    Some(MobSteeringCommand {
+        desired_direction,
+        speed_factor,
+    })
+}
+
+fn wasm_mob_ability(
+    manager: &mut WasmPluginManager,
+    check: &MobAbilityCheck,
+) -> Option<MobAbilityResult> {
+    let input_bytes = postcard::to_allocvec(check).ok()?;
+    let result = manager
+        .call_slot(
+            WasmPluginSlot::MobSteering,
+            OP_MOB_SPECIAL_ABILITY as i32,
+            &input_bytes,
+        )
+        .ok()??;
+    postcard::from_bytes(&result.invocation.output).ok()
+}
 
 fn mob_collision_radius_for_scale(scale: f32) -> f32 {
     let clamped_scale = if scale.is_finite() { scale } else { 0.5 };
@@ -1206,6 +1279,7 @@ fn attempt_phase_spider_blink(
 
 fn simulate_mobs(
     state: &mut ServerState,
+    wasm_manager: &mut Option<WasmPluginManager>,
     now_ms: u64,
 ) -> (Vec<QueuedExplosionEvent>, Vec<QueuedPlayerMovementModifier>) {
     let player_positions: Vec<[f32; 4]> = state
@@ -1252,13 +1326,30 @@ fn simulate_mobs(
             nearest_target
         };
 
-        // Check detonation trigger
+        // Check detonation trigger (WASM first, native fallback)
         if let Some(ref ability) = mob_config.ability_params {
             if ability.detonate_trigger_distance > 0.0 {
-                let should_detonate = player_positions.iter().any(|player_position| {
-                    distance4_sq(pos, *player_position).sqrt()
-                        <= ability.detonate_trigger_distance
-                });
+                let nearest_player_dist = player_positions
+                    .iter()
+                    .map(|pp| distance4_sq(pos, *pp).sqrt())
+                    .fold(f32::MAX, f32::min);
+                let detonate_check = MobAbilityCheck::Detonate {
+                    entity_ns: mob.entity_ns,
+                    entity_type: mob.entity_type,
+                    nearest_player_distance: nearest_player_dist,
+                    trigger_distance: ability.detonate_trigger_distance,
+                };
+                let wasm_result = wasm_manager
+                    .as_mut()
+                    .and_then(|mgr| wasm_mob_ability(mgr, &detonate_check));
+                let should_detonate = if let Some(r) = wasm_result {
+                    r.should_trigger
+                } else {
+                    if wasm_manager.is_some() {
+                        log_wasm_failure(&WASM_ABILITY_FAILURES, "OP_MOB_SPECIAL_ABILITY");
+                    }
+                    nearest_player_dist <= ability.detonate_trigger_distance
+                };
                 if should_detonate {
                     detonations.push((mob.entity_id, pos, mob_config.clone()));
                     continue;
@@ -1280,41 +1371,48 @@ fn simulate_mobs(
             now_ms,
         );
 
-        // Steering dispatch by well-known entity type
-        let mob_type_key = (mob.entity_ns, mob.entity_type);
-        let steering = match mob_type_key {
-            ENTITY_MOB_SEEKER => simulate_seeker_step(
-                &mob,
-                pos,
-                target_position,
-                path_following,
-                state.mob_nav_simple_steer,
-                now_ms,
-            ),
-            ENTITY_MOB_CREEPER4D => simulate_creeper_step(
-                &mob,
-                pos,
-                target_position,
-                path_following,
-                state.mob_nav_simple_steer,
-                now_ms,
-            ),
-            ENTITY_MOB_PHASE_SPIDER => simulate_phase_spider_step(
-                &mob,
-                pos,
-                target_position,
-                path_following,
-                state.mob_nav_simple_steer,
-                now_ms,
-            ),
-            _ => simulate_seeker_step(
-                &mob,
-                pos,
-                target_position,
-                path_following,
-                state.mob_nav_simple_steer,
-                now_ms,
-            ),
+        // Steering dispatch: WASM first, native fallback
+        let steering_input = MobSteeringInput {
+            entity_ns: mob.entity_ns,
+            entity_type: mob.entity_type,
+            position: pos,
+            target_position,
+            path_following,
+            simple_steer: state.mob_nav_simple_steer,
+            now_ms,
+            phase_offset: mob.phase_offset,
+            preferred_distance: mob.preferred_distance,
+            tangent_weight: mob.tangent_weight,
+            locomotion,
+        };
+        let wasm_steering = wasm_manager
+            .as_mut()
+            .and_then(|mgr| wasm_mob_steering(mgr, &steering_input));
+        let steering = if let Some(cmd) = wasm_steering {
+            cmd
+        } else {
+            if wasm_manager.is_some() {
+                log_wasm_failure(&WASM_STEERING_FAILURES, "OP_MOB_STEERING");
+            }
+            let mob_type_key = (mob.entity_ns, mob.entity_type);
+            match mob_type_key {
+                ENTITY_MOB_SEEKER => simulate_seeker_step(
+                    &mob, pos, target_position, path_following,
+                    state.mob_nav_simple_steer, now_ms,
+                ),
+                ENTITY_MOB_CREEPER4D => simulate_creeper_step(
+                    &mob, pos, target_position, path_following,
+                    state.mob_nav_simple_steer, now_ms,
+                ),
+                ENTITY_MOB_PHASE_SPIDER => simulate_phase_spider_step(
+                    &mob, pos, target_position, path_following,
+                    state.mob_nav_simple_steer, now_ms,
+                ),
+                _ => simulate_seeker_step(
+                    &mob, pos, target_position, path_following,
+                    state.mob_nav_simple_steer, now_ms,
+                ),
+            }
         };
         let (next_position, next_forward) = integrate_mob_steering_step(
             &mob,
@@ -1333,7 +1431,7 @@ fn simulate_mobs(
         );
         let mut final_forward = next_forward;
 
-        // Blink ability (phase spider)
+        // Blink ability (phase spider): WASM first, native fallback
         let has_blink = mob_config.ability_params.as_ref()
             .map(|a| a.blink_min_interval_ms > 0)
             .unwrap_or(false);
@@ -1341,9 +1439,34 @@ fn simulate_mobs(
             let ability = mob_config.ability_params.as_ref().unwrap();
             let attempted = distance4_sq(pos, next_position).sqrt();
             let resolved = distance4_sq(pos, final_position).sqrt();
-            let blocked =
-                attempted > 0.12 && resolved + ability.blink_blocked_progress_epsilon < attempted;
-            let should_phase = nearest_target.is_some() && (path_following || blocked);
+            let nearest_player_dist = player_positions
+                .iter()
+                .map(|pp| distance4_sq(pos, *pp).sqrt())
+                .fold(f32::MAX, f32::min);
+            let blink_check = MobAbilityCheck::Blink {
+                entity_ns: mob.entity_ns,
+                entity_type: mob.entity_type,
+                has_target: nearest_target.is_some(),
+                path_following,
+                now_ms,
+                next_phase_ms: mob.next_phase_ms,
+                blocked_progress_epsilon: ability.blink_blocked_progress_epsilon,
+                attempted_move_distance: attempted,
+                resolved_move_distance: resolved,
+            };
+            let wasm_blink = wasm_manager
+                .as_mut()
+                .and_then(|mgr| wasm_mob_ability(mgr, &blink_check));
+            let should_phase = if let Some(r) = wasm_blink {
+                r.should_trigger
+            } else {
+                if wasm_manager.is_some() {
+                    log_wasm_failure(&WASM_ABILITY_FAILURES, "OP_MOB_SPECIAL_ABILITY");
+                }
+                let blocked = attempted > 0.12
+                    && resolved + ability.blink_blocked_progress_epsilon < attempted;
+                nearest_target.is_some() && (path_following || blocked)
+            };
             if should_phase {
                 if let Some(phase_position) = attempt_phase_spider_blink(
                     state,
@@ -1481,6 +1604,7 @@ fn simulate_mobs(
 
 pub(super) fn tick_entity_simulation_window(
     state: &mut ServerState,
+    wasm_manager: &mut Option<WasmPluginManager>,
     now_ms: u64,
     next_sim_ms: &mut u64,
     sim_step_ms: u64,
@@ -1490,7 +1614,7 @@ pub(super) fn tick_entity_simulation_window(
     let mut sim_steps = 0usize;
     while *next_sim_ms <= now_ms && sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
         state.entity_store.simulate(*next_sim_ms, &state.content_registry);
-        let (mut step_explosions, mut step_player_modifiers) = simulate_mobs(state, *next_sim_ms);
+        let (mut step_explosions, mut step_player_modifiers) = simulate_mobs(state, wasm_manager, *next_sim_ms);
         queued_explosions.append(&mut step_explosions);
         queued_player_modifiers.append(&mut step_player_modifiers);
         *next_sim_ms = (*next_sim_ms).saturating_add(sim_step_ms);

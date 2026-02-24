@@ -3,6 +3,8 @@ extern crate alloc;
 
 mod blocks;
 mod entities;
+mod math4d;
+mod steering;
 
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
@@ -14,7 +16,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 use alloc::vec::Vec;
 use polychora_plugin_api::manifest::PluginManifest;
-use polychora_plugin_api::opcodes::OP_GET_MANIFEST;
+use polychora_plugin_api::mob_abi::{
+    MobAbilityCheck, MobAbilityResult, MobSteeringInput, MobSteeringOutput,
+};
+use polychora_plugin_api::opcodes::{
+    ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_GET_MANIFEST,
+    OP_MOB_SPECIAL_ABILITY, OP_MOB_STEERING,
+};
 
 /// Namespace ID for the first-party polychora-content plugin.
 pub const NAMESPACE: u32 = 0x706f6c79; // "poly" in ASCII
@@ -61,14 +69,16 @@ pub extern "C" fn polychora_free(ptr: i32, len: i32) {
 #[no_mangle]
 pub extern "C" fn polychora_call(
     opcode: i32,
-    _in_ptr: i32,
-    _in_len: i32,
+    in_ptr: i32,
+    in_len: i32,
     out_ptr: i32,
     out_cap: i32,
 ) -> i32 {
     match opcode as u32 {
         OP_GET_MANIFEST => handle_get_manifest(out_ptr, out_cap),
-        _ => -1, // unknown opcode
+        OP_MOB_STEERING => handle_mob_steering(in_ptr, in_len, out_ptr, out_cap),
+        OP_MOB_SPECIAL_ABILITY => handle_mob_ability(in_ptr, in_len, out_ptr, out_cap),
+        _ => ABI_ERR_UNKNOWN_OPCODE,
     }
 }
 
@@ -76,11 +86,51 @@ fn handle_get_manifest(out_ptr: i32, out_cap: i32) -> i32 {
     let manifest = build_manifest();
     let bytes = match postcard::to_allocvec(&manifest) {
         Ok(bytes) => bytes,
-        Err(_) => return -2, // serialization error
+        Err(_) => return ABI_ERR_SERIALIZE,
     };
+    write_output(&bytes, out_ptr, out_cap)
+}
+
+fn handle_mob_steering(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+    let input_bytes = read_input(in_ptr, in_len);
+    let input: MobSteeringInput = match postcard::from_bytes(&input_bytes) {
+        Ok(v) => v,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    let output: MobSteeringOutput = steering::mob_steering(&input);
+    let bytes = match postcard::to_allocvec(&output) {
+        Ok(bytes) => bytes,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    write_output(&bytes, out_ptr, out_cap)
+}
+
+fn handle_mob_ability(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+    let input_bytes = read_input(in_ptr, in_len);
+    let check: MobAbilityCheck = match postcard::from_bytes(&input_bytes) {
+        Ok(v) => v,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    let result: MobAbilityResult = steering::mob_ability_check(&check);
+    let bytes = match postcard::to_allocvec(&result) {
+        Ok(bytes) => bytes,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    write_output(&bytes, out_ptr, out_cap)
+}
+
+fn read_input(in_ptr: i32, in_len: i32) -> Vec<u8> {
+    if in_len <= 0 || in_ptr <= 0 {
+        return Vec::new();
+    }
+    let slice = unsafe { core::slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+    slice.to_vec()
+}
+
+fn write_output(bytes: &[u8], out_ptr: i32, out_cap: i32) -> i32 {
     let len = bytes.len();
     if len > out_cap as usize {
-        return -3; // output too large
+        return ABI_ERR_OUTPUT_TOO_LARGE;
     }
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, len);

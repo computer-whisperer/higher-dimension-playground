@@ -1,7 +1,8 @@
 use crate::builtin_content;
 use crate::content_registry::{ContentRegistry, EntityEntry};
 use crate::shared::wasm::{
-    WasmExecutionLimits, WasmExecutionRole, WasmRuntime, WasmRuntimeError, WasmRuntimeInstance,
+    WasmExecutionLimits, WasmExecutionRole, WasmModuleCache, WasmPluginManager, WasmPluginSlot,
+    WasmRuntime, WasmRuntimeError, WasmRuntimeInstance,
 };
 use polychora_plugin_api::manifest::PluginManifest;
 use polychora_plugin_api::opcodes::OP_GET_MANIFEST;
@@ -171,8 +172,8 @@ fn legacy_aliases(name: &str) -> Vec<String> {
 /// texture mappings, legacy remaps) + embedded first-party content plugin
 /// (68 blocks, 6 entities).
 ///
-/// This is the standard way to initialize the content registry for both the
-/// game client and the server.
+/// This is the standard way to initialize the content registry for the game
+/// client (which does not need a persisted WASM runtime).
 pub fn create_full_registry() -> ContentRegistry {
     let mut registry = ContentRegistry::new();
     builtin_content::register_builtin_content(&mut registry);
@@ -188,4 +189,63 @@ pub fn create_full_registry() -> ContentRegistry {
         .expect("failed to populate registry from plugin");
 
     registry
+}
+
+/// Build a content registry *and* a persistent `WasmPluginManager` with the
+/// MobSteering slot already activated.
+///
+/// Used by the server (both integrated and dedicated) so that mob steering and
+/// ability trigger logic can be evaluated via WASM at runtime.
+pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) {
+    let mut registry = ContentRegistry::new();
+    builtin_content::register_builtin_content(&mut registry);
+
+    let runtime = Arc::new(WasmRuntime::new().expect("failed to init WASM runtime"));
+    let cache = Arc::new(
+        WasmModuleCache::new(runtime.clone(), None).expect("failed to init WASM module cache"),
+    );
+
+    let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
+    let plugin = load_plugin(&runtime, wasm_bytes, WasmExecutionLimits::default())
+        .expect("failed to load polychora-content plugin");
+    populate_registry_from_plugin(&mut registry, &plugin)
+        .expect("failed to populate registry from plugin");
+
+    let mut manager = WasmPluginManager::new(
+        WasmExecutionRole::ServerAuthoritative,
+        runtime,
+        cache,
+    );
+    manager
+        .activate_slot_from_bytes(
+            WasmPluginSlot::MobSteering,
+            wasm_bytes,
+            WasmExecutionLimits::default(),
+        )
+        .expect("failed to activate MobSteering WASM slot");
+
+    (registry, manager)
+}
+
+/// Create a standalone `WasmPluginManager` with the MobSteering slot activated.
+///
+/// Used when creating a new integrated server from the main menu (the content
+/// registry already exists but a fresh WASM manager is needed).
+pub fn create_wasm_manager_for_server() -> Option<WasmPluginManager> {
+    let runtime = Arc::new(WasmRuntime::new().ok()?);
+    let cache = Arc::new(WasmModuleCache::new(runtime.clone(), None).ok()?);
+    let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
+    let mut manager = WasmPluginManager::new(
+        WasmExecutionRole::ServerAuthoritative,
+        runtime,
+        cache,
+    );
+    manager
+        .activate_slot_from_bytes(
+            WasmPluginSlot::MobSteering,
+            wasm_bytes,
+            WasmExecutionLimits::default(),
+        )
+        .ok()?;
+    Some(manager)
 }

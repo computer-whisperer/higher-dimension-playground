@@ -1,6 +1,7 @@
 use crate::content_registry::ContentRegistry;
 use crate::shared::protocol::{ClientMessage, ServerMessage};
 use crate::shared::voxel::{BaseWorldKind, BlockData};
+use crate::shared::wasm::WasmPluginManager;
 use polychora_plugin_api::content_ids;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -24,7 +25,11 @@ impl WorldGeneratorKind {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Server runtime configuration.
+///
+/// `wasm_manager` is separate from the rest because it is moved into the
+/// broadcast thread (not stored in `ServerState`). This keeps `WasmPluginManager`
+/// out of the mutex and avoids split-borrow issues during mob simulation.
 pub struct RuntimeConfig {
     pub bind: String,
     pub world_file: PathBuf,
@@ -40,6 +45,25 @@ pub struct RuntimeConfig {
     pub procgen_keepout_padding_chunks: i32,
     pub world_seed: u64,
     pub content_registry: Arc<ContentRegistry>,
+    /// WASM plugin manager for mob steering / ability evaluation.
+    /// Taken during `initialize_state` and moved into the broadcast thread.
+    pub wasm_manager: Option<WasmPluginManager>,
+}
+
+impl std::fmt::Debug for RuntimeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeConfig")
+            .field("bind", &self.bind)
+            .field("world_file", &self.world_file)
+            .field("world_generator", &self.world_generator)
+            .field("tick_hz", &self.tick_hz)
+            .field("entity_sim_hz", &self.entity_sim_hz)
+            .field("save_interval_secs", &self.save_interval_secs)
+            .field("procgen_structures", &self.procgen_structures)
+            .field("world_seed", &self.world_seed)
+            .field("wasm_manager", &self.wasm_manager.as_ref().map(|_| ".."))
+            .finish_non_exhaustive()
+    }
 }
 
 impl RuntimeConfig {
@@ -59,6 +83,7 @@ impl RuntimeConfig {
             procgen_keepout_padding_chunks: 1,
             world_seed: 1337,
             content_registry,
+            wasm_manager: None,
         }
     }
 }

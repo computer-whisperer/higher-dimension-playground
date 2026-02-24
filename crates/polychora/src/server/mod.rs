@@ -287,7 +287,7 @@ fn build_entity_replication_batches(
 }
 
 fn initialize_state(
-    config: &RuntimeConfig,
+    config: &mut RuntimeConfig,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<(SharedState, Instant)> {
     let start = Instant::now();
@@ -341,12 +341,13 @@ fn initialize_state(
         config.save_interval_secs.max(1),
         start,
         shutdown.clone(),
+        config.wasm_manager.take(),
     );
 
     Ok((state, start))
 }
 
-pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnection> {
+pub fn connect_local_client(config: &mut RuntimeConfig) -> io::Result<LocalConnection> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let (state, start) = initialize_state(config, shutdown.clone())?;
     let (client_to_server_tx, client_to_server_rx) = mpsc::channel::<ClientMessage>();
@@ -360,14 +361,14 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
     };
 
     let state_for_client = state.clone();
-    let cfg = config.clone();
+    let tick_hz = config.tick_hz;
     thread::spawn(move || {
         while let Ok(message) = client_to_server_rx.recv() {
             handle_message(
                 &state_for_client,
                 client_id,
                 message,
-                cfg.tick_hz.max(0.1),
+                tick_hz.max(0.1),
                 start,
             );
         }
@@ -381,7 +382,7 @@ pub fn connect_local_client(config: &RuntimeConfig) -> io::Result<LocalConnectio
     })
 }
 
-pub fn run_tcp_server(config: &RuntimeConfig) -> io::Result<()> {
+pub fn run_tcp_server(config: &mut RuntimeConfig) -> io::Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let (state, start) = initialize_state(config, shutdown)?;
     let runtime_world_seed = {

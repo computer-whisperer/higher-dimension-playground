@@ -21,8 +21,8 @@ pub struct MultiplayerClient {
 }
 
 impl MultiplayerClient {
-    pub fn connect_local(config: ServerRuntimeConfig, player_name: String) -> io::Result<Self> {
-        let endpoint = polychora::server::connect_local_client(&config)?;
+    pub fn connect_local(mut config: ServerRuntimeConfig, player_name: String) -> io::Result<Self> {
+        let endpoint = polychora::server::connect_local_client(&mut config)?;
         let (incoming_tx, incoming_rx) = mpsc::channel::<MultiplayerEvent>();
         thread::spawn(move || {
             while let Ok(message) = endpoint.incoming.recv() {

@@ -54,8 +54,9 @@ impl WorldGeneratorArg {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    let content_registry = Arc::new(polychora::plugin_loader::create_full_registry());
-    let config = RuntimeConfig {
+    let (registry, wasm_manager) = polychora::plugin_loader::create_full_registry_with_wasm();
+    let content_registry = Arc::new(registry);
+    let mut config = RuntimeConfig {
         bind: args.bind,
         world_file: args.world_file,
         world_generator: args.world_generator.to_runtime(),
@@ -70,6 +71,7 @@ fn main() -> std::io::Result<()> {
         procgen_keepout_padding_chunks: args.procgen_keepout_padding_chunks,
         world_seed: args.world_seed,
         content_registry,
+        wasm_manager: Some(wasm_manager),
     };
-    run_tcp_server(&config)
+    run_tcp_server(&mut config)
 }
