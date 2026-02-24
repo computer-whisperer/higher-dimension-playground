@@ -1,9 +1,7 @@
 use crate::shared::voxel::BlockData;
 use polychora_plugin_api::block::BlockCategory;
 use polychora_plugin_api::content_ids;
-use polychora_plugin_api::entity::{
-    EntityCategory, MobArchetype, MobArchetypeDefaults, MobLocomotionMode,
-};
+use polychora_plugin_api::entity::{EntityCategory, MobConfig};
 use polychora_plugin_api::texture::TextureRef;
 use std::collections::HashMap;
 
@@ -234,8 +232,7 @@ pub struct EntityEntry {
     /// Explicit texture palette for entity model parts.
     /// Rendering code resolves each TextureRef to a GPU token at draw time.
     pub model_textures: Vec<TextureRef>,
-    pub mob_archetype: Option<MobArchetype>,
-    pub mob_defaults: Option<MobArchetypeDefaults>,
+    pub mob_config: Option<MobConfig>,
 }
 
 impl EntityEntry {
@@ -624,22 +621,10 @@ impl ContentRegistry {
             .collect()
     }
 
-    /// Get mob archetype defaults.
-    pub fn mob_archetype_defaults(&self, archetype: MobArchetype) -> MobArchetypeDefaults {
-        for entry in self.entities.values() {
-            if entry.mob_archetype == Some(archetype) {
-                if let Some(defaults) = entry.mob_defaults {
-                    return defaults;
-                }
-            }
-        }
-        // Fallback defaults
-        MobArchetypeDefaults {
-            move_speed: 2.0,
-            preferred_distance: 3.0,
-            tangent_weight: 0.5,
-            locomotion: MobLocomotionMode::Walking,
-        }
+    /// Get mob config for an entity type by (namespace, entity_type).
+    pub fn mob_config(&self, namespace: u32, entity_type: u32) -> Option<&MobConfig> {
+        self.resolve_entity_entry(namespace, entity_type)
+            .and_then(|e| e.mob_config.as_ref())
     }
 
     // -----------------------------------------------------------------------
@@ -757,7 +742,10 @@ mod tests {
 
         // Seeker mob (from plugin)
         let seeker = registry.entity_lookup_by_name("seeker").unwrap();
-        assert_eq!(seeker.mob_archetype, Some(MobArchetype::Seeker));
+        assert!(seeker.mob_config.is_some(), "seeker should have mob_config");
+        let seeker_config = seeker.mob_config.as_ref().unwrap();
+        assert_eq!(seeker_config.move_speed, 3.0);
+        assert_eq!(seeker_config.locomotion, polychora_plugin_api::entity::MobLocomotionMode::Walking);
 
         // Spawnable names should include all non-player entities
         let spawnable = registry.spawnable_entity_names();

@@ -33,8 +33,9 @@ use self::types::{
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
 use crate::shared::entity_types::{
-    EntityCategory, MobArchetype, MobLocomotionMode,
+    EntityCategory, MobLocomotionMode,
     ENTITY_PLAYER_AVATAR,
+    ENTITY_MOB_SEEKER, ENTITY_MOB_CREEPER4D, ENTITY_MOB_PHASE_SPIDER,
 };
 use crate::shared::protocol::{
     ClientMessage, Entity, EntityPose, EntitySnapshot, EntityTransform, ServerMessage, WorldBounds,
@@ -57,11 +58,6 @@ const STREAM_FAR_LOD_SCALE: i32 = 4;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
 const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
 const ENTITY_SIM_STEP_MAX_PER_BROADCAST: usize = 16;
-const CREEPER_EXPLOSION_TRIGGER_DISTANCE: f32 = 1.55;
-const CREEPER_EXPLOSION_RADIUS_VOXELS: i32 = 3;
-const CREEPER_EXPLOSION_IMPULSE_RADIUS: f32 = 7.0;
-const CREEPER_EXPLOSION_MAX_IMPULSE_DISTANCE: f32 = 5.0;
-const CREEPER_POUNCE_TARGET_BELOW_PLAYER_Y: f32 = 1.05;
 const MOB_COLLISION_RADIUS_SCALE: f32 = 0.42;
 const MOB_COLLISION_RADIUS_MIN: f32 = 0.20;
 const MOB_COLLISION_RADIUS_MAX: f32 = 0.55;
@@ -83,11 +79,6 @@ const MOB_WALK_STEP_UP_MAX_HEIGHT: f32 = 1.10;
 const MOB_WALK_STEP_UP_SAMPLE_STEP: f32 = 0.05;
 const MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS: i32 = 16;
 const MOB_NAV_CACHE_EVICT_BUDGET_PER_TICK: usize = 64;
-const PHASE_SPIDER_PHASE_MIN_INTERVAL_MS: u64 = 720;
-const PHASE_SPIDER_PHASE_MAX_INTERVAL_MS: u64 = 1520;
-const PHASE_SPIDER_PHASE_DISTANCE: f32 = 2.8;
-const PHASE_SPIDER_PHASE_MIN_DISTANCE: f32 = 1.0;
-const PHASE_SPIDER_BLOCKED_PROGRESS_EPSILON: f32 = 0.08;
 
 fn entity_snapshot_from_record(
     state: &ServerState,

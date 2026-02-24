@@ -66,13 +66,15 @@ pub(super) fn phase_spider_next_phase_deadline(
     now_ms: u64,
     phase_offset: f32,
     phase_ticks: u32,
+    min_interval_ms: u64,
+    max_interval_ms: u64,
 ) -> u64 {
-    let span = PHASE_SPIDER_PHASE_MAX_INTERVAL_MS
-        .saturating_sub(PHASE_SPIDER_PHASE_MIN_INTERVAL_MS)
+    let span = max_interval_ms
+        .saturating_sub(min_interval_ms)
         .max(1);
     let wobble =
         ((phase_offset * 31.0 + phase_ticks as f32 * 1.73).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
     now_ms.saturating_add(
-        PHASE_SPIDER_PHASE_MIN_INTERVAL_MS + ((span as f32 * wobble).round() as u64),
+        min_interval_ms + ((span as f32 * wobble).round() as u64),
     )
 }

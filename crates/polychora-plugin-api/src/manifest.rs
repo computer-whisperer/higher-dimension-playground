@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockCategory;
-use crate::entity::EntityCategory;
+use crate::entity::{EntityCategory, MobConfig};
 use crate::texture::TextureRef;
 
 /// Declares a plugin's content to the host at load time.
@@ -44,6 +44,9 @@ pub struct EntityDeclaration {
     /// base_material_token + saturating_add(N).
     #[serde(default)]
     pub model_textures: Vec<TextureRef>,
+    /// Data-driven mob configuration. Present only for Mob-category entities.
+    #[serde(default)]
+    pub mob_config: Option<MobConfig>,
 }
 
 /// An item type declared by a plugin.
@@ -66,6 +69,7 @@ pub struct TextureDeclaration {
 mod tests {
     extern crate alloc;
     use super::*;
+    use crate::entity::{MobAbilityParams, MobLocomotionMode};
     use alloc::string::String;
     use alloc::vec;
 
@@ -94,6 +98,25 @@ mod tests {
                 default_scale: 1.5,
                 base_material_color: [10, 20, 30],
                 model_textures: vec![],
+                mob_config: Some(MobConfig {
+                    locomotion: MobLocomotionMode::Walking,
+                    move_speed: 3.0,
+                    preferred_distance: 2.6,
+                    tangent_weight: 0.72,
+                    aliases: vec![String::from("testalias")],
+                    nav_target_y_offset: 0.0,
+                    ability_params: Some(MobAbilityParams {
+                        detonate_trigger_distance: 1.55,
+                        detonate_radius_voxels: 3,
+                        detonate_impulse_radius: 7.0,
+                        detonate_max_impulse_distance: 5.0,
+                        blink_min_interval_ms: 720,
+                        blink_max_interval_ms: 1520,
+                        blink_distance: 2.8,
+                        blink_min_distance: 1.0,
+                        blink_blocked_progress_epsilon: 0.08,
+                    }),
+                }),
             }],
             items: vec![ItemDeclaration {
                 type_id: 0x12345678,

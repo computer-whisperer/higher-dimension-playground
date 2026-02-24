@@ -548,7 +548,8 @@ fn mob_nav_debug_log(
     debug_enabled: bool,
     now_ms: u64,
     mob_entity_id: u64,
-    archetype: MobArchetype,
+    entity_ns: u32,
+    entity_type: u32,
     message: &str,
 ) {
     if !debug_enabled {
@@ -559,8 +560,8 @@ fn mob_nav_debug_log(
     }
     navigation.last_debug_log_ms = now_ms;
     eprintln!(
-        "[mob-nav][server] t={} entity={} archetype={:?} {}",
-        now_ms, mob_entity_id, archetype, message
+        "[mob-nav][server] t={} entity={} type=({:#x},{:#x}) {}",
+        now_ms, mob_entity_id, entity_ns, entity_type, message
     );
 }
 
@@ -568,7 +569,8 @@ fn update_mob_navigation_state(
     state: &ServerState,
     mut navigation: MobNavigationState,
     mob_entity_id: u64,
-    archetype: MobArchetype,
+    entity_ns: u32,
+    entity_type: u32,
     locomotion: MobLocomotionMode,
     debug_enabled: bool,
     position: [f32; 4],
@@ -623,7 +625,8 @@ fn update_mob_navigation_state(
                 debug_enabled,
                 now_ms,
                 mob_entity_id,
-                archetype,
+                entity_ns,
+                entity_type,
                 &format!(
                     "mode=los start={:?} goal={:?} path_exhausted={} repath_due={}",
                     start_cell, desired_goal_cell, path_exhausted, repath_due
@@ -661,7 +664,8 @@ fn update_mob_navigation_state(
                 debug_enabled,
                 now_ms,
                 mob_entity_id,
-                archetype,
+                entity_ns,
+                entity_type,
                 &format!(
                     "mode=path start={:?} goal={:?} reached_goal={} path_len={} expanded={} best_cell={:?} best_goal_dist={}",
                     start_cell,
@@ -682,7 +686,8 @@ fn update_mob_navigation_state(
                 debug_enabled,
                 now_ms,
                 mob_entity_id,
-                archetype,
+                entity_ns,
+                entity_type,
                 &format!(
                     "mode=path-fail start={:?} goal={:?} (no reachable cell found, fallback=wander)",
                     start_cell,
@@ -1144,6 +1149,8 @@ fn attempt_phase_spider_blink(
     scale: f32,
     phase_offset: f32,
     now_ms: u64,
+    blink_distance: f32,
+    blink_min_distance: f32,
 ) -> Option<[f32; 4]> {
     let forward = normalize4_or_default(forward, [0.0, 0.0, 1.0, 0.0]);
     let phase = now_ms as f32 * 0.0047 + phase_offset * 1.3;
@@ -1179,8 +1186,8 @@ fn attempt_phase_spider_blink(
     let lift_primary = 0.16 + 0.12 * (phase * 0.8).sin().abs();
     let lift_options = [lift_primary, 0.05, -0.08];
 
-    let mut distance = PHASE_SPIDER_PHASE_DISTANCE;
-    while distance >= PHASE_SPIDER_PHASE_MIN_DISTANCE {
+    let mut distance = blink_distance;
+    while distance >= blink_min_distance {
         for &lift in &lift_options {
             let candidate = [
                 position[0] + blink_dir[0] * distance,
@@ -1209,7 +1216,7 @@ fn simulate_mobs(
         .collect();
 
     let mut stale = Vec::new();
-    let mut detonations = Vec::new();
+    let mut detonations: Vec<(u64, [f32; 4], polychora_plugin_api::entity::MobConfig)> = Vec::new();
     let mut navigation_updates = Vec::with_capacity(state.mobs.len());
     let mut phase_deadline_updates = Vec::with_capacity(state.mobs.len());
     let mut updates = Vec::with_capacity(state.mobs.len());
@@ -1222,37 +1229,49 @@ fn simulate_mobs(
             stale.push(mob.entity_id);
             continue;
         };
+        let Some(mob_config) = state.content_registry.mob_config(mob.entity_ns, mob.entity_type) else {
+            stale.push(mob.entity_id);
+            continue;
+        };
         let pos = snapshot.entity.pose.position;
         let scl = snapshot.entity.pose.scale;
-        let locomotion = state.content_registry.mob_archetype_defaults(mob.archetype).locomotion;
+        let locomotion = mob_config.locomotion;
         let nearest_target = nearest_position_to(pos, &player_positions);
-        let navigation_target = match mob.archetype {
-            MobArchetype::Seeker => nearest_target,
-            MobArchetype::Creeper4d => nearest_target.map(|target| {
+
+        // Apply nav target Y offset (e.g. creeper pounces below player)
+        let navigation_target = if mob_config.nav_target_y_offset != 0.0 {
+            nearest_target.map(|target| {
                 [
                     target[0],
-                    target[1] - CREEPER_POUNCE_TARGET_BELOW_PLAYER_Y,
+                    target[1] - mob_config.nav_target_y_offset,
                     target[2],
                     target[3],
                 ]
-            }),
-            MobArchetype::PhaseSpider => nearest_target,
+            })
+        } else {
+            nearest_target
         };
-        if mob.archetype == MobArchetype::Creeper4d {
-            let should_detonate = player_positions.iter().any(|player_position| {
-                distance4_sq(pos, *player_position).sqrt()
-                    <= CREEPER_EXPLOSION_TRIGGER_DISTANCE
-            });
-            if should_detonate {
-                detonations.push((mob.entity_id, pos));
-                continue;
+
+        // Check detonation trigger
+        if let Some(ref ability) = mob_config.ability_params {
+            if ability.detonate_trigger_distance > 0.0 {
+                let should_detonate = player_positions.iter().any(|player_position| {
+                    distance4_sq(pos, *player_position).sqrt()
+                        <= ability.detonate_trigger_distance
+                });
+                if should_detonate {
+                    detonations.push((mob.entity_id, pos, mob_config.clone()));
+                    continue;
+                }
             }
         }
+
         let (target_position, path_following, mut navigation) = update_mob_navigation_state(
             state,
             mob.navigation.clone(),
             mob.entity_id,
-            mob.archetype,
+            mob.entity_ns,
+            mob.entity_type,
             locomotion,
             state.mob_nav_debug,
             pos,
@@ -1260,8 +1279,11 @@ fn simulate_mobs(
             navigation_target,
             now_ms,
         );
-        let steering = match mob.archetype {
-            MobArchetype::Seeker => simulate_seeker_step(
+
+        // Steering dispatch by well-known entity type
+        let mob_type_key = (mob.entity_ns, mob.entity_type);
+        let steering = match mob_type_key {
+            ENTITY_MOB_SEEKER => simulate_seeker_step(
                 &mob,
                 pos,
                 target_position,
@@ -1269,7 +1291,7 @@ fn simulate_mobs(
                 state.mob_nav_simple_steer,
                 now_ms,
             ),
-            MobArchetype::Creeper4d => simulate_creeper_step(
+            ENTITY_MOB_CREEPER4D => simulate_creeper_step(
                 &mob,
                 pos,
                 target_position,
@@ -1277,7 +1299,15 @@ fn simulate_mobs(
                 state.mob_nav_simple_steer,
                 now_ms,
             ),
-            MobArchetype::PhaseSpider => simulate_phase_spider_step(
+            ENTITY_MOB_PHASE_SPIDER => simulate_phase_spider_step(
+                &mob,
+                pos,
+                target_position,
+                path_following,
+                state.mob_nav_simple_steer,
+                now_ms,
+            ),
+            _ => simulate_seeker_step(
                 &mob,
                 pos,
                 target_position,
@@ -1302,11 +1332,17 @@ fn simulate_mobs(
             locomotion,
         );
         let mut final_forward = next_forward;
-        if mob.archetype == MobArchetype::PhaseSpider && now_ms >= mob.next_phase_ms {
+
+        // Blink ability (phase spider)
+        let has_blink = mob_config.ability_params.as_ref()
+            .map(|a| a.blink_min_interval_ms > 0)
+            .unwrap_or(false);
+        if has_blink && now_ms >= mob.next_phase_ms {
+            let ability = mob_config.ability_params.as_ref().unwrap();
             let attempted = distance4_sq(pos, next_position).sqrt();
             let resolved = distance4_sq(pos, final_position).sqrt();
             let blocked =
-                attempted > 0.12 && resolved + PHASE_SPIDER_BLOCKED_PROGRESS_EPSILON < attempted;
+                attempted > 0.12 && resolved + ability.blink_blocked_progress_epsilon < attempted;
             let should_phase = nearest_target.is_some() && (path_following || blocked);
             if should_phase {
                 if let Some(phase_position) = attempt_phase_spider_blink(
@@ -1316,6 +1352,8 @@ fn simulate_mobs(
                     scl,
                     mob.phase_offset,
                     now_ms,
+                    ability.blink_distance,
+                    ability.blink_min_distance,
                 ) {
                     final_forward = normalize4_or_default(
                         [
@@ -1332,7 +1370,8 @@ fn simulate_mobs(
                         state.mob_nav_debug,
                         now_ms,
                         mob.entity_id,
-                        mob.archetype,
+                        mob.entity_ns,
+                        mob.entity_type,
                         &format!("mode=phase-blink success pos={:?}", phase_position),
                     );
                 } else {
@@ -1341,7 +1380,8 @@ fn simulate_mobs(
                         state.mob_nav_debug,
                         now_ms,
                         mob.entity_id,
-                        mob.archetype,
+                        mob.entity_ns,
+                        mob.entity_type,
                         "mode=phase-blink fail (no valid destination)",
                     );
                 }
@@ -1350,6 +1390,8 @@ fn simulate_mobs(
                 now_ms,
                 mob.phase_offset,
                 (mob.entity_id as u32) ^ (now_ms as u32),
+                ability.blink_min_interval_ms,
+                ability.blink_max_interval_ms,
             );
             phase_deadline_updates.push((mob.entity_id, next_deadline));
         }
@@ -1388,19 +1430,20 @@ fn simulate_mobs(
 
     let mut queued_explosions = Vec::new();
     let mut queued_player_modifiers = Vec::new();
-    for (entity_id, center) in detonations {
+    for (entity_id, center, det_config) in detonations {
         if !state.mobs.contains_key(&entity_id) {
             continue;
         }
+        let ability = det_config.ability_params.as_ref().unwrap();
         let (changed_chunk_count, explosion) =
-            apply_creeper_explosion(state, entity_id, center, CREEPER_EXPLOSION_RADIUS_VOXELS);
+            apply_creeper_explosion(state, entity_id, center, ability.detonate_radius_voxels);
         queued_explosions.push(explosion);
         let (_persistent_motion, mut player_modifiers) = apply_explosion_impulse(
             state,
             entity_id,
             center,
-            CREEPER_EXPLOSION_IMPULSE_RADIUS,
-            CREEPER_EXPLOSION_MAX_IMPULSE_DISTANCE,
+            ability.detonate_impulse_radius,
+            ability.detonate_max_impulse_distance,
             now_ms,
         );
         eprintln!(

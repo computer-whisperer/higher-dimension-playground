@@ -1,6 +1,6 @@
 // Re-export core entity types from the plugin API crate.
 pub use polychora_plugin_api::entity::{
-    EntityCategory, MobArchetype, MobArchetypeDefaults, MobLocomotionMode,
+    EntityCategory, MobConfig, MobLocomotionMode,
 };
 
 // ---------------------------------------------------------------------------

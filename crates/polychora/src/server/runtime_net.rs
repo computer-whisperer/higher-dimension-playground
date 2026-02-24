@@ -1090,11 +1090,13 @@ fn spawn_entity_from_request(
         data: Vec::new(),
     };
 
-    let snapshot = match (entry.category, entry.mob_archetype) {
-        (EntityCategory::Mob, Some(archetype)) => spawn_mob_entity(
+    let snapshot = match (entry.category, &entry.mob_config) {
+        (EntityCategory::Mob, Some(config)) => spawn_mob_entity(
             state,
             entity_data,
-            archetype,
+            namespace,
+            entity_type,
+            config,
             None,
             true,
             None,
@@ -1104,10 +1106,10 @@ fn spawn_entity_from_request(
         (EntityCategory::Accent, None) => {
             spawn_entity(state, entity_data, None, true, None, start)
         }
-        (category, archetype) => {
+        (category, mob_config) => {
             return Err(format!(
-                "spawn spec for '{}' is invalid (category={:?}, archetype={:?})",
-                entry.canonical_name, category, archetype
+                "spawn spec for '{}' is invalid (category={:?}, has_mob_config={})",
+                entry.canonical_name, category, mob_config.is_some()
             ));
         }
     };
@@ -1446,7 +1448,9 @@ fn spawn_entity(
 fn spawn_mob_entity(
     state: &SharedState,
     entity: Entity,
-    archetype: MobArchetype,
+    entity_ns: u32,
+    entity_type: u32,
+    config: &polychora_plugin_api::entity::MobConfig,
     display_name: Option<String>,
     persistent: bool,
     persisted_mob: Option<PersistedMobEntry>,
@@ -1459,7 +1463,6 @@ fn spawn_mob_entity(
     guard
         .entity_store
         .spawn(allocated_id, entity, now_ms);
-    let defaults = guard.content_registry.mob_archetype_defaults(archetype);
     let phase_offset = persisted_mob
         .as_ref()
         .map(|mob| mob.phase_offset)
@@ -1467,26 +1470,29 @@ fn spawn_mob_entity(
     let move_speed = persisted_mob
         .as_ref()
         .map(|mob| mob.move_speed)
-        .unwrap_or(defaults.move_speed)
+        .unwrap_or(config.move_speed)
         .max(0.1);
     let preferred_distance = persisted_mob
         .as_ref()
         .map(|mob| mob.preferred_distance)
-        .unwrap_or(defaults.preferred_distance)
+        .unwrap_or(config.preferred_distance)
         .max(0.1);
     let tangent_weight = persisted_mob
         .as_ref()
         .map(|mob| mob.tangent_weight)
-        .unwrap_or(defaults.tangent_weight)
+        .unwrap_or(config.tangent_weight)
         .clamp(0.0, 2.0);
     let initial_phase_tick_seed = (allocated_id as u32).wrapping_mul(7477);
+    let blink_min_ms = config.ability_params.as_ref().map(|a| a.blink_min_interval_ms).unwrap_or(0);
+    let blink_max_ms = config.ability_params.as_ref().map(|a| a.blink_max_interval_ms).unwrap_or(0);
     let next_phase_ms =
-        phase_spider_next_phase_deadline(now_ms, phase_offset, initial_phase_tick_seed);
+        phase_spider_next_phase_deadline(now_ms, phase_offset, initial_phase_tick_seed, blink_min_ms, blink_max_ms);
     guard.mobs.insert(
         allocated_id,
         MobState {
             entity_id: allocated_id,
-            archetype,
+            entity_ns,
+            entity_type,
             phase_offset,
             move_speed,
             preferred_distance,

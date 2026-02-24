@@ -1,7 +1,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use polychora_plugin_api::content_ids::*;
-use polychora_plugin_api::entity::EntityCategory;
+use polychora_plugin_api::entity::{
+    EntityCategory, MobAbilityParams, MobConfig, MobLocomotionMode,
+};
 use polychora_plugin_api::manifest::EntityDeclaration;
 use polychora_plugin_api::texture::builtin_textures::*;
 use polychora_plugin_api::texture::TextureRef;
@@ -28,6 +30,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             model_textures: alloc::vec![
                 tex(TEX_PURPLE),        // slot 0
             ],
+            mob_config: None,
         },
         EntityDeclaration {
             type_id: ENTITY_ROTOR,
@@ -39,6 +42,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_WHITE),         // slot 0
                 tex(TEX_LIGHT),         // slot 1
             ],
+            mob_config: None,
         },
         EntityDeclaration {
             type_id: ENTITY_DRIFTER,
@@ -51,6 +55,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_OXIDIZED_METAL),// slot 1 (unused but keeps alignment)
                 tex(TEX_BIO_SPORE_MOSS),// slot 2
             ],
+            mob_config: None,
         },
         EntityDeclaration {
             type_id: ENTITY_SEEKER,
@@ -69,6 +74,15 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_BROWN),         // slot 7 (unused)
                 tex(TEX_GRID_FLOOR),    // slot 8
             ],
+            mob_config: Some(MobConfig {
+                locomotion: MobLocomotionMode::Walking,
+                move_speed: 3.0,
+                preferred_distance: 2.6,
+                tangent_weight: 0.72,
+                aliases: alloc::vec![String::from("mobseeker")],
+                nav_target_y_offset: 0.0,
+                ability_params: None,
+            }),
         },
         EntityDeclaration {
             type_id: ENTITY_CREEPER,
@@ -88,6 +102,28 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_MIRROR),        // slot 8 (unused)
                 tex(TEX_LAVA_VEINED_BASALT), // slot 9
             ],
+            mob_config: Some(MobConfig {
+                locomotion: MobLocomotionMode::Walking,
+                move_speed: 2.55,
+                preferred_distance: 3.8,
+                tangent_weight: 0.92,
+                aliases: alloc::vec![
+                    String::from("4dcreeper"),
+                    String::from("mobcreeper4d"),
+                ],
+                nav_target_y_offset: 1.05,
+                ability_params: Some(MobAbilityParams {
+                    detonate_trigger_distance: 1.55,
+                    detonate_radius_voxels: 3,
+                    detonate_impulse_radius: 7.0,
+                    detonate_max_impulse_distance: 5.0,
+                    blink_min_interval_ms: 0,
+                    blink_max_interval_ms: 0,
+                    blink_distance: 0.0,
+                    blink_min_distance: 0.0,
+                    blink_blocked_progress_epsilon: 0.0,
+                }),
+            }),
         },
         EntityDeclaration {
             type_id: ENTITY_PHASE_SPIDER,
@@ -107,6 +143,29 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_MARBLE),        // slot 8
                 tex(TEX_OXIDIZED_METAL),// slot 9
             ],
+            mob_config: Some(MobConfig {
+                locomotion: MobLocomotionMode::Flying,
+                move_speed: 3.1,
+                preferred_distance: 2.4,
+                tangent_weight: 0.95,
+                aliases: alloc::vec![
+                    String::from("phase-spider"),
+                    String::from("spider"),
+                    String::from("mobphasespider"),
+                ],
+                nav_target_y_offset: 0.0,
+                ability_params: Some(MobAbilityParams {
+                    detonate_trigger_distance: 0.0,
+                    detonate_radius_voxels: 0,
+                    detonate_impulse_radius: 0.0,
+                    detonate_max_impulse_distance: 0.0,
+                    blink_min_interval_ms: 720,
+                    blink_max_interval_ms: 1520,
+                    blink_distance: 2.8,
+                    blink_min_distance: 1.0,
+                    blink_blocked_progress_epsilon: 0.08,
+                }),
+            }),
         },
     ]
 }

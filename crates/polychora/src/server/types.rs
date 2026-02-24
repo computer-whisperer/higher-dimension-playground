@@ -1,5 +1,5 @@
 use crate::shared::chunk_payload::ResolvedChunkPayload;
-use crate::shared::entity_types::{EntityCategory, MobArchetype};
+use crate::shared::entity_types::EntityCategory;
 use crate::shared::protocol::{EntitySnapshot, EntityTransform};
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +32,8 @@ pub(super) struct MobNavPathResult {
 #[derive(Clone, Debug)]
 pub(super) struct MobState {
     pub(super) entity_id: u64,
-    pub(super) archetype: MobArchetype,
+    pub(super) entity_ns: u32,
+    pub(super) entity_type: u32,
     pub(super) phase_offset: f32,
     pub(super) move_speed: f32,
     pub(super) preferred_distance: f32,
@@ -43,7 +44,8 @@ pub(super) struct MobState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct PersistedMobEntry {
-    pub(super) archetype: MobArchetype,
+    pub(super) entity_ns: u32,
+    pub(super) entity_type: u32,
     pub(super) phase_offset: f32,
     pub(super) move_speed: f32,
     pub(super) preferred_distance: f32,

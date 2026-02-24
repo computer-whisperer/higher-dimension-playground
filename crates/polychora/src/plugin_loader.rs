@@ -3,7 +3,6 @@ use crate::content_registry::{ContentRegistry, EntityEntry};
 use crate::shared::wasm::{
     WasmExecutionLimits, WasmExecutionRole, WasmRuntime, WasmRuntimeError, WasmRuntimeInstance,
 };
-use polychora_plugin_api::entity::{EntityCategory, MobArchetype, MobArchetypeDefaults, MobLocomotionMode};
 use polychora_plugin_api::manifest::PluginManifest;
 use polychora_plugin_api::opcodes::OP_GET_MANIFEST;
 use std::fmt;
@@ -119,8 +118,6 @@ pub fn populate_registry_from_plugin(
 
     // Register entities
     for entity in &plugin.manifest.entities {
-        let (mob_archetype, mob_defaults) = resolve_mob_metadata(&entity.name, entity.category);
-
         // Build aliases: canonical name + common variants
         let mut aliases = vec![entity.name.clone()];
         // Add underscore-stripped alias if name contains underscores
@@ -128,7 +125,15 @@ pub fn populate_registry_from_plugin(
         if stripped != entity.name {
             aliases.push(stripped);
         }
-        // Add well-known legacy aliases for first-party entities
+        // Merge mob_config aliases (replaces legacy_aliases for mob entities)
+        if let Some(ref config) = entity.mob_config {
+            for alias in &config.aliases {
+                if !aliases.contains(alias) {
+                    aliases.push(alias.clone());
+                }
+            }
+        }
+        // Add well-known legacy aliases for non-mob first-party entities
         for extra in legacy_aliases(&entity.name) {
             if !aliases.contains(&extra) {
                 aliases.push(extra);
@@ -143,68 +148,21 @@ pub fn populate_registry_from_plugin(
             aliases,
             default_scale: entity.default_scale,
             model_textures: entity.model_textures.clone(),
-            mob_archetype,
-            mob_defaults,
+            mob_config: entity.mob_config.clone(),
         });
     }
 
     Ok(())
 }
 
-/// Resolve mob archetype and defaults for known first-party entity names.
-///
-/// Phase 2 is declarations-only, so mob AI metadata stays hard-coded on the
-/// host side. Phase 3 will move steering into WASM.
-fn resolve_mob_metadata(
-    name: &str,
-    category: EntityCategory,
-) -> (Option<MobArchetype>, Option<MobArchetypeDefaults>) {
-    if category != EntityCategory::Mob {
-        return (None, None);
-    }
-
-    match name {
-        "seeker" => (
-            Some(MobArchetype::Seeker),
-            Some(MobArchetypeDefaults {
-                move_speed: 3.0,
-                preferred_distance: 2.6,
-                tangent_weight: 0.72,
-                locomotion: MobLocomotionMode::Walking,
-            }),
-        ),
-        "creeper" => (
-            Some(MobArchetype::Creeper4d),
-            Some(MobArchetypeDefaults {
-                move_speed: 2.55,
-                preferred_distance: 3.8,
-                tangent_weight: 0.92,
-                locomotion: MobLocomotionMode::Walking,
-            }),
-        ),
-        "phase_spider" => (
-            Some(MobArchetype::PhaseSpider),
-            Some(MobArchetypeDefaults {
-                move_speed: 3.1,
-                preferred_distance: 2.4,
-                tangent_weight: 0.95,
-                locomotion: MobLocomotionMode::Flying,
-            }),
-        ),
-        _ => (None, None),
-    }
-}
-
 /// Return additional legacy aliases for well-known first-party entity names.
-/// These preserve backward compatibility with commands like `/spawn spider`.
+/// Mob aliases are now declared in `MobConfig.aliases` in the WASM manifest;
+/// only accent entity aliases remain here.
 fn legacy_aliases(name: &str) -> Vec<String> {
     match name {
         "cube" => vec!["testcube".into()],
         "rotor" => vec!["testrotor".into()],
         "drifter" => vec!["testdrifter".into()],
-        "seeker" => vec!["mobseeker".into()],
-        "creeper" => vec!["4dcreeper".into(), "mobcreeper4d".into()],
-        "phase_spider" => vec!["phase-spider".into(), "spider".into(), "mobphasespider".into()],
         _ => vec![],
     }
 }
