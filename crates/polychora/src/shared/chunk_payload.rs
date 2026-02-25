@@ -8,6 +8,10 @@ pub const MAX_CHUNKARRAY_CELLS_PER_NODE: usize = 256;
 pub const PAGED_RLE_PAGE_EDGE_CELLS: usize = 4;
 const PAGED_SPARSE_RLE_VERSION: u8 = 1;
 
+fn default_chunk_array_scale_exp() -> i8 {
+    0
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChunkPayload {
     Empty,
@@ -149,6 +153,8 @@ pub enum ChunkArrayIndexCodec {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkArrayData {
     pub bounds: Aabb4i,
+    #[serde(default = "default_chunk_array_scale_exp")]
+    pub scale_exp: i8,
     pub chunk_palette: Vec<ChunkPayload>,
     pub index_codec: ChunkArrayIndexCodec,
     pub index_data: Vec<u8>,
@@ -278,12 +284,13 @@ impl ChunkArrayData {
         dense_indices: Vec<u16>,
         default_chunk_idx: Option<u16>,
     ) -> Result<Self, ChunkArrayCodecError> {
-        Self::from_dense_indices_with_block_palette(
+        Self::from_dense_indices_with_block_palette_and_scale(
             bounds,
             chunk_palette,
             dense_indices,
             default_chunk_idx,
             vec![BlockData::AIR],
+            0,
         )
     }
 
@@ -293,6 +300,24 @@ impl ChunkArrayData {
         dense_indices: Vec<u16>,
         default_chunk_idx: Option<u16>,
         block_palette: Vec<BlockData>,
+    ) -> Result<Self, ChunkArrayCodecError> {
+        Self::from_dense_indices_with_block_palette_and_scale(
+            bounds,
+            chunk_palette,
+            dense_indices,
+            default_chunk_idx,
+            block_palette,
+            0,
+        )
+    }
+
+    pub fn from_dense_indices_with_block_palette_and_scale(
+        bounds: Aabb4i,
+        chunk_palette: Vec<ChunkPayload>,
+        dense_indices: Vec<u16>,
+        default_chunk_idx: Option<u16>,
+        block_palette: Vec<BlockData>,
+        scale_exp: i8,
     ) -> Result<Self, ChunkArrayCodecError> {
         let dims = bounds_extents(bounds)?;
         let expected_cells = dims_cell_count(dims)?;
@@ -309,6 +334,7 @@ impl ChunkArrayData {
 
         Ok(Self {
             bounds,
+            scale_exp,
             chunk_palette,
             index_codec: ChunkArrayIndexCodec::PagedSparseRle,
             index_data,

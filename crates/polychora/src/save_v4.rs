@@ -39,7 +39,7 @@ pub const SAVE_FORMAT_VERSION: u32 = 4;
 pub const PAYLOAD_FILE_VERSION: u32 = 1;
 pub const DATA_FILE_VERSION: u32 = 1;
 pub const CHUNK_PAYLOAD_BLOB_VERSION: u16 = 1;
-pub const CHUNK_ARRAY_BLOB_VERSION: u16 = 2;
+pub const CHUNK_ARRAY_BLOB_VERSION: u16 = 3;
 pub const ENTITY_BLOB_VERSION: u16 = 2;
 pub const DEFAULT_REGION_CHUNK_EDGE: i32 = 4;
 
@@ -194,15 +194,60 @@ pub struct ChunkPayloadBlob {
     pub payload: FieldChunkPayload,
 }
 
+fn default_chunk_array_blob_scale_exp() -> i8 {
+    0
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChunkArrayBlob {
     pub volume_min_chunk: [i32; 4],
     pub volume_max_chunk: [i32; 4],
+    #[serde(default = "default_chunk_array_blob_scale_exp")]
+    pub scale_exp: i8,
     pub payload_palette: Vec<BlobRef>,
     pub block_palette: Vec<BlockData>,
     pub index_codec: ChunkArrayIndexCodec,
     pub index_data: Vec<u8>,
     pub default_palette_index: Option<u16>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyChunkArrayBlobV2Compat {
+    volume_min_chunk: [i32; 4],
+    volume_max_chunk: [i32; 4],
+    payload_palette: Vec<BlobRef>,
+    block_palette: Vec<BlockData>,
+    index_codec: ChunkArrayIndexCodec,
+    index_data: Vec<u8>,
+    default_palette_index: Option<u16>,
+}
+
+fn decode_chunk_array_blob(payload: &[u8]) -> io::Result<ChunkArrayBlob> {
+    match postcard::from_bytes::<ChunkArrayBlob>(payload) {
+        Ok(blob) => Ok(blob),
+        Err(primary_error) => {
+            let legacy: LegacyChunkArrayBlobV2Compat = postcard::from_bytes(payload).map_err(
+                |legacy_error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "failed to decode chunk array blob (v3: {primary_error}, v2 fallback: {legacy_error})"
+                        ),
+                    )
+                },
+            )?;
+            Ok(ChunkArrayBlob {
+                volume_min_chunk: legacy.volume_min_chunk,
+                volume_max_chunk: legacy.volume_max_chunk,
+                scale_exp: 0,
+                payload_palette: legacy.payload_palette,
+                block_palette: legacy.block_palette,
+                index_codec: legacy.index_codec,
+                index_data: legacy.index_data,
+                default_palette_index: legacy.default_palette_index,
+            })
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -622,8 +667,7 @@ fn load_world_subtree_core_from_index_node_filtered(
                 cached.clone()
             } else {
                 let payload = read_blob_payload(root, chunk_array_ref)?;
-                let blob: ChunkArrayBlob = postcard::from_bytes(&payload)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                let blob = decode_chunk_array_blob(&payload)?;
                 let chunk_array_bounds = Aabb4i::new(blob.volume_min_chunk, blob.volume_max_chunk);
                 if !chunk_array_bounds.is_valid() {
                     return Err(io::Error::new(
@@ -642,6 +686,7 @@ fn load_world_subtree_core_from_index_node_filtered(
                 }
                 let decoded = ChunkArrayData {
                     bounds: chunk_array_bounds,
+                    scale_exp: blob.scale_exp,
                     chunk_palette,
                     index_codec: blob.index_codec,
                     index_data: blob.index_data.clone(),
@@ -1335,6 +1380,7 @@ fn build_world_leaf_descriptors_from_payloads(
             let chunk_array_blob = ChunkArrayBlob {
                 volume_min_chunk: min,
                 volume_max_chunk: max,
+                scale_exp: 0,
                 payload_palette,
                 block_palette: unified_block_palette,
                 index_codec: ChunkArrayIndexCodec::DenseU16,
@@ -1600,8 +1646,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
                 ));
             }
             let payload = read_blob_payload(root, chunk_array_ref)?;
-            let blob: ChunkArrayBlob = postcard::from_bytes(&payload)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let blob = decode_chunk_array_blob(&payload)?;
             let bounds = Aabb4i::new(blob.volume_min_chunk, blob.volume_max_chunk);
             if !bounds.is_valid() {
                 return Err(io::Error::new(
@@ -1615,6 +1660,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
             let block_palette = blob.block_palette.clone();
             let chunk_array_data = ChunkArrayData {
                 bounds,
+                scale_exp: blob.scale_exp,
                 chunk_palette: dummy_palette,
                 index_codec: blob.index_codec,
                 index_data: blob.index_data.clone(),
@@ -1948,8 +1994,7 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
                 ));
             }
             let payload = read_blob_payload(root, chunk_array_ref)?;
-            let blob: ChunkArrayBlob = postcard::from_bytes(&payload)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let blob = decode_chunk_array_blob(&payload)?;
             let chunk_array_bounds = Aabb4i::new(blob.volume_min_chunk, blob.volume_max_chunk);
             if !chunk_array_bounds.is_valid() {
                 return Err(io::Error::new(
@@ -1962,6 +2007,7 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
             let block_palette = blob.block_palette.clone();
             let chunk_array_data = ChunkArrayData {
                 bounds: chunk_array_bounds,
+                scale_exp: blob.scale_exp,
                 chunk_palette: vec![FieldChunkPayload::Empty; palette_len],
                 index_codec: blob.index_codec,
                 index_data: blob.index_data.clone(),
@@ -4188,6 +4234,7 @@ mod tests {
             postcard::from_bytes(&payload).expect("decode chunk array blob");
         assert_eq!(chunk_array_blob.volume_min_chunk, [0, 0, 0, 0]);
         assert_eq!(chunk_array_blob.volume_max_chunk, [2, 0, 0, 0]);
+        assert_eq!(chunk_array_blob.scale_exp, 0);
         assert_eq!(chunk_array_blob.payload_palette.len(), 2);
         assert_eq!(chunk_array_blob.index_codec, ChunkArrayIndexCodec::DenseU16);
 
@@ -4196,6 +4243,7 @@ mod tests {
                 chunk_array_blob.volume_min_chunk,
                 chunk_array_blob.volume_max_chunk,
             ),
+            scale_exp: chunk_array_blob.scale_exp,
             chunk_palette: vec![FieldChunkPayload::Empty; chunk_array_blob.payload_palette.len()],
             index_codec: chunk_array_blob.index_codec,
             index_data: chunk_array_blob.index_data,
@@ -4208,6 +4256,33 @@ mod tests {
         assert_eq!(dense, vec![0, 1, 0]);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct LegacyChunkArrayBlobV2 {
+        volume_min_chunk: [i32; 4],
+        volume_max_chunk: [i32; 4],
+        payload_palette: Vec<BlobRef>,
+        block_palette: Vec<BlockData>,
+        index_codec: ChunkArrayIndexCodec,
+        index_data: Vec<u8>,
+        default_palette_index: Option<u16>,
+    }
+
+    #[test]
+    fn chunk_array_blob_without_scale_field_defaults_to_zero() {
+        let legacy_blob = LegacyChunkArrayBlobV2 {
+            volume_min_chunk: [0, 0, 0, 0],
+            volume_max_chunk: [0, 0, 0, 0],
+            payload_palette: Vec::new(),
+            block_palette: vec![BlockData::AIR],
+            index_codec: ChunkArrayIndexCodec::DenseU16,
+            index_data: vec![0, 0],
+            default_palette_index: None,
+        };
+        let bytes = postcard::to_stdvec(&legacy_blob).expect("encode v2 blob");
+        let decoded = decode_chunk_array_blob(&bytes).expect("decode v2 blob with fallback");
+        assert_eq!(decoded.scale_exp, 0);
     }
 
     #[test]

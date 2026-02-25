@@ -129,6 +129,41 @@ fn chunk_array_uniform_palette_core(bounds: Aabb4i, materials: &[u16]) -> Region
     }
 }
 
+fn single_cell_chunk_array_core_with_scale(
+    key: ChunkKey,
+    material: u16,
+    scale_exp: i8,
+) -> RegionTreeCore {
+    let bounds = Aabb4i::new(key, key);
+    let block_palette = vec![BlockData::AIR, BlockData::simple(0, material as u32)];
+    let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+        bounds,
+        vec![ChunkPayload::Uniform(1)],
+        vec![0],
+        None,
+        block_palette,
+        scale_exp,
+    )
+    .expect("single-cell chunk array");
+    RegionTreeCore {
+        bounds,
+        kind: RegionNodeKind::ChunkArray(chunk_array),
+        generator_version_hash: 0,
+    }
+}
+
+fn collect_chunk_array_scale_exps(core: &RegionTreeCore, out: &mut Vec<i8>) {
+    match &core.kind {
+        RegionNodeKind::ChunkArray(chunk_array) => out.push(chunk_array.scale_exp),
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                collect_chunk_array_scale_exps(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn assert_tree_matches_expected_uniform_map(
     tree: &RegionChunkTree,
     global_bounds: Aabb4i,
@@ -204,6 +239,64 @@ fn assert_tree_non_overlapping(node: &RegionTreeCore) {
             }
         }
     }
+}
+
+#[test]
+fn mixed_scale_non_overlapping_splice_is_accepted() {
+    let mut tree = RegionChunkTree::new();
+    let coarse = single_cell_chunk_array_core_with_scale(key(0, 0, 0, 0), 11, 0);
+    let fine_non_overlapping = single_cell_chunk_array_core_with_scale(key(2, 0, 0, 0), 22, -1);
+
+    assert_eq!(
+        tree.splice_core_in_bounds(coarse.bounds, &coarse),
+        Some(coarse.bounds)
+    );
+    assert_eq!(
+        tree.splice_core_in_bounds(fine_non_overlapping.bounds, &fine_non_overlapping),
+        Some(fine_non_overlapping.bounds)
+    );
+
+    let root = tree.root().expect("root");
+    validate_region_core_world_space_non_overlapping(root).expect("tree must be world-space valid");
+}
+
+#[test]
+fn mixed_scale_world_overlapping_splice_is_detected() {
+    let mut tree = RegionChunkTree::new();
+    let coarse = single_cell_chunk_array_core_with_scale(key(0, 0, 0, 0), 11, 0);
+    let fine_overlapping = single_cell_chunk_array_core_with_scale(key(1, 0, 0, 0), 22, -1);
+
+    assert_eq!(
+        tree.splice_core_in_bounds(coarse.bounds, &coarse),
+        Some(coarse.bounds)
+    );
+    // Overlapping splice proceeds (no rollback) but validation detects the overlap.
+    assert_eq!(
+        tree.splice_core_in_bounds(fine_overlapping.bounds, &fine_overlapping),
+        Some(fine_overlapping.bounds)
+    );
+
+    let root = tree.root().expect("root");
+    assert!(validate_region_core_world_space_non_overlapping(root).is_err());
+}
+
+#[test]
+fn chunk_array_consolidation_does_not_cross_scale_boundaries() {
+    let mut tree = RegionChunkTree::new();
+    let coarse = single_cell_chunk_array_core_with_scale(key(0, 0, 0, 0), 11, 0);
+    let fine = single_cell_chunk_array_core_with_scale(key(2, 0, 0, 0), 22, -1);
+
+    assert_eq!(
+        tree.splice_core_in_bounds(coarse.bounds, &coarse),
+        Some(coarse.bounds)
+    );
+    assert_eq!(tree.splice_core_in_bounds(fine.bounds, &fine), Some(fine.bounds));
+
+    let root = tree.root().expect("root");
+    let mut scale_exps = Vec::new();
+    collect_chunk_array_scale_exps(root, &mut scale_exps);
+    scale_exps.sort_unstable();
+    assert_eq!(scale_exps, vec![-1, 0]);
 }
 
 #[test]
@@ -1800,7 +1893,6 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
 /// virgin terrain at gap positions with Empty entries from the consolidated array.
 #[test]
 fn overlay_preserves_virgin_terrain_at_chunk_array_gaps() {
-    use crate::shared::chunk_payload::ChunkArrayData;
     use crate::shared::voxel::CHUNK_VOLUME;
 
     let stone = BlockData::simple(0, 11);

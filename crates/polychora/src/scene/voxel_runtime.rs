@@ -476,6 +476,14 @@ impl Scene {
         let RenderLeafKind::VoxelChunkArray(chunk_array) = &leaf.kind else {
             return Ok(Vec::new());
         };
+        if chunk_array.scale_exp != 0 {
+            let message = format!(
+                "unsupported voxel leaf scale_exp={} for VTE upload at {:?}->{:?}",
+                chunk_array.scale_exp, leaf.bounds.min, leaf.bounds.max
+            );
+            eprintln!("[vte-voxel-unsupported-scale] {}", message);
+            return Err(message);
+        }
         let Some(leaf_extents) = leaf.bounds.chunk_extents() else {
             return Ok(Vec::new());
         };
@@ -871,6 +879,15 @@ impl Scene {
                     });
                 }
                 RenderLeafKind::VoxelChunkArray(chunk_array) => {
+                    if chunk_array.scale_exp != 0 {
+                        eprintln!(
+                            "[vte-voxel-unsupported-scale] snapshot build rejected scale_exp={} at {:?}->{:?}",
+                            chunk_array.scale_exp,
+                            leaf.bounds.min,
+                            leaf.bounds.max
+                        );
+                        return None;
+                    }
                     let Some(leaf_extents) = leaf.bounds.chunk_extents() else {
                         leaf_headers.push(GpuVoxelLeafHeader {
                             min_chunk_coord: leaf.bounds.min,

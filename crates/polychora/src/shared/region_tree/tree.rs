@@ -1,5 +1,6 @@
 use super::*;
 use crate::shared::chunk_payload::ResolvedChunkPayload;
+use crate::shared::scaled_bounds::scaled_bounds_overlap_world;
 use crate::shared::voxel::BlockData;
 use std::collections::HashMap;
 
@@ -50,6 +51,7 @@ impl RegionChunkTree {
                 kind: kind_from_resolved_value(bounds, Some(payload)),
                 generator_version_hash: 0,
             }));
+            self.warn_if_world_space_overlapping("set_chunk:init");
             return true;
         }
 
@@ -90,6 +92,10 @@ impl RegionChunkTree {
                 .unwrap_or(false)
         {
             self.root = None;
+        }
+
+        if changed {
+            self.warn_if_world_space_overlapping("set_chunk");
         }
 
         changed
@@ -219,6 +225,9 @@ impl RegionChunkTree {
         {
             self.root = None;
         }
+        if changed_bounds.is_some() {
+            self.warn_if_world_space_overlapping("lazy_drop_outside_bounds");
+        }
         changed_bounds
     }
 
@@ -239,6 +248,7 @@ impl RegionChunkTree {
                 return None;
             }
             self.root = Some(Box::new(replacement));
+            self.warn_if_world_space_overlapping("splice_non_empty:init");
             return Some(bounds);
         }
 
@@ -261,6 +271,10 @@ impl RegionChunkTree {
             self.root = None;
         }
 
+        if changed_bounds.is_some() {
+            self.warn_if_world_space_overlapping("splice_non_empty");
+        }
+
         changed_bounds
     }
 
@@ -281,6 +295,7 @@ impl RegionChunkTree {
                 return None;
             }
             self.root = Some(Box::new(replacement));
+            self.warn_if_world_space_overlapping("splice_core:init");
             return Some(bounds);
         }
 
@@ -301,6 +316,10 @@ impl RegionChunkTree {
             .unwrap_or(false)
         {
             self.root = None;
+        }
+
+        if changed_bounds.is_some() {
+            self.warn_if_world_space_overlapping("splice_core");
         }
 
         changed_bounds
@@ -369,6 +388,140 @@ impl RegionChunkTree {
                 break;
             };
             self.root = Some(expand_root_once(root, grow_key));
+        }
+    }
+
+    fn warn_if_world_space_overlapping(&self, op: &str) {
+        let Some(root) = self.root.as_ref() else {
+            return;
+        };
+        if let Err(error) = validate_region_core_world_space_non_overlapping(root.as_ref()) {
+            eprintln!("[region-tree-scale-overlap] BUG: op={} produced overlap: {}", op, error);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorldOccupiedCell {
+    bounds: Aabb4i,
+    scale_exp: i8,
+}
+
+pub fn validate_region_core_world_space_non_overlapping(
+    core: &RegionTreeCore,
+) -> Result<(), String> {
+    if !core.bounds.is_valid() {
+        return Ok(());
+    }
+    if !kind_contains_nonzero_scale(&core.kind) {
+        return Ok(());
+    }
+
+    let mut occupied = Vec::<WorldOccupiedCell>::new();
+    collect_world_occupied_cells_from_kind(&core.kind, core.bounds, &mut occupied)?;
+    if occupied.len() < 2 {
+        return Ok(());
+    }
+
+    for i in 0..occupied.len() {
+        for j in (i + 1)..occupied.len() {
+            let a = occupied[i];
+            let b = occupied[j];
+            if a.scale_exp == b.scale_exp && !a.bounds.intersects(&b.bounds) {
+                continue;
+            }
+            let overlaps = scaled_bounds_overlap_world(a.bounds, a.scale_exp, b.bounds, b.scale_exp)
+                .map_err(|error| format!("scaled overlap check failed: {error:?}"))?;
+            if overlaps {
+                return Err(format!(
+                    "overlap detected between bounds {:?}->{:?} (scale_exp={}) and {:?}->{:?} (scale_exp={})",
+                    a.bounds.min,
+                    a.bounds.max,
+                    a.scale_exp,
+                    b.bounds.min,
+                    b.bounds.max,
+                    b.scale_exp
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn kind_contains_nonzero_scale(kind: &RegionNodeKind) -> bool {
+    match kind {
+        RegionNodeKind::ChunkArray(chunk_array) => chunk_array.scale_exp != 0,
+        RegionNodeKind::Branch(children) => children
+            .iter()
+            .any(|child| kind_contains_nonzero_scale(&child.kind)),
+        _ => false,
+    }
+}
+
+fn collect_world_occupied_cells_from_kind(
+    kind: &RegionNodeKind,
+    kind_bounds: Aabb4i,
+    out: &mut Vec<WorldOccupiedCell>,
+) -> Result<(), String> {
+    match kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => Ok(()),
+        RegionNodeKind::Uniform(block) => {
+            if !block.is_air() {
+                out.push(WorldOccupiedCell {
+                    bounds: kind_bounds,
+                    scale_exp: 0,
+                });
+            }
+            Ok(())
+        }
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            let indices = chunk_array
+                .decode_dense_indices()
+                .map_err(|error| format!("decode chunk array indices failed: {error:?}"))?;
+            let extents = chunk_array
+                .bounds
+                .chunk_extents()
+                .ok_or_else(|| "chunk array bounds extents missing".to_string())?;
+            let palette_non_empty = chunk_array_palette_non_empty_mask(chunk_array);
+            for w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
+                for z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
+                    for y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
+                        for x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
+                            let local = [
+                                (x - chunk_array.bounds.min[0]) as usize,
+                                (y - chunk_array.bounds.min[1]) as usize,
+                                (z - chunk_array.bounds.min[2]) as usize,
+                                (w - chunk_array.bounds.min[3]) as usize,
+                            ];
+                            let linear = linear_cell_index(local, extents);
+                            let Some(palette_idx) = indices.get(linear) else {
+                                return Err("chunk-array index out of bounds while validating overlap"
+                                    .to_string());
+                            };
+                            if !palette_non_empty
+                                .get(*palette_idx as usize)
+                                .copied()
+                                .unwrap_or(true)
+                            {
+                                continue;
+                            }
+                            let pos = [x, y, z, w];
+                            out.push(WorldOccupiedCell {
+                                bounds: Aabb4i::new(pos, pos),
+                                scale_exp: chunk_array.scale_exp,
+                            });
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                collect_world_occupied_cells_from_kind(&child.kind, child.bounds, out)?;
+            }
+            Ok(())
         }
     }
 }
@@ -506,12 +659,13 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
         }
     }
 
-    ChunkArrayData::from_dense_indices_with_block_palette(
+    ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
         intersection,
         chunk_array.chunk_palette.clone(),
         target_indices,
         None,
         chunk_array.block_palette.clone(),
+        chunk_array.scale_exp,
     )
     .ok()
 }
@@ -914,7 +1068,7 @@ fn overlay_chunk_array_non_empty_cells<F>(
 
                     let pos = [x, y, z, w];
                     let cell_bounds = Aabb4i::new(pos, pos);
-                    let Ok(cell_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
+                    let Ok(mut cell_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
                         cell_bounds,
                         vec![payload.clone()],
                         vec![0],
@@ -923,6 +1077,7 @@ fn overlay_chunk_array_non_empty_cells<F>(
                     ) else {
                         continue;
                     };
+                    cell_ca.scale_exp = chunk_array.scale_exp;
                     visit(&RegionTreeCore {
                         bounds: cell_bounds,
                         kind: RegionNodeKind::ChunkArray(cell_ca),
@@ -1475,6 +1630,22 @@ fn consolidate_chunk_array_children(
         }
     }
 
+    let common_scale_exp = ca_children
+        .iter()
+        .find_map(|child| match &child.kind {
+            RegionNodeKind::ChunkArray(ca) => Some(ca.scale_exp),
+            _ => None,
+        })
+        .unwrap_or(0);
+    if ca_children.iter().any(|child| match &child.kind {
+        RegionNodeKind::ChunkArray(ca) => ca.scale_exp != common_scale_exp,
+        _ => false,
+    }) {
+        *children = ca_children;
+        children.extend(other_children);
+        return false;
+    }
+
     // Compute combined bounds and total populated chunk count.
     let mut combined_bounds = ca_children[0].bounds;
     let mut total_chunks = 0usize;
@@ -1623,12 +1794,13 @@ fn consolidate_chunk_array_children(
     }
 
     // Build the merged ChunkArray.
-    let Ok(merged_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
+    let Ok(merged_ca) = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
         combined_bounds,
         palette,
         dense_indices,
         Some(0), // default = Empty
         merged_block_palette,
+        common_scale_exp,
     ) else {
         *children = ca_children;
         children.extend(other_children);

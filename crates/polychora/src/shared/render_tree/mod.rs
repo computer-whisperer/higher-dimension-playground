@@ -1,6 +1,7 @@
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
-    collect_non_empty_chunks_from_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
+    collect_non_empty_chunks_from_core_in_bounds, validate_region_core_world_space_non_overlapping,
+    ChunkKey, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{BlockData, CHUNK_SIZE};
@@ -57,6 +58,12 @@ pub fn from_region_core(core: &RegionTreeCore) -> RenderTreeCore {
         kind: map_kind(&core.kind),
     };
     normalize_render_core(&mut mapped);
+    if let Err(error) = validate_render_core_world_space_non_overlapping(&mapped) {
+        eprintln!(
+            "[render-tree-scale-overlap] BUG: from_region_core produced overlap: {}",
+            error
+        );
+    }
     mapped
 }
 
@@ -122,6 +129,12 @@ pub fn compose_in_bounds(bounds: Aabb4i, mut children: Vec<RenderTreeCore>) -> R
         kind: RenderNodeKind::Branch(children),
     };
     normalize_render_core(&mut out);
+    if let Err(error) = validate_render_core_world_space_non_overlapping(&out) {
+        eprintln!(
+            "[render-tree-scale-overlap] BUG: compose_in_bounds produced overlap: {}",
+            error
+        );
+    }
     out
 }
 
@@ -220,29 +233,76 @@ impl RenderBvhChunkMutationDelta {
     }
 }
 
+pub fn validate_render_core_world_space_non_overlapping(
+    core: &RenderTreeCore,
+) -> Result<(), String> {
+    let region_core = to_region_core(core);
+    validate_region_core_world_space_non_overlapping(&region_core)
+}
+
+fn validate_render_leaves_world_space_non_overlapping(leaves: &[RenderLeaf]) -> Result<(), String> {
+    if leaves.len() < 2 {
+        return Ok(());
+    }
+
+    let mut children = Vec::<RenderTreeCore>::with_capacity(leaves.len());
+    let mut combined_bounds: Option<Aabb4i> = None;
+    for leaf in leaves {
+        if !leaf.bounds.is_valid() {
+            continue;
+        }
+        let kind = match &leaf.kind {
+            RenderLeafKind::Uniform(block) => RenderNodeKind::Uniform(block.clone()),
+            RenderLeafKind::VoxelChunkArray(chunk_array) => {
+                RenderNodeKind::VoxelChunkArray(chunk_array.clone())
+            }
+        };
+        children.push(RenderTreeCore {
+            bounds: leaf.bounds,
+            kind,
+        });
+        combined_bounds = Some(match combined_bounds {
+            Some(existing) => union_bounds(existing, leaf.bounds),
+            None => leaf.bounds,
+        });
+    }
+
+    let Some(bounds) = combined_bounds else {
+        return Ok(());
+    };
+    let core = RenderTreeCore {
+        bounds,
+        kind: RenderNodeKind::Branch(children),
+    };
+    validate_render_core_world_space_non_overlapping(&core)
+}
+
+fn empty_render_bvh(bounds: Aabb4i) -> RenderBvh {
+    RenderBvh {
+        bounds,
+        root: None,
+        nodes: Vec::new(),
+        leaves: Vec::new(),
+        free_node_ids: Vec::new(),
+        free_leaf_ids: Vec::new(),
+    }
+}
+
 pub fn build_bvh_in_bounds(core: &RenderTreeCore, bounds: Aabb4i) -> RenderBvh {
     if !bounds.is_valid() {
-        return RenderBvh {
-            bounds,
-            root: None,
-            nodes: Vec::new(),
-            leaves: Vec::new(),
-            free_node_ids: Vec::new(),
-            free_leaf_ids: Vec::new(),
-        };
+        return empty_render_bvh(bounds);
     }
 
     let mut leaf_inputs = Vec::<RenderLeaf>::new();
     collect_render_leaves_in_bounds(core, bounds, &mut leaf_inputs);
     if leaf_inputs.is_empty() {
-        return RenderBvh {
-            bounds,
-            root: None,
-            nodes: Vec::new(),
-            leaves: Vec::new(),
-            free_node_ids: Vec::new(),
-            free_leaf_ids: Vec::new(),
-        };
+        return empty_render_bvh(bounds);
+    }
+    if let Err(error) = validate_render_leaves_world_space_non_overlapping(&leaf_inputs) {
+        eprintln!(
+            "[render-tree-scale-overlap] BUG: build_bvh_in_bounds produced overlap: {}",
+            error
+        );
     }
 
     let mut bvh = RenderBvh {
@@ -419,6 +479,12 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
 
     let mut replacement_leaves = Vec::<RenderLeaf>::new();
     collect_render_leaves_in_bounds(patch_core, clipped_patch_bounds, &mut replacement_leaves);
+    if let Err(error) = validate_render_leaves_world_space_non_overlapping(&replacement_leaves) {
+        eprintln!(
+            "[render-tree-scale-overlap] BUG: apply_core_patch produced overlap: {}",
+            error
+        );
+    }
     let replacement_root = if replacement_leaves.is_empty() {
         None
     } else {
@@ -848,7 +914,7 @@ fn slice_chunk_array_kind_to_bounds(
         return Ok(None);
     }
 
-    let piece_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+    let mut piece_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
         bounds,
         chunk_array.chunk_palette.clone(),
         piece_indices,
@@ -856,6 +922,7 @@ fn slice_chunk_array_kind_to_bounds(
         chunk_array.block_palette.clone(),
     )
     .map_err(|error| format!("slice chunk-array piece failed: {error:?}"))?;
+    piece_chunk_array.scale_exp = chunk_array.scale_exp;
     Ok(Some(RenderLeafKind::VoxelChunkArray(piece_chunk_array)))
 }
 
@@ -1497,6 +1564,46 @@ mod tests {
         assert!(bvh.root.is_none());
         assert!(bvh.nodes.is_empty());
         assert!(bvh.leaves.is_empty());
+    }
+
+    #[test]
+    fn validate_render_core_rejects_mixed_scale_world_overlap() {
+        let coarse_bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let fine_bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
+        let coarse = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+            coarse_bounds,
+            vec![ChunkPayload::Uniform(1)],
+            vec![0],
+            None,
+            vec![BlockData::AIR, BlockData::simple(0, 7)],
+            0,
+        )
+        .expect("coarse chunk array");
+        let fine = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+            fine_bounds,
+            vec![ChunkPayload::Uniform(1)],
+            vec![0],
+            None,
+            vec![BlockData::AIR, BlockData::simple(0, 9)],
+            -1,
+        )
+        .expect("fine chunk array");
+
+        let core = RenderTreeCore {
+            bounds: Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]),
+            kind: RenderNodeKind::Branch(vec![
+                RenderTreeCore {
+                    bounds: coarse_bounds,
+                    kind: RenderNodeKind::VoxelChunkArray(coarse),
+                },
+                RenderTreeCore {
+                    bounds: fine_bounds,
+                    kind: RenderNodeKind::VoxelChunkArray(fine),
+                },
+            ]),
+        };
+
+        assert!(validate_render_core_world_space_non_overlapping(&core).is_err());
     }
 
     #[test]

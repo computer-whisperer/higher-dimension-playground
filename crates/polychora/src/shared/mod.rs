@@ -4,6 +4,7 @@ pub mod item_types;
 pub mod protocol;
 pub mod region_tree;
 pub mod render_tree;
+pub mod scaled_bounds;
 pub mod spatial;
 pub mod voxel;
 pub mod wasm;
