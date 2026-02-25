@@ -1726,469 +1726,96 @@ impl App {
         instances
     }
 
-    pub(super) fn remote_entity_instances(&self) -> Vec<common::ModelInstance> {
+    pub(super) fn remote_entity_instances(&mut self) -> Vec<common::ModelInstance> {
         use multiplayer::entity_types::*;
+        use polychora::shared::wasm::WasmPluginSlot;
+        use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput};
+        use polychora_plugin_api::opcodes::OP_ENTITY_MODEL;
+
         let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
         ids.sort_unstable();
         let mut instances = Vec::with_capacity(ids.len() * 18);
         for entity_id in ids {
-            if let Some(entity) = self.remote_entities.get(&entity_id) {
-                if !vec4_is_finite(entity.render_position)
-                    || !vec4_is_finite(entity.render_orientation)
-                    || !entity.scale.is_finite()
-                {
-                    continue;
+            let Some(entity) = self.remote_entities.get(&entity_id) else {
+                continue;
+            };
+            if !vec4_is_finite(entity.render_position)
+                || !vec4_is_finite(entity.render_orientation)
+                || !entity.scale.is_finite()
+            {
+                continue;
+            }
+            let type_key = (entity.entity_type_ns, entity.entity_type);
+            if type_key == ENTITY_PLAYER_AVATAR {
+                continue;
+            }
+
+            // Resolve entity texture palette to GPU material tokens.
+            let gpu_mats: [u32; 10] = {
+                let textures = self
+                    .content_registry
+                    .entity_lookup(entity.entity_type_ns, entity.entity_type)
+                    .map(|e| &e.model_textures[..])
+                    .unwrap_or(&[]);
+                let mut mats = [7u32; 10]; // fallback to Purple for all slots
+                for (i, t) in textures.iter().enumerate().take(10) {
+                    mats[i] = self
+                        .material_resolver
+                        .resolve_texture(t.namespace, t.texture_id)
+                        .unwrap_or(7) as u32;
                 }
-                let type_key = (entity.entity_type_ns, entity.entity_type);
-                // Resolve entity texture palette to GPU material tokens.
-                let gpu_mats: [u32; 10] = {
-                    let textures = self.content_registry
-                        .entity_lookup(entity.entity_type_ns, entity.entity_type)
-                        .map(|e| &e.model_textures[..])
-                        .unwrap_or(&[]);
-                    let mut mats = [7u32; 10]; // fallback to Purple for all slots
-                    for (i, t) in textures.iter().enumerate().take(10) {
-                        mats[i] = self.material_resolver
-                            .resolve_texture(t.namespace, t.texture_id)
-                            .unwrap_or(7) as u32;
-                    }
-                    mats
-                };
-                match type_key {
-                    ENTITY_PLAYER_AVATAR => {}
-                    ENTITY_TEST_CUBE => {
-                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        instances.push(build_centered_model_instance(
-                            entity.render_position,
-                            &basis,
-                            [entity.scale; 4],
-                            [gpu_mats[0]; 8],
-                        ));
-                    }
-                    ENTITY_TEST_ROTOR => {
-                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        instances.push(build_centered_model_instance(
-                            entity.render_position,
-                            &basis,
-                            [
-                                entity.scale * 0.56,
-                                entity.scale * 0.56,
-                                entity.scale * 1.35,
-                                entity.scale * 0.82,
-                            ],
-                            [
-                                gpu_mats[0],
-                                gpu_mats[0],
-                                gpu_mats[0],
-                                gpu_mats[1],
-                                gpu_mats[0],
-                                gpu_mats[1],
-                                gpu_mats[0],
-                                gpu_mats[1],
-                            ],
-                        ));
-                    }
-                    ENTITY_TEST_DRIFTER => {
-                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        instances.push(build_centered_model_instance(
-                            entity.render_position,
-                            &basis,
-                            [
-                                entity.scale * 1.15,
-                                entity.scale * 0.44,
-                                entity.scale * 0.72,
-                                entity.scale * 1.05,
-                            ],
-                            [
-                                gpu_mats[2],
-                                gpu_mats[0],
-                                gpu_mats[0],
-                                gpu_mats[0],
-                                gpu_mats[0],
-                                gpu_mats[2],
-                                gpu_mats[0],
-                                gpu_mats[0],
-                            ],
-                        ));
-                    }
-                    ENTITY_MOB_SEEKER => {
-                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        let speed = remote_entity_speed_xzw(entity);
-                        let stride = (speed / 3.6).clamp(0.0, 1.35);
-                        let anim_t = entity.last_received_at.elapsed().as_secs_f32()
-                            * (2.9 + stride * 4.8)
-                            + entity_id as f32 * 0.31;
-                        let bob = (0.02 + 0.035 * stride) * (anim_t * 0.9).sin();
-                        let pulse = ((anim_t * 1.1).sin() * 0.5 + 0.5).powf(1.6);
-                        let core_center = offset_point_along_basis(
-                            entity.render_position,
-                            &basis,
-                            [0.0, 0.06 + bob, 0.0, 0.0],
-                        );
-                        let pulse_bias: usize = if pulse > 0.66 { 8 } else { 6 };
-                        instances.push(build_centered_model_instance(
-                            core_center,
-                            &basis,
-                            [
-                                entity.scale * 0.54,
-                                entity.scale * 0.52,
-                                entity.scale * 0.74,
-                                entity.scale * 0.56,
-                            ],
-                            [
-                                gpu_mats[0],
-                                gpu_mats[1],
-                                gpu_mats[2],
-                                gpu_mats[0],
-                                gpu_mats[3],
-                                gpu_mats[0],
-                                gpu_mats[4],
-                                gpu_mats[0],
-                            ],
-                        ));
+                mats
+            };
 
-                        let prow_center =
-                            offset_point_along_basis(core_center, &basis, [0.0, 0.08, 0.47, 0.0]);
-                        instances.push(build_centered_model_instance(
-                            prow_center,
-                            &basis,
-                            [
-                                entity.scale * 0.30,
-                                entity.scale * 0.26,
-                                entity.scale * 0.30,
-                                entity.scale * 0.26,
-                            ],
-                            [
-                                gpu_mats[2],
-                                gpu_mats[pulse_bias],
-                                gpu_mats[2],
-                                gpu_mats[pulse_bias],
-                                gpu_mats[2],
-                                gpu_mats[pulse_bias],
-                                gpu_mats[2],
-                                gpu_mats[pulse_bias],
-                            ],
-                        ));
+            let basis = orthonormal_basis_from_forward(entity.render_orientation);
 
-                        let fin_specs: [([f32; 4], [f32; 4], usize); 2] = [
-                            ([0.0, 0.18, 0.05, 0.34], [0.14, 0.30, 0.44, 0.12], 5),
-                            ([0.0, 0.18, 0.05, -0.34], [0.14, 0.30, 0.44, 0.12], 5),
-                        ];
-                        for (offset, scales, bias) in fin_specs {
-                            let fin_center = offset_point_along_basis(core_center, &basis, offset);
-                            instances.push(build_centered_model_instance(
-                                fin_center,
-                                &basis,
-                                [
-                                    entity.scale * scales[0],
-                                    entity.scale * scales[1],
-                                    entity.scale * scales[2],
-                                    entity.scale * scales[3],
-                                ],
-                                [
-                                    gpu_mats[0],
-                                    gpu_mats[bias],
-                                    gpu_mats[0],
-                                    gpu_mats[2],
-                                    gpu_mats[0],
-                                    gpu_mats[bias],
-                                    gpu_mats[0],
-                                    gpu_mats[2],
-                                ],
-                            ));
-                        }
+            // Build WASM input.
+            let model_input = EntityModelInput {
+                entity_ns: entity.entity_type_ns,
+                entity_type: entity.entity_type,
+                entity_id,
+                elapsed_s: entity.last_received_at.elapsed().as_secs_f32(),
+                speed_xzw: remote_entity_speed_xzw(entity),
+                scale: entity.scale,
+            };
 
-                        let pod_specs = [
-                            ([0.34, -0.19, 0.18, 0.18], 0.0f32),
-                            ([-0.34, -0.19, -0.18, -0.18], std::f32::consts::PI),
-                            ([0.34, -0.19, -0.18, 0.18], std::f32::consts::FRAC_PI_2),
-                            (
-                                [-0.34, -0.19, 0.18, -0.18],
-                                std::f32::consts::PI + std::f32::consts::FRAC_PI_2,
-                            ),
-                        ];
-                        for (mut offset, phase) in pod_specs {
-                            let swing = (anim_t * 1.8 + phase).sin();
-                            let lift = (anim_t * 1.8 + phase).sin().max(0.0);
-                            offset[2] += 0.11 * stride * swing;
-                            offset[1] += 0.08 * stride * lift;
-                            let pod_center = offset_point_along_basis(core_center, &basis, offset);
-                            instances.push(build_centered_model_instance(
-                                pod_center,
-                                &basis,
-                                [
-                                    entity.scale * 0.18,
-                                    entity.scale * 0.24,
-                                    entity.scale * 0.18,
-                                    entity.scale * 0.16,
-                                ],
-                                [
-                                    gpu_mats[1],
-                                    gpu_mats[0],
-                                    gpu_mats[3],
-                                    gpu_mats[0],
-                                    gpu_mats[1],
-                                    gpu_mats[0],
-                                    gpu_mats[3],
-                                    gpu_mats[0],
-                                ],
-                            ));
-                        }
-                    }
-                    ENTITY_MOB_CREEPER4D => {
-                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        let speed = remote_entity_speed_xzw(entity);
-                        let stride = (speed / 3.2).clamp(0.0, 1.45);
-                        let anim_t = entity.last_received_at.elapsed().as_secs_f32()
-                            * (2.4 + stride * 4.2)
-                            + entity_id as f32 * 0.29;
-                        let charge = ((anim_t * 0.8).sin() * 0.5 + 0.5).powf(1.8);
-                        let charge_bias: usize = if charge > 0.70 { 9 } else { 7 };
-                        let body_center = offset_point_along_basis(
-                            entity.render_position,
-                            &basis,
-                            [0.0, 0.05 + 0.03 * (anim_t * 0.7).sin(), 0.0, 0.0],
-                        );
-                        instances.push(build_centered_model_instance(
-                            body_center,
-                            &basis,
-                            [
-                                entity.scale * 0.86,
-                                entity.scale * 0.94,
-                                entity.scale * 0.84,
-                                entity.scale * 0.98,
-                            ],
-                            [
-                                gpu_mats[3],
-                                gpu_mats[1],
-                                gpu_mats[4],
-                                gpu_mats[0],
-                                gpu_mats[5],
-                                gpu_mats[2],
-                                gpu_mats[4],
-                                gpu_mats[0],
-                            ],
-                        ));
+            // Try WASM call.
+            let model_output = self
+                .wasm_model_manager
+                .as_mut()
+                .and_then(|mgr| {
+                    let input_bytes = postcard::to_allocvec(&model_input).ok()?;
+                    let result = mgr
+                        .call_slot(WasmPluginSlot::ModelLogic, OP_ENTITY_MODEL as i32, &input_bytes)
+                        .ok()??;
+                    postcard::from_bytes::<EntityModelOutput>(&result.invocation.output).ok()
+                });
 
-                        let head_center = offset_point_along_basis(
-                            body_center,
-                            &basis,
-                            [0.0, 0.58 + 0.04 * (anim_t * 0.6).sin(), 0.0, 0.0],
-                        );
-                        instances.push(build_centered_model_instance(
-                            head_center,
-                            &basis,
-                            [
-                                entity.scale * 0.52,
-                                entity.scale * 0.40,
-                                entity.scale * 0.50,
-                                entity.scale * 0.58,
-                            ],
-                            [
-                                gpu_mats[2],
-                                gpu_mats[charge_bias],
-                                gpu_mats[2],
-                                gpu_mats[charge_bias],
-                                gpu_mats[2],
-                                gpu_mats[charge_bias],
-                                gpu_mats[2],
-                                gpu_mats[charge_bias],
-                            ],
-                        ));
-
-                        let vent_center =
-                            offset_point_along_basis(body_center, &basis, [0.0, 0.16, -0.40, 0.0]);
-                        instances.push(build_centered_model_instance(
-                            vent_center,
-                            &basis,
-                            [
-                                entity.scale * 0.46,
-                                entity.scale * 0.22,
-                                entity.scale * 0.24,
-                                entity.scale * 0.40,
-                            ],
-                            [
-                                gpu_mats[6],
-                                gpu_mats[3],
-                                gpu_mats[6],
-                                gpu_mats[3],
-                                gpu_mats[6],
-                                gpu_mats[3],
-                                gpu_mats[6],
-                                gpu_mats[3],
-                            ],
-                        ));
-
-                        let leg_specs = [
-                            ([0.38, -0.56, 0.30, 0.30], 0.0f32),
-                            ([-0.38, -0.56, -0.30, -0.30], std::f32::consts::PI),
-                            ([0.38, -0.56, -0.30, 0.30], std::f32::consts::FRAC_PI_2),
-                            (
-                                [-0.38, -0.56, 0.30, -0.30],
-                                std::f32::consts::PI + std::f32::consts::FRAC_PI_2,
-                            ),
-                        ];
-                        for (mut offset, phase) in leg_specs {
-                            let swing = (anim_t * 1.65 + phase).sin();
-                            let lift = swing.max(0.0);
-                            offset[2] += 0.12 * stride * swing;
-                            offset[1] += 0.10 * stride * lift;
-                            let leg_center = offset_point_along_basis(body_center, &basis, offset);
-                            instances.push(build_centered_model_instance(
-                                leg_center,
-                                &basis,
-                                [
-                                    entity.scale * 0.26,
-                                    entity.scale * 0.36,
-                                    entity.scale * 0.24,
-                                    entity.scale * 0.24,
-                                ],
-                                [
-                                    gpu_mats[0],
-                                    gpu_mats[1],
-                                    gpu_mats[0],
-                                    gpu_mats[2],
-                                    gpu_mats[0],
-                                    gpu_mats[1],
-                                    gpu_mats[0],
-                                    gpu_mats[2],
-                                ],
-                            ));
-                        }
-                    }
-                    ENTITY_MOB_PHASE_SPIDER => {
-                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        let anim_t = entity.last_received_at.elapsed().as_secs_f32() * 6.0
-                            + entity_id as f32 * 0.23;
-                        let body_bob = 0.05 * (anim_t * 0.7).sin();
-                        let body_center = offset_point_along_basis(
-                            entity.render_position,
-                            &basis,
-                            [0.0, 0.08 + body_bob, 0.0, 0.0],
-                        );
-                        instances.push(build_centered_model_instance(
-                            body_center,
-                            &basis,
-                            [
-                                entity.scale * 0.88,
-                                entity.scale * 0.36,
-                                entity.scale * 0.78,
-                                entity.scale * 0.96,
-                            ],
-                            [
-                                gpu_mats[2],
-                                gpu_mats[0],
-                                gpu_mats[4],
-                                gpu_mats[0],
-                                gpu_mats[3],
-                                gpu_mats[0],
-                                gpu_mats[5],
-                                gpu_mats[0],
-                            ],
-                        ));
-
-                        let core_center =
-                            offset_point_along_basis(body_center, &basis, [0.0, 0.11, 0.0, 0.0]);
-                        instances.push(build_centered_model_instance(
-                            core_center,
-                            &basis,
-                            [
-                                entity.scale * 0.32,
-                                entity.scale * 0.30,
-                                entity.scale * 0.32,
-                                entity.scale * 0.32,
-                            ],
-                            [
-                                gpu_mats[7],
-                                gpu_mats[9],
-                                gpu_mats[8],
-                                gpu_mats[9],
-                                gpu_mats[7],
-                                gpu_mats[9],
-                                gpu_mats[8],
-                                gpu_mats[9],
-                            ],
-                        ));
-
-                        let splay = 0.12 * anim_t.sin();
-                        let leg_y = -0.16 + 0.04 * (anim_t * 1.5).cos();
-                        let leg_specs: [([f32; 4], [f32; 4], usize); 8] = [
-                            (
-                                [0.56 + splay, leg_y, 0.42, 0.20],
-                                [0.72, 0.08, 0.14, 0.18],
-                                1,
-                            ),
-                            (
-                                [0.56 + splay, leg_y, -0.42, -0.20],
-                                [0.72, 0.08, 0.14, 0.18],
-                                2,
-                            ),
-                            (
-                                [-0.56 - splay, leg_y, 0.42, -0.20],
-                                [0.72, 0.08, 0.14, 0.18],
-                                3,
-                            ),
-                            (
-                                [-0.56 - splay, leg_y, -0.42, 0.20],
-                                [0.72, 0.08, 0.14, 0.18],
-                                4,
-                            ),
-                            (
-                                [0.20, leg_y, 0.52 + splay, 0.56],
-                                [0.16, 0.08, 0.72, 0.18],
-                                5,
-                            ),
-                            (
-                                [-0.20, leg_y, -0.52 - splay, -0.56],
-                                [0.16, 0.08, 0.72, 0.18],
-                                6,
-                            ),
-                            (
-                                [0.20, leg_y, -0.52 - splay, 0.56],
-                                [0.16, 0.08, 0.72, 0.18],
-                                7,
-                            ),
-                            (
-                                [-0.20, leg_y, 0.52 + splay, -0.56],
-                                [0.16, 0.08, 0.72, 0.18],
-                                8,
-                            ),
-                        ];
-                        for (offset, axis_scale, material_bias) in leg_specs {
-                            let leg_center = offset_point_along_basis(body_center, &basis, offset);
-                            instances.push(build_centered_model_instance(
-                                leg_center,
-                                &basis,
-                                [
-                                    entity.scale * axis_scale[0],
-                                    entity.scale * axis_scale[1],
-                                    entity.scale * axis_scale[2],
-                                    entity.scale * axis_scale[3],
-                                ],
-                                [
-                                    gpu_mats[0],
-                                    gpu_mats[material_bias],
-                                    gpu_mats[0],
-                                    gpu_mats[material_bias],
-                                    gpu_mats[0],
-                                    gpu_mats[material_bias],
-                                    gpu_mats[0],
-                                    gpu_mats[material_bias],
-                                ],
-                            ));
-                        }
-                    }
-                    _ => {
-                        // Unknown entity type — render as a generic colored cube.
-                        let basis = orthonormal_basis_from_forward(entity.render_orientation);
-                        instances.push(build_centered_model_instance(
-                            entity.render_position,
-                            &basis,
-                            [entity.scale; 4],
-                            [gpu_mats[0]; 8],
-                        ));
-                    }
+            if let Some(output) = model_output {
+                for part in &output.parts {
+                    let center = offset_point_along_basis(
+                        entity.render_position,
+                        &basis,
+                        part.offset,
+                    );
+                    let cell_mats = part.cell_materials.map(|idx| {
+                        gpu_mats[idx.min(9) as usize]
+                    });
+                    instances.push(build_centered_model_instance(
+                        center,
+                        &basis,
+                        part.half_extents,
+                        cell_mats,
+                    ));
                 }
+            } else {
+                // Fallback: render as a generic cube if WASM is unavailable.
+                instances.push(build_centered_model_instance(
+                    entity.render_position,
+                    &basis,
+                    [entity.scale; 4],
+                    [gpu_mats[0]; 8],
+                ));
             }
         }
         instances

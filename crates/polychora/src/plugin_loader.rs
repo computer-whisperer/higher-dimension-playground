@@ -227,6 +227,29 @@ pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) 
     (registry, manager)
 }
 
+/// Create a standalone `WasmPluginManager` with the ModelLogic slot activated.
+///
+/// Used by the game client so that entity model/geometry/animation logic can be
+/// evaluated via WASM at render time.
+pub fn create_wasm_manager_for_client() -> Option<WasmPluginManager> {
+    let runtime = Arc::new(WasmRuntime::new().ok()?);
+    let cache = Arc::new(WasmModuleCache::new(runtime.clone(), None).ok()?);
+    let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
+    let mut manager = WasmPluginManager::new(
+        WasmExecutionRole::ClientSpeculative,
+        runtime,
+        cache,
+    );
+    manager
+        .activate_slot_from_bytes(
+            WasmPluginSlot::ModelLogic,
+            wasm_bytes,
+            WasmExecutionLimits::default(),
+        )
+        .ok()?;
+    Some(manager)
+}
+
 /// Create a standalone `WasmPluginManager` with the MobSteering slot activated.
 ///
 /// Used when creating a new integrated server from the main menu (the content

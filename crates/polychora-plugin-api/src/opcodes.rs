@@ -11,6 +11,7 @@ pub const OP_GET_TEXTURES: u32 = 0x0011;
 pub const OP_MOB_STEERING: u32 = 0x0100;
 pub const OP_MOB_SPECIAL_ABILITY: u32 = 0x0101;
 pub const OP_BLOCK_INTERACT: u32 = 0x0200;
+pub const OP_ENTITY_MODEL: u32 = 0x0300;
 
 /// ABI error codes returned by `polychora_call`.
 pub const ABI_ERR_UNKNOWN_OPCODE: i32 = -1;

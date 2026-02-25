@@ -4,6 +4,7 @@ extern crate alloc;
 mod blocks;
 mod entities;
 mod math4d;
+mod models;
 mod steering;
 
 #[global_allocator]
@@ -19,9 +20,10 @@ use polychora_plugin_api::manifest::PluginManifest;
 use polychora_plugin_api::mob_abi::{
     MobAbilityCheck, MobAbilityResult, MobSteeringInput, MobSteeringOutput,
 };
+use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput};
 use polychora_plugin_api::opcodes::{
-    ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_GET_MANIFEST,
-    OP_MOB_SPECIAL_ABILITY, OP_MOB_STEERING,
+    ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_ENTITY_MODEL,
+    OP_GET_MANIFEST, OP_MOB_SPECIAL_ABILITY, OP_MOB_STEERING,
 };
 
 /// Namespace ID for the first-party polychora-content plugin.
@@ -78,6 +80,7 @@ pub extern "C" fn polychora_call(
         OP_GET_MANIFEST => handle_get_manifest(out_ptr, out_cap),
         OP_MOB_STEERING => handle_mob_steering(in_ptr, in_len, out_ptr, out_cap),
         OP_MOB_SPECIAL_ABILITY => handle_mob_ability(in_ptr, in_len, out_ptr, out_cap),
+        OP_ENTITY_MODEL => handle_entity_model(in_ptr, in_len, out_ptr, out_cap),
         _ => ABI_ERR_UNKNOWN_OPCODE,
     }
 }
@@ -113,6 +116,20 @@ fn handle_mob_ability(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i
     };
     let result: MobAbilityResult = steering::mob_ability_check(&check);
     let bytes = match postcard::to_allocvec(&result) {
+        Ok(bytes) => bytes,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    write_output(&bytes, out_ptr, out_cap)
+}
+
+fn handle_entity_model(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+    let input_bytes = read_input(in_ptr, in_len);
+    let input: EntityModelInput = match postcard::from_bytes(&input_bytes) {
+        Ok(v) => v,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    let output: EntityModelOutput = models::entity_model(&input);
+    let bytes = match postcard::to_allocvec(&output) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,
     };
