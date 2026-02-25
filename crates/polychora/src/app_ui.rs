@@ -1186,11 +1186,11 @@ impl App {
             .color(info_color),
         );
 
-        // Mob config summary
+        // Sim config summary
         if let Some(entry) = entry {
-            if let Some(ref config) = entry.mob_config {
+            if let Some(ref config) = entry.sim_config {
                 ui.label(
-                    egui::RichText::new(format!("mob: {:?} spd={:.1}", config.locomotion, config.move_speed))
+                    egui::RichText::new(format!("{:?}: {:?} spd={:.1}", config.mode, config.locomotion, config.move_speed))
                         .monospace()
                         .size(info_size)
                         .color(info_color),

@@ -1093,26 +1093,29 @@ fn spawn_entity_from_request(
         data: Vec::new(),
     };
 
-    let snapshot = match (entry.category, &entry.mob_config) {
-        (EntityCategory::Mob, Some(config)) => spawn_mob_entity(
-            state,
-            entity_data,
-            namespace,
-            entity_type,
-            config,
-            None,
-            true,
-            None,
-            None,
-            start,
-        ),
-        (EntityCategory::Accent, None) => {
+    let snapshot = match (entry.category, entry.sim_config.as_ref().map(|c| c.mode)) {
+        (EntityCategory::Mob, Some(polychora_plugin_api::entity::SimulationMode::PhysicsDriven)) => {
+            let config = entry.sim_config.as_ref().unwrap();
+            spawn_mob_entity(
+                state,
+                entity_data,
+                namespace,
+                entity_type,
+                config,
+                None,
+                true,
+                None,
+                None,
+                start,
+            )
+        }
+        (EntityCategory::Accent, _) => {
             spawn_entity(state, entity_data, None, true, None, start)
         }
-        (category, mob_config) => {
+        (category, sim_mode) => {
             return Err(format!(
-                "spawn spec for '{}' is invalid (category={:?}, has_mob_config={})",
-                entry.canonical_name, category, mob_config.is_some()
+                "spawn spec for '{}' is invalid (category={:?}, sim_mode={:?})",
+                entry.canonical_name, category, sim_mode
             ));
         }
     };
@@ -1453,7 +1456,7 @@ fn spawn_mob_entity(
     entity: Entity,
     entity_ns: u32,
     entity_type: u32,
-    config: &polychora_plugin_api::entity::MobConfig,
+    config: &polychora_plugin_api::entity::EntitySimConfig,
     display_name: Option<String>,
     persistent: bool,
     persisted_mob: Option<PersistedMobEntry>,

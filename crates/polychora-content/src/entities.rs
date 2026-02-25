@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use polychora_plugin_api::content_ids::*;
 use polychora_plugin_api::entity::{
-    EntityCategory, MobAbilityParams, MobConfig, MobLocomotionMode,
+    EntityCategory, EntitySimConfig, MobAbilityParams, MobLocomotionMode, SimulationMode,
 };
 use polychora_plugin_api::manifest::EntityDeclaration;
 use polychora_plugin_api::texture::builtin_textures::*;
@@ -30,7 +30,16 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             model_textures: alloc::vec![
                 tex(TEX_PURPLE),        // slot 0
             ],
-            mob_config: None,
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::Parametric,
+                locomotion: MobLocomotionMode::default(),
+                move_speed: 0.0,
+                preferred_distance: 0.0,
+                tangent_weight: 0.0,
+                aliases: alloc::vec![String::from("testcube")],
+                nav_target_y_offset: 0.0,
+                ability_params: None,
+            }),
         },
         EntityDeclaration {
             type_id: ENTITY_ROTOR,
@@ -42,7 +51,16 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_WHITE),         // slot 0
                 tex(TEX_LIGHT),         // slot 1
             ],
-            mob_config: None,
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::Parametric,
+                locomotion: MobLocomotionMode::default(),
+                move_speed: 0.0,
+                preferred_distance: 0.0,
+                tangent_weight: 0.0,
+                aliases: alloc::vec![String::from("testrotor")],
+                nav_target_y_offset: 0.0,
+                ability_params: None,
+            }),
         },
         EntityDeclaration {
             type_id: ENTITY_DRIFTER,
@@ -55,7 +73,16 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_OXIDIZED_METAL),// slot 1 (unused but keeps alignment)
                 tex(TEX_BIO_SPORE_MOSS),// slot 2
             ],
-            mob_config: None,
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::Parametric,
+                locomotion: MobLocomotionMode::default(),
+                move_speed: 0.0,
+                preferred_distance: 0.0,
+                tangent_weight: 0.0,
+                aliases: alloc::vec![String::from("testdrifter")],
+                nav_target_y_offset: 0.0,
+                ability_params: None,
+            }),
         },
         EntityDeclaration {
             type_id: ENTITY_SEEKER,
@@ -74,7 +101,8 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_BROWN),         // slot 7 (unused)
                 tex(TEX_GRID_FLOOR),    // slot 8
             ],
-            mob_config: Some(MobConfig {
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::PhysicsDriven,
                 locomotion: MobLocomotionMode::Walking,
                 move_speed: 3.0,
                 preferred_distance: 2.6,
@@ -102,7 +130,8 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_MIRROR),        // slot 8 (unused)
                 tex(TEX_LAVA_VEINED_BASALT), // slot 9
             ],
-            mob_config: Some(MobConfig {
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::PhysicsDriven,
                 locomotion: MobLocomotionMode::Walking,
                 move_speed: 2.55,
                 preferred_distance: 3.8,
@@ -143,7 +172,8 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_MARBLE),        // slot 8
                 tex(TEX_OXIDIZED_METAL),// slot 9
             ],
-            mob_config: Some(MobConfig {
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::PhysicsDriven,
                 locomotion: MobLocomotionMode::Flying,
                 move_speed: 3.1,
                 preferred_distance: 2.4,

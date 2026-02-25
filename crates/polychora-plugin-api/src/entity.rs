@@ -18,6 +18,16 @@ pub enum MobArchetype {
     PhaseSpider,
 }
 
+/// How the engine simulates an entity each tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SimulationMode {
+    /// Engine applies collision, gravity, locomotion from a desired direction.
+    #[default]
+    PhysicsDriven,
+    /// Engine directly sets pose — no physics.
+    Parametric,
+}
+
 /// How a mob moves through the world.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MobLocomotionMode {
@@ -35,12 +45,13 @@ pub struct MobArchetypeDefaults {
     pub locomotion: MobLocomotionMode,
 }
 
-/// Data-driven mob configuration declared in the WASM manifest.
+/// Data-driven entity simulation configuration declared in the WASM manifest.
 ///
-/// This is the single source of truth for mob parameters — the host reads
-/// these values instead of hardcoding them per archetype.
+/// This is the single source of truth for entity simulation parameters — the
+/// host reads these values instead of hardcoding them per entity type.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MobConfig {
+pub struct EntitySimConfig {
+    pub mode: SimulationMode,
     pub locomotion: MobLocomotionMode,
     pub move_speed: f32,
     pub preferred_distance: f32,

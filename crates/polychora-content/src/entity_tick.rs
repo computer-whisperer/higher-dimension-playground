@@ -1,33 +1,36 @@
 use crate::math4d::{distance4_sq, normalize4_or_default};
 use libm::{cosf, sinf, sqrtf};
 use polychora_plugin_api::content_ids;
-use polychora_plugin_api::mob_abi::{
-    MobAbilityCheck, MobAbilityResult, MobSteeringInput, MobSteeringOutput,
+use polychora_plugin_api::entity_tick_abi::{
+    EntityAbilityCheck, EntityAbilityResult, EntityTickInput, EntityTickOutput,
 };
 
 /// Path-following reach distance (must match MOB_NAV_PATH_NODE_REACH_DISTANCE
 /// in the host).
 const PATH_NODE_REACH_DISTANCE: f32 = 0.62;
 
-/// Dispatch steering by entity type.
-pub fn mob_steering(input: &MobSteeringInput) -> MobSteeringOutput {
+/// Dispatch tick by entity type.
+pub fn entity_tick(input: &EntityTickInput) -> EntityTickOutput {
     match (input.entity_ns, input.entity_type) {
-        (content_ids::CONTENT_NS, content_ids::ENTITY_SEEKER) => seeker_step(input),
-        (content_ids::CONTENT_NS, content_ids::ENTITY_CREEPER) => creeper_step(input),
-        (content_ids::CONTENT_NS, content_ids::ENTITY_PHASE_SPIDER) => phase_spider_step(input),
-        _ => seeker_step(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_CUBE) => cube_tick(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_ROTOR) => rotor_tick(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_DRIFTER) => drifter_tick(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_SEEKER) => seeker_tick(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_CREEPER) => creeper_tick(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_PHASE_SPIDER) => phase_spider_tick(input),
+        _ => seeker_tick(input),
     }
 }
 
-/// Evaluate an ability trigger for a mob.
-pub fn mob_ability_check(check: &MobAbilityCheck) -> MobAbilityResult {
+/// Evaluate an ability trigger for an entity.
+pub fn entity_ability_check(check: &EntityAbilityCheck) -> EntityAbilityResult {
     let should_trigger = match check {
-        MobAbilityCheck::Detonate {
+        EntityAbilityCheck::Detonate {
             nearest_player_distance,
             trigger_distance,
             ..
         } => *trigger_distance > 0.0 && *nearest_player_distance <= *trigger_distance,
-        MobAbilityCheck::Blink {
+        EntityAbilityCheck::Blink {
             has_target,
             path_following,
             now_ms,
@@ -42,10 +45,87 @@ pub fn mob_ability_check(check: &MobAbilityCheck) -> MobAbilityResult {
             *now_ms >= *next_phase_ms && *has_target && (*path_following || blocked)
         }
     };
-    MobAbilityResult { should_trigger }
+    EntityAbilityResult { should_trigger }
 }
 
-fn seeker_step(input: &MobSteeringInput) -> MobSteeringOutput {
+// ---------------------------------------------------------------------------
+// Accent entity ticks (Parametric — return SetPose)
+// ---------------------------------------------------------------------------
+
+fn cube_tick(input: &EntityTickInput) -> EntityTickOutput {
+    let t = input.now_ms as f32 * 0.001;
+    let phase_a = t * 0.65 + input.entity_id as f32 * 0.61;
+    let phase_b = t * 0.41 + input.entity_id as f32 * 0.23;
+    let position = [
+        input.home_position[0] + 0.18 * cosf(phase_b),
+        input.home_position[1] + 0.26 * sinf(phase_a),
+        input.home_position[2] + 0.18 * cosf(phase_a),
+        input.home_position[3] + 0.18 * sinf(phase_b),
+    ];
+    let orientation = normalize4_or_default(
+        [
+            cosf(phase_a),
+            0.35 * cosf(phase_b),
+            sinf(phase_a),
+            0.70 * sinf(phase_b),
+        ],
+        [0.0, 0.0, 1.0, 0.0],
+    );
+    let scale = input.scale * (1.0 + 0.06 * sinf(phase_a * 0.7));
+    EntityTickOutput::SetPose { position, orientation, scale }
+}
+
+fn rotor_tick(input: &EntityTickInput) -> EntityTickOutput {
+    let t = input.now_ms as f32 * 0.001;
+    let phase = t * 0.95 + input.entity_id as f32 * 0.41;
+    let wobble = t * 0.57 + input.entity_id as f32 * 0.19;
+    let position = [
+        input.home_position[0] + 0.36 * cosf(phase),
+        input.home_position[1] + 0.10 * sinf(wobble),
+        input.home_position[2] + 0.36 * sinf(phase),
+        input.home_position[3] + 0.24 * cosf(phase * 1.3),
+    ];
+    let orientation = normalize4_or_default(
+        [
+            -sinf(phase),
+            0.25 * cosf(wobble),
+            cosf(phase),
+            -0.80 * sinf(phase * 1.3),
+        ],
+        [0.0, 0.0, 1.0, 0.0],
+    );
+    let scale = input.scale * (1.0 + 0.10 * sinf(wobble * 1.2));
+    EntityTickOutput::SetPose { position, orientation, scale }
+}
+
+fn drifter_tick(input: &EntityTickInput) -> EntityTickOutput {
+    let t = input.now_ms as f32 * 0.001;
+    let phase_a = t * 0.33 + input.entity_id as f32 * 0.77;
+    let phase_b = t * 0.53 + input.entity_id as f32 * 0.29;
+    let position = [
+        input.home_position[0] + 0.46 * sinf(phase_a),
+        input.home_position[1] + 0.18 * cosf(phase_b),
+        input.home_position[2] + 0.34 * cosf(phase_a * 1.4),
+        input.home_position[3] + 0.42 * sinf(phase_b),
+    ];
+    let orientation = normalize4_or_default(
+        [
+            sinf(phase_a * 1.4),
+            -0.35 * sinf(phase_b),
+            -cosf(phase_a * 1.4),
+            0.90 * cosf(phase_b),
+        ],
+        [0.0, 0.0, 1.0, 0.0],
+    );
+    let scale = input.scale * (1.0 + 0.08 * sinf(phase_a + phase_b));
+    EntityTickOutput::SetPose { position, orientation, scale }
+}
+
+// ---------------------------------------------------------------------------
+// Mob entity ticks (PhysicsDriven — return Steer)
+// ---------------------------------------------------------------------------
+
+fn seeker_tick(input: &EntityTickInput) -> EntityTickOutput {
     let t_s = input.now_ms as f32 * 0.001;
     let (desired_dir, slow_factor) = if let Some(target) = input.target_position {
         let to_target = [
@@ -119,13 +199,13 @@ fn seeker_step(input: &MobSteeringInput) -> MobSteeringOutput {
         )
     };
 
-    MobSteeringOutput {
+    EntityTickOutput::Steer {
         desired_direction: desired_dir,
         speed_factor: slow_factor,
     }
 }
 
-fn creeper_step(input: &MobSteeringInput) -> MobSteeringOutput {
+fn creeper_tick(input: &EntityTickInput) -> EntityTickOutput {
     let t_s = input.now_ms as f32 * 0.001;
     let (desired_dir, speed_factor) = if let Some(target) = input.target_position {
         let to_target = [
@@ -212,13 +292,13 @@ fn creeper_step(input: &MobSteeringInput) -> MobSteeringOutput {
         )
     };
 
-    MobSteeringOutput {
+    EntityTickOutput::Steer {
         desired_direction: desired_dir,
         speed_factor,
     }
 }
 
-fn phase_spider_step(input: &MobSteeringInput) -> MobSteeringOutput {
+fn phase_spider_tick(input: &EntityTickInput) -> EntityTickOutput {
     let t_s = input.now_ms as f32 * 0.001;
     let (desired_dir, speed_factor) = if let Some(target) = input.target_position {
         let to_target = [
@@ -314,7 +394,7 @@ fn phase_spider_step(input: &MobSteeringInput) -> MobSteeringOutput {
         )
     };
 
-    MobSteeringOutput {
+    EntityTickOutput::Steer {
         desired_direction: desired_dir,
         speed_factor,
     }

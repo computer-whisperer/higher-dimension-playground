@@ -3,9 +3,9 @@ extern crate alloc;
 
 mod blocks;
 mod entities;
+mod entity_tick;
 mod math4d;
 mod models;
-mod steering;
 
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
@@ -16,14 +16,14 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 use alloc::vec::Vec;
-use polychora_plugin_api::manifest::PluginManifest;
-use polychora_plugin_api::mob_abi::{
-    MobAbilityCheck, MobAbilityResult, MobSteeringInput, MobSteeringOutput,
+use polychora_plugin_api::entity_tick_abi::{
+    EntityAbilityCheck, EntityAbilityResult, EntityTickInput, EntityTickOutput,
 };
+use polychora_plugin_api::manifest::PluginManifest;
 use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput};
 use polychora_plugin_api::opcodes::{
-    ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_ENTITY_MODEL,
-    OP_GET_MANIFEST, OP_MOB_SPECIAL_ABILITY, OP_MOB_STEERING,
+    ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_ENTITY_ABILITY,
+    OP_ENTITY_MODEL, OP_ENTITY_TICK, OP_GET_MANIFEST,
 };
 
 /// Namespace ID for the first-party polychora-content plugin.
@@ -78,8 +78,8 @@ pub extern "C" fn polychora_call(
 ) -> i32 {
     match opcode as u32 {
         OP_GET_MANIFEST => handle_get_manifest(out_ptr, out_cap),
-        OP_MOB_STEERING => handle_mob_steering(in_ptr, in_len, out_ptr, out_cap),
-        OP_MOB_SPECIAL_ABILITY => handle_mob_ability(in_ptr, in_len, out_ptr, out_cap),
+        OP_ENTITY_TICK => handle_entity_tick(in_ptr, in_len, out_ptr, out_cap),
+        OP_ENTITY_ABILITY => handle_entity_ability(in_ptr, in_len, out_ptr, out_cap),
         OP_ENTITY_MODEL => handle_entity_model(in_ptr, in_len, out_ptr, out_cap),
         _ => ABI_ERR_UNKNOWN_OPCODE,
     }
@@ -94,13 +94,13 @@ fn handle_get_manifest(out_ptr: i32, out_cap: i32) -> i32 {
     write_output(&bytes, out_ptr, out_cap)
 }
 
-fn handle_mob_steering(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+fn handle_entity_tick(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
     let input_bytes = read_input(in_ptr, in_len);
-    let input: MobSteeringInput = match postcard::from_bytes(&input_bytes) {
+    let input: EntityTickInput = match postcard::from_bytes(&input_bytes) {
         Ok(v) => v,
         Err(_) => return ABI_ERR_SERIALIZE,
     };
-    let output: MobSteeringOutput = steering::mob_steering(&input);
+    let output: EntityTickOutput = entity_tick::entity_tick(&input);
     let bytes = match postcard::to_allocvec(&output) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,
@@ -108,13 +108,13 @@ fn handle_mob_steering(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> 
     write_output(&bytes, out_ptr, out_cap)
 }
 
-fn handle_mob_ability(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+fn handle_entity_ability(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
     let input_bytes = read_input(in_ptr, in_len);
-    let check: MobAbilityCheck = match postcard::from_bytes(&input_bytes) {
+    let check: EntityAbilityCheck = match postcard::from_bytes(&input_bytes) {
         Ok(v) => v,
         Err(_) => return ABI_ERR_SERIALIZE,
     };
-    let result: MobAbilityResult = steering::mob_ability_check(&check);
+    let result: EntityAbilityResult = entity_tick::entity_ability_check(&check);
     let bytes = match postcard::to_allocvec(&result) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,

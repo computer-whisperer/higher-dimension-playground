@@ -126,18 +126,12 @@ pub fn populate_registry_from_plugin(
         if stripped != entity.name {
             aliases.push(stripped);
         }
-        // Merge mob_config aliases (replaces legacy_aliases for mob entities)
-        if let Some(ref config) = entity.mob_config {
+        // Merge sim_config aliases (works for both PhysicsDriven and Parametric)
+        if let Some(ref config) = entity.sim_config {
             for alias in &config.aliases {
                 if !aliases.contains(alias) {
                     aliases.push(alias.clone());
                 }
-            }
-        }
-        // Add well-known legacy aliases for non-mob first-party entities
-        for extra in legacy_aliases(&entity.name) {
-            if !aliases.contains(&extra) {
-                aliases.push(extra);
             }
         }
 
@@ -149,23 +143,11 @@ pub fn populate_registry_from_plugin(
             aliases,
             default_scale: entity.default_scale,
             model_textures: entity.model_textures.clone(),
-            mob_config: entity.mob_config.clone(),
+            sim_config: entity.sim_config.clone(),
         });
     }
 
     Ok(())
-}
-
-/// Return additional legacy aliases for well-known first-party entity names.
-/// Mob aliases are now declared in `MobConfig.aliases` in the WASM manifest;
-/// only accent entity aliases remain here.
-fn legacy_aliases(name: &str) -> Vec<String> {
-    match name {
-        "cube" => vec!["testcube".into()],
-        "rotor" => vec!["testrotor".into()],
-        "drifter" => vec!["testdrifter".into()],
-        _ => vec![],
-    }
 }
 
 /// Build a fully-populated content registry: engine internals (Air, Player,
@@ -192,10 +174,10 @@ pub fn create_full_registry() -> ContentRegistry {
 }
 
 /// Build a content registry *and* a persistent `WasmPluginManager` with the
-/// MobSteering slot already activated.
+/// EntitySimulation slot already activated.
 ///
-/// Used by the server (both integrated and dedicated) so that mob steering and
-/// ability trigger logic can be evaluated via WASM at runtime.
+/// Used by the server (both integrated and dedicated) so that entity simulation
+/// (steering, abilities, parametric animation) can be evaluated via WASM at runtime.
 pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) {
     let mut registry = ContentRegistry::new();
     builtin_content::register_builtin_content(&mut registry);
@@ -218,11 +200,11 @@ pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) 
     );
     manager
         .activate_slot_from_bytes(
-            WasmPluginSlot::MobSteering,
+            WasmPluginSlot::EntitySimulation,
             wasm_bytes,
             WasmExecutionLimits::default(),
         )
-        .expect("failed to activate MobSteering WASM slot");
+        .expect("failed to activate EntitySimulation WASM slot");
 
     (registry, manager)
 }
@@ -250,7 +232,7 @@ pub fn create_wasm_manager_for_client() -> Option<WasmPluginManager> {
     Some(manager)
 }
 
-/// Create a standalone `WasmPluginManager` with the MobSteering slot activated.
+/// Create a standalone `WasmPluginManager` with the EntitySimulation slot activated.
 ///
 /// Used when creating a new integrated server from the main menu (the content
 /// registry already exists but a fresh WASM manager is needed).
@@ -265,7 +247,7 @@ pub fn create_wasm_manager_for_server() -> Option<WasmPluginManager> {
     );
     manager
         .activate_slot_from_bytes(
-            WasmPluginSlot::MobSteering,
+            WasmPluginSlot::EntitySimulation,
             wasm_bytes,
             WasmExecutionLimits::default(),
         )

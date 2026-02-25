@@ -1,7 +1,7 @@
 use crate::shared::voxel::BlockData;
 use polychora_plugin_api::block::BlockCategory;
 use polychora_plugin_api::content_ids;
-use polychora_plugin_api::entity::{EntityCategory, MobConfig};
+use polychora_plugin_api::entity::{EntityCategory, EntitySimConfig};
 use polychora_plugin_api::texture::TextureRef;
 use std::collections::HashMap;
 
@@ -232,7 +232,7 @@ pub struct EntityEntry {
     /// Explicit texture palette for entity model parts.
     /// Rendering code resolves each TextureRef to a GPU token at draw time.
     pub model_textures: Vec<TextureRef>,
-    pub mob_config: Option<MobConfig>,
+    pub sim_config: Option<EntitySimConfig>,
 }
 
 impl EntityEntry {
@@ -621,10 +621,10 @@ impl ContentRegistry {
             .collect()
     }
 
-    /// Get mob config for an entity type by (namespace, entity_type).
-    pub fn mob_config(&self, namespace: u32, entity_type: u32) -> Option<&MobConfig> {
+    /// Get simulation config for an entity type by (namespace, entity_type).
+    pub fn sim_config(&self, namespace: u32, entity_type: u32) -> Option<&EntitySimConfig> {
         self.resolve_entity_entry(namespace, entity_type)
-            .and_then(|e| e.mob_config.as_ref())
+            .and_then(|e| e.sim_config.as_ref())
     }
 
     // -----------------------------------------------------------------------
@@ -742,8 +742,8 @@ mod tests {
 
         // Seeker mob (from plugin)
         let seeker = registry.entity_lookup_by_name("seeker").unwrap();
-        assert!(seeker.mob_config.is_some(), "seeker should have mob_config");
-        let seeker_config = seeker.mob_config.as_ref().unwrap();
+        assert!(seeker.sim_config.is_some(), "seeker should have sim_config");
+        let seeker_config = seeker.sim_config.as_ref().unwrap();
         assert_eq!(seeker_config.move_speed, 3.0);
         assert_eq!(seeker_config.locomotion, polychora_plugin_api::entity::MobLocomotionMode::Walking);
 

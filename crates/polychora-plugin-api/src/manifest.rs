@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockCategory;
-use crate::entity::{EntityCategory, MobConfig};
+use crate::entity::{EntityCategory, EntitySimConfig};
 use crate::texture::TextureRef;
 
 /// Declares a plugin's content to the host at load time.
@@ -44,9 +44,9 @@ pub struct EntityDeclaration {
     /// base_material_token + saturating_add(N).
     #[serde(default)]
     pub model_textures: Vec<TextureRef>,
-    /// Data-driven mob configuration. Present only for Mob-category entities.
+    /// Data-driven simulation configuration. Present for entities with WASM-driven ticks.
     #[serde(default)]
-    pub mob_config: Option<MobConfig>,
+    pub sim_config: Option<EntitySimConfig>,
 }
 
 /// An item type declared by a plugin.
@@ -69,7 +69,7 @@ pub struct TextureDeclaration {
 mod tests {
     extern crate alloc;
     use super::*;
-    use crate::entity::{MobAbilityParams, MobLocomotionMode};
+    use crate::entity::{MobAbilityParams, MobLocomotionMode, SimulationMode};
     use alloc::string::String;
     use alloc::vec;
 
@@ -98,7 +98,8 @@ mod tests {
                 default_scale: 1.5,
                 base_material_color: [10, 20, 30],
                 model_textures: vec![],
-                mob_config: Some(MobConfig {
+                sim_config: Some(EntitySimConfig {
+                    mode: SimulationMode::PhysicsDriven,
                     locomotion: MobLocomotionMode::Walking,
                     move_speed: 3.0,
                     preferred_distance: 2.6,

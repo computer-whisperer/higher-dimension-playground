@@ -22,7 +22,7 @@ impl WasmExecutionRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum WasmCallOpcode {
-    MobSteering = 1,
+    EntitySimulation = 1,
     ModelLogic = 2,
 }
 
@@ -37,7 +37,7 @@ impl TryFrom<i32> for WasmCallOpcode {
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(Self::MobSteering),
+            1 => Ok(Self::EntitySimulation),
             2 => Ok(Self::ModelLogic),
             _ => Err(()),
         }

@@ -1,8 +1,9 @@
 use crate::content_registry::ContentRegistry;
-use crate::shared::entity_types::{
-    EntityCategory, ENTITY_TEST_CUBE, ENTITY_TEST_DRIFTER, ENTITY_TEST_ROTOR,
-};
+use crate::shared::entity_types::SimulationMode;
 use crate::shared::protocol::{Entity, EntitySnapshot};
+use crate::shared::wasm::{WasmPluginManager, WasmPluginSlot};
+use polychora_plugin_api::entity_tick_abi::{EntityTickInput, EntityTickOutput};
+use polychora_plugin_api::opcodes::OP_ENTITY_TICK;
 use std::collections::HashMap;
 
 use super::normalize4_or_default;
@@ -42,94 +43,49 @@ pub struct EntityState {
 }
 
 impl EntityState {
-    fn category(&self, registry: &ContentRegistry) -> EntityCategory {
-        registry.entity_category(self.entity.namespace, self.entity.entity_type)
-    }
-
-    fn type_key(&self) -> (u32, u32) {
-        (self.entity.namespace, self.entity.entity_type)
-    }
-
-    fn simulate(&mut self, now_ms: u64, registry: &ContentRegistry) -> bool {
-        if self.category(registry) != EntityCategory::Accent {
+    fn simulate(
+        &mut self,
+        now_ms: u64,
+        registry: &ContentRegistry,
+        wasm_manager: &mut Option<WasmPluginManager>,
+    ) -> bool {
+        // Only tick entities with Parametric simulation mode
+        let sim_config = registry.sim_config(self.entity.namespace, self.entity.entity_type);
+        let is_parametric = sim_config
+            .map(|c| c.mode == SimulationMode::Parametric)
+            .unwrap_or(false);
+        if !is_parametric {
             return false;
         }
+
         let previous_position = self.entity.pose.position;
         let previous_orientation = self.entity.pose.orientation;
         let previous_scale = self.entity.pose.scale;
-        let t = now_ms as f32 * 0.001;
-        let type_key = self.type_key();
-        let (next_position, next_orientation, next_scale) = if type_key == ENTITY_TEST_CUBE {
-            let phase_a = t * 0.65 + self.entity_id as f32 * 0.61;
-            let phase_b = t * 0.41 + self.entity_id as f32 * 0.23;
-            (
-                [
-                    self.home_position[0] + 0.18 * phase_b.cos(),
-                    self.home_position[1] + 0.26 * phase_a.sin(),
-                    self.home_position[2] + 0.18 * phase_a.cos(),
-                    self.home_position[3] + 0.18 * phase_b.sin(),
-                ],
-                normalize4_or_default(
-                    [
-                        phase_a.cos(),
-                        0.35 * phase_b.cos(),
-                        phase_a.sin(),
-                        0.70 * phase_b.sin(),
-                    ],
-                    [0.0, 0.0, 1.0, 0.0],
-                ),
-                self.base_scale * (1.0 + 0.06 * (phase_a * 0.7).sin()),
-            )
-        } else if type_key == ENTITY_TEST_ROTOR {
-            let phase = t * 0.95 + self.entity_id as f32 * 0.41;
-            let wobble = t * 0.57 + self.entity_id as f32 * 0.19;
-            (
-                [
-                    self.home_position[0] + 0.36 * phase.cos(),
-                    self.home_position[1] + 0.10 * wobble.sin(),
-                    self.home_position[2] + 0.36 * phase.sin(),
-                    self.home_position[3] + 0.24 * (phase * 1.3).cos(),
-                ],
-                normalize4_or_default(
-                    [
-                        -phase.sin(),
-                        0.25 * wobble.cos(),
-                        phase.cos(),
-                        -0.80 * (phase * 1.3).sin(),
-                    ],
-                    [0.0, 0.0, 1.0, 0.0],
-                ),
-                self.base_scale * (1.0 + 0.10 * (wobble * 1.2).sin()),
-            )
-        } else if type_key == ENTITY_TEST_DRIFTER {
-            let phase_a = t * 0.33 + self.entity_id as f32 * 0.77;
-            let phase_b = t * 0.53 + self.entity_id as f32 * 0.29;
-            (
-                [
-                    self.home_position[0] + 0.46 * phase_a.sin(),
-                    self.home_position[1] + 0.18 * phase_b.cos(),
-                    self.home_position[2] + 0.34 * (phase_a * 1.4).cos(),
-                    self.home_position[3] + 0.42 * phase_b.sin(),
-                ],
-                normalize4_or_default(
-                    [
-                        (phase_a * 1.4).sin(),
-                        -0.35 * phase_b.sin(),
-                        -(phase_a * 1.4).cos(),
-                        0.90 * phase_b.cos(),
-                    ],
-                    [0.0, 0.0, 1.0, 0.0],
-                ),
-                self.base_scale * (1.0 + 0.08 * (phase_a + phase_b).sin()),
-            )
-        } else {
-            // Unknown accent or mob/player — no server-side animation
-            (
-                self.entity.pose.position,
-                self.entity.pose.orientation,
-                self.base_scale.max(0.01),
-            )
+
+        // Build EntityTickInput for the WASM plugin
+        let tick_input = EntityTickInput {
+            entity_ns: self.entity.namespace,
+            entity_type: self.entity.entity_type,
+            entity_id: self.entity_id,
+            position: self.entity.pose.position,
+            home_position: self.home_position,
+            scale: self.base_scale,
+            now_ms,
+            ..Default::default()
         };
+
+        let (next_position, next_orientation, next_scale) =
+            if let Some(pose) = wasm_entity_set_pose(wasm_manager, &tick_input) {
+                pose
+            } else {
+                // Fallback: no animation (unknown entity or no WASM)
+                (
+                    self.entity.pose.position,
+                    self.entity.pose.orientation,
+                    self.base_scale.max(0.01),
+                )
+            };
+
         self.entity.pose.scale = next_scale;
         update_entity_motion(
             &mut self.entity,
@@ -151,6 +107,33 @@ impl EntityState {
             display_name: None,
             last_update_ms: self.last_update_ms,
         }
+    }
+}
+
+/// Call OP_ENTITY_TICK via WASM and extract a SetPose result.
+fn wasm_entity_set_pose(
+    wasm_manager: &mut Option<WasmPluginManager>,
+    input: &EntityTickInput,
+) -> Option<([f32; 4], [f32; 4], f32)> {
+    let manager = wasm_manager.as_mut()?;
+    let input_bytes = postcard::to_allocvec(input).ok()?;
+    let result = manager
+        .call_slot(WasmPluginSlot::EntitySimulation, OP_ENTITY_TICK as i32, &input_bytes)
+        .ok()??;
+    let output: EntityTickOutput = postcard::from_bytes(&result.invocation.output).ok()?;
+    match output {
+        EntityTickOutput::SetPose { position, orientation, scale } => {
+            // Validate finite values
+            if position.iter().all(|v| v.is_finite())
+                && orientation.iter().all(|v| v.is_finite())
+                && scale.is_finite()
+            {
+                Some((position, orientation, scale))
+            } else {
+                None
+            }
+        }
+        EntityTickOutput::Steer { .. } => None, // Parametric entities should not return Steer
     }
 }
 
@@ -178,10 +161,15 @@ impl EntityStore {
         self.entities.remove(&entity_id).is_some()
     }
 
-    pub fn simulate(&mut self, now_ms: u64, registry: &ContentRegistry) -> Vec<EntityId> {
+    pub fn simulate(
+        &mut self,
+        now_ms: u64,
+        registry: &ContentRegistry,
+        wasm_manager: &mut Option<WasmPluginManager>,
+    ) -> Vec<EntityId> {
         let mut moved = Vec::new();
         for entity in self.entities.values_mut() {
-            if entity.simulate(now_ms, registry) {
+            if entity.simulate(now_ms, registry, wasm_manager) {
                 moved.push(entity.entity_id);
             }
         }

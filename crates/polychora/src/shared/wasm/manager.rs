@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WasmPluginSlot {
-    MobSteering,
+    EntitySimulation,
     ModelLogic,
 }
 
@@ -204,18 +204,18 @@ mod tests {
 
         let hash = manager
             .activate_slot_from_bytes(
-                WasmPluginSlot::MobSteering,
+                WasmPluginSlot::EntitySimulation,
                 &valid_runtime_module(),
                 WasmExecutionLimits::default(),
             )
             .expect("activate should succeed");
         assert_eq!(
-            manager.active_module_hash(WasmPluginSlot::MobSteering),
+            manager.active_module_hash(WasmPluginSlot::EntitySimulation),
             Some(hash)
         );
 
         let called = manager
-            .call_slot(WasmPluginSlot::MobSteering, 42, &[9, 8, 7])
+            .call_slot(WasmPluginSlot::EntitySimulation, 42, &[9, 8, 7])
             .expect("call should succeed")
             .expect("slot should be active");
         assert_eq!(called.module_hash, hash);
@@ -245,14 +245,14 @@ mod tests {
 
         let _ = manager
             .activate_slot_from_bytes(
-                WasmPluginSlot::MobSteering,
+                WasmPluginSlot::EntitySimulation,
                 &valid_runtime_module(),
                 WasmExecutionLimits::default(),
             )
             .expect("activate should succeed");
-        assert!(manager.deactivate_slot(WasmPluginSlot::MobSteering));
+        assert!(manager.deactivate_slot(WasmPluginSlot::EntitySimulation));
         assert_eq!(
-            manager.active_module_hash(WasmPluginSlot::MobSteering),
+            manager.active_module_hash(WasmPluginSlot::EntitySimulation),
             None
         );
     }

@@ -105,7 +105,7 @@ polychora_call(opcode, in_ptr, in_len, out_ptr, out_cap) -> i32   // dispatch
 
 The current model: single dispatch entry point, opcode selects the operation, input/output are opaque byte buffers. The host manages allocation, fuel limits, and memory bounds. **No host-imported functions** — the linker is empty, so the guest cannot call back into the host.
 
-Opcodes today: `MobSteering = 1`, `ModelLogic = 2` (defined but not yet wired to gameplay).
+Opcodes today: `EntitySimulation = 1`, `ModelLogic = 2`.
 
 ### The key insight: where to draw the host/guest boundary
 
@@ -120,15 +120,13 @@ Looking at `mob_sim.rs` reveals the natural split. The mob simulation loop does:
 Steps 1, 2, and 4 need deep `ServerState` access (world voxels, chunk caches, entity store). Step 3 is **pure computation** — it receives pre-resolved data and returns a steering command:
 
 ```rust
-// What steering functions actually receive today:
-fn simulate_seeker_step(
-    mob: &MobState,              // move_speed, preferred_distance, tangent_weight, phase_offset
-    position: [f32; 4],          // current mob position
-    target_position: Option<[f32; 4]>,  // navigation waypoint (host already resolved via A*)
-    path_following: bool,        // is this a pathfinding waypoint or direct LOS?
-    simple_steer: bool,          // debug flag
-    now_ms: u64,                 // current time
-) -> MobSteeringCommand {       // desired_direction: [f32; 4], speed_factor: f32
+// What entity tick functions receive today (via EntityTickInput):
+//   entity_ns, entity_type, entity_id, position, home_position, scale,
+//   target_position, path_following, simple_steer, now_ms, phase_offset,
+//   preferred_distance, tangent_weight, locomotion
+// And return EntityTickOutput:
+//   Steer { desired_direction, speed_factor }    — for PhysicsDriven mobs
+//   SetPose { position, orientation, scale }     — for Parametric accents
 ```
 
 This separation already exists in the code. **The plugin boundary goes between steps 2 and 3** — the host does the heavy lifting (pathfinding, collision, physics), the plugin makes behavioral decisions.
@@ -229,13 +227,13 @@ Hooks are grouped by domain. Each hook has a typed input struct and a typed outp
 | `0x0010` | `GetManifest` | `()` | `PluginManifest` | Once at load time |
 | `0x0011` | `GetTextures` | `()` | `TextureBatch` | Once at load time, after GetManifest |
 
-#### Mob hooks
+#### Entity hooks
 
 | Opcode | Name | Input | Output | When |
 |--------|------|-------|--------|------|
-| `0x0100` | `MobSteering` | `MobSteeringInput` | `MobSteeringOutput` | Per mob, per sim tick |
-| `0x0101` | `MobSpecialAbility` | `MobAbilityInput` | `MobAbilityOutput` | Per mob with abilities, per sim tick |
-| `0x0102` | `MobSpawn` | `MobSpawnInput` | `MobSpawnOutput` | When a mob is spawned |
+| `0x0100` | `EntityTick` | `EntityTickInput` | `EntityTickOutput` | Per entity with sim_config, per sim tick |
+| `0x0101` | `EntityAbility` | `EntityAbilityCheck` | `EntityAbilityResult` | Per entity with abilities, per sim tick |
+| `0x0102` | `MobSpawn` | `MobSpawnInput` | `MobSpawnOutput` | When a mob is spawned (future) |
 
 #### Block hooks
 
@@ -251,135 +249,24 @@ Hooks are grouped by domain. Each hook has a typed input struct and a typed outp
 |--------|------|-------|--------|------|
 | `0x0300` | `ItemUse` | `ItemUseInput` | `ItemUseOutput` | Player uses an item |
 
-### Concrete data schemas (first hooks to implement)
+### Concrete data schemas (implemented)
 
-```rust
-// --- polychora-plugin-api crate ---
+> **Note:** The early brainstorm schemas below evolved during implementation.
+> See `polychora-plugin-api/src/` for the actual current types:
+> - `manifest.rs`: `PluginManifest`, `EntityDeclaration` (with `sim_config: Option<EntitySimConfig>`)
+> - `entity.rs`: `EntitySimConfig`, `SimulationMode` (PhysicsDriven | Parametric)
+> - `entity_tick_abi.rs`: `EntityTickInput`, `EntityTickOutput` (Steer | SetPose), `EntityAbilityCheck`, `EntityAbilityResult`
+> - `opcodes.rs`: `OP_ENTITY_TICK` (0x0100), `OP_ENTITY_ABILITY` (0x0101)
 
-// Universal texture handle — (namespace, texture_id) pair.
-// Both IDs are random u32s. Any namespace (including 0) can have both
-// procedural and uploaded textures. The host resolves handles to GPU
-// material tokens — plugins never see the GPU layer.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TextureRef {
-    pub namespace: u32,
-    pub texture_id: u32,
-}
+### Why not batch entity ticks?
 
-// GetManifest output
-#[derive(Serialize, Deserialize)]
-pub struct PluginManifest {
-    pub namespace_id: u32,
-    pub name: String,
-    pub version: [u32; 3],         // semver major.minor.patch
-    pub blocks: Vec<BlockDeclaration>,
-    pub entities: Vec<EntityDeclaration>,
-    pub items: Vec<ItemDeclaration>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct BlockDeclaration {
-    pub type_id: u32,              // random u32
-    pub name: String,
-    pub category: String,
-    pub color_hint: [u8; 3],       // fallback RGB for minimaps, particles
-    pub texture: TextureRef,       // (namespace, texture_id)
-    pub transparent: bool,
-    pub light_emission: u8,        // 0-15
-}
-
-// GetTextures output — pixel data for all textures this plugin provides
-#[derive(Serialize, Deserialize)]
-pub struct TextureBatch {
-    pub textures: Vec<TextureDeclaration>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TextureDeclaration {
-    pub texture_id: u32,           // random u32, scoped to this plugin's namespace
-    pub width: u32,
-    pub height: u32,
-    pub depth: u32,                // 1 for flat, >1 for 3D volumetric
-    pub format: TextureFormat,
-    pub pixels: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct EntityDeclaration {
-    pub type_id: u32,              // random u32
-    pub name: String,
-    pub category: EntityCategory,
-    pub default_scale: f32,
-    pub base_material: u8,
-    pub mob_config: Option<MobConfig>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct MobConfig {
-    pub move_speed: f32,
-    pub preferred_distance: f32,
-    pub tangent_weight: f32,
-    pub locomotion: MobLocomotionMode,
-    pub has_special_ability: bool,
-}
-
-// MobSteering input — what the host provides
-#[derive(Serialize, Deserialize)]
-pub struct MobSteeringInput {
-    pub entity_type_id: u32,       // which mob type (dispatches within the plugin)
-    pub position: [f32; 4],
-    pub target_position: Option<[f32; 4]>,  // host-resolved navigation waypoint
-    pub path_following: bool,
-    pub move_speed: f32,
-    pub preferred_distance: f32,
-    pub tangent_weight: f32,
-    pub phase_offset: f32,
-    pub now_ms: u64,
-}
-
-// MobSteering output — what the plugin returns
-#[derive(Serialize, Deserialize)]
-pub struct MobSteeringOutput {
-    pub desired_direction: [f32; 4],
-    pub speed_factor: f32,
-}
-
-// MobSpecialAbility input
-#[derive(Serialize, Deserialize)]
-pub struct MobAbilityInput {
-    pub entity_type_id: u32,
-    pub position: [f32; 4],
-    pub forward: [f32; 4],
-    pub scale: f32,
-    pub phase_offset: f32,
-    pub nearest_player_distance: Option<f32>,
-    pub movement_was_blocked: bool,  // collision prevented desired movement
-    pub now_ms: u64,
-}
-
-// MobSpecialAbility output
-#[derive(Serialize, Deserialize)]
-pub struct MobAbilityOutput {
-    pub action: MobAbilityAction,
-}
-
-#[derive(Serialize, Deserialize)]
-pub enum MobAbilityAction {
-    None,
-    Detonate { radius: f32 },
-    Blink { direction: [f32; 4], max_distance: f32 },
-}
-```
-
-### Why not batch mob steering?
-
-One `polychora_call` per mob per tick seems expensive. But:
-- postcard serialization of `MobSteeringInput` is ~70 bytes. Deserialization is essentially a memcpy.
-- The current fuel budget (200k) is generous for the per-mob math.
+One `polychora_call` per entity per tick seems expensive. But:
+- postcard serialization of `EntityTickInput` is ~100 bytes. Deserialization is essentially a memcpy.
+- The current fuel budget (200k) is generous for the per-entity math.
 - wasmtime function call overhead is ~microseconds.
-- At 20 mobs × 20 ticks/sec = 400 calls/sec. This is trivially cheap.
+- At 20 entities × 20 ticks/sec = 400 calls/sec. This is trivially cheap.
 
-If it ever matters, batching is an additive change — define a `BatchMobSteering` opcode that takes `Vec<MobSteeringInput>` and returns `Vec<MobSteeringOutput>`. No ABI break needed.
+If it ever matters, batching is an additive change — define a `BatchEntityTick` opcode that takes `Vec<EntityTickInput>` and returns `Vec<EntityTickOutput>`. No ABI break needed.
 
 ### What about per-entity persistent state?
 
@@ -411,7 +298,7 @@ This keeps WASM instances stateless (no accumulated heap state between calls) wh
 
 ### Current: slot-based
 
-`WasmPluginManager` has named slots (`MobSteering`, `ModelLogic`). One module per slot. This doesn't map to the namespace model where each plugin is a module with multiple capabilities.
+`WasmPluginManager` has named slots (`EntitySimulation`, `ModelLogic`). One module per slot. This doesn't map to the namespace model where each plugin is a module with multiple capabilities.
 
 ### Proposed: namespace-keyed plugin registry
 
@@ -581,13 +468,13 @@ The first module to build. It proves the entire pipeline works end to end.
 - Declares all 68 block types with new random u32 type IDs, names, categories, colors
 - Declares the 3 mob types with archetype + defaults
 - Maps first-party blocks to procedural material shader IDs
-- MobSteering opcode implementation for Seeker/Creeper4d/PhaseSpider
+- EntityTick opcode implementation for all 6 entity types (mobs + accents)
 
 **What this proves:**
 - Plugin loading and manifest reading works
 - Block registry is driven by plugin data, not compile-time constants
 - Random IDs work end to end through storage, protocol, and rendering
-- Mob AI runs in WASM with the same behavior as today's native code
+- Entity behavior runs in WASM with the same behavior as today's native code
 
 ### Language
 
@@ -604,13 +491,13 @@ crates/
       blocks.rs             # Block declarations + properties (random IDs defined here)
       entities.rs           # Entity declarations
       items.rs              # Item declarations
-      mob_steering.rs       # Mob AI logic (ported from server/mob_sim.rs)
+      entity_tick.rs        # Entity tick logic (mob steering + accent animation)
   polychora-plugin-api/     # Shared contract types between host and guest
     Cargo.toml              # no_std, serde, postcard
     src/
       lib.rs
       manifest.rs           # PluginManifest, BlockDeclaration, EntityDeclaration, etc.
-      steering.rs           # MobSteeringInput/Output types
+      entity_tick_abi.rs    # EntityTickInput/Output, EntityAbilityCheck/Result types
 ```
 
 `polychora-plugin-api` is the contract crate — used by both the host (to deserialize) and the guest (to serialize). Must be `no_std` compatible.
@@ -730,10 +617,11 @@ For now, all plugins load server-side and are distributed to clients at connecti
 - Rendering uses registry-based `block_to_material_token()` lookup
 - Game runs identically but content is now plugin-driven
 
-### Phase 3: Mob steering in WASM
-- Port `mob_sim.rs` steering logic into `polychora-content`
-- Wire plugin registry into server tick loop (replaces old `WasmPluginManager` slot model)
-- Mob behavior now runs in WASM
+### Phase 3: Entity simulation in WASM ✅
+- Entity tick logic (mob steering + accent animation) runs in `polychora-content` WASM plugin
+- `OP_ENTITY_TICK` opcode covers both `PhysicsDriven` mobs (returns `Steer`) and `Parametric` accents (returns `SetPose`)
+- `OP_ENTITY_ABILITY` opcode handles detonation + blink triggers
+- Hardcoded accent animation removed from engine; all 6 entity types simulated via WASM
 
 ### Phase 4: Block interactions in WASM
 - Block break/place/interact opcodes

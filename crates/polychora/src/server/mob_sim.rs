@@ -1,10 +1,10 @@
 use super::runtime_net::{apply_creeper_explosion, apply_explosion_impulse};
 use super::*;
 use crate::shared::wasm::{WasmPluginManager, WasmPluginSlot};
-use polychora_plugin_api::mob_abi::{
-    MobAbilityCheck, MobAbilityResult, MobSteeringInput, MobSteeringOutput,
+use polychora_plugin_api::entity_tick_abi::{
+    EntityAbilityCheck, EntityAbilityResult, EntityTickInput, EntityTickOutput,
 };
-use polychora_plugin_api::opcodes::{OP_MOB_SPECIAL_ABILITY, OP_MOB_STEERING};
+use polychora_plugin_api::opcodes::{OP_ENTITY_ABILITY, OP_ENTITY_TICK};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct SimTimings {
@@ -22,36 +22,41 @@ fn sanitize_direction(d: [f32; 4]) -> Option<[f32; 4]> {
     }
 }
 
-fn wasm_mob_steering(
+fn wasm_entity_steer(
     manager: &mut WasmPluginManager,
-    input: &MobSteeringInput,
+    input: &EntityTickInput,
 ) -> Option<MobSteeringCommand> {
     let input_bytes = postcard::to_allocvec(input).ok()?;
     let result = manager
-        .call_slot(WasmPluginSlot::MobSteering, OP_MOB_STEERING as i32, &input_bytes)
+        .call_slot(WasmPluginSlot::EntitySimulation, OP_ENTITY_TICK as i32, &input_bytes)
         .ok()??;
-    let output: MobSteeringOutput = postcard::from_bytes(&result.invocation.output).ok()?;
-    let desired_direction = sanitize_direction(output.desired_direction)?;
-    let speed_factor = if output.speed_factor.is_finite() {
-        output.speed_factor.clamp(0.0, 10.0)
-    } else {
-        return None;
-    };
-    Some(MobSteeringCommand {
-        desired_direction,
-        speed_factor,
-    })
+    let output: EntityTickOutput = postcard::from_bytes(&result.invocation.output).ok()?;
+    match output {
+        EntityTickOutput::Steer { desired_direction, speed_factor } => {
+            let desired_direction = sanitize_direction(desired_direction)?;
+            let speed_factor = if speed_factor.is_finite() {
+                speed_factor.clamp(0.0, 10.0)
+            } else {
+                return None;
+            };
+            Some(MobSteeringCommand {
+                desired_direction,
+                speed_factor,
+            })
+        }
+        EntityTickOutput::SetPose { .. } => None, // PhysicsDriven mobs should not return SetPose
+    }
 }
 
-fn wasm_mob_ability(
+fn wasm_entity_ability(
     manager: &mut WasmPluginManager,
-    check: &MobAbilityCheck,
-) -> Option<MobAbilityResult> {
+    check: &EntityAbilityCheck,
+) -> Option<EntityAbilityResult> {
     let input_bytes = postcard::to_allocvec(check).ok()?;
     let result = manager
         .call_slot(
-            WasmPluginSlot::MobSteering,
-            OP_MOB_SPECIAL_ABILITY as i32,
+            WasmPluginSlot::EntitySimulation,
+            OP_ENTITY_ABILITY as i32,
             &input_bytes,
         )
         .ok()??;
@@ -990,7 +995,7 @@ fn simulate_mobs(
         .collect();
 
     let mut stale = Vec::new();
-    let mut detonations: Vec<(u64, [f32; 4], polychora_plugin_api::entity::MobConfig)> = Vec::new();
+    let mut detonations: Vec<(u64, [f32; 4], polychora_plugin_api::entity::EntitySimConfig)> = Vec::new();
     let mut navigation_updates = Vec::with_capacity(state.mobs.len());
     let mut phase_deadline_updates = Vec::with_capacity(state.mobs.len());
     let mut updates = Vec::with_capacity(state.mobs.len());
@@ -1003,21 +1008,21 @@ fn simulate_mobs(
             stale.push(mob.entity_id);
             continue;
         };
-        let Some(mob_config) = state.content_registry.mob_config(mob.entity_ns, mob.entity_type) else {
+        let Some(sim_config) = state.content_registry.sim_config(mob.entity_ns, mob.entity_type) else {
             stale.push(mob.entity_id);
             continue;
         };
         let pos = snapshot.entity.pose.position;
         let scl = snapshot.entity.pose.scale;
-        let locomotion = mob_config.locomotion;
+        let locomotion = sim_config.locomotion;
         let nearest_target = nearest_position_to(pos, &player_positions);
 
         // Apply nav target Y offset (e.g. creeper pounces below player)
-        let navigation_target = if mob_config.nav_target_y_offset != 0.0 {
+        let navigation_target = if sim_config.nav_target_y_offset != 0.0 {
             nearest_target.map(|target| {
                 [
                     target[0],
-                    target[1] - mob_config.nav_target_y_offset,
+                    target[1] - sim_config.nav_target_y_offset,
                     target[2],
                     target[3],
                 ]
@@ -1027,13 +1032,13 @@ fn simulate_mobs(
         };
 
         // Check detonation trigger via WASM
-        if let Some(ref ability) = mob_config.ability_params {
+        if let Some(ref ability) = sim_config.ability_params {
             if ability.detonate_trigger_distance > 0.0 {
                 let nearest_player_dist = player_positions
                     .iter()
                     .map(|pp| distance4_sq(pos, *pp).sqrt())
                     .fold(f32::MAX, f32::min);
-                let detonate_check = MobAbilityCheck::Detonate {
+                let detonate_check = EntityAbilityCheck::Detonate {
                     entity_ns: mob.entity_ns,
                     entity_type: mob.entity_type,
                     nearest_player_distance: nearest_player_dist,
@@ -1042,12 +1047,12 @@ fn simulate_mobs(
                 let wasm_t0 = Instant::now();
                 let should_detonate = wasm_manager
                     .as_mut()
-                    .and_then(|mgr| wasm_mob_ability(mgr, &detonate_check))
+                    .and_then(|mgr| wasm_entity_ability(mgr, &detonate_check))
                     .map(|r| r.should_trigger)
                     .unwrap_or(false);
                 timings.wasm_us += wasm_t0.elapsed().as_micros() as u64;
                 if should_detonate {
-                    detonations.push((mob.entity_id, pos, mob_config.clone()));
+                    detonations.push((mob.entity_id, pos, sim_config.clone()));
                     continue;
                 }
             }
@@ -1071,10 +1076,13 @@ fn simulate_mobs(
         timings.nav_us += nav_t0.elapsed().as_micros() as u64;
 
         // Steering dispatch via WASM
-        let steering_input = MobSteeringInput {
+        let steering_input = EntityTickInput {
             entity_ns: mob.entity_ns,
             entity_type: mob.entity_type,
+            entity_id: mob.entity_id,
             position: pos,
+            home_position: snapshot.entity.pose.position,
+            scale: scl,
             target_position,
             path_following,
             simple_steer: state.mob_nav_simple_steer,
@@ -1087,7 +1095,7 @@ fn simulate_mobs(
         let wasm_t0 = Instant::now();
         let Some(steering) = wasm_manager
             .as_mut()
-            .and_then(|mgr| wasm_mob_steering(mgr, &steering_input))
+            .and_then(|mgr| wasm_entity_steer(mgr, &steering_input))
         else {
             timings.wasm_us += wasm_t0.elapsed().as_micros() as u64;
             continue;
@@ -1114,14 +1122,14 @@ fn simulate_mobs(
         let mut final_forward = next_forward;
 
         // Blink ability (phase spider) via WASM
-        let has_blink = mob_config.ability_params.as_ref()
+        let has_blink = sim_config.ability_params.as_ref()
             .map(|a| a.blink_min_interval_ms > 0)
             .unwrap_or(false);
         if has_blink && now_ms >= mob.next_phase_ms {
-            let ability = mob_config.ability_params.as_ref().unwrap();
+            let ability = sim_config.ability_params.as_ref().unwrap();
             let attempted = distance4_sq(pos, next_position).sqrt();
             let resolved = distance4_sq(pos, final_position).sqrt();
-            let blink_check = MobAbilityCheck::Blink {
+            let blink_check = EntityAbilityCheck::Blink {
                 entity_ns: mob.entity_ns,
                 entity_type: mob.entity_type,
                 has_target: nearest_target.is_some(),
@@ -1135,7 +1143,7 @@ fn simulate_mobs(
             let wasm_t0 = Instant::now();
             let should_phase = wasm_manager
                 .as_mut()
-                .and_then(|mgr| wasm_mob_ability(mgr, &blink_check))
+                .and_then(|mgr| wasm_entity_ability(mgr, &blink_check))
                 .map(|r| r.should_trigger)
                 .unwrap_or(false);
             timings.wasm_us += wasm_t0.elapsed().as_micros() as u64;
@@ -1291,7 +1299,7 @@ pub(super) fn tick_entity_simulation_window(
     let mut collision_cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
     while *next_sim_ms <= now_ms && timings.sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
         collision_cache.clear();
-        state.entity_store.simulate(*next_sim_ms, &state.content_registry);
+        state.entity_store.simulate(*next_sim_ms, &state.content_registry, wasm_manager);
         let (mut step_explosions, mut step_player_modifiers) =
             simulate_mobs(state, &mut collision_cache, wasm_manager, *next_sim_ms, &mut timings);
         queued_explosions.append(&mut step_explosions);
