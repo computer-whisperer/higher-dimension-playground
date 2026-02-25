@@ -841,7 +841,96 @@ where
                 overlay_non_empty_leaves(child, visit);
             }
         }
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            // A consolidated ChunkArray may contain Empty gap entries at positions
+            // where no original data existed. If we splice the whole array, those
+            // Empty gaps overwrite base data (e.g. virgin terrain). Decompose arrays
+            // that have Empty gaps so only positions with real data are overlayed.
+            if chunk_array_has_empty_gap_default(chunk_array) {
+                overlay_chunk_array_non_empty_cells(
+                    chunk_array,
+                    core.generator_version_hash,
+                    visit,
+                );
+            } else {
+                visit(core);
+            }
+        }
         _ => visit(core),
+    }
+}
+
+/// Returns true if this ChunkArray uses a default_chunk_idx pointing to an
+/// Empty palette entry — the signature of consolidation-created gap positions.
+fn chunk_array_has_empty_gap_default(chunk_array: &ChunkArrayData) -> bool {
+    if let Some(default_idx) = chunk_array.default_chunk_idx {
+        chunk_array
+            .chunk_palette
+            .get(default_idx as usize)
+            .map_or(false, |p| *p == ChunkPayload::Empty)
+    } else {
+        false
+    }
+}
+
+/// Visit each non-Empty cell in a ChunkArray individually, skipping gap entries.
+fn overlay_chunk_array_non_empty_cells<F>(
+    chunk_array: &ChunkArrayData,
+    generator_version_hash: u64,
+    visit: &mut F,
+) where
+    F: FnMut(&RegionTreeCore),
+{
+    let Ok(indices) = chunk_array.decode_dense_indices() else {
+        return;
+    };
+    let Some(extents) = chunk_array.bounds.chunk_extents() else {
+        return;
+    };
+    let default_idx = chunk_array.default_chunk_idx;
+
+    for w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
+        for z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
+            for y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
+                for x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
+                    let local = [
+                        (x - chunk_array.bounds.min[0]) as usize,
+                        (y - chunk_array.bounds.min[1]) as usize,
+                        (z - chunk_array.bounds.min[2]) as usize,
+                        (w - chunk_array.bounds.min[3]) as usize,
+                    ];
+                    let linear = linear_cell_index(local, extents);
+                    let palette_idx = indices[linear];
+
+                    // Skip gap entries (positions at the default Empty index).
+                    if default_idx == Some(palette_idx) {
+                        continue;
+                    }
+
+                    let payload = &chunk_array.chunk_palette[palette_idx as usize];
+                    if *payload == ChunkPayload::Empty {
+                        continue;
+                    }
+
+                    let pos = [x, y, z, w];
+                    let cell_bounds = Aabb4i::new(pos, pos);
+                    let Ok(cell_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
+                        cell_bounds,
+                        vec![payload.clone()],
+                        vec![0],
+                        None,
+                        chunk_array.block_palette.clone(),
+                    ) else {
+                        continue;
+                    };
+                    visit(&RegionTreeCore {
+                        bounds: cell_bounds,
+                        kind: RegionNodeKind::ChunkArray(cell_ca),
+                        generator_version_hash,
+                    });
+                }
+            }
+        }
     }
 }
 

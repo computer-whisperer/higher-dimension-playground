@@ -4492,4 +4492,201 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn patch_save_cluster_edits_preserve_non_dirty_chunks() {
+        // Reproduce: editing multiple chunks in a cluster, then reloading —
+        // verify that non-dirty chunks survive sequential patch saves.
+        let root = test_root("patch-cluster-edits");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+
+        // Create 8 non-uniform chunks in a row (forces ChunkArray storage).
+        let mut initial_payloads = Vec::new();
+        for x in 0..8i32 {
+            let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+            blocks[0] = BlockData::simple(0, (x + 1) as u32);
+            blocks[1] = BlockData::simple(0, (x + 10) as u32);
+            let resolved =
+                ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
+            initial_payloads.push(([x, 0, 0, 0], resolved));
+        }
+
+        let initial = save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: initial_payloads.clone(),
+                entities: &[],
+                players: &[],
+                world_seed: 99,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("initial save");
+        assert_eq!(initial.generation, 1);
+
+        // Patch save 1: edit 3 chunks in the middle (cluster edit).
+        let mut patch1_dirty = Vec::new();
+        for x in 2..=4i32 {
+            let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+            blocks[0] = BlockData::simple(0, (x + 100) as u32);
+            blocks[1] = BlockData::simple(0, (x + 200) as u32);
+            let resolved =
+                ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
+            patch1_dirty.push(([x, 0, 0, 0], Some(resolved)));
+        }
+
+        let patch1 = save_state_from_chunk_payload_patch(
+            &root,
+            SaveChunkPayloadPatchRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                dirty_chunk_payloads: patch1_dirty,
+                world_seed: 99,
+                next_entity_id: 1,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                now_ms: now_ms.saturating_add(1),
+            },
+        )
+        .expect("patch save 1")
+        .expect("patch 1 should write a generation");
+        assert_eq!(patch1.generation, 2);
+
+        // Verify ALL 8 chunks survive.
+        let bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 0, 0]);
+        let loaded_chunks =
+            load_world_chunk_payloads_for_bounds(&root, bounds).expect("load after patch 1");
+        let loaded_map: HashMap<[i32; 4], ResolvedChunkPayload> =
+            loaded_chunks.into_iter().collect();
+        for x in 0..8i32 {
+            let key = [x, 0, 0, 0];
+            let resolved = loaded_map
+                .get(&key)
+                .unwrap_or_else(|| panic!("chunk {key:?} missing after patch 1"));
+            let blocks = resolved.dense_blocks();
+            if (2..=4).contains(&x) {
+                // Edited chunks should have new data.
+                assert_eq!(
+                    blocks[0],
+                    BlockData::simple(0, (x + 100) as u32),
+                    "chunk {key:?} block[0] after patch 1"
+                );
+            } else {
+                // Non-edited chunks should retain original data.
+                assert_eq!(
+                    blocks[0],
+                    BlockData::simple(0, (x + 1) as u32),
+                    "chunk {key:?} block[0] after patch 1"
+                );
+            }
+        }
+
+        // Patch save 2: edit 2 more chunks (x=1 and x=5).
+        let mut patch2_dirty = Vec::new();
+        for x in [1i32, 5] {
+            let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+            blocks[0] = BlockData::simple(0, (x + 300) as u32);
+            let resolved =
+                ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
+            patch2_dirty.push(([x, 0, 0, 0], Some(resolved)));
+        }
+
+        let patch2 = save_state_from_chunk_payload_patch(
+            &root,
+            SaveChunkPayloadPatchRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                dirty_chunk_payloads: patch2_dirty,
+                world_seed: 99,
+                next_entity_id: 1,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                now_ms: now_ms.saturating_add(2),
+            },
+        )
+        .expect("patch save 2")
+        .expect("patch 2 should write a generation");
+        assert_eq!(patch2.generation, 3);
+
+        // Verify ALL 8 chunks survive after second patch.
+        let loaded_chunks_2 =
+            load_world_chunk_payloads_for_bounds(&root, bounds).expect("load after patch 2");
+        let loaded_map_2: HashMap<[i32; 4], ResolvedChunkPayload> =
+            loaded_chunks_2.into_iter().collect();
+        for x in 0..8i32 {
+            let key = [x, 0, 0, 0];
+            let resolved = loaded_map_2
+                .get(&key)
+                .unwrap_or_else(|| panic!("chunk {key:?} missing after patch 2"));
+            let blocks = resolved.dense_blocks();
+            if x == 1 || x == 5 {
+                // Newly edited in patch 2.
+                assert_eq!(
+                    blocks[0],
+                    BlockData::simple(0, (x + 300) as u32),
+                    "chunk {key:?} block[0] after patch 2"
+                );
+            } else if (2..=4).contains(&x) {
+                // Edited in patch 1, should still be there.
+                assert_eq!(
+                    blocks[0],
+                    BlockData::simple(0, (x + 100) as u32),
+                    "chunk {key:?} block[0] after patch 2"
+                );
+            } else {
+                // Never edited (x=0,6,7), should retain original data.
+                assert_eq!(
+                    blocks[0],
+                    BlockData::simple(0, (x + 1) as u32),
+                    "chunk {key:?} block[0] after patch 2"
+                );
+            }
+        }
+
+        // Patch save 3: send a None payload for x=3 (simulating undo to virgin).
+        let patch3 = save_state_from_chunk_payload_patch(
+            &root,
+            SaveChunkPayloadPatchRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                dirty_chunk_payloads: vec![([3, 0, 0, 0], None)],
+                world_seed: 99,
+                next_entity_id: 1,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                now_ms: now_ms.saturating_add(3),
+            },
+        )
+        .expect("patch save 3")
+        .expect("patch 3 should write a generation");
+        assert_eq!(patch3.generation, 4);
+
+        // Verify: chunk x=3 should be gone (None payload = deleted from index).
+        // All OTHER chunks should survive.
+        let loaded_chunks_3 =
+            load_world_chunk_payloads_for_bounds(&root, bounds).expect("load after patch 3");
+        let loaded_map_3: HashMap<[i32; 4], ResolvedChunkPayload> =
+            loaded_chunks_3.into_iter().collect();
+        assert!(
+            !loaded_map_3.contains_key(&[3, 0, 0, 0]),
+            "chunk [3,0,0,0] should be removed after None payload"
+        );
+        for x in [0i32, 1, 2, 4, 5, 6, 7] {
+            let key = [x, 0, 0, 0];
+            assert!(
+                loaded_map_3.contains_key(&key),
+                "chunk {key:?} missing after patch 3 (should have survived)"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
 }

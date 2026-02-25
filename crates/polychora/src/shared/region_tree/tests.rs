@@ -1059,3 +1059,819 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
         Some(&BlockData::simple(0, 4))
     );
 }
+
+/// Simulates placing 4+ dense blocks in a cluster on a Uniform platform.
+/// After consolidation, edit another adjacent chunk and verify all data survives.
+/// This exercises the path: set_chunk → normalize → consolidate → set_chunk → carve.
+#[test]
+fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
+    let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
+    let mut tree = RegionChunkTree::new();
+    let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+
+    // Place dense blocks in a cluster of 4 adjacent chunks (x=2..5, y=0, z=3, w=0).
+    let mut expected_blocks: HashMap<ChunkKey, Vec<BlockData>> = HashMap::new();
+    for x in 2..=5i32 {
+        let mut blocks = vec![BlockData::simple(0, 4); chunk_volume]; // Start with platform block.
+        blocks[0] = BlockData::simple(0, (10 + x) as u32);
+        blocks[1] = BlockData::simple(0, (20 + x) as u32);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
+        assert!(
+            tree.set_chunk(key(x, 0, 3, 0), Some(resolved)),
+            "set_chunk [{x},0,3,0] should succeed"
+        );
+        expected_blocks.insert(key(x, 0, 3, 0), blocks);
+
+        // Verify ALL previously placed chunks still exist.
+        for prev_x in 2..=x {
+            let payload = tree
+                .chunk_payload(key(prev_x, 0, 3, 0))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "chunk [{prev_x},0,3,0] disappeared after editing [{x},0,3,0]"
+                    )
+                });
+            let actual = payload.dense_blocks();
+            let expected = &expected_blocks[&key(prev_x, 0, 3, 0)];
+            assert_eq!(
+                actual[0], expected[0],
+                "chunk [{prev_x},0,3,0] block[0] wrong after editing [{x},0,3,0]"
+            );
+            assert_eq!(
+                actual[1], expected[1],
+                "chunk [{prev_x},0,3,0] block[1] wrong after editing [{x},0,3,0]"
+            );
+        }
+    }
+
+    // Verify platform chunks are still uniform.
+    assert_eq!(
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 4))
+    );
+    assert_eq!(
+        tree.chunk_payload(key(7, 0, 7, 0)).unwrap().uniform_block(),
+        Some(&BlockData::simple(0, 4))
+    );
+
+    // Now edit chunk [3,0,3,0] again (already edited above) — triggers re-carve of
+    // consolidated ChunkArray.
+    {
+        let mut blocks = tree
+            .chunk_payload(key(3, 0, 3, 0))
+            .expect("chunk should exist")
+            .dense_blocks();
+        blocks[2] = BlockData::simple(0, 99);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
+        tree.set_chunk(key(3, 0, 3, 0), Some(resolved));
+        expected_blocks.get_mut(&key(3, 0, 3, 0)).unwrap()[2] = BlockData::simple(0, 99);
+    }
+
+    // Verify ALL cluster chunks survived the re-edit.
+    for x in 2..=5i32 {
+        let payload = tree
+            .chunk_payload(key(x, 0, 3, 0))
+            .unwrap_or_else(|| {
+                panic!(
+                    "chunk [{x},0,3,0] disappeared after re-editing [3,0,3,0]"
+                )
+            });
+        let actual = payload.dense_blocks();
+        let expected = &expected_blocks[&key(x, 0, 3, 0)];
+        assert_eq!(
+            actual[0], expected[0],
+            "chunk [{x},0,3,0] block[0] wrong after re-edit"
+        );
+        assert_eq!(
+            actual[1], expected[1],
+            "chunk [{x},0,3,0] block[1] wrong after re-edit"
+        );
+    }
+
+    // Add an adjacent chunk at [6,0,3,0] — outside the original cluster.
+    {
+        let mut blocks = vec![BlockData::simple(0, 4); chunk_volume];
+        blocks[0] = BlockData::simple(0, 77);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
+        tree.set_chunk(key(6, 0, 3, 0), Some(resolved));
+        expected_blocks.insert(key(6, 0, 3, 0), blocks);
+    }
+
+    // Final verification of ALL chunks.
+    for (&k, expected) in &expected_blocks {
+        let payload = tree
+            .chunk_payload(k)
+            .unwrap_or_else(|| panic!("chunk {k:?} missing in final check"));
+        let actual = payload.dense_blocks();
+        assert_eq!(
+            actual[0], expected[0],
+            "chunk {k:?} block[0] final check"
+        );
+        assert_eq!(
+            actual[1], expected[1],
+            "chunk {k:?} block[1] final check"
+        );
+    }
+
+    // Verify tree structure is valid (no overlapping children).
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}
+
+/// Simulates the server-side flow: save data containing a ChunkArray is loaded
+/// via `splice_core_in_bounds`, then individual chunks are edited via `set_chunk`.
+/// Verifies that editing one chunk within a ChunkArray does not lose sibling chunks.
+#[test]
+fn set_chunk_in_spliced_chunk_array_preserves_siblings() {
+    let ca_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 0, 0]);
+    // 8 chunks along x, each with a unique uniform material (1..=8).
+    let materials: Vec<u16> = (1..=8u16).collect();
+    let core = chunk_array_uniform_palette_core(ca_bounds, &materials);
+
+    // Splice the ChunkArray into an empty tree (simulating save load).
+    let mut tree = RegionChunkTree::new();
+    tree.splice_non_empty_core_in_bounds(ca_bounds, &core);
+
+    // Verify all 8 chunks are present.
+    for x in 0..8i32 {
+        let payload = tree
+            .chunk_payload(key(x, 0, 0, 0))
+            .unwrap_or_else(|| panic!("chunk [{x},0,0,0] missing before any edit"));
+        assert_eq!(
+            payload.uniform_block(),
+            Some(&BlockData::simple(0, (x + 1) as u32)),
+            "chunk [{x},0,0,0] has wrong material before edit"
+        );
+    }
+
+    // Edit chunk x=3 (in the middle of the array).
+    tree.set_chunk(
+        key(3, 0, 0, 0),
+        Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 99))),
+    );
+
+    // Verify the edited chunk.
+    assert_eq!(
+        tree.chunk_payload(key(3, 0, 0, 0))
+            .expect("edited chunk missing")
+            .uniform_block(),
+        Some(&BlockData::simple(0, 99))
+    );
+
+    // Verify ALL other chunks survived the edit.
+    for x in 0..8i32 {
+        if x == 3 {
+            continue;
+        }
+        let payload = tree
+            .chunk_payload(key(x, 0, 0, 0))
+            .unwrap_or_else(|| panic!("chunk [{x},0,0,0] disappeared after editing chunk [3,0,0,0]"));
+        assert_eq!(
+            payload.uniform_block(),
+            Some(&BlockData::simple(0, (x + 1) as u32)),
+            "chunk [{x},0,0,0] has wrong material after editing chunk [3,0,0,0]"
+        );
+    }
+
+    // Edit chunk x=0 (start of array).
+    tree.set_chunk(
+        key(0, 0, 0, 0),
+        Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 100))),
+    );
+
+    // Edit chunk x=7 (end of array).
+    tree.set_chunk(
+        key(7, 0, 0, 0),
+        Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 101))),
+    );
+
+    // Verify all chunks after multiple edits.
+    let expected = [100, 2, 3, 99, 5, 6, 7, 101];
+    for (x, &expected_mat) in expected.iter().enumerate() {
+        let payload = tree
+            .chunk_payload(key(x as i32, 0, 0, 0))
+            .unwrap_or_else(|| panic!("chunk [{x},0,0,0] missing after cluster edits"));
+        assert_eq!(
+            payload.uniform_block(),
+            Some(&BlockData::simple(0, expected_mat)),
+            "chunk [{x},0,0,0] has wrong material after cluster edits"
+        );
+    }
+}
+
+/// Same scenario as above but with non-uniform (dense) chunk payloads
+/// instead of uniform ones, since the bug might only manifest with
+/// complex payloads.
+#[test]
+fn set_chunk_in_spliced_chunk_array_preserves_dense_siblings() {
+    let ca_bounds = Aabb4i::new([0, 0, 0, 0], [3, 0, 0, 0]);
+    let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
+
+    // Build 4 non-uniform chunks, each with a unique pattern.
+    let mut block_palette = vec![BlockData::AIR];
+    let mut chunk_payloads = Vec::new();
+    let mut dense_indices = Vec::new();
+    for x in 0..4u32 {
+        // Each chunk has block_type = (x+1) at voxel 0, rest is AIR.
+        let block = BlockData::simple(0, x + 1);
+        let block_idx = block_palette.len() as u16;
+        block_palette.push(block.clone());
+
+        let mut materials = vec![0u16; chunk_volume];
+        materials[0] = block_idx;
+        let payload = ChunkPayload::Dense16 {
+            materials: materials.clone(),
+        };
+        let chunk_idx = chunk_payloads.len() as u16;
+        chunk_payloads.push(payload);
+        dense_indices.push(chunk_idx);
+    }
+
+    let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+        ca_bounds,
+        chunk_payloads,
+        dense_indices,
+        None,
+        block_palette,
+    )
+    .expect("chunk array must build");
+
+    let core = RegionTreeCore {
+        bounds: ca_bounds,
+        kind: RegionNodeKind::ChunkArray(chunk_array),
+        generator_version_hash: 0,
+    };
+
+    let mut tree = RegionChunkTree::new();
+    tree.splice_non_empty_core_in_bounds(ca_bounds, &core);
+
+    // Verify all 4 chunks are present with correct first voxel.
+    for x in 0..4i32 {
+        let payload = tree
+            .chunk_payload(key(x, 0, 0, 0))
+            .unwrap_or_else(|| panic!("chunk [{x},0,0,0] missing before edit"));
+        let blocks = payload.dense_blocks();
+        assert_eq!(
+            blocks[0],
+            BlockData::simple(0, (x + 1) as u32),
+            "chunk [{x},0,0,0] block[0] before edit"
+        );
+    }
+
+    // Edit chunk x=1 (middle of array).
+    let mut new_blocks = vec![BlockData::AIR; chunk_volume];
+    new_blocks[0] = BlockData::simple(0, 50);
+    new_blocks[1] = BlockData::simple(0, 51);
+    let new_payload = ResolvedChunkPayload::from_dense_blocks(&new_blocks).expect("from dense");
+    tree.set_chunk(key(1, 0, 0, 0), Some(new_payload));
+
+    // Verify edited chunk.
+    {
+        let payload = tree
+            .chunk_payload(key(1, 0, 0, 0))
+            .expect("edited chunk missing");
+        let blocks = payload.dense_blocks();
+        assert_eq!(blocks[0], BlockData::simple(0, 50));
+        assert_eq!(blocks[1], BlockData::simple(0, 51));
+    }
+
+    // Verify all other chunks survived.
+    for x in [0, 2, 3] {
+        let payload = tree
+            .chunk_payload(key(x, 0, 0, 0))
+            .unwrap_or_else(|| panic!("chunk [{x},0,0,0] disappeared after edit"));
+        let blocks = payload.dense_blocks();
+        assert_eq!(
+            blocks[0],
+            BlockData::simple(0, (x + 1) as u32),
+            "chunk [{x},0,0,0] block[0] after edit"
+        );
+    }
+
+    // Edit chunk x=2.
+    tree.set_chunk(
+        key(2, 0, 0, 0),
+        Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 60))),
+    );
+
+    // Verify ALL chunks.
+    {
+        let p0 = tree.chunk_payload(key(0, 0, 0, 0)).expect("x=0 missing after second edit");
+        assert_eq!(p0.dense_blocks()[0], BlockData::simple(0, 1));
+    }
+    {
+        let p1 = tree.chunk_payload(key(1, 0, 0, 0)).expect("x=1 missing after second edit");
+        assert_eq!(p1.dense_blocks()[0], BlockData::simple(0, 50));
+    }
+    {
+        let p2 = tree.chunk_payload(key(2, 0, 0, 0)).expect("x=2 missing after second edit");
+        assert_eq!(
+            p2.uniform_block(),
+            Some(&BlockData::simple(0, 60))
+        );
+    }
+    {
+        let p3 = tree.chunk_payload(key(3, 0, 0, 0)).expect("x=3 missing after second edit");
+        assert_eq!(p3.dense_blocks()[0], BlockData::simple(0, 4));
+    }
+}
+
+/// Simulates the full server lifecycle: bulk load from save → edits →
+/// persist_dirty_overrides query → simulate reload → verify all data.
+/// This exercises dense chunk array consolidation + dirty set interaction.
+#[test]
+fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
+    use std::collections::HashSet;
+    let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
+
+    // Build 6 dense chunks in a 3×2 cluster at y=0..1, z=0, w=0.
+    // Each has a unique block at voxel[0] and voxel[1].
+    let positions: Vec<[i32; 4]> = vec![
+        [0, 0, 0, 0],
+        [1, 0, 0, 0],
+        [2, 0, 0, 0],
+        [0, 1, 0, 0],
+        [1, 1, 0, 0],
+        [2, 1, 0, 0],
+    ];
+
+    // Build a "save tree" containing all 6 chunks as a single ChunkArray.
+    let mut save_block_palette = vec![BlockData::AIR];
+    let mut save_chunk_palette = Vec::new();
+    let mut save_dense_indices = Vec::new();
+    let mut original_blocks: HashMap<[i32; 4], Vec<BlockData>> = HashMap::new();
+
+    for (i, pos) in positions.iter().enumerate() {
+        let block_a = BlockData::simple(0, (i as u32 + 1) * 10);
+        let block_b = BlockData::simple(0, (i as u32 + 1) * 10 + 1);
+        let idx_a = save_block_palette.len() as u16;
+        save_block_palette.push(block_a.clone());
+        let idx_b = save_block_palette.len() as u16;
+        save_block_palette.push(block_b.clone());
+
+        let mut materials = vec![0u16; chunk_volume];
+        materials[0] = idx_a;
+        materials[1] = idx_b;
+        let payload = ChunkPayload::Dense16 {
+            materials: materials.clone(),
+        };
+        let chunk_idx = save_chunk_palette.len() as u16;
+        save_chunk_palette.push(payload);
+        save_dense_indices.push(chunk_idx);
+
+        let mut blocks = vec![BlockData::AIR; chunk_volume];
+        blocks[0] = block_a;
+        blocks[1] = block_b;
+        original_blocks.insert(*pos, blocks);
+    }
+
+    let save_bounds = Aabb4i::new([0, 0, 0, 0], [2, 1, 0, 0]);
+    let save_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+        save_bounds,
+        save_chunk_palette,
+        save_dense_indices,
+        None,
+        save_block_palette,
+    )
+    .expect("save chunk array must build");
+    let save_core = RegionTreeCore {
+        bounds: save_bounds,
+        kind: RegionNodeKind::ChunkArray(save_chunk_array),
+        generator_version_hash: 0,
+    };
+
+    // Phase 1: Bulk load from "save" into override tree.
+    let mut tree = RegionChunkTree::new();
+    tree.splice_non_empty_core_in_bounds(save_bounds, &save_core);
+
+    // Verify all 6 chunks loaded correctly.
+    for pos in &positions {
+        let payload = tree
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("chunk {pos:?} missing after bulk load"));
+        let blocks = payload.dense_blocks();
+        let expected = &original_blocks[pos];
+        assert_eq!(blocks[0], expected[0], "chunk {pos:?} block[0] after load");
+        assert_eq!(blocks[1], expected[1], "chunk {pos:?} block[1] after load");
+    }
+
+    // Phase 2: Edit 3 chunks (simulating apply_voxel_edit).
+    let mut dirty_save_chunks: HashSet<[i32; 4]> = HashSet::new();
+    let edited_positions = [[0, 0, 0, 0], [1, 1, 0, 0], [2, 0, 0, 0]];
+    for pos in &edited_positions {
+        let mut blocks = tree
+            .chunk_payload(*pos)
+            .expect("chunk should exist for edit")
+            .dense_blocks();
+        blocks[0] = BlockData::simple(0, 999);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(*pos, Some(resolved));
+        dirty_save_chunks.insert(*pos);
+        original_blocks.get_mut(pos).unwrap()[0] = BlockData::simple(0, 999);
+    }
+
+    // Verify all 6 chunks survive after edits.
+    for pos in &positions {
+        let payload = tree
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("chunk {pos:?} missing after edits"));
+        let blocks = payload.dense_blocks();
+        let expected = &original_blocks[pos];
+        assert_eq!(
+            blocks[0], expected[0],
+            "chunk {pos:?} block[0] after edits"
+        );
+        assert_eq!(
+            blocks[1], expected[1],
+            "chunk {pos:?} block[1] after edits"
+        );
+    }
+
+    // Phase 3: Simulate persist_dirty_overrides — query only dirty chunks.
+    let mut dirty_payloads: Vec<([i32; 4], Option<ResolvedChunkPayload>)> = Vec::new();
+    for pos in &dirty_save_chunks {
+        let resolved = tree.chunk_payload(*pos);
+        dirty_payloads.push((*pos, resolved));
+    }
+
+    // All dirty payloads should be present and non-empty.
+    for (pos, payload) in &dirty_payloads {
+        assert!(
+            payload.is_some(),
+            "dirty chunk {pos:?} returned None from override tree"
+        );
+        let blocks = payload.as_ref().unwrap().dense_blocks();
+        assert_eq!(
+            blocks[0],
+            BlockData::simple(0, 999),
+            "dirty chunk {pos:?} has wrong edit data"
+        );
+    }
+
+    // Phase 4: Simulate "save + reload" by building a new tree from:
+    // - Non-dirty chunks from the original save
+    // - Dirty chunks from the current override tree
+    let mut reload_tree = RegionChunkTree::new();
+
+    // Load the non-dirty chunks from "old save".
+    for pos in &positions {
+        if dirty_save_chunks.contains(pos) {
+            continue;
+        }
+        // Extract from the original save_core (simulating reading from disk).
+        let chunk_bounds = Aabb4i::new(*pos, *pos);
+        let sliced = slice_region_core_in_bounds(&save_core, chunk_bounds);
+        reload_tree.splice_non_empty_core_in_bounds(chunk_bounds, &sliced);
+    }
+
+    // Load the dirty chunks from the "new save" (which would have their updated data).
+    for (pos, payload) in &dirty_payloads {
+        if let Some(resolved) = payload {
+            reload_tree.set_chunk(*pos, Some(resolved.clone()));
+        }
+    }
+
+    // Phase 5: Verify all 6 chunks in the reloaded tree.
+    for pos in &positions {
+        let payload = reload_tree
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("chunk {pos:?} missing after reload"));
+        let blocks = payload.dense_blocks();
+        let expected = &original_blocks[pos];
+        assert_eq!(
+            blocks[0], expected[0],
+            "chunk {pos:?} block[0] after reload"
+        );
+        assert_eq!(
+            blocks[1], expected[1],
+            "chunk {pos:?} block[1] after reload"
+        );
+    }
+
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+    if let Some(root) = reload_tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}
+
+/// Tests the scenario where chunks are loaded INDIVIDUALLY (one at a time)
+/// from a save ChunkArray, triggering progressive consolidation, then edited.
+/// This is the exact server flow when ensure_persisted_bounds_loaded loads
+/// one chunk at a time as the player edits different positions.
+#[test]
+fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
+    let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
+
+    // Build a save ChunkArray with 4 dense chunks.
+    let positions: Vec<[i32; 4]> = vec![
+        [0, 0, 0, 0],
+        [1, 0, 0, 0],
+        [2, 0, 0, 0],
+        [3, 0, 0, 0],
+    ];
+
+    let mut save_block_palette = vec![BlockData::AIR];
+    let mut save_chunk_palette = Vec::new();
+    let mut save_dense_indices = Vec::new();
+    let mut expected_blocks: HashMap<[i32; 4], Vec<BlockData>> = HashMap::new();
+
+    for (i, pos) in positions.iter().enumerate() {
+        let block = BlockData::simple(0, (i as u32 + 1) * 100);
+        let block_idx = save_block_palette.len() as u16;
+        save_block_palette.push(block.clone());
+
+        let mut materials = vec![0u16; chunk_volume];
+        materials[0] = block_idx;
+        materials[i + 1] = block_idx; // unique position per chunk
+        let payload = ChunkPayload::Dense16 { materials };
+        let chunk_idx = save_chunk_palette.len() as u16;
+        save_chunk_palette.push(payload);
+        save_dense_indices.push(chunk_idx);
+
+        let mut blocks = vec![BlockData::AIR; chunk_volume];
+        blocks[0] = block.clone();
+        blocks[i + 1] = block;
+        expected_blocks.insert(*pos, blocks);
+    }
+
+    let save_bounds = Aabb4i::new([0, 0, 0, 0], [3, 0, 0, 0]);
+    let save_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+        save_bounds,
+        save_chunk_palette,
+        save_dense_indices,
+        None,
+        save_block_palette,
+    )
+    .expect("save chunk array must build");
+    let save_core = RegionTreeCore {
+        bounds: save_bounds,
+        kind: RegionNodeKind::ChunkArray(save_chunk_array),
+        generator_version_hash: 0,
+    };
+
+    // Load chunks ONE AT A TIME (simulating individual ensure_persisted_bounds_loaded calls).
+    let mut tree = RegionChunkTree::new();
+    for (load_idx, pos) in positions.iter().enumerate() {
+        let chunk_bounds = Aabb4i::new(*pos, *pos);
+        let sliced = slice_region_core_in_bounds(&save_core, chunk_bounds);
+        tree.splice_non_empty_core_in_bounds(chunk_bounds, &sliced);
+
+        // After each load, verify ALL previously loaded chunks are still correct.
+        for prev_pos in &positions[..=load_idx] {
+            let payload = tree.chunk_payload(*prev_pos).unwrap_or_else(|| {
+                panic!(
+                    "chunk {prev_pos:?} disappeared after loading {pos:?} (load #{load_idx})"
+                )
+            });
+            let blocks = payload.dense_blocks();
+            let expected = &expected_blocks[prev_pos];
+            assert_eq!(
+                blocks[0], expected[0],
+                "chunk {prev_pos:?} block[0] wrong after loading {pos:?}"
+            );
+        }
+    }
+
+    // Now edit chunk [1,0,0,0].
+    {
+        let mut blocks = tree
+            .chunk_payload(key(1, 0, 0, 0))
+            .expect("chunk should exist")
+            .dense_blocks();
+        blocks[0] = BlockData::simple(0, 777);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
+        expected_blocks.get_mut(&[1, 0, 0, 0]).unwrap()[0] = BlockData::simple(0, 777);
+    }
+
+    // Verify ALL chunks after edit.
+    for pos in &positions {
+        let payload = tree
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("chunk {pos:?} missing after editing [1,0,0,0]"));
+        let blocks = payload.dense_blocks();
+        let expected = &expected_blocks[pos];
+        assert_eq!(
+            blocks[0], expected[0],
+            "chunk {pos:?} block[0] after editing [1,0,0,0]"
+        );
+    }
+
+    // Edit chunk [3,0,0,0].
+    {
+        let mut blocks = tree
+            .chunk_payload(key(3, 0, 0, 0))
+            .expect("chunk should exist")
+            .dense_blocks();
+        blocks[0] = BlockData::simple(0, 888);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(key(3, 0, 0, 0), Some(resolved));
+        expected_blocks.get_mut(&[3, 0, 0, 0]).unwrap()[0] = BlockData::simple(0, 888);
+    }
+
+    // Verify ALL chunks after second edit.
+    for pos in &positions {
+        let payload = tree
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("chunk {pos:?} missing after editing [3,0,0,0]"));
+        let blocks = payload.dense_blocks();
+        let expected = &expected_blocks[pos];
+        assert_eq!(
+            blocks[0], expected[0],
+            "chunk {pos:?} block[0] after second edit"
+        );
+    }
+
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}
+
+/// Tests a critical edge case: after consolidation creates a ChunkArray with
+/// default_chunk_idx=Some(0), subsequent carving and re-consolidation preserves
+/// all data correctly through multiple cycles.
+#[test]
+fn repeated_carve_consolidation_cycles_preserve_dense_data() {
+    let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
+
+    let mut tree = RegionChunkTree::new();
+    let mut expected: HashMap<[i32; 4], Vec<BlockData>> = HashMap::new();
+
+    // Insert 4 chunks one at a time (each triggers potential consolidation).
+    for i in 0..4i32 {
+        let pos = [i, 0, 0, 0];
+        let mut blocks = vec![BlockData::AIR; chunk_volume];
+        blocks[0] = BlockData::simple(0, (i + 1) as u32);
+        blocks[1] = BlockData::simple(0, (i + 1) as u32 * 10);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(pos, Some(resolved));
+        expected.insert(pos, blocks);
+    }
+
+    // Cycle 1: edit chunk [1,0,0,0] → carves consolidated array
+    {
+        let mut blocks = tree.chunk_payload(key(1, 0, 0, 0)).unwrap().dense_blocks();
+        blocks[2] = BlockData::simple(0, 42);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
+        expected.get_mut(&[1, 0, 0, 0]).unwrap()[2] = BlockData::simple(0, 42);
+    }
+
+    // Verify after cycle 1.
+    for (pos, exp) in &expected {
+        let payload = tree
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("chunk {pos:?} missing after cycle 1"));
+        let blocks = payload.dense_blocks();
+        assert_eq!(blocks[0], exp[0], "cycle 1: chunk {pos:?} block[0]");
+        assert_eq!(blocks[1], exp[1], "cycle 1: chunk {pos:?} block[1]");
+        assert_eq!(blocks[2], exp[2], "cycle 1: chunk {pos:?} block[2]");
+    }
+
+    // Cycle 2: edit chunk [3,0,0,0] → carves again
+    {
+        let mut blocks = tree.chunk_payload(key(3, 0, 0, 0)).unwrap().dense_blocks();
+        blocks[3] = BlockData::simple(0, 77);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(key(3, 0, 0, 0), Some(resolved));
+        expected.get_mut(&[3, 0, 0, 0]).unwrap()[3] = BlockData::simple(0, 77);
+    }
+
+    // Cycle 3: edit chunk [0,0,0,0] → carves again
+    {
+        let mut blocks = tree.chunk_payload(key(0, 0, 0, 0)).unwrap().dense_blocks();
+        blocks[4] = BlockData::simple(0, 55);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(key(0, 0, 0, 0), Some(resolved));
+        expected.get_mut(&[0, 0, 0, 0]).unwrap()[4] = BlockData::simple(0, 55);
+    }
+
+    // Cycle 4: edit chunk [2,0,0,0] → carves again
+    {
+        let mut blocks = tree.chunk_payload(key(2, 0, 0, 0)).unwrap().dense_blocks();
+        blocks[5] = BlockData::simple(0, 33);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(key(2, 0, 0, 0), Some(resolved));
+        expected.get_mut(&[2, 0, 0, 0]).unwrap()[5] = BlockData::simple(0, 33);
+    }
+
+    // Cycle 5: re-edit chunk [1,0,0,0] again
+    {
+        let mut blocks = tree.chunk_payload(key(1, 0, 0, 0)).unwrap().dense_blocks();
+        blocks[6] = BlockData::simple(0, 11);
+        let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
+        tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
+        expected.get_mut(&[1, 0, 0, 0]).unwrap()[6] = BlockData::simple(0, 11);
+    }
+
+    // Final verification of ALL chunks and ALL voxels.
+    for (pos, exp) in &expected {
+        let payload = tree
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("chunk {pos:?} missing after 5 carve cycles"));
+        let blocks = payload.dense_blocks();
+        for voxel_idx in 0..7 {
+            assert_eq!(
+                blocks[voxel_idx], exp[voxel_idx],
+                "chunk {pos:?} block[{voxel_idx}] after 5 carve cycles"
+            );
+        }
+    }
+
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}
+
+/// Regression test for the chunk disappearance bug.
+///
+/// Scenario: The override tree has scattered chunks that consolidate into a
+/// ChunkArray spanning gap positions (consolidation requires >= 25% density).
+/// The virgin field has solid terrain. overlay_core_in_bounds must NOT overwrite
+/// virgin terrain at gap positions with Empty entries from the consolidated array.
+#[test]
+fn overlay_preserves_virgin_terrain_at_chunk_array_gaps() {
+    use crate::shared::chunk_payload::ChunkArrayData;
+    use crate::shared::voxel::CHUNK_VOLUME;
+
+    let stone = BlockData::simple(0, 11);
+    let dirt = BlockData::simple(0, 7);
+
+    // Build a "virgin terrain" tree: a Uniform solid block.
+    let virgin_bounds = Aabb4i::new([-1, 0, -1, 0], [0, 0, 0, 0]);
+    let virgin_core = RegionTreeCore {
+        bounds: virgin_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 42,
+    };
+
+    // Build an override tree with chunks at diagonal positions [-1,0,-1,0] and
+    // [0,0,0,0]. The bounding box is 2×1×2×1 = 4 cells, with 2 populated.
+    // Density = 50% >= 25%, so consolidation triggers.
+    // Positions [-1,0,0,0] and [0,0,-1,0] become Empty gap entries.
+    let mut override_tree = RegionChunkTree::new();
+
+    let mut dirt_voxels = vec![BlockData::AIR; CHUNK_VOLUME];
+    dirt_voxels[0] = dirt.clone();
+    let dirt_payload = ResolvedChunkPayload::from_dense_blocks(&dirt_voxels).expect("from dense");
+
+    override_tree.set_chunk(key(-1, 0, -1, 0), Some(dirt_payload.clone()));
+    override_tree.set_chunk(key(0, 0, 0, 0), Some(dirt_payload.clone()));
+
+    // Verify that consolidation actually happened: the override tree should have
+    // a ChunkArray (not individual branches/leaves) as the root or near the root.
+    let override_slice = override_tree.slice_core_in_bounds(virgin_bounds);
+    let has_chunk_array = has_chunk_array_node(&override_slice);
+    assert!(
+        has_chunk_array,
+        "override tree should consolidate into a ChunkArray for this test to be valid"
+    );
+
+    // Compose: virgin + overrides (same as query_region_core does).
+    let mut composed = RegionChunkTree::new();
+    let _ = composed.splice_non_empty_core_in_bounds(virgin_bounds, &virgin_core);
+    let _ = composed.overlay_core_in_bounds(virgin_bounds, &override_slice);
+
+    // Verify: overridden positions should have dirt at voxel 0.
+    let overridden_positions = [key(-1, 0, -1, 0), key(0, 0, 0, 0)];
+    for pos in &overridden_positions {
+        let payload = composed
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("overridden chunk {pos:?} missing"));
+        let blocks = payload.dense_blocks();
+        assert_eq!(
+            blocks[0], dirt,
+            "overridden chunk {pos:?} voxel[0] should be dirt"
+        );
+    }
+
+    // Verify: gap positions should still have the virgin stone block.
+    let gap_positions = [key(-1, 0, 0, 0), key(0, 0, -1, 0)];
+    for pos in &gap_positions {
+        let payload = composed
+            .chunk_payload(*pos)
+            .unwrap_or_else(|| panic!("virgin chunk {pos:?} missing after overlay"));
+        let blocks = payload.dense_blocks();
+        assert_eq!(
+            blocks[0], stone,
+            "gap position {pos:?} should still have virgin stone, not be overwritten by Empty"
+        );
+    }
+}
+
+fn has_chunk_array_node(core: &RegionTreeCore) -> bool {
+    match &core.kind {
+        RegionNodeKind::ChunkArray(_) => true,
+        RegionNodeKind::Branch(children) => children.iter().any(has_chunk_array_node),
+        _ => false,
+    }
+}
