@@ -1,58 +1,79 @@
-# Higher Dimension Playground
+# Polychora (Higher Dimension Playground)
 
-A 4D rendering engine for visualizing tesseracts (hypercubes) and other four-dimensional geometry using Vulkan.
+Polychora is a genuine 4D voxel game engine and multiplayer sandbox built on Vulkan.
 
-## Overview
+It started as a rendering experiment and has evolved into a full 4D world simulation stack:
+- 4D player movement and camera control
+- real-time voxel world editing
+- procedural 4D world generation (structures + mazes)
+- server-authoritative multiplayer with mob simulation
+- multiple rendering backends, including a dedicated voxel traversal path
 
-This project renders 4D geometry with multiple backends. It supports three rendering pipelines:
+## What "Genuine 4D" Means Here
 
-- **Tetra Ray Tracing** - Monte Carlo/path-traced tetrahedron intersections in 4D
-- **Tetra Rasterization** - Rasterization extended to 4D with ZW-depth integration
-- **Voxel Traversal Engine (VTE)** - Native voxel chunk/cell traversal with Stage-A/Stage-B resolve
+This engine does not fake 4D as hidden 3D slices.
 
-## Features
+- World coordinates are spatial `X/Y/Z/W` (with `W` as space, not time)
+- Camera/view math is 4D with explicit 4D basis vectors and 4D projection
+- Rotation math supports all six spatial planes (`XY`, `XZ`, `XW`, `YZ`, `YW`, `ZW`)
+- Voxel storage and traversal are native 4D chunk/cell structures
+- Players can navigate and build geometry that is impossible in ordinary 3D space
 
-### Implemented
+## Core Capabilities
 
-- **4D Math Library** (`common/`)
-  - Generic N-dimensional vectors (`VecN<N>`) and matrices (`MatN<N>`)
-  - 4D transformations: translation, rotation (in any plane), scaling
-  - Normal calculation for 3D hyperplanes in 4D
-  - Combinatorial utilities for face/simplex generation
+- **4D voxel world runtime**
+  - Chunked 4D voxel world model (`8x8x8x8` chunks)
+  - Break/place/pick gameplay editing
+  - Collision and movement resolved against 4D voxel solids
 
-- **Hypercube Geometry** (`src/hypercube.rs`)
-  - Vertex generation for D-dimensional hypercubes
-  - Edge (1-face) generation with proper connectivity
-  - Cell (3-face) generation for tesseracts
-  - Simplex decomposition of cells into tetrahedra
+- **Procedural world generation**
+  - Base world modes (`FlatFloor`, `MassivePlatforms`)
+  - Rich procedural structure placement from embedded blueprints
+  - Procedural 4D maze generation with cached compiled topology
 
-- **Rendering Engine** (`src/render.rs`)
-  - Vulkan-based compute and graphics pipelines via vulkano
-  - Model instancing with per-cell material assignment
-  - View matrix transforms for camera positioning
-  - Configurable focal lengths for XY and ZW projections
-  - Runtime-selectable backend: tetra-raster, tetra-raytrace, or voxel-traversal
+- **4D rendering backends**
+  - **Voxel Traversal Engine (VTE)**: native 4D chunk/cell ray traversal
+  - **Tetra Ray Tracing**: path-traced tetrahedron intersections in 4D
+  - **Tetra Rasterization**: tetra pipeline with ZW integration
+  - Runtime backend selection for comparison/debugging
 
-- **Shader System** (`slang-shaders/`)
-  - Written in [Slang](https://shader-slang.com/) for stable generics support
-  - Raytracing: tetrahedron preprocessing, ray-tetrahedron intersection, path tracing
-  - Rasterization: tetrahedron processing, per-pixel ZW integration, edge rendering
-  - VTE: chunk DDA + in-chunk voxel DDA, plus Stage-B display modes
-  - Presentation: line wireframe rendering, buffer display
+- **Multiplayer + server simulation**
+  - Server-authoritative world overlay + edits
+  - Streaming subtree world replication
+  - Mob simulation with 4D pathfinding, LOS, collision, and abilities
 
-- **Procedural Materials** (`slang-shaders/src/materials.slang`)
-  - 34 material presets (colors, floor, light source, mirrors, animated and Minecraft-style procedural blocks)
-  - PBR properties: albedo, metallic, roughness, luminance
+- **Plugin-driven content**
+  - Content registry for blocks/entities/textures
+  - First-party WASM content plugin (`polychora-content`)
+  - Separate host/plugin ABI for steering + ability logic
 
-- **Output Modes**
-  - Windowed display with winit
-  - Headless rendering for offline frame generation
-  - EXR export for high dynamic range output
+## High-Level Architecture
 
-### Not Yet Implemented
+- `common/`:
+  Shared N-dimensional math/types used by CPU and GPU paths.
 
-- Custom scene loading (currently hardcoded demo scene)
-- WebGPU/WASM support (infrastructure exists in `pkg/`)
+- `crates/polychora/`:
+  Main game client + dedicated server binary.
+
+- `crates/polychora-content/`:
+  First-party WASM content plugin (block/entity declarations + mob behavior).
+
+- `crates/polychora-plugin-api/`:
+  Stable ABI/shared types for content plugins.
+
+- `src/` + `slang-shaders/`:
+  Core rendering infrastructure and shader pipelines.
+
+## How Rendering Works (VTE View)
+
+VTE explicitly separates 4D viewing into two stages:
+
+1. **Stage A (4D -> 3D hyper-image)**
+   Cast rays through the 4D voxel world using 4D basis vectors and chunk/cell DDA.
+2. **Stage B (3D -> 2D display operator)**
+   Resolve Stage A samples into final screen output (`integral`, `slice`, `thick-slice`, debug modes).
+
+This keeps the hidden dimension as a first-class rendering quantity instead of burying it in ad-hoc projections.
 
 ## Building
 
@@ -76,11 +97,11 @@ yay -S shader-slang-bin spirv-tools
 # Build (compiles shaders automatically)
 cargo build --release
 
-# Interactive FPS-style explorer (WASD + mouse look, Q/E for W-axis)
+# Interactive 4D voxel explorer/game client
 # (workspace default points to crates/polychora)
 cargo run --release
 
-# Basic multiplayer state server
+# Dedicated multiplayer state server
 cargo run -p polychora --bin polychora-server --release -- --bind 0.0.0.0:4000
 
 # Demo with pre-set camera (supports --headless, --raytrace, --edges, etc.)
@@ -89,70 +110,6 @@ cargo run -p demo --release
 # Demo headless render to PNG
 cargo run -p demo --release -- --headless
 ```
-
-## Project Structure
-
-```
-higher-dimension-playground/
-├── src/                     # Core library
-│   ├── lib.rs               # Library root
-│   ├── render.rs            # Vulkan rendering context and pipelines
-│   ├── hypercube.rs         # Hypercube geometry generation
-│   ├── matrix_operations.rs # 4D transformation matrices
-│   └── vulkan_setup.rs      # Vulkan device/instance initialization
-├── crates/
-│   ├── polychora/           # Interactive FPS-style 4D explorer
-│   │   └── src/
-│   │       ├── main.rs      # App struct, event loop, mouse grab
-│   │       ├── camera.rs    # Camera4D: 5-angle orientation, auto-leveling
-│   │       ├── input.rs     # InputState: keys, mouse buttons, scroll, rotation modes
-│   │       ├── scene.rs     # Demo scene builder
-│   │       ├── multiplayer.rs # Multiplayer client protocol + socket threads
-│   │       └── bin/polychora-server.rs # Dedicated server binary entrypoint
-│   ├── demo/                # CLI demo with pre-set camera angles
-│   │   └── src/main.rs      # Headless/windowed demo, CLI options
-│   └── exr-converter/       # Standalone EXR recompression tool
-├── common/                  # Shared math library (CPU + GPU compatible)
-│   └── src/
-│       ├── lib.rs           # Data structures (must match Slang types)
-│       ├── vec_n.rs         # Generic N-dimensional vectors
-│       ├── mat_n.rs         # Generic N-dimensional matrices
-│       └── layout_verify.rs # Struct layout verification tests
-├── slang-shaders/           # GPU shaders in Slang
-│   └── src/
-│       ├── math.slang       # Generic VecN/MatN for GPU
-│       ├── types.slang      # Shared data structures
-│       ├── materials.slang  # Procedural material system
-│       ├── raytracer.slang  # 4D path tracing
-│       ├── rasterizer.slang # 4D rasterization + near-plane clipping
-│       └── present.slang    # Screen presentation
-└── build.rs                 # Slang shader compilation
-```
-
-## How It Works
-
-### 4D to 2D Projection
-
-1. **Tesseract decomposition**: The 8 cubic cells of a tesseract are each divided into 6 tetrahedra (total 48 tetrahedra per tesseract)
-2. **Model transform**: Each model instance applies a 5x5 homogeneous transformation matrix
-3. **4D viewing**: The view matrix positions the camera in 4D space
-4. **Dual projection**: Points are projected first from 4D→3D (using ZW focal length), then 3D→2D (using XY focal length)
-
-### Raytracing Pipeline
-
-1. **Tetrahedron preprocessing** - Transform model tetrahedra to world space, compute normals
-2. **Ray generation** - Cast rays from camera with jittered sampling
-3. **Intersection** - Ray-tetrahedron intersection in 4D
-4. **Shading** - Monte Carlo path tracing with material sampling
-5. **Accumulation** - Progressive rendering with frame averaging
-
-### Demo Scene
-
-The default scene includes:
-- Central light-emitting tesseract
-- 16 outer colored tesseracts in a 2x2x2x2 grid
-- Reflective floor plane extending in XZW
-- Mirror walls for enclosure
 
 ## Configuration
 
