@@ -11,7 +11,6 @@ use crate::shared::voxel::{
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use crate::content_registry::ContentRegistry;
 use std::sync::Arc;
 
 mod flat_world_generator;
@@ -286,7 +285,6 @@ fn build_server_world_field(
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<crate::server::procgen::StructureCell>,
-    content_registry: Arc<ContentRegistry>,
 ) -> ServerWorldField {
     match base_kind {
         BaseWorldKind::MassivePlatforms { .. } => {
@@ -296,7 +294,6 @@ fn build_server_world_field(
                 world_seed,
                 procgen_structures,
                 blocked_cells,
-                content_registry,
             ))
         }
         BaseWorldKind::FlatFloor { .. } | BaseWorldKind::Empty => {
@@ -306,7 +303,6 @@ fn build_server_world_field(
                 world_seed,
                 procgen_structures,
                 blocked_cells,
-                content_registry,
             ))
         }
     }
@@ -319,10 +315,9 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         world_seed: u64,
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
-        content_registry: Arc<ContentRegistry>,
     ) -> Self {
         let field =
-            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, blocked_cells, content_registry);
+            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, blocked_cells);
         Self {
             field,
             override_chunks: RegionChunkTree::from_chunks(chunk_payloads),
@@ -341,7 +336,6 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
         now_ms: u64,
-        content_registry: Arc<ContentRegistry>,
     ) -> io::Result<Self> {
         let metadata =
             save_v4::load_or_init_state_metadata(root, default_base_kind, world_seed, now_ms)?;
@@ -352,7 +346,6 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             runtime_world_seed,
             procgen_structures,
             blocked_cells,
-            content_registry,
         );
         Ok(Self {
             field,
@@ -676,6 +669,7 @@ pub type ServerWorldOverlay = PassthroughWorldOverlay<ServerWorldField>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content_registry::ContentRegistry;
     use crate::shared::voxel::BaseWorldKind;
 
     fn test_registry() -> Arc<ContentRegistry> {
@@ -731,7 +725,7 @@ mod tests {
         query_bounds: Aabb4i,
     ) -> Vec<u16> {
         let field =
-            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, HashSet::new(), test_registry());
+            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, HashSet::new());
         assert!(query_bounds.contains_chunk(chunk_key));
         let core = field.query_region_core(
             QueryVolume {
@@ -768,7 +762,6 @@ mod tests {
             123,
             false,
             HashSet::new(),
-            test_registry(),
         );
 
         let changed_a = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 3));
@@ -789,7 +782,6 @@ mod tests {
             123,
             false,
             HashSet::new(),
-            test_registry(),
         );
 
         let _ = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 1));
@@ -811,7 +803,6 @@ mod tests {
             123,
             false,
             HashSet::new(),
-            test_registry(),
         );
 
         let _ = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 5));
@@ -829,7 +820,6 @@ mod tests {
             777,
             false,
             HashSet::new(),
-            test_registry(),
         );
 
         let (chunk_pos, voxel_idx) = world_to_chunk(0, -1, 0, 0);
@@ -872,7 +862,6 @@ mod tests {
             991,
             false,
             HashSet::new(),
-            test_registry(),
         );
 
         let composed = overlay.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -900,7 +889,6 @@ mod tests {
             1337,
             false,
             HashSet::new(),
-            test_registry(),
         );
         let query_bounds = Aabb4i::new([0, -1, 0, 0], [0, -1, 0, 0]);
         let core = overlay.query_region_core(
@@ -924,7 +912,6 @@ mod tests {
             1337,
             true,
             HashSet::new(),
-            test_registry(),
         );
         let edit_pos = [0, -1, 0, 0];
         let (chunk_pos, voxel_idx) =

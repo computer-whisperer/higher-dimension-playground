@@ -464,8 +464,8 @@ impl ContentRegistry {
     }
 
     /// Resolve (namespace, block_type) → GPU material token.
-    /// Deprecated: use `MaterialResolver::resolve_block()` instead.
-    #[deprecated(note = "use MaterialResolver::resolve_block() instead")]
+    /// Prefer `MaterialResolver::resolve_block()` in render code; this method
+    /// is used by save/load and server code that lacks a `MaterialResolver`.
     pub fn block_material_token(&self, namespace: u32, block_type: u32) -> u16 {
         self.resolve_block_entry(namespace, block_type)
             .map(|e| e.material_token)
@@ -500,59 +500,6 @@ impl ContentRegistry {
     }
 
     // -----------------------------------------------------------------------
-    // Material-token-based lookups (reverse: token → block info)
-    // Deprecated: use block_name/block_color/block_entry via (namespace, block_type) instead.
-    // These methods are retained for migration code and CPU render fallback.
-    // -----------------------------------------------------------------------
-
-    /// Get material name by token.
-    #[deprecated(note = "use block_name(namespace, block_type) instead")]
-    pub fn material_name_by_token(&self, token: u16) -> &str {
-        self.token_to_block
-            .get(&token)
-            .and_then(|key| self.blocks.get(key))
-            .map(|e| e.name.as_str())
-            .unwrap_or("Unknown")
-    }
-
-    /// Get material color by token.
-    #[deprecated(note = "use block_color(namespace, block_type) instead")]
-    pub fn material_color_by_token(&self, token: u16) -> [u8; 3] {
-        self.token_to_block
-            .get(&token)
-            .and_then(|key| self.blocks.get(key))
-            .map(|e| e.color)
-            .unwrap_or([128, 128, 128])
-    }
-
-    /// Get material category label by token.
-    #[deprecated(note = "use block_category_label(namespace, block_type) instead")]
-    pub fn material_category_label_by_token(&self, token: u16) -> &'static str {
-        self.token_to_block
-            .get(&token)
-            .and_then(|key| self.blocks.get(key))
-            .map(|e| e.category.label())
-            .unwrap_or("Unknown")
-    }
-
-    /// Get the block entry for a material token.
-    #[deprecated(note = "use block_entry(namespace, block_type) instead")]
-    pub fn block_entry_by_token(&self, token: u16) -> Option<&BlockEntry> {
-        self.token_to_block
-            .get(&token)
-            .and_then(|key| self.blocks.get(key))
-    }
-
-    /// Convert a material token to a `BlockData` with proper namespace and block type.
-    #[deprecated(note = "use block_data_from_material_token() for migration code")]
-    #[allow(deprecated)]
-    pub fn block_data_for_token(&self, token: u16) -> BlockData {
-        self.block_entry_by_token(token)
-            .map(|entry| BlockData::simple(entry.namespace, entry.block_type))
-            .unwrap_or(BlockData::AIR)
-    }
-
-    // -----------------------------------------------------------------------
     // Iteration / counts
     // -----------------------------------------------------------------------
 
@@ -566,16 +513,6 @@ impl ContentRegistry {
     /// Replacement for `MATERIALS.len()`.
     pub fn block_count(&self) -> usize {
         self.block_order.len()
-    }
-
-    /// Maximum material token assigned so far.
-    #[deprecated(note = "use block_count() instead")]
-    pub fn max_material_token(&self) -> u16 {
-        if self.next_procedural_token > 0 {
-            self.next_procedural_token - 1
-        } else {
-            0
-        }
     }
 
     // -----------------------------------------------------------------------

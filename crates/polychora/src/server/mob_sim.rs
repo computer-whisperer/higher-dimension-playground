@@ -1330,7 +1330,6 @@ mod tests {
             0,
             false,
             HashSet::new(),
-            test_registry(),
         );
         ServerState::new(world, 1, false, false, Instant::now(), test_registry())
     }

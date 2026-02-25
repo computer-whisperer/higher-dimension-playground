@@ -1,5 +1,4 @@
 use super::{QueryDetail, QueryVolume, WorldField};
-use crate::content_registry::ContentRegistry;
 use crate::server::procgen;
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 #[cfg(test)]
@@ -56,7 +55,6 @@ pub struct MassivePlatformsWorldGenerator {
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<procgen::StructureCell>,
-    content_registry: Arc<ContentRegistry>,
 }
 
 impl std::fmt::Debug for MassivePlatformsWorldGenerator {
@@ -77,14 +75,12 @@ impl MassivePlatformsWorldGenerator {
         world_seed: u64,
         procgen_structures: bool,
         blocked_cells: HashSet<procgen::StructureCell>,
-        content_registry: Arc<ContentRegistry>,
     ) -> Self {
         Self {
             platform_voxel: platform_voxel_from_base_kind(base_kind),
             world_seed,
             procgen_structures,
             blocked_cells,
-            content_registry,
         }
     }
 
@@ -793,10 +789,6 @@ mod tests {
     use crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
     use std::collections::HashMap;
 
-    fn test_registry() -> Arc<ContentRegistry> {
-        Arc::new(crate::plugin_loader::create_full_registry())
-    }
-
     fn payload_at_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Option<ResolvedChunkPayload> {
         let bounds = Aabb4i::new(chunk_key, chunk_key);
         collect_non_empty_chunks_from_core_in_bounds(core, bounds)
@@ -826,7 +818,6 @@ mod tests {
             seed,
             true,
             HashSet::new(),
-            test_registry(),
         );
         let bounds = Aabb4i::new([-96, -16, -96, -96], [96, 48, 96, 96]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -860,7 +851,6 @@ mod tests {
             7,
             false,
             HashSet::new(),
-            test_registry(),
         );
         let bounds = Aabb4i::new([3, 0, 0, 0], [2, 0, 0, 0]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -878,7 +868,6 @@ mod tests {
             1337,
             false,
             HashSet::new(),
-            test_registry(),
         );
         let bounds = Aabb4i::new([-96, -2, -96, -96], [96, 30, 96, 96]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -903,7 +892,6 @@ mod tests {
             1337,
             false,
             HashSet::new(),
-            test_registry(),
         );
         let bounds = Aabb4i::new([-1, -1, -1, -1], [1, 1, 1, 1]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -922,7 +910,6 @@ mod tests {
             1337,
             true,
             HashSet::new(),
-            test_registry(),
         );
         let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
         let platform = PlatformInstance {
@@ -975,7 +962,6 @@ mod tests {
 
     #[test]
     fn procgen_structure_spawning_reaches_multiple_y_levels() {
-        let registry = test_registry();
         let seeded = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
                 material: BlockData::simple(0, 11),
@@ -984,7 +970,6 @@ mod tests {
             1337,
             true,
             HashSet::new(),
-            registry.clone(),
         );
         let no_procgen = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
@@ -994,7 +979,6 @@ mod tests {
             1337,
             false,
             HashSet::new(),
-            registry,
         );
         let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
         let search = Aabb4i::new([-96, -64, -96, -96], [96, 96, 96, 96]);
@@ -1104,7 +1088,6 @@ mod tests {
 
     #[test]
     fn procgen_chunks_are_anchored_to_some_platform_volume() {
-        let registry = test_registry();
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
                 material: BlockData::simple(0, 11),
@@ -1113,7 +1096,6 @@ mod tests {
             1337,
             true,
             HashSet::new(),
-            registry.clone(),
         );
         let no_procgen = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
@@ -1123,7 +1105,6 @@ mod tests {
             1337,
             false,
             HashSet::new(),
-            registry,
         );
         let bounds = Aabb4i::new([-24, -8, -24, -24], [24, 36, 24, 24]);
         let with_structures =
@@ -1203,7 +1184,6 @@ mod tests {
             seed,
             true,
             HashSet::new(),
-            test_registry(),
         );
 
         let chunk_key = find_platform_chunk_key(seed);

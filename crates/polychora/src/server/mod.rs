@@ -301,7 +301,6 @@ fn initialize_state(
         config.procgen_structures,
         HashSet::new(),
         crate::save_v4::now_unix_ms(),
-        config.content_registry.clone(),
     )?;
     let runtime_world_seed = initial_world.world_seed();
     let next_object_id = initial_world.persisted_next_entity_id().max(1);

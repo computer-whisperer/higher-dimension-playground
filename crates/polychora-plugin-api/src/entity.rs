@@ -10,14 +10,6 @@ pub enum EntityCategory {
     Mob,
 }
 
-/// Behavioural archetype tag for mob AI dispatch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MobArchetype {
-    Seeker,
-    Creeper4d,
-    PhaseSpider,
-}
-
 /// How the engine simulates an entity each tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SimulationMode {
@@ -34,15 +26,6 @@ pub enum MobLocomotionMode {
     #[default]
     Walking,
     Flying,
-}
-
-/// Default movement parameters for a mob archetype.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MobArchetypeDefaults {
-    pub move_speed: f32,
-    pub preferred_distance: f32,
-    pub tangent_weight: f32,
-    pub locomotion: MobLocomotionMode,
 }
 
 /// Data-driven entity simulation configuration declared in the WASM manifest.

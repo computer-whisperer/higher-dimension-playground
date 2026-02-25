@@ -1,5 +1,4 @@
 use super::{QueryDetail, QueryVolume, WorldField};
-use crate::content_registry::ContentRegistry;
 use crate::server::procgen;
 use crate::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
@@ -17,7 +16,6 @@ pub struct FlatWorldGenerator {
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<procgen::StructureCell>,
-    content_registry: Arc<ContentRegistry>,
 }
 
 impl std::fmt::Debug for FlatWorldGenerator {
@@ -38,14 +36,12 @@ impl FlatWorldGenerator {
         world_seed: u64,
         procgen_structures: bool,
         blocked_cells: HashSet<procgen::StructureCell>,
-        content_registry: Arc<ContentRegistry>,
     ) -> Self {
         Self {
             flat_floor_voxel: floor_voxel_from_base_kind(base_kind),
             world_seed,
             procgen_structures,
             blocked_cells,
-            content_registry,
         }
     }
 
@@ -202,10 +198,6 @@ mod tests {
     use crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
     use crate::shared::voxel::BlockData;
 
-    fn test_registry() -> Arc<ContentRegistry> {
-        Arc::new(crate::plugin_loader::create_full_registry())
-    }
-
     fn grid_floor_block() -> BlockData {
         use polychora_plugin_api::content_ids;
         BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_GRID_FLOOR)
@@ -222,7 +214,6 @@ mod tests {
             123,
             false,
             HashSet::new(),
-            test_registry(),
         );
         let bounds = Aabb4i::new([0, FLAT_FLOOR_CHUNK_Y, 0, 0], [0, FLAT_FLOOR_CHUNK_Y, 0, 0]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -241,7 +232,6 @@ mod tests {
             123,
             false,
             HashSet::new(),
-            test_registry(),
         );
         let bounds = Aabb4i::new([-2, -3, -1, -2], [2, 1, 3, 2]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -264,7 +254,6 @@ mod tests {
             123,
             false,
             HashSet::new(),
-            test_registry(),
         );
         let bounds = Aabb4i::new([-2, -3, -1, -2], [2, 1, 3, 2]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
