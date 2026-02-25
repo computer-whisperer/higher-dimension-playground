@@ -1,7 +1,7 @@
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
     collect_non_empty_chunks_from_core_in_bounds, validate_region_core_world_space_non_overlapping,
-    ChunkKey, RegionNodeKind, RegionTreeCore,
+    ChunkKey, RegionNodeKind, RegionTreeCore, ScaledChunkKey,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{BlockData, CHUNK_SIZE};
@@ -405,6 +405,74 @@ pub fn sample_chunk_payloads_from_bvh(bvh: &RenderBvh, key: ChunkKey) -> Vec<Res
         }
     }
     out
+}
+
+/// Sample chunk payloads at a scaled key from the BVH.
+///
+/// For `scale_exp = 0`, this behaves identically to [`sample_chunk_payloads_from_bvh`].
+/// For non-zero scales, only leaves whose `ChunkArrayData.scale_exp` matches will
+/// be returned; `Uniform` leaves are treated as scale_exp=0.
+pub fn sample_chunk_payloads_from_bvh_scaled(
+    bvh: &RenderBvh,
+    key: ScaledChunkKey,
+) -> Vec<ResolvedChunkPayload> {
+    if key.scale_exp == 0 {
+        return sample_chunk_payloads_from_bvh(bvh, key.pos);
+    }
+
+    // For non-zero scales, traverse the BVH looking for matching leaves.
+    let Some(root) = bvh.root else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::<ResolvedChunkPayload>::new();
+    let mut stack = Vec::<u32>::with_capacity(64);
+    stack.push(root);
+
+    while let Some(node_idx) = stack.pop() {
+        let Some(node) = bvh.nodes.get(node_idx as usize) else {
+            continue;
+        };
+        // For non-zero scale, we cannot use bounds.contains_chunk directly because
+        // the key is in a different coordinate space. We traverse all nodes and
+        // filter at the leaf level based on the ChunkArrayData's own scale and bounds.
+        match node.kind {
+            RenderBvhNodeKind::Internal { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            RenderBvhNodeKind::Leaf { leaf_index } => {
+                let Some(leaf) = bvh.leaves.get(leaf_index as usize) else {
+                    continue;
+                };
+                if let Some(payload) = sample_leaf_payload_at_scaled_key(leaf, key) {
+                    out.push(payload);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn sample_leaf_payload_at_scaled_key(
+    leaf: &RenderLeaf,
+    key: ScaledChunkKey,
+) -> Option<ResolvedChunkPayload> {
+    match &leaf.kind {
+        RenderLeafKind::Uniform(_) => {
+            // Uniform leaves are conceptually at scale_exp=0
+            None
+        }
+        RenderLeafKind::VoxelChunkArray(chunk_array) => {
+            if chunk_array.scale_exp != key.scale_exp {
+                return None;
+            }
+            if !chunk_array.bounds.contains_chunk(key.pos) {
+                return None;
+            }
+            sample_chunkarray_payload_at_key(chunk_array, key.pos)
+        }
+    }
 }
 
 pub fn apply_chunk_payload_mutations_in_bvh(

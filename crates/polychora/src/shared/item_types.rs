@@ -84,6 +84,7 @@ impl ItemStack {
             block_type: meta.block_type,
             orientation: TesseractOrientation::IDENTITY,
             extra_data: meta.extra_data,
+            scale_exp: 0,
         })
     }
 

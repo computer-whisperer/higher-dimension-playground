@@ -105,6 +105,76 @@ impl RegionChunkTree {
         self.set_chunk(key, None)
     }
 
+    /// Query a chunk at a specific scale. Returns `None` if no chunk exists at
+    /// that position and scale.
+    pub fn chunk_payload_scaled(&self, key: ScaledChunkKey) -> Option<ResolvedChunkPayload> {
+        self.root
+            .as_ref()
+            .and_then(|node| query_chunk_payload_in_node_scaled(node, key))
+    }
+
+    /// Check if a chunk exists at a specific scale.
+    pub fn has_chunk_scaled(&self, key: ScaledChunkKey) -> bool {
+        self.chunk_payload_scaled(key).is_some()
+    }
+
+    /// Set a chunk at a specific scale. Returns `true` if the tree was modified.
+    pub fn set_chunk_scaled(
+        &mut self,
+        key: ScaledChunkKey,
+        resolved: Option<ResolvedChunkPayload>,
+    ) -> bool {
+        if key.scale_exp == 0 {
+            return self.set_chunk(key.pos, resolved);
+        }
+
+        let payload = resolved.map(canonicalize_resolved_payload);
+        let chunk_bounds = Aabb4i::new(key.pos, key.pos);
+
+        if self.root.is_none() {
+            let Some(payload) = payload else {
+                return false;
+            };
+            let kind = kind_from_resolved_value_at_scale(chunk_bounds, Some(payload), key.scale_exp);
+            self.root = Some(Box::new(RegionTreeCore {
+                bounds: chunk_bounds,
+                kind,
+                generator_version_hash: 0,
+            }));
+            self.warn_if_world_space_overlapping("set_chunk_scaled:init");
+            return true;
+        }
+
+        // For non-zero scale, we build a one-chunk ChunkArray at the target scale
+        // and splice it in via the core-splicing machinery.
+        let patch_kind = kind_from_resolved_value_at_scale(chunk_bounds, payload.clone(), key.scale_exp);
+        let patch_core = RegionTreeCore {
+            bounds: chunk_bounds,
+            kind: patch_kind,
+            generator_version_hash: 0,
+        };
+
+        // Check if this is a deletion (setting to empty/air).
+        let is_delete = payload.is_none()
+            || payload
+                .as_ref()
+                .map(|p| matches!(p.payload, ChunkPayload::Empty) || p.uniform_block().map(|b| b.is_air()).unwrap_or(false))
+                .unwrap_or(false);
+
+        if !is_delete {
+            self.ensure_root_contains_bounds(chunk_bounds);
+        }
+
+        let changed = self
+            .splice_core_in_bounds(chunk_bounds, &patch_core)
+            .is_some();
+
+        if changed {
+            self.warn_if_world_space_overlapping("set_chunk_scaled");
+        }
+        changed
+    }
+
     pub fn any_non_empty_chunk_in_bounds(&self, bounds: Aabb4i) -> bool {
         if !bounds.is_valid() {
             return false;
@@ -1991,6 +2061,54 @@ fn chunk_array_resolved_payload_at(
     })
 }
 
+fn query_chunk_payload_in_node_scaled(
+    node: &RegionTreeCore,
+    key: ScaledChunkKey,
+) -> Option<ResolvedChunkPayload> {
+    query_chunk_payload_in_kind_scaled(&node.kind, node.bounds, key)
+}
+
+fn query_chunk_payload_in_kind_scaled(
+    kind: &RegionNodeKind,
+    bounds: Aabb4i,
+    key: ScaledChunkKey,
+) -> Option<ResolvedChunkPayload> {
+    match kind {
+        RegionNodeKind::Empty => None,
+        RegionNodeKind::Uniform(block) => {
+            // Uniform nodes are conceptually at scale_exp=0. Only match if the
+            // query is also at scale_exp=0 and the position is within bounds.
+            if key.scale_exp != 0 {
+                return None;
+            }
+            if !bounds.contains_chunk(key.pos) {
+                return None;
+            }
+            Some(ResolvedChunkPayload::uniform(block.clone()))
+        }
+        RegionNodeKind::ProceduralRef(_) => None,
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            if chunk_array.scale_exp != key.scale_exp {
+                return None;
+            }
+            if !chunk_array.bounds.contains_chunk(key.pos) {
+                return None;
+            }
+            chunk_array_resolved_payload_at(chunk_array, key.pos)
+        }
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                if let Some(result) =
+                    query_chunk_payload_in_kind_scaled(&child.kind, child.bounds, key)
+                {
+                    return Some(result);
+                }
+            }
+            None
+        }
+    }
+}
+
 fn kind_has_non_empty_chunk_intersection(
     kind: &RegionNodeKind,
     kind_bounds: Aabb4i,
@@ -2455,20 +2573,46 @@ fn repeated_payload_kind_resolved(
     bounds: Aabb4i,
     resolved: ResolvedChunkPayload,
 ) -> RegionNodeKind {
+    repeated_payload_kind_resolved_at_scale(bounds, resolved, 0)
+}
+
+fn repeated_payload_kind_resolved_at_scale(
+    bounds: Aabb4i,
+    resolved: ResolvedChunkPayload,
+    scale_exp: i8,
+) -> RegionNodeKind {
     let Some(cell_count) = bounds.chunk_cell_count() else {
         return RegionNodeKind::Empty;
     };
     let indices = vec![0u16; cell_count];
-    match ChunkArrayData::from_dense_indices_with_block_palette(
+    match ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
         bounds,
         vec![resolved.payload],
         indices,
         Some(0),
         resolved.block_palette,
+        scale_exp,
     ) {
         Ok(chunk_array) => RegionNodeKind::ChunkArray(chunk_array),
         Err(_) => RegionNodeKind::Empty,
     }
+}
+
+fn kind_from_resolved_value_at_scale(
+    bounds: Aabb4i,
+    value: Option<ResolvedChunkPayload>,
+    scale_exp: i8,
+) -> RegionNodeKind {
+    if scale_exp == 0 {
+        return kind_from_resolved_value(bounds, value);
+    }
+    let Some(resolved) = value else {
+        return RegionNodeKind::Empty;
+    };
+    let resolved = canonicalize_resolved_payload(resolved);
+    // For non-zero scales, always create a ChunkArray to carry the scale_exp.
+    // We cannot use Uniform(block) because Uniform has no scale_exp field.
+    repeated_payload_kind_resolved_at_scale(bounds, resolved, scale_exp)
 }
 
 /// Remap block-palette indices inside a single `ChunkPayload` using the given remap table.

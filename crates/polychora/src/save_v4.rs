@@ -6,7 +6,9 @@ use crate::shared::chunk_payload::{
 use crate::shared::protocol::Entity;
 #[cfg(test)]
 use crate::shared::protocol::EntityPose;
-use crate::shared::region_tree::{slice_region_core_in_bounds, RegionNodeKind, RegionTreeCore};
+use crate::shared::region_tree::{
+    slice_region_core_in_bounds, RegionNodeKind, RegionTreeCore, ScaledChunkKey,
+};
 use crate::shared::spatial::Aabb4i;
 #[cfg(test)]
 use crate::shared::voxel::CHUNK_VOLUME;
@@ -272,7 +274,7 @@ pub struct LoadedState {
     pub global: GlobalPayload,
     pub players: PlayersPayload,
     pub index: IndexPayload,
-    pub world_chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
+    pub world_chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
     pub entities: Vec<PersistedEntityRecord>,
 }
 
@@ -311,7 +313,7 @@ struct SaveWorldRequest<'a> {
 
 pub struct SaveChunkPayloadRequest<'a> {
     pub base_world_kind: BaseWorldKind,
-    pub chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
+    pub chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
     pub entities: &'a [PersistedEntityRecord],
     pub players: &'a [PlayerRecord],
     pub world_seed: u64,
@@ -328,7 +330,7 @@ pub struct SaveChunkPayloadRequest<'a> {
 
 pub struct SaveChunkPayloadPatchRequest {
     pub base_world_kind: BaseWorldKind,
-    pub dirty_chunk_payloads: Vec<([i32; 4], Option<ResolvedChunkPayload>)>,
+    pub dirty_chunk_payloads: Vec<(ScaledChunkKey, Option<ResolvedChunkPayload>)>,
     pub world_seed: u64,
     pub next_entity_id: u64,
     pub player_entity_hints: Option<Vec<PlayerEntityHint>>,
@@ -543,7 +545,7 @@ pub fn load_state_metadata(root: &Path) -> io::Result<LoadedStateMetadata> {
 pub fn load_world_chunk_payloads_for_regions(
     root: &Path,
     regions: &HashSet<[i32; 4]>,
-) -> io::Result<Vec<([i32; 4], ResolvedChunkPayload)>> {
+) -> io::Result<Vec<(ScaledChunkKey, ResolvedChunkPayload)>> {
     let manifest = load_manifest(root)?;
     let index = read_index_file(root.join(&manifest.index_file))?;
     materialize_world_chunk_payloads_from_index_filtered(root, &index, Some(regions), true, None)
@@ -552,7 +554,7 @@ pub fn load_world_chunk_payloads_for_regions(
 pub fn load_world_chunk_payloads_for_bounds(
     root: &Path,
     bounds: Aabb4i,
-) -> io::Result<Vec<([i32; 4], ResolvedChunkPayload)>> {
+) -> io::Result<Vec<(ScaledChunkKey, ResolvedChunkPayload)>> {
     let manifest = load_manifest(root)?;
     let index = read_index_file(root.join(&manifest.index_file))?;
     load_world_chunk_payloads_for_bounds_from_index(root, &index, bounds)
@@ -562,7 +564,7 @@ pub fn load_world_chunk_payloads_for_bounds_from_index(
     root: &Path,
     index: &IndexPayload,
     bounds: Aabb4i,
-) -> io::Result<Vec<([i32; 4], ResolvedChunkPayload)>> {
+) -> io::Result<Vec<(ScaledChunkKey, ResolvedChunkPayload)>> {
     if !bounds.is_valid() {
         return Ok(Vec::new());
     }
@@ -761,13 +763,13 @@ fn legacy_chunk_from_field_chunk_payload(payload: &FieldChunkPayload) -> io::Res
 
 #[cfg(test)]
 fn save_state_from_world(root: &Path, request: SaveWorldRequest<'_>) -> io::Result<SaveResult> {
-    let chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)> = request
+    let chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)> = request
         .world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
-                [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+                ScaledChunkKey::unit([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]),
                 ResolvedChunkPayload::from_payload_with_static_palette(
                     field_chunk_payload_from_legacy_chunk(chunk),
                 ),
@@ -838,34 +840,40 @@ pub fn save_state_from_chunk_payload_patch(
     } = loaded;
     let mut reuse_index = build_blob_reuse_index(root, &manifest)?;
 
-    let mut dirty_chunk_payloads = HashMap::<[i32; 4], Option<ResolvedChunkPayload>>::new();
-    for (chunk_pos, payload) in request.dirty_chunk_payloads {
-        dirty_chunk_payloads.insert(chunk_pos, payload);
+    let mut dirty_chunk_payloads = HashMap::<ScaledChunkKey, Option<ResolvedChunkPayload>>::new();
+    for (key, payload) in request.dirty_chunk_payloads {
+        dirty_chunk_payloads.insert(key, payload);
     }
     if dirty_chunk_payloads.is_empty() {
         return Ok(None);
     }
 
-    let dirty_chunks: HashSet<[i32; 4]> = dirty_chunk_payloads.keys().copied().collect();
+    // For the existing on-disk patch logic, we need the set of dirty chunk positions
+    // at scale_exp=0 (the only scale that existing save data can contain).
+    let dirty_chunks_scale0: HashSet<[i32; 4]> = dirty_chunk_payloads
+        .keys()
+        .filter(|k| k.scale_exp == 0)
+        .map(|k| k.pos)
+        .collect();
     let node_by_id = build_node_lookup(&loaded_index);
     let mut preserved_world_leaves = Vec::<LeafDescriptor>::new();
-    let mut reencode_chunk_payloads = Vec::<([i32; 4], ResolvedChunkPayload)>::new();
+    let mut reencode_chunk_payloads = Vec::<(ScaledChunkKey, ResolvedChunkPayload)>::new();
     let mut payload_cache = HashMap::<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>::new();
     collect_world_leaf_descriptors_with_chunk_patch(
         root,
         &node_by_id,
         loaded_index.root_node_id,
-        &dirty_chunks,
+        &dirty_chunks_scale0,
         &mut payload_cache,
         &mut preserved_world_leaves,
         &mut reencode_chunk_payloads,
     )?;
 
-    let mut dirty_chunk_positions: Vec<[i32; 4]> = dirty_chunk_payloads.keys().copied().collect();
-    dirty_chunk_positions.sort_unstable();
-    for chunk_pos in dirty_chunk_positions {
-        if let Some(Some(payload)) = dirty_chunk_payloads.get(&chunk_pos) {
-            reencode_chunk_payloads.push((chunk_pos, payload.clone()));
+    let mut dirty_keys: Vec<ScaledChunkKey> = dirty_chunk_payloads.keys().copied().collect();
+    dirty_keys.sort_unstable_by_key(|k| (k.scale_exp, k.pos));
+    for key in dirty_keys {
+        if let Some(Some(payload)) = dirty_chunk_payloads.get(&key) {
+            reencode_chunk_payloads.push((key, payload.clone()));
         }
     }
 
@@ -948,7 +956,7 @@ pub fn save_state_from_chunk_payload_patch(
 fn save_state_internal(
     root: &Path,
     base_world_kind: BaseWorldKind,
-    chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
+    chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
     common: SaveStateCommon<'_>,
 ) -> io::Result<SaveResult> {
     let loaded = load_or_init_save_metadata(
@@ -1143,47 +1151,47 @@ fn save_state_internal(
 }
 
 fn resolve_world_chunk_payloads_for_save(
-    persisted_chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
-    chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
+    persisted_chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
+    chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
     dirty_block_regions: &HashSet<[i32; 4]>,
     force_full_blocks: bool,
-) -> Vec<([i32; 4], ResolvedChunkPayload)> {
+) -> Vec<(ScaledChunkKey, ResolvedChunkPayload)> {
     let normalized_current = normalize_chunk_payloads_latest_wins(chunk_payloads);
     if force_full_blocks {
         return normalized_current;
     }
 
-    let mut merged = HashMap::<[i32; 4], ResolvedChunkPayload>::new();
-    for (chunk_pos, payload) in persisted_chunk_payloads {
-        merged.insert(chunk_pos, payload);
+    let mut merged = HashMap::<ScaledChunkKey, ResolvedChunkPayload>::new();
+    for (key, payload) in persisted_chunk_payloads {
+        merged.insert(key, payload);
     }
     if dirty_block_regions.is_empty() {
-        let mut out: Vec<([i32; 4], ResolvedChunkPayload)> = merged.into_iter().collect();
-        out.sort_unstable_by_key(|(pos, _)| *pos);
+        let mut out: Vec<(ScaledChunkKey, ResolvedChunkPayload)> = merged.into_iter().collect();
+        out.sort_unstable_by_key(|(key, _)| (key.scale_exp, key.pos));
         return out;
     }
 
-    merged.retain(|chunk_pos, _| {
-        !dirty_block_regions.contains(&region_from_chunk(*chunk_pos, DEFAULT_REGION_CHUNK_EDGE))
+    merged.retain(|key, _| {
+        !dirty_block_regions.contains(&region_from_chunk(key.pos, DEFAULT_REGION_CHUNK_EDGE))
     });
-    for (chunk_pos, payload) in normalized_current {
-        if dirty_block_regions.contains(&region_from_chunk(chunk_pos, DEFAULT_REGION_CHUNK_EDGE)) {
-            merged.insert(chunk_pos, payload);
+    for (key, payload) in normalized_current {
+        if dirty_block_regions.contains(&region_from_chunk(key.pos, DEFAULT_REGION_CHUNK_EDGE)) {
+            merged.insert(key, payload);
         }
     }
 
-    let mut out: Vec<([i32; 4], ResolvedChunkPayload)> = merged.into_iter().collect();
-    out.sort_unstable_by_key(|(pos, _)| *pos);
+    let mut out: Vec<(ScaledChunkKey, ResolvedChunkPayload)> = merged.into_iter().collect();
+    out.sort_unstable_by_key(|(key, _)| (key.scale_exp, key.pos));
     out
 }
 
 fn normalize_chunk_payloads_latest_wins(
-    chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
-) -> Vec<([i32; 4], ResolvedChunkPayload)> {
-    let mut by_pos = HashMap::<[i32; 4], (u64, ResolvedChunkPayload)>::new();
-    for (idx, (chunk_pos, payload)) in chunk_payloads.into_iter().enumerate() {
+    chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
+) -> Vec<(ScaledChunkKey, ResolvedChunkPayload)> {
+    let mut by_key = HashMap::<ScaledChunkKey, (u64, ResolvedChunkPayload)>::new();
+    for (idx, (key, payload)) in chunk_payloads.into_iter().enumerate() {
         let epoch = idx as u64;
-        match by_pos.entry(chunk_pos) {
+        match by_key.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert((epoch, payload));
             }
@@ -1196,11 +1204,11 @@ fn normalize_chunk_payloads_latest_wins(
             }
         }
     }
-    let mut out: Vec<([i32; 4], ResolvedChunkPayload)> = by_pos
+    let mut out: Vec<(ScaledChunkKey, ResolvedChunkPayload)> = by_key
         .into_iter()
-        .map(|(chunk_pos, (_, payload))| (chunk_pos, payload))
+        .map(|(key, (_, payload))| (key, payload))
         .collect();
-    out.sort_unstable_by_key(|(pos, _)| *pos);
+    out.sort_unstable_by_key(|(key, _)| (key.scale_exp, key.pos));
     out
 }
 
@@ -1247,13 +1255,15 @@ fn build_world_leaf_descriptors_from_payloads(
     root: &Path,
     manifest: &mut Manifest,
     reuse_index: &mut BlobReuseIndex,
-    mut chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
+    mut chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
 ) -> io::Result<Vec<LeafDescriptor>> {
     let mut world_leaves = Vec::<LeafDescriptor>::new();
-    chunk_payloads.sort_unstable_by_key(|(pos, _)| *pos);
+    chunk_payloads.sort_unstable_by_key(|(key, _)| (key.scale_exp, key.pos));
+    // Group by scale_exp so chunks at different scales produce separate ChunkArrayBlobs.
     let mut non_uniform_rows =
-        HashMap::<(i32, i32, i32), Vec<(i32, ResolvedChunkPayload)>>::new();
-    for (chunk_pos, resolved) in chunk_payloads {
+        HashMap::<(i8, i32, i32, i32), Vec<(i32, ResolvedChunkPayload)>>::new();
+    for (key, resolved) in chunk_payloads {
+        let chunk_pos = key.pos;
         let min = chunk_pos;
         let max = chunk_pos;
         if let Some(block) = resolved.uniform_block() {
@@ -1274,16 +1284,16 @@ fn build_world_leaf_descriptors_from_payloads(
             }
         } else {
             non_uniform_rows
-                .entry((chunk_pos[1], chunk_pos[2], chunk_pos[3]))
+                .entry((key.scale_exp, chunk_pos[1], chunk_pos[2], chunk_pos[3]))
                 .or_default()
                 .push((chunk_pos[0], resolved));
         }
     }
 
-    let mut row_keys: Vec<(i32, i32, i32)> = non_uniform_rows.keys().copied().collect();
+    let mut row_keys: Vec<(i8, i32, i32, i32)> = non_uniform_rows.keys().copied().collect();
     row_keys.sort_unstable();
-    for (row_y, row_z, row_w) in row_keys {
-        let Some(mut row_payloads) = non_uniform_rows.remove(&(row_y, row_z, row_w)) else {
+    for (row_scale_exp, row_y, row_z, row_w) in row_keys {
+        let Some(mut row_payloads) = non_uniform_rows.remove(&(row_scale_exp, row_y, row_z, row_w)) else {
             continue;
         };
         row_payloads.sort_unstable_by_key(|(x, _)| *x);
@@ -1380,7 +1390,7 @@ fn build_world_leaf_descriptors_from_payloads(
             let chunk_array_blob = ChunkArrayBlob {
                 volume_min_chunk: min,
                 volume_max_chunk: max,
-                scale_exp: 0,
+                scale_exp: row_scale_exp,
                 payload_palette,
                 block_palette: unified_block_palette,
                 index_codec: ChunkArrayIndexCodec::DenseU16,
@@ -1417,17 +1427,17 @@ fn test_content_registry() -> crate::content_registry::ContentRegistry {
 #[cfg(test)]
 fn chunk_payloads_to_voxel_world(
     base_world_kind: BaseWorldKind,
-    chunk_payloads: &[([i32; 4], ResolvedChunkPayload)],
+    chunk_payloads: &[(ScaledChunkKey, ResolvedChunkPayload)],
 ) -> io::Result<RegionChunkWorld> {
     let reg = test_content_registry();
     let mut world = RegionChunkWorld::new_with_base(base_world_kind);
-    for (chunk_pos, resolved) in chunk_payloads {
+    for (key, resolved) in chunk_payloads {
         let legacy = resolved.to_material_token_payload(|block| {
             reg.block_material_token(block.namespace, block.block_type) as u8
         });
         let chunk = legacy_chunk_from_field_chunk_payload(&legacy)?;
         world.insert_chunk(
-            ChunkPos::new(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]),
+            ChunkPos::new(key.pos[0], key.pos[1], key.pos[2], key.pos[3]),
             chunk,
         );
     }
@@ -1583,7 +1593,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
     include_matches: bool,
     bounds_filter: Option<Aabb4i>,
     payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
-    out: &mut Vec<([i32; 4], ResolvedChunkPayload)>,
+    out: &mut Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
 ) -> io::Result<()> {
     let Some(node) = node_by_id.get(&node_id).copied() else {
         return Err(io::Error::new(
@@ -1620,7 +1630,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
                     .map(|filter| filter.contains_chunk(chunk))
                     .unwrap_or(true);
                 if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
-                    out.push((chunk, ResolvedChunkPayload::empty()));
+                    out.push((ScaledChunkKey::unit(chunk), ResolvedChunkPayload::empty()));
                 }
             });
         }
@@ -1631,7 +1641,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
                     .map(|filter| filter.contains_chunk(chunk))
                     .unwrap_or(true);
                 if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
-                    out.push((chunk, ResolvedChunkPayload::uniform(block.clone())));
+                    out.push((ScaledChunkKey::unit(chunk), ResolvedChunkPayload::uniform(block.clone())));
                 }
             });
         }
@@ -1721,7 +1731,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
                                     )
                                 })?;
                             out.push((
-                                chunk,
+                                ScaledChunkKey::new(chunk, blob.scale_exp),
                                 ResolvedChunkPayload {
                                     payload,
                                     block_palette: block_palette.clone(),
@@ -1742,9 +1752,9 @@ fn materialize_world_chunk_payloads_from_index_filtered(
     region_filter: Option<&HashSet<[i32; 4]>>,
     include_matches: bool,
     bounds_filter: Option<Aabb4i>,
-) -> io::Result<Vec<([i32; 4], ResolvedChunkPayload)>> {
+) -> io::Result<Vec<(ScaledChunkKey, ResolvedChunkPayload)>> {
     let node_by_id = build_node_lookup(index);
-    let mut out = Vec::<([i32; 4], ResolvedChunkPayload)>::new();
+    let mut out = Vec::<(ScaledChunkKey, ResolvedChunkPayload)>::new();
     let mut payload_cache = HashMap::<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>::new();
     collect_world_chunk_payloads_from_node_filtered(
         root,
@@ -1756,7 +1766,7 @@ fn materialize_world_chunk_payloads_from_index_filtered(
         &mut payload_cache,
         &mut out,
     )?;
-    out.sort_unstable_by_key(|(pos, _)| *pos);
+    out.sort_unstable_by_key(|(key, _)| (key.scale_exp, key.pos));
     Ok(out)
 }
 
@@ -1926,7 +1936,7 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
     dirty_chunks: &HashSet<[i32; 4]>,
     payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
     preserved_out: &mut Vec<LeafDescriptor>,
-    reencode_payloads_out: &mut Vec<([i32; 4], ResolvedChunkPayload)>,
+    reencode_payloads_out: &mut Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
 ) -> io::Result<()> {
     let Some(node) = node_by_id.get(&node_id).copied() else {
         return Err(io::Error::new(
@@ -2062,7 +2072,7 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
                                     )
                                 })?;
                             reencode_payloads_out.push((
-                                chunk,
+                                ScaledChunkKey::new(chunk, blob.scale_exp),
                                 ResolvedChunkPayload {
                                     payload,
                                     block_palette: block_palette.clone(),
@@ -3491,7 +3501,7 @@ mod tests {
         let loaded_chunk_payloads =
             load_world_chunk_payloads_for_regions(&root, &region_filter).expect("load chunks");
         assert_eq!(loaded_chunk_payloads.len(), 1);
-        assert_eq!(loaded_chunk_payloads[0].0, chunk_a);
+        assert_eq!(loaded_chunk_payloads[0].0, ScaledChunkKey::unit(chunk_a));
         let reg = test_content_registry();
         let legacy_payload = loaded_chunk_payloads[0].1.to_material_token_payload(|block| {
             reg.block_material_token(block.namespace, block.block_type) as u8
@@ -3547,7 +3557,7 @@ mod tests {
         let loaded_a =
             load_world_chunk_payloads_for_bounds(&root, only_chunk_a).expect("load chunk a");
         assert_eq!(loaded_a.len(), 1);
-        assert_eq!(loaded_a[0].0, chunk_a);
+        assert_eq!(loaded_a[0].0, ScaledChunkKey::unit(chunk_a));
 
         let both_bounds = Aabb4i::new(
             [chunk_a[0], chunk_a[1], chunk_a[2], chunk_a[3]],
@@ -3556,8 +3566,8 @@ mod tests {
         let loaded_both =
             load_world_chunk_payloads_for_bounds(&root, both_bounds).expect("load both chunks");
         assert_eq!(loaded_both.len(), 2);
-        assert_eq!(loaded_both[0].0, chunk_a);
-        assert_eq!(loaded_both[1].0, chunk_b);
+        assert_eq!(loaded_both[0].0, ScaledChunkKey::unit(chunk_a));
+        assert_eq!(loaded_both[1].0, ScaledChunkKey::unit(chunk_b));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3600,8 +3610,8 @@ mod tests {
             SaveChunkPayloadRequest {
                 base_world_kind: BaseWorldKind::Empty,
                 chunk_payloads: vec![
-                    (chunk_pos, ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
-                    (chunk_pos, ResolvedChunkPayload::uniform(BlockData::simple(0, 9))),
+                    (ScaledChunkKey::unit(chunk_pos), ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
+                    (ScaledChunkKey::unit(chunk_pos), ResolvedChunkPayload::uniform(BlockData::simple(0, 9))),
                 ],
                 entities: &[],
                 players: &[],
@@ -3646,8 +3656,8 @@ mod tests {
             SaveChunkPayloadRequest {
                 base_world_kind: BaseWorldKind::Empty,
                 chunk_payloads: vec![
-                    (chunk_a, ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
-                    (chunk_b, ResolvedChunkPayload::uniform(BlockData::simple(0, 7))),
+                    (ScaledChunkKey::unit(chunk_a), ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
+                    (ScaledChunkKey::unit(chunk_b), ResolvedChunkPayload::uniform(BlockData::simple(0, 7))),
                 ],
                 entities: &[],
                 players: &[],
@@ -3669,7 +3679,7 @@ mod tests {
             &root,
             SaveChunkPayloadRequest {
                 base_world_kind: BaseWorldKind::Empty,
-                chunk_payloads: vec![(chunk_a, ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))],
+                chunk_payloads: vec![(ScaledChunkKey::unit(chunk_a), ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))],
                 entities: &[],
                 players: &[],
                 world_seed: 1,
@@ -3712,12 +3722,12 @@ mod tests {
         world.set_voxel(1, 1, 1, 1, LegacyVoxel(3));
         world.set_voxel(40, 2, -5, 17, LegacyVoxel(7));
 
-        let chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)> = world
+        let chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)> = world
             .chunks
             .iter()
             .map(|(&chunk_pos, chunk)| {
                 (
-                    [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+                    ScaledChunkKey::unit([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]),
                     ResolvedChunkPayload::from_payload_with_static_palette(
                         field_chunk_payload_from_legacy_chunk(chunk),
                     ),
@@ -3769,8 +3779,8 @@ mod tests {
 
         let mut initial_payloads = Vec::new();
         for x in 0..=3 {
-            initial_payloads.push(([x, 0, 0, 0], dense_resolved.clone()));
-            initial_payloads.push(([x, 1, 0, 0], dense_resolved.clone()));
+            initial_payloads.push((ScaledChunkKey::unit([x, 0, 0, 0]), dense_resolved.clone()));
+            initial_payloads.push((ScaledChunkKey::unit([x, 1, 0, 0]), dense_resolved.clone()));
         }
 
         let initial = save_state_from_chunk_payloads(
@@ -3799,7 +3809,7 @@ mod tests {
             &root,
             SaveChunkPayloadPatchRequest {
                 base_world_kind: BaseWorldKind::Empty,
-                dirty_chunk_payloads: vec![([1, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9))))],
+                dirty_chunk_payloads: vec![(ScaledChunkKey::unit([1, 0, 0, 0]), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9))))],
                 world_seed: 7,
                 next_entity_id: 1,
                 player_entity_hints: None,
@@ -4584,7 +4594,7 @@ mod tests {
             blocks[1] = BlockData::simple(0, (x + 10) as u32);
             let resolved =
                 ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
-            initial_payloads.push(([x, 0, 0, 0], resolved));
+            initial_payloads.push((ScaledChunkKey::unit([x, 0, 0, 0]), resolved));
         }
 
         let initial = save_state_from_chunk_payloads(
@@ -4617,7 +4627,7 @@ mod tests {
             blocks[1] = BlockData::simple(0, (x + 200) as u32);
             let resolved =
                 ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
-            patch1_dirty.push(([x, 0, 0, 0], Some(resolved)));
+            patch1_dirty.push((ScaledChunkKey::unit([x, 0, 0, 0]), Some(resolved)));
         }
 
         let patch1 = save_state_from_chunk_payload_patch(
@@ -4640,10 +4650,10 @@ mod tests {
         let bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 0, 0]);
         let loaded_chunks =
             load_world_chunk_payloads_for_bounds(&root, bounds).expect("load after patch 1");
-        let loaded_map: HashMap<[i32; 4], ResolvedChunkPayload> =
+        let loaded_map: HashMap<ScaledChunkKey, ResolvedChunkPayload> =
             loaded_chunks.into_iter().collect();
         for x in 0..8i32 {
-            let key = [x, 0, 0, 0];
+            let key = ScaledChunkKey::unit([x, 0, 0, 0]);
             let resolved = loaded_map
                 .get(&key)
                 .unwrap_or_else(|| panic!("chunk {key:?} missing after patch 1"));
@@ -4672,7 +4682,7 @@ mod tests {
             blocks[0] = BlockData::simple(0, (x + 300) as u32);
             let resolved =
                 ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
-            patch2_dirty.push(([x, 0, 0, 0], Some(resolved)));
+            patch2_dirty.push((ScaledChunkKey::unit([x, 0, 0, 0]), Some(resolved)));
         }
 
         let patch2 = save_state_from_chunk_payload_patch(
@@ -4694,10 +4704,10 @@ mod tests {
         // Verify ALL 8 chunks survive after second patch.
         let loaded_chunks_2 =
             load_world_chunk_payloads_for_bounds(&root, bounds).expect("load after patch 2");
-        let loaded_map_2: HashMap<[i32; 4], ResolvedChunkPayload> =
+        let loaded_map_2: HashMap<ScaledChunkKey, ResolvedChunkPayload> =
             loaded_chunks_2.into_iter().collect();
         for x in 0..8i32 {
-            let key = [x, 0, 0, 0];
+            let key = ScaledChunkKey::unit([x, 0, 0, 0]);
             let resolved = loaded_map_2
                 .get(&key)
                 .unwrap_or_else(|| panic!("chunk {key:?} missing after patch 2"));
@@ -4731,7 +4741,7 @@ mod tests {
             &root,
             SaveChunkPayloadPatchRequest {
                 base_world_kind: BaseWorldKind::Empty,
-                dirty_chunk_payloads: vec![([3, 0, 0, 0], None)],
+                dirty_chunk_payloads: vec![(ScaledChunkKey::unit([3, 0, 0, 0]), None)],
                 world_seed: 99,
                 next_entity_id: 1,
                 player_entity_hints: None,
@@ -4747,14 +4757,14 @@ mod tests {
         // All OTHER chunks should survive.
         let loaded_chunks_3 =
             load_world_chunk_payloads_for_bounds(&root, bounds).expect("load after patch 3");
-        let loaded_map_3: HashMap<[i32; 4], ResolvedChunkPayload> =
+        let loaded_map_3: HashMap<ScaledChunkKey, ResolvedChunkPayload> =
             loaded_chunks_3.into_iter().collect();
         assert!(
-            !loaded_map_3.contains_key(&[3, 0, 0, 0]),
+            !loaded_map_3.contains_key(&ScaledChunkKey::unit([3, 0, 0, 0])),
             "chunk [3,0,0,0] should be removed after None payload"
         );
         for x in [0i32, 1, 2, 4, 5, 6, 7] {
-            let key = [x, 0, 0, 0];
+            let key = ScaledChunkKey::unit([x, 0, 0, 0]);
             assert!(
                 loaded_map_3.contains_key(&key),
                 "chunk {key:?} missing after patch 3 (should have survived)"

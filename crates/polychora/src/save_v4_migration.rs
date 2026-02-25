@@ -10,6 +10,7 @@ use crate::shared::chunk_payload::{ChunkPayload as FieldChunkPayload, ResolvedCh
 use crate::migration::save_v3::{EntityClass, EntityKind};
 use crate::shared::entity_types;
 use crate::shared::protocol::{Entity, EntityPose};
+use crate::shared::region_tree::ScaledChunkKey;
 use crate::shared::voxel::BlockData;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -87,7 +88,7 @@ fn resolve_legacy_payload(payload: FieldChunkPayload, palette: &[BlockData]) -> 
     }
 }
 
-fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], ResolvedChunkPayload)> {
+fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ScaledChunkKey, ResolvedChunkPayload)> {
     fn payload_from_legacy_chunk(chunk: &LegacyChunk) -> FieldChunkPayload {
         if chunk.is_empty() {
             return FieldChunkPayload::Empty;
@@ -106,27 +107,27 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<([i32; 4], ResolvedChun
     }
 
     let legacy_palette = build_legacy_block_palette();
-    let mut chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)> = world
+    let mut chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)> = world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
-                [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w],
+                ScaledChunkKey::unit([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]),
                 resolve_legacy_payload(payload_from_legacy_chunk(chunk), &legacy_palette),
             )
         })
         .collect();
-    chunk_payloads.sort_unstable_by_key(|(pos, _)| *pos);
+    chunk_payloads.sort_unstable_by_key(|(key, _)| *key);
     chunk_payloads
 }
 
 fn all_block_regions_from_chunk_payloads(
-    chunk_payloads: &[([i32; 4], ResolvedChunkPayload)],
+    chunk_payloads: &[(ScaledChunkKey, ResolvedChunkPayload)],
     region_chunk_edge: i32,
 ) -> HashSet<[i32; 4]> {
     chunk_payloads
         .iter()
-        .map(|(chunk_pos, _)| save_v4::region_from_chunk(*chunk_pos, region_chunk_edge))
+        .map(|(key, _)| save_v4::region_from_chunk(key.pos, region_chunk_edge))
         .collect()
 }
 
@@ -232,7 +233,7 @@ pub fn migrate_legacy_world_to_v4(
 
 fn verify_v3_migration_equivalence(
     output_root: &Path,
-    expected_chunk_payloads: Vec<([i32; 4], ResolvedChunkPayload)>,
+    expected_chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
     expected_entities: &[PersistedEntityRecord],
     expected_players: &[PlayerRecord],
     expected_world_seed: u64,
@@ -296,7 +297,7 @@ fn verify_v3_migration_equivalence(
     }
 
     let mut loaded_chunk_payloads = loaded.world_chunk_payloads;
-    loaded_chunk_payloads.sort_unstable_by_key(|(pos, _)| *pos);
+    loaded_chunk_payloads.sort_unstable_by_key(|(key, _)| *key);
     // Compare semantically: palettes may differ structurally after save/load round-trip
     // (the save process compacts palettes), so compare resolved blocks instead.
     if expected_chunk_payloads.len() != loaded_chunk_payloads.len() {

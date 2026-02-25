@@ -1967,3 +1967,127 @@ fn has_chunk_array_node(core: &RegionTreeCore) -> bool {
         _ => false,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase B: scale-aware tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scaled_chunk_key_equality_and_hashing() {
+    let a = ScaledChunkKey::new([0, 0, 0, 0], 0);
+    let b = ScaledChunkKey::unit([0, 0, 0, 0]);
+    assert_eq!(a, b);
+    assert_eq!(chunk_key_to_scaled([1, 2, 3, 4]), ScaledChunkKey::new([1, 2, 3, 4], 0));
+
+    // Different scale_exp → different key
+    let c = ScaledChunkKey::new([0, 0, 0, 0], -1);
+    assert_ne!(a, c);
+
+    // Hash consistency
+    use std::hash::{Hash, Hasher};
+    let mut ha = std::collections::hash_map::DefaultHasher::new();
+    a.hash(&mut ha);
+    let mut hb = std::collections::hash_map::DefaultHasher::new();
+    b.hash(&mut hb);
+    assert_eq!(ha.finish(), hb.finish());
+}
+
+#[test]
+fn block_data_scale_exp_default_and_at_scale() {
+    let b = BlockData::simple(1, 2);
+    assert_eq!(b.scale_exp, 0);
+    let b2 = b.at_scale(-2);
+    assert_eq!(b2.scale_exp, -2);
+    assert_eq!(b2.namespace, 1);
+    assert_eq!(b2.block_type, 2);
+}
+
+#[test]
+fn block_data_scale_exp_serde_roundtrip() {
+    let b = BlockData::simple(1, 42).at_scale(-3);
+    let bytes = postcard::to_allocvec(&b).unwrap();
+    let b2: BlockData = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(b, b2);
+    assert_eq!(b2.scale_exp, -3);
+}
+
+#[test]
+fn block_data_scale_exp_serde_missing_field_defaults_to_zero() {
+    // Simulate legacy data: serialize without scale_exp, deserialize with default
+    let legacy_json = r#"{"namespace":1,"block_type":2}"#;
+    let b: BlockData = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(b.scale_exp, 0);
+    assert_eq!(b.namespace, 1);
+    assert_eq!(b.block_type, 2);
+}
+
+#[test]
+fn set_and_get_chunk_scaled_round_trip() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(1, 7);
+    let payload = ResolvedChunkPayload::uniform(block.clone());
+    let scaled_key = ScaledChunkKey::new([0, 0, 0, 0], -1);
+
+    assert!(!tree.has_chunk_scaled(scaled_key));
+    assert!(tree.set_chunk_scaled(scaled_key, Some(payload.clone())));
+    assert!(tree.has_chunk_scaled(scaled_key));
+
+    let result = tree.chunk_payload_scaled(scaled_key).unwrap();
+    assert_eq!(result.uniform_block(), Some(&block));
+}
+
+#[test]
+fn scaled_chunks_at_non_overlapping_positions() {
+    let mut tree = RegionChunkTree::new();
+    let block_a = BlockData::simple(1, 10);
+    let block_b = BlockData::simple(1, 20);
+
+    // Unit chunk at [0,0,0,0] covers world [0..8)^4
+    let unit_key = ScaledChunkKey::unit([0, 0, 0, 0]);
+    // Half-scale chunk at [2,0,0,0] covers world [8..12) × [0..4)^3
+    // (scale_exp=-1: cell_size=0.5, chunk spans 4 world units per axis)
+    let half_key = ScaledChunkKey::new([2, 0, 0, 0], -1);
+
+    tree.set_chunk_scaled(unit_key, Some(ResolvedChunkPayload::uniform(block_a.clone())));
+    tree.set_chunk_scaled(half_key, Some(ResolvedChunkPayload::uniform(block_b.clone())));
+
+    // Both should be retrievable at their respective scales
+    let result_unit = tree.chunk_payload_scaled(unit_key).unwrap();
+    assert_eq!(result_unit.uniform_block(), Some(&block_a));
+
+    let result_half = tree.chunk_payload_scaled(half_key).unwrap();
+    assert_eq!(result_half.uniform_block(), Some(&block_b));
+
+    // Querying the wrong scale at each position should return None
+    assert!(tree.chunk_payload_scaled(ScaledChunkKey::new([0, 0, 0, 0], -1)).is_none());
+    assert!(tree.chunk_payload_scaled(ScaledChunkKey::unit([2, 0, 0, 0])).is_none());
+}
+
+#[test]
+fn set_chunk_scaled_at_zero_delegates_to_set_chunk() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(1, 5);
+    let payload = ResolvedChunkPayload::uniform(block.clone());
+
+    let key = ScaledChunkKey::unit([2, 3, 0, 0]);
+    tree.set_chunk_scaled(key, Some(payload));
+
+    // Should be queryable via both the scaled and unscaled APIs
+    assert!(tree.has_chunk(key.pos));
+    assert!(tree.has_chunk_scaled(key));
+    let result = tree.chunk_payload(key.pos).unwrap();
+    assert_eq!(result.uniform_block(), Some(&block));
+}
+
+#[test]
+fn delete_scaled_chunk_removes_it() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(1, 7);
+    let key = ScaledChunkKey::new([0, 0, 0, 0], -1);
+
+    tree.set_chunk_scaled(key, Some(ResolvedChunkPayload::uniform(block)));
+    assert!(tree.has_chunk_scaled(key));
+
+    tree.set_chunk_scaled(key, None);
+    assert!(!tree.has_chunk_scaled(key));
+}

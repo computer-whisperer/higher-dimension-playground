@@ -124,6 +124,8 @@ pub struct BlockData {
     pub orientation: TesseractOrientation,
     #[serde(default)]
     pub extra_data: Vec<u8>,
+    #[serde(default)]
+    pub scale_exp: i8,
 }
 
 impl BlockData {
@@ -132,6 +134,7 @@ impl BlockData {
         block_type: 0,
         orientation: TesseractOrientation::IDENTITY,
         extra_data: Vec::new(),
+        scale_exp: 0,
     };
 
     pub fn simple(namespace: u32, block_type: u32) -> Self {
@@ -140,7 +143,13 @@ impl BlockData {
             block_type,
             orientation: TesseractOrientation::IDENTITY,
             extra_data: Vec::new(),
+            scale_exp: 0,
         }
+    }
+
+    pub fn at_scale(mut self, scale_exp: i8) -> Self {
+        self.scale_exp = scale_exp;
+        self
     }
 
     pub fn is_air(&self) -> bool {
@@ -172,20 +181,125 @@ pub enum BaseWorldKind {
 
 #[inline]
 pub fn world_to_chunk(wx: i32, wy: i32, wz: i32, ww: i32) -> (ChunkPos, usize) {
-    let cs = CHUNK_SIZE as i32;
+    world_to_chunk_at_scale(wx, wy, wz, ww, 0)
+}
+
+/// Convert world coordinates to chunk position and local voxel index at a given scale.
+///
+/// - `scale_exp = 0`: cell_size = 1, chunk spans 8 world units (default behavior)
+/// - `scale_exp = -1`: cell_size = 0.5, chunk spans 4 world units (half-scale)
+/// - `scale_exp = 1`: cell_size = 2, chunk spans 16 world units (double-scale)
+///
+/// For negative `scale_exp`, world coords are multiplied by `2^(-scale_exp)` to get
+/// scaled-lattice coords, then `div_euclid`/`rem_euclid` by `CHUNK_SIZE`.
+///
+/// For positive `scale_exp`, world coords are divided (integer) by `2^scale_exp`.
+#[inline]
+pub fn world_to_chunk_at_scale(
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    ww: i32,
+    scale_exp: i8,
+) -> (ChunkPos, usize) {
+    let cs = CHUNK_SIZE as i64;
+
+    // Convert world coords to scaled-lattice coords using i64 to avoid overflow.
+    // For scale_exp >= 0: divide by 2^scale_exp (floor division)
+    // For scale_exp < 0: multiply by 2^(-scale_exp)
+    let (sx, sy, sz, sw) = if scale_exp >= 0 {
+        let shift = scale_exp as u32;
+        (
+            (wx as i64).div_euclid(1i64 << shift),
+            (wy as i64).div_euclid(1i64 << shift),
+            (wz as i64).div_euclid(1i64 << shift),
+            (ww as i64).div_euclid(1i64 << shift),
+        )
+    } else {
+        let shift = (-scale_exp) as u32;
+        (
+            (wx as i64) << shift,
+            (wy as i64) << shift,
+            (wz as i64) << shift,
+            (ww as i64) << shift,
+        )
+    };
+
     let chunk = ChunkPos::new(
-        wx.div_euclid(cs),
-        wy.div_euclid(cs),
-        wz.div_euclid(cs),
-        ww.div_euclid(cs),
+        sx.div_euclid(cs) as i32,
+        sy.div_euclid(cs) as i32,
+        sz.div_euclid(cs) as i32,
+        sw.div_euclid(cs) as i32,
     );
-    let lx = wx.rem_euclid(cs) as usize;
-    let ly = wy.rem_euclid(cs) as usize;
-    let lz = wz.rem_euclid(cs) as usize;
-    let lw = ww.rem_euclid(cs) as usize;
+    let lx = sx.rem_euclid(cs) as usize;
+    let ly = sy.rem_euclid(cs) as usize;
+    let lz = sz.rem_euclid(cs) as usize;
+    let lw = sw.rem_euclid(cs) as usize;
     let idx = lw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
         + lz * CHUNK_SIZE * CHUNK_SIZE
         + ly * CHUNK_SIZE
         + lx;
     (chunk, idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_to_chunk_at_scale_zero_matches_world_to_chunk() {
+        for &(wx, wy, wz, ww) in &[
+            (0, 0, 0, 0),
+            (7, 7, 7, 7),
+            (8, 0, 0, 0),
+            (-1, 0, 0, 0),
+            (-8, -8, -8, -8),
+            (15, 3, -4, 10),
+        ] {
+            let a = world_to_chunk(wx, wy, wz, ww);
+            let b = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
+            assert_eq!(a, b, "mismatch for ({wx},{wy},{wz},{ww})");
+        }
+    }
+
+    #[test]
+    fn world_to_chunk_at_scale_negative_one() {
+        // scale_exp=-1: cell_size=0.5, chunk spans 4 world units
+        // World coord 0 → scaled coord 0 → chunk (0,0,0,0) local index 0
+        let (cp, _idx) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
+        assert_eq!((cp.x, cp.y, cp.z, cp.w), (0, 0, 0, 0));
+
+        // World coord 3 → scaled coord 6 → chunk 0, local 6
+        let (cp, idx) = world_to_chunk_at_scale(3, 0, 0, 0, -1);
+        assert_eq!(cp.x, 0);
+        assert_eq!(idx, 6); // local x=6, others=0
+
+        // World coord 4 → scaled coord 8 → chunk 1, local 0
+        let (cp, idx) = world_to_chunk_at_scale(4, 0, 0, 0, -1);
+        assert_eq!(cp.x, 1);
+        assert_eq!(idx, 0);
+
+        // Negative: world coord -1 → scaled coord -2 → chunk -1, local 6
+        let (cp, idx) = world_to_chunk_at_scale(-1, 0, 0, 0, -1);
+        assert_eq!(cp.x, -1);
+        assert_eq!(idx, 6);
+    }
+
+    #[test]
+    fn world_to_chunk_at_scale_positive_one() {
+        // scale_exp=1: cell_size=2, chunk spans 16 world units
+        // World coord 0 → scaled coord 0 → chunk (0,0,0,0)
+        let (cp, _) = world_to_chunk_at_scale(0, 0, 0, 0, 1);
+        assert_eq!((cp.x, cp.y, cp.z, cp.w), (0, 0, 0, 0));
+
+        // World coord 15 → scaled coord 7 → chunk 0, local 7
+        let (cp, idx) = world_to_chunk_at_scale(15, 0, 0, 0, 1);
+        assert_eq!(cp.x, 0);
+        assert_eq!(idx, 7);
+
+        // World coord 16 → scaled coord 8 → chunk 1, local 0
+        let (cp, idx) = world_to_chunk_at_scale(16, 0, 0, 0, 1);
+        assert_eq!(cp.x, 1);
+        assert_eq!(idx, 0);
+    }
 }

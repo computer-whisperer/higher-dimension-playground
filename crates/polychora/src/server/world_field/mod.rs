@@ -2,7 +2,7 @@ use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::protocol::WorldBounds;
 use crate::shared::region_tree::{
-    chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
+    chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore, ScaledChunkKey,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{
@@ -67,7 +67,7 @@ pub struct PassthroughWorldOverlay<F> {
     // Dirty tracking for replication fanout.
     dirty_chunks: RegionChunkTree,
     // Dirty tracking for save patch writes.
-    dirty_save_chunks: HashSet<[i32; 4]>,
+    dirty_save_chunks: HashSet<ScaledChunkKey>,
     save_stream: Option<SaveStreamingState>,
     base_world_kind: BaseWorldKind,
     world_seed: u64,
@@ -504,7 +504,62 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         }
 
         self.mark_dirty_chunk(chunk_pos);
-        self.dirty_save_chunks.insert(chunk_key);
+        self.dirty_save_chunks.insert(ScaledChunkKey::unit(chunk_key));
+        Some(chunk_pos)
+    }
+
+    /// Edit a voxel at a specific scale. For `scale_exp = 0`, delegates to
+    /// [`apply_voxel_edit`]. For non-zero scales, uses the scale-aware mutation
+    /// API to insert/modify chunks in the override tree.
+    pub fn apply_voxel_edit_at_scale(
+        &mut self,
+        position: [i32; 4],
+        block: BlockData,
+        scale_exp: i8,
+    ) -> Option<ChunkPos> {
+        if scale_exp == 0 {
+            return self.apply_voxel_edit(position, block);
+        }
+
+        let (chunk_pos, voxel_index) = crate::shared::voxel::world_to_chunk_at_scale(
+            position[0],
+            position[1],
+            position[2],
+            position[3],
+            scale_exp,
+        );
+        let chunk_key = chunk_key_from_chunk_pos(chunk_pos);
+        let scaled_key = crate::shared::region_tree::ScaledChunkKey::new(chunk_key, scale_exp);
+
+        let current_payload = self.override_chunks.chunk_payload_scaled(scaled_key);
+        let current_block = current_payload
+            .as_ref()
+            .map(|r| r.block_at(voxel_index))
+            .unwrap_or(BlockData::AIR);
+        if current_block == block {
+            return None;
+        }
+
+        let mut blocks = current_payload
+            .map(|r| r.dense_blocks())
+            .unwrap_or_else(|| vec![BlockData::AIR; crate::shared::voxel::CHUNK_VOLUME]);
+        blocks[voxel_index] = block;
+
+        let desired_payload = if blocks.iter().all(|b| b.is_air()) {
+            None
+        } else {
+            ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
+        };
+
+        let changed = self
+            .override_chunks
+            .set_chunk_scaled(scaled_key, desired_payload);
+        if !changed {
+            return None;
+        }
+
+        self.mark_dirty_chunk(chunk_pos);
+        self.dirty_save_chunks.insert(scaled_key);
         Some(chunk_pos)
     }
 
@@ -523,14 +578,14 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             return Ok(None);
         }
 
-        let mut dirty_chunk_positions: Vec<[i32; 4]> =
+        let mut dirty_keys: Vec<ScaledChunkKey> =
             self.dirty_save_chunks.iter().copied().collect();
-        dirty_chunk_positions.sort_unstable();
-        let dirty_chunk_payloads = dirty_chunk_positions
+        dirty_keys.sort_unstable_by_key(|k| (k.scale_exp, k.pos));
+        let dirty_chunk_payloads = dirty_keys
             .into_iter()
-            .map(|chunk_pos| {
-                let resolved = self.override_chunks.chunk_payload(chunk_pos);
-                (chunk_pos, resolved)
+            .map(|key| {
+                let resolved = self.override_chunks.chunk_payload_scaled(key);
+                (key, resolved)
             })
             .collect::<Vec<_>>();
 

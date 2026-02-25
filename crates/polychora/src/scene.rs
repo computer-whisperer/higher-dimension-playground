@@ -8,11 +8,11 @@ use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::protocol::WorldBounds;
 use polychora::shared::region_tree::{
     chunk_key_from_chunk_pos, slice_non_empty_region_core_in_bounds, RegionChunkTree,
-    RegionNodeKind, RegionTreeCore,
+    RegionNodeKind, RegionTreeCore, ScaledChunkKey,
 };
 use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
 use polychora::shared::spatial::Aabb4i;
-use polychora::shared::voxel::{world_to_chunk, BlockData};
+use polychora::shared::voxel::{world_to_chunk, world_to_chunk_at_scale, BlockData};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
@@ -44,6 +44,7 @@ const FLAT_PRESET_FLOOR_MATERIAL_BLOCK: BlockData = BlockData {
     block_type: polychora_plugin_api::content_ids::BLOCK_GRID_FLOOR,
     orientation: polychora::shared::voxel::TesseractOrientation::IDENTITY,
     extra_data: Vec::new(),
+    scale_exp: 0,
 };
 const SHOWCASE_MATERIAL_TOKENS: [u8; 37] = [
     15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 40, 45, 50, 55,
@@ -400,6 +401,26 @@ impl Scene {
     pub fn get_block_data(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> BlockData {
         let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
         if let Some(payload) = self.world_tree.chunk_payload(chunk_key_from_chunk_pos(cp)) {
+            return payload.block_at(idx);
+        }
+        BlockData::AIR
+    }
+
+    /// Look up block at world position, querying a specific scale.
+    pub fn get_block_data_at_scale(
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        ww: i32,
+        scale_exp: i8,
+    ) -> BlockData {
+        if scale_exp == 0 {
+            return self.get_block_data(wx, wy, wz, ww);
+        }
+        let (cp, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, scale_exp);
+        let key = ScaledChunkKey::new(chunk_key_from_chunk_pos(cp), scale_exp);
+        if let Some(payload) = self.world_tree.chunk_payload_scaled(key) {
             return payload.block_at(idx);
         }
         BlockData::AIR
