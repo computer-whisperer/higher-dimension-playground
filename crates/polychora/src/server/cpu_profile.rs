@@ -14,6 +14,14 @@ pub(super) struct ServerCpuProfile {
     tick_player_snapshots_max: u64,
     tick_entity_snapshots_sum: u64,
     tick_entity_snapshots_max: u64,
+    tick_sim_steps_sum: u64,
+    tick_sim_steps_max: u64,
+    tick_wasm_us_sum: u64,
+    tick_wasm_us_max: u64,
+    tick_nav_us_sum: u64,
+    tick_nav_us_max: u64,
+    tick_collision_us_sum: u64,
+    tick_collision_us_max: u64,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -28,6 +36,14 @@ pub(super) struct ServerCpuProfileReport {
     pub(super) tick_player_snapshots_max: u64,
     pub(super) tick_entity_snapshots_sum: u64,
     pub(super) tick_entity_snapshots_max: u64,
+    pub(super) tick_sim_steps_sum: u64,
+    pub(super) tick_sim_steps_max: u64,
+    pub(super) tick_wasm_us_sum: u64,
+    pub(super) tick_wasm_us_max: u64,
+    pub(super) tick_nav_us_sum: u64,
+    pub(super) tick_nav_us_max: u64,
+    pub(super) tick_collision_us_sum: u64,
+    pub(super) tick_collision_us_max: u64,
 }
 
 impl ServerCpuProfile {
@@ -44,6 +60,14 @@ impl ServerCpuProfile {
             tick_player_snapshots_max: 0,
             tick_entity_snapshots_sum: 0,
             tick_entity_snapshots_max: 0,
+            tick_sim_steps_sum: 0,
+            tick_sim_steps_max: 0,
+            tick_wasm_us_sum: 0,
+            tick_wasm_us_max: 0,
+            tick_nav_us_sum: 0,
+            tick_nav_us_max: 0,
+            tick_collision_us_sum: 0,
+            tick_collision_us_max: 0,
         }
     }
 
@@ -76,6 +100,18 @@ impl ServerCpuProfile {
         self.tick_entity_snapshots_max = self.tick_entity_snapshots_max.max(entity_snapshots);
     }
 
+    pub(super) fn record_tick_subtimings(&mut self, subtimings: &super::mob_sim::SimTimings) {
+        let steps = subtimings.sim_steps as u64;
+        self.tick_sim_steps_sum = self.tick_sim_steps_sum.saturating_add(steps);
+        self.tick_sim_steps_max = self.tick_sim_steps_max.max(steps);
+        self.tick_wasm_us_sum = self.tick_wasm_us_sum.saturating_add(subtimings.wasm_us);
+        self.tick_wasm_us_max = self.tick_wasm_us_max.max(subtimings.wasm_us);
+        self.tick_nav_us_sum = self.tick_nav_us_sum.saturating_add(subtimings.nav_us);
+        self.tick_nav_us_max = self.tick_nav_us_max.max(subtimings.nav_us);
+        self.tick_collision_us_sum = self.tick_collision_us_sum.saturating_add(subtimings.collision_us);
+        self.tick_collision_us_max = self.tick_collision_us_max.max(subtimings.collision_us);
+    }
+
     pub(super) fn take_report_if_due(&mut self, now: Instant) -> Option<ServerCpuProfileReport> {
         if now.duration_since(self.window_start) < SERVER_CPU_PROFILE_INTERVAL {
             return None;
@@ -92,6 +128,14 @@ impl ServerCpuProfile {
             tick_player_snapshots_max: self.tick_player_snapshots_max,
             tick_entity_snapshots_sum: self.tick_entity_snapshots_sum,
             tick_entity_snapshots_max: self.tick_entity_snapshots_max,
+            tick_sim_steps_sum: self.tick_sim_steps_sum,
+            tick_sim_steps_max: self.tick_sim_steps_max,
+            tick_wasm_us_sum: self.tick_wasm_us_sum,
+            tick_wasm_us_max: self.tick_wasm_us_max,
+            tick_nav_us_sum: self.tick_nav_us_sum,
+            tick_nav_us_max: self.tick_nav_us_max,
+            tick_collision_us_sum: self.tick_collision_us_sum,
+            tick_collision_us_max: self.tick_collision_us_max,
         };
 
         self.window_start = now;
@@ -105,6 +149,14 @@ impl ServerCpuProfile {
         self.tick_player_snapshots_max = 0;
         self.tick_entity_snapshots_sum = 0;
         self.tick_entity_snapshots_max = 0;
+        self.tick_sim_steps_sum = 0;
+        self.tick_sim_steps_max = 0;
+        self.tick_wasm_us_sum = 0;
+        self.tick_wasm_us_max = 0;
+        self.tick_nav_us_sum = 0;
+        self.tick_nav_us_max = 0;
+        self.tick_collision_us_sum = 0;
+        self.tick_collision_us_max = 0;
 
         if report.message_samples == 0 && report.tick_samples == 0 {
             None

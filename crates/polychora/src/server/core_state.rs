@@ -326,6 +326,7 @@ pub(super) fn record_server_cpu_sample(
     state: &SharedState,
     message_elapsed: Option<Duration>,
     tick_sample: Option<(Duration, usize, usize)>,
+    tick_subtimings: Option<&super::mob_sim::SimTimings>,
 ) {
     let maybe_report = {
         let mut guard = state.lock().expect("server state lock poisoned");
@@ -336,6 +337,9 @@ pub(super) fn record_server_cpu_sample(
             guard
                 .cpu_profile
                 .record_tick_sample(elapsed, player_snapshots, entity_snapshots);
+        }
+        if let Some(subtimings) = tick_subtimings {
+            guard.cpu_profile.record_tick_subtimings(subtimings);
         }
         guard
             .cpu_profile
@@ -375,14 +379,40 @@ pub(super) fn record_server_cpu_sample(
         0.0
     };
 
+    let sim_steps_avg = if report.tick_samples > 0 {
+        report.tick_sim_steps_sum as f64 / report.tick_samples as f64
+    } else {
+        0.0
+    };
+    let wasm_ms_avg = if report.tick_samples > 0 {
+        report.tick_wasm_us_sum as f64 / report.tick_samples as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let nav_ms_avg = if report.tick_samples > 0 {
+        report.tick_nav_us_sum as f64 / report.tick_samples as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let collision_ms_avg = if report.tick_samples > 0 {
+        report.tick_collision_us_sum as f64 / report.tick_samples as f64 / 1000.0
+    } else {
+        0.0
+    };
+
     eprintln!(
-        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_persistent={} rec_owned={} rec_tombstones={}",
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_sim_steps_avg={:.1} tick_sim_steps_max={} tick_wasm_ms={:.3} tick_nav_ms={:.3} tick_collision_ms={:.3} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_persistent={} rec_owned={} rec_tombstones={}",
         msg_avg_ms,
         report.message_cpu_ms_max,
         report.message_samples,
         tick_avg_ms,
         report.tick_cpu_ms_max,
         report.tick_samples,
+        sim_steps_avg,
+        report.tick_sim_steps_max,
+        wasm_ms_avg,
+        nav_ms_avg,
+        collision_ms_avg,
         tick_players_avg,
         report.tick_player_snapshots_max,
         tick_entities_avg,

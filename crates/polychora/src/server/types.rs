@@ -18,6 +18,8 @@ pub(super) struct MobNavigationState {
     pub(super) blocked_without_path: bool,
     pub(super) last_repath_ms: u64,
     pub(super) last_debug_log_ms: u64,
+    pub(super) last_los_result: bool,
+    pub(super) last_los_check_ms: u64,
 }
 
 #[derive(Clone, Debug)]

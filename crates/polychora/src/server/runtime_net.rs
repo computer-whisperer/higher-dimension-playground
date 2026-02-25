@@ -772,13 +772,13 @@ pub(super) fn start_broadcast_thread(
             }
             let tick_cpu_start = Instant::now();
             let now = monotonic_ms(start);
-            let (entity_batches, explosion_events, player_movement_modifiers) = {
+            let (entity_batches, explosion_events, player_movement_modifiers, sim_timings) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 let _ = guard.evict_far_mob_nav_cache_chunks(
                     MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS,
                     MOB_NAV_CACHE_EVICT_BUDGET_PER_TICK,
                 );
-                let (explosion_events, player_movement_modifiers) = tick_entity_simulation_window(
+                let (explosion_events, player_movement_modifiers, sim_timings) = tick_entity_simulation_window(
                     &mut guard,
                     &mut wasm_manager,
                     now,
@@ -787,7 +787,7 @@ pub(super) fn start_broadcast_thread(
                 );
                 let entity_batches =
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
-                (entity_batches, explosion_events, player_movement_modifiers)
+                (entity_batches, explosion_events, player_movement_modifiers, sim_timings)
             };
             let spawned_count: usize = entity_batches.iter().map(|batch| batch.spawned.len()).sum();
             let transform_count: usize = entity_batches
@@ -878,6 +878,7 @@ pub(super) fn start_broadcast_thread(
                             .saturating_add(world_chunk_update_count)
                             .saturating_add(player_modifier_count),
                     )),
+                    Some(&sim_timings),
                 );
             }
 
@@ -1288,7 +1289,7 @@ pub(super) fn handle_message(
             send_to_client(state, client_id, ServerMessage::Pong { nonce });
         }
     }
-    record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None);
+    record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None, None);
 }
 
 pub(super) fn spawn_client_thread(

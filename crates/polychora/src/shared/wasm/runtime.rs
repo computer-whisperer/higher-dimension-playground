@@ -226,21 +226,48 @@ impl WasmRuntime {
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, WASM_ABI_EXPORT_ALLOC)
             .map_err(|_| WasmRuntimeError::MissingExport(WASM_ABI_EXPORT_ALLOC))?;
-        let free = instance
+        let _free = instance
             .get_typed_func::<(i32, i32), ()>(&mut store, WASM_ABI_EXPORT_FREE)
             .map_err(|_| WasmRuntimeError::MissingExport(WASM_ABI_EXPORT_FREE))?;
         let call = instance
             .get_typed_func::<(i32, i32, i32, i32, i32), i32>(&mut store, WASM_ABI_EXPORT_CALL)
             .map_err(|_| WasmRuntimeError::MissingExport(WASM_ABI_EXPORT_CALL))?;
 
+        let io_in_cap = i32::try_from(limits.max_input_bytes)
+            .map_err(|_| WasmRuntimeError::IntegerOverflow("io_in_cap"))?;
+        let io_out_cap = i32::try_from(limits.max_output_bytes)
+            .map_err(|_| WasmRuntimeError::IntegerOverflow("io_out_cap"))?;
+
+        let io_in_ptr = alloc.call(&mut store, io_in_cap).map_err(|error| {
+            WasmRuntimeError::GuestFunctionError {
+                function: WASM_ABI_EXPORT_ALLOC,
+                message: format!("failed to pre-allocate input buffer: {error}"),
+            }
+        })?;
+        if io_in_ptr < 0 {
+            return Err(WasmRuntimeError::InvalidGuestPointer(io_in_ptr));
+        }
+
+        let io_out_ptr = alloc.call(&mut store, io_out_cap).map_err(|error| {
+            WasmRuntimeError::GuestFunctionError {
+                function: WASM_ABI_EXPORT_ALLOC,
+                message: format!("failed to pre-allocate output buffer: {error}"),
+            }
+        })?;
+        if io_out_ptr < 0 {
+            return Err(WasmRuntimeError::InvalidGuestPointer(io_out_ptr));
+        }
+
         Ok(WasmRuntimeInstance {
             compiled,
             limits,
             store,
             memory,
-            alloc,
-            free,
             call,
+            io_in_ptr,
+            io_in_cap,
+            io_out_ptr,
+            io_out_cap,
         })
     }
 }
@@ -256,9 +283,11 @@ pub struct WasmRuntimeInstance {
     limits: WasmExecutionLimits,
     store: Store<HostState>,
     memory: Memory,
-    alloc: TypedFunc<i32, i32>,
-    free: TypedFunc<(i32, i32), ()>,
     call: TypedFunc<(i32, i32, i32, i32, i32), i32>,
+    io_in_ptr: i32,
+    io_in_cap: i32,
+    io_out_ptr: i32,
+    io_out_cap: i32,
 }
 
 impl WasmRuntimeInstance {
@@ -279,17 +308,15 @@ impl WasmRuntimeInstance {
         opcode: i32,
         input: &[u8],
     ) -> Result<WasmInvocationResult, WasmRuntimeError> {
-        if input.len() > self.limits.max_input_bytes {
+        if input.len() > self.io_in_cap as usize {
             return Err(WasmRuntimeError::InputTooLarge {
                 actual: input.len(),
-                max: self.limits.max_input_bytes,
+                max: self.io_in_cap as usize,
             });
         }
 
         let input_len_i32 = i32::try_from(input.len())
             .map_err(|_| WasmRuntimeError::IntegerOverflow("input_len"))?;
-        let output_cap_i32 = i32::try_from(self.limits.max_output_bytes)
-            .map_err(|_| WasmRuntimeError::IntegerOverflow("output_cap"))?;
 
         self.store.set_fuel(self.limits.max_fuel).map_err(|error| {
             WasmRuntimeError::GuestFunctionError {
@@ -298,20 +325,11 @@ impl WasmRuntimeInstance {
             }
         })?;
 
-        let input_ptr = self.alloc_region(input_len_i32)?;
-        self.write_memory(input_ptr, input)?;
-
-        let output_ptr = match self.alloc_region(output_cap_i32) {
-            Ok(ptr) => ptr,
-            Err(error) => {
-                let _ = self.free_region(input_ptr, input_len_i32);
-                return Err(error);
-            }
-        };
+        self.write_memory(self.io_in_ptr, input)?;
 
         let call_result = self.call.call(
             &mut self.store,
-            (opcode, input_ptr, input_len_i32, output_ptr, output_cap_i32),
+            (opcode, self.io_in_ptr, input_len_i32, self.io_out_ptr, self.io_out_cap),
         );
 
         let output = match call_result {
@@ -321,13 +339,13 @@ impl WasmRuntimeInstance {
                 } else {
                     let output_len = usize::try_from(return_len)
                         .map_err(|_| WasmRuntimeError::IntegerOverflow("guest_output_len"))?;
-                    if output_len > self.limits.max_output_bytes {
+                    if output_len > self.io_out_cap as usize {
                         Err(WasmRuntimeError::OutputTooLarge {
                             actual: output_len,
-                            max: self.limits.max_output_bytes,
+                            max: self.io_out_cap as usize,
                         })
                     } else {
-                        self.read_memory(output_ptr, output_len)
+                        self.read_memory(self.io_out_ptr, output_len)
                     }
                 }
             }
@@ -337,9 +355,6 @@ impl WasmRuntimeInstance {
             }),
         };
 
-        let _ = self.free_region(input_ptr, input_len_i32);
-        let _ = self.free_region(output_ptr, output_cap_i32);
-
         let output = output?;
         let fuel_used = self
             .store
@@ -347,28 +362,6 @@ impl WasmRuntimeInstance {
             .ok()
             .map(|remaining| self.limits.max_fuel.saturating_sub(remaining));
         Ok(WasmInvocationResult { output, fuel_used })
-    }
-
-    fn alloc_region(&mut self, len: i32) -> Result<i32, WasmRuntimeError> {
-        let ptr = self.alloc.call(&mut self.store, len).map_err(|error| {
-            WasmRuntimeError::GuestFunctionError {
-                function: WASM_ABI_EXPORT_ALLOC,
-                message: error.to_string(),
-            }
-        })?;
-        if ptr < 0 {
-            return Err(WasmRuntimeError::InvalidGuestPointer(ptr));
-        }
-        Ok(ptr)
-    }
-
-    fn free_region(&mut self, ptr: i32, len: i32) -> Result<(), WasmRuntimeError> {
-        self.free
-            .call(&mut self.store, (ptr, len))
-            .map_err(|error| WasmRuntimeError::GuestFunctionError {
-                function: WASM_ABI_EXPORT_FREE,
-                message: error.to_string(),
-            })
     }
 
     fn write_memory(&mut self, ptr: i32, bytes: &[u8]) -> Result<(), WasmRuntimeError> {
@@ -415,7 +408,7 @@ mod tests {
         wat::parse_str(
             r#"
             (module
-              (memory (export "memory") 1 4)
+              (memory (export "memory") 4 4)
               (global $heap (mut i32) (i32.const 4096))
               (func (export "polychora_abi_version") (result i32)
                 (i32.const 1))

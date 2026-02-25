@@ -159,7 +159,7 @@ mod tests {
         wat::parse_str(
             r#"
             (module
-              (memory (export "memory") 1 4)
+              (memory (export "memory") 4 4)
               (global $heap (mut i32) (i32.const 4096))
               (func (export "polychora_abi_version") (result i32)
                 (i32.const 1))
