@@ -1,6 +1,9 @@
 use crate::migration::legacy_voxel::{Chunk, LegacyVoxel, RegionChunkWorld};
 use crate::migration::legacy_world_io::load_world;
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, CHUNK_SIZE, CHUNK_VOLUME};
+
+/// Legacy chunk position type for v3 save format (replaced by [i32; 4]).
+type ChunkPos = [i32; 4];
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -310,7 +313,7 @@ pub fn region_from_chunk(chunk: [i32; 4], region_chunk_edge: i32) -> [i32; 4] {
 }
 
 pub fn region_from_chunk_pos(chunk: ChunkPos, region_chunk_edge: i32) -> [i32; 4] {
-    region_from_chunk([chunk.x, chunk.y, chunk.z, chunk.w], region_chunk_edge)
+    region_from_chunk(chunk, region_chunk_edge)
 }
 
 pub fn all_block_regions(world: &RegionChunkWorld, region_chunk_edge: i32) -> HashSet<[i32; 4]> {
@@ -827,12 +830,12 @@ fn apply_block_blob_to_world(blob: &BlockBlob, world: &mut RegionChunkWorld) -> 
     ];
 
     for assignment in &blob.assignments {
-        let chunk_pos = ChunkPos::new(
+        let chunk_pos: ChunkPos = [
             region_min[0].saturating_add(assignment.local_chunk_coord[0] as i32),
             region_min[1].saturating_add(assignment.local_chunk_coord[1] as i32),
             region_min[2].saturating_add(assignment.local_chunk_coord[2] as i32),
             region_min[3].saturating_add(assignment.local_chunk_coord[3] as i32),
-        );
+        ];
         match assignment.state {
             ChunkFillState::Virgin => {
                 let _ = world.remove_chunk_override(chunk_pos);
@@ -877,10 +880,10 @@ fn build_block_blob_for_region(
             region[3].saturating_mul(region_chunk_edge.max(1)),
         ];
         let local = [
-            pos.x.saturating_sub(region_min[0]) as u16,
-            pos.y.saturating_sub(region_min[1]) as u16,
-            pos.z.saturating_sub(region_min[2]) as u16,
-            pos.w.saturating_sub(region_min[3]) as u16,
+            pos[0].saturating_sub(region_min[0]) as u16,
+            pos[1].saturating_sub(region_min[1]) as u16,
+            pos[2].saturating_sub(region_min[2]) as u16,
+            pos[3].saturating_sub(region_min[3]) as u16,
         ];
         if chunk.is_empty() {
             assignments.push(ChunkAssignment {

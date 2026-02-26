@@ -6,19 +6,21 @@ use higher_dimension_playground::render::{
 use polychora::shared::render_tree::{DebugRayBvhNodeHit, DebugRayBvhNodeKind};
 
 fn describe_sample_ray_hit_for_hud(hit: &DebugRayBvhNodeHit) -> String {
+    use polychora::shared::spatial::ChunkCoord;
+    let one = ChunkCoord::from_num(1);
     let span = [
-        hit.bounds.max[0]
+        (hit.bounds.max[0]
             .saturating_sub(hit.bounds.min[0])
-            .saturating_add(1),
-        hit.bounds.max[1]
+            .saturating_add(one)).to_num::<i32>(),
+        (hit.bounds.max[1]
             .saturating_sub(hit.bounds.min[1])
-            .saturating_add(1),
-        hit.bounds.max[2]
+            .saturating_add(one)).to_num::<i32>(),
+        (hit.bounds.max[2]
             .saturating_sub(hit.bounds.min[2])
-            .saturating_add(1),
-        hit.bounds.max[3]
+            .saturating_add(one)).to_num::<i32>(),
+        (hit.bounds.max[3]
             .saturating_sub(hit.bounds.min[3])
-            .saturating_add(1),
+            .saturating_add(one)).to_num::<i32>(),
     ];
     match &hit.kind {
         DebugRayBvhNodeKind::Internal => format!(

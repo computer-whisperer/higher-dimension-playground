@@ -1,5 +1,5 @@
 use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
-use crate::voxel::{ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::voxel::{CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
     VoxelFrameInput, VoxelMutationBatch, VTE_REGION_BVH_INVALID_NODE,
@@ -7,11 +7,11 @@ use higher_dimension_playground::render::{
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::protocol::WorldBounds;
 use polychora::shared::region_tree::{
-    chunk_key_from_chunk_pos, slice_non_empty_region_core_in_bounds, RegionChunkTree,
-    RegionNodeKind, RegionTreeCore, ScaledChunkKey,
+    chunk_key_i32, slice_non_empty_region_core_in_bounds, ChunkKey, RegionChunkTree,
+    RegionNodeKind, RegionTreeCore,
 };
 use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
-use polychora::shared::spatial::Aabb4i;
+use polychora::shared::spatial::{Aabb4i, ChunkCoord};
 use polychora::shared::voxel::{world_to_chunk, world_to_chunk_at_scale, BlockData};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -117,9 +117,9 @@ pub struct Scene {
     world_tree: RegionChunkTree,
     world_tree_revision: u64,
     #[cfg(test)]
-    world_pending_chunk_updates: Vec<ChunkPos>,
+    world_pending_chunk_updates: Vec<ChunkKey>,
     #[cfg(test)]
-    world_pending_chunk_update_set: HashSet<ChunkPos>,
+    world_pending_chunk_update_set: HashSet<ChunkKey>,
     voxel_visibility_generation: u64,
     voxel_cached_visibility_bounds: Option<Aabb4i>,
     voxel_pending_scene_dirty_regions: Vec<Aabb4i>,
@@ -167,7 +167,7 @@ pub struct RegionPatchStats {
 
 impl Scene {
     fn set_dense_blocks_voxel(
-        chunks: &mut HashMap<ChunkPos, Vec<BlockData>>,
+        chunks: &mut HashMap<ChunkKey, Vec<BlockData>>,
         wx: i32,
         wy: i32,
         wz: i32,
@@ -186,7 +186,7 @@ impl Scene {
     }
 
     fn fill_hypercube(
-        chunks: &mut HashMap<ChunkPos, Vec<BlockData>>,
+        chunks: &mut HashMap<ChunkKey, Vec<BlockData>>,
         min: [i32; 4],
         edge: i32,
         block: BlockData,
@@ -202,7 +202,7 @@ impl Scene {
         }
     }
 
-    fn place_material_showcase(chunks: &mut HashMap<ChunkPos, Vec<BlockData>>, origin: [i32; 4]) {
+    fn place_material_showcase(chunks: &mut HashMap<ChunkKey, Vec<BlockData>>, origin: [i32; 4]) {
         for (idx, token) in SHOWCASE_MATERIAL_TOKENS.iter().copied().enumerate() {
             let col = (idx % 6) as i32;
             let row = (idx / 6) as i32;
@@ -217,7 +217,7 @@ impl Scene {
     }
 
     fn build_scene_preset_world(preset: ScenePreset) -> RegionChunkTree {
-        let mut chunks = HashMap::<ChunkPos, Vec<BlockData>>::new();
+        let mut chunks = HashMap::<ChunkKey, Vec<BlockData>>::new();
 
         match preset {
             ScenePreset::Empty => {}
@@ -227,24 +227,18 @@ impl Scene {
                 for x in -2..=2 {
                     for z in -2..=2 {
                         for w in -2..=2 {
-                            let pos = ChunkPos {
-                                x,
-                                y: FLAT_FLOOR_CHUNK_Y,
-                                z,
-                                w,
-                            };
+                            let key = chunk_key_i32(x, FLAT_FLOOR_CHUNK_Y, z, w);
                             // Insert a dummy entry so we know to emit this chunk;
                             // the actual payload is already built.
-                            chunks.entry(pos).or_insert_with(Vec::new);
+                            chunks.entry(key).or_insert_with(Vec::new);
                         }
                     }
                 }
                 // Build the tree from the chunks map, but override floor chunks
                 // with the prebuilt payload.
-                let mut tree_entries: Vec<([i32; 4], ResolvedChunkPayload)> = Vec::new();
-                for (&pos, blocks) in &chunks {
-                    let key = chunk_key_from_chunk_pos(pos);
-                    if pos.y == FLAT_FLOOR_CHUNK_Y && blocks.is_empty() {
+                let mut tree_entries: Vec<(ChunkKey, ResolvedChunkPayload)> = Vec::new();
+                for (&key, blocks) in &chunks {
+                    if key[1] == ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y) && blocks.is_empty() {
                         tree_entries.push((key, floor_payload.clone()));
                     } else if !blocks.is_empty() && blocks.len() == CHUNK_VOLUME {
                         if blocks.iter().all(|b| b.is_air()) {
@@ -286,16 +280,16 @@ impl Scene {
     }
 
     fn dense_blocks_map_to_tree(
-        chunks: HashMap<ChunkPos, Vec<BlockData>>,
+        chunks: HashMap<ChunkKey, Vec<BlockData>>,
     ) -> RegionChunkTree {
         RegionChunkTree::from_chunks(
             chunks
                 .into_iter()
                 .filter(|(_, blocks)| blocks.len() == CHUNK_VOLUME && !blocks.iter().all(|b| b.is_air()))
-                .map(|(pos, blocks)| {
+                .map(|(key, blocks)| {
                     let payload = ResolvedChunkPayload::from_dense_blocks(&blocks)
                         .unwrap_or_else(|_| ResolvedChunkPayload::empty());
-                    (chunk_key_from_chunk_pos(pos), payload)
+                    (key, payload)
                 }),
         )
     }
@@ -320,9 +314,9 @@ impl Scene {
     }
 
     #[cfg(test)]
-    fn world_queue_chunk_update(&mut self, pos: ChunkPos) -> bool {
-        if self.world_pending_chunk_update_set.insert(pos) {
-            self.world_pending_chunk_updates.push(pos);
+    fn world_queue_chunk_update(&mut self, key: ChunkKey) -> bool {
+        if self.world_pending_chunk_update_set.insert(key) {
+            self.world_pending_chunk_updates.push(key);
             true
         } else {
             false
@@ -331,8 +325,7 @@ impl Scene {
 
     #[cfg(test)]
     fn world_set_block(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, block: BlockData) {
-        let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
-        let key = chunk_key_from_chunk_pos(cp);
+        let (key, idx) = world_to_chunk(wx, wy, wz, ww);
         let old = self.get_block_data(wx, wy, wz, ww);
         if old == block {
             return;
@@ -388,19 +381,19 @@ impl Scene {
         if changed {
             self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
             self.mark_voxel_scene_region_dirty(Aabb4i::new(key, key));
-            let _ = self.world_queue_chunk_update(cp);
+            let _ = self.world_queue_chunk_update(key);
         }
     }
 
     #[cfg(test)]
-    fn world_drain_pending_chunk_updates(&mut self) -> Vec<ChunkPos> {
+    fn world_drain_pending_chunk_updates(&mut self) -> Vec<ChunkKey> {
         self.world_pending_chunk_update_set.clear();
         std::mem::take(&mut self.world_pending_chunk_updates)
     }
 
     pub fn get_block_data(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> BlockData {
-        let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
-        if let Some(payload) = self.world_tree.chunk_payload(chunk_key_from_chunk_pos(cp)) {
+        let (key, idx) = world_to_chunk(wx, wy, wz, ww);
+        if let Some(payload) = self.world_tree.chunk_payload(key) {
             return payload.block_at(idx);
         }
         BlockData::AIR
@@ -418,19 +411,18 @@ impl Scene {
         if scale_exp == 0 {
             return self.get_block_data(wx, wy, wz, ww);
         }
-        let (cp, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, scale_exp);
-        let key = ScaledChunkKey::new(chunk_key_from_chunk_pos(cp), scale_exp);
-        if let Some(payload) = self.world_tree.chunk_payload_scaled(key) {
+        let (key, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, scale_exp);
+        if let Some(payload) = self.world_tree.chunk_payload(key) {
             return payload.block_at(idx);
         }
         BlockData::AIR
     }
 
-    pub fn debug_world_tree_chunk_payload(&self, chunk_key: [i32; 4]) -> Option<ResolvedChunkPayload> {
+    pub fn debug_world_tree_chunk_payload(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
         self.world_tree.chunk_payload(chunk_key)
     }
 
-    pub fn debug_render_bvh_cache_chunk_payloads(&self, chunk_key: [i32; 4]) -> Vec<ResolvedChunkPayload> {
+    pub fn debug_render_bvh_cache_chunk_payloads(&self, chunk_key: ChunkKey) -> Vec<ResolvedChunkPayload> {
         self.render_bvh_cache
             .as_ref()
             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
@@ -550,15 +542,13 @@ impl Scene {
         out
     }
 
-    pub fn collect_non_empty_explicit_chunk_positions(&self) -> Vec<[i32; 4]> {
+    pub fn collect_non_empty_explicit_chunk_positions(&self) -> Vec<ChunkKey> {
         let Some(root) = self.world_tree.root() else {
             return Vec::new();
         };
-        let mut out: Vec<[i32; 4]> = self
+        let mut out: Vec<ChunkKey> = self
             .world_tree
-            .collect_non_empty_chunk_keys_in_bounds(root.bounds)
-            .into_iter()
-            .collect();
+            .collect_non_empty_chunk_keys_in_bounds(root.bounds);
         out.sort_unstable();
         out
     }
@@ -630,8 +620,8 @@ mod tests {
     }
 
     fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) -> Option<u8> {
-        let (chunk_pos, voxel_idx) = world_to_chunk(wx, wy, wz, ww);
-        let chunk_key = chunk_key_from_chunk_pos(chunk_pos);
+        let (chunk_key_fixed, voxel_idx) = world_to_chunk(wx, wy, wz, ww);
+        let chunk_key: [i32; 4] = chunk_key_fixed.map(|c| c.to_num::<i32>());
 
         for leaf in &scene.voxel_frame_data.leaf_headers {
             if chunk_key[0] < leaf.min_chunk_coord[0]

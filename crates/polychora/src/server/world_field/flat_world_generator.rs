@@ -2,10 +2,10 @@ use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
 use crate::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
-    chunk_key_from_chunk_pos, RegionChunkTree, RegionNodeKind, RegionTreeCore,
+    ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
-use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{BaseWorldKind, BlockData, ChunkPos, CHUNK_VOLUME};
+use crate::shared::spatial::{Aabb4i, ChunkCoord};
+use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_VOLUME};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -55,22 +55,23 @@ impl FlatWorldGenerator {
 
     fn floor_core_for_bounds(&self, bounds: Aabb4i) -> Option<RegionTreeCore> {
         let material = self.flat_floor_voxel.as_ref()?;
+        let floor_y = ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y);
         if !bounds.is_valid()
-            || FLAT_FLOOR_CHUNK_Y < bounds.min[1]
-            || FLAT_FLOOR_CHUNK_Y > bounds.max[1]
+            || floor_y < bounds.min[1]
+            || floor_y > bounds.max[1]
         {
             return None;
         }
         let floor_bounds = Aabb4i::new(
             [
                 bounds.min[0],
-                FLAT_FLOOR_CHUNK_Y,
+                floor_y,
                 bounds.min[2],
                 bounds.min[3],
             ],
             [
                 bounds.max[0],
-                FLAT_FLOOR_CHUNK_Y,
+                floor_y,
                 bounds.max[2],
                 bounds.max[3],
             ],
@@ -82,19 +83,19 @@ impl FlatWorldGenerator {
         })
     }
 
-    fn structure_chunk_payload(&self, chunk_pos: ChunkPos) -> Option<ResolvedChunkPayload> {
+    fn structure_chunk_payload(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
         if !self.procgen_structures {
             return None;
         }
         let structure_chunk = procgen::generate_structure_chunk_with_keepout(
             self.world_seed,
-            chunk_pos,
+            chunk_key,
             self.procgen_keepout_cells(),
         )?;
 
         // Build palette: start with procgen palette, add floor material if needed.
         let mut palette = procgen::block_palette().to_vec();
-        let floor_idx = if chunk_pos.y == FLAT_FLOOR_CHUNK_Y {
+        let floor_idx = if chunk_key[1] == ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y) {
             self.flat_floor_voxel
                 .as_ref()
                 .map(|block| procgen::intern_block_into_palette(&mut palette, block))
@@ -128,11 +129,11 @@ impl FlatWorldGenerator {
             bounds,
             self.procgen_keepout_cells(),
         );
-        for chunk_pos in candidates {
-            let Some(resolved) = self.structure_chunk_payload(chunk_pos) else {
+        for chunk_key in candidates {
+            let Some(resolved) = self.structure_chunk_payload(chunk_key) else {
                 continue;
             };
-            let _ = tree.set_chunk(chunk_key_from_chunk_pos(chunk_pos), Some(resolved));
+            let _ = tree.set_chunk(chunk_key, Some(resolved));
         }
     }
 
@@ -215,7 +216,7 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([0, FLAT_FLOOR_CHUNK_Y, 0, 0], [0, FLAT_FLOOR_CHUNK_Y, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, FLAT_FLOOR_CHUNK_Y, 0, 0], [0, FLAT_FLOOR_CHUNK_Y, 0, 0]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         assert_eq!(core.bounds, bounds);
         assert_eq!(core.kind, RegionNodeKind::Uniform(floor));
@@ -233,16 +234,16 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-2, -3, -1, -2], [2, 1, 3, 2]);
+        let bounds = Aabb4i::from_i32([-2, -3, -1, -2], [2, 1, 3, 2]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let non_empty = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
-        let expected_count = ((bounds.max[0] - bounds.min[0] + 1) as usize)
-            * ((bounds.max[2] - bounds.min[2] + 1) as usize)
-            * ((bounds.max[3] - bounds.min[3] + 1) as usize);
+        let expected_count = ((bounds.max[0] - bounds.min[0]).to_num::<i32>() + 1) as usize
+            * ((bounds.max[2] - bounds.min[2]).to_num::<i32>() + 1) as usize
+            * ((bounds.max[3] - bounds.min[3]).to_num::<i32>() + 1) as usize;
         assert_eq!(non_empty.len(), expected_count);
         assert!(non_empty
             .iter()
-            .all(|(key, payload)| key[1] == FLAT_FLOOR_CHUNK_Y
+            .all(|(key, payload)| key[1] == ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y)
                 && payload.uniform_block() == Some(&floor)));
     }
 
@@ -255,7 +256,7 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-2, -3, -1, -2], [2, 1, 3, 2]);
+        let bounds = Aabb4i::from_i32([-2, -3, -1, -2], [2, 1, 3, 2]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         assert_eq!(core.bounds, bounds);
         assert!(matches!(core.kind, RegionNodeKind::Empty));

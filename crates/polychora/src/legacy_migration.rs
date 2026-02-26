@@ -1,6 +1,5 @@
 use crate::migration::legacy_voxel::RegionChunkWorld;
 use crate::migration::legacy_world_io::{load_world, save_world};
-use crate::shared::voxel::ChunkPos;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -28,17 +27,17 @@ pub fn drop_overrides_outside_chunk_bounds(
     min_chunk: [i32; 4],
     max_chunk: [i32; 4],
 ) -> usize {
-    let positions: Vec<ChunkPos> = world.chunks.keys().copied().collect();
+    let positions: Vec<[i32; 4]> = world.chunks.keys().copied().collect();
     let mut dropped = 0usize;
     for pos in positions {
-        let outside = pos.x < min_chunk[0]
-            || pos.x > max_chunk[0]
-            || pos.y < min_chunk[1]
-            || pos.y > max_chunk[1]
-            || pos.z < min_chunk[2]
-            || pos.z > max_chunk[2]
-            || pos.w < min_chunk[3]
-            || pos.w > max_chunk[3];
+        let outside = pos[0] < min_chunk[0]
+            || pos[0] > max_chunk[0]
+            || pos[1] < min_chunk[1]
+            || pos[1] > max_chunk[1]
+            || pos[2] < min_chunk[2]
+            || pos[2] > max_chunk[2]
+            || pos[3] < min_chunk[3]
+            || pos[3] > max_chunk[3];
         if outside && world.remove_chunk_override(pos) {
             dropped = dropped.saturating_add(1);
         }

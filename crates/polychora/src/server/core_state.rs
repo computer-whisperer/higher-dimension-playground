@@ -2,7 +2,7 @@ use super::*;
 use crate::content_registry::ContentRegistry;
 use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::entity_types::EntityCategory;
-use crate::shared::region_tree::{chunk_key_from_chunk_pos, RegionChunkTree, RegionTreeCore};
+use crate::shared::region_tree::{ChunkKey, RegionChunkTree, RegionTreeCore};
 use crate::shared::voxel::BlockData;
 
 pub(super) struct ServerState {
@@ -87,10 +87,10 @@ impl ServerState {
 
     pub(super) fn mob_nav_cached_chunk_at(
         &self,
-        chunk_pos: ChunkPos,
+        chunk_key: ChunkKey,
     ) -> Option<ResolvedChunkPayload> {
         self.mob_nav_chunk_cache
-            .chunk_payload(chunk_key_from_chunk_pos(chunk_pos))
+            .chunk_payload(chunk_key)
     }
 
     pub(super) fn evict_far_mob_nav_cache_chunks(
@@ -120,7 +120,7 @@ impl ServerState {
                 continue;
             };
             let center = world_chunk_from_position(snapshot.entity.pose.position);
-            let player_keep = Aabb4i::new(
+            let player_keep = Aabb4i::from_i32(
                 [
                     center[0] - radius,
                     center[1] - radius,
@@ -140,7 +140,7 @@ impl ServerState {
             });
         }
 
-        keep_bounds.unwrap_or_else(|| Aabb4i::new([1, 1, 1, 1], [0, 0, 0, 0]))
+        keep_bounds.unwrap_or_else(|| Aabb4i::from_i32([1, 1, 1, 1], [0, 0, 0, 0]))
     }
 
     pub(super) fn world_bounds(&self) -> crate::shared::protocol::WorldBounds {
@@ -155,24 +155,24 @@ impl ServerState {
         self.world.non_empty_chunk_count()
     }
 
-    pub(super) fn world_chunk_at(&self, chunk_pos: ChunkPos) -> Option<ResolvedChunkPayload> {
-        self.world.chunk_at(chunk_pos)
+    pub(super) fn world_chunk_at(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
+        self.world.chunk_at(chunk_key)
     }
 
     pub(super) fn world_effective_chunk(
         &self,
-        chunk_pos: ChunkPos,
+        chunk_key: ChunkKey,
         preserve_explicit_empty_chunk: bool,
     ) -> Option<ResolvedChunkPayload> {
         self.world
-            .effective_chunk(chunk_pos, preserve_explicit_empty_chunk)
+            .effective_chunk(chunk_key, preserve_explicit_empty_chunk)
     }
 
     pub(super) fn apply_world_voxel_edit(
         &mut self,
         position: [i32; 4],
         block: BlockData,
-    ) -> Option<ChunkPos> {
+    ) -> Option<ChunkKey> {
         self.world.apply_voxel_edit(position, block)
     }
 

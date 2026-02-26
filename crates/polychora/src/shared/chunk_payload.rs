@@ -1,4 +1,4 @@
-use crate::shared::spatial::Aabb4i;
+use crate::shared::spatial::{Aabb4, Aabb4i};
 use crate::shared::voxel::{BlockData, CHUNK_VOLUME};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -319,7 +319,7 @@ impl ChunkArrayData {
         block_palette: Vec<BlockData>,
         scale_exp: i8,
     ) -> Result<Self, ChunkArrayCodecError> {
-        let dims = bounds_extents(bounds)?;
+        let dims = bounds_extents_at_scale(bounds, scale_exp)?;
         let expected_cells = dims_cell_count(dims)?;
         if dense_indices.len() != expected_cells {
             return Err(ChunkArrayCodecError::DenseIndexCountMismatch {
@@ -389,7 +389,7 @@ impl ChunkArrayData {
         }
         validate_default_index(self.default_chunk_idx, self.chunk_palette.len())?;
 
-        let dims = bounds_extents(self.bounds)?;
+        let dims = bounds_extents_at_scale(self.bounds, self.scale_exp)?;
         match self.index_codec {
             ChunkArrayIndexCodec::DenseU16 => {
                 let expected_bytes = dims_cell_count(dims)?
@@ -490,9 +490,9 @@ fn unpack_indices_u16(packed: &[u64], bit_width: u8, count: usize) -> Vec<u16> {
     out
 }
 
-fn bounds_extents(bounds: Aabb4i) -> Result<[usize; 4], ChunkArrayCodecError> {
+fn bounds_extents_at_scale(bounds: Aabb4, scale_exp: i8) -> Result<[usize; 4], ChunkArrayCodecError> {
     bounds
-        .chunk_extents()
+        .chunk_extents_at_scale(scale_exp)
         .ok_or(ChunkArrayCodecError::InvalidBounds)
 }
 

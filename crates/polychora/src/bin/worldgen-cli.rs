@@ -233,14 +233,14 @@ fn compute_world_stats(world: &RegionChunkWorld, file_version: Option<u32>) -> W
         }
         non_empty += 1;
         have_bounds = true;
-        bounds_min[0] = bounds_min[0].min(pos.x);
-        bounds_min[1] = bounds_min[1].min(pos.y);
-        bounds_min[2] = bounds_min[2].min(pos.z);
-        bounds_min[3] = bounds_min[3].min(pos.w);
-        bounds_max[0] = bounds_max[0].max(pos.x);
-        bounds_max[1] = bounds_max[1].max(pos.y);
-        bounds_max[2] = bounds_max[2].max(pos.z);
-        bounds_max[3] = bounds_max[3].max(pos.w);
+        bounds_min[0] = bounds_min[0].min(pos[0]);
+        bounds_min[1] = bounds_min[1].min(pos[1]);
+        bounds_min[2] = bounds_min[2].min(pos[2]);
+        bounds_min[3] = bounds_min[3].min(pos[3]);
+        bounds_max[0] = bounds_max[0].max(pos[0]);
+        bounds_max[1] = bounds_max[1].max(pos[1]);
+        bounds_max[2] = bounds_max[2].max(pos[2]);
+        bounds_max[3] = bounds_max[3].max(pos[3]);
     }
 
     WorldStats {

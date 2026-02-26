@@ -1,5 +1,6 @@
-use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{BlockData, ChunkPos, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::region_tree::ChunkKey;
+use crate::shared::spatial::{Aabb4i, ChunkCoord};
+use crate::shared::voxel::{BlockData, CHUNK_SIZE, CHUNK_VOLUME};
 use flate2::read::GzDecoder;
 use polychora_plugin_api::content_ids;
 use serde::Deserialize;
@@ -869,13 +870,13 @@ fn maze_world_y_bounds() -> (i32, i32) {
     )
 }
 
-fn chunk_bounds(chunk_pos: ChunkPos) -> ([i32; 4], [i32; 4]) {
+fn chunk_bounds(chunk_key: ChunkKey) -> ([i32; 4], [i32; 4]) {
     let chunk_size = CHUNK_SIZE as i32;
     let chunk_min = [
-        chunk_pos.x * chunk_size,
-        chunk_pos.y * chunk_size,
-        chunk_pos.z * chunk_size,
-        chunk_pos.w * chunk_size,
+        chunk_key[0].to_num::<i32>() * chunk_size,
+        chunk_key[1].to_num::<i32>() * chunk_size,
+        chunk_key[2].to_num::<i32>() * chunk_size,
+        chunk_key[3].to_num::<i32>() * chunk_size,
     ];
     let chunk_max = [
         chunk_min[0] + chunk_size - 1,
@@ -889,16 +890,16 @@ fn chunk_bounds(chunk_pos: ChunkPos) -> ([i32; 4], [i32; 4]) {
 fn world_bounds_from_chunk_bounds(bounds: Aabb4i) -> ([i32; 4], [i32; 4]) {
     let chunk_size = CHUNK_SIZE as i32;
     let min = [
-        bounds.min[0] * chunk_size,
-        bounds.min[1] * chunk_size,
-        bounds.min[2] * chunk_size,
-        bounds.min[3] * chunk_size,
+        bounds.min[0].to_num::<i32>() * chunk_size,
+        bounds.min[1].to_num::<i32>() * chunk_size,
+        bounds.min[2].to_num::<i32>() * chunk_size,
+        bounds.min[3].to_num::<i32>() * chunk_size,
     ];
     let max = [
-        bounds.max[0] * chunk_size + (chunk_size - 1),
-        bounds.max[1] * chunk_size + (chunk_size - 1),
-        bounds.max[2] * chunk_size + (chunk_size - 1),
-        bounds.max[3] * chunk_size + (chunk_size - 1),
+        bounds.max[0].to_num::<i32>() * chunk_size + (chunk_size - 1),
+        bounds.max[1].to_num::<i32>() * chunk_size + (chunk_size - 1),
+        bounds.max[2].to_num::<i32>() * chunk_size + (chunk_size - 1),
+        bounds.max[3].to_num::<i32>() * chunk_size + (chunk_size - 1),
     ];
     (min, max)
 }
@@ -953,7 +954,7 @@ fn intersect_world_bounds_as_chunk_bounds(
     {
         return None;
     }
-    Some(Aabb4i::new(chunk_min, chunk_max))
+    Some(Aabb4i::from_i32(chunk_min, chunk_max))
 }
 
 fn collect_structure_placements_for_chunk_bounds(
@@ -1111,7 +1112,7 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
     world_seed: u64,
     bounds: Aabb4i,
     blocked_cells: Option<&HashSet<StructureCell>>,
-) -> Vec<ChunkPos> {
+) -> Vec<ChunkKey> {
     if !bounds.is_valid() {
         return Vec::new();
     }
@@ -1129,10 +1130,11 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
         else {
             continue;
         };
-        for w in covered_chunks.min[3]..=covered_chunks.max[3] {
-            for z in covered_chunks.min[2]..=covered_chunks.max[2] {
-                for y in covered_chunks.min[1]..=covered_chunks.max[1] {
-                    for x in covered_chunks.min[0]..=covered_chunks.max[0] {
+        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
+        for w in cc_min[3]..=cc_max[3] {
+            for z in cc_min[2]..=cc_max[2] {
+                for y in cc_min[1]..=cc_max[1] {
+                    for x in cc_min[0]..=cc_max[0] {
                         chunk_positions.insert([x, y, z, w]);
                     }
                 }
@@ -1147,10 +1149,11 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
         else {
             continue;
         };
-        for w in covered_chunks.min[3]..=covered_chunks.max[3] {
-            for z in covered_chunks.min[2]..=covered_chunks.max[2] {
-                for y in covered_chunks.min[1]..=covered_chunks.max[1] {
-                    for x in covered_chunks.min[0]..=covered_chunks.max[0] {
+        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
+        for w in cc_min[3]..=cc_max[3] {
+            for z in cc_min[2]..=cc_max[2] {
+                for y in cc_min[1]..=cc_max[1] {
+                    for x in cc_min[0]..=cc_max[0] {
                         chunk_positions.insert([x, y, z, w]);
                     }
                 }
@@ -1158,11 +1161,11 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
         }
     }
 
-    let mut out: Vec<ChunkPos> = chunk_positions
+    let mut out: Vec<ChunkKey> = chunk_positions
         .into_iter()
-        .map(|[x, y, z, w]| ChunkPos::new(x, y, z, w))
+        .map(|[x, y, z, w]| [x, y, z, w].map(ChunkCoord::from_num))
         .collect();
-    out.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+    out.sort_unstable();
     out
 }
 
@@ -1199,7 +1202,7 @@ pub fn generate_structure_placements_for_bounds(
 
         // Convert placement world bounds to chunk coordinates
         let chunk_size = CHUNK_SIZE as i32;
-        let full_chunk_bounds = Aabb4i::new(
+        let full_chunk_bounds = Aabb4i::from_i32(
             [
                 placement_world_min[0].div_euclid(chunk_size),
                 placement_world_min[1].div_euclid(chunk_size),
@@ -1233,11 +1236,12 @@ pub fn generate_structure_placements_for_bounds(
             continue;
         }
 
+        let (cl_min, cl_max) = clipped.to_lattice_bounds(0);
         let mut chunks = HashMap::new();
-        for cw in clipped.min[3]..=clipped.max[3] {
-            for cz in clipped.min[2]..=clipped.max[2] {
-                for cy in clipped.min[1]..=clipped.max[1] {
-                    for cx in clipped.min[0]..=clipped.max[0] {
+        for cw in cl_min[3]..=cl_max[3] {
+            for cz in cl_min[2]..=cl_max[2] {
+                for cy in cl_min[1]..=cl_max[1] {
+                    for cx in cl_min[0]..=cl_max[0] {
                         let chunk_min = [
                             cx * chunk_size,
                             cy * chunk_size,
@@ -1293,16 +1297,17 @@ fn rotate_offset_xzw(offset: [i32; 4], orientation: u8) -> [i32; 4] {
 
 fn collect_structure_placements_for_chunk(
     world_seed: u64,
-    chunk_pos: ChunkPos,
+    chunk_key: ChunkKey,
 ) -> Vec<StructurePlacement> {
     let set = structure_set();
     let (min_chunk_y, max_chunk_y) = structure_chunk_y_bounds();
-    if chunk_pos.y < min_chunk_y || chunk_pos.y > max_chunk_y {
+    let chunk_y = chunk_key[1].to_num::<i32>();
+    if chunk_y < min_chunk_y || chunk_y > max_chunk_y {
         return Vec::new();
     }
 
     let chunk_size = CHUNK_SIZE as i32;
-    let (chunk_min, chunk_max) = chunk_bounds(chunk_pos);
+    let (chunk_min, chunk_max) = chunk_bounds(chunk_key);
 
     let search_margin = STRUCTURE_CELL_JITTER + set.max_abs_offset_xzw + chunk_size;
     let cell_min_x = (chunk_min[0] - search_margin).div_euclid(STRUCTURE_CELL_SIZE) - 1;
@@ -1370,9 +1375,9 @@ fn placement_allowed(
 }
 
 #[cfg(test)]
-pub fn structure_cells_affecting_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Vec<StructureCell> {
+pub fn structure_cells_affecting_chunk(world_seed: u64, chunk_key: ChunkKey) -> Vec<StructureCell> {
     let mut unique = HashSet::new();
-    for placement in collect_structure_placements_for_chunk(world_seed, chunk_pos) {
+    for placement in collect_structure_placements_for_chunk(world_seed, chunk_key) {
         unique.insert(placement.cell);
     }
     let mut out: Vec<_> = unique.into_iter().collect();
@@ -1897,16 +1902,17 @@ fn maze_compiled_layout_for_placement(placement: MazePlacement) -> Arc<MazeCompi
     cache.get_or_insert(key)
 }
 
-fn collect_maze_placements_for_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Vec<MazePlacement> {
+fn collect_maze_placements_for_chunk(world_seed: u64, chunk_key: ChunkKey) -> Vec<MazePlacement> {
     let (maze_world_min_y, maze_world_max_y) = maze_world_y_bounds();
     let maze_min_chunk_y = maze_world_min_y.div_euclid(CHUNK_SIZE as i32);
     let maze_max_chunk_y = maze_world_max_y.div_euclid(CHUNK_SIZE as i32);
-    if chunk_pos.y < maze_min_chunk_y || chunk_pos.y > maze_max_chunk_y {
+    let chunk_y = chunk_key[1].to_num::<i32>();
+    if chunk_y < maze_min_chunk_y || chunk_y > maze_max_chunk_y {
         return Vec::new();
     }
 
     let chunk_size = CHUNK_SIZE as i32;
-    let (chunk_min, chunk_max) = chunk_bounds(chunk_pos);
+    let (chunk_min, chunk_max) = chunk_bounds(chunk_key);
 
     let search_margin = MAZE_CELL_JITTER + MAZE_MAX_HALF_SPAN_XZW + chunk_size;
     let cell_min_x = (chunk_min[0] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
@@ -2200,13 +2206,13 @@ fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &
 
 pub fn generate_structure_chunk_with_keepout(
     world_seed: u64,
-    chunk_pos: ChunkPos,
+    chunk_key: ChunkKey,
     blocked_cells: Option<&HashSet<StructureCell>>,
 ) -> Option<DenseChunk> {
     let set = structure_set();
-    let (chunk_min, _) = chunk_bounds(chunk_pos);
-    let structure_placements = collect_structure_placements_for_chunk(world_seed, chunk_pos);
-    let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_pos);
+    let (chunk_min, _) = chunk_bounds(chunk_key);
+    let structure_placements = collect_structure_placements_for_chunk(world_seed, chunk_key);
+    let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_key);
 
     let mut chunk = dense_chunk_new();
     for placement in structure_placements {
@@ -2258,7 +2264,7 @@ pub fn intern_block_into_palette(palette: &mut Vec<BlockData>, block: &BlockData
 pub fn maze_chunk_positions_for_bounds(
     world_seed: u64,
     bounds: Aabb4i,
-) -> Vec<ChunkPos> {
+) -> Vec<ChunkKey> {
     if !bounds.is_valid() {
         return Vec::new();
     }
@@ -2270,21 +2276,22 @@ pub fn maze_chunk_positions_for_bounds(
         else {
             continue;
         };
-        for w in covered_chunks.min[3]..=covered_chunks.max[3] {
-            for z in covered_chunks.min[2]..=covered_chunks.max[2] {
-                for y in covered_chunks.min[1]..=covered_chunks.max[1] {
-                    for x in covered_chunks.min[0]..=covered_chunks.max[0] {
+        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
+        for w in cc_min[3]..=cc_max[3] {
+            for z in cc_min[2]..=cc_max[2] {
+                for y in cc_min[1]..=cc_max[1] {
+                    for x in cc_min[0]..=cc_max[0] {
                         chunk_positions.insert([x, y, z, w]);
                     }
                 }
             }
         }
     }
-    let mut out: Vec<ChunkPos> = chunk_positions
+    let mut out: Vec<ChunkKey> = chunk_positions
         .into_iter()
-        .map(|[x, y, z, w]| ChunkPos::new(x, y, z, w))
+        .map(|[x, y, z, w]| [x, y, z, w].map(ChunkCoord::from_num))
         .collect();
-    out.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+    out.sort_unstable();
     out
 }
 
@@ -2311,11 +2318,12 @@ pub fn generate_maze_placements_for_bounds(
             continue;
         };
 
+        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
         let mut chunks = HashMap::new();
-        for cw in covered_chunks.min[3]..=covered_chunks.max[3] {
-            for cz in covered_chunks.min[2]..=covered_chunks.max[2] {
-                for cy in covered_chunks.min[1]..=covered_chunks.max[1] {
-                    for cx in covered_chunks.min[0]..=covered_chunks.max[0] {
+        for cw in cc_min[3]..=cc_max[3] {
+            for cz in cc_min[2]..=cc_max[2] {
+                for cy in cc_min[1]..=cc_max[1] {
+                    for cx in cc_min[0]..=cc_max[0] {
                         let chunk_min = [
                             cx * chunk_size,
                             cy * chunk_size,
@@ -2352,10 +2360,10 @@ pub fn generate_maze_placements_for_bounds(
 #[cfg(test)]
 pub fn generate_maze_chunk(
     world_seed: u64,
-    chunk_pos: ChunkPos,
+    chunk_key: ChunkKey,
 ) -> Option<DenseChunk> {
-    let (chunk_min, _) = chunk_bounds(chunk_pos);
-    let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_pos);
+    let (chunk_min, _) = chunk_bounds(chunk_key);
+    let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_key);
     if maze_placements.is_empty() {
         return None;
     }
@@ -2371,19 +2379,19 @@ pub fn generate_maze_chunk(
 }
 
 #[cfg(test)]
-pub fn generate_structure_chunk(world_seed: u64, chunk_pos: ChunkPos) -> Option<DenseChunk> {
-    generate_structure_chunk_with_keepout(world_seed, chunk_pos, None)
+pub fn generate_structure_chunk(world_seed: u64, chunk_key: ChunkKey) -> Option<DenseChunk> {
+    generate_structure_chunk_with_keepout(world_seed, chunk_key, None)
 }
 
 #[cfg(test)]
 pub fn structure_chunk_has_content_with_keepout(
     world_seed: u64,
-    chunk_pos: ChunkPos,
+    chunk_key: ChunkKey,
     blocked_cells: Option<&HashSet<StructureCell>>,
 ) -> bool {
     let set = structure_set();
-    let (chunk_min, chunk_max) = chunk_bounds(chunk_pos);
-    let has_structure = collect_structure_placements_for_chunk(world_seed, chunk_pos)
+    let (chunk_min, chunk_max) = chunk_bounds(chunk_key);
+    let has_structure = collect_structure_placements_for_chunk(world_seed, chunk_key)
         .into_iter()
         .any(|placement| {
             if !placement_allowed(&placement, blocked_cells) {
@@ -2398,36 +2406,40 @@ pub fn structure_chunk_has_content_with_keepout(
         return true;
     }
     // Also check for maze content in this chunk
-    !collect_maze_placements_for_chunk(world_seed, chunk_pos).is_empty()
+    !collect_maze_placements_for_chunk(world_seed, chunk_key).is_empty()
 }
 
 #[cfg(test)]
-pub fn structure_chunk_has_content(world_seed: u64, chunk_pos: ChunkPos) -> bool {
-    structure_chunk_has_content_with_keepout(world_seed, chunk_pos, None)
+pub fn structure_chunk_has_content(world_seed: u64, chunk_key: ChunkKey) -> bool {
+    structure_chunk_has_content_with_keepout(world_seed, chunk_key, None)
 }
 
 #[cfg(test)]
 pub fn structure_chunk_has_content_for_scale_with_keepout(
     world_seed: u64,
-    chunk_pos: ChunkPos,
+    chunk_key: ChunkKey,
     chunk_scale: i32,
     blocked_cells: Option<&HashSet<StructureCell>>,
 ) -> bool {
     let scale = chunk_scale.max(1);
     if scale == 1 {
-        return structure_chunk_has_content_with_keepout(world_seed, chunk_pos, blocked_cells);
+        return structure_chunk_has_content_with_keepout(world_seed, chunk_key, blocked_cells);
     }
 
+    let cx = chunk_key[0].to_num::<i32>();
+    let cy = chunk_key[1].to_num::<i32>();
+    let cz = chunk_key[2].to_num::<i32>();
+    let cw = chunk_key[3].to_num::<i32>();
     for dw in 0..scale {
         for dz in 0..scale {
             for dy in 0..scale {
                 for dx in 0..scale {
-                    let child = ChunkPos::new(
-                        chunk_pos.x * scale + dx,
-                        chunk_pos.y * scale + dy,
-                        chunk_pos.z * scale + dz,
-                        chunk_pos.w * scale + dw,
-                    );
+                    let child = [
+                        cx * scale + dx,
+                        cy * scale + dy,
+                        cz * scale + dz,
+                        cw * scale + dw,
+                    ].map(ChunkCoord::from_num);
                     if structure_chunk_has_content_with_keepout(world_seed, child, blocked_cells) {
                         return true;
                     }
@@ -2441,10 +2453,10 @@ pub fn structure_chunk_has_content_for_scale_with_keepout(
 #[cfg(test)]
 pub fn structure_chunk_has_content_for_scale(
     world_seed: u64,
-    chunk_pos: ChunkPos,
+    chunk_key: ChunkKey,
     chunk_scale: i32,
 ) -> bool {
-    structure_chunk_has_content_for_scale_with_keepout(world_seed, chunk_pos, chunk_scale, None)
+    structure_chunk_has_content_for_scale_with_keepout(world_seed, chunk_key, chunk_scale, None)
 }
 
 fn jitter_from_hash(hash: u64) -> i32 {
@@ -2477,9 +2489,14 @@ fn splitmix64(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::region_tree::chunk_key_i32;
     use std::collections::HashSet;
 
-    fn find_chunk_with_maze(seed: u64) -> Option<ChunkPos> {
+    fn ck(x: i32, y: i32, z: i32, w: i32) -> ChunkKey {
+        chunk_key_i32(x, y, z, w)
+    }
+
+    fn find_chunk_with_maze(seed: u64) -> Option<ChunkKey> {
         for cell_x in -8..=8 {
             for cell_z in -8..=8 {
                 for cell_w in -8..=8 {
@@ -2512,14 +2529,14 @@ mod tests {
                         continue;
                     }
 
-                    let chunk_pos = ChunkPos::new(
+                    let chunk_key = [
                         origin_x.div_euclid(CHUNK_SIZE as i32),
                         shape.world_y_min.div_euclid(CHUNK_SIZE as i32),
                         origin_z.div_euclid(CHUNK_SIZE as i32),
                         origin_w.div_euclid(CHUNK_SIZE as i32),
-                    );
-                    if !collect_maze_placements_for_chunk(seed, chunk_pos).is_empty() {
-                        return Some(chunk_pos);
+                    ].map(ChunkCoord::from_num);
+                    if !collect_maze_placements_for_chunk(seed, chunk_key).is_empty() {
+                        return Some(chunk_key);
                     }
                 }
             }
@@ -2652,8 +2669,8 @@ mod tests {
 
     #[test]
     fn structure_chunk_generation_is_seed_deterministic() {
-        let chunk_a = generate_structure_chunk(42, ChunkPos::new(6, 0, 4, -3));
-        let chunk_b = generate_structure_chunk(42, ChunkPos::new(6, 0, 4, -3));
+        let chunk_a = generate_structure_chunk(42, ck(6, 0, 4, -3));
+        let chunk_b = generate_structure_chunk(42, ck(6, 0, 4, -3));
 
         assert_eq!(chunk_a.is_some(), chunk_b.is_some());
         if let (Some(a), Some(b)) = (chunk_a, chunk_b) {
@@ -2670,7 +2687,7 @@ mod tests {
             for z in -25..=25 {
                 for w in -25..=25 {
                     for y in min_y..=max_y {
-                        if generate_structure_chunk(1337, ChunkPos::new(x, y, z, w)).is_some() {
+                        if generate_structure_chunk(1337, ck(x, y, z, w)).is_some() {
                             found_non_empty = true;
                             break;
                         }
@@ -2783,8 +2800,8 @@ mod tests {
             for z in -35..=35 {
                 for w in -35..=35 {
                     for y in min_y..=max_y {
-                        let left = ChunkPos::new(x, y, z, w);
-                        let right = ChunkPos::new(x + 1, y, z, w);
+                        let left = ck(x, y, z, w);
+                        let right = ck(x + 1, y, z, w);
                         let left_placements = collect_structure_placements_for_chunk(2026, left);
                         if left_placements.is_empty() {
                             continue;
@@ -2820,7 +2837,7 @@ mod tests {
             for z in -8..=8 {
                 for w in -8..=8 {
                     for y in min_y..=max_y {
-                        let chunk_pos = ChunkPos::new(x, y, z, w);
+                        let chunk_pos = ck(x, y, z, w);
                         let has_content = structure_chunk_has_content(seed, chunk_pos);
                         let generated = generate_structure_chunk(seed, chunk_pos).is_some();
                         assert_eq!(
@@ -2836,14 +2853,15 @@ mod tests {
     #[test]
     fn structure_chunk_positions_for_bounds_matches_bruteforce() {
         let seed = 0x4e73_9ac1_2f07_118du64;
-        let bounds = Aabb4i::new([-3, -2, -3, -3], [3, 3, 3, 3]);
+        let bounds = Aabb4i::from_i32([-3, -2, -3, -3], [3, 3, 3, 3]);
 
         let mut brute = Vec::new();
-        for w in bounds.min[3]..=bounds.max[3] {
-            for z in bounds.min[2]..=bounds.max[2] {
-                for y in bounds.min[1]..=bounds.max[1] {
-                    for x in bounds.min[0]..=bounds.max[0] {
-                        let pos = ChunkPos::new(x, y, z, w);
+        let (bmin, bmax) = bounds.to_lattice_bounds(0);
+        for w in bmin[3]..=bmax[3] {
+            for z in bmin[2]..=bmax[2] {
+                for y in bmin[1]..=bmax[1] {
+                    for x in bmin[0]..=bmax[0] {
+                        let pos = ck(x, y, z, w);
                         if structure_chunk_has_content_with_keepout(seed, pos, None) {
                             brute.push(pos);
                         }
@@ -2851,7 +2869,7 @@ mod tests {
                 }
             }
         }
-        brute.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+        brute.sort_unstable();
 
         let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, None);
         assert_eq!(fast, brute);
@@ -2861,12 +2879,12 @@ mod tests {
     fn structure_chunk_positions_for_bounds_respects_keepout_cells() {
         let seed = 0x2a19_6e8d_0cb4_7fd1u64;
         let (min_y, max_y) = structure_chunk_y_bounds();
-        let mut target = None::<(ChunkPos, StructureCell)>;
+        let mut target = None::<(ChunkKey, StructureCell)>;
         'search: for x in -30..=30 {
             for z in -30..=30 {
                 for w in -30..=30 {
                     for y in min_y..=max_y {
-                        let pos = ChunkPos::new(x, y, z, w);
+                        let pos = ck(x, y, z, w);
                         if generate_structure_chunk(seed, pos).is_none() {
                             continue;
                         }
@@ -2880,29 +2898,26 @@ mod tests {
             }
         }
         let (target_pos, blocked_cell) = target.expect("expected target structure chunk");
-        let bounds = Aabb4i::new(
-            [
-                target_pos.x - 2,
-                target_pos.y - 2,
-                target_pos.z - 2,
-                target_pos.w - 2,
-            ],
-            [
-                target_pos.x + 2,
-                target_pos.y + 2,
-                target_pos.z + 2,
-                target_pos.w + 2,
-            ],
+        let tp = [
+            target_pos[0].to_num::<i32>(),
+            target_pos[1].to_num::<i32>(),
+            target_pos[2].to_num::<i32>(),
+            target_pos[3].to_num::<i32>(),
+        ];
+        let bounds = Aabb4i::from_i32(
+            [tp[0] - 2, tp[1] - 2, tp[2] - 2, tp[3] - 2],
+            [tp[0] + 2, tp[1] + 2, tp[2] + 2, tp[3] + 2],
         );
         let mut blocked = HashSet::new();
         blocked.insert(blocked_cell);
 
         let mut brute = Vec::new();
-        for w in bounds.min[3]..=bounds.max[3] {
-            for z in bounds.min[2]..=bounds.max[2] {
-                for y in bounds.min[1]..=bounds.max[1] {
-                    for x in bounds.min[0]..=bounds.max[0] {
-                        let pos = ChunkPos::new(x, y, z, w);
+        let (bmin, bmax) = bounds.to_lattice_bounds(0);
+        for w in bmin[3]..=bmax[3] {
+            for z in bmin[2]..=bmax[2] {
+                for y in bmin[1]..=bmax[1] {
+                    for x in bmin[0]..=bmax[0] {
+                        let pos = ck(x, y, z, w);
                         if structure_chunk_has_content_with_keepout(seed, pos, Some(&blocked)) {
                             brute.push(pos);
                         }
@@ -2910,7 +2925,7 @@ mod tests {
                 }
             }
         }
-        brute.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z, pos.w));
+        brute.sort_unstable();
 
         let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, Some(&blocked));
         assert_eq!(fast, brute);
@@ -2926,17 +2941,17 @@ mod tests {
             for z in -6..=6 {
                 for w in -6..=6 {
                     for y in min_y..=max_y {
-                        let coarse = ChunkPos::new(x, y, z, w);
+                        let coarse = ck(x, y, z, w);
                         let mut expected = false;
                         for dw in 0..scale {
                             for dz in 0..scale {
                                 for dy in 0..scale {
                                     for dx in 0..scale {
-                                        let child = ChunkPos::new(
-                                            coarse.x * scale + dx,
-                                            coarse.y * scale + dy,
-                                            coarse.z * scale + dz,
-                                            coarse.w * scale + dw,
+                                        let child = ck(
+                                            x * scale + dx,
+                                            y * scale + dy,
+                                            z * scale + dz,
+                                            w * scale + dw,
                                         );
                                         if structure_chunk_has_content(seed, child) {
                                             expected = true;
@@ -2977,7 +2992,7 @@ mod tests {
             for z in -30..=30 {
                 for w in -30..=30 {
                     for y in min_y..=max_y {
-                        let chunk_pos = ChunkPos::new(x, y, z, w);
+                        let chunk_pos = ck(x, y, z, w);
                         let cells = structure_cells_affecting_chunk(seed, chunk_pos);
                         if !cells.is_empty() && generate_structure_chunk(seed, chunk_pos).is_some()
                         {

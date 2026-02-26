@@ -288,8 +288,8 @@ pub(super) fn append_voxel_outline_edge_instance(
 
 pub(super) fn append_chunk_bounds_outline_edge_instance(
     overlay_edge_instances: &mut Vec<common::ModelInstance>,
-    min_chunk: [i32; 4],
-    max_chunk: [i32; 4],
+    min_chunk: polychora::shared::region_tree::ChunkKey,
+    max_chunk: polychora::shared::region_tree::ChunkKey,
     edge_tag: u32,
 ) {
     if min_chunk
@@ -301,18 +301,8 @@ pub(super) fn append_chunk_bounds_outline_edge_instance(
     }
 
     let chunk_size = voxel::CHUNK_SIZE as i32;
-    let min_world_i32 = [
-        min_chunk[0].saturating_mul(chunk_size),
-        min_chunk[1].saturating_mul(chunk_size),
-        min_chunk[2].saturating_mul(chunk_size),
-        min_chunk[3].saturating_mul(chunk_size),
-    ];
-    let max_world_i32 = [
-        max_chunk[0].saturating_add(1).saturating_mul(chunk_size),
-        max_chunk[1].saturating_add(1).saturating_mul(chunk_size),
-        max_chunk[2].saturating_add(1).saturating_mul(chunk_size),
-        max_chunk[3].saturating_add(1).saturating_mul(chunk_size),
-    ];
+    let min_world_i32: [i32; 4] = std::array::from_fn(|i| min_chunk[i].to_num::<i32>().saturating_mul(chunk_size));
+    let max_world_i32: [i32; 4] = std::array::from_fn(|i| max_chunk[i].to_num::<i32>().saturating_add(1).saturating_mul(chunk_size));
 
     let min_world = [
         min_world_i32[0] as f32,

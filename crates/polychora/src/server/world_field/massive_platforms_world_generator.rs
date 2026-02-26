@@ -3,13 +3,13 @@ use crate::server::procgen;
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 #[cfg(test)]
 use crate::shared::chunk_payload::ResolvedChunkPayload;
+#[cfg(test)]
+use crate::shared::region_tree::ChunkKey;
 use crate::shared::region_tree::{
     RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::Aabb4i;
 use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_VOLUME};
-#[cfg(test)]
-use crate::shared::voxel::ChunkPos;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -108,7 +108,7 @@ impl MassivePlatformsWorldGenerator {
             let h = ORIGIN_ANCHOR_HALF_EXTENT_CHUNKS;
             let min_y = ORIGIN_ANCHOR_POS[1] - PLATFORM_THICKNESS_CHUNKS + 1;
             let max_y = ORIGIN_ANCHOR_POS[1];
-            return Some(Aabb4i::new(
+            return Some(Aabb4i::from_i32(
                 [-h, min_y, -h, -h],
                 [h - 1, max_y, h - 1, h - 1],
             ));
@@ -153,7 +153,7 @@ impl MassivePlatformsWorldGenerator {
         let min_y = pos[1] - PLATFORM_THICKNESS_CHUNKS + 1;
         let max_y = pos[1];
 
-        let platform_bounds = Aabb4i::new(
+        let platform_bounds = Aabb4i::from_i32(
             [
                 pos[0] - half_x,
                 min_y,
@@ -182,8 +182,8 @@ impl MassivePlatformsWorldGenerator {
         // To intersect query [qmin_y, qmax_y]:
         //   surface >= qmin_y AND surface - THICKNESS + 1 <= qmax_y
         //   surface in [qmin_y, qmax_y + THICKNESS - 1]
-        let min_cy = bounds.min[1].div_euclid(POISSON_CELL_Y);
-        let max_cy = (bounds.max[1] + PLATFORM_THICKNESS_CHUNKS - 1).div_euclid(POISSON_CELL_Y);
+        let min_cy = bounds.min[1].to_num::<i32>().div_euclid(POISSON_CELL_Y);
+        let max_cy = (bounds.max[1].to_num::<i32>() + PLATFORM_THICKNESS_CHUNKS - 1).div_euclid(POISSON_CELL_Y);
         self.for_each_platform_instance_in_bounds(bounds, min_cy, max_cy, |platform| {
             let Some(_intersection) = intersect_bounds(bounds, platform.bounds) else {
                 return;
@@ -206,12 +206,12 @@ impl MassivePlatformsWorldGenerator {
         }
 
         let xzw_margin = POISSON_CELL_XZW - 1 + PLATFORM_HALF_EXTENT_MAX_CHUNKS;
-        let min_cx = (bounds.min[0] - xzw_margin).div_euclid(POISSON_CELL_XZW);
-        let max_cx = (bounds.max[0] + xzw_margin).div_euclid(POISSON_CELL_XZW);
-        let min_cz = (bounds.min[2] - xzw_margin).div_euclid(POISSON_CELL_XZW);
-        let max_cz = (bounds.max[2] + xzw_margin).div_euclid(POISSON_CELL_XZW);
-        let min_cw = (bounds.min[3] - xzw_margin).div_euclid(POISSON_CELL_XZW);
-        let max_cw = (bounds.max[3] + xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let min_cx = (bounds.min[0].to_num::<i32>() - xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let max_cx = (bounds.max[0].to_num::<i32>() + xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let min_cz = (bounds.min[2].to_num::<i32>() - xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let max_cz = (bounds.max[2].to_num::<i32>() + xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let min_cw = (bounds.min[3].to_num::<i32>() - xzw_margin).div_euclid(POISSON_CELL_XZW);
+        let max_cw = (bounds.max[3].to_num::<i32>() + xzw_margin).div_euclid(POISSON_CELL_XZW);
 
         for cw in min_cw..=max_cw {
             for cz in min_cz..=max_cz {
@@ -262,8 +262,8 @@ impl MassivePlatformsWorldGenerator {
         // To intersect query [qmin_y, qmax_y]:
         //   s + 1 + local_min_y <= qmax_y AND s + 1 + local_max_y >= qmin_y
         //   s in [qmin_y - 1 - local_max_y, qmax_y - 1 - local_min_y]
-        let surface_min = bounds.min[1] - 1 - local_max_y;
-        let surface_max = bounds.max[1] - 1 - local_min_y;
+        let surface_min = bounds.min[1].to_num::<i32>() - 1 - local_max_y;
+        let surface_max = bounds.max[1].to_num::<i32>() - 1 - local_min_y;
         if surface_min > surface_max {
             return;
         }
@@ -550,21 +550,26 @@ fn is_candidate_accepted(seed: u64, cx: i32, cy: i32, cz: i32, cw: i32) -> bool 
 }
 
 fn platform_y_offset(platform: &PlatformInstance) -> i32 {
-    platform.bounds.max[1] + 1
+    platform.bounds.max[1].to_num::<i32>() + 1
 }
 
 #[cfg(test)]
-fn chunk_pos_from_local_to_platform(
-    local: ChunkPos,
+fn chunk_key_from_local_to_platform(
+    local: ChunkKey,
     platform: &PlatformInstance,
     procgen_frame_offset_xzw: [i32; 3],
-) -> ChunkPos {
+) -> ChunkKey {
+    use crate::shared::region_tree::chunk_key_i32;
     let y_offset = platform_y_offset(platform);
-    ChunkPos::new(
-        local.x.saturating_sub(procgen_frame_offset_xzw[0]),
-        local.y + y_offset,
-        local.z.saturating_sub(procgen_frame_offset_xzw[1]),
-        local.w.saturating_sub(procgen_frame_offset_xzw[2]),
+    let lx = local[0].to_num::<i32>();
+    let ly = local[1].to_num::<i32>();
+    let lz = local[2].to_num::<i32>();
+    let lw = local[3].to_num::<i32>();
+    chunk_key_i32(
+        lx.saturating_sub(procgen_frame_offset_xzw[0]),
+        ly + y_offset,
+        lz.saturating_sub(procgen_frame_offset_xzw[1]),
+        lw.saturating_sub(procgen_frame_offset_xzw[2]),
     )
 }
 
@@ -574,30 +579,40 @@ fn query_bounds_local_to_platform(
     procgen_frame_offset_xzw: [i32; 3],
 ) -> Option<Aabb4i> {
     let y_offset = platform_y_offset(&platform);
-    let local = Aabb4i::new(
+    let qmin = [
+        query_bounds.min[0].to_num::<i32>(),
+        query_bounds.min[1].to_num::<i32>(),
+        query_bounds.min[2].to_num::<i32>(),
+        query_bounds.min[3].to_num::<i32>(),
+    ];
+    let qmax = [
+        query_bounds.max[0].to_num::<i32>(),
+        query_bounds.max[1].to_num::<i32>(),
+        query_bounds.max[2].to_num::<i32>(),
+        query_bounds.max[3].to_num::<i32>(),
+    ];
+    let pmin = [
+        platform.bounds.min[0].to_num::<i32>(),
+        platform.bounds.min[2].to_num::<i32>(),
+        platform.bounds.min[3].to_num::<i32>(),
+    ];
+    let pmax = [
+        platform.bounds.max[0].to_num::<i32>(),
+        platform.bounds.max[2].to_num::<i32>(),
+        platform.bounds.max[3].to_num::<i32>(),
+    ];
+    let local = Aabb4i::from_i32(
         [
-            query_bounds.min[0]
-                .max(platform.bounds.min[0])
-                .saturating_add(procgen_frame_offset_xzw[0]),
-            query_bounds.min[1] - y_offset,
-            query_bounds.min[2]
-                .max(platform.bounds.min[2])
-                .saturating_add(procgen_frame_offset_xzw[1]),
-            query_bounds.min[3]
-                .max(platform.bounds.min[3])
-                .saturating_add(procgen_frame_offset_xzw[2]),
+            qmin[0].max(pmin[0]).saturating_add(procgen_frame_offset_xzw[0]),
+            qmin[1] - y_offset,
+            qmin[2].max(pmin[1]).saturating_add(procgen_frame_offset_xzw[1]),
+            qmin[3].max(pmin[2]).saturating_add(procgen_frame_offset_xzw[2]),
         ],
         [
-            query_bounds.max[0]
-                .min(platform.bounds.max[0])
-                .saturating_add(procgen_frame_offset_xzw[0]),
-            query_bounds.max[1] - y_offset,
-            query_bounds.max[2]
-                .min(platform.bounds.max[2])
-                .saturating_add(procgen_frame_offset_xzw[1]),
-            query_bounds.max[3]
-                .min(platform.bounds.max[3])
-                .saturating_add(procgen_frame_offset_xzw[2]),
+            qmax[0].min(pmax[0]).saturating_add(procgen_frame_offset_xzw[0]),
+            qmax[1] - y_offset,
+            qmax[2].min(pmax[1]).saturating_add(procgen_frame_offset_xzw[1]),
+            qmax[3].min(pmax[2]).saturating_add(procgen_frame_offset_xzw[2]),
         ],
     );
     local.is_valid().then_some(local)
@@ -731,17 +746,17 @@ fn build_chunk_array_from_placement(
             tight_max[axis] = tight_max[axis].max(pos[axis]);
         }
     }
-    let effective_bounds = Aabb4i::new(tight_min, tight_max);
+    let effective_bounds = Aabb4i::from_i32(tight_min, tight_max);
     if !effective_bounds.is_valid() {
         return None;
     }
 
     // Build deduplicated palette and dense index array.
     let dims = [
-        (effective_bounds.max[0] - effective_bounds.min[0] + 1) as usize,
-        (effective_bounds.max[1] - effective_bounds.min[1] + 1) as usize,
-        (effective_bounds.max[2] - effective_bounds.min[2] + 1) as usize,
-        (effective_bounds.max[3] - effective_bounds.min[3] + 1) as usize,
+        (tight_max[0] - tight_min[0] + 1) as usize,
+        (tight_max[1] - tight_min[1] + 1) as usize,
+        (tight_max[2] - tight_min[2] + 1) as usize,
+        (tight_max[3] - tight_min[3] + 1) as usize,
     ];
     let cell_count = dims[0] * dims[1] * dims[2] * dims[3];
 
@@ -755,10 +770,10 @@ fn build_chunk_array_from_placement(
 
     for (pos, payload) in world_chunks {
         let rel = [
-            (pos[0] - effective_bounds.min[0]) as usize,
-            (pos[1] - effective_bounds.min[1]) as usize,
-            (pos[2] - effective_bounds.min[2]) as usize,
-            (pos[3] - effective_bounds.min[3]) as usize,
+            (pos[0] - tight_min[0]) as usize,
+            (pos[1] - tight_min[1]) as usize,
+            (pos[2] - tight_min[2]) as usize,
+            (pos[3] - tight_min[3]) as usize,
         ];
         let idx = rel[3] * dims[2] * dims[1] * dims[0]
             + rel[2] * dims[1] * dims[0]
@@ -786,10 +801,10 @@ fn build_chunk_array_from_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
+    use crate::shared::region_tree::{collect_non_empty_chunks_from_core_in_bounds, ChunkKey, chunk_key_i32};
     use std::collections::HashMap;
 
-    fn payload_at_chunk(core: &RegionTreeCore, chunk_key: [i32; 4]) -> Option<ResolvedChunkPayload> {
+    fn payload_at_chunk(core: &RegionTreeCore, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
         let bounds = Aabb4i::new(chunk_key, chunk_key);
         collect_non_empty_chunks_from_core_in_bounds(core, bounds)
             .into_iter()
@@ -809,7 +824,7 @@ mod tests {
     }
 
     /// Find a non-empty platform chunk key for a given seed, suitable for query-invariance tests.
-    fn find_platform_chunk_key(seed: u64) -> [i32; 4] {
+    fn find_platform_chunk_key(seed: u64) -> ChunkKey {
         let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
             BaseWorldKind::MassivePlatforms {
                 material: BlockData::simple(0, 11),
@@ -819,7 +834,7 @@ mod tests {
             true,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-96, -16, -96, -96], [96, 48, 96, 96]);
+        let bounds = Aabb4i::from_i32([-96, -16, -96, -96], [96, 48, 96, 96]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let chunks = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
         // Find a chunk that's NOT in the origin anchor (to test non-trivial platforms).
@@ -852,7 +867,7 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([3, 0, 0, 0], [2, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([3, 0, 0, 0], [2, 0, 0, 0]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         assert_eq!(core.bounds, bounds);
         assert!(matches!(core.kind, RegionNodeKind::Empty));
@@ -869,15 +884,15 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-96, -2, -96, -96], [96, 30, 96, 96]);
+        let bounds = Aabb4i::from_i32([-96, -2, -96, -96], [96, 30, 96, 96]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let mut uniform_bounds = Vec::new();
         collect_uniform_bounds(core.as_ref(), &mut uniform_bounds);
         assert!(!uniform_bounds.is_empty());
         assert!(uniform_bounds.iter().any(|platform| {
-            let dx = platform.max[0] - platform.min[0] + 1;
-            let dz = platform.max[2] - platform.min[2] + 1;
-            let dw = platform.max[3] - platform.min[3] + 1;
+            let dx = platform.max[0].to_num::<i32>() - platform.min[0].to_num::<i32>() + 1;
+            let dz = platform.max[2].to_num::<i32>() - platform.min[2].to_num::<i32>() + 1;
+            let dw = platform.max[3].to_num::<i32>() - platform.min[3].to_num::<i32>() + 1;
             dx >= 20 && dz >= 20 && dw >= 20
         }));
     }
@@ -893,11 +908,11 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-1, -1, -1, -1], [1, 1, 1, 1]);
+        let bounds = Aabb4i::from_i32([-1, -1, -1, -1], [1, 1, 1, 1]);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let non_empty = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
-        assert!(non_empty.iter().any(|(key, _)| *key == [0, 0, 0, 0]));
-        assert!(!non_empty.iter().any(|(key, _)| *key == [0, 1, 0, 0]));
+        assert!(non_empty.iter().any(|(key, _)| *key == chunk_key_i32(0, 0, 0, 0)));
+        assert!(!non_empty.iter().any(|(key, _)| *key == chunk_key_i32(0, 1, 0, 0)));
     }
 
     #[test]
@@ -921,18 +936,18 @@ mod tests {
                 .sample_platform_bounds(0, 0, 0, 0)
                 .expect("origin anchor platform must exist"),
         };
-        let probe = Aabb4i::new(
+        let probe = Aabb4i::from_i32(
             [
-                platform.bounds.min[0],
+                platform.bounds.min[0].to_num::<i32>(),
                 local_min_y,
-                platform.bounds.min[2],
-                platform.bounds.min[3],
+                platform.bounds.min[2].to_num::<i32>(),
+                platform.bounds.min[3].to_num::<i32>(),
             ],
             [
-                platform.bounds.max[0],
+                platform.bounds.max[0].to_num::<i32>(),
                 local_max_y,
-                platform.bounds.max[2],
-                platform.bounds.max[3],
+                platform.bounds.max[2].to_num::<i32>(),
+                platform.bounds.max[3].to_num::<i32>(),
             ],
         );
         let local_probe = query_bounds_local_to_platform(
@@ -981,7 +996,7 @@ mod tests {
             HashSet::new(),
         );
         let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
-        let search = Aabb4i::new([-96, -64, -96, -96], [96, 96, 96, 96]);
+        let search = Aabb4i::from_i32([-96, -64, -96, -96], [96, 96, 96, 96]);
         let mut validated = false;
         // Search cells at cy >= 1 to find platforms above level 0.
         let min_cy = 1;
@@ -993,18 +1008,18 @@ mod tests {
             let y_offset = platform_y_offset(&platform);
             let frame_offset = procgen_frame_offset_xzw_chunks(seeded.world_seed, platform);
             // Build probe in world coords, then convert to frame-shifted local space.
-            let world_probe = Aabb4i::new(
+            let world_probe = Aabb4i::from_i32(
                 [
-                    platform.bounds.min[0],
+                    platform.bounds.min[0].to_num::<i32>(),
                     y_offset + local_min_y,
-                    platform.bounds.min[2],
-                    platform.bounds.min[3],
+                    platform.bounds.min[2].to_num::<i32>(),
+                    platform.bounds.min[3].to_num::<i32>(),
                 ],
                 [
-                    platform.bounds.max[0],
+                    platform.bounds.max[0].to_num::<i32>(),
                     y_offset + local_max_y,
-                    platform.bounds.max[2],
-                    platform.bounds.max[3],
+                    platform.bounds.max[2].to_num::<i32>(),
+                    platform.bounds.max[3].to_num::<i32>(),
                 ],
             );
             let Some(local_probe) =
@@ -1027,30 +1042,17 @@ mod tests {
             else {
                 return;
             };
-            let global_chunk = chunk_pos_from_local_to_platform(
+            let global_chunk = chunk_key_from_local_to_platform(
                 local_chunk,
                 &platform,
                 frame_offset,
             );
             // Verify the global chunk is above the origin platform surface.
-            if global_chunk.y < POISSON_CELL_Y {
+            if global_chunk[1].to_num::<i32>() < POISSON_CELL_Y {
                 return;
             }
 
-            let chunk_bounds = Aabb4i::new(
-                [
-                    global_chunk.x,
-                    global_chunk.y,
-                    global_chunk.z,
-                    global_chunk.w,
-                ],
-                [
-                    global_chunk.x,
-                    global_chunk.y,
-                    global_chunk.z,
-                    global_chunk.w,
-                ],
-            );
+            let chunk_bounds = Aabb4i::new(global_chunk, global_chunk);
             let with_core = seeded.query_region_core(
                 QueryVolume {
                     bounds: chunk_bounds,
@@ -1067,17 +1069,11 @@ mod tests {
                 collect_non_empty_chunks_from_core_in_bounds(with_core.as_ref(), chunk_bounds);
             let without_chunks =
                 collect_non_empty_chunks_from_core_in_bounds(without_core.as_ref(), chunk_bounds);
-            let target_key = [
-                global_chunk.x,
-                global_chunk.y,
-                global_chunk.z,
-                global_chunk.w,
-            ];
             let with_payload = with_chunks.iter().find_map(|(key, payload)| {
-                (*key == target_key).then_some(canonicalize_payload(payload.clone()))
+                (*key == global_chunk).then_some(canonicalize_payload(payload.clone()))
             });
             let without_payload = without_chunks.iter().find_map(|(key, payload)| {
-                (*key == target_key).then_some(canonicalize_payload(payload.clone()))
+                (*key == global_chunk).then_some(canonicalize_payload(payload.clone()))
             });
             if with_payload != without_payload {
                 validated = true;
@@ -1106,7 +1102,7 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let bounds = Aabb4i::new([-24, -8, -24, -24], [24, 36, 24, 24]);
+        let bounds = Aabb4i::from_i32([-24, -8, -24, -24], [24, 36, 24, 24]);
         let with_structures =
             generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let without_structures =
@@ -1145,8 +1141,9 @@ mod tests {
             // y_offset = surface + 1, surface = candidate Y.
             // We need: y_offset + local_min_y <= key[1] <= y_offset + local_max_y
             // So: surface in [key[1] - 1 - local_max_y, key[1] - 1 - local_min_y]
-            let surface_min = key[1] - 1 - local_max_y;
-            let surface_max = key[1] - 1 - local_min_y;
+            let key_y = key[1].to_num::<i32>();
+            let surface_min = key_y - 1 - local_max_y;
+            let surface_max = key_y - 1 - local_min_y;
             let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
             let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
             let mut anchored = false;
@@ -1163,7 +1160,7 @@ mod tests {
                         && key[3] >= platform.bounds.min[3]
                         && key[3] <= platform.bounds.max[3];
                     let in_vertical =
-                        key[1] >= y_offset + local_min_y && key[1] <= y_offset + local_max_y;
+                        key_y >= y_offset + local_min_y && key_y <= y_offset + local_max_y;
                     if in_horizontal && in_vertical {
                         anchored = true;
                     }
@@ -1187,34 +1184,20 @@ mod tests {
         );
 
         let chunk_key = find_platform_chunk_key(seed);
+        let ck = [
+            chunk_key[0].to_num::<i32>(),
+            chunk_key[1].to_num::<i32>(),
+            chunk_key[2].to_num::<i32>(),
+            chunk_key[3].to_num::<i32>(),
+        ];
         let single_bounds = Aabb4i::new(chunk_key, chunk_key);
-        let neighborhood_bounds = Aabb4i::new(
-            [
-                chunk_key[0] - 1,
-                chunk_key[1] - 1,
-                chunk_key[2] - 1,
-                chunk_key[3] - 1,
-            ],
-            [
-                chunk_key[0] + 1,
-                chunk_key[1] + 1,
-                chunk_key[2] + 1,
-                chunk_key[3] + 1,
-            ],
+        let neighborhood_bounds = Aabb4i::from_i32(
+            [ck[0] - 1, ck[1] - 1, ck[2] - 1, ck[3] - 1],
+            [ck[0] + 1, ck[1] + 1, ck[2] + 1, ck[3] + 1],
         );
-        let wide_bounds = Aabb4i::new(
-            [
-                chunk_key[0] - 8,
-                chunk_key[1] - 8,
-                chunk_key[2] - 8,
-                chunk_key[3] - 8,
-            ],
-            [
-                chunk_key[0] + 8,
-                chunk_key[1] + 8,
-                chunk_key[2] + 8,
-                chunk_key[3] + 8,
-            ],
+        let wide_bounds = Aabb4i::from_i32(
+            [ck[0] - 8, ck[1] - 8, ck[2] - 8, ck[3] - 8],
+            [ck[0] + 8, ck[1] + 8, ck[2] + 8, ck[3] + 8],
         );
 
         let single = generator.query_region_core(

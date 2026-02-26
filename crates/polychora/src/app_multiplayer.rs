@@ -7,9 +7,9 @@ use higher_dimension_playground::render::{
 use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::voxel::BlockData;
 use polychora::shared::region_tree::{
-    collect_non_empty_chunks_from_core_in_bounds, RegionNodeKind, RegionTreeCore,
+    collect_non_empty_chunks_from_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
 };
-use polychora::shared::spatial::Aabb4i;
+use polychora::shared::spatial::{Aabb4i, ChunkCoord};
 use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
@@ -91,19 +91,20 @@ fn region_tree_diag_style(kind: RegionTreeDiagKind) -> RegionTreeDiagStyle {
 }
 
 fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
+    let one = ChunkCoord::from_num(1);
     let span = [
         node.bounds.max[0]
             .saturating_sub(node.bounds.min[0])
-            .saturating_add(1),
+            .saturating_add(one).to_num::<i32>(),
         node.bounds.max[1]
             .saturating_sub(node.bounds.min[1])
-            .saturating_add(1),
+            .saturating_add(one).to_num::<i32>(),
         node.bounds.max[2]
             .saturating_sub(node.bounds.min[2])
-            .saturating_add(1),
+            .saturating_add(one).to_num::<i32>(),
         node.bounds.max[3]
             .saturating_sub(node.bounds.min[3])
-            .saturating_add(1),
+            .saturating_add(one).to_num::<i32>(),
     ];
     let (kind_label, kind_suffix) = match node.kind {
         RegionTreeDiagKind::Branch => ("Branch", String::new()),
@@ -128,18 +129,19 @@ fn project_chunk_bounds_to_ndc(
         return None;
     }
 
-    let chunk_size = voxel::CHUNK_SIZE as i32;
+    let chunk_size = ChunkCoord::from_num(voxel::CHUNK_SIZE as i32);
+    let one = ChunkCoord::from_num(1);
     let min_world = [
-        bounds.min[0].saturating_mul(chunk_size) as f32,
-        bounds.min[1].saturating_mul(chunk_size) as f32,
-        bounds.min[2].saturating_mul(chunk_size) as f32,
-        bounds.min[3].saturating_mul(chunk_size) as f32,
+        (bounds.min[0].saturating_mul(chunk_size)).to_num::<f32>(),
+        (bounds.min[1].saturating_mul(chunk_size)).to_num::<f32>(),
+        (bounds.min[2].saturating_mul(chunk_size)).to_num::<f32>(),
+        (bounds.min[3].saturating_mul(chunk_size)).to_num::<f32>(),
     ];
     let max_world = [
-        bounds.max[0].saturating_add(1).saturating_mul(chunk_size) as f32,
-        bounds.max[1].saturating_add(1).saturating_mul(chunk_size) as f32,
-        bounds.max[2].saturating_add(1).saturating_mul(chunk_size) as f32,
-        bounds.max[3].saturating_add(1).saturating_mul(chunk_size) as f32,
+        ((bounds.max[0].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
+        ((bounds.max[1].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
+        ((bounds.max[2].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
+        ((bounds.max[3].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
     ];
 
     let mut min_ndc = [f32::INFINITY; 2];
@@ -332,7 +334,7 @@ fn collect_region_tree_node_stats(node: &RegionTreeCore) -> RegionTreeNodeStats 
 }
 
 fn tight_bounds_from_chunk_positions(
-    positions: impl IntoIterator<Item = [i32; 4]>,
+    positions: impl IntoIterator<Item = ChunkKey>,
 ) -> Option<Aabb4i> {
     let mut iter = positions.into_iter();
     let first = iter.next()?;
@@ -347,18 +349,18 @@ fn tight_bounds_from_chunk_positions(
     Some(Aabb4i::new(min, max))
 }
 
-fn world_chunk_from_position(position: [f32; 4]) -> [i32; 4] {
+fn world_chunk_from_position(position: [f32; 4]) -> ChunkKey {
     let chunk_size = voxel::CHUNK_SIZE as i32;
     [
-        (position[0].floor() as i32).div_euclid(chunk_size),
-        (position[1].floor() as i32).div_euclid(chunk_size),
-        (position[2].floor() as i32).div_euclid(chunk_size),
-        (position[3].floor() as i32).div_euclid(chunk_size),
+        ChunkCoord::from_num((position[0].floor() as i32).div_euclid(chunk_size)),
+        ChunkCoord::from_num((position[1].floor() as i32).div_euclid(chunk_size)),
+        ChunkCoord::from_num((position[2].floor() as i32).div_euclid(chunk_size)),
+        ChunkCoord::from_num((position[3].floor() as i32).div_euclid(chunk_size)),
     ]
 }
 
-fn world_request_bounds_for_center_chunk(center_chunk: [i32; 4], radius_chunks: i32) -> Aabb4i {
-    let radius = radius_chunks.max(0);
+fn world_request_bounds_for_center_chunk(center_chunk: ChunkKey, radius_chunks: i32) -> Aabb4i {
+    let radius = ChunkCoord::from_num(radius_chunks.max(0));
     Aabb4i::new(
         [
             center_chunk[0].saturating_sub(radius),
@@ -383,7 +385,7 @@ fn world_request_radius_chunks_for_distance(distance_world: f32) -> i32 {
         .max(1)
 }
 
-fn bounds_contains_chunk(bounds: Aabb4i, chunk: [i32; 4]) -> bool {
+fn bounds_contains_chunk(bounds: Aabb4i, chunk: ChunkKey) -> bool {
     bounds.is_valid()
         && chunk[0] >= bounds.min[0]
         && chunk[0] <= bounds.max[0]
@@ -425,7 +427,7 @@ fn dense_blocks_from_payload_or_zero(
 
 fn dense_blocks_from_region_core_chunk(
     core: &RegionTreeCore,
-    chunk: [i32; 4],
+    chunk: ChunkKey,
 ) -> Vec<polychora::shared::voxel::BlockData> {
     let bounds = Aabb4i::new(chunk, chunk);
     let chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
@@ -864,8 +866,8 @@ impl App {
     fn next_multiplayer_chunk_sample_diag_chunk_in_bounds(&mut self, bounds: Aabb4i) -> [i32; 4] {
         let mut chunk = [0i32; 4];
         for axis in 0..4 {
-            let lo = bounds.min[axis];
-            let hi = bounds.max[axis];
+            let lo: i32 = bounds.min[axis].to_num();
+            let hi: i32 = bounds.max[axis].to_num();
             if hi <= lo {
                 chunk[axis] = lo;
                 continue;
@@ -928,7 +930,7 @@ impl App {
     fn handle_multiplayer_chunk_sample_diag_response(
         &mut self,
         request_id: u64,
-        chunk: [i32; 4],
+        chunk: ChunkKey,
         dense_blocks: Vec<polychora::shared::voxel::BlockData>,
     ) {
         if !self.multiplayer_chunk_sample_diag_enabled {
@@ -965,7 +967,7 @@ impl App {
             .iter()
             .skip(1)
             .any(|dense| *dense != render_dense);
-        let frame_payloads = self.scene.debug_voxel_frame_chunk_payloads(chunk);
+        let frame_payloads = self.scene.debug_voxel_frame_chunk_payloads(chunk.map(|c| c.to_num::<i32>()));
         let frame_dense_variants: Vec<Vec<polychora::shared::voxel::BlockData>> = frame_payloads
             .iter()
             .cloned()
@@ -1070,7 +1072,7 @@ impl App {
             .unwrap_or(false);
         if let Some(last_bounds) = self.multiplayer_last_world_request_bounds {
             if !radius_expanding && !radius_changed {
-                let hysteresis = (request_radius_chunks / 4).max(1);
+                let hysteresis = ChunkCoord::from_num((request_radius_chunks / 4).max(1));
                 let keep_bounds = Aabb4i::new(
                     [
                         last_bounds.min[0].saturating_add(hysteresis),
@@ -1221,16 +1223,16 @@ impl App {
 
         let mut world_positions = self.scene.collect_non_empty_explicit_chunk_positions();
         world_positions.sort_unstable();
-        let world_set: HashSet<[i32; 4]> = world_positions.iter().copied().collect();
+        let world_set: HashSet<ChunkKey> = world_positions.iter().copied().collect();
 
-        let mut tree_positions: Vec<[i32; 4]> = self
+        let mut tree_positions: Vec<ChunkKey> = self
             .multiplayer_stream_tree_diag
             .collect_chunks()
             .into_iter()
             .map(|(key, _)| key)
             .collect();
         tree_positions.sort_unstable();
-        let tree_set: HashSet<[i32; 4]> = tree_positions.iter().copied().collect();
+        let tree_set: HashSet<ChunkKey> = tree_positions.iter().copied().collect();
 
         let missing_count = world_set
             .iter()
@@ -1454,7 +1456,7 @@ impl App {
                 let render_cache_payloads = self.scene.debug_render_bvh_cache_chunk_payloads(key);
                 let frame_payloads: Vec<ResolvedChunkPayload> = self
                     .scene
-                    .debug_voxel_frame_chunk_payloads(key)
+                    .debug_voxel_frame_chunk_payloads(key.map(|c| c.to_num::<i32>()))
                     .into_iter()
                     .map(|p| ResolvedChunkPayload::from_payload_with_token_palette(p, &self.material_resolver))
                     .collect();
@@ -1532,7 +1534,7 @@ impl App {
             } => {
                 self.handle_multiplayer_chunk_sample_diag_response(
                     request_id,
-                    chunk,
+                    chunk.map(ChunkCoord::from_num),
                     dense_blocks,
                 );
             }

@@ -41,7 +41,7 @@ use crate::shared::protocol::{
     WorldSummary,
 };
 use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{self, BlockData, ChunkPos, CHUNK_SIZE};
+use crate::shared::voxel::{self, BlockData, CHUNK_SIZE};
 use std::cmp::Reverse;
 use std::collections::{hash_map::Entry, BinaryHeap, HashMap, HashSet};
 use std::io::{self, BufWriter, Read, Write};

@@ -1,3 +1,5 @@
+use crate::shared::region_tree::ChunkKey;
+use crate::shared::spatial::fixed_from_lattice;
 use serde::{Deserialize, Serialize};
 
 pub const CHUNK_SIZE: usize = 8;
@@ -157,21 +159,6 @@ impl BlockData {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ChunkPos {
-    pub x: i32,
-    pub y: i32,
-    pub z: i32,
-    pub w: i32,
-}
-
-impl ChunkPos {
-    #[inline]
-    pub const fn new(x: i32, y: i32, z: i32, w: i32) -> Self {
-        Self { x, y, z, w }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BaseWorldKind {
     Empty,
@@ -179,21 +166,19 @@ pub enum BaseWorldKind {
     MassivePlatforms { material: BlockData },
 }
 
+/// Convert world coordinates to a fixed-point ChunkKey and local voxel index.
 #[inline]
-pub fn world_to_chunk(wx: i32, wy: i32, wz: i32, ww: i32) -> (ChunkPos, usize) {
+pub fn world_to_chunk(wx: i32, wy: i32, wz: i32, ww: i32) -> (ChunkKey, usize) {
     world_to_chunk_at_scale(wx, wy, wz, ww, 0)
 }
 
-/// Convert world coordinates to chunk position and local voxel index at a given scale.
+/// Convert world coordinates to chunk key and local voxel index at a given scale.
 ///
 /// - `scale_exp = 0`: cell_size = 1, chunk spans 8 world units (default behavior)
 /// - `scale_exp = -1`: cell_size = 0.5, chunk spans 4 world units (half-scale)
 /// - `scale_exp = 1`: cell_size = 2, chunk spans 16 world units (double-scale)
 ///
-/// For negative `scale_exp`, world coords are multiplied by `2^(-scale_exp)` to get
-/// scaled-lattice coords, then `div_euclid`/`rem_euclid` by `CHUNK_SIZE`.
-///
-/// For positive `scale_exp`, world coords are divided (integer) by `2^scale_exp`.
+/// The returned ChunkKey is in fixed-point coordinates.
 #[inline]
 pub fn world_to_chunk_at_scale(
     wx: i32,
@@ -201,12 +186,10 @@ pub fn world_to_chunk_at_scale(
     wz: i32,
     ww: i32,
     scale_exp: i8,
-) -> (ChunkPos, usize) {
+) -> (ChunkKey, usize) {
     let cs = CHUNK_SIZE as i64;
 
     // Convert world coords to scaled-lattice coords using i64 to avoid overflow.
-    // For scale_exp >= 0: divide by 2^scale_exp (floor division)
-    // For scale_exp < 0: multiply by 2^(-scale_exp)
     let (sx, sy, sz, sw) = if scale_exp >= 0 {
         let shift = scale_exp as u32;
         (
@@ -225,12 +208,18 @@ pub fn world_to_chunk_at_scale(
         )
     };
 
-    let chunk = ChunkPos::new(
+    let chunk_lattice = [
         sx.div_euclid(cs) as i32,
         sy.div_euclid(cs) as i32,
         sz.div_euclid(cs) as i32,
         sw.div_euclid(cs) as i32,
-    );
+    ];
+    let key = [
+        fixed_from_lattice(chunk_lattice[0], scale_exp),
+        fixed_from_lattice(chunk_lattice[1], scale_exp),
+        fixed_from_lattice(chunk_lattice[2], scale_exp),
+        fixed_from_lattice(chunk_lattice[3], scale_exp),
+    ];
     let lx = sx.rem_euclid(cs) as usize;
     let ly = sy.rem_euclid(cs) as usize;
     let lz = sz.rem_euclid(cs) as usize;
@@ -239,12 +228,14 @@ pub fn world_to_chunk_at_scale(
         + lz * CHUNK_SIZE * CHUNK_SIZE
         + ly * CHUNK_SIZE
         + lx;
-    (chunk, idx)
+    (key, idx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::region_tree::chunk_key_i32;
+    use crate::shared::spatial::{fixed_from_lattice, ChunkCoord};
 
     #[test]
     fn world_to_chunk_at_scale_zero_matches_world_to_chunk() {
@@ -265,41 +256,41 @@ mod tests {
     #[test]
     fn world_to_chunk_at_scale_negative_one() {
         // scale_exp=-1: cell_size=0.5, chunk spans 4 world units
-        // World coord 0 → scaled coord 0 → chunk (0,0,0,0) local index 0
         let (cp, _idx) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
-        assert_eq!((cp.x, cp.y, cp.z, cp.w), (0, 0, 0, 0));
+        assert_eq!(cp, chunk_key_i32(0, 0, 0, 0));
 
         // World coord 3 → scaled coord 6 → chunk 0, local 6
         let (cp, idx) = world_to_chunk_at_scale(3, 0, 0, 0, -1);
-        assert_eq!(cp.x, 0);
-        assert_eq!(idx, 6); // local x=6, others=0
+        assert_eq!(cp[0], ChunkCoord::from_num(0));
+        assert_eq!(idx, 6);
 
         // World coord 4 → scaled coord 8 → chunk 1, local 0
+        // At scale -1, lattice pos 1 → fixed 0.5
         let (cp, idx) = world_to_chunk_at_scale(4, 0, 0, 0, -1);
-        assert_eq!(cp.x, 1);
+        assert_eq!(cp[0], ChunkCoord::from_bits(1i64 << 15)); // 0.5
         assert_eq!(idx, 0);
 
         // Negative: world coord -1 → scaled coord -2 → chunk -1, local 6
         let (cp, idx) = world_to_chunk_at_scale(-1, 0, 0, 0, -1);
-        assert_eq!(cp.x, -1);
+        assert_eq!(cp[0], fixed_from_lattice(-1, -1));
         assert_eq!(idx, 6);
     }
 
     #[test]
     fn world_to_chunk_at_scale_positive_one() {
         // scale_exp=1: cell_size=2, chunk spans 16 world units
-        // World coord 0 → scaled coord 0 → chunk (0,0,0,0)
         let (cp, _) = world_to_chunk_at_scale(0, 0, 0, 0, 1);
-        assert_eq!((cp.x, cp.y, cp.z, cp.w), (0, 0, 0, 0));
+        assert_eq!(cp, chunk_key_i32(0, 0, 0, 0));
 
         // World coord 15 → scaled coord 7 → chunk 0, local 7
         let (cp, idx) = world_to_chunk_at_scale(15, 0, 0, 0, 1);
-        assert_eq!(cp.x, 0);
+        assert_eq!(cp[0], ChunkCoord::from_num(0));
         assert_eq!(idx, 7);
 
         // World coord 16 → scaled coord 8 → chunk 1, local 0
+        // At scale 1, lattice pos 1 → fixed 2
         let (cp, idx) = world_to_chunk_at_scale(16, 0, 0, 0, 1);
-        assert_eq!(cp.x, 1);
+        assert_eq!(cp[0], ChunkCoord::from_num(2));
         assert_eq!(idx, 0);
     }
 }

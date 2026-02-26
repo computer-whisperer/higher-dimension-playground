@@ -1,11 +1,11 @@
 use super::*;
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
-use crate::shared::spatial::Aabb4i;
+use crate::shared::spatial::{chunk_key_from_lattice, Aabb4i};
 use crate::shared::voxel::BlockData;
 use std::collections::HashMap;
 
 fn key(x: i32, y: i32, z: i32, w: i32) -> ChunkKey {
-    [x, y, z, w]
+    chunk_key_i32(x, y, z, w)
 }
 
 fn max_depth(node: &RegionTreeCore) -> usize {
@@ -41,12 +41,13 @@ impl TestRng {
 }
 
 fn keys_in_bounds(bounds: Aabb4i) -> Vec<ChunkKey> {
+    let (lmin, lmax) = bounds.to_lattice_bounds(0);
     let mut keys = Vec::new();
-    for w in bounds.min[3]..=bounds.max[3] {
-        for z in bounds.min[2]..=bounds.max[2] {
-            for y in bounds.min[1]..=bounds.max[1] {
-                for x in bounds.min[0]..=bounds.max[0] {
-                    keys.push([x, y, z, w]);
+    for w in lmin[3]..=lmax[3] {
+        for z in lmin[2]..=lmax[2] {
+            for y in lmin[1]..=lmax[1] {
+                for x in lmin[0]..=lmax[0] {
+                    keys.push(chunk_key_i32(x, y, z, w));
                 }
             }
         }
@@ -55,25 +56,26 @@ fn keys_in_bounds(bounds: Aabb4i) -> Vec<ChunkKey> {
 }
 
 fn random_sub_bounds(rng: &mut TestRng, outer: Aabb4i) -> Aabb4i {
+    let (omin, omax) = outer.to_lattice_bounds(0);
     let mut min = [0i32; 4];
     let mut max = [0i32; 4];
     for axis in 0..4 {
-        let lo = rng.next_inclusive_i32(outer.min[axis], outer.max[axis]);
-        let hi = rng.next_inclusive_i32(lo, outer.max[axis]);
+        let lo = rng.next_inclusive_i32(omin[axis], omax[axis]);
+        let hi = rng.next_inclusive_i32(lo, omax[axis]);
         min[axis] = lo;
         max[axis] = hi;
     }
-    Aabb4i::new(min, max)
+    Aabb4i::from_i32(min, max)
 }
 
 fn linear_index_in_bounds(bounds: Aabb4i, key: ChunkKey) -> usize {
     let extents = bounds
         .chunk_extents()
         .expect("bounds used in tests must be valid");
-    let lx = (key[0] - bounds.min[0]) as usize;
-    let ly = (key[1] - bounds.min[1]) as usize;
-    let lz = (key[2] - bounds.min[2]) as usize;
-    let lw = (key[3] - bounds.min[3]) as usize;
+    let lx = (key[0] - bounds.min[0]).to_num::<i32>() as usize;
+    let ly = (key[1] - bounds.min[1]).to_num::<i32>() as usize;
+    let lz = (key[2] - bounds.min[2]).to_num::<i32>() as usize;
+    let lw = (key[3] - bounds.min[3]).to_num::<i32>() as usize;
     lx + extents[0] * (ly + extents[1] * (lz + extents[2] * lw))
 }
 
@@ -245,7 +247,8 @@ fn assert_tree_non_overlapping(node: &RegionTreeCore) {
 fn mixed_scale_non_overlapping_splice_is_accepted() {
     let mut tree = RegionChunkTree::new();
     let coarse = single_cell_chunk_array_core_with_scale(key(0, 0, 0, 0), 11, 0);
-    let fine_non_overlapping = single_cell_chunk_array_core_with_scale(key(2, 0, 0, 0), 22, -1);
+    // scale-(-1) lattice [2,0,0,0] = fixed [1.0, 0, 0, 0] — non-overlapping with coarse [0,0,0,0]
+    let fine_non_overlapping = single_cell_chunk_array_core_with_scale(chunk_key_from_lattice([2, 0, 0, 0], -1), 22, -1);
 
     assert_eq!(
         tree.splice_core_in_bounds(coarse.bounds, &coarse),
@@ -264,7 +267,8 @@ fn mixed_scale_non_overlapping_splice_is_accepted() {
 fn mixed_scale_world_overlapping_splice_is_detected() {
     let mut tree = RegionChunkTree::new();
     let coarse = single_cell_chunk_array_core_with_scale(key(0, 0, 0, 0), 11, 0);
-    let fine_overlapping = single_cell_chunk_array_core_with_scale(key(1, 0, 0, 0), 22, -1);
+    // scale-(-1) lattice [1,0,0,0] = fixed [0.5, 0, 0, 0] — overlaps with coarse [0,0,0,0]
+    let fine_overlapping = single_cell_chunk_array_core_with_scale(chunk_key_from_lattice([1, 0, 0, 0], -1), 22, -1);
 
     assert_eq!(
         tree.splice_core_in_bounds(coarse.bounds, &coarse),
@@ -284,7 +288,8 @@ fn mixed_scale_world_overlapping_splice_is_detected() {
 fn chunk_array_consolidation_does_not_cross_scale_boundaries() {
     let mut tree = RegionChunkTree::new();
     let coarse = single_cell_chunk_array_core_with_scale(key(0, 0, 0, 0), 11, 0);
-    let fine = single_cell_chunk_array_core_with_scale(key(2, 0, 0, 0), 22, -1);
+    // scale-(-1) lattice [2,0,0,0] = fixed [1.0, 0, 0, 0] — non-overlapping
+    let fine = single_cell_chunk_array_core_with_scale(chunk_key_from_lattice([2, 0, 0, 0], -1), 22, -1);
 
     assert_eq!(
         tree.splice_core_in_bounds(coarse.bounds, &coarse),
@@ -366,12 +371,12 @@ fn non_covering_uniform_children_do_not_fill_parent_gaps() {
     );
     assert_eq!(tree.chunk_payload(key(1, 0, 0, 0)), None);
 
-    let bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+    let bounds = Aabb4i::from_i32([0, 0, 0, 0], [2, 0, 0, 0]);
     let non_empty = collect_non_empty_chunks_from_core_in_bounds(
         &tree.slice_non_empty_core_in_bounds(bounds),
         bounds,
     );
-    let mut keys: Vec<[i32; 4]> = non_empty
+    let mut keys: Vec<ChunkKey> = non_empty
         .into_iter()
         .map(|(chunk_key, _)| chunk_key)
         .collect();
@@ -382,7 +387,7 @@ fn non_covering_uniform_children_do_not_fill_parent_gaps() {
 #[test]
 fn adjacent_uniform_children_merge_even_when_branch_partition_is_non_canonical() {
     let mut tree = RegionChunkTree::new();
-    let full_bounds = Aabb4i::new([0, 0, 0, 0], [2, 0, 0, 0]);
+    let full_bounds = Aabb4i::from_i32([0, 0, 0, 0], [2, 0, 0, 0]);
     let full_uniform = RegionTreeCore {
         bounds: full_bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 11)),
@@ -393,7 +398,7 @@ fn adjacent_uniform_children_merge_even_when_branch_partition_is_non_canonical()
         Some(full_bounds)
     );
 
-    let center_bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
+    let center_bounds = Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]);
     let center_empty = RegionTreeCore {
         bounds: center_bounds,
         kind: RegionNodeKind::Empty,
@@ -423,17 +428,18 @@ fn adjacent_uniform_children_merge_even_when_branch_partition_is_non_canonical()
 fn randomized_mutations_preserve_non_overlapping_branches() {
     let mut rng = TestRng::new(0x8A5F_3D71_C2B4_9E10);
     let mut tree = RegionChunkTree::new();
-    let global = Aabb4i::new([-6, -3, -6, -3], [6, 3, 6, 3]);
+    let global = Aabb4i::from_i32([-6, -3, -6, -3], [6, 3, 6, 3]);
 
     for _step in 0..5000 {
         let op = rng.next_u32() % 10;
         if op < 7 {
-            let chunk = [
-                rng.next_inclusive_i32(global.min[0], global.max[0]),
-                rng.next_inclusive_i32(global.min[1], global.max[1]),
-                rng.next_inclusive_i32(global.min[2], global.max[2]),
-                rng.next_inclusive_i32(global.min[3], global.max[3]),
-            ];
+            let (gmin, gmax) = global.to_lattice_bounds(0);
+            let chunk = chunk_key_i32(
+                rng.next_inclusive_i32(gmin[0], gmax[0]),
+                rng.next_inclusive_i32(gmin[1], gmax[1]),
+                rng.next_inclusive_i32(gmin[2], gmax[2]),
+                rng.next_inclusive_i32(gmin[3], gmax[3]),
+            );
             let payload = match rng.next_u32() % 4 {
                 0 => None,
                 1 => Some(ResolvedChunkPayload::empty()),
@@ -466,7 +472,7 @@ fn splice_non_empty_core_replaces_window_contents() {
     assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 2)))));
     assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
 
-    let bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
+    let bounds = Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]);
     let patch_core = RegionTreeCore {
         bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 9)),
@@ -496,7 +502,7 @@ fn take_non_empty_core_extracts_and_clears_region() {
     assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3)))));
     assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
 
-    let bounds = Aabb4i::new([1, 0, 0, 0], [2, 0, 0, 0]);
+    let bounds = Aabb4i::from_i32([1, 0, 0, 0], [2, 0, 0, 0]);
     let extracted = tree.take_non_empty_core_in_bounds(bounds);
     let mut extracted_chunks = collect_non_empty_chunks_from_core_in_bounds(&extracted, bounds);
     extracted_chunks.sort_unstable_by_key(|(key, _)| *key);
@@ -520,7 +526,7 @@ fn lazy_drop_outside_bounds_respects_budget() {
     assert!(tree.set_chunk(key(-8, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 6)))));
     assert!(tree.set_chunk(key(8, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7)))));
 
-    let keep_bounds = Aabb4i::new([-9, -1, -1, -1], [-7, 1, 1, 1]);
+    let keep_bounds = Aabb4i::from_i32([-9, -1, -1, -1], [-7, 1, 1, 1]);
     assert!(tree.lazy_drop_outside_bounds(keep_bounds, 0).is_none());
     let changed = tree.lazy_drop_outside_bounds(keep_bounds, 8);
     assert!(changed.is_some());
@@ -534,7 +540,7 @@ fn slice_preserves_query_bounds() {
     assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 2)))));
     assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
 
-    let bounds = Aabb4i::new([2, 0, 0, 0], [3, 0, 0, 0]);
+    let bounds = Aabb4i::from_i32([2, 0, 0, 0], [3, 0, 0, 0]);
     let slice = tree.slice_core_in_bounds(bounds);
     assert_eq!(slice.bounds, bounds);
     let mut chunks = collect_non_empty_chunks_from_core_in_bounds(&slice, bounds);
@@ -547,7 +553,7 @@ fn slice_preserves_query_bounds() {
 #[test]
 fn set_chunk_carves_large_uniform_leaf_locally() {
     let mut tree = RegionChunkTree::new();
-    let bounds = Aabb4i::new([0, 0, 0, 0], [7, 7, 7, 7]);
+    let bounds = Aabb4i::from_i32([0, 0, 0, 0], [7, 7, 7, 7]);
     let core = RegionTreeCore {
         bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
@@ -589,7 +595,7 @@ fn set_chunk_carves_large_uniform_leaf_locally() {
 #[test]
 fn set_chunk_same_uniform_value_is_noop_without_fragmentation() {
     let mut tree = RegionChunkTree::new();
-    let bounds = Aabb4i::new([0, 0, 0, 0], [7, 7, 7, 7]);
+    let bounds = Aabb4i::from_i32([0, 0, 0, 0], [7, 7, 7, 7]);
     let core = RegionTreeCore {
         bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 6)),
@@ -608,7 +614,7 @@ fn set_chunk_same_uniform_value_is_noop_without_fragmentation() {
 #[test]
 fn set_chunk_carves_large_procedural_leaf_locally() {
     let mut tree = RegionChunkTree::new();
-    let bounds = Aabb4i::new([-4, -4, -4, -4], [4, 4, 4, 4]);
+    let bounds = Aabb4i::from_i32([-4, -4, -4, -4], [4, 4, 4, 4]);
     let generator = GeneratorRef {
         generator_id: "test-generator".to_string(),
         params: vec![1, 2, 3],
@@ -641,11 +647,11 @@ fn set_chunk_carves_large_procedural_leaf_locally() {
         children.len()
     );
     assert!(children.iter().any(|child| {
-        child.bounds == Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0])
+        child.bounds == Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0])
             && matches!(child.kind, RegionNodeKind::Uniform(ref b) if b.block_type == 12)
     }));
     assert!(children.iter().any(|child| {
-        child.bounds != Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0])
+        child.bounds != Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0])
             && matches!(child.kind, RegionNodeKind::ProceduralRef(ref g) if *g == generator)
     }));
 }
@@ -653,7 +659,7 @@ fn set_chunk_carves_large_procedural_leaf_locally() {
 #[test]
 fn splice_identical_partial_uniform_region_is_noop() {
     let mut tree = RegionChunkTree::new();
-    let root_bounds = Aabb4i::new([0, 0, 0, 0], [31, 7, 31, 7]);
+    let root_bounds = Aabb4i::from_i32([0, 0, 0, 0], [31, 7, 31, 7]);
     let root_core = RegionTreeCore {
         bounds: root_bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 2)),
@@ -665,7 +671,7 @@ fn splice_identical_partial_uniform_region_is_noop() {
     );
     let before = tree.root().expect("root").clone();
 
-    let patch_bounds = Aabb4i::new([4, 1, 4, 1], [20, 5, 20, 5]);
+    let patch_bounds = Aabb4i::from_i32([4, 1, 4, 1], [20, 5, 20, 5]);
     let patch_core = RegionTreeCore {
         bounds: patch_bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 2)),
@@ -688,7 +694,7 @@ fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
     assert!(tree.set_chunk(key(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))));
     let before = tree.root().expect("root").clone();
 
-    let patch_bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
+    let patch_bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
     let block_palette = vec![BlockData::AIR, BlockData::simple(0, 3), BlockData::simple(0, 4)];
     let patch_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
         patch_bounds,
@@ -721,7 +727,7 @@ fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
 
 #[test]
 fn overlay_core_applies_explicit_uniform_zero_and_non_zero_leaves() {
-    let bounds = Aabb4i::new([0, 0, 0, 0], [3, 0, 0, 0]);
+    let bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
     let mut tree = RegionChunkTree::new();
     let base = RegionTreeCore {
         bounds,
@@ -733,8 +739,8 @@ fn overlay_core_applies_explicit_uniform_zero_and_non_zero_leaves() {
         Some(bounds)
     );
 
-    let zero_leaf_bounds = Aabb4i::new([1, 0, 0, 0], [1, 0, 0, 0]);
-    let nine_leaf_bounds = Aabb4i::new([2, 0, 0, 0], [2, 0, 0, 0]);
+    let zero_leaf_bounds = Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]);
+    let nine_leaf_bounds = Aabb4i::from_i32([2, 0, 0, 0], [2, 0, 0, 0]);
     let overlay = RegionTreeCore {
         bounds,
         kind: RegionNodeKind::Branch(vec![
@@ -773,7 +779,7 @@ fn overlay_core_applies_explicit_uniform_zero_and_non_zero_leaves() {
 
 #[test]
 fn splice_non_empty_randomized_window_replacements_match_reference_grid() {
-    let global_bounds = Aabb4i::new([0, 0, 0, 0], [5, 2, 5, 1]);
+    let global_bounds = Aabb4i::from_i32([0, 0, 0, 0], [5, 2, 5, 1]);
     let mut tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
@@ -833,7 +839,7 @@ fn splice_non_empty_randomized_window_replacements_match_reference_grid() {
 
 #[test]
 fn overlay_core_randomized_uniform_leaf_layers_match_reference_grid() {
-    let global_bounds = Aabb4i::new([0, 0, 0, 0], [4, 1, 4, 1]);
+    let global_bounds = Aabb4i::from_i32([0, 0, 0, 0], [4, 1, 4, 1]);
     let mut tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
@@ -895,7 +901,7 @@ fn overlay_core_randomized_uniform_leaf_layers_match_reference_grid() {
 
 #[test]
 fn splice_non_empty_randomized_negative_coordinate_windows_match_reference_grid() {
-    let global_bounds = Aabb4i::new([-4, -2, -3, -2], [3, 1, 4, 1]);
+    let global_bounds = Aabb4i::from_i32([-4, -2, -3, -2], [3, 1, 4, 1]);
     let mut tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
@@ -956,7 +962,7 @@ fn splice_non_empty_randomized_negative_coordinate_windows_match_reference_grid(
 
 #[test]
 fn replaying_sliced_non_empty_windows_over_synced_tree_is_semantically_stable() {
-    let global_bounds = Aabb4i::new([-5, -1, -5, -1], [6, 2, 6, 2]);
+    let global_bounds = Aabb4i::from_i32([-5, -1, -5, -1], [6, 2, 6, 2]);
     let mut server_tree = RegionChunkTree::new();
     let base_core = RegionTreeCore {
         bounds: global_bounds,
@@ -1029,7 +1035,7 @@ fn replaying_sliced_non_empty_windows_over_synced_tree_is_semantically_stable() 
 #[test]
 fn consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     let mut tree = RegionChunkTree::new();
-    let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
+    let platform_bounds = Aabb4i::from_i32([0, 0, 0, 0], [7, 0, 7, 0]);
     let platform_core = RegionTreeCore {
         bounds: platform_bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
@@ -1076,7 +1082,7 @@ fn consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
 #[test]
 fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     let mut tree = RegionChunkTree::new();
-    let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
+    let platform_bounds = Aabb4i::from_i32([0, 0, 0, 0], [7, 0, 7, 0]);
     let platform_core = RegionTreeCore {
         bounds: platform_bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
@@ -1092,7 +1098,7 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     let payload_a = ChunkPayload::Dense16 {
         materials: dense_indices_a,
     };
-    let a_bounds = Aabb4i::new([3, 0, 3, 0], [3, 0, 3, 0]);
+    let a_bounds = Aabb4i::from_i32([3, 0, 3, 0], [3, 0, 3, 0]);
     let a_ca = ChunkArrayData::from_dense_indices_with_block_palette(
         a_bounds,
         vec![payload_a.clone()],
@@ -1120,7 +1126,7 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     let payload_b = ChunkPayload::Dense16 {
         materials: dense_indices_b,
     };
-    let b_bounds = Aabb4i::new([4, 0, 3, 0], [4, 0, 3, 0]);
+    let b_bounds = Aabb4i::from_i32([4, 0, 3, 0], [4, 0, 3, 0]);
     let b_ca = ChunkArrayData::from_dense_indices_with_block_palette(
         b_bounds,
         vec![payload_b.clone()],
@@ -1160,7 +1166,7 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
 fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
     let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
     let mut tree = RegionChunkTree::new();
-    let platform_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 7, 0]);
+    let platform_bounds = Aabb4i::from_i32([0, 0, 0, 0], [7, 0, 7, 0]);
     let platform_core = RegionTreeCore {
         bounds: platform_bounds,
         kind: RegionNodeKind::Uniform(BlockData::simple(0, 4)),
@@ -1283,7 +1289,7 @@ fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
 /// Verifies that editing one chunk within a ChunkArray does not lose sibling chunks.
 #[test]
 fn set_chunk_in_spliced_chunk_array_preserves_siblings() {
-    let ca_bounds = Aabb4i::new([0, 0, 0, 0], [7, 0, 0, 0]);
+    let ca_bounds = Aabb4i::from_i32([0, 0, 0, 0], [7, 0, 0, 0]);
     // 8 chunks along x, each with a unique uniform material (1..=8).
     let materials: Vec<u16> = (1..=8u16).collect();
     let core = chunk_array_uniform_palette_core(ca_bounds, &materials);
@@ -1364,7 +1370,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_siblings() {
 /// complex payloads.
 #[test]
 fn set_chunk_in_spliced_chunk_array_preserves_dense_siblings() {
-    let ca_bounds = Aabb4i::new([0, 0, 0, 0], [3, 0, 0, 0]);
+    let ca_bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
     let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
 
     // Build 4 non-uniform chunks, each with a unique pattern.
@@ -1486,20 +1492,20 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
 
     // Build 6 dense chunks in a 3×2 cluster at y=0..1, z=0, w=0.
     // Each has a unique block at voxel[0] and voxel[1].
-    let positions: Vec<[i32; 4]> = vec![
-        [0, 0, 0, 0],
-        [1, 0, 0, 0],
-        [2, 0, 0, 0],
-        [0, 1, 0, 0],
-        [1, 1, 0, 0],
-        [2, 1, 0, 0],
+    let positions: Vec<ChunkKey> = vec![
+        chunk_key_i32(0, 0, 0, 0),
+        chunk_key_i32(1, 0, 0, 0),
+        chunk_key_i32(2, 0, 0, 0),
+        chunk_key_i32(0, 1, 0, 0),
+        chunk_key_i32(1, 1, 0, 0),
+        chunk_key_i32(2, 1, 0, 0),
     ];
 
     // Build a "save tree" containing all 6 chunks as a single ChunkArray.
     let mut save_block_palette = vec![BlockData::AIR];
     let mut save_chunk_palette = Vec::new();
     let mut save_dense_indices = Vec::new();
-    let mut original_blocks: HashMap<[i32; 4], Vec<BlockData>> = HashMap::new();
+    let mut original_blocks: HashMap<ChunkKey, Vec<BlockData>> = HashMap::new();
 
     for (i, pos) in positions.iter().enumerate() {
         let block_a = BlockData::simple(0, (i as u32 + 1) * 10);
@@ -1525,7 +1531,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
         original_blocks.insert(*pos, blocks);
     }
 
-    let save_bounds = Aabb4i::new([0, 0, 0, 0], [2, 1, 0, 0]);
+    let save_bounds = Aabb4i::from_i32([0, 0, 0, 0], [2, 1, 0, 0]);
     let save_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
         save_bounds,
         save_chunk_palette,
@@ -1556,8 +1562,8 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
     }
 
     // Phase 2: Edit 3 chunks (simulating apply_voxel_edit).
-    let mut dirty_save_chunks: HashSet<[i32; 4]> = HashSet::new();
-    let edited_positions = [[0, 0, 0, 0], [1, 1, 0, 0], [2, 0, 0, 0]];
+    let mut dirty_save_chunks: HashSet<ChunkKey> = HashSet::new();
+    let edited_positions = [chunk_key_i32(0, 0, 0, 0), chunk_key_i32(1, 1, 0, 0), chunk_key_i32(2, 0, 0, 0)];
     for pos in &edited_positions {
         let mut blocks = tree
             .chunk_payload(*pos)
@@ -1588,7 +1594,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
     }
 
     // Phase 3: Simulate persist_dirty_overrides — query only dirty chunks.
-    let mut dirty_payloads: Vec<([i32; 4], Option<ResolvedChunkPayload>)> = Vec::new();
+    let mut dirty_payloads: Vec<(ChunkKey, Option<ResolvedChunkPayload>)> = Vec::new();
     for pos in &dirty_save_chunks {
         let resolved = tree.chunk_payload(*pos);
         dirty_payloads.push((*pos, resolved));
@@ -1665,17 +1671,17 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
     let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
 
     // Build a save ChunkArray with 4 dense chunks.
-    let positions: Vec<[i32; 4]> = vec![
-        [0, 0, 0, 0],
-        [1, 0, 0, 0],
-        [2, 0, 0, 0],
-        [3, 0, 0, 0],
+    let positions: Vec<ChunkKey> = vec![
+        chunk_key_i32(0, 0, 0, 0),
+        chunk_key_i32(1, 0, 0, 0),
+        chunk_key_i32(2, 0, 0, 0),
+        chunk_key_i32(3, 0, 0, 0),
     ];
 
     let mut save_block_palette = vec![BlockData::AIR];
     let mut save_chunk_palette = Vec::new();
     let mut save_dense_indices = Vec::new();
-    let mut expected_blocks: HashMap<[i32; 4], Vec<BlockData>> = HashMap::new();
+    let mut expected_blocks: HashMap<ChunkKey, Vec<BlockData>> = HashMap::new();
 
     for (i, pos) in positions.iter().enumerate() {
         let block = BlockData::simple(0, (i as u32 + 1) * 100);
@@ -1696,7 +1702,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
         expected_blocks.insert(*pos, blocks);
     }
 
-    let save_bounds = Aabb4i::new([0, 0, 0, 0], [3, 0, 0, 0]);
+    let save_bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
     let save_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
         save_bounds,
         save_chunk_palette,
@@ -1743,7 +1749,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
         blocks[0] = BlockData::simple(0, 777);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
-        expected_blocks.get_mut(&[1, 0, 0, 0]).unwrap()[0] = BlockData::simple(0, 777);
+        expected_blocks.get_mut(&chunk_key_i32(1, 0, 0, 0)).unwrap()[0] = BlockData::simple(0, 777);
     }
 
     // Verify ALL chunks after edit.
@@ -1768,7 +1774,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
         blocks[0] = BlockData::simple(0, 888);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(3, 0, 0, 0), Some(resolved));
-        expected_blocks.get_mut(&[3, 0, 0, 0]).unwrap()[0] = BlockData::simple(0, 888);
+        expected_blocks.get_mut(&chunk_key_i32(3, 0, 0, 0)).unwrap()[0] = BlockData::simple(0, 888);
     }
 
     // Verify ALL chunks after second edit.
@@ -1797,11 +1803,11 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
     let chunk_volume = crate::shared::voxel::CHUNK_VOLUME;
 
     let mut tree = RegionChunkTree::new();
-    let mut expected: HashMap<[i32; 4], Vec<BlockData>> = HashMap::new();
+    let mut expected: HashMap<ChunkKey, Vec<BlockData>> = HashMap::new();
 
     // Insert 4 chunks one at a time (each triggers potential consolidation).
     for i in 0..4i32 {
-        let pos = [i, 0, 0, 0];
+        let pos = chunk_key_i32(i, 0, 0, 0);
         let mut blocks = vec![BlockData::AIR; chunk_volume];
         blocks[0] = BlockData::simple(0, (i + 1) as u32);
         blocks[1] = BlockData::simple(0, (i + 1) as u32 * 10);
@@ -1816,7 +1822,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
         blocks[2] = BlockData::simple(0, 42);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
-        expected.get_mut(&[1, 0, 0, 0]).unwrap()[2] = BlockData::simple(0, 42);
+        expected.get_mut(&chunk_key_i32(1, 0, 0, 0)).unwrap()[2] = BlockData::simple(0, 42);
     }
 
     // Verify after cycle 1.
@@ -1836,7 +1842,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
         blocks[3] = BlockData::simple(0, 77);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(3, 0, 0, 0), Some(resolved));
-        expected.get_mut(&[3, 0, 0, 0]).unwrap()[3] = BlockData::simple(0, 77);
+        expected.get_mut(&chunk_key_i32(3, 0, 0, 0)).unwrap()[3] = BlockData::simple(0, 77);
     }
 
     // Cycle 3: edit chunk [0,0,0,0] → carves again
@@ -1845,7 +1851,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
         blocks[4] = BlockData::simple(0, 55);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(0, 0, 0, 0), Some(resolved));
-        expected.get_mut(&[0, 0, 0, 0]).unwrap()[4] = BlockData::simple(0, 55);
+        expected.get_mut(&chunk_key_i32(0, 0, 0, 0)).unwrap()[4] = BlockData::simple(0, 55);
     }
 
     // Cycle 4: edit chunk [2,0,0,0] → carves again
@@ -1854,7 +1860,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
         blocks[5] = BlockData::simple(0, 33);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(2, 0, 0, 0), Some(resolved));
-        expected.get_mut(&[2, 0, 0, 0]).unwrap()[5] = BlockData::simple(0, 33);
+        expected.get_mut(&chunk_key_i32(2, 0, 0, 0)).unwrap()[5] = BlockData::simple(0, 33);
     }
 
     // Cycle 5: re-edit chunk [1,0,0,0] again
@@ -1863,7 +1869,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
         blocks[6] = BlockData::simple(0, 11);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
-        expected.get_mut(&[1, 0, 0, 0]).unwrap()[6] = BlockData::simple(0, 11);
+        expected.get_mut(&chunk_key_i32(1, 0, 0, 0)).unwrap()[6] = BlockData::simple(0, 11);
     }
 
     // Final verification of ALL chunks and ALL voxels.
@@ -1899,7 +1905,7 @@ fn overlay_preserves_virgin_terrain_at_chunk_array_gaps() {
     let dirt = BlockData::simple(0, 7);
 
     // Build a "virgin terrain" tree: a Uniform solid block.
-    let virgin_bounds = Aabb4i::new([-1, 0, -1, 0], [0, 0, 0, 0]);
+    let virgin_bounds = Aabb4i::from_i32([-1, 0, -1, 0], [0, 0, 0, 0]);
     let virgin_core = RegionTreeCore {
         bounds: virgin_bounds,
         kind: RegionNodeKind::Uniform(stone.clone()),
@@ -1969,19 +1975,22 @@ fn has_chunk_array_node(core: &RegionTreeCore) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Phase B: scale-aware tests
+// Phase B: scale-aware tests (using fixed-point ChunkKey)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn scaled_chunk_key_equality_and_hashing() {
-    let a = ScaledChunkKey::new([0, 0, 0, 0], 0);
-    let b = ScaledChunkKey::unit([0, 0, 0, 0]);
-    assert_eq!(a, b);
-    assert_eq!(chunk_key_to_scaled([1, 2, 3, 4]), ScaledChunkKey::new([1, 2, 3, 4], 0));
+fn fixed_point_chunk_key_equality_and_hashing() {
+    use crate::shared::spatial::{chunk_key_from_lattice, ChunkCoord};
 
-    // Different scale_exp → different key
-    let c = ScaledChunkKey::new([0, 0, 0, 0], -1);
-    assert_ne!(a, c);
+    // Scale 0: lattice [1,2,3,4] → fixed [1.0, 2.0, 3.0, 4.0]
+    let a = chunk_key_i32(1, 2, 3, 4);
+    let b = chunk_key_from_lattice([1, 2, 3, 4], 0);
+    assert_eq!(a, b);
+
+    // Scale -1: lattice [1,0,0,0] → fixed [0.5, 0, 0, 0]
+    let c = chunk_key_from_lattice([1, 0, 0, 0], -1);
+    assert_eq!(c[0], ChunkCoord::from_bits(1i64 << 15)); // 0.5
+    assert_ne!(a, c); // Different from [1, 2, 3, 4]
 
     // Hash consistency
     use std::hash::{Hash, Hasher};
@@ -2022,72 +2031,74 @@ fn block_data_scale_exp_serde_missing_field_defaults_to_zero() {
 }
 
 #[test]
-fn set_and_get_chunk_scaled_round_trip() {
+fn set_and_get_chunk_at_scale_round_trip() {
+    use crate::shared::spatial::chunk_key_from_lattice;
+
     let mut tree = RegionChunkTree::new();
     let block = BlockData::simple(1, 7);
     let payload = ResolvedChunkPayload::uniform(block.clone());
-    let scaled_key = ScaledChunkKey::new([0, 0, 0, 0], -1);
+    // Scale -1, lattice [0,0,0,0] → fixed [0,0,0,0]
+    let key = chunk_key_from_lattice([0, 0, 0, 0], -1);
 
-    assert!(!tree.has_chunk_scaled(scaled_key));
-    assert!(tree.set_chunk_scaled(scaled_key, Some(payload.clone())));
-    assert!(tree.has_chunk_scaled(scaled_key));
+    assert!(!tree.has_chunk(key));
+    assert!(tree.set_chunk_at_scale(key, Some(payload.clone()), -1));
+    assert!(tree.has_chunk(key));
 
-    let result = tree.chunk_payload_scaled(scaled_key).unwrap();
+    let result = tree.chunk_payload(key).unwrap();
     assert_eq!(result.uniform_block(), Some(&block));
 }
 
 #[test]
 fn scaled_chunks_at_non_overlapping_positions() {
+    use crate::shared::spatial::chunk_key_from_lattice;
+
     let mut tree = RegionChunkTree::new();
     let block_a = BlockData::simple(1, 10);
     let block_b = BlockData::simple(1, 20);
 
     // Unit chunk at [0,0,0,0] covers world [0..8)^4
-    let unit_key = ScaledChunkKey::unit([0, 0, 0, 0]);
-    // Half-scale chunk at [2,0,0,0] covers world [8..12) × [0..4)^3
-    // (scale_exp=-1: cell_size=0.5, chunk spans 4 world units per axis)
-    let half_key = ScaledChunkKey::new([2, 0, 0, 0], -1);
+    let unit_key = chunk_key_i32(0, 0, 0, 0);
+    // Half-scale chunk at lattice [2,0,0,0] at scale -1 → fixed [1, 0, 0, 0]
+    // Covers world [4..8) × [0..4)^3 at half-scale cell size
+    let half_key = chunk_key_from_lattice([2, 0, 0, 0], -1);
 
-    tree.set_chunk_scaled(unit_key, Some(ResolvedChunkPayload::uniform(block_a.clone())));
-    tree.set_chunk_scaled(half_key, Some(ResolvedChunkPayload::uniform(block_b.clone())));
+    tree.set_chunk(unit_key, Some(ResolvedChunkPayload::uniform(block_a.clone())));
+    tree.set_chunk_at_scale(half_key, Some(ResolvedChunkPayload::uniform(block_b.clone())), -1);
 
-    // Both should be retrievable at their respective scales
-    let result_unit = tree.chunk_payload_scaled(unit_key).unwrap();
+    // Both should be retrievable
+    let result_unit = tree.chunk_payload(unit_key).unwrap();
     assert_eq!(result_unit.uniform_block(), Some(&block_a));
 
-    let result_half = tree.chunk_payload_scaled(half_key).unwrap();
+    let result_half = tree.chunk_payload(half_key).unwrap();
     assert_eq!(result_half.uniform_block(), Some(&block_b));
-
-    // Querying the wrong scale at each position should return None
-    assert!(tree.chunk_payload_scaled(ScaledChunkKey::new([0, 0, 0, 0], -1)).is_none());
-    assert!(tree.chunk_payload_scaled(ScaledChunkKey::unit([2, 0, 0, 0])).is_none());
 }
 
 #[test]
-fn set_chunk_scaled_at_zero_delegates_to_set_chunk() {
+fn set_chunk_at_scale_zero_delegates_to_set_chunk() {
     let mut tree = RegionChunkTree::new();
     let block = BlockData::simple(1, 5);
     let payload = ResolvedChunkPayload::uniform(block.clone());
 
-    let key = ScaledChunkKey::unit([2, 3, 0, 0]);
-    tree.set_chunk_scaled(key, Some(payload));
+    let key = chunk_key_i32(2, 3, 0, 0);
+    tree.set_chunk_at_scale(key, Some(payload), 0);
 
-    // Should be queryable via both the scaled and unscaled APIs
-    assert!(tree.has_chunk(key.pos));
-    assert!(tree.has_chunk_scaled(key));
-    let result = tree.chunk_payload(key.pos).unwrap();
+    // Should be queryable via both set_chunk and set_chunk_at_scale APIs
+    assert!(tree.has_chunk(key));
+    let result = tree.chunk_payload(key).unwrap();
     assert_eq!(result.uniform_block(), Some(&block));
 }
 
 #[test]
 fn delete_scaled_chunk_removes_it() {
+    use crate::shared::spatial::chunk_key_from_lattice;
+
     let mut tree = RegionChunkTree::new();
     let block = BlockData::simple(1, 7);
-    let key = ScaledChunkKey::new([0, 0, 0, 0], -1);
+    let key = chunk_key_from_lattice([0, 0, 0, 0], -1);
 
-    tree.set_chunk_scaled(key, Some(ResolvedChunkPayload::uniform(block)));
-    assert!(tree.has_chunk_scaled(key));
+    tree.set_chunk_at_scale(key, Some(ResolvedChunkPayload::uniform(block)), -1);
+    assert!(tree.has_chunk(key));
 
-    tree.set_chunk_scaled(key, None);
-    assert!(!tree.has_chunk_scaled(key));
+    tree.set_chunk_at_scale(key, None, -1);
+    assert!(!tree.has_chunk(key));
 }

@@ -1,6 +1,8 @@
 use super::*;
 use crate::shared::chunk_payload::ResolvedChunkPayload;
-use crate::shared::scaled_bounds::scaled_bounds_overlap_world;
+use crate::shared::spatial::{
+    chunk_key_from_lattice, lattice_from_fixed, step_for_scale, ChunkCoord,
+};
 use crate::shared::voxel::BlockData;
 use std::collections::HashMap;
 
@@ -39,8 +41,21 @@ impl RegionChunkTree {
             .and_then(|node| query_chunk_payload_in_node(node, key))
     }
 
+    /// Set a chunk at scale 0 (the standard unit-scale lattice).
     pub fn set_chunk(&mut self, key: ChunkKey, resolved: Option<ResolvedChunkPayload>) -> bool {
+        self.set_chunk_at_scale(key, resolved, 0)
+    }
+
+    /// Set a chunk at a specific scale. The key is already in fixed-point coordinates.
+    /// `scale_exp` is needed to create ChunkArrayData with correct cell resolution.
+    pub fn set_chunk_at_scale(
+        &mut self,
+        key: ChunkKey,
+        resolved: Option<ResolvedChunkPayload>,
+        scale_exp: i8,
+    ) -> bool {
         let payload = resolved.map(|r| canonicalize_resolved_payload(r));
+        let step = step_for_scale(scale_exp);
         if self.root.is_none() {
             let Some(payload) = payload else {
                 return false;
@@ -48,7 +63,7 @@ impl RegionChunkTree {
             let bounds = Aabb4i::new(key, key);
             self.root = Some(Box::new(RegionTreeCore {
                 bounds,
-                kind: kind_from_resolved_value(bounds, Some(payload)),
+                kind: kind_from_resolved_value_at_scale(bounds, Some(payload), scale_exp),
                 generator_version_hash: 0,
             }));
             self.warn_if_world_space_overlapping("set_chunk:init");
@@ -62,7 +77,6 @@ impl RegionChunkTree {
                 .map(|root| !root.bounds.contains_chunk(key))
                 .unwrap_or(false)
         {
-            // Deleting outside the represented bounds cannot change tree contents.
             return false;
         }
 
@@ -75,11 +89,11 @@ impl RegionChunkTree {
             let Some(root) = self.root.take() else {
                 break;
             };
-            self.root = Some(expand_root_once(root, key));
+            self.root = Some(expand_root_once(root, key, step));
         }
 
         let changed = if let Some(root) = self.root.as_mut() {
-            set_chunk_recursive(root, key, payload)
+            set_chunk_recursive(root, key, payload, scale_exp)
         } else {
             false
         };
@@ -103,76 +117,6 @@ impl RegionChunkTree {
 
     pub fn remove_chunk(&mut self, key: ChunkKey) -> bool {
         self.set_chunk(key, None)
-    }
-
-    /// Query a chunk at a specific scale. Returns `None` if no chunk exists at
-    /// that position and scale.
-    pub fn chunk_payload_scaled(&self, key: ScaledChunkKey) -> Option<ResolvedChunkPayload> {
-        self.root
-            .as_ref()
-            .and_then(|node| query_chunk_payload_in_node_scaled(node, key))
-    }
-
-    /// Check if a chunk exists at a specific scale.
-    pub fn has_chunk_scaled(&self, key: ScaledChunkKey) -> bool {
-        self.chunk_payload_scaled(key).is_some()
-    }
-
-    /// Set a chunk at a specific scale. Returns `true` if the tree was modified.
-    pub fn set_chunk_scaled(
-        &mut self,
-        key: ScaledChunkKey,
-        resolved: Option<ResolvedChunkPayload>,
-    ) -> bool {
-        if key.scale_exp == 0 {
-            return self.set_chunk(key.pos, resolved);
-        }
-
-        let payload = resolved.map(canonicalize_resolved_payload);
-        let chunk_bounds = Aabb4i::new(key.pos, key.pos);
-
-        if self.root.is_none() {
-            let Some(payload) = payload else {
-                return false;
-            };
-            let kind = kind_from_resolved_value_at_scale(chunk_bounds, Some(payload), key.scale_exp);
-            self.root = Some(Box::new(RegionTreeCore {
-                bounds: chunk_bounds,
-                kind,
-                generator_version_hash: 0,
-            }));
-            self.warn_if_world_space_overlapping("set_chunk_scaled:init");
-            return true;
-        }
-
-        // For non-zero scale, we build a one-chunk ChunkArray at the target scale
-        // and splice it in via the core-splicing machinery.
-        let patch_kind = kind_from_resolved_value_at_scale(chunk_bounds, payload.clone(), key.scale_exp);
-        let patch_core = RegionTreeCore {
-            bounds: chunk_bounds,
-            kind: patch_kind,
-            generator_version_hash: 0,
-        };
-
-        // Check if this is a deletion (setting to empty/air).
-        let is_delete = payload.is_none()
-            || payload
-                .as_ref()
-                .map(|p| matches!(p.payload, ChunkPayload::Empty) || p.uniform_block().map(|b| b.is_air()).unwrap_or(false))
-                .unwrap_or(false);
-
-        if !is_delete {
-            self.ensure_root_contains_bounds(chunk_bounds);
-        }
-
-        let changed = self
-            .splice_core_in_bounds(chunk_bounds, &patch_core)
-            .is_some();
-
-        if changed {
-            self.warn_if_world_space_overlapping("set_chunk_scaled");
-        }
-        changed
     }
 
     pub fn any_non_empty_chunk_in_bounds(&self, bounds: Aabb4i) -> bool {
@@ -435,6 +379,7 @@ impl RegionChunkTree {
             return;
         }
 
+        let step = step_for_kind(self.root.as_ref().map(|r| &r.kind));
         while self
             .root
             .as_ref()
@@ -457,7 +402,7 @@ impl RegionChunkTree {
             let Some(root) = self.root.take() else {
                 break;
             };
-            self.root = Some(expand_root_once(root, grow_key));
+            self.root = Some(expand_root_once(root, grow_key, step));
         }
     }
 
@@ -471,23 +416,14 @@ impl RegionChunkTree {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct WorldOccupiedCell {
-    bounds: Aabb4i,
-    scale_exp: i8,
-}
-
 pub fn validate_region_core_world_space_non_overlapping(
     core: &RegionTreeCore,
 ) -> Result<(), String> {
     if !core.bounds.is_valid() {
         return Ok(());
     }
-    if !kind_contains_nonzero_scale(&core.kind) {
-        return Ok(());
-    }
 
-    let mut occupied = Vec::<WorldOccupiedCell>::new();
+    let mut occupied = Vec::<Aabb4i>::new();
     collect_world_occupied_cells_from_kind(&core.kind, core.bounds, &mut occupied)?;
     if occupied.len() < 2 {
         return Ok(());
@@ -497,20 +433,13 @@ pub fn validate_region_core_world_space_non_overlapping(
         for j in (i + 1)..occupied.len() {
             let a = occupied[i];
             let b = occupied[j];
-            if a.scale_exp == b.scale_exp && !a.bounds.intersects(&b.bounds) {
-                continue;
-            }
-            let overlaps = scaled_bounds_overlap_world(a.bounds, a.scale_exp, b.bounds, b.scale_exp)
-                .map_err(|error| format!("scaled overlap check failed: {error:?}"))?;
-            if overlaps {
+            if a.intersects(&b) {
                 return Err(format!(
-                    "overlap detected between bounds {:?}->{:?} (scale_exp={}) and {:?}->{:?} (scale_exp={})",
-                    a.bounds.min,
-                    a.bounds.max,
-                    a.scale_exp,
-                    b.bounds.min,
-                    b.bounds.max,
-                    b.scale_exp
+                    "overlap detected between bounds {:?}->{:?} and {:?}->{:?}",
+                    a.min,
+                    a.max,
+                    b.min,
+                    b.max,
                 ));
             }
         }
@@ -519,29 +448,16 @@ pub fn validate_region_core_world_space_non_overlapping(
     Ok(())
 }
 
-fn kind_contains_nonzero_scale(kind: &RegionNodeKind) -> bool {
-    match kind {
-        RegionNodeKind::ChunkArray(chunk_array) => chunk_array.scale_exp != 0,
-        RegionNodeKind::Branch(children) => children
-            .iter()
-            .any(|child| kind_contains_nonzero_scale(&child.kind)),
-        _ => false,
-    }
-}
-
 fn collect_world_occupied_cells_from_kind(
     kind: &RegionNodeKind,
     kind_bounds: Aabb4i,
-    out: &mut Vec<WorldOccupiedCell>,
+    out: &mut Vec<Aabb4i>,
 ) -> Result<(), String> {
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => Ok(()),
         RegionNodeKind::Uniform(block) => {
             if !block.is_air() {
-                out.push(WorldOccupiedCell {
-                    bounds: kind_bounds,
-                    scale_exp: 0,
-                });
+                out.push(kind_bounds);
             }
             Ok(())
         }
@@ -551,18 +467,21 @@ fn collect_world_occupied_cells_from_kind(
                 .map_err(|error| format!("decode chunk array indices failed: {error:?}"))?;
             let extents = chunk_array
                 .bounds
-                .chunk_extents()
+                .chunk_extents_at_scale(chunk_array.scale_exp)
                 .ok_or_else(|| "chunk array bounds extents missing".to_string())?;
             let palette_non_empty = chunk_array_palette_non_empty_mask(chunk_array);
-            for w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
-                for z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
-                    for y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
-                        for x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
+            let step = step_for_scale(chunk_array.scale_exp);
+            let epsilon = ChunkCoord::from_bits(1);
+            let (lmin, lmax) = chunk_array.bounds.to_lattice_bounds(chunk_array.scale_exp);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
                             let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
+                                (lx - lmin[0]) as usize,
+                                (ly - lmin[1]) as usize,
+                                (lz - lmin[2]) as usize,
+                                (lw - lmin[3]) as usize,
                             ];
                             let linear = linear_cell_index(local, extents);
                             let Some(palette_idx) = indices.get(linear) else {
@@ -576,11 +495,14 @@ fn collect_world_occupied_cells_from_kind(
                             {
                                 continue;
                             }
-                            let pos = [x, y, z, w];
-                            out.push(WorldOccupiedCell {
-                                bounds: Aabb4i::new(pos, pos),
-                                scale_exp: chunk_array.scale_exp,
-                            });
+                            let pos = chunk_key_from_lattice(
+                                [lx, ly, lz, lw],
+                                chunk_array.scale_exp,
+                            );
+                            // Push the world-space extent of this cell, not just a point.
+                            // A cell at `pos` with step `s` covers [pos, pos + s - epsilon].
+                            let cell_max = pos.map(|c| c + step - epsilon);
+                            out.push(Aabb4i::new(pos, cell_max));
                         }
                     }
                 }
@@ -704,23 +626,26 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
     bounds: Aabb4i,
 ) -> Option<ChunkArrayData> {
     let intersection = intersect_aabb(chunk_array.bounds, bounds)?;
-    let source_extents = chunk_array.bounds.chunk_extents()?;
-    let target_extents = intersection.chunk_extents()?;
+    let se = chunk_array.scale_exp;
+    let source_extents = chunk_array.bounds.chunk_extents_at_scale(se)?;
+    let target_extents = intersection.chunk_extents_at_scale(se)?;
     let target_cell_count = target_extents[0]
         .checked_mul(target_extents[1])?
         .checked_mul(target_extents[2])?
         .checked_mul(target_extents[3])?;
     let mut target_indices = Vec::with_capacity(target_cell_count);
 
-    for w in intersection.min[3]..=intersection.max[3] {
-        for z in intersection.min[2]..=intersection.max[2] {
-            for y in intersection.min[1]..=intersection.max[1] {
-                for x in intersection.min[0]..=intersection.max[0] {
+    let (src_lmin, _) = chunk_array.bounds.to_lattice_bounds(se);
+    let (int_lmin, int_lmax) = intersection.to_lattice_bounds(se);
+    for lw in int_lmin[3]..=int_lmax[3] {
+        for lz in int_lmin[2]..=int_lmax[2] {
+            for ly in int_lmin[1]..=int_lmax[1] {
+                for lx in int_lmin[0]..=int_lmax[0] {
                     let source_local = [
-                        usize::try_from(x - chunk_array.bounds.min[0]).ok()?,
-                        usize::try_from(y - chunk_array.bounds.min[1]).ok()?,
-                        usize::try_from(z - chunk_array.bounds.min[2]).ok()?,
-                        usize::try_from(w - chunk_array.bounds.min[3]).ok()?,
+                        (lx - src_lmin[0]) as usize,
+                        (ly - src_lmin[1]) as usize,
+                        (lz - src_lmin[2]) as usize,
+                        (lw - src_lmin[3]) as usize,
                     ];
                     let source_linear = linear_cell_index(source_local, source_extents);
                     target_indices.push(*source_indices.get(source_linear)?);
@@ -910,8 +835,9 @@ fn clear_node_region(node: &mut RegionTreeCore, clear_bounds: Aabb4i) -> bool {
         }
         _ => {
             let old_kind = node.kind.clone();
+            let step = step_for_kind(Some(&old_kind));
             let mut pieces = Vec::new();
-            for piece_bounds in subtract_aabb(node.bounds, intersection) {
+            for piece_bounds in subtract_aabb(node.bounds, intersection, step) {
                 let projected = project_node_to_bounds(
                     &old_kind,
                     node.bounds,
@@ -978,7 +904,8 @@ fn insert_replacement_slice_into_node_with_rebuild(
         RegionNodeKind::Empty => {}
         RegionNodeKind::Branch(existing_children) => {
             for child in existing_children {
-                for piece_bounds in subtract_aabb(child.bounds, replacement_slice.bounds) {
+                let child_step = step_for_kind(Some(&child.kind));
+                for piece_bounds in subtract_aabb(child.bounds, replacement_slice.bounds, child_step) {
                     let projected = project_node_to_bounds(
                         &child.kind,
                         child.bounds,
@@ -992,7 +919,8 @@ fn insert_replacement_slice_into_node_with_rebuild(
             }
         }
         other_kind => {
-            for piece_bounds in subtract_aabb(node.bounds, replacement_slice.bounds) {
+            let other_step = step_for_kind(Some(&other_kind));
+            for piece_bounds in subtract_aabb(node.bounds, replacement_slice.bounds, other_step) {
                 let projected = project_node_to_bounds(
                     &other_kind,
                     node.bounds,
@@ -1108,25 +1036,26 @@ fn overlay_chunk_array_non_empty_cells<F>(
     let Ok(indices) = chunk_array.decode_dense_indices() else {
         return;
     };
-    let Some(extents) = chunk_array.bounds.chunk_extents() else {
+    let se = chunk_array.scale_exp;
+    let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(se) else {
         return;
     };
     let default_idx = chunk_array.default_chunk_idx;
+    let (lmin, lmax) = chunk_array.bounds.to_lattice_bounds(se);
 
-    for w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
-        for z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
-            for y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
-                for x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
+    for lw in lmin[3]..=lmax[3] {
+        for lz in lmin[2]..=lmax[2] {
+            for ly in lmin[1]..=lmax[1] {
+                for lx in lmin[0]..=lmax[0] {
                     let local = [
-                        (x - chunk_array.bounds.min[0]) as usize,
-                        (y - chunk_array.bounds.min[1]) as usize,
-                        (z - chunk_array.bounds.min[2]) as usize,
-                        (w - chunk_array.bounds.min[3]) as usize,
+                        (lx - lmin[0]) as usize,
+                        (ly - lmin[1]) as usize,
+                        (lz - lmin[2]) as usize,
+                        (lw - lmin[3]) as usize,
                     ];
                     let linear = linear_cell_index(local, extents);
                     let palette_idx = indices[linear];
 
-                    // Skip gap entries (positions at the default Empty index).
                     if default_idx == Some(palette_idx) {
                         continue;
                     }
@@ -1136,7 +1065,7 @@ fn overlay_chunk_array_non_empty_cells<F>(
                         continue;
                     }
 
-                    let pos = [x, y, z, w];
+                    let pos = chunk_key_from_lattice([lx, ly, lz, lw], se);
                     let cell_bounds = Aabb4i::new(pos, pos);
                     let Ok(mut cell_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
                         cell_bounds,
@@ -1147,7 +1076,7 @@ fn overlay_chunk_array_non_empty_cells<F>(
                     ) else {
                         continue;
                     };
-                    cell_ca.scale_exp = chunk_array.scale_exp;
+                    cell_ca.scale_exp = se;
                     visit(&RegionTreeCore {
                         bounds: cell_bounds,
                         kind: RegionNodeKind::ChunkArray(cell_ca),
@@ -1156,6 +1085,18 @@ fn overlay_chunk_array_non_empty_cells<F>(
                 }
             }
         }
+    }
+}
+
+fn step_for_kind(kind: Option<&RegionNodeKind>) -> ChunkCoord {
+    match kind {
+        Some(RegionNodeKind::ChunkArray(ca)) => step_for_scale(ca.scale_exp),
+        Some(RegionNodeKind::Branch(children)) => children
+            .iter()
+            .map(|c| step_for_kind(Some(&c.kind)))
+            .min()
+            .unwrap_or(step_for_scale(0)),
+        _ => step_for_scale(0),
     }
 }
 
@@ -1189,7 +1130,7 @@ fn merge_aabb(a: Aabb4i, b: Aabb4i) -> Aabb4i {
     )
 }
 
-fn subtract_aabb(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
+fn subtract_aabb(outer: Aabb4i, inner: Aabb4i, step: ChunkCoord) -> Vec<Aabb4i> {
     let Some(inner) = intersect_aabb(outer, inner) else {
         return vec![outer];
     };
@@ -1203,7 +1144,7 @@ fn subtract_aabb(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
     for axis in 0..4 {
         if core.min[axis] < inner.min[axis] {
             let mut piece = core;
-            piece.max[axis] = inner.min[axis] - 1;
+            piece.max[axis] = inner.min[axis] - step;
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -1211,7 +1152,7 @@ fn subtract_aabb(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
         }
         if core.max[axis] > inner.max[axis] {
             let mut piece = core;
-            piece.min[axis] = inner.max[axis] + 1;
+            piece.min[axis] = inner.max[axis] + step;
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -1239,11 +1180,13 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
                 return;
             }
             let resolved = ResolvedChunkPayload::uniform(block.clone());
-            for w in intersection.min[3]..=intersection.max[3] {
-                for z in intersection.min[2]..=intersection.max[2] {
-                    for y in intersection.min[1]..=intersection.max[1] {
-                        for x in intersection.min[0]..=intersection.max[0] {
-                            out.push(([x, y, z, w], resolved.clone()));
+            // Uniform is always scale 0
+            let (lmin, lmax) = intersection.to_lattice_bounds(0);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            out.push((chunk_key_from_lattice([lx, ly, lz, lw], 0), resolved.clone()));
                         }
                     }
                 }
@@ -1257,19 +1200,22 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
             let Ok(indices) = chunk_array.decode_dense_indices() else {
                 return;
             };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
+            let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(chunk_array.scale_exp) else {
                 return;
             };
             let palette_non_empty = chunk_array_palette_non_empty_mask(chunk_array);
-            for w in chunk_array_intersection.min[3]..=chunk_array_intersection.max[3] {
-                for z in chunk_array_intersection.min[2]..=chunk_array_intersection.max[2] {
-                    for y in chunk_array_intersection.min[1]..=chunk_array_intersection.max[1] {
-                        for x in chunk_array_intersection.min[0]..=chunk_array_intersection.max[0] {
+            let se = chunk_array.scale_exp;
+            let (ca_lmin, _) = chunk_array.bounds.to_lattice_bounds(se);
+            let (int_lmin, int_lmax) = chunk_array_intersection.to_lattice_bounds(se);
+            for lw in int_lmin[3]..=int_lmax[3] {
+                for lz in int_lmin[2]..=int_lmax[2] {
+                    for ly in int_lmin[1]..=int_lmax[1] {
+                        for lx in int_lmin[0]..=int_lmax[0] {
                             let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
+                                (lx - ca_lmin[0]) as usize,
+                                (ly - ca_lmin[1]) as usize,
+                                (lz - ca_lmin[2]) as usize,
+                                (lw - ca_lmin[3]) as usize,
                             ];
                             let linear = linear_cell_index(local, extents);
                             let Some(palette_idx) = indices.get(linear) else {
@@ -1283,7 +1229,7 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
                                 continue;
                             };
                             out.push((
-                                [x, y, z, w],
+                                chunk_key_from_lattice([lx, ly, lz, lw], se),
                                 ResolvedChunkPayload {
                                     payload: payload.clone(),
                                     block_palette: chunk_array.block_palette.clone(),
@@ -1323,11 +1269,12 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
             if block.is_air() {
                 return;
             }
-            for w in intersection.min[3]..=intersection.max[3] {
-                for z in intersection.min[2]..=intersection.max[2] {
-                    for y in intersection.min[1]..=intersection.max[1] {
-                        for x in intersection.min[0]..=intersection.max[0] {
-                            out.push([x, y, z, w]);
+            let (lmin, lmax) = intersection.to_lattice_bounds(0);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            out.push(chunk_key_from_lattice([lx, ly, lz, lw], 0));
                         }
                     }
                 }
@@ -1341,19 +1288,22 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
             let Ok(indices) = chunk_array.decode_dense_indices() else {
                 return;
             };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
+            let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(chunk_array.scale_exp) else {
                 return;
             };
+            let se = chunk_array.scale_exp;
             let palette_non_empty = chunk_array_palette_non_empty_mask(chunk_array);
-            for w in chunk_array_intersection.min[3]..=chunk_array_intersection.max[3] {
-                for z in chunk_array_intersection.min[2]..=chunk_array_intersection.max[2] {
-                    for y in chunk_array_intersection.min[1]..=chunk_array_intersection.max[1] {
-                        for x in chunk_array_intersection.min[0]..=chunk_array_intersection.max[0] {
+            let (ca_lmin, _) = chunk_array.bounds.to_lattice_bounds(se);
+            let (int_lmin, int_lmax) = chunk_array_intersection.to_lattice_bounds(se);
+            for lw in int_lmin[3]..=int_lmax[3] {
+                for lz in int_lmin[2]..=int_lmax[2] {
+                    for ly in int_lmin[1]..=int_lmax[1] {
+                        for lx in int_lmin[0]..=int_lmax[0] {
                             let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
+                                (lx - ca_lmin[0]) as usize,
+                                (ly - ca_lmin[1]) as usize,
+                                (lz - ca_lmin[2]) as usize,
+                                (lw - ca_lmin[3]) as usize,
                             ];
                             let linear = linear_cell_index(local, extents);
                             let Some(palette_idx) = indices.get(linear) else {
@@ -1363,7 +1313,7 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
                             if !palette_non_empty.get(palette_idx).copied().unwrap_or(true) {
                                 continue;
                             }
-                            out.push([x, y, z, w]);
+                            out.push(chunk_key_from_lattice([lx, ly, lz, lw], se));
                         }
                     }
                 }
@@ -1384,15 +1334,16 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
 
 fn set_chunk_recursive(
     node: &mut RegionTreeCore,
-    key_pos: [i32; 4],
+    key_pos: ChunkKey,
     payload: Option<ResolvedChunkPayload>,
+    scale_exp: i8,
 ) -> bool {
     if !node.bounds.contains_chunk(key_pos) {
         return false;
     }
 
     if is_single_chunk_bounds(node.bounds) {
-        let new_kind = kind_from_resolved_value(node.bounds, payload);
+        let new_kind = kind_from_resolved_value_at_scale(node.bounds, payload, scale_exp);
         if node.kind == new_kind {
             return false;
         }
@@ -1401,16 +1352,17 @@ fn set_chunk_recursive(
     }
 
     if matches!(node.kind, RegionNodeKind::Branch(_)) {
-        return set_chunk_recursive_in_branch(node, key_pos, payload);
+        return set_chunk_recursive_in_branch(node, key_pos, payload, scale_exp);
     }
 
-    carve_leaf_for_chunk_edit(node, key_pos, payload)
+    carve_leaf_for_chunk_edit(node, key_pos, payload, scale_exp)
 }
 
 fn set_chunk_recursive_in_branch(
     node: &mut RegionTreeCore,
-    key_pos: [i32; 4],
+    key_pos: ChunkKey,
     payload: Option<ResolvedChunkPayload>,
+    scale_exp: i8,
 ) -> bool {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
         return false;
@@ -1419,12 +1371,12 @@ fn set_chunk_recursive_in_branch(
         .iter()
         .position(|child| child.bounds.contains_chunk(key_pos));
     let changed = if let Some(target_idx) = target_idx {
-        set_chunk_recursive(&mut children[target_idx], key_pos, payload)
+        set_chunk_recursive(&mut children[target_idx], key_pos, payload, scale_exp)
     } else if let Some(payload) = payload {
         let chunk_bounds = Aabb4i::new(key_pos, key_pos);
         children.push(RegionTreeCore {
             bounds: chunk_bounds,
-            kind: kind_from_resolved_value(chunk_bounds, Some(payload)),
+            kind: kind_from_resolved_value_at_scale(chunk_bounds, Some(payload), scale_exp),
             generator_version_hash: node.generator_version_hash,
         });
         true
@@ -1440,8 +1392,9 @@ fn set_chunk_recursive_in_branch(
 
 fn carve_leaf_for_chunk_edit(
     node: &mut RegionTreeCore,
-    key_pos: [i32; 4],
+    key_pos: ChunkKey,
     payload: Option<ResolvedChunkPayload>,
+    scale_exp: i8,
 ) -> bool {
     let chunk_bounds = Aabb4i::new(key_pos, key_pos);
     let source_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
@@ -1476,7 +1429,8 @@ fn carve_leaf_for_chunk_edit(
                 node.kind = source_kind;
                 return false;
             }
-            for piece_bounds in subtract_aabb(node.bounds, chunk_bounds) {
+            let ca_step = step_for_scale(chunk_array.scale_exp);
+            for piece_bounds in subtract_aabb(node.bounds, chunk_bounds, ca_step) {
                 let Some(chunk_array_piece) = slice_chunk_array_to_bounds_with_dense_indices(
                     chunk_array,
                     &source_indices,
@@ -1500,7 +1454,8 @@ fn carve_leaf_for_chunk_edit(
                 node.kind = source_kind;
                 return false;
             }
-            for piece_bounds in subtract_aabb(node.bounds, chunk_bounds) {
+            let ca_step = step_for_scale(chunk_array.scale_exp);
+            for piece_bounds in subtract_aabb(node.bounds, chunk_bounds, ca_step) {
                 let projected = project_node_to_bounds(
                     &source_kind,
                     node.bounds,
@@ -1513,7 +1468,8 @@ fn carve_leaf_for_chunk_edit(
             }
         }
     } else {
-        for piece_bounds in subtract_aabb(node.bounds, chunk_bounds) {
+        let step = step_for_kind(Some(&source_kind));
+        for piece_bounds in subtract_aabb(node.bounds, chunk_bounds, step) {
             let projected = project_node_to_bounds(
                 &source_kind,
                 node.bounds,
@@ -1529,7 +1485,7 @@ fn carve_leaf_for_chunk_edit(
     if let Some(payload) = payload {
         children.push(RegionTreeCore {
             bounds: chunk_bounds,
-            kind: kind_from_resolved_value(chunk_bounds, Some(payload)),
+            kind: kind_from_resolved_value_at_scale(chunk_bounds, Some(payload), scale_exp),
             generator_version_hash: node.generator_version_hash,
         });
     }
@@ -1544,14 +1500,15 @@ fn ensure_binary_children(node: &mut RegionTreeCore) {
         return;
     }
 
+    let step = step_for_kind(Some(&node.kind));
     if let RegionNodeKind::Branch(children) = &mut node.kind {
-        if branch_matches_split(node.bounds, children) {
+        if branch_matches_split(node.bounds, children, step) {
             sort_children_canonical(children);
             return;
         }
     }
 
-    let Some((left_bounds, right_bounds)) = split_bounds_longest_axis(node.bounds) else {
+    let Some((left_bounds, right_bounds)) = split_bounds_longest_axis(node.bounds, step) else {
         return;
     };
 
@@ -1576,8 +1533,8 @@ struct AdjacentMergeGroupKey {
     axis: u8,
     kind: AdjacentMergeKind,
     generator_version_hash: u64,
-    other_mins: [i32; 3],
-    other_maxs: [i32; 3],
+    other_mins: [ChunkCoord; 3],
+    other_maxs: [ChunkCoord; 3],
 }
 
 fn adjacent_merge_kind(kind: &RegionNodeKind) -> Option<AdjacentMergeKind> {
@@ -1595,8 +1552,8 @@ fn build_adjacent_merge_group_key(
     axis: usize,
 ) -> Option<AdjacentMergeGroupKey> {
     let kind = adjacent_merge_kind(&node.kind)?;
-    let mut other_mins = [0i32; 3];
-    let mut other_maxs = [0i32; 3];
+    let mut other_mins = [ChunkCoord::ZERO; 3];
+    let mut other_maxs = [ChunkCoord::ZERO; 3];
     let mut write_idx = 0usize;
     for dim in 0..4 {
         if dim == axis {
@@ -1644,8 +1601,10 @@ fn merge_adjacent_children_once(children: &mut Vec<RegionTreeCore>) -> bool {
             let mut current = iter
                 .next()
                 .expect("group with len >= 2 must produce first child");
+            // Uniform/ProceduralRef are always scale 0
+            let step = step_for_scale(0);
             for node in iter {
-                if node.bounds.min[axis] == current.bounds.max[axis].saturating_add(1) {
+                if node.bounds.min[axis] == current.bounds.max[axis] + step {
                     current.bounds.max[axis] = node.bounds.max[axis];
                     merged_any = true;
                 } else {
@@ -1722,7 +1681,7 @@ fn consolidate_chunk_array_children(
     for ca_child in &ca_children {
         combined_bounds = merge_aabb(combined_bounds, ca_child.bounds);
         if let RegionNodeKind::ChunkArray(ca) = &ca_child.kind {
-            if let Some(extents) = ca.bounds.chunk_extents() {
+            if let Some(extents) = ca.bounds.chunk_extents_at_scale(ca.scale_exp) {
                 total_chunks += extents.iter().copied().product::<usize>();
             }
         }
@@ -1742,7 +1701,7 @@ fn consolidate_chunk_array_children(
         return false;
     }
 
-    let Some(combined_extents) = combined_bounds.chunk_extents() else {
+    let Some(combined_extents) = combined_bounds.chunk_extents_at_scale(common_scale_exp) else {
         *children = ca_children;
         children.extend(other_children);
         return false;
@@ -1804,20 +1763,25 @@ fn consolidate_chunk_array_children(
             children.extend(other_children);
             return false;
         };
-        let Some(child_extents) = ca.bounds.chunk_extents() else {
+        let Some(child_extents) = ca.bounds.chunk_extents_at_scale(common_scale_exp) else {
             continue;
         };
         let block_remap = &child_block_remaps[child_idx];
+        let (child_lmin, child_lmax) = ca.bounds.to_lattice_bounds(common_scale_exp);
+        let (comb_lmin, _) = combined_bounds.to_lattice_bounds(common_scale_exp);
 
         // Iterate all positions in this child's bounds.
-        for w in 0..child_extents[3] {
-            for z in 0..child_extents[2] {
-                for y in 0..child_extents[1] {
-                    for x in 0..child_extents[0] {
-                        let child_linear = linear_cell_index(
-                            [x, y, z, w],
-                            child_extents,
-                        );
+        for lw in child_lmin[3]..=child_lmax[3] {
+            for lz in child_lmin[2]..=child_lmax[2] {
+                for ly in child_lmin[1]..=child_lmax[1] {
+                    for lx in child_lmin[0]..=child_lmax[0] {
+                        let child_local = [
+                            (lx - child_lmin[0]) as usize,
+                            (ly - child_lmin[1]) as usize,
+                            (lz - child_lmin[2]) as usize,
+                            (lw - child_lmin[3]) as usize,
+                        ];
+                        let child_linear = linear_cell_index(child_local, child_extents);
                         let palette_idx = child_indices[child_linear] as usize;
 
                         let payload = ca.chunk_palette[palette_idx].clone();
@@ -1829,18 +1793,12 @@ fn consolidate_chunk_array_children(
                         // Remap block palette indices within this payload.
                         let remapped_payload = remap_chunk_payload_block_indices(&payload, block_remap);
 
-                        // Map child-local coords to combined coords.
-                        let world_pos = [
-                            ca.bounds.min[0] + x as i32,
-                            ca.bounds.min[1] + y as i32,
-                            ca.bounds.min[2] + z as i32,
-                            ca.bounds.min[3] + w as i32,
-                        ];
+                        // Map child lattice coords to combined lattice coords.
                         let combined_local = [
-                            (world_pos[0] - combined_bounds.min[0]) as usize,
-                            (world_pos[1] - combined_bounds.min[1]) as usize,
-                            (world_pos[2] - combined_bounds.min[2]) as usize,
-                            (world_pos[3] - combined_bounds.min[3]) as usize,
+                            (lx - comb_lmin[0]) as usize,
+                            (ly - comb_lmin[1]) as usize,
+                            (lz - comb_lmin[2]) as usize,
+                            (lw - comb_lmin[3]) as usize,
                         ];
                         let combined_linear = linear_cell_index(
                             combined_local,
@@ -1934,7 +1892,12 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
     if children.len() != 2 {
         return;
     }
-    if !branch_matches_split(node.bounds, children) {
+    let merge_step = children
+        .iter()
+        .map(|c| step_for_kind(Some(&c.kind)))
+        .min()
+        .unwrap_or(step_for_scale(0));
+    if !branch_matches_split(node.bounds, children, merge_step) {
         // Only collapse two-child branches when they are the canonical binary partition
         // of this node's bounds. Two arbitrary non-overlapping children with the same kind
         // must not fill gaps in the parent region.
@@ -2019,7 +1982,7 @@ fn project_node_to_bounds(
 
 fn query_chunk_payload_in_node(
     node: &RegionTreeCore,
-    key_pos: [i32; 4],
+    key_pos: ChunkKey,
 ) -> Option<ResolvedChunkPayload> {
     query_chunk_payload_in_kind(&node.kind, node.bounds, key_pos)
 }
@@ -2027,7 +1990,7 @@ fn query_chunk_payload_in_node(
 fn query_chunk_payload_in_kind(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
-    key_pos: [i32; 4],
+    key_pos: ChunkKey,
 ) -> Option<ResolvedChunkPayload> {
     if !bounds.contains_chunk(key_pos) {
         return None;
@@ -2052,61 +2015,13 @@ fn query_chunk_payload_in_kind(
 
 fn chunk_array_resolved_payload_at(
     chunk_array: &ChunkArrayData,
-    key_pos: [i32; 4],
+    key_pos: ChunkKey,
 ) -> Option<ResolvedChunkPayload> {
     let payload = chunk_array_payload_at(chunk_array, key_pos)?;
     Some(ResolvedChunkPayload {
         payload,
         block_palette: chunk_array.block_palette.clone(),
     })
-}
-
-fn query_chunk_payload_in_node_scaled(
-    node: &RegionTreeCore,
-    key: ScaledChunkKey,
-) -> Option<ResolvedChunkPayload> {
-    query_chunk_payload_in_kind_scaled(&node.kind, node.bounds, key)
-}
-
-fn query_chunk_payload_in_kind_scaled(
-    kind: &RegionNodeKind,
-    bounds: Aabb4i,
-    key: ScaledChunkKey,
-) -> Option<ResolvedChunkPayload> {
-    match kind {
-        RegionNodeKind::Empty => None,
-        RegionNodeKind::Uniform(block) => {
-            // Uniform nodes are conceptually at scale_exp=0. Only match if the
-            // query is also at scale_exp=0 and the position is within bounds.
-            if key.scale_exp != 0 {
-                return None;
-            }
-            if !bounds.contains_chunk(key.pos) {
-                return None;
-            }
-            Some(ResolvedChunkPayload::uniform(block.clone()))
-        }
-        RegionNodeKind::ProceduralRef(_) => None,
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            if chunk_array.scale_exp != key.scale_exp {
-                return None;
-            }
-            if !chunk_array.bounds.contains_chunk(key.pos) {
-                return None;
-            }
-            chunk_array_resolved_payload_at(chunk_array, key.pos)
-        }
-        RegionNodeKind::Branch(children) => {
-            for child in children {
-                if let Some(result) =
-                    query_chunk_payload_in_kind_scaled(&child.kind, child.bounds, key)
-                {
-                    return Some(result);
-                }
-            }
-            None
-        }
-    }
 }
 
 fn kind_has_non_empty_chunk_intersection(
@@ -2171,11 +2086,12 @@ fn collect_chunks_from_kind(
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
         RegionNodeKind::Uniform(block) => {
             let resolved = ResolvedChunkPayload::uniform(block.clone());
-            for w in bounds.min[3]..=bounds.max[3] {
-                for z in bounds.min[2]..=bounds.max[2] {
-                    for y in bounds.min[1]..=bounds.max[1] {
-                        for x in bounds.min[0]..=bounds.max[0] {
-                            out.push(([x, y, z, w], resolved.clone()));
+            let (lmin, lmax) = bounds.to_lattice_bounds(0);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            out.push((chunk_key_from_lattice([lx, ly, lz, lw], 0), resolved.clone()));
                         }
                     }
                 }
@@ -2185,18 +2101,20 @@ fn collect_chunks_from_kind(
             let Ok(indices) = chunk_array.decode_dense_indices() else {
                 return;
             };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
+            let se = chunk_array.scale_exp;
+            let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(se) else {
                 return;
             };
-            for w in chunk_array.bounds.min[3]..=chunk_array.bounds.max[3] {
-                for z in chunk_array.bounds.min[2]..=chunk_array.bounds.max[2] {
-                    for y in chunk_array.bounds.min[1]..=chunk_array.bounds.max[1] {
-                        for x in chunk_array.bounds.min[0]..=chunk_array.bounds.max[0] {
+            let (lmin, lmax) = chunk_array.bounds.to_lattice_bounds(se);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
                             let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
+                                (lx - lmin[0]) as usize,
+                                (ly - lmin[1]) as usize,
+                                (lz - lmin[2]) as usize,
+                                (lw - lmin[3]) as usize,
                             ];
                             let linear = linear_cell_index(local, extents);
                             let Some(palette_idx) = indices.get(linear) else {
@@ -2208,7 +2126,7 @@ fn collect_chunks_from_kind(
                                 continue;
                             };
                             out.push((
-                                [x, y, z, w],
+                                chunk_key_from_lattice([lx, ly, lz, lw], se),
                                 ResolvedChunkPayload {
                                     payload: payload.clone(),
                                     block_palette: chunk_array.block_palette.clone(),
@@ -2241,11 +2159,12 @@ fn collect_chunks_from_kind_in_bounds(
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
         RegionNodeKind::Uniform(block) => {
             let resolved = ResolvedChunkPayload::uniform(block.clone());
-            for w in intersection.min[3]..=intersection.max[3] {
-                for z in intersection.min[2]..=intersection.max[2] {
-                    for y in intersection.min[1]..=intersection.max[1] {
-                        for x in intersection.min[0]..=intersection.max[0] {
-                            out.push(([x, y, z, w], resolved.clone()));
+            let (lmin, lmax) = intersection.to_lattice_bounds(0);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            out.push((chunk_key_from_lattice([lx, ly, lz, lw], 0), resolved.clone()));
                         }
                     }
                 }
@@ -2259,18 +2178,21 @@ fn collect_chunks_from_kind_in_bounds(
             let Ok(indices) = chunk_array.decode_dense_indices() else {
                 return;
             };
-            let Some(extents) = chunk_array.bounds.chunk_extents() else {
+            let se = chunk_array.scale_exp;
+            let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(se) else {
                 return;
             };
-            for w in chunk_array_intersection.min[3]..=chunk_array_intersection.max[3] {
-                for z in chunk_array_intersection.min[2]..=chunk_array_intersection.max[2] {
-                    for y in chunk_array_intersection.min[1]..=chunk_array_intersection.max[1] {
-                        for x in chunk_array_intersection.min[0]..=chunk_array_intersection.max[0] {
+            let (ca_lmin, _) = chunk_array.bounds.to_lattice_bounds(se);
+            let (int_lmin, int_lmax) = chunk_array_intersection.to_lattice_bounds(se);
+            for lw in int_lmin[3]..=int_lmax[3] {
+                for lz in int_lmin[2]..=int_lmax[2] {
+                    for ly in int_lmin[1]..=int_lmax[1] {
+                        for lx in int_lmin[0]..=int_lmax[0] {
                             let local = [
-                                (x - chunk_array.bounds.min[0]) as usize,
-                                (y - chunk_array.bounds.min[1]) as usize,
-                                (z - chunk_array.bounds.min[2]) as usize,
-                                (w - chunk_array.bounds.min[3]) as usize,
+                                (lx - ca_lmin[0]) as usize,
+                                (ly - ca_lmin[1]) as usize,
+                                (lz - ca_lmin[2]) as usize,
+                                (lw - ca_lmin[3]) as usize,
                             ];
                             let linear = linear_cell_index(local, extents);
                             let Some(palette_idx) = indices.get(linear) else {
@@ -2282,7 +2204,7 @@ fn collect_chunks_from_kind_in_bounds(
                                 continue;
                             };
                             out.push((
-                                [x, y, z, w],
+                                chunk_key_from_lattice([lx, ly, lz, lw], se),
                                 ResolvedChunkPayload {
                                     payload: payload.clone(),
                                     block_palette: chunk_array.block_palette.clone(),
@@ -2313,12 +2235,26 @@ fn collect_chunk_keys_from_kind_in_bounds(
 
     match kind {
         RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(_) | RegionNodeKind::ChunkArray(_) => {
-            for w in intersection.min[3]..=intersection.max[3] {
-                for z in intersection.min[2]..=intersection.max[2] {
-                    for y in intersection.min[1]..=intersection.max[1] {
-                        for x in intersection.min[0]..=intersection.max[0] {
-                            out.push([x, y, z, w]);
+        RegionNodeKind::Uniform(_) => {
+            let (lmin, lmax) = intersection.to_lattice_bounds(0);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            out.push(chunk_key_from_lattice([lx, ly, lz, lw], 0));
+                        }
+                    }
+                }
+            }
+        }
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            let se = chunk_array.scale_exp;
+            let (lmin, lmax) = intersection.to_lattice_bounds(se);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            out.push(chunk_key_from_lattice([lx, ly, lz, lw], se));
                         }
                     }
                 }
@@ -2345,23 +2281,25 @@ fn chunk_array_has_non_empty_intersection(
         return false;
     };
     let Ok(indices) = chunk_array.decode_dense_indices() else {
-        // Conservatively treat malformed payload as potentially non-empty.
         return true;
     };
-    let Some(extents) = chunk_array.bounds.chunk_extents() else {
+    let se = chunk_array.scale_exp;
+    let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(se) else {
         return true;
     };
     let palette_non_empty = chunk_array_palette_non_empty_mask(chunk_array);
+    let (ca_lmin, _) = chunk_array.bounds.to_lattice_bounds(se);
+    let (int_lmin, int_lmax) = intersection.to_lattice_bounds(se);
 
-    for w in intersection.min[3]..=intersection.max[3] {
-        for z in intersection.min[2]..=intersection.max[2] {
-            for y in intersection.min[1]..=intersection.max[1] {
-                for x in intersection.min[0]..=intersection.max[0] {
+    for lw in int_lmin[3]..=int_lmax[3] {
+        for lz in int_lmin[2]..=int_lmax[2] {
+            for ly in int_lmin[1]..=int_lmax[1] {
+                for lx in int_lmin[0]..=int_lmax[0] {
                     let local = [
-                        (x - chunk_array.bounds.min[0]) as usize,
-                        (y - chunk_array.bounds.min[1]) as usize,
-                        (z - chunk_array.bounds.min[2]) as usize,
-                        (w - chunk_array.bounds.min[3]) as usize,
+                        (lx - ca_lmin[0]) as usize,
+                        (ly - ca_lmin[1]) as usize,
+                        (lz - ca_lmin[2]) as usize,
+                        (lw - ca_lmin[3]) as usize,
                     ];
                     let linear = linear_cell_index(local, extents);
                     let Some(palette_idx) = indices.get(linear) else {
@@ -2491,7 +2429,7 @@ fn chunk_array_palette_non_empty_mask(chunk_array: &ChunkArrayData) -> Vec<bool>
         .collect()
 }
 
-fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: [i32; 4]) -> Option<ChunkPayload> {
+fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: ChunkKey) -> Option<ChunkPayload> {
     if !chunk_array.bounds.contains_chunk(key_pos) {
         return None;
     }
@@ -2502,17 +2440,25 @@ fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: [i32; 4]) -> Op
 fn chunk_array_payload_at_with_dense_indices(
     chunk_array: &ChunkArrayData,
     dense_indices: &[u16],
-    key_pos: [i32; 4],
+    key_pos: ChunkKey,
 ) -> Option<ChunkPayload> {
     if !chunk_array.bounds.contains_chunk(key_pos) {
         return None;
     }
-    let extents = chunk_array.bounds.chunk_extents()?;
+    let se = chunk_array.scale_exp;
+    let extents = chunk_array.bounds.chunk_extents_at_scale(se)?;
+    let (ca_lmin, _) = chunk_array.bounds.to_lattice_bounds(se);
+    let lpos = [
+        lattice_from_fixed(key_pos[0], se),
+        lattice_from_fixed(key_pos[1], se),
+        lattice_from_fixed(key_pos[2], se),
+        lattice_from_fixed(key_pos[3], se),
+    ];
     let local = [
-        (key_pos[0] - chunk_array.bounds.min[0]) as usize,
-        (key_pos[1] - chunk_array.bounds.min[1]) as usize,
-        (key_pos[2] - chunk_array.bounds.min[2]) as usize,
-        (key_pos[3] - chunk_array.bounds.min[3]) as usize,
+        (lpos[0] - ca_lmin[0]) as usize,
+        (lpos[1] - ca_lmin[1]) as usize,
+        (lpos[2] - ca_lmin[2]) as usize,
+        (lpos[3] - ca_lmin[3]) as usize,
     ];
     let linear = linear_cell_index(local, extents);
     let palette_idx = *dense_indices.get(linear)? as usize;
@@ -2581,7 +2527,7 @@ fn repeated_payload_kind_resolved_at_scale(
     resolved: ResolvedChunkPayload,
     scale_exp: i8,
 ) -> RegionNodeKind {
-    let Some(cell_count) = bounds.chunk_cell_count() else {
+    let Some(cell_count) = bounds.chunk_cell_count_at_scale(scale_exp) else {
         return RegionNodeKind::Empty;
     };
     let indices = vec![0u16; cell_count];
@@ -2678,28 +2624,31 @@ fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
     coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
-fn branch_matches_split(bounds: Aabb4i, children: &[RegionTreeCore]) -> bool {
+fn branch_matches_split(bounds: Aabb4i, children: &[RegionTreeCore], step: ChunkCoord) -> bool {
     if children.len() != 2 {
         return false;
     }
-    let Some((left, right)) = split_bounds_longest_axis(bounds) else {
+    let Some((left, right)) = split_bounds_longest_axis(bounds, step) else {
         return false;
     };
     (children[0].bounds == left && children[1].bounds == right)
         || (children[0].bounds == right && children[1].bounds == left)
 }
 
-fn split_bounds_longest_axis(bounds: Aabb4i) -> Option<(Aabb4i, Aabb4i)> {
+fn split_bounds_longest_axis(bounds: Aabb4i, step: ChunkCoord) -> Option<(Aabb4i, Aabb4i)> {
     if !bounds.is_valid() {
         return None;
     }
 
-    let spans = [
-        bounds.max[0] - bounds.min[0] + 1,
-        bounds.max[1] - bounds.min[1] + 1,
-        bounds.max[2] - bounds.min[2] + 1,
-        bounds.max[3] - bounds.min[3] + 1,
-    ];
+    // Convert to step-relative lattice integers for arithmetic
+    let step_bits = step.to_bits();
+    let to_lattice = |coord: ChunkCoord| -> i64 { coord.to_bits() / step_bits };
+    let from_lattice = |lattice: i64| -> ChunkCoord { ChunkCoord::from_bits(lattice * step_bits) };
+
+    let mut spans = [0i64; 4];
+    for i in 0..4 {
+        spans[i] = to_lattice(bounds.max[i]) - to_lattice(bounds.min[i]) + 1;
+    }
     let mut axis = 0usize;
     for idx in 1..4 {
         if spans[idx] > spans[axis] {
@@ -2711,12 +2660,14 @@ fn split_bounds_longest_axis(bounds: Aabb4i) -> Option<(Aabb4i, Aabb4i)> {
     }
 
     let left_len = spans[axis] / 2;
-    let left_max_axis = bounds.min[axis] + left_len - 1;
+    let left_max_axis = from_lattice(to_lattice(bounds.min[axis]) + left_len - 1);
+    let right_min_axis = from_lattice(to_lattice(bounds.min[axis]) + left_len);
+
     let mut left_max = bounds.max;
     left_max[axis] = left_max_axis;
 
     let mut right_min = bounds.min;
-    right_min[axis] = left_max_axis + 1;
+    right_min[axis] = right_min_axis;
 
     Some((
         Aabb4i::new(bounds.min, left_max),
@@ -2739,18 +2690,12 @@ fn sort_children_canonical(children: &mut [RegionTreeCore]) {
     });
 }
 
-fn expand_root_once(root: Box<RegionTreeCore>, key_pos: [i32; 4]) -> Box<RegionTreeCore> {
+fn expand_root_once(root: Box<RegionTreeCore>, key_pos: ChunkKey, step: ChunkCoord) -> Box<RegionTreeCore> {
     if root.bounds.contains_chunk(key_pos) {
         return root;
     }
 
     let mut old_root = *root;
-    // Root expansion introduces an empty sibling placeholder for the out-of-bounds side.
-    // Normalize the carried subtree first so placeholder empties from prior expansions
-    // do not accumulate off-path.
-    // Save bounds before normalize: normalize may collapse Branch(1) chains with
-    // bounds tightening, but we need the pre-normalize extent for geometric expansion
-    // so the while-loop in set_chunk converges (each expansion at least doubles span).
     let old_bounds = old_root.bounds;
     normalize_chunk_node(&mut old_root);
     let axis = (0..4)
@@ -2758,25 +2703,29 @@ fn expand_root_once(root: Box<RegionTreeCore>, key_pos: [i32; 4]) -> Box<RegionT
             key_pos[*axis] < old_bounds.min[*axis] || key_pos[*axis] > old_bounds.max[*axis]
         })
         .unwrap_or(0);
-    let span = (old_bounds.max[axis] - old_bounds.min[axis] + 1).max(1);
+    let span = (old_bounds.max[axis] - old_bounds.min[axis] + step).max(step);
 
     let mut new_bounds = old_bounds;
     let mut sibling_bounds = old_bounds;
     if key_pos[axis] < old_bounds.min[axis] {
-        let mut expanded = old_bounds.min[axis].saturating_sub(span);
-        if expanded >= old_bounds.min[axis] {
-            expanded = key_pos[axis];
-        }
+        let expanded = old_bounds.min[axis].saturating_sub(span);
+        let expanded = if expanded >= old_bounds.min[axis] {
+            key_pos[axis]
+        } else {
+            expanded
+        };
         new_bounds.min[axis] = expanded;
         sibling_bounds.min[axis] = expanded;
-        sibling_bounds.max[axis] = old_bounds.min[axis] - 1;
+        sibling_bounds.max[axis] = old_bounds.min[axis] - step;
     } else {
-        let mut expanded = old_bounds.max[axis].saturating_add(span);
-        if expanded <= old_bounds.max[axis] {
-            expanded = key_pos[axis];
-        }
+        let expanded = old_bounds.max[axis].saturating_add(span);
+        let expanded = if expanded <= old_bounds.max[axis] {
+            key_pos[axis]
+        } else {
+            expanded
+        };
         new_bounds.max[axis] = expanded;
-        sibling_bounds.min[axis] = old_bounds.max[axis] + 1;
+        sibling_bounds.min[axis] = old_bounds.max[axis] + step;
         sibling_bounds.max[axis] = expanded;
     }
 

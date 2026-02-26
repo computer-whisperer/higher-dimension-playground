@@ -1,45 +1,19 @@
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
-use crate::shared::spatial::Aabb4i;
-use crate::shared::voxel::{BlockData, ChunkPos};
+use crate::shared::spatial::{Aabb4i, ChunkCoord};
+use crate::shared::voxel::BlockData;
 use serde::{Deserialize, Serialize};
 
-pub type ChunkKey = [i32; 4];
+pub type ChunkKey = [ChunkCoord; 4];
 
+/// Convenience constructor for a ChunkKey from integer coordinates (scale 0).
 #[inline]
-pub fn chunk_key_from_chunk_pos(chunk_pos: ChunkPos) -> ChunkKey {
-    [chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]
-}
-
-#[inline]
-pub fn chunk_pos_from_chunk_key(key: ChunkKey) -> ChunkPos {
-    ChunkPos::new(key[0], key[1], key[2], key[3])
-}
-
-/// A chunk key paired with a scale exponent, identifying a chunk at a specific
-/// position in a specific scale lattice.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ScaledChunkKey {
-    pub pos: ChunkKey,
-    pub scale_exp: i8,
-}
-
-impl ScaledChunkKey {
-    #[inline]
-    pub fn new(pos: ChunkKey, scale_exp: i8) -> Self {
-        Self { pos, scale_exp }
-    }
-
-    /// Shorthand for `scale_exp = 0` (the standard unit-scale lattice).
-    #[inline]
-    pub fn unit(pos: ChunkKey) -> Self {
-        Self { pos, scale_exp: 0 }
-    }
-}
-
-/// Wrap a `ChunkKey` as a `ScaledChunkKey` with `scale_exp = 0`.
-#[inline]
-pub fn chunk_key_to_scaled(key: ChunkKey) -> ScaledChunkKey {
-    ScaledChunkKey::unit(key)
+pub fn chunk_key_i32(x: i32, y: i32, z: i32, w: i32) -> ChunkKey {
+    [
+        ChunkCoord::from_num(x),
+        ChunkCoord::from_num(y),
+        ChunkCoord::from_num(z),
+        ChunkCoord::from_num(w),
+    ]
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

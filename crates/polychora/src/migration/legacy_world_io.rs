@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
 use crate::migration::legacy_voxel::{Chunk, LegacyVoxel, RegionChunkWorld};
-use crate::shared::voxel::{BaseWorldKind, ChunkPos, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, CHUNK_VOLUME};
 
 const MAGIC: &[u8; 4] = b"V4DW";
 const VERSION_V1: u32 = 1;
@@ -27,7 +27,7 @@ pub fn save_world<W: Write>(world: &RegionChunkWorld, writer: &mut W) -> io::Res
         .iter()
         .map(|(&pos, chunk)| (pos, chunk))
         .collect();
-    overrides.sort_unstable_by_key(|(pos, _)| (pos.w, pos.z, pos.y, pos.x));
+    overrides.sort_unstable_by_key(|(pos, _)| (pos[3], pos[2], pos[1], pos[0]));
 
     let mut payloads: Vec<&Chunk> = Vec::new();
     let mut payload_hash_buckets: HashMap<u64, Vec<u32>> = HashMap::new();
@@ -46,10 +46,10 @@ pub fn save_world<W: Write>(world: &RegionChunkWorld, writer: &mut W) -> io::Res
     }
 
     for (pos, payload_index) in entries {
-        writer.write_all(&pos.x.to_le_bytes())?;
-        writer.write_all(&pos.y.to_le_bytes())?;
-        writer.write_all(&pos.z.to_le_bytes())?;
-        writer.write_all(&pos.w.to_le_bytes())?;
+        writer.write_all(&pos[0].to_le_bytes())?;
+        writer.write_all(&pos[1].to_le_bytes())?;
+        writer.write_all(&pos[2].to_le_bytes())?;
+        writer.write_all(&pos[3].to_le_bytes())?;
         writer.write_all(&payload_index.to_le_bytes())?;
     }
 
@@ -212,7 +212,7 @@ fn load_world_v1<R: Read>(reader: &mut R) -> io::Result<RegionChunkWorld> {
         let w = i32::from_le_bytes(buf4);
 
         let chunk = read_chunk(reader)?;
-        world.insert_chunk(ChunkPos::new(x, y, z, w), chunk);
+        world.insert_chunk([x, y, z, w], chunk);
     }
 
     Ok(world)
@@ -253,7 +253,7 @@ fn load_world_v2<R: Read>(reader: &mut R) -> io::Result<RegionChunkWorld> {
             ));
         };
 
-        world.insert_chunk(ChunkPos::new(x, y, z, w), payload.clone());
+        world.insert_chunk([x, y, z, w], payload.clone());
     }
 
     Ok(world)
@@ -347,10 +347,10 @@ mod tests {
         writer.write_all(&(non_empty.len() as u32).to_le_bytes())?;
 
         for (&pos, chunk) in non_empty {
-            writer.write_all(&pos.x.to_le_bytes())?;
-            writer.write_all(&pos.y.to_le_bytes())?;
-            writer.write_all(&pos.z.to_le_bytes())?;
-            writer.write_all(&pos.w.to_le_bytes())?;
+            writer.write_all(&pos[0].to_le_bytes())?;
+            writer.write_all(&pos[1].to_le_bytes())?;
+            writer.write_all(&pos[2].to_le_bytes())?;
+            writer.write_all(&pos[3].to_le_bytes())?;
             write_chunk(chunk, writer)?;
         }
 
@@ -371,14 +371,14 @@ mod tests {
     fn round_trip_uniform_chunk() {
         let mut world = RegionChunkWorld::new();
         let chunk = Chunk::new_filled(LegacyVoxel(3));
-        world.insert_chunk(ChunkPos::new(1, -2, 3, 0), chunk);
+        world.insert_chunk([1, -2, 3, 0], chunk);
 
         let mut buf = Vec::new();
         save_world(&world, &mut buf).unwrap();
         let loaded = load_world(&mut &buf[..]).unwrap();
 
         assert_eq!(loaded.chunks.len(), 1);
-        let c = loaded.chunks.get(&ChunkPos::new(1, -2, 3, 0)).unwrap();
+        let c = loaded.chunks.get(&[1, -2, 3, 0]).unwrap();
         assert!(c.voxels.iter().all(|v| v.0 == 3));
     }
 
@@ -389,13 +389,13 @@ mod tests {
         chunk.set(0, 0, 0, 0, LegacyVoxel(1));
         chunk.set(7, 7, 7, 7, LegacyVoxel(5));
         chunk.set(3, 2, 1, 4, LegacyVoxel(10));
-        world.insert_chunk(ChunkPos::new(0, 0, 0, 0), chunk);
+        world.insert_chunk([0, 0, 0, 0], chunk);
 
         let mut buf = Vec::new();
         save_world(&world, &mut buf).unwrap();
         let loaded = load_world(&mut &buf[..]).unwrap();
 
-        let c = loaded.chunks.get(&ChunkPos::new(0, 0, 0, 0)).unwrap();
+        let c = loaded.chunks.get(&[0, 0, 0, 0]).unwrap();
         assert_eq!(c.get(0, 0, 0, 0).0, 1);
         assert_eq!(c.get(7, 7, 7, 7).0, 5);
         assert_eq!(c.get(3, 2, 1, 4).0, 10);
@@ -434,7 +434,7 @@ mod tests {
         let mut world = RegionChunkWorld::new();
         let mut chunk = Chunk::new();
         chunk.set(1, 2, 3, 4, LegacyVoxel(9));
-        world.insert_chunk(ChunkPos::new(-1, 0, 2, 0), chunk);
+        world.insert_chunk([-1, 0, 2, 0], chunk);
 
         let mut buf = Vec::new();
         save_world_v1_legacy(&world, &mut buf).unwrap();

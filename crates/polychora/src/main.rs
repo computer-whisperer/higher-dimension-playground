@@ -1450,7 +1450,7 @@ struct App {
     material_icons_texture_id: Option<egui::TextureId>,
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
-    multiplayer_last_world_request_center_chunk: Option<[i32; 4]>,
+    multiplayer_last_world_request_center_chunk: Option<polychora::shared::region_tree::ChunkKey>,
     multiplayer_last_world_request_bounds: Option<Aabb4i>,
     multiplayer_last_world_request_radius_chunks: Option<i32>,
     multiplayer_world_interest_bootstrap_pending: bool,

@@ -1,10 +1,17 @@
 use super::*;
 use polychora::content_registry::MaterialResolver;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
+use polychora::shared::spatial::ChunkCoord;
 use polychora::shared::voxel::BlockData;
 use polychora::shared::render_tree::{
     RenderBvh, RenderBvhChunkMutationDelta, RenderBvhNodeKind, RenderLeaf, RenderLeafKind,
 };
+
+/// Convert a `[ChunkCoord; 4]` to `[i32; 4]` for GPU boundary types.
+#[inline]
+fn chunk_coord_to_i32(c: [ChunkCoord; 4]) -> [i32; 4] {
+    [c[0].to_num::<i32>(), c[1].to_num::<i32>(), c[2].to_num::<i32>(), c[3].to_num::<i32>()]
+}
 
 use std::time::Instant;
 
@@ -210,8 +217,8 @@ impl Scene {
             ),
         };
         GpuVoxelChunkBvhNode {
-            min_chunk_coord: node.bounds.min,
-            max_chunk_coord: node.bounds.max,
+            min_chunk_coord: chunk_coord_to_i32(node.bounds.min),
+            max_chunk_coord: chunk_coord_to_i32(node.bounds.max),
             left_child,
             right_child,
             leaf_index,
@@ -501,15 +508,15 @@ impl Scene {
                 for y in 0..leaf_extents[1] {
                     for x in 0..leaf_extents[0] {
                         let chunk_coord = [
-                            leaf.bounds.min[0] + x as i32,
-                            leaf.bounds.min[1] + y as i32,
-                            leaf.bounds.min[2] + z as i32,
-                            leaf.bounds.min[3] + w as i32,
+                            leaf.bounds.min[0] + ChunkCoord::from_num(x as i32),
+                            leaf.bounds.min[1] + ChunkCoord::from_num(y as i32),
+                            leaf.bounds.min[2] + ChunkCoord::from_num(z as i32),
+                            leaf.bounds.min[3] + ChunkCoord::from_num(w as i32),
                         ];
-                        let lx = (chunk_coord[0] - chunk_array.bounds.min[0]) as usize;
-                        let ly = (chunk_coord[1] - chunk_array.bounds.min[1]) as usize;
-                        let lz = (chunk_coord[2] - chunk_array.bounds.min[2]) as usize;
-                        let lw = (chunk_coord[3] - chunk_array.bounds.min[3]) as usize;
+                        let lx = (chunk_coord[0] - chunk_array.bounds.min[0]).to_num::<usize>();
+                        let ly = (chunk_coord[1] - chunk_array.bounds.min[1]).to_num::<usize>();
+                        let lz = (chunk_coord[2] - chunk_array.bounds.min[2]).to_num::<usize>();
+                        let lw = (chunk_coord[3] - chunk_array.bounds.min[3]).to_num::<usize>();
                         let linear =
                             lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
                         let palette_index = src_indices
@@ -562,7 +569,7 @@ impl Scene {
             {
                 continue;
             }
-            let bounds = Aabb4i::new(header.min_chunk_coord, header.max_chunk_coord);
+            let bounds = Aabb4i::from_i32(header.min_chunk_coord, header.max_chunk_coord);
             let Some(cell_count) = bounds.chunk_cell_count() else {
                 continue;
             };
@@ -764,8 +771,8 @@ impl Scene {
                     RenderLeafKind::Uniform(block) => {
                         let mat = resolver.resolve_block(block.namespace, block.block_type);
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
-                            min_chunk_coord: leaf.bounds.min,
-                            max_chunk_coord: leaf.bounds.max,
+                            min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
+                            max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
                             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
                             uniform_material: u32::from(mat),
                             chunk_entry_offset: 0,
@@ -790,8 +797,8 @@ impl Scene {
                         Self::mark_dirty_range(&mut dirty.leaf_chunk_entries, span.clone());
                         leaf_spans[leaf_index] = Some(span.clone());
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
-                            min_chunk_coord: leaf.bounds.min,
-                            max_chunk_coord: leaf.bounds.max,
+                            min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
+                            max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
                             leaf_kind:
                                 higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                             uniform_material: 0,
@@ -870,8 +877,8 @@ impl Scene {
                 RenderLeafKind::Uniform(block) => {
                     let mat = resolver.resolve_block(block.namespace, block.block_type);
                     leaf_headers.push(GpuVoxelLeafHeader {
-                        min_chunk_coord: leaf.bounds.min,
-                        max_chunk_coord: leaf.bounds.max,
+                        min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
+                        max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
                         leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
                         uniform_material: u32::from(mat),
                         chunk_entry_offset: 0,
@@ -890,8 +897,8 @@ impl Scene {
                     }
                     let Some(leaf_extents) = leaf.bounds.chunk_extents() else {
                         leaf_headers.push(GpuVoxelLeafHeader {
-                            min_chunk_coord: leaf.bounds.min,
-                            max_chunk_coord: leaf.bounds.max,
+                            min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
+                            max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
                             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                             uniform_material: 0,
                             chunk_entry_offset: 0,
@@ -913,10 +920,10 @@ impl Scene {
                             for y in 0..leaf_extents[1] {
                                 for x in 0..leaf_extents[0] {
                                     let chunk_coord = [
-                                        leaf.bounds.min[0] + x as i32,
-                                        leaf.bounds.min[1] + y as i32,
-                                        leaf.bounds.min[2] + z as i32,
-                                        leaf.bounds.min[3] + w as i32,
+                                        leaf.bounds.min[0] + ChunkCoord::from_num(x as i32),
+                                        leaf.bounds.min[1] + ChunkCoord::from_num(y as i32),
+                                        leaf.bounds.min[2] + ChunkCoord::from_num(z as i32),
+                                        leaf.bounds.min[3] + ChunkCoord::from_num(w as i32),
                                     ];
                                     let mut encoded = higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY;
                                     if let (Some(indices), Some(src_dims)) =
@@ -932,13 +939,13 @@ impl Scene {
                                             && chunk_coord[3] <= chunk_array.bounds.max[3]
                                         {
                                             let lx = (chunk_coord[0] - chunk_array.bounds.min[0])
-                                                as usize;
+                                                .to_num::<usize>();
                                             let ly = (chunk_coord[1] - chunk_array.bounds.min[1])
-                                                as usize;
+                                                .to_num::<usize>();
                                             let lz = (chunk_coord[2] - chunk_array.bounds.min[2])
-                                                as usize;
+                                                .to_num::<usize>();
                                             let lw = (chunk_coord[3] - chunk_array.bounds.min[3])
-                                                as usize;
+                                                .to_num::<usize>();
                                             let linear = lx
                                                 + src_dims[0]
                                                     * (ly + src_dims[1] * (lz + src_dims[2] * lw));
@@ -1072,8 +1079,8 @@ impl Scene {
                     }
 
                     leaf_headers.push(GpuVoxelLeafHeader {
-                        min_chunk_coord: leaf.bounds.min,
-                        max_chunk_coord: leaf.bounds.max,
+                        min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
+                        max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
                         leaf_kind:
                             higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                         uniform_material: 0,
@@ -1168,7 +1175,7 @@ impl Scene {
         let active_distance = max_trace_distance.max(VOXEL_NEAR_ACTIVE_DISTANCE);
         let chunk_radius = (active_distance / CHUNK_SIZE as f32).ceil() as i32 + 1;
         let cam_chunk = Self::camera_chunk_key(cam_pos);
-        let view_bounds = Aabb4i::new(
+        let view_bounds = Aabb4i::from_i32(
             [
                 cam_chunk[0] - chunk_radius,
                 cam_chunk[1] - chunk_radius,
@@ -1186,7 +1193,7 @@ impl Scene {
             .saturating_mul(SCENE_RESIDENCY_RADIUS_MULTIPLIER)
             .saturating_add(SCENE_RESIDENCY_EXTRA_CHUNKS)
             .max(chunk_radius + 1);
-        let desired_scene_bounds = Aabb4i::new(
+        let desired_scene_bounds = Aabb4i::from_i32(
             [
                 cam_chunk[0] - resident_radius,
                 cam_chunk[1] - resident_radius,
@@ -1382,7 +1389,7 @@ impl Scene {
                             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, key))
                             .unwrap_or_default();
                         let frame_payloads: Vec<ResolvedChunkPayload> = self
-                            .debug_voxel_frame_chunk_payloads(key)
+                            .debug_voxel_frame_chunk_payloads(chunk_coord_to_i32(key))
                             .into_iter()
                             .map(ResolvedChunkPayload::from_payload_with_static_palette)
                             .collect();

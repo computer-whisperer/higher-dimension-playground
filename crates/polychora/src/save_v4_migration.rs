@@ -10,7 +10,7 @@ use crate::shared::chunk_payload::{ChunkPayload as FieldChunkPayload, ResolvedCh
 use crate::migration::save_v3::{EntityClass, EntityKind};
 use crate::shared::entity_types;
 use crate::shared::protocol::{Entity, EntityPose};
-use crate::shared::region_tree::ScaledChunkKey;
+use crate::shared::region_tree::ChunkKey;
 use crate::shared::voxel::BlockData;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -88,7 +88,7 @@ fn resolve_legacy_payload(payload: FieldChunkPayload, palette: &[BlockData]) -> 
     }
 }
 
-fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ScaledChunkKey, ResolvedChunkPayload)> {
+fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
     fn payload_from_legacy_chunk(chunk: &LegacyChunk) -> FieldChunkPayload {
         if chunk.is_empty() {
             return FieldChunkPayload::Empty;
@@ -107,12 +107,12 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ScaledChunkKey, Resolv
     }
 
     let legacy_palette = build_legacy_block_palette();
-    let mut chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)> = world
+    let mut chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)> = world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
-                ScaledChunkKey::unit([chunk_pos.x, chunk_pos.y, chunk_pos.z, chunk_pos.w]),
+                crate::shared::spatial::chunk_key_from_lattice(chunk_pos, 0),
                 resolve_legacy_payload(payload_from_legacy_chunk(chunk), &legacy_palette),
             )
         })
@@ -122,12 +122,12 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ScaledChunkKey, Resolv
 }
 
 fn all_block_regions_from_chunk_payloads(
-    chunk_payloads: &[(ScaledChunkKey, ResolvedChunkPayload)],
+    chunk_payloads: &[(ChunkKey, ResolvedChunkPayload)],
     region_chunk_edge: i32,
 ) -> HashSet<[i32; 4]> {
     chunk_payloads
         .iter()
-        .map(|(key, _)| save_v4::region_from_chunk(key.pos, region_chunk_edge))
+        .map(|(key, _)| save_v4::region_from_chunk_key(*key, region_chunk_edge))
         .collect()
 }
 
@@ -233,7 +233,7 @@ pub fn migrate_legacy_world_to_v4(
 
 fn verify_v3_migration_equivalence(
     output_root: &Path,
-    expected_chunk_payloads: Vec<(ScaledChunkKey, ResolvedChunkPayload)>,
+    expected_chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
     expected_entities: &[PersistedEntityRecord],
     expected_players: &[PlayerRecord],
     expected_world_seed: u64,

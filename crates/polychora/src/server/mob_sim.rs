@@ -1,5 +1,6 @@
 use super::runtime_net::{apply_creeper_explosion, apply_explosion_impulse};
 use super::*;
+use crate::shared::region_tree::ChunkKey;
 use crate::shared::wasm::{WasmPluginManager, WasmPluginSlot};
 use polychora_plugin_api::entity_tick_abi::{
     EntityAbilityCheck, EntityAbilityResult, EntityTickInput, EntityTickOutput,
@@ -90,7 +91,7 @@ fn resolved_payload_is_all_air(payload: &crate::shared::chunk_payload::ResolvedC
 
 fn sample_effective_voxel_for_collision(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     wx: i32,
     wy: i32,
     wz: i32,
@@ -142,7 +143,7 @@ fn sample_effective_voxel_for_collision(
 
 fn mob_collides_at(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     position: [f32; 4],
     radius: f32,
 ) -> bool {
@@ -151,7 +152,7 @@ fn mob_collides_at(
 
 fn mob_collides_at_with_bounds(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     position: [f32; 4],
     radius: f32,
     world_bounds: &WorldBounds,
@@ -214,7 +215,7 @@ fn mob_collides_at_with_bounds(
 
 fn resolve_mob_collision(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     old_pos: [f32; 4],
     attempted_pos: [f32; 4],
     scale: f32,
@@ -303,7 +304,7 @@ fn mob_nav_manhattan_distance(a: MobNavCell, b: MobNavCell) -> i32 {
 
 fn mob_nav_has_line_of_sight(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     from: [f32; 4],
     to: [f32; 4],
     collision_radius: f32,
@@ -350,7 +351,7 @@ fn mob_nav_has_line_of_sight(
 
 fn mob_nav_cell_is_walkable(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     cell: MobNavCell,
     collision_radius: f32,
     locomotion: MobLocomotionMode,
@@ -418,7 +419,7 @@ fn mob_nav_neighbor_steps(locomotion: MobLocomotionMode) -> &'static [MobNavCell
 
 fn mob_nav_find_walkable_goal_cell(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     desired_goal: MobNavCell,
     origin: MobNavCell,
     collision_radius: f32,
@@ -501,7 +502,7 @@ fn mob_nav_reconstruct_path(
 
 fn mob_nav_find_path(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     start: MobNavCell,
     goal: MobNavCell,
     collision_radius: f32,
@@ -629,7 +630,7 @@ fn mob_nav_debug_log(
 
 fn update_mob_navigation_state(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     mut navigation: MobNavigationState,
     mob_entity_id: u64,
     entity_ns: u32,
@@ -826,7 +827,7 @@ fn mob_horizontal_distance_sq(a: [f32; 4], b: [f32; 4]) -> f32 {
 
 fn stick_mob_to_ground(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     position: [f32; 4],
     scale: f32,
     max_drop: f32,
@@ -851,7 +852,7 @@ fn stick_mob_to_ground(
 
 fn resolve_walking_collision_with_steps(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     old_position: [f32; 4],
     attempted_position: [f32; 4],
     scale: f32,
@@ -902,7 +903,7 @@ fn resolve_walking_collision_with_steps(
 
 fn apply_mob_locomotion_post_collision(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     old_position: [f32; 4],
     attempted_position: [f32; 4],
     scale: f32,
@@ -920,7 +921,7 @@ fn apply_mob_locomotion_post_collision(
 
 fn attempt_phase_spider_blink(
     state: &ServerState,
-    cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     position: [f32; 4],
     forward: [f32; 4],
     scale: f32,
@@ -982,7 +983,7 @@ fn attempt_phase_spider_blink(
 
 fn simulate_mobs(
     state: &mut ServerState,
-    collision_cache: &mut HashMap<ChunkPos, CollisionChunkCacheEntry>,
+    collision_cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,
     wasm_manager: &mut Option<WasmPluginManager>,
     now_ms: u64,
     timings: &mut SimTimings,
@@ -1296,7 +1297,7 @@ pub(super) fn tick_entity_simulation_window(
     let mut queued_explosions = Vec::new();
     let mut queued_player_modifiers = Vec::new();
     let mut timings = SimTimings::default();
-    let mut collision_cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
+    let mut collision_cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
     while *next_sim_ms <= now_ms && timings.sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
         collision_cache.clear();
         state.entity_store.simulate(*next_sim_ms, &state.content_registry, wasm_manager);
@@ -1353,7 +1354,7 @@ mod tests {
         set_solid_voxel(&mut state, 0, 1, 0, 0);
         set_solid_voxel(&mut state, 2, 1, 0, 0);
 
-        let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
         let from = [0.0, 2.2, 0.0, 0.0];
         let to = [2.0, 2.2, 0.0, 0.0];
         assert!(!mob_nav_has_line_of_sight(
@@ -1386,7 +1387,7 @@ mod tests {
 
         let start = [0, 3, 0, 0];
         let goal = [2, 4, 0, 0];
-        let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
         let path = mob_nav_find_path(&state, &mut cache, start, goal, 0.2, MobLocomotionMode::Walking)
             .expect("walking path should step up onto one-cell rise");
         assert!(path.reached_goal);
@@ -1417,7 +1418,7 @@ mod tests {
         let old_pos = [0.2, 2.0, 0.0, 0.0];
         let attempted_pos = [1.2, 2.0, 0.0, 0.0];
         let scale = 0.78;
-        let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
         let baseline = resolve_mob_collision(&state, &mut cache, old_pos, attempted_pos, scale);
         let stepped = resolve_walking_collision_with_steps(&state, &mut cache, old_pos, attempted_pos, scale);
         assert!(
@@ -1432,7 +1433,7 @@ mod tests {
     fn ground_stick_respects_max_drop_budget() {
         let state = test_server_state_with_world();
         let start = [0.0, 10.0, 0.0, 0.0];
-        let mut cache = HashMap::<ChunkPos, CollisionChunkCacheEntry>::new();
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
         let stuck = stick_mob_to_ground(&state, &mut cache, start, 0.3, MOB_WALK_GROUND_STICK_MAX_DROP);
         let dropped = start[1] - stuck[1];
         assert!(dropped <= MOB_WALK_GROUND_STICK_MAX_DROP + 1e-4);

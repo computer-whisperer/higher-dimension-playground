@@ -1,4 +1,5 @@
 use super::*;
+use crate::shared::spatial::ChunkCoord;
 
 fn world_bootstrap_diag_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -191,10 +192,11 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
 
     let mut pieces = Vec::with_capacity(8);
     let mut core = outer;
+    let one = ChunkCoord::from_num(1);
     for axis in 0..4 {
         if core.min[axis] < inner.min[axis] {
             let mut piece = core;
-            piece.max[axis] = inner.min[axis] - 1;
+            piece.max[axis] = inner.min[axis] - one;
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -202,7 +204,7 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
         }
         if core.max[axis] > inner.max[axis] {
             let mut piece = core;
-            piece.min[axis] = inner.max[axis] + 1;
+            piece.min[axis] = inner.max[axis] + one;
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -236,11 +238,13 @@ fn split_bounds_for_streaming(
             continue;
         }
 
+        let one = ChunkCoord::from_num(1);
+        let two = ChunkCoord::from_num(2);
         let extents = [
-            current.max[0] - current.min[0] + 1,
-            current.max[1] - current.min[1] + 1,
-            current.max[2] - current.min[2] + 1,
-            current.max[3] - current.min[3] + 1,
+            current.max[0] - current.min[0] + one,
+            current.max[1] - current.min[1] + one,
+            current.max[2] - current.min[2] + one,
+            current.max[3] - current.min[3] + one,
         ];
         let mut split_axis = 0usize;
         for axis in 1..4 {
@@ -248,16 +252,16 @@ fn split_bounds_for_streaming(
                 split_axis = axis;
             }
         }
-        if extents[split_axis] <= 1 {
+        if extents[split_axis] <= one {
             out.push(current);
             continue;
         }
 
-        let mid = current.min[split_axis] + (extents[split_axis] / 2) - 1;
+        let mid = current.min[split_axis] + (extents[split_axis] / two) - one;
         let mut left = current;
         let mut right = current;
         left.max[split_axis] = mid;
-        right.min[split_axis] = mid + 1;
+        right.min[split_axis] = mid + one;
         if left.is_valid() {
             stack.push(left);
         }
@@ -382,13 +386,15 @@ fn dense_blocks_from_region_core_chunk(
     core: &crate::shared::region_tree::RegionTreeCore,
     chunk_key: [i32; 4],
 ) -> Vec<voxel::BlockData> {
-    let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
+    use crate::shared::region_tree::chunk_key_i32;
+    let ck = chunk_key_i32(chunk_key[0], chunk_key[1], chunk_key[2], chunk_key[3]);
+    let chunk_bounds = Aabb4i::new(ck, ck);
     let chunks = crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds(
         core,
         chunk_bounds,
     );
     for (key, resolved) in chunks {
-        if key == chunk_key {
+        if key == ck {
             return dense_blocks_from_resolved_payload(&resolved);
         }
     }
@@ -401,7 +407,7 @@ fn handle_world_chunk_sample_request(
     request_id: u64,
     chunk: [i32; 4],
 ) {
-    let chunk_bounds = Aabb4i::new(chunk, chunk);
+    let chunk_bounds = Aabb4i::from_i32(chunk, chunk);
     if !chunk_bounds.is_valid() {
         send_to_client(
             state,
@@ -520,7 +526,7 @@ fn apply_authoritative_voxel_edit(
     state: &mut ServerState,
     position: [i32; 4],
     block: BlockData,
-) -> Option<ChunkPos> {
+) -> Option<crate::shared::region_tree::ChunkKey> {
     state.apply_world_voxel_edit(position, block)
 }
 
