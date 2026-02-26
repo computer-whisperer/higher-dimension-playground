@@ -1054,11 +1054,16 @@ impl App {
             .color(info_color),
         );
 
-        // Coordinates
+        // Coordinates and scale
+        let scale_label = if block.scale_exp != 0 {
+            format!("  scale: {}", block.scale_exp)
+        } else {
+            String::new()
+        };
         ui.label(
             egui::RichText::new(format!(
-                "[{}, {}, {}, {}]",
-                coords[0], coords[1], coords[2], coords[3]
+                "[{}, {}, {}, {}]{}",
+                coords[0], coords[1], coords[2], coords[3], scale_label
             ))
             .monospace()
             .size(info_size)

@@ -18,7 +18,7 @@ enum RegionTreeDiagKind {
     Branch,
     Empty,
     Uniform(u16),
-    ChunkArray,
+    ChunkArray { scale_exp: i8 },
     ProceduralRef,
 }
 
@@ -50,7 +50,7 @@ fn region_tree_diag_kind(kind: &RegionNodeKind) -> RegionTreeDiagKind {
         RegionNodeKind::Branch(_) => RegionTreeDiagKind::Branch,
         RegionNodeKind::Empty => RegionTreeDiagKind::Empty,
         RegionNodeKind::Uniform(block) => RegionTreeDiagKind::Uniform(block.block_type as u16),
-        RegionNodeKind::ChunkArray(_) => RegionTreeDiagKind::ChunkArray,
+        RegionNodeKind::ChunkArray(ca) => RegionTreeDiagKind::ChunkArray { scale_exp: ca.scale_exp },
         RegionNodeKind::ProceduralRef(_) => RegionTreeDiagKind::ProceduralRef,
     }
 }
@@ -75,7 +75,7 @@ fn region_tree_diag_style(kind: RegionTreeDiagKind) -> RegionTreeDiagStyle {
             border_color: [0.36, 0.84, 0.34, 0.88],
             connector_color: [0.36, 0.84, 0.34, 0.70],
         },
-        RegionTreeDiagKind::ChunkArray => RegionTreeDiagStyle {
+        RegionTreeDiagKind::ChunkArray { .. } => RegionTreeDiagStyle {
             edge_tag: OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
             text_color: [0.78, 0.96, 1.00, 1.00],
             border_color: [0.22, 0.80, 0.90, 0.90],
@@ -110,7 +110,7 @@ fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
         RegionTreeDiagKind::Branch => ("Branch", String::new()),
         RegionTreeDiagKind::Empty => ("Empty", String::new()),
         RegionTreeDiagKind::Uniform(material) => ("Uniform", format!(" material={material}")),
-        RegionTreeDiagKind::ChunkArray => ("ChunkArray", String::new()),
+        RegionTreeDiagKind::ChunkArray { scale_exp } => ("ChunkArray", format!(" scale={scale_exp}")),
         RegionTreeDiagKind::ProceduralRef => ("ProceduralRef", String::new()),
     };
     format!(
@@ -554,7 +554,7 @@ impl App {
             RegionTreeDiagKind::Branch => self.multiplayer_stream_tree_diag_show_branch_bounds,
             RegionTreeDiagKind::Empty => self.multiplayer_stream_tree_diag_show_empty_bounds,
             RegionTreeDiagKind::Uniform(_) => self.multiplayer_stream_tree_diag_show_uniform_bounds,
-            RegionTreeDiagKind::ChunkArray => {
+            RegionTreeDiagKind::ChunkArray { .. } => {
                 self.multiplayer_stream_tree_diag_show_chunk_array_bounds
             }
             RegionTreeDiagKind::ProceduralRef => {

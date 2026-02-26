@@ -206,7 +206,7 @@ pub enum RenderLeafKind {
 pub enum DebugRayBvhNodeKind {
     Internal,
     LeafUniform { block: BlockData },
-    LeafChunkArray,
+    LeafChunkArray { scale_exp: i8 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -686,7 +686,7 @@ pub fn collect_ray_intersected_nodes_from_bvh(
                     RenderLeafKind::Uniform(block) => {
                         DebugRayBvhNodeKind::LeafUniform { block: block.clone() }
                     }
-                    RenderLeafKind::VoxelChunkArray(_) => DebugRayBvhNodeKind::LeafChunkArray,
+                    RenderLeafKind::VoxelChunkArray(ca) => DebugRayBvhNodeKind::LeafChunkArray { scale_exp: ca.scale_exp },
                 }
             }
         };

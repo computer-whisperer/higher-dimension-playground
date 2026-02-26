@@ -40,8 +40,9 @@ fn describe_sample_ray_hit_for_hud(hit: &DebugRayBvhNodeHit) -> String {
             hit.t_enter,
         ),
         DebugRayBvhNodeKind::LeafUniform { block } => format!(
-            "kind=LeafUniform block={}:{} bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
+            "kind=LeafUniform block={}:{} scale={} bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
             block.namespace, block.block_type,
+            block.scale_exp,
             hit.bounds.min[0],
             hit.bounds.min[1],
             hit.bounds.min[2],
@@ -56,8 +57,9 @@ fn describe_sample_ray_hit_for_hud(hit: &DebugRayBvhNodeHit) -> String {
             span[3],
             hit.t_enter,
         ),
-        DebugRayBvhNodeKind::LeafChunkArray => format!(
-            "kind=LeafChunkArray bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
+        DebugRayBvhNodeKind::LeafChunkArray { scale_exp } => format!(
+            "kind=LeafChunkArray scale={} bounds=({:+},{:+},{:+},{:+})->({:+},{:+},{:+},{:+}) span={}x{}x{}x{} t={:.3}",
+            scale_exp,
             hit.bounds.min[0],
             hit.bounds.min[1],
             hit.bounds.min[2],
@@ -79,7 +81,7 @@ fn overlay_edge_tag_for_sample_ray_hit(hit: &DebugRayBvhNodeHit) -> u32 {
     match &hit.kind {
         DebugRayBvhNodeKind::Internal => OVERLAY_EDGE_TAG_REGION_BRANCH,
         DebugRayBvhNodeKind::LeafUniform { .. } => OVERLAY_EDGE_TAG_REGION_UNIFORM,
-        DebugRayBvhNodeKind::LeafChunkArray => OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
+        DebugRayBvhNodeKind::LeafChunkArray { .. } => OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY,
     }
 }
 
@@ -690,7 +692,7 @@ impl App {
             .find(|hit| {
                 matches!(
                     hit.kind,
-                    DebugRayBvhNodeKind::LeafUniform { .. } | DebugRayBvhNodeKind::LeafChunkArray
+                    DebugRayBvhNodeKind::LeafUniform { .. } | DebugRayBvhNodeKind::LeafChunkArray { .. }
                 )
             })
             .map(describe_sample_ray_hit_for_hud);
