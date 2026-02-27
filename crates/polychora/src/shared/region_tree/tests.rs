@@ -3936,3 +3936,65 @@ fn consolidation_after_multi_scale_edits_preserves_data() {
         assert_eq!(r0.block_type, 1, "stone lost after consolidation");
     }
 }
+
+// ── Cross-scale overlap detection tests ─────────────────────────────────
+
+#[test]
+fn find_leaf_chunks_detects_same_scale_overlap() {
+    use crate::shared::region_tree::tree::chunk_spatial_extent;
+
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(0, 42);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block, -1);
+
+    // Query for the exact spatial extent of the chunk we just placed.
+    let query_key = chunk_key_from_lattice([0, 0, 0, 0], -1);
+    let query = chunk_spatial_extent(Aabb4i::new(query_key, query_key), -1);
+    let found = tree.find_leaf_chunks_in_spatial_range(&query);
+
+    assert_eq!(found.len(), 1, "expected exactly one overlapping chunk");
+    assert_eq!(found[0].1, -1i8, "expected scale -1");
+}
+
+#[test]
+fn find_leaf_chunks_detects_cross_scale_overlap() {
+    use crate::shared::region_tree::tree::chunk_spatial_extent;
+
+    let mut tree = RegionChunkTree::new();
+    // Place a block at scale -1 at origin.
+    // Scale -1 chunk at key [0,0,0,0] covers spatial [0, 3.5].
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], BlockData::simple(0, 10), -1);
+
+    // Now query for a scale -2 chunk at [0,0,0,0].
+    // Scale -2 chunk at key [0,0,0,0] covers spatial [0, 1.75].
+    // These overlap in [0, 1.75].
+    let query_key = chunk_key_from_lattice([0, 0, 0, 0], -2);
+    let query = chunk_spatial_extent(Aabb4i::new(query_key, query_key), -2);
+    let found = tree.find_leaf_chunks_in_spatial_range(&query);
+
+    assert!(
+        !found.is_empty(),
+        "scale -1 chunk at [0,0,0,0] should overlap scale -2 query at [0,0,0,0]"
+    );
+    assert_eq!(found[0].1, -1i8, "overlapping chunk should be at scale -1");
+}
+
+#[test]
+fn find_leaf_chunks_no_overlap_when_spatially_disjoint() {
+    use crate::shared::region_tree::tree::chunk_spatial_extent;
+
+    let mut tree = RegionChunkTree::new();
+    // Place at scale -1, chunk at [0,0,0,0], spatial extent [0, 3.5].
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], BlockData::simple(0, 10), -1);
+
+    // Query a scale -2 chunk far away: key [8,0,0,0], spatial [8, 9.75].
+    // No overlap.
+    let query_key = chunk_key_from_lattice([32, 0, 0, 0], -2);
+    let query = chunk_spatial_extent(Aabb4i::new(query_key, query_key), -2);
+    let found = tree.find_leaf_chunks_in_spatial_range(&query);
+
+    assert!(
+        found.is_empty(),
+        "disjoint chunks should not overlap"
+    );
+}

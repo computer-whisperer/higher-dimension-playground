@@ -41,9 +41,9 @@ pub enum RegionNodeKind {
 
 mod tree;
 pub use tree::{
-    collect_non_empty_chunks_from_core_in_bounds, slice_non_empty_region_core_in_bounds,
-    slice_region_core_in_bounds, validate_region_core_world_space_non_overlapping,
-    RegionChunkTree,
+    chunk_spatial_extent, collect_non_empty_chunks_from_core_in_bounds,
+    slice_non_empty_region_core_in_bounds, slice_region_core_in_bounds,
+    validate_region_core_world_space_non_overlapping, RegionChunkTree,
 };
 
 #[cfg(test)]

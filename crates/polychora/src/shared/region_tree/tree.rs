@@ -350,6 +350,25 @@ impl RegionChunkTree {
         changed
     }
 
+    /// Find all non-empty leaf chunks whose spatial extent overlaps `query`.
+    ///
+    /// Returns `(ChunkKey, scale_exp)` for each overlapping leaf. For single-chunk
+    /// leaves this is the key and scale directly. For multi-chunk ChunkArray or
+    /// Uniform nodes, individual chunk positions within the overlapping region
+    /// are enumerated.
+    pub fn find_leaf_chunks_in_spatial_range(&self, query: &Aabb4i) -> Vec<(ChunkKey, i8)> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root.as_ref() {
+            find_leaf_chunks_in_spatial_range_recursive(
+                &root.kind,
+                root.bounds,
+                query,
+                &mut out,
+            );
+        }
+        out
+    }
+
     fn ensure_root_contains_bounds(&mut self, bounds: Aabb4i) {
         if !bounds.is_valid() {
             return;
@@ -1378,6 +1397,15 @@ fn set_chunk_recursive(
     }
 
     if is_single_chunk_bounds(node.bounds) {
+        if let RegionNodeKind::ChunkArray(existing_ca) = &node.kind {
+            if existing_ca.scale_exp != scale_exp {
+                eprintln!(
+                    "[set-chunk-scale-mismatch] replacing scale {} with {} at {:?} — \
+                     caller should have resolved cross-scale overlap first",
+                    existing_ca.scale_exp, scale_exp, key_pos
+                );
+            }
+        }
         let new_kind = kind_from_resolved_value_at_scale(node.bounds, payload, scale_exp);
         if node.kind == new_kind {
             return false;
@@ -2631,6 +2659,105 @@ fn payload_has_solid_material_in_context(
 
 fn is_single_chunk_bounds(bounds: Aabb4i) -> bool {
     bounds.min == bounds.max
+}
+
+/// Compute the spatial extent of a chunk (or set of chunks) given their
+/// key-space bounds and scale. Each chunk has 8 cells per axis, so the last
+/// cell starts at `max + 7 * step`. The returned AABB covers all grid
+/// positions from `bounds.min` to `bounds.max + 7 * step`.
+pub fn chunk_spatial_extent(bounds: Aabb4i, scale_exp: i8) -> Aabb4i {
+    let step = step_for_scale(scale_exp);
+    let offset = step.saturating_mul(ChunkCoord::from_num(7));
+    Aabb4i::new(
+        bounds.min,
+        [
+            bounds.max[0].saturating_add(offset),
+            bounds.max[1].saturating_add(offset),
+            bounds.max[2].saturating_add(offset),
+            bounds.max[3].saturating_add(offset),
+        ],
+    )
+}
+
+fn find_leaf_chunks_in_spatial_range_recursive(
+    kind: &RegionNodeKind,
+    kind_bounds: Aabb4i,
+    query: &Aabb4i,
+    out: &mut Vec<(ChunkKey, i8)>,
+) {
+    match kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
+                return;
+            }
+            let se = block.scale_exp;
+            let spatial = chunk_spatial_extent(kind_bounds, se);
+            if !spatial.intersects(query) {
+                return;
+            }
+            if is_single_chunk_bounds(kind_bounds) {
+                out.push((kind_bounds.min, se));
+            } else {
+                // Enumerate each chunk position within bounds at this scale.
+                let (lmin, lmax) = kind_bounds.to_lattice_bounds(se);
+                for lw in lmin[3]..=lmax[3] {
+                    for lz in lmin[2]..=lmax[2] {
+                        for ly in lmin[1]..=lmax[1] {
+                            for lx in lmin[0]..=lmax[0] {
+                                let ck = chunk_key_from_lattice([lx, ly, lz, lw], se);
+                                let ck_spatial = chunk_spatial_extent(
+                                    Aabb4i::new(ck, ck),
+                                    se,
+                                );
+                                if ck_spatial.intersects(query) {
+                                    out.push((ck, se));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        RegionNodeKind::ChunkArray(ca) => {
+            let se = ca.scale_exp;
+            let spatial = chunk_spatial_extent(ca.bounds, se);
+            if !spatial.intersects(query) {
+                return;
+            }
+            if is_single_chunk_bounds(ca.bounds) {
+                out.push((ca.bounds.min, se));
+            } else {
+                let (lmin, lmax) = ca.bounds.to_lattice_bounds(se);
+                for lw in lmin[3]..=lmax[3] {
+                    for lz in lmin[2]..=lmax[2] {
+                        for ly in lmin[1]..=lmax[1] {
+                            for lx in lmin[0]..=lmax[0] {
+                                let ck = chunk_key_from_lattice([lx, ly, lz, lw], se);
+                                let ck_spatial = chunk_spatial_extent(
+                                    Aabb4i::new(ck, ck),
+                                    se,
+                                );
+                                if ck_spatial.intersects(query) {
+                                    out.push((ck, se));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                find_leaf_chunks_in_spatial_range_recursive(
+                    &child.kind,
+                    child.bounds,
+                    query,
+                    out,
+                );
+            }
+        }
+    }
 }
 
 fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {

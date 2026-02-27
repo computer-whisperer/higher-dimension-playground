@@ -2,11 +2,13 @@ use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::protocol::WorldBounds;
 use crate::shared::region_tree::{
-    ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
+    chunk_spatial_extent, ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
-use crate::shared::spatial::{Aabb4i, ChunkCoord, lattice_from_fixed};
+use crate::shared::spatial::{
+    chunk_key_from_lattice, lattice_from_fixed, Aabb4i, ChunkCoord,
+};
 use crate::shared::voxel::{
-    world_to_chunk, BaseWorldKind, BlockData, CHUNK_VOLUME,
+    world_to_chunk, world_to_chunk_at_scale, BaseWorldKind, BlockData, CHUNK_SIZE, CHUNK_VOLUME,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -511,40 +513,111 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         Some(chunk_key)
     }
 
-    /// Edit a voxel at a specific scale. For `scale_exp = 0`, delegates to
-    /// [`apply_voxel_edit`]. For non-zero scales, uses the scale-aware mutation
-    /// API to insert/modify chunks in the override tree.
+    /// Edit a voxel at a specific scale, resolving cross-scale spatial overlaps.
+    ///
+    /// When the edit's chunk spatially overlaps existing content at a different
+    /// scale, the overlapping content is cascade-rechunked to the finest scale
+    /// (one level at a time) before the edit is applied.
+    ///
+    /// For `scale_exp = 0` with no cross-scale overlap, delegates to
+    /// [`apply_voxel_edit`] for its virgin-chunk fallback logic.
     pub fn apply_voxel_edit_at_scale(
         &mut self,
         position: [i32; 4],
         block: BlockData,
         scale_exp: i8,
     ) -> Option<ChunkKey> {
-        if scale_exp == 0 {
+        let (edit_key, _edit_voxel_idx) =
+            world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
+
+        // Compute the spatial extent of the edit's chunk.
+        let edit_extent = chunk_spatial_extent(Aabb4i::new(edit_key, edit_key), scale_exp);
+
+        // Find all existing non-empty leaf chunks that spatially overlap.
+        let overlapping = self
+            .override_chunks
+            .find_leaf_chunks_in_spatial_range(&edit_extent);
+
+        // Determine if there's any cross-scale conflict.
+        let has_cross_scale = overlapping.iter().any(|(_, es)| *es != scale_exp);
+
+        // For pure scale-0 edits with no cross-scale overlap, use the original
+        // path which has virgin-chunk fallback logic.
+        if scale_exp == 0 && !has_cross_scale {
             return self.apply_voxel_edit(position, block);
         }
 
-        let (chunk_key, voxel_index) = crate::shared::voxel::world_to_chunk_at_scale(
+        // Find the finest (most negative) scale among the edit and all overlapping.
+        let target_scale = overlapping
+            .iter()
+            .map(|(_, es)| *es)
+            .min()
+            .unwrap_or(scale_exp)
+            .min(scale_exp);
+
+        // Rechunk any overlapping chunks that are coarser than the target scale.
+        let mut any_rechunked = false;
+        if has_cross_scale {
+            // Collect coarser chunks (those with scale > target_scale).
+            let coarser: Vec<_> = overlapping
+                .iter()
+                .filter(|(_, es)| *es > target_scale)
+                .cloned()
+                .collect();
+
+            for (coarser_key, coarser_scale) in coarser {
+                let created = cascade_rechunk_to_scale(
+                    &mut self.override_chunks,
+                    coarser_key,
+                    coarser_scale,
+                    target_scale,
+                    &edit_extent,
+                );
+                for (new_key, new_scale) in &created {
+                    self.mark_dirty_chunk(*new_key);
+                    self.dirty_save_chunks.insert(*new_key, *new_scale);
+                }
+                // Also mark the removed coarser chunk dirty (as deleted).
+                self.mark_dirty_chunk(coarser_key);
+                self.dirty_save_chunks.insert(coarser_key, coarser_scale);
+                any_rechunked = true;
+            }
+        }
+
+        // Now perform the edit at the target scale.
+        let (target_key, target_voxel_idx) = world_to_chunk_at_scale(
             position[0],
             position[1],
             position[2],
             position[3],
-            scale_exp,
+            target_scale,
         );
 
-        let current_payload = self.override_chunks.chunk_payload(chunk_key);
-        let current_block = current_payload
-            .as_ref()
-            .map(|r| r.block_at(voxel_index))
-            .unwrap_or(BlockData::AIR);
-        if current_block == block {
-            return None;
-        }
-
+        let current_payload = self.override_chunks.chunk_payload(target_key);
         let mut blocks = current_payload
             .map(|r| r.dense_blocks())
-            .unwrap_or_else(|| vec![BlockData::AIR; crate::shared::voxel::CHUNK_VOLUME]);
-        blocks[voxel_index] = block;
+            .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+
+        if scale_exp > target_scale {
+            // Coarser edit into finer grid: fill multiple cells.
+            let cells_per_axis = 1usize << (scale_exp - target_scale) as u32;
+            // Compute base local coordinates for the multi-cell fill.
+            // The target_voxel_idx corresponds to a single cell; we need the
+            // base coordinates (aligned to cells_per_axis boundary).
+            let lx = target_voxel_idx % CHUNK_SIZE;
+            let ly = (target_voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
+            let lz = (target_voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
+            let lw = target_voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+            let base = [
+                lx - (lx % cells_per_axis),
+                ly - (ly % cells_per_axis),
+                lz - (lz % cells_per_axis),
+                lw - (lw % cells_per_axis),
+            ];
+            fill_multi_cell_block(&mut blocks, base, block.at_scale(scale_exp), cells_per_axis);
+        } else {
+            blocks[target_voxel_idx] = block;
+        }
 
         let desired_payload = if blocks.iter().all(|b| b.is_air()) {
             None
@@ -554,14 +627,14 @@ impl PassthroughWorldOverlay<ServerWorldField> {
 
         let changed = self
             .override_chunks
-            .set_chunk_at_scale(chunk_key, desired_payload, scale_exp);
-        if !changed {
+            .set_chunk_at_scale(target_key, desired_payload, target_scale);
+        if !changed && !any_rechunked {
             return None;
         }
 
-        self.mark_dirty_chunk(chunk_key);
-        self.dirty_save_chunks.insert(chunk_key, scale_exp);
-        Some(chunk_key)
+        self.mark_dirty_chunk(target_key);
+        self.dirty_save_chunks.insert(target_key, target_scale);
+        Some(target_key)
     }
 
     pub fn persist_dirty_overrides(
@@ -647,6 +720,173 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         }
         let virgin_payload = self.query_virgin_chunk_payload(chunk_key)?;
         resolved_to_effective(virgin_payload, preserve_explicit_empty_chunk)
+    }
+}
+
+/// Re-chunk a single coarser chunk one scale level finer (into 2^4 = 16 chunks).
+///
+/// Returns the newly created chunk keys (at the finer scale) for dirty tracking.
+fn rechunk_one_level_finer(
+    tree: &mut RegionChunkTree,
+    coarser_key: ChunkKey,
+    coarser_scale: i8,
+) -> Vec<(ChunkKey, i8)> {
+    let finer_scale = coarser_scale - 1;
+    let r = 2usize; // ratio per axis for one scale level
+
+    // Read existing content.
+    let coarser_payload = tree.chunk_payload(coarser_key);
+    let coarser_blocks = coarser_payload
+        .map(|p| p.dense_blocks())
+        .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+
+    // Remove the coarser chunk.
+    tree.set_chunk_at_scale(coarser_key, None, coarser_scale);
+
+    // Compute the coarser chunk's lattice origin at the finer scale.
+    let coarser_lattice: [i32; 4] = std::array::from_fn(|axis| {
+        lattice_from_fixed(coarser_key[axis], coarser_scale)
+    });
+    let finer_base: [i32; 4] = std::array::from_fn(|axis| coarser_lattice[axis] * 2);
+
+    let mut created = Vec::new();
+
+    // Enumerate 2^4 = 16 finer chunks.
+    for iw in 0..r {
+        for iz in 0..r {
+            for iy in 0..r {
+                for ix in 0..r {
+                    let finer_chunk_lattice = [
+                        finer_base[0] + ix as i32,
+                        finer_base[1] + iy as i32,
+                        finer_base[2] + iz as i32,
+                        finer_base[3] + iw as i32,
+                    ];
+                    let finer_key = chunk_key_from_lattice(finer_chunk_lattice, finer_scale);
+
+                    // Build the finer chunk's 8^4 blocks by mapping each finer
+                    // cell back to its corresponding coarser cell.
+                    let mut finer_blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+                    let mut all_air = true;
+
+                    for fw in 0..CHUNK_SIZE {
+                        for fz in 0..CHUNK_SIZE {
+                            for fy in 0..CHUNK_SIZE {
+                                for fx in 0..CHUNK_SIZE {
+                                    // Each finer cell covers half the space of a coarser cell,
+                                    // so 2 finer cells map to 1 coarser cell.
+                                    let cx = ix * (CHUNK_SIZE / r) + fx / r;
+                                    let cy = iy * (CHUNK_SIZE / r) + fy / r;
+                                    let cz = iz * (CHUNK_SIZE / r) + fz / r;
+                                    let cw = iw * (CHUNK_SIZE / r) + fw / r;
+                                    let coarser_idx = cw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                                        + cz * CHUNK_SIZE * CHUNK_SIZE
+                                        + cy * CHUNK_SIZE
+                                        + cx;
+                                    let block = coarser_blocks[coarser_idx].clone();
+                                    if !block.is_air() {
+                                        all_air = false;
+                                    }
+                                    let finer_idx = fw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                                        + fz * CHUNK_SIZE * CHUNK_SIZE
+                                        + fy * CHUNK_SIZE
+                                        + fx;
+                                    finer_blocks[finer_idx] = block;
+                                }
+                            }
+                        }
+                    }
+
+                    if all_air {
+                        continue; // Skip Uniform(air) — no chunk needed.
+                    }
+
+                    let payload = ResolvedChunkPayload::from_dense_blocks(&finer_blocks)
+                        .ok();
+                    if let Some(payload) = payload {
+                        tree.set_chunk_at_scale(finer_key, Some(payload), finer_scale);
+                        created.push((finer_key, finer_scale));
+                    }
+                }
+            }
+        }
+    }
+
+    created
+}
+
+/// Cascade rechunk: split coarser content down to `target_scale`, one level at
+/// a time, only splitting the chunk that overlaps `edit_spatial_extent` at each
+/// level. Returns all newly created `(ChunkKey, scale)` pairs for dirty tracking.
+fn cascade_rechunk_to_scale(
+    tree: &mut RegionChunkTree,
+    coarser_key: ChunkKey,
+    coarser_scale: i8,
+    target_scale: i8,
+    edit_spatial_extent: &Aabb4i,
+) -> Vec<(ChunkKey, i8)> {
+    debug_assert!(coarser_scale > target_scale);
+    let mut all_created = Vec::new();
+
+    // Split one level at a time.
+    let mut current_keys = vec![(coarser_key, coarser_scale)];
+
+    for current_scale in (target_scale + 1..=coarser_scale).rev() {
+        let mut next_keys = Vec::new();
+        for (key, scale) in &current_keys {
+            if *scale != current_scale {
+                continue;
+            }
+            let created = rechunk_one_level_finer(tree, *key, *scale);
+            for &(new_key, new_scale) in &created {
+                // Check if this newly created chunk overlaps the edit extent.
+                // If so, and it's still coarser than target, queue it for the next pass.
+                if new_scale > target_scale {
+                    let new_spatial = chunk_spatial_extent(
+                        Aabb4i::new(new_key, new_key),
+                        new_scale,
+                    );
+                    if new_spatial.intersects(edit_spatial_extent) {
+                        next_keys.push((new_key, new_scale));
+                    }
+                }
+            }
+            all_created.extend(created);
+        }
+        current_keys = next_keys;
+    }
+
+    all_created
+}
+
+/// Fill multiple cells in a chunk when placing a coarser block into a finer grid.
+///
+/// A block at `edit_scale` placed into a chunk at `chunk_scale` (where
+/// `chunk_scale < edit_scale`) fills `cells_per_axis^4` cells.
+fn fill_multi_cell_block(
+    blocks: &mut [BlockData],
+    edit_local_base: [usize; 4],
+    block: BlockData,
+    cells_per_axis: usize,
+) {
+    for dw in 0..cells_per_axis {
+        for dz in 0..cells_per_axis {
+            for dy in 0..cells_per_axis {
+                for dx in 0..cells_per_axis {
+                    let x = edit_local_base[0] + dx;
+                    let y = edit_local_base[1] + dy;
+                    let z = edit_local_base[2] + dz;
+                    let w = edit_local_base[3] + dw;
+                    if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE && w < CHUNK_SIZE {
+                        let idx = w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                            + z * CHUNK_SIZE * CHUNK_SIZE
+                            + y * CHUNK_SIZE
+                            + x;
+                        blocks[idx] = block.clone();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1135,5 +1375,157 @@ mod tests {
 
         let dirty_bounds = overlay.take_dirty_bounds();
         assert!(!dirty_bounds.is_empty());
+    }
+
+    // ── Cross-scale overlap resolution tests ────────────────────────────
+
+    fn make_empty_overlay() -> PassthroughWorldOverlay<ServerWorldField> {
+        let field = build_server_world_field(
+            BaseWorldKind::Empty,
+            42,
+            false,
+            HashSet::new(),
+        );
+        PassthroughWorldOverlay::new(field, BaseWorldKind::Empty, 42)
+    }
+
+    fn read_block_from_overlay(
+        overlay: &PassthroughWorldOverlay<ServerWorldField>,
+        pos: [i32; 4],
+        scale_exp: i8,
+    ) -> BlockData {
+        let (chunk_key, voxel_index) =
+            world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], scale_exp);
+        overlay
+            .override_chunks
+            .chunk_payload(chunk_key)
+            .map(|r| r.block_at(voxel_index))
+            .unwrap_or(BlockData::AIR)
+    }
+
+    #[test]
+    fn cross_scale_finer_then_coarser_both_survive() {
+        let mut overlay = make_empty_overlay();
+        let stone = BlockData::simple(0, 1);
+        let brick = BlockData::simple(0, 2);
+
+        // Place a scale -2 block at origin.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], stone.clone(), -2);
+        // Place a scale -1 block at [2,0,0,0] — spatially nearby.
+        // The scale -1 chunk at origin covers [0, 3.5], overlapping the -2 chunk.
+        overlay.apply_voxel_edit_at_scale([2, 0, 0, 0], brick.clone(), -1);
+
+        // The -2 block should still be readable at its position.
+        let read_stone = read_block_from_overlay(&overlay, [0, 0, 0, 0], -2);
+        assert_eq!(
+            read_stone.block_type, 1,
+            "scale -2 stone block should survive after scale -1 placement"
+        );
+    }
+
+    #[test]
+    fn cross_scale_coarser_then_finer_rechunks() {
+        let mut overlay = make_empty_overlay();
+        let stone = BlockData::simple(0, 1);
+        let brick = BlockData::simple(0, 2);
+
+        // Place a scale -1 block at origin first.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], stone.clone(), -1);
+        // Now place a scale -2 block — should trigger rechunking of the -1 chunk.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], brick.clone(), -2);
+
+        // The brick at scale -2 should be present.
+        let read_brick = read_block_from_overlay(&overlay, [0, 0, 0, 0], -2);
+        assert_eq!(
+            read_brick.block_type, 2,
+            "scale -2 brick should be placed after rechunking"
+        );
+
+        // The original stone content (which was at scale -1) should be rechunked
+        // to scale -2 and preserved in the cells that weren't overwritten.
+    }
+
+    #[test]
+    fn same_scale_edit_no_rechunk() {
+        let mut overlay = make_empty_overlay();
+        let stone = BlockData::simple(0, 1);
+        let brick = BlockData::simple(0, 2);
+
+        // Place two blocks at the same scale.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], stone.clone(), -1);
+        overlay.apply_voxel_edit_at_scale([1, 0, 0, 0], brick.clone(), -1);
+
+        let read_stone = read_block_from_overlay(&overlay, [0, 0, 0, 0], -1);
+        let read_brick = read_block_from_overlay(&overlay, [1, 0, 0, 0], -1);
+        assert_eq!(read_stone.block_type, 1);
+        assert_eq!(read_brick.block_type, 2);
+    }
+
+    #[test]
+    fn coarser_edit_fills_multiple_cells() {
+        let mut overlay = make_empty_overlay();
+        let brick = BlockData::simple(0, 2);
+
+        // Place a scale -2 block first (fine).
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], BlockData::simple(0, 1), -2);
+
+        // Place a scale -1 block (coarser) into the same region.
+        // The target scale is -2 (finest), so the -1 block should fill
+        // 2^4 = 16 cells at scale -2 (2 cells per axis).
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], brick.clone(), -1);
+
+        // The brick should fill a 2x2x2x2 region at scale -2.
+        let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], -2);
+        assert_eq!(
+            read.block_type, 2,
+            "coarser brick block should overwrite finer cells"
+        );
+    }
+
+    #[test]
+    fn rechunk_sparse_chunk_skips_all_air_finer_chunks() {
+        // A coarser chunk with 1 block + 4095 air cells should produce only 1
+        // finer chunk (the one containing the block). The other 15 should be
+        // skipped because they're all-air.
+        let mut tree = RegionChunkTree::new();
+        let stone = BlockData::simple(0, 1);
+
+        // Place one block at scale -1 (creates a chunk with 1 non-air + 4095 air).
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
+        let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+        blocks[voxel_idx] = stone.clone();
+        let payload = ResolvedChunkPayload::from_dense_blocks(&blocks).unwrap();
+        tree.set_chunk_at_scale(chunk_key, Some(payload), -1);
+
+        // Rechunk to scale -2.
+        let edit_extent = chunk_spatial_extent(Aabb4i::new(chunk_key, chunk_key), -1);
+        let created = cascade_rechunk_to_scale(
+            &mut tree,
+            chunk_key,
+            -1,
+            -2,
+            &edit_extent,
+        );
+
+        // Only the finer chunk(s) that contain the non-air block should be created.
+        // With 1 block at cell (0,0,0,0), it falls in exactly one of the 16 finer
+        // chunks (the one covering coarser cells 0..3 per axis).
+        assert!(
+            created.len() <= 2,
+            "expected at most 2 finer chunks from sparse rechunk, got {}",
+            created.len()
+        );
+        assert!(
+            created.len() >= 1,
+            "expected at least 1 finer chunk with non-air content"
+        );
+
+        // The block should still be readable at scale -2.
+        let (finer_key, finer_idx) = world_to_chunk_at_scale(0, 0, 0, 0, -2);
+        let read = tree
+            .chunk_payload(finer_key)
+            .map(|r| r.block_at(finer_idx))
+            .unwrap_or(BlockData::AIR);
+        assert_eq!(read.block_type, 1, "stone should survive rechunking");
     }
 }
