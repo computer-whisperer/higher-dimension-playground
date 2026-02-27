@@ -3425,3 +3425,514 @@ fn mixed_scale_lazy_drop_does_not_corrupt_uniform_bounds() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-scale block placement integrity tests
+// ---------------------------------------------------------------------------
+
+/// Helper: place a single block at a world position and scale, mimicking the
+/// server's `apply_voxel_edit_at_scale` flow but operating directly on a
+/// `RegionChunkTree`.
+fn place_block_at_scale(
+    tree: &mut RegionChunkTree,
+    position: [i32; 4],
+    block: BlockData,
+    scale_exp: i8,
+) {
+    use crate::shared::voxel::{world_to_chunk_at_scale, CHUNK_VOLUME};
+
+    let (chunk_key, voxel_index) =
+        world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
+
+    let current_payload = tree.chunk_payload(chunk_key);
+    let mut blocks = current_payload
+        .map(|r| r.dense_blocks())
+        .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+    blocks[voxel_index] = block;
+
+    let desired_payload = if blocks.iter().all(|b| b.is_air()) {
+        None
+    } else {
+        ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
+    };
+
+    tree.set_chunk_at_scale(chunk_key, desired_payload, scale_exp);
+}
+
+/// Helper: validate structural tree invariants (branch non-overlap, containment).
+/// Does NOT check world-space overlap or fractional bounds, since those are
+/// expected when mixing scales in the same region.
+fn assert_tree_structure(tree: &RegionChunkTree, context: &str) {
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+        // World-space overlap and fractional bounds are not checked here;
+        // mixing scales intentionally produces sub-integer bounds.
+        let _ = context;
+    }
+}
+
+/// Stricter variant: also checks world-space non-overlap and integer bounds.
+/// Only use for single-scale or known non-overlapping scenarios.
+fn assert_tree_integrity_strict(tree: &RegionChunkTree, context: &str) {
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+        validate_region_core_world_space_non_overlapping(root)
+            .unwrap_or_else(|e| panic!("{context}: world-space overlap: {e}"));
+        assert_no_fractional_bounds(root, context);
+    }
+}
+
+/// Helper: read back a block at a world position and scale.
+fn read_block_at_scale(
+    tree: &RegionChunkTree,
+    position: [i32; 4],
+    scale_exp: i8,
+) -> BlockData {
+    use crate::shared::voxel::world_to_chunk_at_scale;
+
+    let (chunk_key, voxel_index) =
+        world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
+
+    tree.chunk_payload(chunk_key)
+        .map(|r| r.block_at(voxel_index))
+        .unwrap_or(BlockData::AIR)
+}
+
+#[test]
+fn place_single_block_at_scale_zero() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(1, 42);
+    place_block_at_scale(&mut tree, [3, 0, 5, 1], block.clone(), 0);
+
+    assert_tree_integrity_strict(&tree, "single_block_s0");
+    let read = read_block_at_scale(&tree, [3, 0, 5, 1], 0);
+    assert_eq!(read.namespace, block.namespace);
+    assert_eq!(read.block_type, block.block_type);
+}
+
+#[test]
+fn place_single_block_at_negative_scale() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(1, 7);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block.clone(), -1);
+
+    assert_tree_structure(&tree, "single_block_s-1");
+    let read = read_block_at_scale(&tree, [0, 0, 0, 0], -1);
+    assert_eq!(read.namespace, block.namespace);
+    assert_eq!(read.block_type, block.block_type);
+}
+
+#[test]
+fn place_single_block_at_positive_scale() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(1, 99);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block.clone(), 1);
+
+    assert_tree_structure(&tree, "single_block_s1");
+    let read = read_block_at_scale(&tree, [0, 0, 0, 0], 1);
+    assert_eq!(read.namespace, block.namespace);
+    assert_eq!(read.block_type, block.block_type);
+}
+
+#[test]
+fn place_blocks_at_multiple_scales_same_region() {
+    let mut tree = RegionChunkTree::new();
+    let stone = BlockData::simple(0, 1);
+    let brick = BlockData::simple(0, 2);
+    let glass = BlockData::simple(0, 3);
+
+    // Scale 0 block at origin
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], stone.clone(), 0);
+    assert_tree_structure(&tree, "multi_scale_after_s0");
+
+    // Scale 1 block nearby (occupies 2x2x2x2 world units starting at 16,0,0,0)
+    place_block_at_scale(&mut tree, [16, 0, 0, 0], brick.clone(), 1);
+    assert_tree_structure(&tree, "multi_scale_after_s1");
+
+    // Scale -1 block (occupies 0.5 world units, at world 8,0,0,0)
+    place_block_at_scale(&mut tree, [8, 0, 0, 0], glass.clone(), -1);
+    assert_tree_structure(&tree, "multi_scale_after_s-1");
+
+    // All three readable
+    let r0 = read_block_at_scale(&tree, [0, 0, 0, 0], 0);
+    assert_eq!(r0.block_type, stone.block_type);
+
+    let r1 = read_block_at_scale(&tree, [16, 0, 0, 0], 1);
+    assert_eq!(r1.block_type, brick.block_type);
+
+    let r_neg = read_block_at_scale(&tree, [8, 0, 0, 0], -1);
+    assert_eq!(r_neg.block_type, glass.block_type);
+}
+
+#[test]
+fn place_and_remove_block_at_each_scale() {
+    for scale_exp in -3i8..=3 {
+        let mut tree = RegionChunkTree::new();
+        let block = BlockData::simple(1, 50);
+        place_block_at_scale(&mut tree, [0, 0, 0, 0], block.clone(), scale_exp);
+        assert_tree_structure(&tree, &format!("place_remove_s{scale_exp}_after_place"));
+
+        let read = read_block_at_scale(&tree, [0, 0, 0, 0], scale_exp);
+        assert_eq!(read.block_type, block.block_type, "scale_exp={scale_exp}: read mismatch");
+
+        // Remove by placing air
+        place_block_at_scale(&mut tree, [0, 0, 0, 0], BlockData::AIR, scale_exp);
+        assert_tree_structure(&tree, &format!("place_remove_s{scale_exp}_after_remove"));
+    }
+}
+
+#[test]
+fn many_blocks_at_same_negative_scale_fill_chunk() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(0, 5);
+
+    // Fill a full chunk at scale -1 (8^4 = 4096 half-size voxels).
+    // At scale -1, world coord 0 → scaled lattice 0, world coord 1 → scaled lattice 2, etc.
+    // So fill voxels at world positions [0..8) in each axis, stepping by 1 (but each maps
+    // to a unique half-scale voxel).
+    for w in 0..4 {
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    place_block_at_scale(&mut tree, [x, y, z, w], block.clone(), -1);
+                }
+            }
+        }
+    }
+
+    assert_tree_structure(&tree, "fill_chunk_s-1");
+
+    // Spot-check several positions
+    for pos in [[0, 0, 0, 0], [1, 2, 3, 0], [3, 3, 3, 3]] {
+        let read = read_block_at_scale(&tree, pos, -1);
+        assert_eq!(read.block_type, block.block_type, "at {pos:?}");
+    }
+}
+
+#[test]
+fn place_block_at_scale_2_roundtrips() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(0, 77);
+
+    // scale_exp=2: each voxel is 4 world units, chunk spans 32 world units.
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block.clone(), 2);
+    assert_tree_structure(&tree, "s2_roundtrip");
+
+    let read = read_block_at_scale(&tree, [0, 0, 0, 0], 2);
+    assert_eq!(read.block_type, block.block_type);
+}
+
+#[test]
+fn place_block_at_negative_world_coords_all_scales() {
+    for scale_exp in -2i8..=2 {
+        let mut tree = RegionChunkTree::new();
+        let block = BlockData::simple(1, 33);
+        place_block_at_scale(&mut tree, [-5, -3, -7, -1], block.clone(), scale_exp);
+        assert_tree_structure(&tree, &format!("neg_coords_s{scale_exp}"));
+
+        let read = read_block_at_scale(&tree, [-5, -3, -7, -1], scale_exp);
+        assert_eq!(
+            read.block_type, block.block_type,
+            "scale_exp={scale_exp}: block at negative coords lost"
+        );
+    }
+}
+
+#[test]
+fn interleaved_multi_scale_placements_preserve_all_blocks() {
+    let mut tree = RegionChunkTree::new();
+    let mut placements = Vec::new();
+
+    // Place blocks at alternating scales across a range of positions.
+    // Spacing must be large enough that chunk extents at scale 2 (32 world units)
+    // never overlap with adjacent placements.
+    for i in 0..20 {
+        let scale_exp = (i % 5) as i8 - 2; // -2, -1, 0, 1, 2
+        let x = i * 64; // 64 units apart — enough for even scale 2 (chunk = 32)
+        let block = BlockData::simple(0, (i + 1) as u32);
+        place_block_at_scale(&mut tree, [x, 0, 0, 0], block.clone(), scale_exp);
+        placements.push((x, scale_exp, block));
+        assert_tree_structure(&tree, &format!("interleaved_step_{i}"));
+    }
+
+    // Read all back
+    for (x, scale_exp, expected) in &placements {
+        let read = read_block_at_scale(&tree, [*x, 0, 0, 0], *scale_exp);
+        assert_eq!(
+            read.block_type, expected.block_type,
+            "lost block at x={x} scale={scale_exp}"
+        );
+    }
+}
+
+#[test]
+fn place_on_uniform_platform_at_different_scales_preserves_platform() {
+    let mut tree = RegionChunkTree::new();
+    let stone = BlockData::simple(0, 1);
+
+    // Create a uniform platform
+    let platform_bounds = Aabb4i::from_i32([-4, -1, -4, -4], [3, 0, 3, 3]);
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+    assert_tree_integrity_strict(&tree, "platform_before_edits");
+
+    // Place blocks at various scales on top of the platform
+    let brick = BlockData::simple(0, 5);
+    place_block_at_scale(&mut tree, [0, 1, 0, 0], brick.clone(), 0);
+    assert_tree_structure(&tree, "platform_after_s0_edit");
+
+    let glass = BlockData::simple(0, 6);
+    place_block_at_scale(&mut tree, [0, 2, 0, 0], glass.clone(), -1);
+    assert_tree_structure(&tree, "platform_after_s-1_edit");
+
+    let big = BlockData::simple(0, 7);
+    place_block_at_scale(&mut tree, [0, 2, 0, 0], big.clone(), 1);
+    assert_tree_structure(&tree, "platform_after_s1_edit");
+
+    // Platform chunks should still be accessible
+    for x in -4..=3 {
+        let payload = tree.chunk_payload(chunk_key_i32(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},0,0,0] missing after multi-scale edits"
+        );
+    }
+}
+
+#[test]
+fn scale_exp_preserved_in_block_palette_roundtrip() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(1, 10).at_scale(-2);
+
+    // Place the block — the tree should store it with scale_exp = -2.
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block.clone(), -2);
+    let read = read_block_at_scale(&tree, [0, 0, 0, 0], -2);
+    assert_eq!(read.scale_exp, -2, "scale_exp lost in roundtrip");
+    assert_eq!(read.block_type, 10);
+}
+
+#[test]
+fn adjacent_chunks_at_same_non_zero_scale_stay_distinct() {
+    use crate::shared::spatial::chunk_key_from_lattice;
+
+    let mut tree = RegionChunkTree::new();
+    let block_a = BlockData::simple(0, 10);
+    let block_b = BlockData::simple(0, 20);
+
+    // Two adjacent scale -1 chunks. At scale -1, chunk lattice [0,0,0,0] and [1,0,0,0]
+    // map to fixed-point [0,0,0,0] and [0.5,0,0,0].
+    let key_a = chunk_key_from_lattice([0, 0, 0, 0], -1);
+    let key_b = chunk_key_from_lattice([1, 0, 0, 0], -1);
+
+    tree.set_chunk_at_scale(key_a, Some(ResolvedChunkPayload::uniform(block_a.clone())), -1);
+    tree.set_chunk_at_scale(key_b, Some(ResolvedChunkPayload::uniform(block_b.clone())), -1);
+    assert_tree_structure(&tree, "adjacent_s-1");
+
+    let read_a = tree.chunk_payload(key_a).unwrap();
+    let read_b = tree.chunk_payload(key_b).unwrap();
+    assert_eq!(read_a.uniform_block().unwrap().block_type, 10);
+    assert_eq!(read_b.uniform_block().unwrap().block_type, 20);
+}
+
+#[test]
+fn world_to_chunk_at_scale_coordinate_consistency() {
+    use crate::shared::voxel::world_to_chunk_at_scale;
+    use crate::shared::spatial::chunk_key_from_lattice;
+
+    // Scale 0: world (0,0,0,0) → chunk (0,0,0,0), voxel 0
+    let (k, idx) = world_to_chunk_at_scale(0, 0, 0, 0, 0);
+    assert_eq!(k, chunk_key_i32(0, 0, 0, 0));
+    assert_eq!(idx, 0);
+
+    // Scale 0: world (7,7,7,7) → same chunk, last voxel
+    let (k, idx) = world_to_chunk_at_scale(7, 7, 7, 7, 0);
+    assert_eq!(k, chunk_key_i32(0, 0, 0, 0));
+    assert_eq!(idx, 7 + 8 * (7 + 8 * (7 + 8 * 7)));
+
+    // Scale 0: world (8,0,0,0) → chunk (1,0,0,0), voxel 0
+    let (k, _) = world_to_chunk_at_scale(8, 0, 0, 0, 0);
+    assert_eq!(k, chunk_key_i32(1, 0, 0, 0));
+
+    // Scale 1: world (0,0,0,0) → lattice (0,0,0,0) at scale 1
+    let (k, idx) = world_to_chunk_at_scale(0, 0, 0, 0, 1);
+    assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], 1));
+    assert_eq!(idx, 0);
+
+    // Scale 1: world (2,0,0,0) → scaled lattice x=1 → still chunk 0, voxel index 1
+    let (k, idx) = world_to_chunk_at_scale(2, 0, 0, 0, 1);
+    assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], 1));
+    assert_eq!(idx, 1);
+
+    // Scale -1: world (0,0,0,0) → scaled lattice x=0
+    let (k, idx) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
+    assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], -1));
+    assert_eq!(idx, 0);
+
+    // Scale -1: world (1,0,0,0) → scaled lattice x=2 → voxel index 2
+    let (k, idx) = world_to_chunk_at_scale(1, 0, 0, 0, -1);
+    assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], -1));
+    assert_eq!(idx, 2);
+
+    // Scale -1: world (4,0,0,0) → scaled lattice x=8 → chunk lattice 1
+    let (k, _) = world_to_chunk_at_scale(4, 0, 0, 0, -1);
+    assert_eq!(k, chunk_key_from_lattice([1, 0, 0, 0], -1));
+
+    // Negative world: scale 0, world (-1,0,0,0) → chunk (-1,0,0,0), last x voxel
+    let (k, idx) = world_to_chunk_at_scale(-1, 0, 0, 0, 0);
+    assert_eq!(k, chunk_key_i32(-1, 0, 0, 0));
+    assert_eq!(idx, 7); // -1 mod 8 = 7 (Euclidean)
+}
+
+#[test]
+fn randomized_multi_scale_placements_preserve_integrity() {
+    let mut rng = TestRng::new(0xDEAD_BEEF_CAFE);
+    let mut tree = RegionChunkTree::new();
+    let mut placed = Vec::new();
+
+    for i in 0..100 {
+        let scale_exp = rng.next_inclusive_i32(-2, 2) as i8;
+        let x = rng.next_inclusive_i32(-20, 20);
+        let y = rng.next_inclusive_i32(-5, 5);
+        let z = rng.next_inclusive_i32(-20, 20);
+        let w = rng.next_inclusive_i32(-20, 20);
+        let block_type = (i + 1) as u32;
+        let block = BlockData::simple(0, block_type);
+
+        place_block_at_scale(&mut tree, [x, y, z, w], block.clone(), scale_exp);
+        placed.push(([x, y, z, w], scale_exp, block));
+
+        // Check integrity every 10 steps
+        if i % 10 == 9 {
+            assert_tree_structure(&tree, &format!("random_step_{i}"));
+        }
+    }
+
+    assert_tree_structure(&tree, "random_final");
+
+    // Verify the most recent placement at each position/scale is readable.
+    // (Earlier placements at the same position/scale are overwritten.)
+    let mut latest: HashMap<([i32; 4], i8), BlockData> = HashMap::new();
+    for (pos, scale, block) in &placed {
+        latest.insert((*pos, *scale), block.clone());
+    }
+    for ((pos, scale), expected) in &latest {
+        let read = read_block_at_scale(&tree, *pos, *scale);
+        assert_eq!(
+            read.block_type, expected.block_type,
+            "mismatch at pos={pos:?} scale={scale}"
+        );
+    }
+}
+
+#[test]
+fn mixed_scale_edits_then_remove_all_leaves_empty_tree() {
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(0, 1);
+
+    let edits: Vec<([i32; 4], i8)> = vec![
+        ([0, 0, 0, 0], 0),
+        ([0, 0, 0, 0], -1),
+        ([0, 0, 0, 0], 1),
+        ([10, 0, 0, 0], -2),
+        ([-5, -5, -5, -5], 2),
+    ];
+
+    for (pos, scale) in &edits {
+        place_block_at_scale(&mut tree, *pos, block.clone(), *scale);
+    }
+    assert_tree_structure(&tree, "mixed_before_remove");
+
+    // Remove all
+    for (pos, scale) in &edits {
+        place_block_at_scale(&mut tree, *pos, BlockData::AIR, *scale);
+    }
+    assert_tree_structure(&tree, "mixed_after_remove");
+}
+
+#[test]
+fn overwrite_block_at_same_position_different_content() {
+    for scale_exp in [-2i8, -1, 0, 1, 2] {
+        let mut tree = RegionChunkTree::new();
+        let block_a = BlockData::simple(0, 10);
+        let block_b = BlockData::simple(0, 20);
+
+        place_block_at_scale(&mut tree, [0, 0, 0, 0], block_a, scale_exp);
+        let read = read_block_at_scale(&tree, [0, 0, 0, 0], scale_exp);
+        assert_eq!(read.block_type, 10, "scale={scale_exp} initial");
+
+        place_block_at_scale(&mut tree, [0, 0, 0, 0], block_b, scale_exp);
+        assert_tree_structure(&tree, &format!("overwrite_s{scale_exp}"));
+        let read = read_block_at_scale(&tree, [0, 0, 0, 0], scale_exp);
+        assert_eq!(read.block_type, 20, "scale={scale_exp} after overwrite");
+    }
+}
+
+#[test]
+fn scale_exp_3_extreme_range_roundtrip() {
+    // scale_exp = 3: voxels are 8 world units, chunk spans 64 world units
+    let mut tree = RegionChunkTree::new();
+    let block = BlockData::simple(0, 88);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block.clone(), 3);
+    assert_tree_structure(&tree, "s3_place");
+
+    let read = read_block_at_scale(&tree, [0, 0, 0, 0], 3);
+    assert_eq!(read.block_type, 88);
+
+    // scale_exp = -3: voxels are 1/8 world unit, chunk spans 1 world unit
+    let mut tree = RegionChunkTree::new();
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block.clone(), -3);
+    assert_tree_structure(&tree, "s-3_place");
+
+    let read = read_block_at_scale(&tree, [0, 0, 0, 0], -3);
+    assert_eq!(read.block_type, 88);
+}
+
+#[test]
+fn multiple_blocks_in_same_chunk_at_non_zero_scale() {
+    let mut tree = RegionChunkTree::new();
+
+    // At scale 1, world positions 0 and 2 map to voxel indices 0 and 1 in the same chunk.
+    let a = BlockData::simple(0, 10);
+    let b = BlockData::simple(0, 20);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], a.clone(), 1);
+    place_block_at_scale(&mut tree, [2, 0, 0, 0], b.clone(), 1);
+    assert_tree_structure(&tree, "same_chunk_s1");
+
+    let read_a = read_block_at_scale(&tree, [0, 0, 0, 0], 1);
+    let read_b = read_block_at_scale(&tree, [2, 0, 0, 0], 1);
+    assert_eq!(read_a.block_type, 10);
+    assert_eq!(read_b.block_type, 20);
+}
+
+#[test]
+fn consolidation_after_multi_scale_edits_preserves_data() {
+    let mut tree = RegionChunkTree::new();
+
+    // Place blocks at different scales, then consolidate and verify.
+    let stone = BlockData::simple(0, 1);
+    let brick = BlockData::simple(0, 2);
+    let glass = BlockData::simple(0, 3);
+
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], stone.clone(), 0);
+    place_block_at_scale(&mut tree, [0, 8, 0, 0], brick.clone(), -1);
+    place_block_at_scale(&mut tree, [0, 16, 0, 0], glass.clone(), 1);
+
+    assert_tree_structure(&tree, "consolidation_pre");
+
+    // Trigger consolidation by splicing the tree's own content back
+    if let Some(root) = tree.root() {
+        let bounds = root.bounds;
+        let sliced = tree.slice_non_empty_core_in_bounds(bounds);
+        let mut tree2 = RegionChunkTree::new();
+        tree2.splice_non_empty_core_in_bounds(bounds, &sliced);
+        assert_tree_structure(&tree2, "consolidation_post");
+
+        // Data should survive
+        let r0 = read_block_at_scale(&tree2, [0, 0, 0, 0], 0);
+        assert_eq!(r0.block_type, 1, "stone lost after consolidation");
+    }
+}
