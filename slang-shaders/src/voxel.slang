@@ -1284,11 +1284,18 @@ float4 applyTesseractOrientation(float4 pos, uint orientation)
     return r;
 }
 
-float4 voxelMaterialSampleCoords(float4 hitPos, float4 rayDir, float4 hitNormal, uint orientation)
+float4 voxelMaterialSampleCoords(float4 hitPos, float4 rayDir, float4 hitNormal, uint orientationPacked)
 {
+    // Bits 0-15: tesseract orientation, bits 24-31: scale_exp as signed i8.
+    uint orientation = orientationPacked & 0xFFFFu;
+    int rawScale = int(orientationPacked >> 24) & 0xFF;
+    int scaleExp = rawScale >= 128 ? rawScale - 256 : rawScale;
+    float voxelSize = exp2(float(scaleExp));
+
     // Sample from the entered voxel, then map the hit hyperface to 3D local
     // coordinates by dropping the normal axis.
-    float4 local = frac(hitPos + rayDir * 1e-4);
+    // Divide by voxelSize so that frac() wraps at voxel boundaries for any scale.
+    float4 local = frac(hitPos / voxelSize + rayDir * (1e-4 / voxelSize));
 
     // Apply block orientation to local coordinates (centered on voxel).
     local = applyTesseractOrientation(local - 0.5, orientation) + 0.5;
@@ -2500,7 +2507,7 @@ bool traceVoxelRayDDA(
                 float probeT = min(nodeExit, hitT + probeEps);
                 float4 probePos = rayOrigin + rayDir * probeT;
                 hitMaterial = uniformMaterial;
-                hitOrientation = leaf.uniformOrientation & 0xFFFFu;
+                hitOrientation = (leaf.uniformOrientation & 0xFFFFu) | (leaf.uniformOrientation & 0xFF000000u);
                 hitPos = rayOrigin + rayDir * hitT;
                 hitChunkCoord = int4(
                     entryChunkCoordScaled(probePos.x, rayDir.x, cellSize),
@@ -2619,7 +2626,7 @@ bool traceVoxelRayDDA(
                     if (uniformMaterial != 0u)
                     {
                         hitMaterial = uniformMaterial;
-                        hitOrientation = uniformChunkOrientation;
+                        hitOrientation = uniformChunkOrientation | (leaf.uniformOrientation & 0xFF000000u);
                         hitPos = rayOrigin + rayDir * currentT;
                         hitChunkCoord = chunkCoord;
                         hitLodLevel = targetLodLevel;
@@ -2676,7 +2683,7 @@ bool traceVoxelRayDDA(
                                 chunkHitChunkCoord))
                             {
                                 hitMaterial = chunkMaterial;
-                                hitOrientation = chunkOrientation;
+                                hitOrientation = chunkOrientation | (leaf.uniformOrientation & 0xFF000000u);
                                 hitPos = chunkHitPos;
                                 hitChunkCoord = chunkHitChunkCoord;
                                 hitLodLevel = targetLodLevel;

@@ -426,6 +426,88 @@ impl App {
             });
     }
 
+    pub(super) fn draw_egui_scale_selector(&mut self, ctx: &egui::Context) {
+        let screen_rect = ctx.content_rect();
+        let slot_size = 80.0;
+        let center_x = screen_rect.width() / 2.0;
+        let hotbar_bottom = screen_rect.height() - 65.0;
+
+        let scale = self.selected_block.scale_exp;
+        let label = match scale {
+            0 => "Scale: 0 (1×)".to_string(),
+            s if s > 0 => format!("Scale: {s} ({}×)", 1 << s),
+            s => format!("Scale: {s} (1/{}×)", 1 << -s),
+        };
+
+        let widget_width = 160.0;
+        let widget_height = 28.0;
+        let widget_x = center_x - widget_width / 2.0;
+        let widget_y = hotbar_bottom + 4.0;
+
+        egui::Area::new(egui::Id::new("scale_selector"))
+            .fixed_pos(egui::pos2(widget_x, widget_y))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(widget_width, widget_height),
+                    egui::Sense::hover(),
+                );
+
+                // Background
+                let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140);
+                ui.painter().rect_filled(rect, 4.0, bg);
+
+                let text_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200);
+                let arrow_color = egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180);
+                let arrow_hover = egui::Color32::from_rgb(255, 255, 100);
+                let font = egui::FontId::proportional(14.0);
+                let arrow_font = egui::FontId::proportional(18.0);
+
+                // Center label
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &label,
+                    font,
+                    text_color,
+                );
+
+                // Left arrow button
+                let left_rect = egui::Rect::from_min_size(
+                    rect.left_top(),
+                    egui::vec2(28.0, widget_height),
+                );
+                let left_resp = ui.interact(left_rect, egui::Id::new("scale_left"), egui::Sense::click());
+                ui.painter().text(
+                    left_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "◀",
+                    arrow_font.clone(),
+                    if left_resp.hovered() { arrow_hover } else { arrow_color },
+                );
+                if left_resp.clicked() {
+                    self.selected_block.scale_exp = (scale - 1).max(-3);
+                }
+
+                // Right arrow button
+                let right_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.right() - 28.0, rect.top()),
+                    egui::vec2(28.0, widget_height),
+                );
+                let right_resp = ui.interact(right_rect, egui::Id::new("scale_right"), egui::Sense::click());
+                ui.painter().text(
+                    right_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "▶",
+                    arrow_font,
+                    if right_resp.hovered() { arrow_hover } else { arrow_color },
+                );
+                if right_resp.clicked() {
+                    self.selected_block.scale_exp = (scale + 1).min(3);
+                }
+            });
+    }
+
     pub(super) fn draw_egui_teleport_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -789,6 +871,7 @@ impl App {
                     self.draw_egui_dev_console(ctx, &mut console_command, &mut close_console);
                 }
                 self.draw_egui_hotbar(ctx);
+                self.draw_egui_scale_selector(ctx);
                 self.draw_egui_waila(ctx);
             }
         });
