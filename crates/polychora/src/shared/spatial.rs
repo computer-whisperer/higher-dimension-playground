@@ -49,19 +49,6 @@ impl Aabb4 {
         Some(extents)
     }
 
-    /// Backward-compatible version that assumes scale_exp = 0.
-    pub fn chunk_extents(&self) -> Option<[usize; 4]> {
-        self.chunk_extents_at_scale(0)
-    }
-
-    pub fn chunk_cell_count(&self) -> Option<usize> {
-        let extents = self.chunk_extents()?;
-        extents[0]
-            .checked_mul(extents[1])?
-            .checked_mul(extents[2])?
-            .checked_mul(extents[3])
-    }
-
     pub fn chunk_cell_count_at_scale(&self, scale_exp: i8) -> Option<usize> {
         let extents = self.chunk_extents_at_scale(scale_exp)?;
         extents[0]

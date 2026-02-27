@@ -631,7 +631,7 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
         }
     }
 
-    ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+    ChunkArrayData::from_dense_indices_with_block_palette(
         intersection,
         chunk_array.chunk_palette.clone(),
         target_indices,
@@ -1084,16 +1084,16 @@ fn overlay_chunk_array_non_empty_cells<F>(
 
                     let pos = chunk_key_from_lattice([lx, ly, lz, lw], se);
                     let cell_bounds = Aabb4i::new(pos, pos);
-                    let Ok(mut cell_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
+                    let Ok(cell_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
                         cell_bounds,
                         vec![payload.clone()],
                         vec![0],
                         None,
                         chunk_array.block_palette.clone(),
+                        se,
                     ) else {
                         continue;
                     };
-                    cell_ca.scale_exp = se;
                     visit(&RegionTreeCore {
                         bounds: cell_bounds,
                         kind: RegionNodeKind::ChunkArray(cell_ca),
@@ -1857,7 +1857,7 @@ fn consolidate_chunk_array_children(
     }
 
     // Build the merged ChunkArray.
-    let Ok(merged_ca) = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+    let Ok(merged_ca) = ChunkArrayData::from_dense_indices_with_block_palette(
         combined_bounds,
         palette,
         dense_indices,
@@ -2087,7 +2087,7 @@ fn count_non_empty_chunks(kind: &RegionNodeKind, bounds: Aabb4i) -> usize {
             if block.is_air() {
                 0
             } else {
-                bounds.chunk_cell_count().unwrap_or(0)
+                bounds.chunk_cell_count_at_scale(0).unwrap_or(0)
             }
         }
         RegionNodeKind::ChunkArray(chunk_array) => {
@@ -2433,7 +2433,7 @@ fn non_empty_kinds_semantically_equal_in_bounds(
 ) -> bool {
     const MAX_COMPARE_CELLS: usize = 4096;
     if bounds
-        .chunk_cell_count()
+        .chunk_cell_count_at_scale(0)
         .map(|count| count > MAX_COMPARE_CELLS)
         .unwrap_or(true)
     {
@@ -2566,7 +2566,7 @@ fn repeated_payload_kind_resolved_at_scale(
         return RegionNodeKind::Empty;
     };
     let indices = vec![0u16; cell_count];
-    match ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+    match ChunkArrayData::from_dense_indices_with_block_palette(
         bounds,
         vec![resolved.payload],
         indices,

@@ -208,7 +208,7 @@ impl Scene {
                     if block.is_air() {
                         0
                     } else {
-                        core.bounds.chunk_cell_count().unwrap_or(0)
+                        core.bounds.chunk_cell_count_at_scale(0).unwrap_or(0)
                     }
                 }
                 RegionNodeKind::ChunkArray(chunk_array) => {

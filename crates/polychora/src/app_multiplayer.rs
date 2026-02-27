@@ -898,7 +898,7 @@ impl App {
         let Some(client) = self.multiplayer.as_ref() else {
             return;
         };
-        client.send(MultiplayerClientMessage::WorldChunkSampleRequest { request_id, chunk });
+        client.send(MultiplayerClientMessage::WorldChunkSampleRequest { request_id, chunk, scale_exp: 0 });
     }
 
     fn record_multiplayer_chunk_sample_diag_patch(
@@ -1415,8 +1415,8 @@ impl App {
                 authoritative_bounds.max,
                 patch_envelope_bounds.min,
                 patch_envelope_bounds.max,
-                authoritative_bounds.chunk_cell_count().unwrap_or(0),
-                patch_envelope_bounds.chunk_cell_count().unwrap_or(0),
+                authoritative_bounds.chunk_cell_count_at_scale(0).unwrap_or(0),
+                patch_envelope_bounds.chunk_cell_count_at_scale(0).unwrap_or(0),
                 scene_patch_stats.previous_non_empty,
                 scene_patch_stats.desired_non_empty,
                 scene_patch_stats.upserts,

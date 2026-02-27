@@ -331,6 +331,7 @@ impl MassivePlatformsWorldGenerator {
                 indices,
                 Some(0), // default = Empty (palette index 0)
                 block_palette,
+                0,
             ) {
                 Ok(ca) => ca,
                 Err(_) => continue,
@@ -395,6 +396,7 @@ impl MassivePlatformsWorldGenerator {
                 indices,
                 Some(0), // default = Empty (palette index 0)
                 block_palette,
+                0,
             ) {
                 Ok(ca) => ca,
                 Err(_) => continue,

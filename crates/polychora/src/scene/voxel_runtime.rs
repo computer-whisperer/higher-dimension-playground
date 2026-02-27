@@ -491,7 +491,7 @@ impl Scene {
             eprintln!("[vte-voxel-unsupported-scale] {}", message);
             return Err(message);
         }
-        let Some(leaf_extents) = leaf.bounds.chunk_extents() else {
+        let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(0) else {
             return Ok(Vec::new());
         };
         let src_indices = chunk_array
@@ -499,10 +499,10 @@ impl Scene {
             .map_err(|error| format!("decode chunk-array leaf failed: {error:?}"))?;
         let src_dims = chunk_array
             .bounds
-            .chunk_extents()
+            .chunk_extents_at_scale(0)
             .ok_or_else(|| "chunk-array source extents missing".to_string())?;
 
-        let mut encoded = Vec::<u32>::with_capacity(leaf.bounds.chunk_cell_count().unwrap_or(0));
+        let mut encoded = Vec::<u32>::with_capacity(leaf.bounds.chunk_cell_count_at_scale(0).unwrap_or(0));
         for w in 0..leaf_extents[3] {
             for z in 0..leaf_extents[2] {
                 for y in 0..leaf_extents[1] {
@@ -570,7 +570,7 @@ impl Scene {
                 continue;
             }
             let bounds = Aabb4i::from_i32(header.min_chunk_coord, header.max_chunk_coord);
-            let Some(cell_count) = bounds.chunk_cell_count() else {
+            let Some(cell_count) = bounds.chunk_cell_count_at_scale(0) else {
                 continue;
             };
             if cell_count == 0 {
@@ -895,7 +895,7 @@ impl Scene {
                         );
                         return None;
                     }
-                    let Some(leaf_extents) = leaf.bounds.chunk_extents() else {
+                    let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(0) else {
                         leaf_headers.push(GpuVoxelLeafHeader {
                             min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
                             max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
@@ -906,12 +906,12 @@ impl Scene {
                         });
                         continue;
                     };
-                    let leaf_cell_count = leaf.bounds.chunk_cell_count().unwrap_or(0);
+                    let leaf_cell_count = leaf.bounds.chunk_cell_count_at_scale(0).unwrap_or(0);
                     let entry_offset = leaf_chunk_entries.len() as u32;
                     leaf_chunk_entries.reserve(leaf_cell_count);
 
                     let src_indices = chunk_array.decode_dense_indices().ok();
-                    let src_dims = chunk_array.bounds.chunk_extents();
+                    let src_dims = chunk_array.bounds.chunk_extents_at_scale(0);
                     let mut palette_encoded_cache =
                         vec![None::<u32>; chunk_array.chunk_palette.len()];
 

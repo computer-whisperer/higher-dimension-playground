@@ -70,7 +70,7 @@ fn random_sub_bounds(rng: &mut TestRng, outer: Aabb4i) -> Aabb4i {
 
 fn linear_index_in_bounds(bounds: Aabb4i, key: ChunkKey) -> usize {
     let extents = bounds
-        .chunk_extents()
+        .chunk_extents_at_scale(0)
         .expect("bounds used in tests must be valid");
     let lx = (key[0] - bounds.min[0]).to_num::<i32>() as usize;
     let ly = (key[1] - bounds.min[1]).to_num::<i32>() as usize;
@@ -81,7 +81,7 @@ fn linear_index_in_bounds(bounds: Aabb4i, key: ChunkKey) -> usize {
 
 fn chunk_array_uniform_palette_core(bounds: Aabb4i, materials: &[u16]) -> RegionTreeCore {
     let expected_cells = bounds
-        .chunk_cell_count()
+        .chunk_cell_count_at_scale(0)
         .expect("bounds used in tests must be valid");
     assert_eq!(materials.len(), expected_cells);
 
@@ -122,6 +122,7 @@ fn chunk_array_uniform_palette_core(bounds: Aabb4i, materials: &[u16]) -> Region
         dense_indices,
         None,
         block_palette,
+        0,
     )
     .expect("chunk array must build");
     RegionTreeCore {
@@ -138,7 +139,7 @@ fn single_cell_chunk_array_core_with_scale(
 ) -> RegionTreeCore {
     let bounds = Aabb4i::new(key, key);
     let block_palette = vec![BlockData::AIR, BlockData::simple(0, material as u32)];
-    let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+    let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
         bounds,
         vec![ChunkPayload::Uniform(1)],
         vec![0],
@@ -702,6 +703,7 @@ fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
         vec![0, 1],
         None,
         block_palette,
+        0,
     )
     .expect("chunk array");
     let patch_core = RegionTreeCore {
@@ -1105,6 +1107,7 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
         vec![0u16],
         Some(0),
         block_palette_a,
+        0,
     )
     .unwrap();
     let a_core = RegionTreeCore {
@@ -1133,6 +1136,7 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
         vec![0u16],
         Some(0),
         block_palette_b,
+        0,
     )
     .unwrap();
     let b_core = RegionTreeCore {
@@ -1399,6 +1403,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_dense_siblings() {
         dense_indices,
         None,
         block_palette,
+        0,
     )
     .expect("chunk array must build");
 
@@ -1538,6 +1543,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
         save_dense_indices,
         None,
         save_block_palette,
+        0,
     )
     .expect("save chunk array must build");
     let save_core = RegionTreeCore {
@@ -1709,6 +1715,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
         save_dense_indices,
         None,
         save_block_palette,
+        0,
     )
     .expect("save chunk array must build");
     let save_core = RegionTreeCore {
@@ -3222,6 +3229,7 @@ fn procgen_splice_over_platform_uniform_preserves_integer_bounds() {
         indices,
         Some(0),
         vec![BlockData::AIR, wood.clone()],
+        0,
     )
     .expect("valid chunk array");
     let procgen_core = RegionTreeCore {
@@ -3299,6 +3307,7 @@ fn full_server_client_flow_with_procgen_no_fractional_bounds() {
             indices,
             Some(0),
             vec![BlockData::AIR, wood.clone()],
+            0,
         )
         .expect("valid chunk array");
         let core = RegionTreeCore {

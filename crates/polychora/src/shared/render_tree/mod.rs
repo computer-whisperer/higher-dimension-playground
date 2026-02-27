@@ -3,7 +3,7 @@ use crate::shared::region_tree::{
     collect_non_empty_chunks_from_core_in_bounds, validate_region_core_world_space_non_overlapping,
     ChunkKey, RegionNodeKind, RegionTreeCore,
 };
-use crate::shared::spatial::{Aabb4i, ChunkCoord};
+use crate::shared::spatial::{Aabb4i, ChunkCoord, fixed_from_lattice, lattice_from_fixed};
 use crate::shared::voxel::{BlockData, CHUNK_SIZE};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -156,10 +156,10 @@ pub fn repeated_voxel_leaf(bounds: Aabb4i, payload: ChunkPayload, block_palette:
             }
         }
         payload => {
-            let cell_count = bounds.chunk_cell_count()?;
+            let cell_count = bounds.chunk_cell_count_at_scale(0)?;
             let indices = vec![0u16; cell_count];
             let chunk_array =
-                ChunkArrayData::from_dense_indices_with_block_palette(bounds, vec![payload], indices, None, block_palette.to_vec()).ok()?;
+                ChunkArrayData::from_dense_indices_with_block_palette(bounds, vec![payload], indices, None, block_palette.to_vec(), 0).ok()?;
             Some(RenderTreeCore {
                 bounds,
                 kind: RenderNodeKind::VoxelChunkArray(chunk_array),
@@ -750,12 +750,13 @@ fn sample_chunkarray_payload_at_key(
     if !chunk_array.bounds.contains_chunk(key) {
         return None;
     }
-    let dims = chunk_array.bounds.chunk_extents()?;
+    let se = chunk_array.scale_exp;
+    let dims = chunk_array.bounds.chunk_extents_at_scale(se)?;
     let dense_indices = chunk_array.decode_dense_indices().ok()?;
-    let lx = (key[0] - chunk_array.bounds.min[0]).to_num::<i32>() as usize;
-    let ly = (key[1] - chunk_array.bounds.min[1]).to_num::<i32>() as usize;
-    let lz = (key[2] - chunk_array.bounds.min[2]).to_num::<i32>() as usize;
-    let lw = (key[3] - chunk_array.bounds.min[3]).to_num::<i32>() as usize;
+    let lx = lattice_from_fixed(key[0] - chunk_array.bounds.min[0], se) as usize;
+    let ly = lattice_from_fixed(key[1] - chunk_array.bounds.min[1], se) as usize;
+    let lz = lattice_from_fixed(key[2] - chunk_array.bounds.min[2], se) as usize;
+    let lw = lattice_from_fixed(key[3] - chunk_array.bounds.min[3], se) as usize;
     let linear = lx + dims[0] * (ly + dims[1] * (lz + dims[2] * lw));
     let palette_idx = *dense_indices.get(linear)? as usize;
     let payload = chunk_array.chunk_palette.get(palette_idx)?.clone();
@@ -917,14 +918,15 @@ fn slice_chunk_array_kind_to_bounds(
         return Ok(None);
     }
 
-    let Some(src_dims) = chunk_array.bounds.chunk_extents() else {
+    let se = chunk_array.scale_exp;
+    let Some(src_dims) = chunk_array.bounds.chunk_extents_at_scale(se) else {
         return Ok(None);
     };
-    let Some(piece_dims) = bounds.chunk_extents() else {
+    let Some(piece_dims) = bounds.chunk_extents_at_scale(se) else {
         return Ok(None);
     };
     let piece_cell_count = bounds
-        .chunk_cell_count()
+        .chunk_cell_count_at_scale(se)
         .ok_or_else(|| "piece chunk count overflow".to_string())?;
     let mut piece_indices = Vec::<u16>::with_capacity(piece_cell_count);
     let palette_non_empty: Vec<bool> = chunk_array
@@ -939,15 +941,15 @@ fn slice_chunk_array_kind_to_bounds(
             for y in 0..piece_dims[1] {
                 for x in 0..piece_dims[0] {
                     let src_coord = [
-                        bounds.min[0] + ChunkCoord::from_num(x as i32),
-                        bounds.min[1] + ChunkCoord::from_num(y as i32),
-                        bounds.min[2] + ChunkCoord::from_num(z as i32),
-                        bounds.min[3] + ChunkCoord::from_num(w as i32),
+                        bounds.min[0] + fixed_from_lattice(x as i32, se),
+                        bounds.min[1] + fixed_from_lattice(y as i32, se),
+                        bounds.min[2] + fixed_from_lattice(z as i32, se),
+                        bounds.min[3] + fixed_from_lattice(w as i32, se),
                     ];
-                    let lx = (src_coord[0] - chunk_array.bounds.min[0]).to_num::<i32>() as usize;
-                    let ly = (src_coord[1] - chunk_array.bounds.min[1]).to_num::<i32>() as usize;
-                    let lz = (src_coord[2] - chunk_array.bounds.min[2]).to_num::<i32>() as usize;
-                    let lw = (src_coord[3] - chunk_array.bounds.min[3]).to_num::<i32>() as usize;
+                    let lx = lattice_from_fixed(src_coord[0] - chunk_array.bounds.min[0], se) as usize;
+                    let ly = lattice_from_fixed(src_coord[1] - chunk_array.bounds.min[1], se) as usize;
+                    let lz = lattice_from_fixed(src_coord[2] - chunk_array.bounds.min[2], se) as usize;
+                    let lw = lattice_from_fixed(src_coord[3] - chunk_array.bounds.min[3], se) as usize;
                     let src_linear =
                         lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
                     let Some(&palette_index) = source_indices.get(src_linear) else {
@@ -970,15 +972,15 @@ fn slice_chunk_array_kind_to_bounds(
         return Ok(None);
     }
 
-    let mut piece_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+    let piece_chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
         bounds,
         chunk_array.chunk_palette.clone(),
         piece_indices,
         None,
         chunk_array.block_palette.clone(),
+        se,
     )
     .map_err(|error| format!("slice chunk-array piece failed: {error:?}"))?;
-    piece_chunk_array.scale_exp = chunk_array.scale_exp;
     Ok(Some(RenderLeafKind::VoxelChunkArray(piece_chunk_array)))
 }
 
@@ -1341,7 +1343,8 @@ fn collect_non_empty_chunkarray_chunk_keys_in_bounds(
     let Some(clipped_bounds) = intersect_bounds(bounds, chunk_array.bounds) else {
         return;
     };
-    let Some(dims) = chunk_array.bounds.chunk_extents() else {
+    let se = chunk_array.scale_exp;
+    let Some(dims) = chunk_array.bounds.chunk_extents_at_scale(se) else {
         return;
     };
     let Ok(indices) = chunk_array.decode_dense_indices() else {
@@ -1357,19 +1360,19 @@ fn collect_non_empty_chunkarray_chunk_keys_in_bounds(
         .map(|p| chunk_payload_has_solid_material_in_context(p, &chunk_array.block_palette))
         .collect();
 
-    let (cb_min, cb_max) = clipped_bounds.to_lattice_bounds(0);
+    let (cb_min, cb_max) = clipped_bounds.to_lattice_bounds(se);
     for iw in cb_min[3]..=cb_max[3] {
         for iz in cb_min[2]..=cb_max[2] {
             for iy in cb_min[1]..=cb_max[1] {
                 for ix in cb_min[0]..=cb_max[0] {
-                    let x = ChunkCoord::from_num(ix);
-                    let y = ChunkCoord::from_num(iy);
-                    let z = ChunkCoord::from_num(iz);
-                    let w = ChunkCoord::from_num(iw);
-                    let lx = (x - chunk_array.bounds.min[0]).to_num::<i32>() as usize;
-                    let ly = (y - chunk_array.bounds.min[1]).to_num::<i32>() as usize;
-                    let lz = (z - chunk_array.bounds.min[2]).to_num::<i32>() as usize;
-                    let lw = (w - chunk_array.bounds.min[3]).to_num::<i32>() as usize;
+                    let x = fixed_from_lattice(ix, se);
+                    let y = fixed_from_lattice(iy, se);
+                    let z = fixed_from_lattice(iz, se);
+                    let w = fixed_from_lattice(iw, se);
+                    let lx = lattice_from_fixed(x - chunk_array.bounds.min[0], se) as usize;
+                    let ly = lattice_from_fixed(y - chunk_array.bounds.min[1], se) as usize;
+                    let lz = lattice_from_fixed(z - chunk_array.bounds.min[2], se) as usize;
+                    let lw = lattice_from_fixed(w - chunk_array.bounds.min[3], se) as usize;
                     let linear = lx + dims[0] * (ly + dims[1] * (lz + dims[2] * lw));
                     let Some(&palette_index) = indices.get(linear) else {
                         continue;
@@ -1555,6 +1558,7 @@ mod tests {
             vec![0],
             None,
             block_palette,
+            0,
         )
         .expect("chunk array");
         let core = RenderTreeCore {
@@ -1587,6 +1591,7 @@ mod tests {
             vec![1, 0],
             None,
             block_palette,
+            0,
         )
         .expect("chunk array");
         let core = RenderTreeCore {
@@ -1642,7 +1647,7 @@ mod tests {
         // scale-(-1) lattice [1,0,0,0] = fixed [0.5, 0, 0, 0] — overlaps coarse [0,0,0,0]
         let fine_key = chunk_key_from_lattice([1, 0, 0, 0], -1);
         let fine_bounds = Aabb4i::new(fine_key, fine_key);
-        let coarse = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+        let coarse = ChunkArrayData::from_dense_indices_with_block_palette(
             coarse_bounds,
             vec![ChunkPayload::Uniform(1)],
             vec![0],
@@ -1651,7 +1656,7 @@ mod tests {
             0,
         )
         .expect("coarse chunk array");
-        let fine = ChunkArrayData::from_dense_indices_with_block_palette_and_scale(
+        let fine = ChunkArrayData::from_dense_indices_with_block_palette(
             fine_bounds,
             vec![ChunkPayload::Uniform(1)],
             vec![0],
@@ -1683,11 +1688,13 @@ mod tests {
     fn sample_chunk_payloads_from_bvh_reads_uniform_and_chunk_array_leaves() {
         let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
         let chunk_array_bounds = Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]);
-        let chunk_array = ChunkArrayData::from_dense_indices(
+        let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
             chunk_array_bounds,
             vec![ChunkPayload::Uniform(11)],
             vec![0],
             None,
+            vec![BlockData::AIR],
+            0,
         )
         .expect("chunk array");
         let core = RenderTreeCore {

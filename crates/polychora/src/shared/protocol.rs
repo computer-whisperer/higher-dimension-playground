@@ -141,6 +141,8 @@ pub enum ClientMessage {
     WorldChunkSampleRequest {
         request_id: u64,
         chunk: [i32; 4],
+        #[serde(default)]
+        scale_exp: i8,
     },
     Ping {
         nonce: u64,

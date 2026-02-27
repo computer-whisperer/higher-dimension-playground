@@ -278,40 +278,7 @@ impl fmt::Display for ChunkArrayCodecError {
 impl std::error::Error for ChunkArrayCodecError {}
 
 impl ChunkArrayData {
-    pub fn from_dense_indices(
-        bounds: Aabb4i,
-        chunk_palette: Vec<ChunkPayload>,
-        dense_indices: Vec<u16>,
-        default_chunk_idx: Option<u16>,
-    ) -> Result<Self, ChunkArrayCodecError> {
-        Self::from_dense_indices_with_block_palette_and_scale(
-            bounds,
-            chunk_palette,
-            dense_indices,
-            default_chunk_idx,
-            vec![BlockData::AIR],
-            0,
-        )
-    }
-
     pub fn from_dense_indices_with_block_palette(
-        bounds: Aabb4i,
-        chunk_palette: Vec<ChunkPayload>,
-        dense_indices: Vec<u16>,
-        default_chunk_idx: Option<u16>,
-        block_palette: Vec<BlockData>,
-    ) -> Result<Self, ChunkArrayCodecError> {
-        Self::from_dense_indices_with_block_palette_and_scale(
-            bounds,
-            chunk_palette,
-            dense_indices,
-            default_chunk_idx,
-            block_palette,
-            0,
-        )
-    }
-
-    pub fn from_dense_indices_with_block_palette_and_scale(
         bounds: Aabb4i,
         chunk_palette: Vec<ChunkPayload>,
         dense_indices: Vec<u16>,

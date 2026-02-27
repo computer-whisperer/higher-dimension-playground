@@ -229,7 +229,7 @@ fn split_bounds_for_streaming(
     let mut out = Vec::<Aabb4i>::new();
     let mut stack = vec![bounds];
     while let Some(current) = stack.pop() {
-        let Some(cell_count) = current.chunk_cell_count() else {
+        let Some(cell_count) = current.chunk_cell_count_at_scale(0) else {
             out.push(current);
             continue;
         };
@@ -527,8 +527,9 @@ fn apply_authoritative_voxel_edit(
     state: &mut ServerState,
     position: [i32; 4],
     block: BlockData,
+    scale_exp: i8,
 ) -> Option<crate::shared::region_tree::ChunkKey> {
-    state.apply_world_voxel_edit(position, block)
+    state.apply_world_voxel_edit_at_scale(position, block, scale_exp)
 }
 
 fn flush_world_dirty_updates(state: &SharedState) -> usize {
@@ -580,7 +581,7 @@ pub(super) fn apply_creeper_explosion(
                             blast_center[3] + dw,
                         ];
                         if let Some(chunk_pos) =
-                            apply_authoritative_voxel_edit(state, pos, BlockData::AIR)
+                            apply_authoritative_voxel_edit(state, pos, BlockData::AIR, 0)
                         {
                             changed_chunks.insert(chunk_pos);
                         }
@@ -1260,9 +1261,10 @@ pub(super) fn handle_message(
             );
         }
         ClientMessage::SetVoxel { position, block } => {
+            let scale_exp = block.scale_exp;
             let _changed_chunk = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                apply_authoritative_voxel_edit(&mut guard, position, block)
+                apply_authoritative_voxel_edit(&mut guard, position, block, scale_exp)
             };
         }
         ClientMessage::SpawnEntity {
@@ -1292,7 +1294,7 @@ pub(super) fn handle_message(
         ClientMessage::WorldInterestUpdate { bounds } => {
             handle_world_interest_update(state, client_id, bounds);
         }
-        ClientMessage::WorldChunkSampleRequest { request_id, chunk } => {
+        ClientMessage::WorldChunkSampleRequest { request_id, chunk, scale_exp: _ } => {
             handle_world_chunk_sample_request(state, client_id, request_id, chunk);
         }
         ClientMessage::Ping { nonce } => {

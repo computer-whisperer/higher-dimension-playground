@@ -176,6 +176,15 @@ impl ServerState {
         self.world.apply_voxel_edit(position, block)
     }
 
+    pub(super) fn apply_world_voxel_edit_at_scale(
+        &mut self,
+        position: [i32; 4],
+        block: BlockData,
+        scale_exp: i8,
+    ) -> Option<ChunkKey> {
+        self.world.apply_voxel_edit_at_scale(position, block, scale_exp)
+    }
+
     pub(super) fn world_take_dirty_bounds(&mut self) -> Vec<Aabb4i> {
         self.world.take_dirty_bounds()
     }

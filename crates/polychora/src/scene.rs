@@ -467,7 +467,7 @@ impl Scene {
             }
             RegionNodeKind::ProceduralRef(_) => eprintln!("{indent}ProceduralRef {bounds_str}"),
             RegionNodeKind::ChunkArray(ca) => {
-                let cells = ca.bounds.chunk_cell_count().unwrap_or(0);
+                let cells = ca.bounds.chunk_cell_count_at_scale(ca.scale_exp).unwrap_or(0);
                 eprintln!("{indent}ChunkArray(cells={}, palette={}, scale={}) {bounds_str}",
                     cells, ca.chunk_palette.len(), ca.scale_exp);
             }
@@ -953,6 +953,7 @@ mod tests {
                 vec![0, 1],
                 None,
                 patch_block_palette,
+                0,
             )
             .expect("chunk array");
         let patch_core = RegionTreeCore {
@@ -1448,7 +1449,7 @@ mod tests {
             }
             RegionNodeKind::ProceduralRef(_) => format!("{prefix}ProceduralRef {bounds_str}\n"),
             RegionNodeKind::ChunkArray(ca) => {
-                let cells = ca.bounds.chunk_cell_count().unwrap_or(0);
+                let cells = ca.bounds.chunk_cell_count_at_scale(ca.scale_exp).unwrap_or(0);
                 format!("{prefix}ChunkArray(cells={}, palette_len={}, scale={}) {bounds_str}\n",
                     cells, ca.chunk_palette.len(), ca.scale_exp)
             }

@@ -4,7 +4,7 @@ use crate::shared::protocol::WorldBounds;
 use crate::shared::region_tree::{
     ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
-use crate::shared::spatial::{Aabb4i, ChunkCoord};
+use crate::shared::spatial::{Aabb4i, ChunkCoord, lattice_from_fixed};
 use crate::shared::voxel::{
     world_to_chunk, BaseWorldKind, BlockData, CHUNK_VOLUME,
 };
@@ -681,12 +681,13 @@ fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: ChunkKey) -> Op
         return None;
     }
     let dense_indices = chunk_array.decode_dense_indices().ok()?;
-    let extents = chunk_array.bounds.chunk_extents()?;
+    let se = chunk_array.scale_exp;
+    let extents = chunk_array.bounds.chunk_extents_at_scale(se)?;
     let local = [
-        (key_pos[0] - chunk_array.bounds.min[0]).to_num::<i32>() as usize,
-        (key_pos[1] - chunk_array.bounds.min[1]).to_num::<i32>() as usize,
-        (key_pos[2] - chunk_array.bounds.min[2]).to_num::<i32>() as usize,
-        (key_pos[3] - chunk_array.bounds.min[3]).to_num::<i32>() as usize,
+        lattice_from_fixed(key_pos[0] - chunk_array.bounds.min[0], se) as usize,
+        lattice_from_fixed(key_pos[1] - chunk_array.bounds.min[1], se) as usize,
+        lattice_from_fixed(key_pos[2] - chunk_array.bounds.min[2], se) as usize,
+        lattice_from_fixed(key_pos[3] - chunk_array.bounds.min[3], se) as usize,
     ];
     let linear = linear_cell_index(local, extents);
     let palette_idx = *dense_indices.get(linear)? as usize;
