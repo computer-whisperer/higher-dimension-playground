@@ -257,7 +257,8 @@ fn split_bounds_for_streaming(
             continue;
         }
 
-        let mid = current.min[split_axis] + (extents[split_axis] / two) - one;
+        let half_extent = (extents[split_axis] / two).floor();
+        let mid = current.min[split_axis] + half_extent - one;
         let mut left = current;
         let mut right = current;
         left.max[split_axis] = mid;
@@ -1526,4 +1527,40 @@ fn spawn_mob_entity(
         .entity_store
         .snapshot(allocated_id)
         .expect("spawned mob entity should exist in store")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::spatial::Aabb4i;
+
+    #[test]
+    fn split_bounds_for_streaming_produces_integer_bounds_with_odd_extents() {
+        // Bounds with odd extents on all axes -- the old code produced fractional
+        // split points because I48F16 division preserves the .5 remainder.
+        let bounds = Aabb4i::from_i32([-10, -5, -10, -10], [10, 5, 10, 10]);
+        let patches = split_bounds_for_streaming(bounds, 100, 256);
+        for (i, patch) in patches.iter().enumerate() {
+            for axis in 0..4 {
+                let min_frac = patch.min[axis].frac().to_bits();
+                let max_frac = patch.max[axis].frac().to_bits();
+                assert_eq!(
+                    min_frac, 0,
+                    "patch[{i}].min[{axis}] = {} has fractional part (bits={min_frac:#x})",
+                    patch.min[axis]
+                );
+                assert_eq!(
+                    max_frac, 0,
+                    "patch[{i}].max[{axis}] = {} has fractional part (bits={max_frac:#x})",
+                    patch.max[axis]
+                );
+            }
+            assert!(
+                patch.is_valid(),
+                "patch[{i}] is invalid: {:?}->{:?}",
+                patch.min,
+                patch.max
+            );
+        }
+    }
 }

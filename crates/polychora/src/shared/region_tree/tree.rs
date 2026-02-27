@@ -55,7 +55,7 @@ impl RegionChunkTree {
         scale_exp: i8,
     ) -> bool {
         let payload = resolved.map(|r| canonicalize_resolved_payload(r));
-        let step = step_for_scale(scale_exp);
+        let chunk_step = step_for_scale(scale_exp);
         if self.root.is_none() {
             let Some(payload) = payload else {
                 return false;
@@ -66,7 +66,6 @@ impl RegionChunkTree {
                 kind: kind_from_resolved_value_at_scale(bounds, Some(payload), scale_exp),
                 generator_version_hash: 0,
             }));
-            self.warn_if_world_space_overlapping("set_chunk:init");
             return true;
         }
 
@@ -89,7 +88,10 @@ impl RegionChunkTree {
             let Some(root) = self.root.take() else {
                 break;
             };
-            self.root = Some(expand_root_once(root, key, step));
+            // Use the coarsest step between the new chunk and the existing tree
+            // so sibling boundaries stay on a grid compatible with all content.
+            let expand_step = chunk_step.max(step_for_kind(Some(&root.kind)));
+            self.root = Some(expand_root_once(root, key, expand_step));
         }
 
         let changed = if let Some(root) = self.root.as_mut() {
@@ -106,10 +108,6 @@ impl RegionChunkTree {
                 .unwrap_or(false)
         {
             self.root = None;
-        }
-
-        if changed {
-            self.warn_if_world_space_overlapping("set_chunk");
         }
 
         changed
@@ -239,9 +237,6 @@ impl RegionChunkTree {
         {
             self.root = None;
         }
-        if changed_bounds.is_some() {
-            self.warn_if_world_space_overlapping("lazy_drop_outside_bounds");
-        }
         changed_bounds
     }
 
@@ -262,7 +257,6 @@ impl RegionChunkTree {
                 return None;
             }
             self.root = Some(Box::new(replacement));
-            self.warn_if_world_space_overlapping("splice_non_empty:init");
             return Some(bounds);
         }
 
@@ -285,10 +279,6 @@ impl RegionChunkTree {
             self.root = None;
         }
 
-        if changed_bounds.is_some() {
-            self.warn_if_world_space_overlapping("splice_non_empty");
-        }
-
         changed_bounds
     }
 
@@ -309,7 +299,6 @@ impl RegionChunkTree {
                 return None;
             }
             self.root = Some(Box::new(replacement));
-            self.warn_if_world_space_overlapping("splice_core:init");
             return Some(bounds);
         }
 
@@ -330,10 +319,6 @@ impl RegionChunkTree {
             .unwrap_or(false)
         {
             self.root = None;
-        }
-
-        if changed_bounds.is_some() {
-            self.warn_if_world_space_overlapping("splice_core");
         }
 
         changed_bounds
@@ -406,14 +391,6 @@ impl RegionChunkTree {
         }
     }
 
-    fn warn_if_world_space_overlapping(&self, op: &str) {
-        let Some(root) = self.root.as_ref() else {
-            return;
-        };
-        if let Err(error) = validate_region_core_world_space_non_overlapping(root.as_ref()) {
-            eprintln!("[region-tree-scale-overlap] BUG: op={} produced overlap: {}", op, error);
-        }
-    }
 }
 
 pub fn validate_region_core_world_space_non_overlapping(
@@ -727,7 +704,9 @@ fn splice_node_with_non_empty_core(
         RegionNodeKind::Branch(_) | RegionNodeKind::ChunkArray(_)
     ) {
         let existing_slice = slice_non_empty_region_core_in_bounds(node, intersection);
-        if existing_slice.kind == replacement_slice.kind {
+        if existing_slice.kind == replacement_slice.kind
+            && existing_slice.bounds == replacement_slice.bounds
+        {
             return None;
         }
     }
@@ -749,7 +728,28 @@ fn splice_node_with_non_empty_core(
         return Some(node.bounds);
     }
 
+    // Save original bounds: clear_node_region may shrink them via normalize,
+    // but insert needs the full extent to place replacement data correctly.
+    let original_bounds = node.bounds;
     let mut changed = clear_node_region(node, intersection);
+    if node.bounds != original_bounds {
+        // Normalize inside clear shrunk the node (single-child collapse).
+        // Re-wrap so the node keeps its original spatial extent.
+        let gen_hash = node.generator_version_hash;
+        if matches!(node.kind, RegionNodeKind::Empty) {
+            node.bounds = original_bounds;
+        } else {
+            let inner = std::mem::replace(
+                node,
+                RegionTreeCore {
+                    bounds: original_bounds,
+                    kind: RegionNodeKind::Empty,
+                    generator_version_hash: gen_hash,
+                },
+            );
+            node.kind = RegionNodeKind::Branch(vec![inner]);
+        }
+    }
     if !matches!(replacement_slice.kind, RegionNodeKind::Empty) {
         changed |= insert_replacement_slice_into_node(node, replacement_slice);
     }
@@ -781,7 +781,24 @@ fn splice_node_with_core(
         return Some(node.bounds);
     }
 
+    let original_bounds = node.bounds;
     let mut changed = clear_node_region(node, intersection);
+    if node.bounds != original_bounds {
+        let gen_hash = node.generator_version_hash;
+        if matches!(node.kind, RegionNodeKind::Empty) {
+            node.bounds = original_bounds;
+        } else {
+            let inner = std::mem::replace(
+                node,
+                RegionTreeCore {
+                    bounds: original_bounds,
+                    kind: RegionNodeKind::Empty,
+                    generator_version_hash: gen_hash,
+                },
+            );
+            node.kind = RegionNodeKind::Branch(vec![inner]);
+        }
+    }
     if !matches!(replacement_slice.kind, RegionNodeKind::Empty) {
         changed |= insert_replacement_slice_into_node(node, replacement_slice);
     }
@@ -1091,10 +1108,15 @@ fn overlay_chunk_array_non_empty_cells<F>(
 fn step_for_kind(kind: Option<&RegionNodeKind>) -> ChunkCoord {
     match kind {
         Some(RegionNodeKind::ChunkArray(ca)) => step_for_scale(ca.scale_exp),
+        // Use MAX of children's steps so split/carve boundaries land on the
+        // coarsest grid. Every fine grid is a superset of the coarse grid, so
+        // coarse boundaries are always valid for fine-grid children. Using MIN
+        // would create fractional boundaries that corrupt coarse-grid siblings
+        // (e.g. Uniform nodes gaining half-integer bounds).
         Some(RegionNodeKind::Branch(children)) => children
             .iter()
             .map(|c| step_for_kind(Some(&c.kind)))
-            .min()
+            .max()
             .unwrap_or(step_for_scale(0)),
         _ => step_for_scale(0),
     }
@@ -1141,11 +1163,18 @@ fn subtract_aabb(outer: Aabb4i, inner: Aabb4i, step: ChunkCoord) -> Vec<Aabb4i> 
     let mut pieces = Vec::with_capacity(8);
     let mut core = outer;
 
+    let step_bits = step.to_bits();
     for axis in 0..4 {
         if core.min[axis] < inner.min[axis] {
             let mut piece = core;
             piece.max[axis] = inner.min[axis] - step;
             if piece.is_valid() {
+                debug_assert!(
+                    step_bits != 0 && piece.max[axis].to_bits() % step_bits == 0,
+                    "subtract_aabb: piece max[{axis}]={} not on step={step} lattice \
+                     (outer={outer:?} inner={inner:?})",
+                    piece.max[axis],
+                );
                 pieces.push(piece);
             }
             core.min[axis] = inner.min[axis];
@@ -1154,6 +1183,12 @@ fn subtract_aabb(outer: Aabb4i, inner: Aabb4i, step: ChunkCoord) -> Vec<Aabb4i> 
             let mut piece = core;
             piece.min[axis] = inner.max[axis] + step;
             if piece.is_valid() {
+                debug_assert!(
+                    step_bits != 0 && piece.min[axis].to_bits() % step_bits == 0,
+                    "subtract_aabb: piece min[{axis}]={} not on step={step} lattice \
+                     (outer={outer:?} inner={inner:?})",
+                    piece.min[axis],
+                );
                 pieces.push(piece);
             }
             core.max[axis] = inner.max[axis];
@@ -1895,7 +1930,7 @@ fn normalize_chunk_node(node: &mut RegionTreeCore) {
     let merge_step = children
         .iter()
         .map(|c| step_for_kind(Some(&c.kind)))
-        .min()
+        .max()
         .unwrap_or(step_for_scale(0));
     if !branch_matches_split(node.bounds, children, merge_step) {
         // Only collapse two-child branches when they are the canonical binary partition
@@ -2669,10 +2704,22 @@ fn split_bounds_longest_axis(bounds: Aabb4i, step: ChunkCoord) -> Option<(Aabb4i
     let mut right_min = bounds.min;
     right_min[axis] = right_min_axis;
 
-    Some((
-        Aabb4i::new(bounds.min, left_max),
-        Aabb4i::new(right_min, bounds.max),
-    ))
+    let left = Aabb4i::new(bounds.min, left_max);
+    let right = Aabb4i::new(right_min, bounds.max);
+
+    // Verify split boundaries are on the step lattice.
+    debug_assert!(
+        left_max_axis.to_bits() % step_bits == 0,
+        "split_bounds_longest_axis: left_max[{axis}]={left_max_axis} not on step={step} lattice \
+         (bounds={bounds:?})",
+    );
+    debug_assert!(
+        right_min_axis.to_bits() % step_bits == 0,
+        "split_bounds_longest_axis: right_min[{axis}]={right_min_axis} not on step={step} lattice \
+         (bounds={bounds:?})",
+    );
+
+    Some((left, right))
 }
 
 fn sort_children_canonical(children: &mut [RegionTreeCore]) {

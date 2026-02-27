@@ -1086,4 +1086,53 @@ mod tests {
             }
         }
     }
+
+    /// Verify that placing the same block as the platform material is correctly
+    /// detected as a no-op (no dirty bounds produced).
+    #[test]
+    fn voxel_edit_same_as_platform_material_is_noop() {
+        let platform_material = BlockData::simple(0, 11);
+        let mut overlay = ServerWorldOverlay::from_chunk_payloads(
+            BaseWorldKind::MassivePlatforms {
+                material: platform_material.clone(),
+            },
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
+            1337,
+            false,
+            HashSet::new(),
+        );
+
+        // Edit within the platform, placing the same material.
+        let edit_pos = [-1, 0, -6, -4];
+        let changed = overlay.apply_voxel_edit(edit_pos, platform_material);
+        assert_eq!(changed, None, "placing same block as platform should be no-op");
+        assert!(overlay.take_dirty_bounds().is_empty());
+    }
+
+    /// Verify that placing a *different* block on the platform succeeds and
+    /// produces dirty bounds that a client can receive.
+    #[test]
+    fn voxel_edit_different_from_platform_material_produces_dirty_bounds() {
+        let mut overlay = ServerWorldOverlay::from_chunk_payloads(
+            BaseWorldKind::MassivePlatforms {
+                material: BlockData::simple(0, 11),
+            },
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
+            1337,
+            false,
+            HashSet::new(),
+        );
+
+        let edit_pos = [-1, 0, -6, -4];
+        let (edit_chunk_key, edit_voxel_idx) =
+            world_to_chunk(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3]);
+
+        // Place a different block.
+        let edit_block = BlockData::simple(0, 42);
+        let changed = overlay.apply_voxel_edit(edit_pos, edit_block.clone());
+        assert_eq!(changed, Some(edit_chunk_key));
+
+        let dirty_bounds = overlay.take_dirty_bounds();
+        assert!(!dirty_bounds.is_empty());
+    }
 }

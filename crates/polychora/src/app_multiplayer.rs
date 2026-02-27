@@ -1525,6 +1525,25 @@ impl App {
                     } else {
                         eprintln!("World ready: subtree patch received (no-op)");
                     }
+                    if std::env::var_os("R4D_DUMP_WORLD_TREE").is_some() {
+                        self.scene.dump_world_tree();
+                        // Also probe a few key positions
+                        for (label, wx, wy, wz, ww) in [
+                            ("origin floor", 0, -1, 0, 0),
+                            ("origin air", 0, 0, 0, 0),
+                            ("x=8 floor", 8, -1, 0, 0),
+                            ("x=16 floor", 16, -1, 0, 0),
+                            ("x=-8 floor", -8, -1, 0, 0),
+                            ("z=8 floor", 0, -1, 8, 0),
+                        ] {
+                            let block = self.scene.get_block_data(wx, wy, wz, ww);
+                            eprintln!(
+                                "[world-probe] {} ({},{},{},{}) = ns={} bt={} air={}",
+                                label, wx, wy, wz, ww,
+                                block.namespace, block.block_type, block.is_air()
+                            );
+                        }
+                    }
                 }
             }
             multiplayer::ServerMessage::WorldChunkSampleResponse {

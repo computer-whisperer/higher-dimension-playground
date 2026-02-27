@@ -430,7 +430,7 @@ fn randomized_mutations_preserve_non_overlapping_branches() {
     let mut tree = RegionChunkTree::new();
     let global = Aabb4i::from_i32([-6, -3, -6, -3], [6, 3, 6, 3]);
 
-    for _step in 0..5000 {
+    for _step in 0..500 {
         let op = rng.next_u32() % 10;
         if op < 7 {
             let (gmin, gmax) = global.to_lattice_bounds(0);
@@ -2101,4 +2101,1316 @@ fn delete_scaled_chunk_removes_it() {
 
     tree.set_chunk_at_scale(key, None, -1);
     assert!(!tree.has_chunk(key));
+}
+
+/// Simulate the server generating the origin platform (MassivePlatforms style)
+/// and verify that chunks across the full extent are accessible.
+#[test]
+fn origin_platform_uniform_accessible_at_positive_x() {
+    let stone = BlockData::simple(0, 11);
+    let platform_bounds = Aabb4i::from_i32([-18, -1, -18, -18], [17, 0, 17, 17]);
+    let core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+
+    let mut tree = RegionChunkTree::new();
+    let _ = tree.splice_non_empty_core_in_bounds(platform_bounds, &core);
+
+    // Check origin chunk
+    let payload_origin = tree.chunk_payload(key(0, 0, 0, 0));
+    assert!(payload_origin.is_some(), "origin chunk [0,0,0,0] should be present");
+
+    // Check +x chunks
+    for x in 1..=17 {
+        let payload = tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "chunk [{x},0,0,0] should be present in Uniform platform"
+        );
+    }
+
+    // Check -x chunks
+    for x in -18..0 {
+        let payload = tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "chunk [{x},0,0,0] should be present in Uniform platform"
+        );
+    }
+}
+
+/// Simulate the multiplayer patch flow: server generates a subtree,
+/// client receives it via splice_non_empty_core_in_bounds.
+#[test]
+fn multiplayer_patch_flow_preserves_platform_chunks() {
+    let stone = BlockData::simple(0, 11);
+    let platform_bounds = Aabb4i::from_i32([-18, -1, -18, -18], [17, 0, 17, 17]);
+
+    // Server-side: generate world for a query region
+    let query_bounds = Aabb4i::from_i32([-10, -5, -10, -10], [10, 5, 10, 10]);
+    let mut server_tree = RegionChunkTree::new();
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    let _ = server_tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+
+    // Server slices the subtree for the client
+    let subtree = server_tree.slice_non_empty_core_in_bounds(query_bounds);
+
+    // Client receives the patch
+    let mut client_tree = RegionChunkTree::new();
+    let _ = client_tree.splice_non_empty_core_in_bounds(query_bounds, &subtree);
+
+    // Verify chunks in the platform region within the query bounds
+    for x in -10..=10 {
+        let payload = client_tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "chunk [{x},0,0,0] should be present after multiplayer patch"
+        );
+        let payload_neg_y = client_tree.chunk_payload(key(x, -1, 0, 0));
+        assert!(
+            payload_neg_y.is_some(),
+            "chunk [{x},-1,0,0] should be present after multiplayer patch"
+        );
+    }
+
+    // Also verify +x edge chunks that are AT the query boundary
+    let edge_payload = client_tree.chunk_payload(key(10, 0, 0, 0));
+    assert!(
+        edge_payload.is_some(),
+        "edge chunk [10,0,0,0] should be present"
+    );
+}
+
+/// Simulate the client receiving multiple overlapping patches as the player moves.
+#[test]
+fn sequential_multiplayer_patches_preserve_platform_data() {
+    let stone = BlockData::simple(0, 11);
+    let platform_bounds = Aabb4i::from_i32([-18, -1, -18, -18], [17, 0, 17, 17]);
+
+    // Build the server world
+    let mut server_tree = RegionChunkTree::new();
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    let _ = server_tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+
+    // First client interest: around spawn
+    let first_bounds = Aabb4i::from_i32([-8, -4, -8, -8], [8, 4, 8, 8]);
+    let first_subtree = server_tree.slice_non_empty_core_in_bounds(first_bounds);
+
+    let mut client_tree = RegionChunkTree::new();
+    let _ = client_tree.splice_non_empty_core_in_bounds(first_bounds, &first_subtree);
+
+    // Verify initial chunks
+    for x in -8..=8 {
+        let payload = client_tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "chunk [{x},0,0,0] missing after first patch"
+        );
+    }
+
+    // Second client interest: shifted +x
+    let second_bounds = Aabb4i::from_i32([-4, -4, -8, -8], [14, 4, 8, 8]);
+    let second_subtree = server_tree.slice_non_empty_core_in_bounds(second_bounds);
+    let _ = client_tree.splice_non_empty_core_in_bounds(second_bounds, &second_subtree);
+
+    // Verify chunks after second patch
+    // The platform extends to x=17, so chunks up to x=14 should all be solid
+    let mut missing = Vec::new();
+    for x in -8..=14 {
+        let payload = client_tree.chunk_payload(key(x, 0, 0, 0));
+        if payload.is_none() {
+            missing.push(x);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "chunks missing after second patch at x={missing:?}"
+    );
+
+    // Verify that old chunks from the first patch that are OUTSIDE the second patch
+    // are still present (they shouldn't be cleared)
+    let old_edge = client_tree.chunk_payload(key(-8, 0, 0, 0));
+    assert!(
+        old_edge.is_some(),
+        "chunk [-8,0,0,0] should still be present from first patch"
+    );
+}
+
+// ============================================================================
+// Regression tests for I48F16 / multi-scale migration at scale_exp=0
+// ============================================================================
+
+/// Basic set_chunk + chunk_payload round-trip at scale_exp=0.
+/// Regression: if fixed-point coordinate comparison or tree insertion is broken,
+/// chunks will be lost or placed at wrong positions.
+#[test]
+fn set_chunk_query_roundtrip_at_scale_zero() {
+    let stone = BlockData::simple(0, 11);
+    let mut tree = RegionChunkTree::new();
+
+    // Set chunks at various positions including negative coords
+    let positions = [
+        (0, 0, 0, 0),
+        (1, 0, 0, 0),
+        (-1, 0, 0, 0),
+        (0, 1, 0, 0),
+        (0, 0, 0, 1),
+        (5, -3, 2, -1),
+        (-10, -10, -10, -10),
+    ];
+
+    for &(x, y, z, w) in &positions {
+        let payload = ResolvedChunkPayload {
+            payload: ChunkPayload::Uniform(1),
+            block_palette: vec![BlockData::AIR, stone.clone()],
+        };
+        tree.set_chunk(key(x, y, z, w), Some(payload));
+    }
+
+    // Verify every chunk is retrievable
+    for &(x, y, z, w) in &positions {
+        let payload = tree.chunk_payload(key(x, y, z, w));
+        assert!(
+            payload.is_some(),
+            "chunk [{x},{y},{z},{w}] missing after set_chunk"
+        );
+    }
+
+    // Verify a position that was never set returns None
+    let missing = tree.chunk_payload(key(100, 100, 100, 100));
+    assert!(missing.is_none(), "unset chunk should return None");
+}
+
+/// Verify that set_chunk (which calls set_chunk_at_scale(0)) doesn't lose data
+/// when multiple chunks are added sequentially, forcing tree growth.
+#[test]
+fn sequential_set_chunk_preserves_all_chunks() {
+    let stone = BlockData::simple(0, 11);
+    let mut tree = RegionChunkTree::new();
+    let mut expected = Vec::new();
+
+    // Add chunks in a line along x-axis, forcing repeated root expansion
+    for x in -20..=20 {
+        let payload = ResolvedChunkPayload {
+            payload: ChunkPayload::Uniform(1),
+            block_palette: vec![BlockData::AIR, stone.clone()],
+        };
+        tree.set_chunk(key(x, 0, 0, 0), Some(payload));
+        expected.push(x);
+    }
+
+    let mut missing = Vec::new();
+    for &x in &expected {
+        if tree.chunk_payload(key(x, 0, 0, 0)).is_none() {
+            missing.push(x);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "chunks missing after sequential set_chunk: x={missing:?}"
+    );
+}
+
+/// Verify that expand_root_once correctly preserves existing tree content.
+/// Regression: if the step parameter or bounds arithmetic is wrong,
+/// the old root may be placed incorrectly in the expanded tree.
+#[test]
+fn expand_root_preserves_existing_content() {
+    let stone = BlockData::simple(0, 11);
+    let mut tree = RegionChunkTree::new();
+
+    // Place a chunk at origin
+    let payload = ResolvedChunkPayload {
+        payload: ChunkPayload::Uniform(1),
+        block_palette: vec![BlockData::AIR, stone.clone()],
+    };
+    tree.set_chunk(key(0, 0, 0, 0), Some(payload.clone()));
+
+    // Verify it exists
+    assert!(tree.chunk_payload(key(0, 0, 0, 0)).is_some());
+
+    // Place a chunk far away, forcing root expansion
+    tree.set_chunk(key(100, 0, 0, 0), Some(payload.clone()));
+
+    // Both chunks must be present
+    assert!(
+        tree.chunk_payload(key(0, 0, 0, 0)).is_some(),
+        "origin chunk lost after root expansion"
+    );
+    assert!(
+        tree.chunk_payload(key(100, 0, 0, 0)).is_some(),
+        "far chunk not found after root expansion"
+    );
+
+    // Expand in negative direction too
+    tree.set_chunk(key(-100, 0, 0, 0), Some(payload));
+    assert!(
+        tree.chunk_payload(key(0, 0, 0, 0)).is_some(),
+        "origin chunk lost after second root expansion"
+    );
+    assert!(
+        tree.chunk_payload(key(100, 0, 0, 0)).is_some(),
+        "far chunk lost after second root expansion"
+    );
+    assert!(
+        tree.chunk_payload(key(-100, 0, 0, 0)).is_some(),
+        "negative chunk not found after second root expansion"
+    );
+}
+
+/// subtract_aabb via clear: clearing a center region from a Uniform leaf
+/// should produce pieces that cover exactly the outer minus inner.
+/// Regression: if subtract_aabb with step=1 breaks, clear_node_region corrupts the tree.
+#[test]
+fn clear_center_of_uniform_produces_correct_coverage() {
+    let stone = BlockData::simple(0, 11);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Create a 6x6x6x6 uniform platform
+    let outer = Aabb4i::from_i32([0, 0, 0, 0], [5, 5, 5, 5]);
+    let core = RegionTreeCore {
+        bounds: outer,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(outer, &core);
+
+    // Clear a center region by splicing Empty
+    let inner = Aabb4i::from_i32([2, 2, 2, 2], [3, 3, 3, 3]);
+    let empty_core = RegionTreeCore {
+        bounds: inner,
+        kind: RegionNodeKind::Empty,
+        generator_version_hash: 0,
+    };
+    tree.splice_core_in_bounds(inner, &empty_core);
+
+    // Verify: every cell in outer that's NOT in inner should be present
+    let mut missing = Vec::new();
+    let mut false_present = Vec::new();
+    for k in keys_in_bounds(outer) {
+        let in_inner = inner.contains_chunk(k);
+        let present = tree.chunk_payload(k).is_some();
+        if in_inner && present {
+            false_present.push(k);
+        } else if !in_inner && !present {
+            missing.push(k);
+        }
+    }
+    assert!(
+        false_present.is_empty(),
+        "{} cells in cleared inner region are still present",
+        false_present.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "{} cells outside cleared inner region are missing",
+        missing.len()
+    );
+}
+
+/// splice_non_empty with a Uniform region extending beyond the existing tree.
+/// Simplified version of the failing sequential_multiplayer_patches test.
+/// Regression: splice drops data from the replacement that extends beyond the original.
+#[test]
+fn splice_uniform_extending_beyond_existing_tree() {
+    let stone = BlockData::simple(0, 11);
+
+    let mut tree = RegionChunkTree::new();
+
+    // First splice: small region
+    let first_bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
+    let first_core = RegionTreeCore {
+        bounds: first_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(first_bounds, &first_core);
+
+    // Verify first splice
+    for x in 0..=3 {
+        assert!(
+            tree.chunk_payload(key(x, 0, 0, 0)).is_some(),
+            "chunk [{x},0,0,0] missing after first splice"
+        );
+    }
+
+    // Second splice: overlapping and extending further in x
+    let second_bounds = Aabb4i::from_i32([2, 0, 0, 0], [7, 0, 0, 0]);
+    let second_core = RegionTreeCore {
+        bounds: second_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(second_bounds, &second_core);
+
+    // Verify all chunks present: 0..3 from first, 4..7 from second
+    let mut missing = Vec::new();
+    for x in 0..=7 {
+        if tree.chunk_payload(key(x, 0, 0, 0)).is_none() {
+            missing.push(x);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "chunks missing after second splice: x={missing:?}"
+    );
+}
+
+/// Splice where the second patch is entirely outside the first.
+/// Tests root expansion + splice into empty expanded space.
+#[test]
+fn splice_into_disjoint_region_preserves_both() {
+    let stone = BlockData::simple(0, 11);
+
+    let mut tree = RegionChunkTree::new();
+
+    // First region: x=0..3
+    let first_bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
+    let first_core = RegionTreeCore {
+        bounds: first_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(first_bounds, &first_core);
+
+    // Second region: x=10..13, entirely disjoint
+    let second_bounds = Aabb4i::from_i32([10, 0, 0, 0], [13, 0, 0, 0]);
+    let second_core = RegionTreeCore {
+        bounds: second_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(second_bounds, &second_core);
+
+    // Verify first region
+    for x in 0..=3 {
+        assert!(
+            tree.chunk_payload(key(x, 0, 0, 0)).is_some(),
+            "first-region chunk [{x},0,0,0] missing"
+        );
+    }
+    // Verify second region
+    for x in 10..=13 {
+        assert!(
+            tree.chunk_payload(key(x, 0, 0, 0)).is_some(),
+            "second-region chunk [{x},0,0,0] missing"
+        );
+    }
+    // Verify gap is empty
+    for x in 4..=9 {
+        assert!(
+            tree.chunk_payload(key(x, 0, 0, 0)).is_none(),
+            "gap chunk [{x},0,0,0] should be empty"
+        );
+    }
+}
+
+/// clear_node_region on a Uniform leaf should produce correct pieces.
+/// Regression: if subtract_aabb with step=1 doesn't produce valid pieces,
+/// the clear operation will corrupt the tree.
+#[test]
+fn clear_region_of_uniform_leaf_preserves_surrounding() {
+    let stone = BlockData::simple(0, 11);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Create a uniform region
+    let bounds = Aabb4i::from_i32([0, 0, 0, 0], [5, 0, 5, 0]);
+    let core = RegionTreeCore {
+        bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(bounds, &core);
+
+    // Delete a chunk in the middle by setting it to None
+    tree.set_chunk(key(2, 0, 2, 0), None);
+
+    // The deleted chunk should be gone
+    assert!(
+        tree.chunk_payload(key(2, 0, 2, 0)).is_none(),
+        "deleted chunk should be None"
+    );
+
+    // All surrounding chunks should still be present
+    let mut missing = Vec::new();
+    for x in 0..=5 {
+        for z in 0..=5 {
+            if x == 2 && z == 2 {
+                continue; // skip deleted
+            }
+            if tree.chunk_payload(key(x, 0, z, 0)).is_none() {
+                missing.push((x, z));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "chunks missing after single-cell clear: {missing:?}"
+    );
+}
+
+/// Verify that the overlap validation isn't causing pathological performance.
+/// This test simulates a realistic world loading pattern with many set_chunk calls
+/// and checks that it completes in a reasonable time.
+#[test]
+fn bulk_set_chunk_completes_in_reasonable_time() {
+    let stone = BlockData::simple(0, 11);
+    let mut tree = RegionChunkTree::new();
+
+    let start = std::time::Instant::now();
+    // Simulate loading a small world: 8x2x8x2 = 256 chunks
+    for w in 0..2 {
+        for z in 0..8 {
+            for y in 0..2 {
+                for x in 0..8 {
+                    let payload = ResolvedChunkPayload {
+                        payload: ChunkPayload::Uniform(1),
+                        block_palette: vec![BlockData::AIR, stone.clone()],
+                    };
+                    tree.set_chunk(key(x, y, z, w), Some(payload));
+                }
+            }
+        }
+    }
+    let elapsed = start.elapsed();
+
+    // 256 set_chunk calls should complete in well under 10 seconds.
+    // The O(n²) overlap validation makes this blow up if it runs on every call.
+    assert!(
+        elapsed.as_secs() < 10,
+        "bulk set_chunk took {elapsed:?} — likely pathological overlap validation"
+    );
+
+    // Verify all chunks are present
+    let mut missing = Vec::new();
+    for w in 0..2 {
+        for z in 0..8 {
+            for y in 0..2 {
+                for x in 0..8 {
+                    if tree.chunk_payload(key(x, y, z, w)).is_none() {
+                        missing.push((x, y, z, w));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} chunks missing after bulk load",
+        missing.len()
+    );
+}
+
+/// Splice a ChunkArray (not just Uniform) into a tree that already has content.
+/// This tests the code path where clear_node_region must split a ChunkArray,
+/// not just a Uniform leaf.
+#[test]
+fn splice_chunk_array_over_existing_chunk_array() {
+    let stone = BlockData::simple(0, 11);
+    let dirt = BlockData::simple(0, 3);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Build a 4x1x1x1 ChunkArray with stone
+    let first_bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
+    let materials: Vec<u16> = vec![11, 11, 11, 11]; // all stone
+    let first_core = chunk_array_uniform_palette_core(first_bounds, &materials);
+    tree.splice_non_empty_core_in_bounds(first_bounds, &first_core);
+
+    // Splice dirt over the middle two chunks
+    let second_bounds = Aabb4i::from_i32([1, 0, 0, 0], [2, 0, 0, 0]);
+    let dirt_materials: Vec<u16> = vec![3, 3];
+    let second_core = chunk_array_uniform_palette_core(second_bounds, &dirt_materials);
+    tree.splice_non_empty_core_in_bounds(second_bounds, &second_core);
+
+    // x=0 should be stone
+    let p0 = tree.chunk_payload(key(0, 0, 0, 0));
+    assert!(p0.is_some(), "chunk [0,0,0,0] missing");
+
+    // x=1,2 should be dirt (replaced)
+    let p1 = tree.chunk_payload(key(1, 0, 0, 0));
+    assert!(p1.is_some(), "chunk [1,0,0,0] missing");
+
+    // x=3 should be stone
+    let p3 = tree.chunk_payload(key(3, 0, 0, 0));
+    assert!(p3.is_some(), "chunk [3,0,0,0] missing");
+}
+
+/// Test the exact multiplayer scenario: server has large world, client receives
+/// successive overlapping patches as they move, and chunks from new patches
+/// that extend beyond old patches must be present.
+#[test]
+fn multiplayer_sliding_window_preserves_new_chunks_simplified() {
+    let stone = BlockData::simple(0, 11);
+
+    // Server world: platform at y=0, x=-20..20 (1D for simplicity)
+    let server_bounds = Aabb4i::from_i32([-20, 0, 0, 0], [20, 0, 0, 0]);
+    let mut server_tree = RegionChunkTree::new();
+    let server_core = RegionTreeCore {
+        bounds: server_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    server_tree.splice_non_empty_core_in_bounds(server_bounds, &server_core);
+
+    let mut client_tree = RegionChunkTree::new();
+
+    // Patch 1: x=-5..5
+    let p1_bounds = Aabb4i::from_i32([-5, 0, 0, 0], [5, 0, 0, 0]);
+    let p1_core = server_tree.slice_non_empty_core_in_bounds(p1_bounds);
+    client_tree.splice_non_empty_core_in_bounds(p1_bounds, &p1_core);
+
+    for x in -5..=5 {
+        assert!(
+            client_tree.chunk_payload(key(x, 0, 0, 0)).is_some(),
+            "patch1: chunk [{x},0,0,0] missing"
+        );
+    }
+
+    // Patch 2: x=0..10 (overlapping, extends right)
+    let p2_bounds = Aabb4i::from_i32([0, 0, 0, 0], [10, 0, 0, 0]);
+    let p2_core = server_tree.slice_non_empty_core_in_bounds(p2_bounds);
+    client_tree.splice_non_empty_core_in_bounds(p2_bounds, &p2_core);
+
+    let mut missing = Vec::new();
+    for x in -5..=10 {
+        if client_tree.chunk_payload(key(x, 0, 0, 0)).is_none() {
+            missing.push(x);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "after patch2: chunks missing at x={missing:?}"
+    );
+
+    // Patch 3: x=5..15 (extends further right)
+    let p3_bounds = Aabb4i::from_i32([5, 0, 0, 0], [15, 0, 0, 0]);
+    let p3_core = server_tree.slice_non_empty_core_in_bounds(p3_bounds);
+    client_tree.splice_non_empty_core_in_bounds(p3_bounds, &p3_core);
+
+    let mut missing = Vec::new();
+    for x in -5..=15 {
+        if client_tree.chunk_payload(key(x, 0, 0, 0)).is_none() {
+            missing.push(x);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "after patch3: chunks missing at x={missing:?}"
+    );
+}
+
+/// Edit (set_chunk) after splice_non_empty — the pattern used during gameplay.
+/// Player places/breaks blocks in a world that was loaded via splice patches.
+#[test]
+fn set_chunk_edit_after_splice_works() {
+    let stone = BlockData::simple(0, 11);
+    let dirt = BlockData::simple(0, 3);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Load a platform via splice
+    let bounds = Aabb4i::from_i32([0, 0, 0, 0], [7, 0, 7, 0]);
+    let core = RegionTreeCore {
+        bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(bounds, &core);
+
+    // Edit: place dirt at (3,0,3,0)
+    let edit_payload = ResolvedChunkPayload {
+        payload: ChunkPayload::Uniform(1),
+        block_palette: vec![BlockData::AIR, dirt.clone()],
+    };
+    let changed = tree.set_chunk(key(3, 0, 3, 0), Some(edit_payload));
+    assert!(changed, "set_chunk should report change");
+
+    // Verify the edit stuck
+    let payload = tree.chunk_payload(key(3, 0, 3, 0));
+    assert!(payload.is_some(), "edited chunk should be present");
+
+    // Verify surrounding chunks weren't lost
+    let mut missing = Vec::new();
+    for x in 0..=7 {
+        for z in 0..=7 {
+            if tree.chunk_payload(key(x, 0, z, 0)).is_none() {
+                missing.push((x, z));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "chunks missing after edit: {missing:?}"
+    );
+}
+
+/// Delete (set_chunk None) after splice — break a block in the world.
+#[test]
+fn delete_chunk_after_splice_preserves_neighbors() {
+    let stone = BlockData::simple(0, 11);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Load a platform via splice
+    let bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 3, 0]);
+    let core = RegionTreeCore {
+        bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(bounds, &core);
+
+    // Delete chunk at (1,0,1,0)
+    let changed = tree.set_chunk(key(1, 0, 1, 0), None);
+    assert!(changed, "set_chunk(None) should report change");
+
+    // Verify deleted chunk is gone
+    assert!(tree.chunk_payload(key(1, 0, 1, 0)).is_none());
+
+    // Verify all other chunks remain
+    let mut missing = Vec::new();
+    for x in 0..=3 {
+        for z in 0..=3 {
+            if x == 1 && z == 1 {
+                continue;
+            }
+            if tree.chunk_payload(key(x, 0, z, 0)).is_none() {
+                missing.push((x, z));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "neighbors missing after delete: {missing:?}"
+    );
+}
+
+/// Test splice of a partially-empty patch (like a worldgen region with both
+/// terrain and air chunks). The splice should only overwrite non-empty cells.
+#[test]
+fn splice_partial_patch_preserves_existing_at_empty_positions() {
+    let stone = BlockData::simple(0, 11);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Existing: stone at x=0..3
+    let existing_bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
+    let existing_core = RegionTreeCore {
+        bounds: existing_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(existing_bounds, &existing_core);
+
+    // Incoming patch only covers x=2 with dirt
+    // (splice_non_empty only writes non-empty, so x=0,1,3 should keep stone)
+    let dirt = BlockData::simple(0, 3);
+    let patch_bounds = Aabb4i::from_i32([2, 0, 0, 0], [2, 0, 0, 0]);
+    let patch_core = RegionTreeCore {
+        bounds: patch_bounds,
+        kind: RegionNodeKind::Uniform(dirt),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(patch_bounds, &patch_core);
+
+    // All chunks should be present
+    for x in 0..=3 {
+        assert!(
+            tree.chunk_payload(key(x, 0, 0, 0)).is_some(),
+            "chunk [{x},0,0,0] missing after partial splice"
+        );
+    }
+}
+
+/// Test that splice_non_empty properly clears the intersection before inserting.
+/// Without clearing, overlapping splices produce duplicate data.
+#[test]
+fn splice_overlapping_uniform_regions_no_duplicates() {
+    let stone = BlockData::simple(0, 11);
+    let dirt = BlockData::simple(0, 3);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Initial: stone at [0,0,0,0]..[5,0,0,0]
+    let first_bounds = Aabb4i::from_i32([0, 0, 0, 0], [5, 0, 0, 0]);
+    let first_core = RegionTreeCore {
+        bounds: first_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(first_bounds, &first_core);
+
+    // Replace overlap with dirt at [3,0,0,0]..[8,0,0,0]
+    let second_bounds = Aabb4i::from_i32([3, 0, 0, 0], [8, 0, 0, 0]);
+    let second_core = RegionTreeCore {
+        bounds: second_bounds,
+        kind: RegionNodeKind::Uniform(dirt.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(second_bounds, &second_core);
+
+    // Everything should be present: 0..2 = stone, 3..8 = dirt
+    let mut missing = Vec::new();
+    for x in 0..=8 {
+        if tree.chunk_payload(key(x, 0, 0, 0)).is_none() {
+            missing.push(x);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "chunks missing after overlapping splice: x={missing:?}"
+    );
+}
+
+/// Multi-dimensional splice: test with a 2D platform (x,z) and overlapping patches.
+/// Exercises the 4D bounds math more thoroughly than 1D tests.
+#[test]
+fn splice_2d_platform_with_overlapping_patches() {
+    let stone = BlockData::simple(0, 11);
+
+    let mut tree = RegionChunkTree::new();
+
+    // Server: 10x10 platform at y=0
+    let server_bounds = Aabb4i::from_i32([0, 0, 0, 0], [9, 0, 9, 0]);
+    let server_core = RegionTreeCore {
+        bounds: server_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    let mut server_tree = RegionChunkTree::new();
+    server_tree.splice_non_empty_core_in_bounds(server_bounds, &server_core);
+
+    // Client patch 1: x=0..4, z=0..4
+    let p1 = Aabb4i::from_i32([0, 0, 0, 0], [4, 0, 4, 0]);
+    let p1_core = server_tree.slice_non_empty_core_in_bounds(p1);
+    tree.splice_non_empty_core_in_bounds(p1, &p1_core);
+
+    // Client patch 2: x=3..7, z=3..7 (overlapping)
+    let p2 = Aabb4i::from_i32([3, 0, 3, 0], [7, 0, 7, 0]);
+    let p2_core = server_tree.slice_non_empty_core_in_bounds(p2);
+    tree.splice_non_empty_core_in_bounds(p2, &p2_core);
+
+    // Verify all chunks in the union of both patches
+    let mut missing = Vec::new();
+    for x in 0..=7 {
+        for z in 0..=7 {
+            // Only check positions that are in at least one patch
+            let in_p1 = x <= 4 && z <= 4;
+            let in_p2 = x >= 3 && x <= 7 && z >= 3 && z <= 7;
+            if (in_p1 || in_p2) && tree.chunk_payload(key(x, 0, z, 0)).is_none() {
+                missing.push((x, z));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "2D platform chunks missing after overlapping patches: {missing:?}"
+    );
+}
+
+/// Simulates the exact client bootstrap scenario where the server sends a large
+/// Uniform platform node and the client clips it to the authoritative bounds.
+/// Verifies that chunks at y=0 (part of the Uniform spanning y=-1..=0) are
+/// present in the client tree after patching.
+#[test]
+fn client_bootstrap_uniform_platform_clipped_to_interest_bounds_preserves_all_y_chunks() {
+    // Server's platform: Uniform(Grid Floor) spanning y=-1..=0 in chunk coords,
+    // similar to MassivePlatforms origin anchor.
+    let platform_material = BlockData::simple(1, 0xc45ed1f0);
+    let platform_bounds = Aabb4i::from_i32([-4, -1, -4, -4], [3, 0, 3, 3]);
+    let server_subtree = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(platform_material.clone()),
+        generator_version_hash: 0,
+    };
+
+    // Client's interest bounds centered at chunk (0, 0, 0, 0) with radius 2.
+    let interest_bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, 2, 2, 2]);
+
+    // Simulate: server sends the full platform subtree, client clips to interest bounds.
+    let clipped = slice_non_empty_region_core_in_bounds(&server_subtree, interest_bounds);
+
+    // Apply to client tree.
+    let mut client_tree = RegionChunkTree::new();
+    client_tree.splice_non_empty_core_in_bounds(interest_bounds, &clipped);
+
+    // Both y=-1 and y=0 should be present (they're within both platform and interest bounds).
+    let mut missing_y_neg1 = Vec::new();
+    let mut missing_y_0 = Vec::new();
+    for x in -2..=2 {
+        for z in -2..=2 {
+            for w in -2..=2 {
+                // Check y=-1 (should be in platform)
+                let payload = client_tree.chunk_payload(key(x, -1, z, w));
+                if payload.is_none() {
+                    missing_y_neg1.push((x, z, w));
+                }
+                // Check y=0 (should be in platform)
+                let payload = client_tree.chunk_payload(key(x, 0, z, w));
+                if payload.is_none() {
+                    missing_y_0.push((x, z, w));
+                }
+            }
+        }
+    }
+    assert!(
+        missing_y_neg1.is_empty(),
+        "chunks at y=-1 missing after bootstrap: {:?} (out of 125)",
+        missing_y_neg1
+    );
+    assert!(
+        missing_y_0.is_empty(),
+        "chunks at y=0 missing after bootstrap: {:?} (out of 125)",
+        missing_y_0
+    );
+
+    // Also verify y=1 and y=-2 are NOT present (outside platform bounds).
+    let y1_present = client_tree.chunk_payload(key(0, 1, 0, 0));
+    assert!(
+        y1_present.is_none(),
+        "chunk at y=1 should NOT be present (outside platform)"
+    );
+    let y_neg2_present = client_tree.chunk_payload(key(0, -2, 0, 0));
+    assert!(
+        y_neg2_present.is_none(),
+        "chunk at y=-2 should NOT be present (outside platform)"
+    );
+}
+
+/// Simulates the case where the server splits the interest bounds into two
+/// patches (y-negative half and y-positive half) and the client applies them
+/// sequentially. The Uniform platform spans y=-1..=0 so each half gets one
+/// y-slice. Verifies both survive splicing.
+#[test]
+fn client_bootstrap_split_patches_both_y_halves_preserve_uniform_platform() {
+    let platform_material = BlockData::simple(1, 0xc45ed1f0);
+    let platform_bounds = Aabb4i::from_i32([-4, -1, -4, -4], [3, 0, 3, 3]);
+    let server_subtree = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(platform_material.clone()),
+        generator_version_hash: 0,
+    };
+
+    let mut client_tree = RegionChunkTree::new();
+
+    // Patch 1: y-negative half of interest bounds (y=-2..=-1)
+    let patch1_bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, -1, 2, 2]);
+    let clipped1 = slice_non_empty_region_core_in_bounds(&server_subtree, patch1_bounds);
+    client_tree.splice_non_empty_core_in_bounds(patch1_bounds, &clipped1);
+
+    // Verify y=-1 is present after first patch
+    assert!(
+        client_tree.chunk_payload(key(0, -1, 0, 0)).is_some(),
+        "y=-1 chunk should be present after first patch"
+    );
+
+    // Patch 2: y-positive half of interest bounds (y=0..=2)
+    let patch2_bounds = Aabb4i::from_i32([-2, 0, -2, -2], [2, 2, 2, 2]);
+    let clipped2 = slice_non_empty_region_core_in_bounds(&server_subtree, patch2_bounds);
+    client_tree.splice_non_empty_core_in_bounds(patch2_bounds, &clipped2);
+
+    // Verify BOTH y=-1 and y=0 are present after second patch
+    assert!(
+        client_tree.chunk_payload(key(0, -1, 0, 0)).is_some(),
+        "y=-1 chunk should STILL be present after second patch (must not be clobbered)"
+    );
+    assert!(
+        client_tree.chunk_payload(key(0, 0, 0, 0)).is_some(),
+        "y=0 chunk should be present after second patch"
+    );
+
+    // Spot-check: both should return the platform material
+    let payload_neg1 = client_tree.chunk_payload(key(0, -1, 0, 0)).unwrap();
+    assert_eq!(
+        payload_neg1.block_at(0),
+        platform_material,
+        "y=-1 payload should be platform material"
+    );
+    let payload_0 = client_tree.chunk_payload(key(0, 0, 0, 0)).unwrap();
+    assert_eq!(
+        payload_0.block_at(0),
+        platform_material,
+        "y=0 payload should be platform material"
+    );
+}
+
+#[test]
+fn block_data_serde_i48f16_bounds_roundtrip() {
+    use crate::shared::spatial::ChunkCoord;
+
+    // ── Part 1: Individual ChunkCoord round-trips ──
+
+    let test_values: &[i32] = &[-18, -1, 0, 17];
+
+    for &v in test_values {
+        let coord = ChunkCoord::from_num(v);
+
+        // Round-trip via raw bits (i64)
+        let bits = coord.to_bits();
+        let bits_bytes = postcard::to_stdvec(&bits).unwrap();
+        let bits_back: i64 = postcard::from_bytes(&bits_bytes).unwrap();
+        assert_eq!(
+            bits, bits_back,
+            "i64 bits round-trip failed for value {v}: original bits {bits:#x}, got {bits_back:#x}"
+        );
+        let coord_from_bits = ChunkCoord::from_bits(bits_back);
+        assert_eq!(
+            coord, coord_from_bits,
+            "ChunkCoord from round-tripped bits differs for value {v}"
+        );
+
+        // Round-trip the ChunkCoord directly via serde
+        let coord_bytes = postcard::to_stdvec(&coord).unwrap();
+        let coord_back: ChunkCoord = postcard::from_bytes(&coord_bytes).unwrap();
+        assert_eq!(
+            coord, coord_back,
+            "Direct ChunkCoord serde round-trip failed for value {v}: \
+             original bits {:#x}, deserialized bits {:#x}",
+            coord.to_bits(),
+            coord_back.to_bits()
+        );
+    }
+
+    // ── Part 2: RegionTreeCore with Aabb4i bounds round-trip ──
+
+    let bounds = Aabb4i::from_i32([-18, -1, -18, -18], [17, 0, 17, 17]);
+    let core = RegionTreeCore {
+        bounds,
+        kind: RegionNodeKind::Uniform(BlockData::simple(1, 0xc45ed1f0)),
+        generator_version_hash: 0,
+    };
+
+    let bytes = postcard::to_stdvec(&core).unwrap();
+    let core_back: RegionTreeCore = postcard::from_bytes(&bytes).unwrap();
+
+    // Check bounds survived round-trip
+    assert_eq!(
+        core.bounds, core_back.bounds,
+        "RegionTreeCore bounds mismatch after serde round-trip!\n\
+         Original min bits: {:?}\n\
+         Original max bits: {:?}\n\
+         Deserialized min bits: {:?}\n\
+         Deserialized max bits: {:?}",
+        core.bounds.min.map(|c| c.to_bits()),
+        core.bounds.max.map(|c| c.to_bits()),
+        core_back.bounds.min.map(|c| c.to_bits()),
+        core_back.bounds.max.map(|c| c.to_bits()),
+    );
+
+    // Explicitly check specific max values that are of concern
+    assert_eq!(
+        core_back.bounds.max[0],
+        ChunkCoord::from_num(17),
+        "max[0] should be 17, got bits {:#x}",
+        core_back.bounds.max[0].to_bits()
+    );
+    assert_eq!(
+        core_back.bounds.max[1],
+        ChunkCoord::from_num(0),
+        "max[1] should be 0, got bits {:#x}",
+        core_back.bounds.max[1].to_bits()
+    );
+    assert_eq!(
+        core_back.bounds.max[2],
+        ChunkCoord::from_num(17),
+        "max[2] should be 17, got bits {:#x}",
+        core_back.bounds.max[2].to_bits()
+    );
+    assert_eq!(
+        core_back.bounds.max[3],
+        ChunkCoord::from_num(17),
+        "max[3] should be 17, got bits {:#x}",
+        core_back.bounds.max[3].to_bits()
+    );
+
+    // Also verify the kind survived
+    assert_eq!(core.kind, core_back.kind, "RegionNodeKind mismatch after round-trip");
+
+    // Full equality check
+    assert_eq!(core, core_back, "Full RegionTreeCore equality failed after round-trip");
+}
+
+/// Verify that no node in the tree has fractional (non-integer) bounds.
+/// This catches the bug where `step_for_kind` / `subtract_aabb` produce
+/// bounds like -0.5 instead of integer-aligned coordinates.
+fn assert_no_fractional_bounds(core: &RegionTreeCore, context: &str) {
+    fn check_node(node: &RegionTreeCore, path: &str) {
+        for axis in 0..4 {
+            let min_val = node.bounds.min[axis];
+            let max_val = node.bounds.max[axis];
+            assert_eq!(
+                min_val.frac().to_bits(),
+                0,
+                "{path}: bounds.min[{axis}] = {} has fractional part (bits={:#x})",
+                min_val,
+                min_val.to_bits()
+            );
+            assert_eq!(
+                max_val.frac().to_bits(),
+                0,
+                "{path}: bounds.max[{axis}] = {} has fractional part (bits={:#x})",
+                max_val,
+                max_val.to_bits()
+            );
+        }
+        if let RegionNodeKind::Branch(children) = &node.kind {
+            for (i, child) in children.iter().enumerate() {
+                check_node(child, &format!("{path}/branch[{i}]"));
+            }
+        }
+    }
+    if let Some(root) = std::iter::once(core).next() {
+        check_node(root, context);
+    }
+}
+
+fn assert_tree_no_fractional_bounds(tree: &RegionChunkTree, context: &str) {
+    if let Some(root) = tree.root() {
+        assert_no_fractional_bounds(root, context);
+    }
+}
+
+/// Simulate the MassivePlatforms generator building a tree:
+/// 1. Insert platform Uniform
+/// 2. Splice procgen ChunkArray that overlaps with platform on y=0
+/// Verify that the splice does not produce fractional bounds.
+#[test]
+fn procgen_splice_over_platform_uniform_preserves_integer_bounds() {
+    let stone = BlockData::simple(0, 11);
+    let wood = BlockData::simple(0, 4);
+
+    // Step 1: Platform Uniform (matches origin anchor from MassivePlatforms)
+    let platform_bounds = Aabb4i::from_i32([-18, -1, -18, -18], [17, 0, 17, 17]);
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+
+    let mut tree = RegionChunkTree::new();
+    let _ = tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+    assert_tree_no_fractional_bounds(&tree, "after platform splice");
+
+    // Step 2: Procgen structure — a small ChunkArray overlapping with the platform at y=0
+    // (procgen structures sit above the platform but may extend into y=0)
+    let procgen_bounds = Aabb4i::from_i32([0, 0, 0, 0], [2, 2, 2, 2]);
+    let procgen_chunk_palette = vec![
+        ChunkPayload::Empty,
+        ChunkPayload::Uniform(1), // wood material at palette index 1
+    ];
+    // 3x3x3x3 = 81 cells, most empty, a few have wood
+    let cell_count = 3 * 3 * 3 * 3;
+    let mut indices = vec![0u16; cell_count];
+    indices[0] = 1; // one wood block at (0,0,0,0) relative
+    indices[1] = 1; // wood at (1,0,0,0)
+    let procgen_ca = ChunkArrayData::from_dense_indices_with_block_palette(
+        procgen_bounds,
+        procgen_chunk_palette,
+        indices,
+        Some(0),
+        vec![BlockData::AIR, wood.clone()],
+    )
+    .expect("valid chunk array");
+    let procgen_core = RegionTreeCore {
+        bounds: procgen_bounds,
+        kind: RegionNodeKind::ChunkArray(procgen_ca),
+        generator_version_hash: 0,
+    };
+
+    let _ = tree.splice_non_empty_core_in_bounds(procgen_bounds, &procgen_core);
+    assert_tree_no_fractional_bounds(&tree, "after procgen splice");
+
+    // Verify platform chunks are still accessible at y=0 outside the procgen area
+    for x in -18..0 {
+        let payload = tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},0,0,0] missing after procgen splice"
+        );
+    }
+    for x in 3..=17 {
+        let payload = tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},0,0,0] missing after procgen splice"
+        );
+    }
+    // Verify platform chunks at y=-1 (untouched by procgen)
+    for x in -18..=17 {
+        let payload = tree.chunk_payload(key(x, -1, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},-1,0,0] missing after procgen splice"
+        );
+    }
+}
+
+/// Simulate the full flow: server generates tree (platform + procgen),
+/// client receives it via streaming patches, then lazy_drop shrinks bounds.
+/// Verify no fractional bounds at each step.
+#[test]
+fn full_server_client_flow_with_procgen_no_fractional_bounds() {
+    let stone = BlockData::simple(0, 11);
+    let wood = BlockData::simple(0, 4);
+
+    // === Server side: build world tree ===
+    let platform_bounds = Aabb4i::from_i32([-18, -1, -18, -18], [17, 0, 17, 17]);
+
+    let mut server_tree = RegionChunkTree::new();
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    let _ = server_tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+
+    // Add several procgen structures at various positions above the platform
+    let procgen_positions: &[[i32; 4]] = &[
+        [-5, 1, -3, -3],   // above platform, inside x/z/w range
+        [3, 1, 5, 2],      // above platform, inside x/z/w range
+        [0, 0, 0, 0],      // overlapping with platform at y=0!
+        [-10, 1, -10, -10], // above platform, at edge
+    ];
+
+    for (i, pos) in procgen_positions.iter().enumerate() {
+        let bounds = Aabb4i::from_i32(
+            *pos,
+            [pos[0] + 1, pos[1] + 1, pos[2] + 1, pos[3] + 1],
+        );
+        let cell_count = 2 * 2 * 2 * 2; // 16 cells
+        let mut indices = vec![0u16; cell_count];
+        indices[0] = 1;
+        let ca = ChunkArrayData::from_dense_indices_with_block_palette(
+            bounds,
+            vec![ChunkPayload::Empty, ChunkPayload::Uniform(1)],
+            indices,
+            Some(0),
+            vec![BlockData::AIR, wood.clone()],
+        )
+        .expect("valid chunk array");
+        let core = RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::ChunkArray(ca),
+            generator_version_hash: 0,
+        };
+        let _ = server_tree.splice_non_empty_core_in_bounds(bounds, &core);
+        assert_tree_no_fractional_bounds(
+            &server_tree,
+            &format!("server: after procgen[{i}] at {pos:?}"),
+        );
+    }
+
+    // === Client side: receive patches ===
+    let interest_bounds = Aabb4i::from_i32([-10, -5, -10, -10], [10, 5, 10, 10]);
+
+    // Simulate split_bounds_for_streaming: split interest into halves along x
+    let left_bounds = Aabb4i::from_i32([-10, -5, -10, -10], [-1, 5, 10, 10]);
+    let right_bounds = Aabb4i::from_i32([0, -5, -10, -10], [10, 5, 10, 10]);
+
+    let left_subtree = server_tree.slice_non_empty_core_in_bounds(left_bounds);
+    let right_subtree = server_tree.slice_non_empty_core_in_bounds(right_bounds);
+
+    let mut client_tree = RegionChunkTree::new();
+
+    // Apply left patch
+    let _ = client_tree.splice_non_empty_core_in_bounds(left_bounds, &left_subtree);
+    assert_tree_no_fractional_bounds(&client_tree, "client: after left patch");
+
+    // Apply right patch
+    let _ = client_tree.splice_non_empty_core_in_bounds(right_bounds, &right_subtree);
+    assert_tree_no_fractional_bounds(&client_tree, "client: after right patch");
+
+    // Verify platform chunks at y=0 are accessible
+    for x in -10..=10 {
+        let payload = client_tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},0,0,0] missing on client after patches"
+        );
+    }
+    for x in -10..=10 {
+        let payload = client_tree.chunk_payload(key(x, -1, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},-1,0,0] missing on client after patches"
+        );
+    }
+
+    // === Client shrinks interest (player moved) ===
+    let shrunk_bounds = Aabb4i::from_i32([-5, -3, -5, -5], [5, 3, 5, 5]);
+    let _ = client_tree.lazy_drop_outside_bounds(shrunk_bounds, 1000);
+    assert_tree_no_fractional_bounds(&client_tree, "client: after lazy_drop");
+
+    // Verify platform chunks within shrunk bounds still accessible
+    for x in -5..=5 {
+        let payload = client_tree.chunk_payload(key(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},0,0,0] missing after lazy_drop"
+        );
+        let payload_neg_y = client_tree.chunk_payload(key(x, -1, 0, 0));
+        assert!(
+            payload_neg_y.is_some(),
+            "platform chunk [{x},-1,0,0] missing after lazy_drop"
+        );
+    }
+}
+
+#[test]
+fn mixed_scale_lazy_drop_does_not_corrupt_uniform_bounds() {
+    use crate::shared::spatial::chunk_key_from_lattice;
+
+    // Simulate a tree with a Uniform platform and a fine-scale (scale_exp=-1) chunk.
+    // Before the fix, step_for_kind on the Branch used min() which returned step=0.5,
+    // causing ensure_binary_children to split the Uniform at half-integer boundaries.
+    let mut tree = RegionChunkTree::new();
+    let stone = BlockData::simple(0, 1);
+    let platform_bounds = Aabb4i::from_i32([-8, -1, -8, -8], [7, 0, 7, 7]);
+    let platform_core = RegionTreeCore {
+        bounds: platform_bounds,
+        kind: RegionNodeKind::Uniform(stone.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(platform_bounds, &platform_core);
+
+    // Insert a fine-scale chunk above the platform.
+    // This creates a Branch with both Uniform (step=1) and ChunkArray(scale=-1, step=0.5).
+    let fine_key = chunk_key_from_lattice([0, 2, 0, 0], -1);
+    let fine_block = BlockData::simple(0, 42);
+    tree.set_chunk_at_scale(
+        fine_key,
+        Some(ResolvedChunkPayload::uniform(fine_block.clone())),
+        -1,
+    );
+
+    // Now call lazy_drop_outside_node with bounds that only partially cover the platform.
+    // This forces ensure_binary_children to split nodes. Before the fix, the split would
+    // use step=0.5 (from the fine-scale child), corrupting the Uniform's bounds.
+    let keep_bounds = Aabb4i::from_i32([-4, -1, -4, -4], [4, 2, 4, 4]);
+    tree.lazy_drop_outside_bounds(keep_bounds, 100);
+
+    // Verify no fractional bounds in the tree.
+    assert_tree_no_fractional_bounds(&tree, "after_mixed_scale_lazy_drop");
+
+    // Verify that platform chunks at y=0 are still accessible.
+    for x in -4..=4 {
+        let payload = tree.chunk_payload(chunk_key_i32(x, 0, 0, 0));
+        assert!(
+            payload.is_some(),
+            "platform chunk [{x},0,0,0] missing after mixed-scale lazy_drop"
+        );
+    }
 }

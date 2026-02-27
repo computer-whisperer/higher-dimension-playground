@@ -16,7 +16,9 @@ impl Scene {
         let collect_desired_start = Instant::now();
         let desired_core = slice_non_empty_region_core_in_bounds(subtree, bounds);
         let collect_desired_ms = collect_desired_start.elapsed().as_secs_f64() * 1000.0;
-        if previous_core.kind == desired_core.kind {
+        if previous_core.kind == desired_core.kind
+            && previous_core.bounds == desired_core.bounds
+        {
             let previous_non_empty = Self::count_non_empty_chunks_in_core(&previous_core);
             return RegionPatchStats {
                 previous_non_empty,
@@ -124,7 +126,9 @@ impl Scene {
         let collect_previous_start = Instant::now();
         let previous_core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
         let collect_previous_ms = collect_previous_start.elapsed().as_secs_f64() * 1000.0;
-        if previous_core.kind == desired_core.kind {
+        if previous_core.kind == desired_core.kind
+            && previous_core.bounds == desired_core.bounds
+        {
             return RegionPatchStats {
                 collect_previous_ms,
                 ..RegionPatchStats::default()

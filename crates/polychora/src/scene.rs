@@ -441,6 +441,45 @@ impl Scene {
         self.world_tree.root().map(|root| root.bounds)
     }
 
+    pub fn dump_world_tree(&self) {
+        eprintln!("\n=== WORLD TREE ===");
+        if let Some(root) = self.world_tree.root() {
+            Self::dump_world_tree_node(root, 0);
+        } else {
+            eprintln!("  (empty)");
+        }
+    }
+
+    fn dump_world_tree_node(node: &RegionTreeCore, depth: usize) {
+        let indent = "  ".repeat(depth + 1);
+        let b = &node.bounds;
+        let bounds_str = format!(
+            "[{},{},{},{}]->[{},{},{},{}]",
+            b.min[0].to_num::<i32>(), b.min[1].to_num::<i32>(),
+            b.min[2].to_num::<i32>(), b.min[3].to_num::<i32>(),
+            b.max[0].to_num::<i32>(), b.max[1].to_num::<i32>(),
+            b.max[2].to_num::<i32>(), b.max[3].to_num::<i32>(),
+        );
+        match &node.kind {
+            RegionNodeKind::Empty => eprintln!("{indent}Empty {bounds_str}"),
+            RegionNodeKind::Uniform(block) => {
+                eprintln!("{indent}Uniform(ns={},bt={}) {bounds_str}", block.namespace, block.block_type);
+            }
+            RegionNodeKind::ProceduralRef(_) => eprintln!("{indent}ProceduralRef {bounds_str}"),
+            RegionNodeKind::ChunkArray(ca) => {
+                let cells = ca.bounds.chunk_cell_count().unwrap_or(0);
+                eprintln!("{indent}ChunkArray(cells={}, palette={}, scale={}) {bounds_str}",
+                    cells, ca.chunk_palette.len(), ca.scale_exp);
+            }
+            RegionNodeKind::Branch(children) => {
+                eprintln!("{indent}Branch({} children) {bounds_str}", children.len());
+                for child in children {
+                    Self::dump_world_tree_node(child, depth + 1);
+                }
+            }
+        }
+    }
+
     pub fn debug_voxel_frame_buffer_lengths(&self) -> (usize, usize, usize, usize) {
         (
             self.voxel_frame_data.chunk_headers.len(),
@@ -608,6 +647,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polychora::shared::region_tree::chunk_key_i32;
     use polychora::shared::voxel::BlockData;
     use polychora::content_registry::{ContentRegistry, MaterialResolver};
 
@@ -798,15 +838,15 @@ mod tests {
 
         scene.world_set_block(0, 0, 0, 0, BlockData::AIR);
         assert!(scene.get_block_data(0, 0, 0, 0).is_air());
-        assert!(!scene.world_tree.has_chunk([0, 0, 0, 0]));
+        assert!(!scene.world_tree.has_chunk(chunk_key_i32(0, 0, 0, 0)));
     }
 
     #[test]
     fn apply_region_patch_splices_chunk_and_queues_update() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut patch_tree = RegionChunkTree::new();
-        let changed = patch_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
+        let changed = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         assert!(changed);
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
@@ -824,16 +864,16 @@ mod tests {
         assert_eq!(scene.get_block_data(0, 0, 0, 0), BlockData::simple(0, 7));
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
-            Vec::<ChunkPos>::new()
+            Vec::<ChunkKey>::new()
         );
     }
 
     #[test]
     fn apply_region_patch_removes_chunk_and_queues_update() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 5))));
+        let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 5))));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
@@ -857,16 +897,16 @@ mod tests {
         assert!(scene.get_block_data(0, 0, 0, 0).is_air());
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
-            Vec::<ChunkPos>::new()
+            Vec::<ChunkKey>::new()
         );
     }
 
     #[test]
     fn apply_region_patch_identical_patch_is_noop() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::new([0, 0, 0, 0], [0, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
         let mut patch_tree = RegionChunkTree::new();
-        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
+        let _ = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
         let _ = scene.apply_region_patch(bounds, &patch_core);
@@ -884,18 +924,18 @@ mod tests {
         assert_eq!(stats.queued_updates, 0);
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
-            Vec::<ChunkPos>::new()
+            Vec::<ChunkKey>::new()
         );
     }
 
     #[test]
     fn apply_region_patch_semantic_noop_skips_splice() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
 
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
-        let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
+        let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
+        let _ = seed_tree.set_chunk(chunk_key_i32(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
@@ -931,19 +971,19 @@ mod tests {
         assert_eq!(scene.world_tree.root().cloned(), before);
         assert_eq!(
             scene.world_drain_pending_chunk_updates(),
-            Vec::<ChunkPos>::new()
+            Vec::<ChunkKey>::new()
         );
     }
 
     #[test]
     fn apply_region_patch_fast_matches_full_splice_state() {
-        let bounds = Aabb4i::new([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
         let mut full_scene = Scene::new(ScenePreset::Empty);
         let mut fast_scene = Scene::new(ScenePreset::Empty);
 
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
-        let _ = seed_tree.set_chunk([1, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
+        let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
+        let _ = seed_tree.set_chunk(chunk_key_i32(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = full_scene.apply_region_patch(bounds, &seed_core);
         let _ = fast_scene.apply_region_patch(bounds, &seed_core);
@@ -951,7 +991,7 @@ mod tests {
         let _ = fast_scene.world_drain_pending_chunk_updates();
 
         let mut patch_tree = RegionChunkTree::new();
-        let _ = patch_tree.set_chunk([0, 0, 0, 0], Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
+        let _ = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
         let full_stats = full_scene.apply_region_patch(bounds, &patch_core);
@@ -977,9 +1017,9 @@ mod tests {
     #[test]
     fn apply_region_patch_fast_updates_render_bvh_for_chunk_payload_changes() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let chunk_key = [0, 0, 0, 0];
+        let chunk_key = chunk_key_i32(0, 0, 0, 0);
         let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
-        let view_bounds = Aabb4i::new([-2, -2, -2, -2], [2, 2, 2, 2]);
+        let view_bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, 2, 2, 2]);
 
         // Seed one non-empty chunk.
         let mut initial_patch = RegionChunkTree::new();
@@ -1016,7 +1056,7 @@ mod tests {
     #[test]
     fn voxel_scene_dirty_tracking_rebuild_clears_only_overlapping_chunks() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::new([-2, -2, -2, -2], [2, 2, 2, 2]);
+        let bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, 2, 2, 2]);
 
         // Prime cache.
         scene.ensure_render_bvh_cache_for_bounds(bounds);
@@ -1028,12 +1068,12 @@ mod tests {
         let far_world_x = (CHUNK_SIZE as i32) * 50;
         scene.world_set_block(far_world_x, 0, 0, 0, BlockData::simple(0, 4));
 
-        let far_key = [50, 0, 0, 0];
+        let far_key = chunk_key_i32(50, 0, 0, 0);
         assert_eq!(scene.voxel_pending_scene_dirty_regions.len(), 2);
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
-            .any(|region| region.contains_chunk([0, 0, 0, 0])));
+            .any(|region| region.contains_chunk(chunk_key_i32(0, 0, 0, 0))));
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
@@ -1051,7 +1091,7 @@ mod tests {
     #[test]
     fn voxel_scene_dirty_tracking_offscreen_edits_do_not_invalidate_local_cache() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::new([-2, -2, -2, -2], [2, 2, 2, 2]);
+        let bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, 2, 2, 2]);
 
         // Prime cache once.
         scene.ensure_render_bvh_cache_for_bounds(bounds);
@@ -1060,7 +1100,7 @@ mod tests {
         // Edit a far chunk; local bounds should remain cache-valid.
         let far_world_x = (CHUNK_SIZE as i32) * 60;
         scene.world_set_block(far_world_x, 0, 0, 0, BlockData::simple(0, 5));
-        let far_key = [60, 0, 0, 0];
+        let far_key = chunk_key_i32(60, 0, 0, 0);
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
@@ -1079,7 +1119,7 @@ mod tests {
     #[test]
     fn voxel_scene_dirty_budget_limits_chunks_per_rebuild() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::new([-2, -2, -2, -2], [200, 2, 2, 2]);
+        let bounds = Aabb4i::from_i32([-2, -2, -2, -2], [200, 2, 2, 2]);
 
         // Prime cache.
         scene.ensure_render_bvh_cache_for_bounds(bounds);
@@ -1161,7 +1201,7 @@ mod tests {
         scene
             .voxel_pending_render_bvh_mutation_deltas
             .push(RenderBvhChunkMutationDelta {
-                key: [0, 0, 0, 0],
+                key: chunk_key_i32(0, 0, 0, 0),
                 expected_root: Some(frame_root.wrapping_add(1)),
                 new_root: Some(frame_root),
                 node_writes: Vec::new(),
@@ -1229,5 +1269,307 @@ mod tests {
             edit_voxel[3],
         );
         assert!(after_frame.is_none());
+    }
+
+    /// Simulate the multiplayer FlatFloor scenario: server sends a Uniform(stone)
+    /// node covering many chunks at Y=-1 via apply_region_patch. Verify that
+    /// get_block_data, look-ray, and collision all work across a range of positions.
+    #[test]
+    fn uniform_floor_patch_query_collision_and_lookray_work_across_range() {
+        use polychora::shared::spatial::ChunkCoord;
+
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let stone = BlockData::simple(0, 7);
+        let floor_y = ChunkCoord::from_num(-1i32);
+        let floor_min = [
+            ChunkCoord::from_num(-10i32),
+            floor_y,
+            ChunkCoord::from_num(-10i32),
+            ChunkCoord::from_num(-10i32),
+        ];
+        let floor_max = [
+            ChunkCoord::from_num(10i32),
+            floor_y,
+            ChunkCoord::from_num(10i32),
+            ChunkCoord::from_num(10i32),
+        ];
+        let floor_bounds = Aabb4i::new(floor_min, floor_max);
+        let floor_core = RegionTreeCore {
+            bounds: floor_bounds,
+            kind: RegionNodeKind::Uniform(stone.clone()),
+            generator_version_hash: 0,
+        };
+        let stats = scene.apply_region_patch(floor_bounds, &floor_core);
+        assert!(stats.changed_chunks > 0, "patch should have applied");
+
+        // Verify get_block_data for voxels within the floor.
+        // The floor covers chunks at Y=-1, which means world Y=-8 to Y=-1 (inclusive).
+        let mut failures = Vec::new();
+        for x in [-80, -40, -8, 0, 7, 40, 79] {
+            for z in [-40, 0, 40] {
+                for w in [0] {
+                    for y in [-8, -5, -1] {
+                        let block = scene.get_block_data(x, y, z, w);
+                        if block.is_air() {
+                            failures.push(format!(
+                                "get_block_data({x},{y},{z},{w}) returned AIR, expected stone"
+                            ));
+                        }
+                    }
+                    // Above the floor should be air.
+                    let block = scene.get_block_data(x, 0, z, w);
+                    if !block.is_air() {
+                        failures.push(format!(
+                            "get_block_data({x},0,{z},{w}) returned solid, expected AIR"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "Block query failures:\n{}",
+            failures.join("\n")
+        );
+
+        // Verify look-ray hits the floor when pointing downward from above.
+        for x in [-40, 0, 40] {
+            let origin = [x as f32 + 0.5, 2.0, 0.5, 0.5];
+            let direction = [0.0, -1.0, 0.0, 0.0];
+            let targets = scene.block_edit_targets(origin, direction, 20.0);
+            assert!(
+                targets.hit_voxel.is_some(),
+                "look-ray at x={x} should hit the floor, got None"
+            );
+            let hit = targets.hit_voxel.unwrap();
+            assert_eq!(
+                hit[1], -1,
+                "look-ray at x={x} should hit at y=-1, got y={}",
+                hit[1]
+            );
+        }
+
+        // Verify collision detects the floor.
+        for x in [-40, 0, 40] {
+            let old_pos = [x as f32 + 0.5, 2.4, 0.5, 0.5];
+            let attempted = [x as f32 + 0.5, -0.5, 0.5, 0.5];
+            let mut vel = -5.0;
+            let (resolved, grounded) =
+                scene.resolve_player_collision(old_pos, attempted, &mut vel);
+            assert!(
+                grounded,
+                "player at x={x} should be grounded, resolved_y={}",
+                resolved[1]
+            );
+        }
+    }
+
+    /// Simulates the multiplayer flow: server sends a flat floor patch (subtree bounds
+    /// thinner than authoritative bounds), client applies via apply_region_patch_fast,
+    /// then verifies queries work.
+    #[test]
+    fn multiplayer_flat_floor_patch_fast_then_query() {
+        use polychora::shared::spatial::ChunkCoord;
+
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let stone = BlockData::simple(0, 7);
+
+        // Simulate server sending a flat floor response:
+        // - Client requests bounds [-5,-5,-5,-5] to [5,5,5,5] (the authoritative_bounds)
+        // - Server responds with Uniform(stone) floor at Y=-1 only (subtree bounds thinner)
+        let authoritative_bounds = Aabb4i::from_i32([-5, -5, -5, -5], [5, 5, 5, 5]);
+        let floor_bounds = Aabb4i::from_i32([-5, -1, -5, -5], [5, -1, 5, 5]);
+        let subtree = RegionTreeCore {
+            bounds: floor_bounds,
+            kind: RegionNodeKind::Uniform(stone.clone()),
+            generator_version_hash: 0,
+        };
+
+        // Use apply_region_patch_fast (the default multiplayer path)
+        let stats = scene.apply_region_patch_fast(authoritative_bounds, &subtree);
+        assert!(
+            stats.changed_chunks > 0,
+            "patch should have applied, stats={:?}",
+            stats
+        );
+
+        // Verify block queries at the floor level
+        let mut query_failures = Vec::new();
+        for x in [-40, -8, -1, 0, 1, 7, 39] {
+            for z in [-40, 0, 39] {
+                for w in [0] {
+                    for y in [-8, -5, -1] {
+                        let block = scene.get_block_data(x, y, z, w);
+                        if block.is_air() {
+                            query_failures.push(format!(
+                                "get_block_data({x},{y},{z},{w}) = AIR, expected stone"
+                            ));
+                        }
+                    }
+                    // Above floor should be air
+                    let block = scene.get_block_data(x, 0, z, w);
+                    if !block.is_air() {
+                        query_failures.push(format!(
+                            "get_block_data({x},0,{z},{w}) = solid, expected AIR"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            query_failures.is_empty(),
+            "Block query failures after multiplayer patch:\n{}",
+            query_failures.join("\n")
+        );
+
+        // Verify look-ray hits floor
+        let targets = scene.block_edit_targets([0.5, 2.0, 0.5, 0.5], [0.0, -1.0, 0.0, 0.0], 20.0);
+        assert!(
+            targets.hit_voxel.is_some(),
+            "look-ray should hit floor"
+        );
+        assert_eq!(targets.hit_voxel.unwrap()[1], -1, "look-ray should hit at y=-1");
+    }
+
+    fn dump_tree_structure(core: &RegionTreeCore, indent: usize) -> String {
+        let prefix = " ".repeat(indent);
+        let b = &core.bounds;
+        let bounds_str = format!(
+            "[{},{},{},{}]->[{},{},{},{}]",
+            b.min[0].to_num::<i32>(), b.min[1].to_num::<i32>(),
+            b.min[2].to_num::<i32>(), b.min[3].to_num::<i32>(),
+            b.max[0].to_num::<i32>(), b.max[1].to_num::<i32>(),
+            b.max[2].to_num::<i32>(), b.max[3].to_num::<i32>(),
+        );
+        match &core.kind {
+            RegionNodeKind::Empty => format!("{prefix}Empty {bounds_str}\n"),
+            RegionNodeKind::Uniform(block) => {
+                format!("{prefix}Uniform(ns={},bt={}) {bounds_str}\n", block.namespace, block.block_type)
+            }
+            RegionNodeKind::ProceduralRef(_) => format!("{prefix}ProceduralRef {bounds_str}\n"),
+            RegionNodeKind::ChunkArray(ca) => {
+                let cells = ca.bounds.chunk_cell_count().unwrap_or(0);
+                format!("{prefix}ChunkArray(cells={}, palette_len={}, scale={}) {bounds_str}\n",
+                    cells, ca.chunk_palette.len(), ca.scale_exp)
+            }
+            RegionNodeKind::Branch(children) => {
+                let mut s = format!("{prefix}Branch({} children) {bounds_str}\n", children.len());
+                for child in children {
+                    s += &dump_tree_structure(child, indent + 2);
+                }
+                s
+            }
+        }
+    }
+
+    /// Creates a MassivePlatforms world, queries it like the server does at
+    /// render distance ~200 blocks, applies the subtree to a Scene, then
+    /// verifies that every non-empty chunk in the subtree is queryable via
+    /// get_block_data.
+    #[test]
+    fn massive_platforms_world_query_roundtrip() {
+        use polychora::server::world_field::{MassivePlatformsWorldGenerator, QueryDetail, QueryVolume};
+        use polychora::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
+
+        let material = BlockData::simple(0, 11);
+        let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
+            polychora::shared::voxel::BaseWorldKind::MassivePlatforms {
+                material: material.clone(),
+            },
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            1337,
+            true, // procgen structures enabled
+            std::collections::HashSet::new(),
+        );
+
+        // 200 blocks / 8 = 25 chunks radius
+        let radius = 25;
+        let authoritative_bounds = Aabb4i::from_i32(
+            [-radius, -radius, -radius, -radius],
+            [radius, radius, radius, radius],
+        );
+
+        let subtree = generator.query_region_core(
+            QueryVolume { bounds: authoritative_bounds },
+            QueryDetail::Exact,
+        );
+
+        eprintln!("=== World tree from server ===");
+        eprintln!("{}", dump_tree_structure(&subtree, 0));
+
+        // Collect all non-empty chunks from the subtree
+        let non_empty_chunks =
+            collect_non_empty_chunks_from_core_in_bounds(&subtree, authoritative_bounds);
+        eprintln!("Non-empty chunks in subtree: {}", non_empty_chunks.len());
+
+        // Apply to scene like the multiplayer path does
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let stats = scene.apply_region_patch_fast(authoritative_bounds, &subtree);
+        eprintln!("Patch stats: changed_chunks={}", stats.changed_chunks);
+
+        // Dump the resulting client tree
+        if let Some(root) = scene.world_tree.root() {
+            eprintln!("=== Client world tree after patch ===");
+            eprintln!("{}", dump_tree_structure(root, 0));
+        } else {
+            eprintln!("Client world tree is EMPTY after patch!");
+        }
+
+        // For every non-empty chunk, verify that get_block_data returns
+        // non-air for at least some voxels within that chunk.
+        let mut missing_chunks = Vec::new();
+        for (key, payload) in &non_empty_chunks {
+            // Convert chunk key back to world coords: chunk_lattice * 8
+            let cx = key[0].to_num::<i32>();
+            let cy = key[1].to_num::<i32>();
+            let cz = key[2].to_num::<i32>();
+            let cw = key[3].to_num::<i32>();
+            let wx_base = cx * 8;
+            let wy_base = cy * 8;
+            let wz_base = cz * 8;
+            let ww_base = cw * 8;
+
+            // Check if any voxel in this chunk is non-air according to get_block_data
+            let mut found_any = false;
+            for local_idx in 0..CHUNK_VOLUME {
+                let lw = local_idx / (8 * 8 * 8);
+                let lz = (local_idx / (8 * 8)) % 8;
+                let ly = (local_idx / 8) % 8;
+                let lx = local_idx % 8;
+                let block = scene.get_block_data(
+                    wx_base + lx as i32,
+                    wy_base + ly as i32,
+                    wz_base + lz as i32,
+                    ww_base + lw as i32,
+                );
+                if !block.is_air() {
+                    found_any = true;
+                    break;
+                }
+            }
+
+            // Also check what the payload says
+            let payload_has_solid = (0..CHUNK_VOLUME).any(|i| !payload.block_at(i).is_air());
+
+            if payload_has_solid && !found_any {
+                missing_chunks.push(format!(
+                    "chunk [{},{},{},{}]: payload has solid blocks but get_block_data returns all AIR",
+                    cx, cy, cz, cw
+                ));
+            }
+        }
+
+        if !missing_chunks.is_empty() {
+            eprintln!("=== MISSING CHUNKS ({}) ===", missing_chunks.len());
+            for msg in &missing_chunks {
+                eprintln!("  {}", msg);
+            }
+        }
+        assert!(
+            missing_chunks.is_empty(),
+            "{} chunks have solid payloads but get_block_data returns AIR:\n{}",
+            missing_chunks.len(),
+            missing_chunks.join("\n")
+        );
     }
 }
