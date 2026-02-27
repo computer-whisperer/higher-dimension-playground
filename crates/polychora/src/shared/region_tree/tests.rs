@@ -2052,7 +2052,8 @@ fn set_and_get_chunk_at_scale_round_trip() {
     assert!(tree.has_chunk(key));
 
     let result = tree.chunk_payload(key).unwrap();
-    assert_eq!(result.uniform_block(), Some(&block));
+    let expected_block = block.at_scale(-1);
+    assert_eq!(result.uniform_block(), Some(&expected_block));
 }
 
 #[test]
@@ -2077,7 +2078,8 @@ fn scaled_chunks_at_non_overlapping_positions() {
     assert_eq!(result_unit.uniform_block(), Some(&block_a));
 
     let result_half = tree.chunk_payload(half_key).unwrap();
-    assert_eq!(result_half.uniform_block(), Some(&block_b));
+    let expected_block_b = block_b.at_scale(-1);
+    assert_eq!(result_half.uniform_block(), Some(&expected_block_b));
 }
 
 #[test]

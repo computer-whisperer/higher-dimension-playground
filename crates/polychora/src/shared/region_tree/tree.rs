@@ -2529,34 +2529,6 @@ fn canonicalize_resolved_payload(resolved: ResolvedChunkPayload) -> ResolvedChun
     }
 }
 
-fn kind_from_resolved_value(
-    bounds: Aabb4i,
-    value: Option<ResolvedChunkPayload>,
-) -> RegionNodeKind {
-    let Some(resolved) = value else {
-        return RegionNodeKind::Empty;
-    };
-    let resolved = canonicalize_resolved_payload(resolved);
-    match &resolved.payload {
-        ChunkPayload::Uniform(idx) => {
-            let block = resolved
-                .block_palette
-                .get(*idx as usize)
-                .cloned()
-                .unwrap_or(BlockData::AIR);
-            RegionNodeKind::Uniform(block)
-        }
-        _ => repeated_payload_kind_resolved(bounds, resolved),
-    }
-}
-
-fn repeated_payload_kind_resolved(
-    bounds: Aabb4i,
-    resolved: ResolvedChunkPayload,
-) -> RegionNodeKind {
-    repeated_payload_kind_resolved_at_scale(bounds, resolved, 0)
-}
-
 fn repeated_payload_kind_resolved_at_scale(
     bounds: Aabb4i,
     resolved: ResolvedChunkPayload,
@@ -2584,16 +2556,22 @@ fn kind_from_resolved_value_at_scale(
     value: Option<ResolvedChunkPayload>,
     scale_exp: i8,
 ) -> RegionNodeKind {
-    if scale_exp == 0 {
-        return kind_from_resolved_value(bounds, value);
-    }
     let Some(resolved) = value else {
         return RegionNodeKind::Empty;
     };
     let resolved = canonicalize_resolved_payload(resolved);
-    // For non-zero scales, always create a ChunkArray to carry the scale_exp.
-    // We cannot use Uniform(block) because Uniform has no scale_exp field.
-    repeated_payload_kind_resolved_at_scale(bounds, resolved, scale_exp)
+    match &resolved.payload {
+        ChunkPayload::Uniform(idx) => {
+            let block = resolved
+                .block_palette
+                .get(*idx as usize)
+                .cloned()
+                .unwrap_or(BlockData::AIR)
+                .at_scale(scale_exp);
+            RegionNodeKind::Uniform(block)
+        }
+        _ => repeated_payload_kind_resolved_at_scale(bounds, resolved, scale_exp),
+    }
 }
 
 /// Remap block-palette indices inside a single `ChunkPayload` using the given remap table.
