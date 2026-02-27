@@ -177,14 +177,8 @@ struct VoxelFrameMeta
     uint worldBvhDiagSampleCount;
     uint orientationWordCount;
     uint worldBvhDiagPadding1;
-    int visibleChunkMinX;
-    int visibleChunkMinY;
-    int visibleChunkMinZ;
-    int visibleChunkMinW;
-    int visibleChunkMaxX;
-    int visibleChunkMaxY;
-    int visibleChunkMaxZ;
-    int visibleChunkMaxW;
+    float4 visibleWorldMin;
+    float4 visibleWorldMax;
     uint highlightFlags;
     uint highlightPadding0;
     uint highlightPadding1;
@@ -207,8 +201,8 @@ struct VoxelChunkHeader
 
 struct VoxelChunkBvhNode
 {
-    int4 minChunkCoord;
-    int4 maxChunkCoord;
+    float4 worldMin;
+    float4 worldMax;
     uint leftChild;
     uint rightChild;
     uint leafIndex;
@@ -222,7 +216,12 @@ struct VoxelLeafHeader
     uint leafKind;
     uint uniformMaterial;
     uint chunkEntryOffset;
-    uint uniformOrientation;
+    uint uniformOrientation;  // bits 0-15: orientation, bits 24-31: scale_exp as i8
+
+    int getScaleExp() {
+        int raw = int(uniformOrientation >> 24) & 0xFF;
+        return raw >= 128 ? raw - 256 : raw;
+    }
 }
 
 // Set 0: OneTimeBuffers
@@ -1542,6 +1541,10 @@ uint findLeafIndexForChunkCoord(int4 chunkCoord, VoxelFrameMeta meta)
         return INVALID_INDEX;
     }
 
+    // Convert chunk coord to a world-space query point (center of the chunk at scale 0).
+    float chunkSizeF = float(CHUNK_SIZE);
+    float4 queryPoint = float4(chunkCoord) * chunkSizeF + chunkSizeF * 0.5;
+
     uint stack[64];
     int stackPtr = 0;
     if (meta.regionBvhRootIndex >= meta.regionBvhNodeCount)
@@ -1560,10 +1563,10 @@ uint findLeafIndexForChunkCoord(int4 chunkCoord, VoxelFrameMeta meta)
 
         VoxelChunkBvhNode node = voxelChunkBvhNodes[nodeIndex];
         bool outside =
-            chunkCoord.x < node.minChunkCoord.x || chunkCoord.x > node.maxChunkCoord.x
-            || chunkCoord.y < node.minChunkCoord.y || chunkCoord.y > node.maxChunkCoord.y
-            || chunkCoord.z < node.minChunkCoord.z || chunkCoord.z > node.maxChunkCoord.z
-            || chunkCoord.w < node.minChunkCoord.w || chunkCoord.w > node.maxChunkCoord.w;
+            queryPoint.x < node.worldMin.x || queryPoint.x >= node.worldMax.x
+            || queryPoint.y < node.worldMin.y || queryPoint.y >= node.worldMax.y
+            || queryPoint.z < node.worldMin.z || queryPoint.z >= node.worldMax.z
+            || queryPoint.w < node.worldMin.w || queryPoint.w >= node.worldMax.w;
         if (outside)
         {
             continue;
@@ -1765,6 +1768,38 @@ int entryChunkCoord(float position, float direction)
     }
 
     return chunk;
+}
+
+int entryChunkCoordScaled(float position, float direction, float cellSize)
+{
+    float q = position / cellSize;
+    float qFloor = floor(q);
+    int chunk = int(qFloor);
+
+    if (direction < 0.0)
+    {
+        float boundary = qFloor * cellSize;
+        float eps = 1e-7 * cellSize;
+        if (abs(position - boundary) <= eps)
+        {
+            chunk -= 1;
+        }
+    }
+
+    return chunk;
+}
+
+bool intersectChunkAABBScaled(
+    float4 rayOrigin,
+    float4 rayDir,
+    int4 chunkCoord,
+    float cellSize,
+    out float tEnter,
+    out float tExit)
+{
+    float4 bmin = float4(chunkCoord) * cellSize;
+    float4 bmax = bmin + cellSize;
+    return intersectAABB(rayOrigin, rayDir, bmin, bmax, tEnter, tExit);
 }
 
 bool voxelInChunk(int4 voxelCoord, int4 chunkMin, int4 chunkMax)
@@ -2035,6 +2070,8 @@ bool traceVoxelsInChunk(
     float tEnter,
     float tExit,
     int4 chunkCoord,
+    float cellSize,
+    float voxelSize,
     VoxelChunkHeader h,
     VoxelFrameMeta meta,
     inout uint remainingVoxelSteps,
@@ -2054,23 +2091,13 @@ bool traceVoxelsInChunk(
         return false;
     }
 
-    int4 chunkMin = chunkCoord * int(CHUNK_SIZE);
+    float4 chunkWorldMin = float4(chunkCoord) * cellSize;
     // Conservative per-chunk solid AABB clip:
     // for sparse edited chunks this rejects rays that only traverse empty chunk space.
     int4 solidLocalMin = h.solidLocalMin;
     int4 solidLocalMax = h.solidLocalMax;
-    float4 solidBMin = float4(
-        float(chunkMin.x + solidLocalMin.x),
-        float(chunkMin.y + solidLocalMin.y),
-        float(chunkMin.z + solidLocalMin.z),
-        float(chunkMin.w + solidLocalMin.w)
-    );
-    float4 solidBMax = float4(
-        float(chunkMin.x + solidLocalMax.x + 1),
-        float(chunkMin.y + solidLocalMax.y + 1),
-        float(chunkMin.z + solidLocalMax.z + 1),
-        float(chunkMin.w + solidLocalMax.w + 1)
-    );
+    float4 solidBMin = chunkWorldMin + float4(solidLocalMin) * voxelSize;
+    float4 solidBMax = chunkWorldMin + float4(solidLocalMax + 1) * voxelSize;
     float solidEnter = 0.0;
     float solidExit = 0.0;
     if (!intersectAABB(rayOrigin, rayDir, solidBMin, solidBMax, solidEnter, solidExit))
@@ -2100,24 +2127,12 @@ bool traceVoxelsInChunk(
         return false;
     }
 
-    int4 chunkMax = chunkMin + int(CHUNK_SIZE);
-
     float4 startPos = rayOrigin + rayDir * tTraceStart;
-    // tTraceStart is already biased inside the interval, so plain floor gives stable ownership.
-    int4 voxelCoord = int4(
-        int(floor(startPos.x)),
-        int(floor(startPos.y)),
-        int(floor(startPos.z)),
-        int(floor(startPos.w))
-    );
-
-    if (!voxelInChunk(voxelCoord, chunkMin, chunkMax))
-    {
-        voxelCoord.x = clamp(voxelCoord.x, chunkMin.x, chunkMax.x - 1);
-        voxelCoord.y = clamp(voxelCoord.y, chunkMin.y, chunkMax.y - 1);
-        voxelCoord.z = clamp(voxelCoord.z, chunkMin.z, chunkMax.z - 1);
-        voxelCoord.w = clamp(voxelCoord.w, chunkMin.w, chunkMax.w - 1);
-    }
+    // Convert to local lattice coordinates (0..CHUNK_SIZE per axis)
+    float4 localPos = (startPos - chunkWorldMin) / voxelSize;
+    int4 voxelCoord = int4(floor(localPos));
+    // Clamp to [0, CHUNK_SIZE-1]
+    voxelCoord = clamp(voxelCoord, int4(0, 0, 0, 0), int4(int(CHUNK_SIZE) - 1));
 
     int4 step = int4(
         stepSign(rayDir.x),
@@ -2127,21 +2142,26 @@ bool traceVoxelsInChunk(
     );
 
     float4 tDelta = float4(
-        safeInvAbs(rayDir.x),
-        safeInvAbs(rayDir.y),
-        safeInvAbs(rayDir.z),
-        safeInvAbs(rayDir.w)
+        safeInvAbs(rayDir.x) * voxelSize,
+        safeInvAbs(rayDir.y) * voxelSize,
+        safeInvAbs(rayDir.z) * voxelSize,
+        safeInvAbs(rayDir.w) * voxelSize
     );
 
+    // tMaxLocal: time from tTraceStart until the ray crosses the next voxel boundary
     float4 tMaxLocal = float4(1e30, 1e30, 1e30, 1e30);
-    if (step.x > 0) tMaxLocal.x = (float(voxelCoord.x + 1) - startPos.x) * tDelta.x;
-    else if (step.x < 0) tMaxLocal.x = (startPos.x - float(voxelCoord.x)) * tDelta.x;
-    if (step.y > 0) tMaxLocal.y = (float(voxelCoord.y + 1) - startPos.y) * tDelta.y;
-    else if (step.y < 0) tMaxLocal.y = (startPos.y - float(voxelCoord.y)) * tDelta.y;
-    if (step.z > 0) tMaxLocal.z = (float(voxelCoord.z + 1) - startPos.z) * tDelta.z;
-    else if (step.z < 0) tMaxLocal.z = (startPos.z - float(voxelCoord.z)) * tDelta.z;
-    if (step.w > 0) tMaxLocal.w = (float(voxelCoord.w + 1) - startPos.w) * tDelta.w;
-    else if (step.w < 0) tMaxLocal.w = (startPos.w - float(voxelCoord.w)) * tDelta.w;
+    if (step.x > 0) tMaxLocal.x = (chunkWorldMin.x + float(voxelCoord.x + 1) * voxelSize - startPos.x) / rayDir.x;
+    else if (step.x < 0) tMaxLocal.x = (startPos.x - (chunkWorldMin.x + float(voxelCoord.x) * voxelSize)) * safeInvAbs(rayDir.x);
+    if (step.y > 0) tMaxLocal.y = (chunkWorldMin.y + float(voxelCoord.y + 1) * voxelSize - startPos.y) / rayDir.y;
+    else if (step.y < 0) tMaxLocal.y = (startPos.y - (chunkWorldMin.y + float(voxelCoord.y) * voxelSize)) * safeInvAbs(rayDir.y);
+    if (step.z > 0) tMaxLocal.z = (chunkWorldMin.z + float(voxelCoord.z + 1) * voxelSize - startPos.z) / rayDir.z;
+    else if (step.z < 0) tMaxLocal.z = (startPos.z - (chunkWorldMin.z + float(voxelCoord.z) * voxelSize)) * safeInvAbs(rayDir.z);
+    if (step.w > 0) tMaxLocal.w = (chunkWorldMin.w + float(voxelCoord.w + 1) * voxelSize - startPos.w) / rayDir.w;
+    else if (step.w < 0) tMaxLocal.w = (startPos.w - (chunkWorldMin.w + float(voxelCoord.w) * voxelSize)) * safeInvAbs(rayDir.w);
+
+    // Voxel coordinates are local [0..CHUNK_SIZE); use zero-origin for sampling.
+    int4 localOrigin = int4(0, 0, 0, 0);
+    int4 localMax = int4(int(CHUNK_SIZE), int(CHUNK_SIZE), int(CHUNK_SIZE), int(CHUNK_SIZE));
 
     float localT = 0.0;
     bool firstVoxelInInterval = true;
@@ -2165,11 +2185,11 @@ bool traceVoxelsInChunk(
             bool macroHasSolid = true;
             if (canMacroSkip)
             {
-                int4 macroCoord = macroCoordForVoxel(voxelCoord, chunkMin);
+                int4 macroCoord = macroCoordForVoxel(voxelCoord, localOrigin);
                 if (!all(macroCoord == cachedMacroCoord))
                 {
                     cachedMacroCoord = macroCoord;
-                    cachedMacroHasSolid = macroCellMayContainSolid(voxelCoord, chunkMin, h, meta);
+                    cachedMacroHasSolid = macroCellMayContainSolid(voxelCoord, localOrigin, h, meta);
                 }
                 macroHasSolid = cachedMacroHasSolid;
             }
@@ -2177,7 +2197,7 @@ bool traceVoxelsInChunk(
             {
                 uint materialId = 0;
                 uint orientId = 0;
-                if (sampleVoxelInChunk(voxelCoord, chunkMin, h, meta, materialId, orientId))
+                if (sampleVoxelInChunk(voxelCoord, localOrigin, h, meta, materialId, orientId))
                 {
                     float hitT = tTraceStart + localT;
                     if (firstVoxelInInterval)
@@ -2200,7 +2220,7 @@ bool traceVoxelsInChunk(
         localT = max(localT, nextLocalT);
         firstVoxelInInterval = false;
 
-        if (!voxelInChunk(voxelCoord, chunkMin, chunkMax))
+        if (!voxelInChunk(voxelCoord, localOrigin, localMax))
         {
             break;
         }
@@ -2279,7 +2299,7 @@ bool traceVoxelRayDDA(
     outNodeVisitCount = 0u;
     outPathHash = 2166136261u;
 
-    if (targetLodLevel != 0u || meta.leafCount == 0u || meta.regionBvhNodeCount == 0u)
+    if (meta.leafCount == 0u || meta.regionBvhNodeCount == 0u)
     {
         return false;
     }
@@ -2301,18 +2321,8 @@ bool traceVoxelRayDDA(
     }
     uint rootIndex = meta.regionBvhRootIndex;
     VoxelChunkBvhNode rootNode = voxelChunkBvhNodes[rootIndex];
-    float4 rootBMin = float4(
-        float(rootNode.minChunkCoord.x) * chunkSizeF,
-        float(rootNode.minChunkCoord.y) * chunkSizeF,
-        float(rootNode.minChunkCoord.z) * chunkSizeF,
-        float(rootNode.minChunkCoord.w) * chunkSizeF
-    );
-    float4 rootBMax = float4(
-        float(rootNode.maxChunkCoord.x + 1) * chunkSizeF,
-        float(rootNode.maxChunkCoord.y + 1) * chunkSizeF,
-        float(rootNode.maxChunkCoord.z + 1) * chunkSizeF,
-        float(rootNode.maxChunkCoord.w + 1) * chunkSizeF
-    );
+    float4 rootBMin = rootNode.worldMin;
+    float4 rootBMax = rootNode.worldMax;
     float rootEnter = 0.0;
     float rootExit = 0.0;
     if (!intersectAABB(rayOrigin, rayDir, rootBMin, rootBMax, rootEnter, rootExit))
@@ -2391,18 +2401,8 @@ bool traceVoxelRayDDA(
             if (node.leftChild != INVALID_INDEX && node.leftChild < meta.regionBvhNodeCount)
             {
                 VoxelChunkBvhNode leftNode = voxelChunkBvhNodes[node.leftChild];
-                float4 leftBMin = float4(
-                    float(leftNode.minChunkCoord.x) * chunkSizeF,
-                    float(leftNode.minChunkCoord.y) * chunkSizeF,
-                    float(leftNode.minChunkCoord.z) * chunkSizeF,
-                    float(leftNode.minChunkCoord.w) * chunkSizeF
-                );
-                float4 leftBMax = float4(
-                    float(leftNode.maxChunkCoord.x + 1) * chunkSizeF,
-                    float(leftNode.maxChunkCoord.y + 1) * chunkSizeF,
-                    float(leftNode.maxChunkCoord.z + 1) * chunkSizeF,
-                    float(leftNode.maxChunkCoord.w + 1) * chunkSizeF
-                );
+                float4 leftBMin = leftNode.worldMin;
+                float4 leftBMax = leftNode.worldMax;
                 if (intersectAABB(rayOrigin, rayDir, leftBMin, leftBMax, leftEnter, leftExit))
                 {
                     leftEnter = max(nodeEnter, leftEnter);
@@ -2414,18 +2414,8 @@ bool traceVoxelRayDDA(
             if (node.rightChild != INVALID_INDEX && node.rightChild < meta.regionBvhNodeCount)
             {
                 VoxelChunkBvhNode rightNode = voxelChunkBvhNodes[node.rightChild];
-                float4 rightBMin = float4(
-                    float(rightNode.minChunkCoord.x) * chunkSizeF,
-                    float(rightNode.minChunkCoord.y) * chunkSizeF,
-                    float(rightNode.minChunkCoord.z) * chunkSizeF,
-                    float(rightNode.minChunkCoord.w) * chunkSizeF
-                );
-                float4 rightBMax = float4(
-                    float(rightNode.maxChunkCoord.x + 1) * chunkSizeF,
-                    float(rightNode.maxChunkCoord.y + 1) * chunkSizeF,
-                    float(rightNode.maxChunkCoord.z + 1) * chunkSizeF,
-                    float(rightNode.maxChunkCoord.w + 1) * chunkSizeF
-                );
+                float4 rightBMin = rightNode.worldMin;
+                float4 rightBMax = rightNode.worldMax;
                 if (intersectAABB(rayOrigin, rayDir, rightBMin, rightBMax, rightEnter, rightExit))
                 {
                     rightEnter = max(nodeEnter, rightEnter);
@@ -2496,6 +2486,10 @@ bool traceVoxelRayDDA(
         VoxelLeafHeader leaf = voxelLeafHeaders[node.leafIndex];
         touchedVisibleChunk = true;
 
+        int scaleExp = leaf.getScaleExp();
+        float cellSize = float(CHUNK_SIZE) * exp2(float(scaleExp));
+        float voxelSize = exp2(float(scaleExp));
+
         if (leaf.leafKind == LEAF_KIND_UNIFORM)
         {
             uint uniformMaterial = leaf.uniformMaterial;
@@ -2506,13 +2500,13 @@ bool traceVoxelRayDDA(
                 float probeT = min(nodeExit, hitT + probeEps);
                 float4 probePos = rayOrigin + rayDir * probeT;
                 hitMaterial = uniformMaterial;
-                hitOrientation = leaf.uniformOrientation;
+                hitOrientation = leaf.uniformOrientation & 0xFFFFu;
                 hitPos = rayOrigin + rayDir * hitT;
                 hitChunkCoord = int4(
-                    entryChunkCoord(probePos.x, rayDir.x),
-                    entryChunkCoord(probePos.y, rayDir.y),
-                    entryChunkCoord(probePos.z, rayDir.z),
-                    entryChunkCoord(probePos.w, rayDir.w)
+                    entryChunkCoordScaled(probePos.x, rayDir.x, cellSize),
+                    entryChunkCoordScaled(probePos.y, rayDir.y, cellSize),
+                    entryChunkCoordScaled(probePos.z, rayDir.z, cellSize),
+                    entryChunkCoordScaled(probePos.w, rayDir.w, cellSize)
                 );
                 hitLodLevel = targetLodLevel;
                 outChunkStepsTaken = chunkStepsTaken;
@@ -2537,10 +2531,10 @@ bool traceVoxelRayDDA(
             stepSign(rayDir.w)
         );
         float4 tDeltaChunk = float4(
-            safeInvAbs(rayDir.x) * float(CHUNK_SIZE),
-            safeInvAbs(rayDir.y) * float(CHUNK_SIZE),
-            safeInvAbs(rayDir.z) * float(CHUNK_SIZE),
-            safeInvAbs(rayDir.w) * float(CHUNK_SIZE)
+            safeInvAbs(rayDir.x) * cellSize,
+            safeInvAbs(rayDir.y) * cellSize,
+            safeInvAbs(rayDir.z) * cellSize,
+            safeInvAbs(rayDir.w) * cellSize
         );
 
         float currentT = nodeEnter;
@@ -2562,21 +2556,21 @@ bool traceVoxelRayDDA(
                 float probeT = min(nodeExit, currentT + probeEps);
                 float4 currentPos = rayOrigin + rayDir * probeT;
                 chunkCoord = int4(
-                    entryChunkCoord(currentPos.x, rayDir.x),
-                    entryChunkCoord(currentPos.y, rayDir.y),
-                    entryChunkCoord(currentPos.z, rayDir.z),
-                    entryChunkCoord(currentPos.w, rayDir.w)
+                    entryChunkCoordScaled(currentPos.x, rayDir.x, cellSize),
+                    entryChunkCoordScaled(currentPos.y, rayDir.y, cellSize),
+                    entryChunkCoordScaled(currentPos.z, rayDir.z, cellSize),
+                    entryChunkCoordScaled(currentPos.w, rayDir.w, cellSize)
                 );
 
                 tMaxChunk = float4(1e30, 1e30, 1e30, 1e30);
-                if (chunkStep.x > 0) tMaxChunk.x = (float((chunkCoord.x + 1) * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
-                else if (chunkStep.x < 0) tMaxChunk.x = (float(chunkCoord.x * int(CHUNK_SIZE)) - rayOrigin.x) / rayDir.x;
-                if (chunkStep.y > 0) tMaxChunk.y = (float((chunkCoord.y + 1) * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
-                else if (chunkStep.y < 0) tMaxChunk.y = (float(chunkCoord.y * int(CHUNK_SIZE)) - rayOrigin.y) / rayDir.y;
-                if (chunkStep.z > 0) tMaxChunk.z = (float((chunkCoord.z + 1) * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
-                else if (chunkStep.z < 0) tMaxChunk.z = (float(chunkCoord.z * int(CHUNK_SIZE)) - rayOrigin.z) / rayDir.z;
-                if (chunkStep.w > 0) tMaxChunk.w = (float((chunkCoord.w + 1) * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
-                else if (chunkStep.w < 0) tMaxChunk.w = (float(chunkCoord.w * int(CHUNK_SIZE)) - rayOrigin.w) / rayDir.w;
+                if (chunkStep.x > 0) tMaxChunk.x = (float(chunkCoord.x + 1) * cellSize - rayOrigin.x) / rayDir.x;
+                else if (chunkStep.x < 0) tMaxChunk.x = (float(chunkCoord.x) * cellSize - rayOrigin.x) / rayDir.x;
+                if (chunkStep.y > 0) tMaxChunk.y = (float(chunkCoord.y + 1) * cellSize - rayOrigin.y) / rayDir.y;
+                else if (chunkStep.y < 0) tMaxChunk.y = (float(chunkCoord.y) * cellSize - rayOrigin.y) / rayDir.y;
+                if (chunkStep.z > 0) tMaxChunk.z = (float(chunkCoord.z + 1) * cellSize - rayOrigin.z) / rayDir.z;
+                else if (chunkStep.z < 0) tMaxChunk.z = (float(chunkCoord.z) * cellSize - rayOrigin.z) / rayDir.z;
+                if (chunkStep.w > 0) tMaxChunk.w = (float(chunkCoord.w + 1) * cellSize - rayOrigin.w) / rayDir.w;
+                else if (chunkStep.w < 0) tMaxChunk.w = (float(chunkCoord.w) * cellSize - rayOrigin.w) / rayDir.w;
                 chunkStateValid = true;
             }
             lastChunkCoord = chunkCoord;
@@ -2653,7 +2647,7 @@ bool traceVoxelRayDDA(
                         {
                             float slabEnter = 0.0;
                             float slabExit = 0.0;
-                            if (intersectChunkAABB(rayOrigin, rayDir, chunkCoord, slabEnter, slabExit))
+                            if (intersectChunkAABBScaled(rayOrigin, rayDir, chunkCoord, cellSize, slabEnter, slabExit))
                             {
                                 tEnter = max(currentT, slabEnter);
                                 tExit = min(chunkExitT, slabExit);
@@ -2671,6 +2665,8 @@ bool traceVoxelRayDDA(
                                 tEnter,
                                 tExit,
                                 chunkCoord,
+                                cellSize,
+                                voxelSize,
                                 h,
                                 meta,
                                 remainingVoxelSteps,

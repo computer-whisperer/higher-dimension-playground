@@ -280,10 +280,10 @@ impl Scene {
         let node = &nodes[node_idx as usize];
         let indent = "  ".repeat(depth + 1);
         let size = [
-            node.max_chunk_coord[0] - node.min_chunk_coord[0] + 1,
-            node.max_chunk_coord[1] - node.min_chunk_coord[1] + 1,
-            node.max_chunk_coord[2] - node.min_chunk_coord[2] + 1,
-            node.max_chunk_coord[3] - node.min_chunk_coord[3] + 1,
+            node.world_max[0] - node.world_min[0],
+            node.world_max[1] - node.world_min[1],
+            node.world_max[2] - node.world_min[2],
+            node.world_max[3] - node.world_min[3],
         ];
         stats.max_depth = stats.max_depth.max(depth);
 
@@ -317,8 +317,8 @@ impl Scene {
                 node_idx,
                 leaf_idx,
                 leaf_label,
-                node.min_chunk_coord,
-                node.max_chunk_coord,
+                node.world_min,
+                node.world_max,
                 size,
             );
         } else {
@@ -334,14 +334,16 @@ impl Scene {
             {
                 let l = &nodes[left as usize];
                 let r = &nodes[right as usize];
-                let o = l.min_chunk_coord[0] <= r.max_chunk_coord[0]
-                    && l.max_chunk_coord[0] >= r.min_chunk_coord[0]
-                    && l.min_chunk_coord[1] <= r.max_chunk_coord[1]
-                    && l.max_chunk_coord[1] >= r.min_chunk_coord[1]
-                    && l.min_chunk_coord[2] <= r.max_chunk_coord[2]
-                    && l.max_chunk_coord[2] >= r.min_chunk_coord[2]
-                    && l.min_chunk_coord[3] <= r.max_chunk_coord[3]
-                    && l.max_chunk_coord[3] >= r.min_chunk_coord[3];
+                // Strict inequality for half-open [min, max) bounds — adjacent
+                // non-overlapping boxes have l.world_max == r.world_min.
+                let o = l.world_min[0] < r.world_max[0]
+                    && l.world_max[0] > r.world_min[0]
+                    && l.world_min[1] < r.world_max[1]
+                    && l.world_max[1] > r.world_min[1]
+                    && l.world_min[2] < r.world_max[2]
+                    && l.world_max[2] > r.world_min[2]
+                    && l.world_min[3] < r.world_max[3]
+                    && l.world_max[3] > r.world_min[3];
                 if o {
                     stats.sibling_overlaps += 1;
                 }
@@ -357,8 +359,8 @@ impl Scene {
                     node_idx,
                     left,
                     right,
-                    node.min_chunk_coord,
-                    node.max_chunk_coord,
+                    node.world_min,
+                    node.world_max,
                     size,
                     if overlaps { "  OVERLAP" } else { "" },
                 );

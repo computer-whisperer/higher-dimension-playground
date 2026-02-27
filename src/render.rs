@@ -1011,6 +1011,10 @@ fn vte_cpu_trace_voxels_in_chunk(
     }
 }
 
+// NOTE: This CPU reference trace assumes scale_exp=0 throughout (hardcoded
+// CHUNK_SIZE=8 for chunk DDA and voxel size=1.0). It will produce incorrect
+// results for non-zero-scale leaves, causing false diagnostic mismatches when
+// `vte_reference_compare` is enabled on multi-scale worlds.
 fn vte_cpu_trace_ray_linear(
     ray_origin: [f32; 4],
     ray_dir: [f32; 4],
@@ -1034,18 +1038,8 @@ fn vte_cpu_trace_ray_linear(
     let Some(root_node) = region_bvh_nodes.get(root_index) else {
         return VteCpuRayTraceResult::default();
     };
-    let root_bmin = [
-        root_node.min_chunk_coord[0] as f32 * 8.0,
-        root_node.min_chunk_coord[1] as f32 * 8.0,
-        root_node.min_chunk_coord[2] as f32 * 8.0,
-        root_node.min_chunk_coord[3] as f32 * 8.0,
-    ];
-    let root_bmax = [
-        (root_node.max_chunk_coord[0] + 1) as f32 * 8.0,
-        (root_node.max_chunk_coord[1] + 1) as f32 * 8.0,
-        (root_node.max_chunk_coord[2] + 1) as f32 * 8.0,
-        (root_node.max_chunk_coord[3] + 1) as f32 * 8.0,
-    ];
+    let root_bmin = root_node.world_min;
+    let root_bmax = root_node.world_max;
     let Some((root_enter, root_exit)) =
         vte_cpu_intersect_aabb(ray_origin, ray_dir, root_bmin, root_bmax)
     else {
@@ -2520,8 +2514,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         let mut vte_orientation_word_count: usize = 0;
         let mut vte_macro_word_count: usize = 0;
         let mut vte_visible_lod_counts = [0u32; 3];
-        let mut vte_visible_chunk_min = [0; 4];
-        let mut vte_visible_chunk_max = [0; 4];
+        let mut vte_visible_world_min = [0.0f32; 4];
+        let mut vte_visible_world_max = [0.0f32; 4];
         let mut vte_buffer_caps = self.frames_in_flight[frame_idx]
             .live_buffers
             .voxel_capacities();
@@ -2899,11 +2893,11 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 && (vte_region_bvh_root_index as usize) < vte_region_bvh_node_count
             {
                 let root = input.region_bvh_nodes[vte_region_bvh_root_index as usize];
-                vte_visible_chunk_min = root.min_chunk_coord;
-                vte_visible_chunk_max = root.max_chunk_coord;
+                vte_visible_world_min = root.world_min;
+                vte_visible_world_max = root.world_max;
             } else {
-                vte_visible_chunk_min = [0; 4];
-                vte_visible_chunk_max = [0; 4];
+                vte_visible_world_min = [0.0; 4];
+                vte_visible_world_max = [0.0; 4];
             }
         }
         let vte_world_bvh_ray_diag_active =
@@ -3014,14 +3008,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 world_bvh_diag_sample_count: vte_world_bvh_ray_diag_sample_count,
                 orientation_word_count: vte_orientation_word_count as u32,
                 _world_bvh_diag_padding1: 0,
-                visible_chunk_min_x: vte_visible_chunk_min[0],
-                visible_chunk_min_y: vte_visible_chunk_min[1],
-                visible_chunk_min_z: vte_visible_chunk_min[2],
-                visible_chunk_min_w: vte_visible_chunk_min[3],
-                visible_chunk_max_x: vte_visible_chunk_max[0],
-                visible_chunk_max_y: vte_visible_chunk_max[1],
-                visible_chunk_max_z: vte_visible_chunk_max[2],
-                visible_chunk_max_w: vte_visible_chunk_max[3],
+                visible_world_min: vte_visible_world_min,
+                visible_world_max: vte_visible_world_max,
                 highlight_flags,
                 _highlight_padding: [
                     integral_sky_scale.to_bits(),
@@ -3208,8 +3196,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 let hash = if collect_visible_set_hash {
                     let mut hash = 0x811C_9DC5u32;
                     for node in input.region_bvh_nodes {
-                        let h = vte::vte_hash_chunk_coord(node.min_chunk_coord)
-                            ^ vte::vte_hash_chunk_coord(node.max_chunk_coord);
+                        let h = vte::vte_hash_world_bounds(node.world_min)
+                            ^ vte::vte_hash_world_bounds(node.world_max);
                         hash ^= h;
                         hash = hash.wrapping_mul(0x0100_0193);
                     }

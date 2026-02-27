@@ -114,25 +114,19 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) world_bvh_diag_sample_count: u32,
     pub(super) orientation_word_count: u32,
     pub(super) _world_bvh_diag_padding1: u32,
-    pub(super) visible_chunk_min_x: i32,
-    pub(super) visible_chunk_min_y: i32,
-    pub(super) visible_chunk_min_z: i32,
-    pub(super) visible_chunk_min_w: i32,
-    pub(super) visible_chunk_max_x: i32,
-    pub(super) visible_chunk_max_y: i32,
-    pub(super) visible_chunk_max_z: i32,
-    pub(super) visible_chunk_max_w: i32,
+    pub(super) visible_world_min: [f32; 4],
+    pub(super) visible_world_max: [f32; 4],
     pub(super) highlight_flags: u32,
     pub(super) _highlight_padding: [u32; 3],
     pub(super) highlight_hit_voxel: [i32; 4],
     pub(super) highlight_place_voxel: [i32; 4],
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 #[repr(C)]
 pub struct GpuVoxelChunkBvhNode {
-    pub min_chunk_coord: [i32; 4],
-    pub max_chunk_coord: [i32; 4],
+    pub world_min: [f32; 4],
+    pub world_max: [f32; 4],
     pub left_child: u32,
     pub right_child: u32,
     pub leaf_index: u32,
@@ -142,8 +136,8 @@ pub struct GpuVoxelChunkBvhNode {
 impl GpuVoxelChunkBvhNode {
     pub fn empty() -> Self {
         Self {
-            min_chunk_coord: [0; 4],
-            max_chunk_coord: [0; 4],
+            world_min: [0.0; 4],
+            world_max: [0.0; 4],
             left_child: VTE_REGION_BVH_INVALID_NODE,
             right_child: VTE_REGION_BVH_INVALID_NODE,
             leaf_index: u32::MAX,
@@ -370,11 +364,11 @@ pub(super) const VTE_WORLD_BVH_RAY_DIAG_RECORD_FLAGS: usize = 15;
 pub(super) const VTE_ENTITY_LINEAR_THRESHOLD_TETS: usize = 0;
 
 #[inline]
-pub(super) fn vte_hash_chunk_coord(chunk_coord: [i32; 4]) -> u32 {
-    let x = chunk_coord[0] as u32;
-    let y = chunk_coord[1] as u32;
-    let z = chunk_coord[2] as u32;
-    let w = chunk_coord[3] as u32;
+pub(super) fn vte_hash_world_bounds(bounds: [f32; 4]) -> u32 {
+    let x = bounds[0].to_bits();
+    let y = bounds[1].to_bits();
+    let z = bounds[2].to_bits();
+    let w = bounds[3].to_bits();
     x.wrapping_mul(0x8DA6_B343)
         ^ y.wrapping_mul(0xD816_3841)
         ^ z.wrapping_mul(0xCB1A_B31F)

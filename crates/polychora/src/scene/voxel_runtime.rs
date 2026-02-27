@@ -1,7 +1,7 @@
 use super::*;
 use polychora::content_registry::MaterialResolver;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
-use polychora::shared::spatial::ChunkCoord;
+use polychora::shared::spatial::{ChunkCoord, step_for_scale, fixed_from_lattice};
 use polychora::shared::voxel::BlockData;
 use polychora::shared::render_tree::{
     RenderBvh, RenderBvhChunkMutationDelta, RenderBvhNodeKind, RenderLeaf, RenderLeafKind,
@@ -11,6 +11,34 @@ use polychora::shared::render_tree::{
 #[inline]
 fn chunk_coord_to_i32(c: [ChunkCoord; 4]) -> [i32; 4] {
     [c[0].to_num::<i32>(), c[1].to_num::<i32>(), c[2].to_num::<i32>(), c[3].to_num::<i32>()]
+}
+
+/// Compute world-space AABB for a leaf's bounds at a given scale.
+///
+/// `bounds.min/max` are in fixed-point chunk coordinates.
+/// The returned `[f32; 4]` pairs are in world-space units.
+fn leaf_world_bounds(bounds: &polychora::shared::spatial::Aabb4, scale_exp: i8) -> ([f32; 4], [f32; 4]) {
+    let cs = CHUNK_SIZE as f32;
+    let step: f32 = step_for_scale(scale_exp).to_num::<f32>();
+    let world_min = [
+        bounds.min[0].to_num::<f32>() * cs,
+        bounds.min[1].to_num::<f32>() * cs,
+        bounds.min[2].to_num::<f32>() * cs,
+        bounds.min[3].to_num::<f32>() * cs,
+    ];
+    let world_max = [
+        (bounds.max[0].to_num::<f32>() + step) * cs,
+        (bounds.max[1].to_num::<f32>() + step) * cs,
+        (bounds.max[2].to_num::<f32>() + step) * cs,
+        (bounds.max[3].to_num::<f32>() + step) * cs,
+    ];
+    (world_min, world_max)
+}
+
+/// Pack a scale_exp (i8) into the upper 8 bits (24-31) of a u32.
+#[inline]
+fn pack_scale_exp_into_orientation(orientation: u32, scale_exp: i8) -> u32 {
+    (orientation & 0x00FFFFFFu32) | ((scale_exp as u8 as u32) << 24)
 }
 
 use std::time::Instant;
@@ -206,6 +234,8 @@ impl Scene {
 
     fn encode_bvh_node(
         node: &polychora::shared::render_tree::RenderBvhNode,
+        world_min: [f32; 4],
+        world_max: [f32; 4],
     ) -> GpuVoxelChunkBvhNode {
         let (left_child, right_child, leaf_index, flags) = match node.kind {
             RenderBvhNodeKind::Internal { left, right } => (left, right, u32::MAX, 0),
@@ -217,13 +247,96 @@ impl Scene {
             ),
         };
         GpuVoxelChunkBvhNode {
-            min_chunk_coord: chunk_coord_to_i32(node.bounds.min),
-            max_chunk_coord: chunk_coord_to_i32(node.bounds.max),
+            world_min,
+            world_max,
             left_child,
             right_child,
             leaf_index,
             flags,
         }
+    }
+
+    /// Compute float world-space bounds for all BVH nodes in a delta write set.
+    ///
+    /// This handles arbitrary index ordering (freed node IDs can be reused in any
+    /// order by the allocator) by recursing into children as needed. Each child's
+    /// bounds are resolved from: (1) already-computed delta nodes, (2) pre-existing
+    /// GPU array entries, or (3) recursively computed from the delta write set.
+    fn compute_all_delta_node_world_bounds(
+        node_writes: &[(u32, polychora::shared::render_tree::RenderBvhNode)],
+        gpu_nodes: &[GpuVoxelChunkBvhNode],
+        leaf_headers: &[GpuVoxelLeafHeader],
+        leaf_world_bounds_map: &std::collections::HashMap<u32, ([f32; 4], [f32; 4])>,
+    ) -> std::collections::HashMap<u32, ([f32; 4], [f32; 4])> {
+        // Index delta nodes by their slot ID for O(1) lookup during recursion.
+        let delta_by_id: std::collections::HashMap<u32, &polychora::shared::render_tree::RenderBvhNode> =
+            node_writes.iter().map(|(id, node)| (*id, node)).collect();
+        let mut computed = std::collections::HashMap::<u32, ([f32; 4], [f32; 4])>::new();
+
+        for &(node_id, _) in node_writes {
+            Self::resolve_node_world_bounds(
+                node_id,
+                &delta_by_id,
+                gpu_nodes,
+                leaf_headers,
+                leaf_world_bounds_map,
+                &mut computed,
+            );
+        }
+        computed
+    }
+
+    fn resolve_node_world_bounds(
+        node_id: u32,
+        delta_by_id: &std::collections::HashMap<u32, &polychora::shared::render_tree::RenderBvhNode>,
+        gpu_nodes: &[GpuVoxelChunkBvhNode],
+        leaf_headers: &[GpuVoxelLeafHeader],
+        leaf_world_bounds_map: &std::collections::HashMap<u32, ([f32; 4], [f32; 4])>,
+        computed: &mut std::collections::HashMap<u32, ([f32; 4], [f32; 4])>,
+    ) -> ([f32; 4], [f32; 4]) {
+        if let Some(&bounds) = computed.get(&node_id) {
+            return bounds;
+        }
+        let Some(node) = delta_by_id.get(&node_id) else {
+            // Not in delta — read from pre-existing GPU array.
+            return gpu_nodes.get(node_id as usize)
+                .map(|n| (n.world_min, n.world_max))
+                .unwrap_or(([0.0; 4], [0.0; 4]));
+        };
+        let bounds = match node.kind {
+            RenderBvhNodeKind::Leaf { leaf_index } => {
+                if let Some(&b) = leaf_world_bounds_map.get(&leaf_index) {
+                    b
+                } else {
+                    // Pre-existing leaf: extract scale_exp from the packed
+                    // uniform_orientation field in the existing leaf header.
+                    let scale_exp = leaf_headers
+                        .get(leaf_index as usize)
+                        .map(|lh| (lh.uniform_orientation >> 24) as i8)
+                        .unwrap_or(0);
+                    leaf_world_bounds(&node.bounds, scale_exp)
+                }
+            }
+            RenderBvhNodeKind::Internal { left, right } => {
+                let (lmin, lmax) = Self::resolve_node_world_bounds(
+                    left, delta_by_id, gpu_nodes, leaf_headers,
+                    leaf_world_bounds_map, computed,
+                );
+                let (rmin, rmax) = Self::resolve_node_world_bounds(
+                    right, delta_by_id, gpu_nodes, leaf_headers,
+                    leaf_world_bounds_map, computed,
+                );
+                ([
+                    lmin[0].min(rmin[0]), lmin[1].min(rmin[1]),
+                    lmin[2].min(rmin[2]), lmin[3].min(rmin[3]),
+                ], [
+                    lmax[0].max(rmax[0]), lmax[1].max(rmax[1]),
+                    lmax[2].max(rmax[2]), lmax[3].max(rmax[3]),
+                ])
+            }
+        };
+        computed.insert(node_id, bounds);
+        bounds
     }
 
     fn append_dense_payload_encoded(
@@ -483,15 +596,8 @@ impl Scene {
         let RenderLeafKind::VoxelChunkArray(chunk_array) = &leaf.kind else {
             return Ok(Vec::new());
         };
-        if chunk_array.scale_exp != 0 {
-            let message = format!(
-                "unsupported voxel leaf scale_exp={} for VTE upload at {:?}->{:?}",
-                chunk_array.scale_exp, leaf.bounds.min, leaf.bounds.max
-            );
-            eprintln!("[vte-voxel-unsupported-scale] {}", message);
-            return Err(message);
-        }
-        let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(0) else {
+        let scale_exp = chunk_array.scale_exp;
+        let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(scale_exp) else {
             return Ok(Vec::new());
         };
         let src_indices = chunk_array
@@ -499,24 +605,48 @@ impl Scene {
             .map_err(|error| format!("decode chunk-array leaf failed: {error:?}"))?;
         let src_dims = chunk_array
             .bounds
-            .chunk_extents_at_scale(0)
+            .chunk_extents_at_scale(scale_exp)
             .ok_or_else(|| "chunk-array source extents missing".to_string())?;
 
-        let mut encoded = Vec::<u32>::with_capacity(leaf.bounds.chunk_cell_count_at_scale(0).unwrap_or(0));
+        let (leaf_lattice_min, _leaf_lattice_max) = leaf.bounds.to_lattice_bounds(scale_exp);
+        let (src_lattice_min, _src_lattice_max) = chunk_array.bounds.to_lattice_bounds(scale_exp);
+
+        let mut encoded = Vec::<u32>::with_capacity(leaf.bounds.chunk_cell_count_at_scale(scale_exp).unwrap_or(0));
         for w in 0..leaf_extents[3] {
             for z in 0..leaf_extents[2] {
                 for y in 0..leaf_extents[1] {
                     for x in 0..leaf_extents[0] {
-                        let chunk_coord = [
-                            leaf.bounds.min[0] + ChunkCoord::from_num(x as i32),
-                            leaf.bounds.min[1] + ChunkCoord::from_num(y as i32),
-                            leaf.bounds.min[2] + ChunkCoord::from_num(z as i32),
-                            leaf.bounds.min[3] + ChunkCoord::from_num(w as i32),
+                        // Lattice-space coordinate for this cell
+                        let lat = [
+                            leaf_lattice_min[0] + x as i32,
+                            leaf_lattice_min[1] + y as i32,
+                            leaf_lattice_min[2] + z as i32,
+                            leaf_lattice_min[3] + w as i32,
                         ];
-                        let lx = (chunk_coord[0] - chunk_array.bounds.min[0]).to_num::<usize>();
-                        let ly = (chunk_coord[1] - chunk_array.bounds.min[1]).to_num::<usize>();
-                        let lz = (chunk_coord[2] - chunk_array.bounds.min[2]).to_num::<usize>();
-                        let lw = (chunk_coord[3] - chunk_array.bounds.min[3]).to_num::<usize>();
+                        // Convert to fixed-point to check against source bounds
+                        let chunk_coord = [
+                            fixed_from_lattice(lat[0], scale_exp),
+                            fixed_from_lattice(lat[1], scale_exp),
+                            fixed_from_lattice(lat[2], scale_exp),
+                            fixed_from_lattice(lat[3], scale_exp),
+                        ];
+                        let lx = (lat[0] - src_lattice_min[0]) as usize;
+                        let ly = (lat[1] - src_lattice_min[1]) as usize;
+                        let lz = (lat[2] - src_lattice_min[2]) as usize;
+                        let lw = (lat[3] - src_lattice_min[3]) as usize;
+                        let in_src_bounds =
+                            chunk_coord[0] >= chunk_array.bounds.min[0]
+                            && chunk_coord[0] <= chunk_array.bounds.max[0]
+                            && chunk_coord[1] >= chunk_array.bounds.min[1]
+                            && chunk_coord[1] <= chunk_array.bounds.max[1]
+                            && chunk_coord[2] >= chunk_array.bounds.min[2]
+                            && chunk_coord[2] <= chunk_array.bounds.max[2]
+                            && chunk_coord[3] >= chunk_array.bounds.min[3]
+                            && chunk_coord[3] <= chunk_array.bounds.max[3];
+                        if !in_src_bounds {
+                            encoded.push(higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY);
+                            continue;
+                        }
                         let linear =
                             lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
                         let palette_index = src_indices
@@ -569,11 +699,21 @@ impl Scene {
             {
                 continue;
             }
-            let bounds = Aabb4i::from_i32(header.min_chunk_coord, header.max_chunk_coord);
-            let Some(cell_count) = bounds.chunk_cell_count_at_scale(0) else {
-                continue;
-            };
-            if cell_count == 0 {
+            // min_chunk_coord / max_chunk_coord are lattice-space integers.
+            // Compute cell count directly from lattice dimensions.
+            let mut cell_count = 1usize;
+            let mut valid = true;
+            for axis in 0..4 {
+                let span = header.max_chunk_coord[axis] as i64
+                    - header.min_chunk_coord[axis] as i64
+                    + 1;
+                if span <= 0 {
+                    valid = false;
+                    break;
+                }
+                cell_count = cell_count.saturating_mul(span as usize);
+            }
+            if !valid || cell_count == 0 {
                 continue;
             }
             let start = header.chunk_entry_offset as usize;
@@ -719,18 +859,7 @@ impl Scene {
                     delta.new_root,
                 ));
             }
-            for (node_index, src_node) in &delta.node_writes {
-                let node_index = *node_index as usize;
-                if self.voxel_frame_data.region_bvh_nodes.len() <= node_index {
-                    self.voxel_frame_data
-                        .region_bvh_nodes
-                        .resize(node_index + 1, GpuVoxelChunkBvhNode::empty());
-                }
-                self.voxel_frame_data.region_bvh_nodes[node_index] =
-                    Self::encode_bvh_node(src_node);
-                Self::mark_dirty_index(&mut dirty.region_bvh_nodes, node_index);
-            }
-
+            // Free old resources first.
             for node_index in &delta.freed_node_ids {
                 let node_index = *node_index as usize;
                 if node_index < self.voxel_frame_data.region_bvh_nodes.len() {
@@ -769,18 +898,25 @@ impl Scene {
 
                 match &leaf.kind {
                     RenderLeafKind::Uniform(block) => {
+                        let scale_exp = block.scale_exp;
+                        let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
                         let mat = resolver.resolve_block(block.namespace, block.block_type);
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
-                            min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
-                            max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
+                            min_chunk_coord: lat_min,
+                            max_chunk_coord: lat_max,
                             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
                             uniform_material: u32::from(mat),
                             chunk_entry_offset: 0,
-                            uniform_orientation: u32::from(block.orientation.0),
+                            uniform_orientation: pack_scale_exp_into_orientation(
+                                u32::from(block.orientation.0),
+                                scale_exp,
+                            ),
                         };
                         Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                     }
-                    RenderLeafKind::VoxelChunkArray(_) => {
+                    RenderLeafKind::VoxelChunkArray(chunk_array) => {
+                        let scale_exp = chunk_array.scale_exp;
+                        let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
                         let entries = Self::encode_leaf_chunk_entries(
                             &mut self.voxel_frame_data,
                             &mut self.voxel_dense_payload_encoded_cache,
@@ -797,17 +933,54 @@ impl Scene {
                         Self::mark_dirty_range(&mut dirty.leaf_chunk_entries, span.clone());
                         leaf_spans[leaf_index] = Some(span.clone());
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
-                            min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
-                            max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
+                            min_chunk_coord: lat_min,
+                            max_chunk_coord: lat_max,
                             leaf_kind:
                                 higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                             uniform_material: 0,
                             chunk_entry_offset: span.start as u32,
-                            uniform_orientation: 0,
+                            uniform_orientation: pack_scale_exp_into_orientation(0, scale_exp),
                         };
                         Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                     }
                 }
+            }
+
+            // Collect leaf world bounds for newly-written leaves so BVH nodes
+            // can reference them when computing world bounds.
+            let mut leaf_world_bounds_map = std::collections::HashMap::<u32, ([f32; 4], [f32; 4])>::new();
+            for (leaf_index, leaf) in &delta.leaf_writes {
+                let scale_exp = match &leaf.kind {
+                    RenderLeafKind::Uniform(block) => block.scale_exp,
+                    RenderLeafKind::VoxelChunkArray(ca) => ca.scale_exp,
+                };
+                leaf_world_bounds_map.insert(*leaf_index, leaf_world_bounds(&leaf.bounds, scale_exp));
+            }
+
+            // Write BVH nodes after leaves so we can compute world bounds.
+            // Pre-compute all node bounds recursively so that internal nodes
+            // resolve their children correctly regardless of index order (freed
+            // node IDs can be reused in arbitrary order by the allocator).
+            let computed_node_bounds = Self::compute_all_delta_node_world_bounds(
+                &delta.node_writes,
+                &self.voxel_frame_data.region_bvh_nodes,
+                &self.voxel_frame_data.leaf_headers,
+                &leaf_world_bounds_map,
+            );
+            for (node_index, src_node) in &delta.node_writes {
+                let node_index_usize = *node_index as usize;
+                if self.voxel_frame_data.region_bvh_nodes.len() <= node_index_usize {
+                    self.voxel_frame_data
+                        .region_bvh_nodes
+                        .resize(node_index_usize + 1, GpuVoxelChunkBvhNode::empty());
+                }
+                let (world_min, world_max) = computed_node_bounds
+                    .get(node_index)
+                    .copied()
+                    .unwrap_or(([0.0; 4], [0.0; 4]));
+                self.voxel_frame_data.region_bvh_nodes[node_index_usize] =
+                    Self::encode_bvh_node(src_node, world_min, world_max);
+                Self::mark_dirty_index(&mut dirty.region_bvh_nodes, node_index_usize);
             }
 
             current_root = delta.new_root;
@@ -872,46 +1045,52 @@ impl Scene {
             Vec::<GpuVoxelChunkBvhNode>::with_capacity(render_bvh.nodes.len());
         let mut dense_payload_encoded_cache = std::collections::HashMap::<ChunkPayload, u32>::new();
 
+        // Pre-compute leaf world bounds for BVH node encoding.
+        let mut per_leaf_world_bounds = Vec::<([f32; 4], [f32; 4])>::with_capacity(render_bvh.leaves.len());
+
         for leaf in &render_bvh.leaves {
+            let scale_exp = match &leaf.kind {
+                RenderLeafKind::Uniform(block) => block.scale_exp,
+                RenderLeafKind::VoxelChunkArray(ca) => ca.scale_exp,
+            };
+            per_leaf_world_bounds.push(leaf_world_bounds(&leaf.bounds, scale_exp));
+
             match &leaf.kind {
                 RenderLeafKind::Uniform(block) => {
+                    let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
                     let mat = resolver.resolve_block(block.namespace, block.block_type);
                     leaf_headers.push(GpuVoxelLeafHeader {
-                        min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
-                        max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
+                        min_chunk_coord: lat_min,
+                        max_chunk_coord: lat_max,
                         leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
                         uniform_material: u32::from(mat),
                         chunk_entry_offset: 0,
-                        uniform_orientation: u32::from(block.orientation.0),
+                        uniform_orientation: pack_scale_exp_into_orientation(
+                            u32::from(block.orientation.0),
+                            scale_exp,
+                        ),
                     });
                 }
                 RenderLeafKind::VoxelChunkArray(chunk_array) => {
-                    if chunk_array.scale_exp != 0 {
-                        eprintln!(
-                            "[vte-voxel-unsupported-scale] snapshot build rejected scale_exp={} at {:?}->{:?}",
-                            chunk_array.scale_exp,
-                            leaf.bounds.min,
-                            leaf.bounds.max
-                        );
-                        return None;
-                    }
-                    let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(0) else {
+                    let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
+                    let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(scale_exp) else {
                         leaf_headers.push(GpuVoxelLeafHeader {
-                            min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
-                            max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
+                            min_chunk_coord: lat_min,
+                            max_chunk_coord: lat_max,
                             leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                             uniform_material: 0,
                             chunk_entry_offset: 0,
-                            uniform_orientation: 0,
+                            uniform_orientation: pack_scale_exp_into_orientation(0, scale_exp),
                         });
                         continue;
                     };
-                    let leaf_cell_count = leaf.bounds.chunk_cell_count_at_scale(0).unwrap_or(0);
+                    let leaf_cell_count = leaf.bounds.chunk_cell_count_at_scale(scale_exp).unwrap_or(0);
                     let entry_offset = leaf_chunk_entries.len() as u32;
                     leaf_chunk_entries.reserve(leaf_cell_count);
 
                     let src_indices = chunk_array.decode_dense_indices().ok();
-                    let src_dims = chunk_array.bounds.chunk_extents_at_scale(0);
+                    let src_dims = chunk_array.bounds.chunk_extents_at_scale(scale_exp);
+                    let (src_lattice_min, _src_lattice_max) = chunk_array.bounds.to_lattice_bounds(scale_exp);
                     let mut palette_encoded_cache =
                         vec![None::<u32>; chunk_array.chunk_palette.len()];
 
@@ -919,11 +1098,17 @@ impl Scene {
                         for z in 0..leaf_extents[2] {
                             for y in 0..leaf_extents[1] {
                                 for x in 0..leaf_extents[0] {
+                                    let lat = [
+                                        lat_min[0] + x as i32,
+                                        lat_min[1] + y as i32,
+                                        lat_min[2] + z as i32,
+                                        lat_min[3] + w as i32,
+                                    ];
                                     let chunk_coord = [
-                                        leaf.bounds.min[0] + ChunkCoord::from_num(x as i32),
-                                        leaf.bounds.min[1] + ChunkCoord::from_num(y as i32),
-                                        leaf.bounds.min[2] + ChunkCoord::from_num(z as i32),
-                                        leaf.bounds.min[3] + ChunkCoord::from_num(w as i32),
+                                        fixed_from_lattice(lat[0], scale_exp),
+                                        fixed_from_lattice(lat[1], scale_exp),
+                                        fixed_from_lattice(lat[2], scale_exp),
+                                        fixed_from_lattice(lat[3], scale_exp),
                                     ];
                                     let mut encoded = higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY;
                                     if let (Some(indices), Some(src_dims)) =
@@ -938,14 +1123,10 @@ impl Scene {
                                             && chunk_coord[3] >= chunk_array.bounds.min[3]
                                             && chunk_coord[3] <= chunk_array.bounds.max[3]
                                         {
-                                            let lx = (chunk_coord[0] - chunk_array.bounds.min[0])
-                                                .to_num::<usize>();
-                                            let ly = (chunk_coord[1] - chunk_array.bounds.min[1])
-                                                .to_num::<usize>();
-                                            let lz = (chunk_coord[2] - chunk_array.bounds.min[2])
-                                                .to_num::<usize>();
-                                            let lw = (chunk_coord[3] - chunk_array.bounds.min[3])
-                                                .to_num::<usize>();
+                                            let lx = (lat[0] - src_lattice_min[0]) as usize;
+                                            let ly = (lat[1] - src_lattice_min[1]) as usize;
+                                            let lz = (lat[2] - src_lattice_min[2]) as usize;
+                                            let lw = (lat[3] - src_lattice_min[3]) as usize;
                                             let linear = lx
                                                 + src_dims[0]
                                                     * (ly + src_dims[1] * (lz + src_dims[2] * lw));
@@ -1079,20 +1260,47 @@ impl Scene {
                     }
 
                     leaf_headers.push(GpuVoxelLeafHeader {
-                        min_chunk_coord: chunk_coord_to_i32(leaf.bounds.min),
-                        max_chunk_coord: chunk_coord_to_i32(leaf.bounds.max),
+                        min_chunk_coord: lat_min,
+                        max_chunk_coord: lat_max,
                         leaf_kind:
                             higher_dimension_playground::render::VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY,
                         uniform_material: 0,
                         chunk_entry_offset: entry_offset,
-                        uniform_orientation: 0,
+                        uniform_orientation: pack_scale_exp_into_orientation(0, scale_exp),
                     });
                 }
             }
         }
 
-        for node in &render_bvh.nodes {
-            region_bvh_nodes.push(Self::encode_bvh_node(node));
+        // Encode BVH nodes with float world bounds.
+        // Children always have lower indices than parents (bottom-up build),
+        // so a forward pass gives correct world bounds for internal nodes.
+        for node in render_bvh.nodes.iter() {
+            let (world_min, world_max) = match node.kind {
+                RenderBvhNodeKind::Leaf { leaf_index } => {
+                    per_leaf_world_bounds.get(leaf_index as usize)
+                        .copied()
+                        .unwrap_or(leaf_world_bounds(&node.bounds, 0))
+                }
+                RenderBvhNodeKind::Internal { left, right } => {
+                    let left_bounds = region_bvh_nodes.get(left as usize).map(|n| (n.world_min, n.world_max));
+                    let right_bounds = region_bvh_nodes.get(right as usize).map(|n| (n.world_min, n.world_max));
+                    match (left_bounds, right_bounds) {
+                        (Some((lmin, lmax)), Some((rmin, rmax))) => {
+                            ([
+                                lmin[0].min(rmin[0]), lmin[1].min(rmin[1]),
+                                lmin[2].min(rmin[2]), lmin[3].min(rmin[3]),
+                            ], [
+                                lmax[0].max(rmax[0]), lmax[1].max(rmax[1]),
+                                lmax[2].max(rmax[2]), lmax[3].max(rmax[3]),
+                            ])
+                        }
+                        (Some(b), None) | (None, Some(b)) => b,
+                        (None, None) => ([0.0; 4], [0.0; 4]),
+                    }
+                }
+            };
+            region_bvh_nodes.push(Self::encode_bvh_node(node, world_min, world_max));
         }
 
         Some(VoxelFrameDataBuffers {
