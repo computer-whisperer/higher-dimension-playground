@@ -8,7 +8,7 @@ use crate::shared::spatial::{Aabb4i, ChunkCoord, lattice_from_fixed};
 use crate::shared::voxel::{
     world_to_chunk, BaseWorldKind, BlockData, CHUNK_VOLUME,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,8 +66,8 @@ pub struct PassthroughWorldOverlay<F> {
     override_chunks: RegionChunkTree,
     // Dirty tracking for replication fanout.
     dirty_chunks: RegionChunkTree,
-    // Dirty tracking for save patch writes.
-    dirty_save_chunks: HashSet<ChunkKey>,
+    // Dirty tracking for save patch writes: ChunkKey → scale_exp.
+    dirty_save_chunks: HashMap<ChunkKey, i8>,
     save_stream: Option<SaveStreamingState>,
     base_world_kind: BaseWorldKind,
     world_seed: u64,
@@ -79,7 +79,7 @@ impl<F> PassthroughWorldOverlay<F> {
             field,
             override_chunks: RegionChunkTree::new(),
             dirty_chunks: RegionChunkTree::new(),
-            dirty_save_chunks: HashSet::new(),
+            dirty_save_chunks: HashMap::new(),
             save_stream: None,
             base_world_kind,
             world_seed,
@@ -327,7 +327,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 }),
             ),
             dirty_chunks: RegionChunkTree::new(),
-            dirty_save_chunks: HashSet::new(),
+            dirty_save_chunks: HashMap::new(),
             save_stream: None,
             base_world_kind: base_kind,
             world_seed,
@@ -356,7 +356,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             field,
             override_chunks: RegionChunkTree::new(),
             dirty_chunks: RegionChunkTree::new(),
-            dirty_save_chunks: HashSet::new(),
+            dirty_save_chunks: HashMap::new(),
             save_stream: Some(SaveStreamingState {
                 root: root.to_path_buf(),
                 index: metadata.index,
@@ -507,7 +507,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         }
 
         self.mark_dirty_chunk(chunk_key);
-        self.dirty_save_chunks.insert(chunk_key);
+        self.dirty_save_chunks.insert(chunk_key, 0i8);
         Some(chunk_key)
     }
 
@@ -560,7 +560,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         }
 
         self.mark_dirty_chunk(chunk_key);
-        self.dirty_save_chunks.insert(chunk_key);
+        self.dirty_save_chunks.insert(chunk_key, scale_exp);
         Some(chunk_key)
     }
 
@@ -579,14 +579,14 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             return Ok(None);
         }
 
-        let mut dirty_keys: Vec<ChunkKey> =
-            self.dirty_save_chunks.iter().copied().collect();
-        dirty_keys.sort_unstable();
-        let dirty_chunk_payloads = dirty_keys
+        let mut dirty_entries: Vec<(ChunkKey, i8)> =
+            self.dirty_save_chunks.iter().map(|(&k, &se)| (k, se)).collect();
+        dirty_entries.sort_unstable();
+        let dirty_chunk_payloads = dirty_entries
             .into_iter()
-            .map(|key| {
+            .map(|(key, se)| {
                 let resolved = self.override_chunks.chunk_payload(key);
-                (key, resolved)
+                (key, se, resolved)
             })
             .collect::<Vec<_>>();
 

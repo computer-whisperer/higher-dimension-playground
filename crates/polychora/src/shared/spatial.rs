@@ -25,6 +25,20 @@ impl Aabb4 {
         }
     }
 
+    pub fn from_lattice_bounds(min: [i32; 4], max: [i32; 4], scale_exp: i8) -> Self {
+        Self {
+            min: min.map(|v| fixed_from_lattice(v, scale_exp)),
+            max: max.map(|v| fixed_from_lattice(v, scale_exp)),
+        }
+    }
+
+    pub fn from_fixed_bits(min: [i64; 4], max: [i64; 4]) -> Self {
+        Self {
+            min: min.map(ChunkCoord::from_bits),
+            max: max.map(ChunkCoord::from_bits),
+        }
+    }
+
     pub fn is_valid(&self) -> bool {
         self.min[0] <= self.max[0]
             && self.min[1] <= self.max[1]

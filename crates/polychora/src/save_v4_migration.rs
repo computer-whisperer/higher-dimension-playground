@@ -88,7 +88,7 @@ fn resolve_legacy_payload(payload: FieldChunkPayload, palette: &[BlockData]) -> 
     }
 }
 
-fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
+fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ChunkKey, i8, ResolvedChunkPayload)> {
     fn payload_from_legacy_chunk(chunk: &LegacyChunk) -> FieldChunkPayload {
         if chunk.is_empty() {
             return FieldChunkPayload::Empty;
@@ -107,27 +107,28 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ChunkKey, ResolvedChun
     }
 
     let legacy_palette = build_legacy_block_palette();
-    let mut chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)> = world
+    let mut chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)> = world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
                 crate::shared::spatial::chunk_key_from_lattice(chunk_pos, 0),
+                0i8,
                 resolve_legacy_payload(payload_from_legacy_chunk(chunk), &legacy_palette),
             )
         })
         .collect();
-    chunk_payloads.sort_unstable_by_key(|(key, _)| *key);
+    chunk_payloads.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
     chunk_payloads
 }
 
 fn all_block_regions_from_chunk_payloads(
-    chunk_payloads: &[(ChunkKey, ResolvedChunkPayload)],
+    chunk_payloads: &[(ChunkKey, i8, ResolvedChunkPayload)],
     region_chunk_edge: i32,
 ) -> HashSet<[i32; 4]> {
     chunk_payloads
         .iter()
-        .map(|(key, _)| save_v4::region_from_chunk_key(*key, region_chunk_edge))
+        .map(|(key, _, _)| save_v4::region_from_chunk_key(*key, region_chunk_edge))
         .collect()
 }
 
@@ -233,7 +234,7 @@ pub fn migrate_legacy_world_to_v4(
 
 fn verify_v3_migration_equivalence(
     output_root: &Path,
-    expected_chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
+    expected_chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
     expected_entities: &[PersistedEntityRecord],
     expected_players: &[PlayerRecord],
     expected_world_seed: u64,
@@ -310,22 +311,22 @@ fn verify_v3_migration_equivalence(
             ),
         ));
     }
-    for (expected, loaded) in expected_chunk_payloads.iter().zip(loaded_chunk_payloads.iter()) {
-        if expected.0 != loaded.0 {
+    for ((exp_key, _, exp_payload), loaded) in expected_chunk_payloads.iter().zip(loaded_chunk_payloads.iter()) {
+        if *exp_key != loaded.0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "v3->v4 migration mismatch: chunk position expected={:?} got={:?}",
-                    expected.0, loaded.0
+                    exp_key, loaded.0
                 ),
             ));
         }
-        if expected.1.dense_blocks() != loaded.1.dense_blocks() {
+        if exp_payload.dense_blocks() != loaded.1.dense_blocks() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "v3->v4 migration mismatch: chunk blocks differ at position {:?}",
-                    expected.0
+                    exp_key
                 ),
             ));
         }

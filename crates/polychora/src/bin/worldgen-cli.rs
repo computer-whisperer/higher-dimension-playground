@@ -603,8 +603,8 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let mut leaf_empty_count = 0usize;
     let mut leaf_uniform_count = 0usize;
     let mut leaf_chunk_array_count = 0usize;
-    let mut node_min = [i32::MAX; 4];
-    let mut node_max = [i32::MIN; 4];
+    let mut node_min = [i64::MAX; 4];
+    let mut node_max = [i64::MIN; 4];
     let mut have_node_bounds = false;
     for node in &index.nodes {
         match &node.kind {
@@ -615,8 +615,8 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
         }
         have_node_bounds = true;
         for axis in 0..4 {
-            node_min[axis] = node_min[axis].min(node.bounds_min_chunk[axis]);
-            node_max[axis] = node_max[axis].max(node.bounds_max_chunk[axis]);
+            node_min[axis] = node_min[axis].min(node.bounds_min_fixed[axis]);
+            node_max[axis] = node_max[axis].max(node.bounds_max_fixed[axis]);
         }
     }
 

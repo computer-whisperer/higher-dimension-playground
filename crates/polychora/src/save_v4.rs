@@ -9,7 +9,7 @@ use crate::shared::protocol::EntityPose;
 use crate::shared::region_tree::{
     chunk_key_i32, slice_region_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
 };
-use crate::shared::spatial::{chunk_key_from_lattice, lattice_from_fixed, Aabb4i, ChunkCoord};
+use crate::shared::spatial::{chunk_key_from_lattice, lattice_from_fixed, Aabb4, Aabb4i, ChunkCoord};
 #[cfg(test)]
 use crate::shared::voxel::CHUNK_VOLUME;
 use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE};
@@ -29,7 +29,7 @@ const INDEX_MAGIC: &[u8; 4] = b"V4IX";
 const DATA_MAGIC: &[u8; 4] = b"V4DT";
 const RECORD_MAGIC: &[u8; 4] = b"RECD";
 const RECORD_HEADER_LEN: u32 = 4 + 1 + 2 + 4 + 4;
-const INDEX_FILE_VERSION: u32 = 1;
+const INDEX_FILE_VERSION: u32 = 2;
 const INDEX_ENTITY_ROOT_NONE: u32 = u32::MAX;
 
 const BLOB_KIND_CHUNK_PAYLOAD: u8 = 1;
@@ -173,9 +173,17 @@ pub enum IndexNodeKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexNode {
     pub node_id: u32,
-    pub bounds_min_chunk: [i32; 4],
-    pub bounds_max_chunk: [i32; 4],
+    pub bounds_min_fixed: [i64; 4],
+    pub bounds_max_fixed: [i64; 4],
+    /// Scale exponent for leaf nodes (0 for branches and entity leaves).
+    pub scale_exp: i8,
     pub kind: IndexNodeKind,
+}
+
+impl IndexNode {
+    pub fn bounds_aabb4(&self) -> Aabb4i {
+        Aabb4i::from_fixed_bits(self.bounds_min_fixed, self.bounds_max_fixed)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -189,6 +197,20 @@ pub struct IndexPayload {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct IndexBody {
     nodes: Vec<IndexNode>,
+}
+
+/// Legacy V1 index node format with [i32; 4] bounds (scale-0 only).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyIndexNodeV1 {
+    node_id: u32,
+    bounds_min_chunk: [i32; 4],
+    bounds_max_chunk: [i32; 4],
+    kind: IndexNodeKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyIndexBodyV1 {
+    nodes: Vec<LegacyIndexNodeV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,7 +335,7 @@ struct SaveWorldRequest<'a> {
 
 pub struct SaveChunkPayloadRequest<'a> {
     pub base_world_kind: BaseWorldKind,
-    pub chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
+    pub chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
     pub entities: &'a [PersistedEntityRecord],
     pub players: &'a [PlayerRecord],
     pub world_seed: u64,
@@ -330,7 +352,7 @@ pub struct SaveChunkPayloadRequest<'a> {
 
 pub struct SaveChunkPayloadPatchRequest {
     pub base_world_kind: BaseWorldKind,
-    pub dirty_chunk_payloads: Vec<(ChunkKey, Option<ResolvedChunkPayload>)>,
+    pub dirty_chunk_payloads: Vec<(ChunkKey, i8, Option<ResolvedChunkPayload>)>,
     pub world_seed: u64,
     pub next_entity_id: u64,
     pub player_entity_hints: Option<Vec<PlayerEntityHint>>,
@@ -362,8 +384,9 @@ pub struct SaveResult {
 
 #[derive(Clone, Debug)]
 struct LeafDescriptor {
-    min: [i32; 4],
-    max: [i32; 4],
+    min: ChunkKey,
+    max: ChunkKey,
+    scale_exp: i8,
     kind: IndexNodeKind,
 }
 
@@ -375,8 +398,9 @@ enum TempNodeKind {
 
 #[derive(Clone, Debug)]
 struct TempNode {
-    min: [i32; 4],
-    max: [i32; 4],
+    min: ChunkKey,
+    max: ChunkKey,
+    scale_exp: i8,
     kind: TempNodeKind,
 }
 
@@ -451,6 +475,10 @@ pub fn all_entity_regions(
         .collect()
 }
 
+fn strip_scale_exp(payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
+    payloads.into_iter().map(|(k, _, p)| (k, p)).collect()
+}
+
 pub fn load_or_init_state(
     root: &Path,
     default_base: BaseWorldKind,
@@ -458,13 +486,13 @@ pub fn load_or_init_state(
     now_ms: u64,
 ) -> io::Result<LoadedState> {
     let metadata = load_or_init_state_metadata(root, default_base, world_seed, now_ms)?;
-    let world_chunk_payloads = materialize_world_chunk_payloads_from_index_filtered(
+    let world_chunk_payloads = strip_scale_exp(materialize_world_chunk_payloads_from_index_filtered(
         root,
         &metadata.index,
         None,
         true,
         None,
-    )?;
+    )?);
     Ok(LoadedState {
         manifest: metadata.manifest,
         global: metadata.global,
@@ -508,13 +536,13 @@ fn load_or_init_save_metadata(
 
 pub fn load_state(root: &Path) -> io::Result<LoadedState> {
     let metadata = load_state_metadata(root)?;
-    let world_chunk_payloads = materialize_world_chunk_payloads_from_index_filtered(
+    let world_chunk_payloads = strip_scale_exp(materialize_world_chunk_payloads_from_index_filtered(
         root,
         &metadata.index,
         None,
         true,
         None,
-    )?;
+    )?);
     Ok(LoadedState {
         manifest: metadata.manifest,
         global: metadata.global,
@@ -549,7 +577,7 @@ pub fn load_world_chunk_payloads_for_regions(
 ) -> io::Result<Vec<(ChunkKey, ResolvedChunkPayload)>> {
     let manifest = load_manifest(root)?;
     let index = read_index_file(root.join(&manifest.index_file))?;
-    materialize_world_chunk_payloads_from_index_filtered(root, &index, Some(regions), true, None)
+    Ok(strip_scale_exp(materialize_world_chunk_payloads_from_index_filtered(root, &index, Some(regions), true, None)?))
 }
 
 pub fn load_world_chunk_payloads_for_bounds(
@@ -569,7 +597,7 @@ pub fn load_world_chunk_payloads_for_bounds_from_index(
     if !bounds.is_valid() {
         return Ok(Vec::new());
     }
-    materialize_world_chunk_payloads_from_index_filtered(root, index, None, true, Some(bounds))
+    Ok(strip_scale_exp(materialize_world_chunk_payloads_from_index_filtered(root, index, None, true, Some(bounds))?))
 }
 
 pub fn load_world_subtree_core_for_bounds_from_index(
@@ -619,7 +647,7 @@ fn load_world_subtree_core_from_index_node_filtered(
         ));
     };
 
-    let node_bounds = Aabb4i::from_i32(node.bounds_min_chunk, node.bounds_max_chunk);
+    let node_bounds = node.bounds_aabb4();
     if !node_bounds.is_valid() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -671,7 +699,9 @@ fn load_world_subtree_core_from_index_node_filtered(
             } else {
                 let payload = read_blob_payload(root, chunk_array_ref)?;
                 let blob = decode_chunk_array_blob(&payload)?;
-                let chunk_array_bounds = Aabb4i::from_i32(blob.volume_min_chunk, blob.volume_max_chunk);
+                let chunk_array_bounds = Aabb4::from_lattice_bounds(
+                    blob.volume_min_chunk, blob.volume_max_chunk, blob.scale_exp,
+                );
                 if !chunk_array_bounds.is_valid() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -764,13 +794,14 @@ fn legacy_chunk_from_field_chunk_payload(payload: &FieldChunkPayload) -> io::Res
 
 #[cfg(test)]
 fn save_state_from_world(root: &Path, request: SaveWorldRequest<'_>) -> io::Result<SaveResult> {
-    let chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)> = request
+    let chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)> = request
         .world
         .chunks
         .iter()
         .map(|(&chunk_pos, chunk)| {
             (
                 chunk_key_i32(chunk_pos[0], chunk_pos[1], chunk_pos[2], chunk_pos[3]),
+                0i8,
                 ResolvedChunkPayload::from_payload_with_static_palette(
                     field_chunk_payload_from_legacy_chunk(chunk),
                 ),
@@ -841,29 +872,24 @@ pub fn save_state_from_chunk_payload_patch(
     } = loaded;
     let mut reuse_index = build_blob_reuse_index(root, &manifest)?;
 
-    let mut dirty_chunk_payloads = HashMap::<ChunkKey, Option<ResolvedChunkPayload>>::new();
-    for (key, payload) in request.dirty_chunk_payloads {
-        dirty_chunk_payloads.insert(key, payload);
+    let mut dirty_chunk_payloads = HashMap::<ChunkKey, (i8, Option<ResolvedChunkPayload>)>::new();
+    for (key, scale_exp, payload) in request.dirty_chunk_payloads {
+        dirty_chunk_payloads.insert(key, (scale_exp, payload));
     }
     if dirty_chunk_payloads.is_empty() {
         return Ok(None);
     }
 
-    // For the existing on-disk patch logic, we need the set of dirty chunk positions
-    // as i32 lattice coordinates (scale_exp=0 for the index node bounds).
-    let dirty_chunks_scale0: HashSet<[i32; 4]> = dirty_chunk_payloads
-        .keys()
-        .map(|k| k.map(|c| c.to_num::<i32>()))
-        .collect();
+    let dirty_keys_set: HashSet<ChunkKey> = dirty_chunk_payloads.keys().copied().collect();
     let node_by_id = build_node_lookup(&loaded_index);
     let mut preserved_world_leaves = Vec::<LeafDescriptor>::new();
-    let mut reencode_chunk_payloads = Vec::<(ChunkKey, ResolvedChunkPayload)>::new();
+    let mut reencode_chunk_payloads = Vec::<(ChunkKey, i8, ResolvedChunkPayload)>::new();
     let mut payload_cache = HashMap::<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>::new();
     collect_world_leaf_descriptors_with_chunk_patch(
         root,
         &node_by_id,
         loaded_index.root_node_id,
-        &dirty_chunks_scale0,
+        &dirty_keys_set,
         &mut payload_cache,
         &mut preserved_world_leaves,
         &mut reencode_chunk_payloads,
@@ -872,8 +898,8 @@ pub fn save_state_from_chunk_payload_patch(
     let mut dirty_keys: Vec<ChunkKey> = dirty_chunk_payloads.keys().copied().collect();
     dirty_keys.sort_unstable();
     for key in dirty_keys {
-        if let Some(Some(payload)) = dirty_chunk_payloads.get(&key) {
-            reencode_chunk_payloads.push((key, payload.clone()));
+        if let Some((scale_exp, Some(payload))) = dirty_chunk_payloads.get(&key) {
+            reencode_chunk_payloads.push((key, *scale_exp, payload.clone()));
         }
     }
 
@@ -885,8 +911,9 @@ pub fn save_state_from_chunk_payload_patch(
         reencode_chunk_payloads,
     )?);
 
+    let zero_key = [ChunkCoord::ZERO; 4];
     let mut world_temp = build_temp_tree_from_leaves(&world_leaves)
-        .unwrap_or_else(|| make_empty_branch_root([0, 0, 0, 0], [0, 0, 0, 0]));
+        .unwrap_or_else(|| make_empty_branch_root(zero_key, zero_key));
     canonicalize_temp_tree(&mut world_temp);
 
     let mut entity_temp = match loaded_index.entity_root_node_id {
@@ -956,7 +983,7 @@ pub fn save_state_from_chunk_payload_patch(
 fn save_state_internal(
     root: &Path,
     base_world_kind: BaseWorldKind,
-    chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
+    chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
     common: SaveStateCommon<'_>,
 ) -> io::Result<SaveResult> {
     let loaded = load_or_init_save_metadata(
@@ -1067,17 +1094,20 @@ fn save_state_internal(
             &entity_blob_bytes,
         )?;
 
+        let ck = chunk.map(ChunkCoord::from_num);
         entity_leaves.push(LeafDescriptor {
-            min: chunk,
-            max: chunk,
+            min: ck,
+            max: ck,
+            scale_exp: 0,
             kind: IndexNodeKind::LeafChunkArray {
                 chunk_array_ref: entity_ref,
             },
         });
     }
 
+    let zero_key = [ChunkCoord::ZERO; 4];
     let mut world_temp = build_temp_tree_from_leaves(&world_leaves)
-        .unwrap_or_else(|| make_empty_branch_root([0, 0, 0, 0], [0, 0, 0, 0]));
+        .unwrap_or_else(|| make_empty_branch_root(zero_key, zero_key));
     canonicalize_temp_tree(&mut world_temp);
 
     let mut entity_temp = build_temp_tree_from_leaves(&entity_leaves);
@@ -1151,64 +1181,63 @@ fn save_state_internal(
 }
 
 fn resolve_world_chunk_payloads_for_save(
-    persisted_chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
-    chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
+    persisted_chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
+    chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
     dirty_block_regions: &HashSet<[i32; 4]>,
     force_full_blocks: bool,
-) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
+) -> Vec<(ChunkKey, i8, ResolvedChunkPayload)> {
     let normalized_current = normalize_chunk_payloads_latest_wins(chunk_payloads);
     if force_full_blocks {
         return normalized_current;
     }
 
-    let mut merged = HashMap::<ChunkKey, ResolvedChunkPayload>::new();
-    for (key, payload) in persisted_chunk_payloads {
-        merged.insert(key, payload);
+    let mut merged = HashMap::<ChunkKey, (i8, ResolvedChunkPayload)>::new();
+    for (key, se, payload) in persisted_chunk_payloads {
+        merged.insert(key, (se, payload));
     }
     if dirty_block_regions.is_empty() {
-        let mut out: Vec<(ChunkKey, ResolvedChunkPayload)> = merged.into_iter().collect();
-        out.sort_unstable_by_key(|(key, _)| *key);
+        let mut out: Vec<(ChunkKey, i8, ResolvedChunkPayload)> = merged.into_iter().map(|(k, (se, p))| (k, se, p)).collect();
+        out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
         return out;
     }
 
     merged.retain(|key, _| {
         !dirty_block_regions.contains(&region_from_chunk(key.map(|c| c.to_num::<i32>()), DEFAULT_REGION_CHUNK_EDGE))
     });
-    for (key, payload) in normalized_current {
+    for (key, se, payload) in normalized_current {
         if dirty_block_regions.contains(&region_from_chunk(key.map(|c| c.to_num::<i32>()), DEFAULT_REGION_CHUNK_EDGE)) {
-            merged.insert(key, payload);
+            merged.insert(key, (se, payload));
         }
     }
 
-    let mut out: Vec<(ChunkKey, ResolvedChunkPayload)> = merged.into_iter().collect();
-    out.sort_unstable_by_key(|(key, _)| *key);
+    let mut out: Vec<(ChunkKey, i8, ResolvedChunkPayload)> = merged.into_iter().map(|(k, (se, p))| (k, se, p)).collect();
+    out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
     out
 }
 
 fn normalize_chunk_payloads_latest_wins(
-    chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
-) -> Vec<(ChunkKey, ResolvedChunkPayload)> {
-    let mut by_key = HashMap::<ChunkKey, (u64, ResolvedChunkPayload)>::new();
-    for (idx, (key, payload)) in chunk_payloads.into_iter().enumerate() {
+    chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
+) -> Vec<(ChunkKey, i8, ResolvedChunkPayload)> {
+    let mut by_key = HashMap::<ChunkKey, (u64, i8, ResolvedChunkPayload)>::new();
+    for (idx, (key, se, payload)) in chunk_payloads.into_iter().enumerate() {
         let epoch = idx as u64;
         match by_key.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert((epoch, payload));
+                entry.insert((epoch, se, payload));
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                // For ResolvedChunkPayload, last write wins (higher epoch).
-                let (current_epoch, _) = entry.get();
+                let (current_epoch, _, _) = entry.get();
                 if epoch >= *current_epoch {
-                    entry.insert((epoch, payload));
+                    entry.insert((epoch, se, payload));
                 }
             }
         }
     }
-    let mut out: Vec<(ChunkKey, ResolvedChunkPayload)> = by_key
+    let mut out: Vec<(ChunkKey, i8, ResolvedChunkPayload)> = by_key
         .into_iter()
-        .map(|(key, (_, payload))| (key, payload))
+        .map(|(key, (_, se, payload))| (key, se, payload))
         .collect();
-    out.sort_unstable_by_key(|(key, _)| *key);
+    out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
     out
 }
 
@@ -1255,29 +1284,31 @@ fn build_world_leaf_descriptors_from_payloads(
     root: &Path,
     manifest: &mut Manifest,
     reuse_index: &mut BlobReuseIndex,
-    mut chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)>,
+    mut chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
 ) -> io::Result<Vec<LeafDescriptor>> {
     let mut world_leaves = Vec::<LeafDescriptor>::new();
-    chunk_payloads.sort_unstable_by_key(|(key, _)| *key);
+    chunk_payloads.sort_unstable_by(|(key_a, se_a, _), (key_b, se_b, _)| {
+        (*se_a, *key_a).cmp(&(*se_b, *key_b))
+    });
     // Group by scale_exp so chunks at different scales produce separate ChunkArrayBlobs.
     let mut non_uniform_rows =
         HashMap::<(i8, i32, i32, i32), Vec<(i32, ResolvedChunkPayload)>>::new();
-    for (key, resolved) in chunk_payloads {
-        let scale_exp = infer_scale_exp(&key);
+    for (key, scale_exp, resolved) in chunk_payloads {
         let chunk_pos = chunk_key_to_lattice(&key, scale_exp);
-        let min = chunk_pos;
-        let max = chunk_pos;
+        let ck = chunk_key_from_lattice(chunk_pos, scale_exp);
         if let Some(block) = resolved.uniform_block() {
             if block.is_air() {
                 world_leaves.push(LeafDescriptor {
-                    min,
-                    max,
+                    min: ck,
+                    max: ck,
+                    scale_exp,
                     kind: IndexNodeKind::LeafEmpty,
                 });
             } else {
                 world_leaves.push(LeafDescriptor {
-                    min,
-                    max,
+                    min: ck,
+                    max: ck,
+                    scale_exp,
                     kind: IndexNodeKind::LeafUniform {
                         block: block.clone(),
                     },
@@ -1308,8 +1339,10 @@ fn build_world_leaf_descriptors_from_payloads(
                 run_end += 1;
             }
             let run = &row_payloads[run_start..run_end];
-            let min = [run[0].0, row_y, row_z, row_w];
-            let max = [run[run.len() - 1].0, row_y, row_z, row_w];
+            let lattice_min = [run[0].0, row_y, row_z, row_w];
+            let lattice_max = [run[run.len() - 1].0, row_y, row_z, row_w];
+            let min = chunk_key_from_lattice(lattice_min, row_scale_exp);
+            let max = chunk_key_from_lattice(lattice_max, row_scale_exp);
 
             // Build a unified block_palette across all payloads in this run,
             // remapping each payload's internal u16 indices.
@@ -1389,8 +1422,8 @@ fn build_world_leaf_descriptors_from_payloads(
                 index_data.extend_from_slice(&idx.to_le_bytes());
             }
             let chunk_array_blob = ChunkArrayBlob {
-                volume_min_chunk: min,
-                volume_max_chunk: max,
+                volume_min_chunk: lattice_min,
+                volume_max_chunk: lattice_max,
                 scale_exp: row_scale_exp,
                 payload_palette,
                 block_palette: unified_block_palette,
@@ -1412,6 +1445,7 @@ fn build_world_leaf_descriptors_from_payloads(
             world_leaves.push(LeafDescriptor {
                 min,
                 max,
+                scale_exp: row_scale_exp,
                 kind: IndexNodeKind::LeafChunkArray { chunk_array_ref },
             });
             run_start = run_end;
@@ -1469,8 +1503,9 @@ fn init_empty_save_root(
         entity_root_node_id: None,
         nodes: vec![IndexNode {
             node_id: 0,
-            bounds_min_chunk: [0, 0, 0, 0],
-            bounds_max_chunk: [0, 0, 0, 0],
+            bounds_min_fixed: [0, 0, 0, 0],
+            bounds_max_fixed: [0, 0, 0, 0],
+            scale_exp: 0,
             kind: IndexNodeKind::Branch {
                 child_node_ids: Vec::new(),
             },
@@ -1595,7 +1630,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
     include_matches: bool,
     bounds_filter: Option<Aabb4i>,
     payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
-    out: &mut Vec<(ChunkKey, ResolvedChunkPayload)>,
+    out: &mut Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
 ) -> io::Result<()> {
     let Some(node) = node_by_id.get(&node_id).copied() else {
         return Err(io::Error::new(
@@ -1605,10 +1640,16 @@ fn collect_world_chunk_payloads_from_node_filtered(
     };
 
     if let Some(filter_bounds) = bounds_filter {
-        if !Aabb4i::from_i32(node.bounds_min_chunk, node.bounds_max_chunk).intersects(&filter_bounds) {
+        if !node.bounds_aabb4().intersects(&filter_bounds) {
             return Ok(());
         }
     }
+
+    // LeafEmpty and LeafUniform nodes store fixed-point bounds and a scale_exp.
+    // Convert bounds to lattice coordinates at the node's scale for iteration.
+    let node_bounds = node.bounds_aabb4();
+    let leaf_scale = node.scale_exp;
+    let (node_lat_min, node_lat_max) = node_bounds.to_lattice_bounds(leaf_scale);
 
     match &node.kind {
         IndexNodeKind::Branch { child_node_ids } => {
@@ -1626,24 +1667,24 @@ fn collect_world_chunk_payloads_from_node_filtered(
             }
         }
         IndexNodeKind::LeafEmpty => {
-            for_each_chunk_in_bounds(node.bounds_min_chunk, node.bounds_max_chunk, |chunk| {
-                let chunk_key = chunk_key_i32(chunk[0], chunk[1], chunk[2], chunk[3]);
+            for_each_chunk_in_bounds(node_lat_min, node_lat_max, |chunk| {
+                let chunk_key = chunk_key_from_lattice(chunk, leaf_scale);
                 let in_bounds = bounds_filter
                     .map(|filter| filter.contains_chunk(chunk_key))
                     .unwrap_or(true);
                 if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
-                    out.push((chunk_key, ResolvedChunkPayload::empty()));
+                    out.push((chunk_key, leaf_scale, ResolvedChunkPayload::empty()));
                 }
             });
         }
         IndexNodeKind::LeafUniform { block } => {
-            for_each_chunk_in_bounds(node.bounds_min_chunk, node.bounds_max_chunk, |chunk| {
-                let chunk_key = chunk_key_i32(chunk[0], chunk[1], chunk[2], chunk[3]);
+            for_each_chunk_in_bounds(node_lat_min, node_lat_max, |chunk| {
+                let chunk_key = chunk_key_from_lattice(chunk, leaf_scale);
                 let in_bounds = bounds_filter
                     .map(|filter| filter.contains_chunk(chunk_key))
                     .unwrap_or(true);
                 if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
-                    out.push((chunk_key, ResolvedChunkPayload::uniform(block.clone())));
+                    out.push((chunk_key, leaf_scale, ResolvedChunkPayload::uniform(block.clone())));
                 }
             });
         }
@@ -1659,7 +1700,9 @@ fn collect_world_chunk_payloads_from_node_filtered(
             }
             let payload = read_blob_payload(root, chunk_array_ref)?;
             let blob = decode_chunk_array_blob(&payload)?;
-            let bounds = Aabb4i::from_i32(blob.volume_min_chunk, blob.volume_max_chunk);
+            let bounds = Aabb4::from_lattice_bounds(
+                blob.volume_min_chunk, blob.volume_max_chunk, blob.scale_exp,
+            );
             if !bounds.is_valid() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1736,6 +1779,7 @@ fn collect_world_chunk_payloads_from_node_filtered(
                                 })?;
                             out.push((
                                 chunk_key,
+                                blob.scale_exp,
                                 ResolvedChunkPayload {
                                     payload,
                                     block_palette: block_palette.clone(),
@@ -1756,9 +1800,9 @@ fn materialize_world_chunk_payloads_from_index_filtered(
     region_filter: Option<&HashSet<[i32; 4]>>,
     include_matches: bool,
     bounds_filter: Option<Aabb4i>,
-) -> io::Result<Vec<(ChunkKey, ResolvedChunkPayload)>> {
+) -> io::Result<Vec<(ChunkKey, i8, ResolvedChunkPayload)>> {
     let node_by_id = build_node_lookup(index);
-    let mut out = Vec::<(ChunkKey, ResolvedChunkPayload)>::new();
+    let mut out = Vec::<(ChunkKey, i8, ResolvedChunkPayload)>::new();
     let mut payload_cache = HashMap::<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>::new();
     collect_world_chunk_payloads_from_node_filtered(
         root,
@@ -1770,7 +1814,7 @@ fn materialize_world_chunk_payloads_from_index_filtered(
         &mut payload_cache,
         &mut out,
     )?;
-    out.sort_unstable_by_key(|(key, _)| *key);
+    out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
     Ok(out)
 }
 
@@ -1907,12 +1951,12 @@ fn subtract_aabb(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
 
 fn carve_bounds_excluding_dirty_chunks(
     bounds: Aabb4i,
-    dirty_chunks: &HashSet<[i32; 4]>,
+    dirty_chunks: &HashSet<ChunkKey>,
 ) -> Vec<Aabb4i> {
-    let mut dirty_in_bounds: Vec<[i32; 4]> = dirty_chunks
+    let mut dirty_in_bounds: Vec<ChunkKey> = dirty_chunks
         .iter()
         .copied()
-        .filter(|chunk| bounds.contains_chunk(chunk.map(ChunkCoord::from_num)))
+        .filter(|chunk| bounds.contains_chunk(*chunk))
         .collect();
     if dirty_in_bounds.is_empty() {
         return vec![bounds];
@@ -1921,7 +1965,7 @@ fn carve_bounds_excluding_dirty_chunks(
 
     let mut pieces = vec![bounds];
     for chunk in dirty_in_bounds {
-        let chunk_bounds = Aabb4i::from_i32(chunk, chunk);
+        let chunk_bounds = Aabb4i::new(chunk, chunk);
         let mut next = Vec::new();
         for piece in pieces {
             next.extend(subtract_aabb(piece, chunk_bounds));
@@ -1938,10 +1982,10 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
     root: &Path,
     node_by_id: &HashMap<u32, &IndexNode>,
     node_id: u32,
-    dirty_chunks: &HashSet<[i32; 4]>,
+    dirty_chunks: &HashSet<ChunkKey>,
     payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
     preserved_out: &mut Vec<LeafDescriptor>,
-    reencode_payloads_out: &mut Vec<(ChunkKey, ResolvedChunkPayload)>,
+    reencode_payloads_out: &mut Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
 ) -> io::Result<()> {
     let Some(node) = node_by_id.get(&node_id).copied() else {
         return Err(io::Error::new(
@@ -1949,7 +1993,7 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
             format!("index references missing world node id {node_id}"),
         ));
     };
-    let bounds = Aabb4i::from_i32(node.bounds_min_chunk, node.bounds_max_chunk);
+    let bounds = node.bounds_aabb4();
     if !bounds.is_valid() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1957,9 +2001,12 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
         ));
     }
 
+    let node_min_key = node.bounds_min_fixed.map(ChunkCoord::from_bits);
+    let node_max_key = node.bounds_max_fixed.map(ChunkCoord::from_bits);
+
     let has_dirty = dirty_chunks
         .iter()
-        .any(|chunk| bounds.contains_chunk(chunk.map(ChunkCoord::from_num)));
+        .any(|chunk| bounds.contains_chunk(*chunk));
     match &node.kind {
         IndexNodeKind::Branch { child_node_ids } => {
             for child_id in child_node_ids {
@@ -1976,8 +2023,9 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
         }
         IndexNodeKind::LeafEmpty | IndexNodeKind::LeafUniform { .. } if !has_dirty => {
             preserved_out.push(LeafDescriptor {
-                min: node.bounds_min_chunk,
-                max: node.bounds_max_chunk,
+                min: node_min_key,
+                max: node_max_key,
+                scale_exp: node.scale_exp,
                 kind: node.kind.clone(),
             });
         }
@@ -1985,16 +2033,18 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
             let pieces = carve_bounds_excluding_dirty_chunks(bounds, dirty_chunks);
             for piece in pieces {
                 preserved_out.push(LeafDescriptor {
-                    min: piece.min.map(|c| c.to_num::<i32>()),
-                    max: piece.max.map(|c| c.to_num::<i32>()),
+                    min: piece.min,
+                    max: piece.max,
+                    scale_exp: node.scale_exp,
                     kind: node.kind.clone(),
                 });
             }
         }
         IndexNodeKind::LeafChunkArray { .. } if !has_dirty => {
             preserved_out.push(LeafDescriptor {
-                min: node.bounds_min_chunk,
-                max: node.bounds_max_chunk,
+                min: node_min_key,
+                max: node_max_key,
+                scale_exp: node.scale_exp,
                 kind: node.kind.clone(),
             });
         }
@@ -2010,7 +2060,9 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
             }
             let payload = read_blob_payload(root, chunk_array_ref)?;
             let blob = decode_chunk_array_blob(&payload)?;
-            let chunk_array_bounds = Aabb4i::from_i32(blob.volume_min_chunk, blob.volume_max_chunk);
+            let chunk_array_bounds = Aabb4::from_lattice_bounds(
+                blob.volume_min_chunk, blob.volume_max_chunk, blob.scale_exp,
+            );
             if !chunk_array_bounds.is_valid() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -2054,7 +2106,8 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
                     for y in lat_min[1]..=lat_max[1] {
                         for x in lat_min[0]..=lat_max[0] {
                             let chunk = [x, y, z, w];
-                            if dirty_chunks.contains(&chunk) {
+                            let chunk_key = chunk_key_from_lattice(chunk, blob.scale_exp);
+                            if dirty_chunks.contains(&chunk_key) {
                                 continue;
                             }
                             let local = [
@@ -2078,7 +2131,8 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
                                     )
                                 })?;
                             reencode_payloads_out.push((
-                                chunk_key_from_lattice(chunk, blob.scale_exp),
+                                chunk_key,
+                                blob.scale_exp,
                                 ResolvedChunkPayload {
                                     payload,
                                     block_palette: block_palette.clone(),
@@ -2122,8 +2176,9 @@ fn build_temp_tree_from_index_subtree(
         leaf_kind => TempNodeKind::Leaf(leaf_kind.clone()),
     };
     Ok(TempNode {
-        min: node.bounds_min_chunk,
-        max: node.bounds_max_chunk,
+        min: node.bounds_min_fixed.map(ChunkCoord::from_bits),
+        max: node.bounds_max_fixed.map(ChunkCoord::from_bits),
+        scale_exp: node.scale_exp,
         kind,
     })
 }
@@ -2191,31 +2246,6 @@ fn chunk_key_from_i32(pos: [i32; 4]) -> ChunkKey {
     pos.map(ChunkCoord::from_num)
 }
 
-/// Infer the scale_exp from a ChunkKey by examining the fractional bits.
-///
-/// Returns a non-positive scale_exp: 0 for integer coordinates, negative for
-/// sub-integer (fractional) coordinates.  Positive scales (coarser than 1:1)
-/// are ambiguous because a scale-0 key `[2,0,0,0]` has the same fixed-point
-/// representation as a scale-1 key at lattice `[1,0,0,0]`.  We therefore clamp
-/// to 0 so that all integer ChunkKey values are treated as scale 0.
-fn infer_scale_exp(key: &ChunkKey) -> i8 {
-    let mut min_trailing = 63i32; // bits in i64 minus sign
-    for coord in key {
-        let bits = coord.to_bits();
-        if bits == 0 {
-            continue;
-        }
-        let trailing = bits.trailing_zeros() as i32;
-        min_trailing = min_trailing.min(trailing);
-    }
-    // The fractional part occupies the lower 16 bits.
-    // scale_exp = trailing_zeros - 16, clamped to [-16, 0].
-    // Capping at 0 avoids misinterpreting even integer coordinates as
-    // higher-scale chunks (e.g. [2,0,0,0] being treated as scale 1).
-    let scale = min_trailing as i32 - 16;
-    scale.clamp(-16, 0) as i8
-}
-
 /// Convert a ChunkKey to lattice [i32; 4] at the given scale_exp.
 fn chunk_key_to_lattice(key: &ChunkKey, scale_exp: i8) -> [i32; 4] {
     [
@@ -2230,34 +2260,42 @@ fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
     coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
-fn bounds_key(min: [i32; 4], max: [i32; 4]) -> [i32; 8] {
+fn bounds_key(min: ChunkKey, max: ChunkKey) -> [i64; 8] {
+    [
+        min[0].to_bits(), min[1].to_bits(), min[2].to_bits(), min[3].to_bits(),
+        max[0].to_bits(), max[1].to_bits(), max[2].to_bits(), max[3].to_bits(),
+    ]
+}
+
+fn fixed_bounds_key(min: [i64; 4], max: [i64; 4]) -> [i64; 8] {
     [
         min[0], min[1], min[2], min[3], max[0], max[1], max[2], max[3],
     ]
 }
 
-fn make_empty_branch_root(min: [i32; 4], max: [i32; 4]) -> TempNode {
+fn make_empty_branch_root(min: ChunkKey, max: ChunkKey) -> TempNode {
     TempNode {
         min,
         max,
+        scale_exp: 0,
         kind: TempNodeKind::Branch(Vec::new()),
     }
 }
 
-fn bounds_are_valid(min: [i32; 4], max: [i32; 4]) -> bool {
+fn fixed_bounds_are_valid(min: [i64; 4], max: [i64; 4]) -> bool {
     (0..4).all(|axis| min[axis] <= max[axis])
 }
 
-fn bounds_contains(
-    parent_min: [i32; 4],
-    parent_max: [i32; 4],
-    child_min: [i32; 4],
-    child_max: [i32; 4],
+fn fixed_bounds_contains(
+    parent_min: [i64; 4],
+    parent_max: [i64; 4],
+    child_min: [i64; 4],
+    child_max: [i64; 4],
 ) -> bool {
     (0..4).all(|axis| parent_min[axis] <= child_min[axis] && child_max[axis] <= parent_max[axis])
 }
 
-fn bounds_intersect(a_min: [i32; 4], a_max: [i32; 4], b_min: [i32; 4], b_max: [i32; 4]) -> bool {
+fn fixed_bounds_intersect(a_min: [i64; 4], a_max: [i64; 4], b_min: [i64; 4], b_max: [i64; 4]) -> bool {
     (0..4).all(|axis| a_min[axis] <= b_max[axis] && a_max[axis] >= b_min[axis])
 }
 
@@ -2271,12 +2309,13 @@ fn build_temp_tree_from_leaves(leaves: &[LeafDescriptor]) -> Option<TempNode> {
         return Some(TempNode {
             min: leaf.min,
             max: leaf.max,
+            scale_exp: leaf.scale_exp,
             kind: TempNodeKind::Leaf(leaf.kind.clone()),
         });
     }
 
-    let mut min = [i32::MAX; 4];
-    let mut max = [i32::MIN; 4];
+    let mut min = [ChunkCoord::MAX; 4];
+    let mut max = [ChunkCoord::MIN; 4];
     for leaf in leaves {
         for axis in 0..4 {
             min[axis] = min[axis].min(leaf.min[axis]);
@@ -2292,6 +2331,7 @@ fn build_temp_tree_from_leaves(leaves: &[LeafDescriptor]) -> Option<TempNode> {
         children.push(TempNode {
             min: leaf.min,
             max: leaf.max,
+            scale_exp: leaf.scale_exp,
             kind: TempNodeKind::Leaf(leaf.kind.clone()),
         });
     }
@@ -2300,6 +2340,7 @@ fn build_temp_tree_from_leaves(leaves: &[LeafDescriptor]) -> Option<TempNode> {
     Some(TempNode {
         min,
         max,
+        scale_exp: 0, // Branch nodes don't have a meaningful scale_exp
         kind: TempNodeKind::Branch(children),
     })
 }
@@ -2314,7 +2355,7 @@ fn canonicalize_temp_tree(node: &mut TempNode) {
     children.sort_unstable_by_key(temp_node_order_key);
 }
 
-fn temp_node_order_key(node: &TempNode) -> ([i32; 8], u8, u64, u64, u64, u64, u64) {
+fn temp_node_order_key(node: &TempNode) -> ([i64; 8], u8, u64, u64, u64, u64, u64) {
     let (kind_rank, v0, v1, v2, v3, v4) = temp_kind_order_key(&node.kind);
     (
         bounds_key(node.min, node.max),
@@ -2373,8 +2414,9 @@ fn flatten_temp_tree(node: &TempNode, out: &mut Vec<IndexNode>) -> u32 {
     let node_id = out.len() as u32;
     out.push(IndexNode {
         node_id,
-        bounds_min_chunk: node.min,
-        bounds_max_chunk: node.max,
+        bounds_min_fixed: node.min.map(|c| c.to_bits()),
+        bounds_max_fixed: node.max.map(|c| c.to_bits()),
+        scale_exp: node.scale_exp,
         kind,
     });
     node_id
@@ -2822,7 +2864,7 @@ fn read_index_file(path: PathBuf) -> io::Result<IndexPayload> {
     }
 
     let version = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
-    if version != INDEX_FILE_VERSION {
+    if version != INDEX_FILE_VERSION && version != 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported index file version {version}"),
@@ -2847,18 +2889,46 @@ fn read_index_file(path: PathBuf) -> io::Result<IndexPayload> {
         ));
     }
 
-    let body: IndexBody = postcard::from_bytes(&payload)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if body.nodes.len() != node_count as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "index node count mismatch: header={}, payload={}",
-                node_count,
-                body.nodes.len()
-            ),
-        ));
-    }
+    let nodes = if version == 1 {
+        // Legacy V1: bounds stored as [i32; 4], convert to [i64; 4] fixed-point bits.
+        let legacy_body: LegacyIndexBodyV1 = postcard::from_bytes(&payload)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if legacy_body.nodes.len() != node_count as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "index node count mismatch: header={}, payload={}",
+                    node_count,
+                    legacy_body.nodes.len()
+                ),
+            ));
+        }
+        legacy_body
+            .nodes
+            .into_iter()
+            .map(|legacy| IndexNode {
+                node_id: legacy.node_id,
+                bounds_min_fixed: legacy.bounds_min_chunk.map(|v| ChunkCoord::from_num(v).to_bits()),
+                bounds_max_fixed: legacy.bounds_max_chunk.map(|v| ChunkCoord::from_num(v).to_bits()),
+                scale_exp: 0,
+                kind: legacy.kind,
+            })
+            .collect()
+    } else {
+        let body: IndexBody = postcard::from_bytes(&payload)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if body.nodes.len() != node_count as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "index node count mismatch: header={}, payload={}",
+                    node_count,
+                    body.nodes.len()
+                ),
+            ));
+        }
+        body.nodes
+    };
 
     let entity_root_node_id =
         (entity_root_raw != INDEX_ENTITY_ROOT_NONE).then_some(entity_root_raw);
@@ -2867,7 +2937,7 @@ fn read_index_file(path: PathBuf) -> io::Result<IndexPayload> {
         generation,
         root_node_id,
         entity_root_node_id,
-        nodes: body.nodes,
+        nodes,
     };
     validate_index_payload(&index)?;
     Ok(index)
@@ -2883,12 +2953,12 @@ fn validate_index_payload(index: &IndexPayload) -> io::Result<()> {
 
     let mut node_by_id = HashMap::<u32, &IndexNode>::new();
     for node in &index.nodes {
-        if !bounds_are_valid(node.bounds_min_chunk, node.bounds_max_chunk) {
+        if !fixed_bounds_are_valid(node.bounds_min_fixed, node.bounds_max_fixed) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "node {} has invalid bounds min={:?} max={:?}",
-                    node.node_id, node.bounds_min_chunk, node.bounds_max_chunk
+                    node.node_id, node.bounds_min_fixed, node.bounds_max_fixed
                 ),
             ));
         }
@@ -2952,7 +3022,7 @@ fn validate_index_payload(index: &IndexPayload) -> io::Result<()> {
 
 fn validate_index_subtree(
     node_id: u32,
-    parent_bounds: Option<([i32; 4], [i32; 4])>,
+    parent_bounds: Option<([i64; 4], [i64; 4])>,
     subtree_kind: IndexSubtreeKind,
     node_by_id: &HashMap<u32, &IndexNode>,
     seen: &mut HashSet<u32>,
@@ -2980,11 +3050,11 @@ fn validate_index_subtree(
     };
 
     if let Some((parent_min, parent_max)) = parent_bounds {
-        if !bounds_contains(
+        if !fixed_bounds_contains(
             parent_min,
             parent_max,
-            node.bounds_min_chunk,
-            node.bounds_max_chunk,
+            node.bounds_min_fixed,
+            node.bounds_max_fixed,
         ) {
             stack.remove(&node_id);
             return Err(io::Error::new(
@@ -2992,8 +3062,8 @@ fn validate_index_subtree(
                 format!(
                     "node {} bounds {:?}..{:?} not contained in parent {:?}..{:?}",
                     node.node_id,
-                    node.bounds_min_chunk,
-                    node.bounds_max_chunk,
+                    node.bounds_min_fixed,
+                    node.bounds_max_fixed,
                     parent_min,
                     parent_max
                 ),
@@ -3033,11 +3103,11 @@ fn validate_index_subtree(
                 let left = window[0];
                 let right = window[1];
                 let left_key = (
-                    bounds_key(left.bounds_min_chunk, left.bounds_max_chunk),
+                    fixed_bounds_key(left.bounds_min_fixed, left.bounds_max_fixed),
                     index_kind_order_key(&left.kind),
                 );
                 let right_key = (
-                    bounds_key(right.bounds_min_chunk, right.bounds_max_chunk),
+                    fixed_bounds_key(right.bounds_min_fixed, right.bounds_max_fixed),
                     index_kind_order_key(&right.kind),
                 );
                 if left_key > right_key {
@@ -3056,11 +3126,11 @@ fn validate_index_subtree(
                 for j in (i + 1)..child_nodes.len() {
                     let a = child_nodes[i];
                     let b = child_nodes[j];
-                    if bounds_intersect(
-                        a.bounds_min_chunk,
-                        a.bounds_max_chunk,
-                        b.bounds_min_chunk,
-                        b.bounds_max_chunk,
+                    if fixed_bounds_intersect(
+                        a.bounds_min_fixed,
+                        a.bounds_max_fixed,
+                        b.bounds_min_fixed,
+                        b.bounds_max_fixed,
                     ) {
                         stack.remove(&node_id);
                         return Err(io::Error::new(
@@ -3077,7 +3147,7 @@ fn validate_index_subtree(
             for child in child_nodes {
                 validate_index_subtree(
                     child.node_id,
-                    Some((node.bounds_min_chunk, node.bounds_max_chunk)),
+                    Some((node.bounds_min_fixed, node.bounds_max_fixed)),
                     subtree_kind,
                     node_by_id,
                     seen,
@@ -3211,6 +3281,17 @@ fn fsync_directory(path: &Path) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Helper to construct an IndexNode from i32 bounds (scale 0) for tests.
+    fn test_index_node(node_id: u32, min: [i32; 4], max: [i32; 4], kind: IndexNodeKind) -> IndexNode {
+        IndexNode {
+            node_id,
+            bounds_min_fixed: min.map(|v| ChunkCoord::from_num(v).to_bits()),
+            bounds_max_fixed: max.map(|v| ChunkCoord::from_num(v).to_bits()),
+            scale_exp: 0,
+            kind,
+        }
+    }
 
     static TEST_UNIQUIFIER: AtomicU64 = AtomicU64::new(0);
 
@@ -3626,12 +3707,9 @@ mod tests {
             generation: 1,
             root_node_id: 7,
             entity_root_node_id: None,
-            nodes: vec![IndexNode {
-                node_id: 7,
-                bounds_min_chunk: [-128, -8, -128, -128],
-                bounds_max_chunk: [127, 8, 127, 127],
-                kind: IndexNodeKind::LeafUniform { block: BlockData::simple(0, 11) },
-            }],
+            nodes: vec![test_index_node(7, [-128, -8, -128, -128], [127, 8, 127, 127],
+                IndexNodeKind::LeafUniform { block: BlockData::simple(0, 11) },
+            )],
         };
         let bounds = Aabb4i::from_i32([-4, -2, -4, -4], [4, 2, 4, 4]);
         let core = load_world_subtree_core_for_bounds_from_index(&root, &index, bounds)
@@ -3657,8 +3735,8 @@ mod tests {
             SaveChunkPayloadRequest {
                 base_world_kind: BaseWorldKind::Empty,
                 chunk_payloads: vec![
-                    (chunk_key_from_i32(chunk_pos), ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
-                    (chunk_key_from_i32(chunk_pos), ResolvedChunkPayload::uniform(BlockData::simple(0, 9))),
+                    (chunk_key_from_i32(chunk_pos), 0i8, ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
+                    (chunk_key_from_i32(chunk_pos), 0i8, ResolvedChunkPayload::uniform(BlockData::simple(0, 9))),
                 ],
                 entities: &[],
                 players: &[],
@@ -3703,8 +3781,8 @@ mod tests {
             SaveChunkPayloadRequest {
                 base_world_kind: BaseWorldKind::Empty,
                 chunk_payloads: vec![
-                    (chunk_key_from_i32(chunk_a), ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
-                    (chunk_key_from_i32(chunk_b), ResolvedChunkPayload::uniform(BlockData::simple(0, 7))),
+                    (chunk_key_from_i32(chunk_a), 0i8, ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
+                    (chunk_key_from_i32(chunk_b), 0i8, ResolvedChunkPayload::uniform(BlockData::simple(0, 7))),
                 ],
                 entities: &[],
                 players: &[],
@@ -3726,7 +3804,7 @@ mod tests {
             &root,
             SaveChunkPayloadRequest {
                 base_world_kind: BaseWorldKind::Empty,
-                chunk_payloads: vec![(chunk_key_from_i32(chunk_a), ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))],
+                chunk_payloads: vec![(chunk_key_from_i32(chunk_a), 0i8, ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))],
                 entities: &[],
                 players: &[],
                 world_seed: 1,
@@ -3769,12 +3847,13 @@ mod tests {
         world.set_voxel(1, 1, 1, 1, LegacyVoxel(3));
         world.set_voxel(40, 2, -5, 17, LegacyVoxel(7));
 
-        let chunk_payloads: Vec<(ChunkKey, ResolvedChunkPayload)> = world
+        let chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)> = world
             .chunks
             .iter()
             .map(|(&chunk_pos, chunk)| {
                 (
                     chunk_key_from_i32(chunk_pos),
+                    0i8,
                     ResolvedChunkPayload::from_payload_with_static_palette(
                         field_chunk_payload_from_legacy_chunk(chunk),
                     ),
@@ -3826,8 +3905,8 @@ mod tests {
 
         let mut initial_payloads = Vec::new();
         for x in 0..=3 {
-            initial_payloads.push((chunk_key_from_i32([x, 0, 0, 0]), dense_resolved.clone()));
-            initial_payloads.push((chunk_key_from_i32([x, 1, 0, 0]), dense_resolved.clone()));
+            initial_payloads.push((chunk_key_from_i32([x, 0, 0, 0]), 0i8, dense_resolved.clone()));
+            initial_payloads.push((chunk_key_from_i32([x, 1, 0, 0]), 0i8, dense_resolved.clone()));
         }
 
         let initial = save_state_from_chunk_payloads(
@@ -3856,7 +3935,7 @@ mod tests {
             &root,
             SaveChunkPayloadPatchRequest {
                 base_world_kind: BaseWorldKind::Empty,
-                dirty_chunk_payloads: vec![(chunk_key_from_i32([1, 0, 0, 0]), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9))))],
+                dirty_chunk_payloads: vec![(chunk_key_from_i32([1, 0, 0, 0]), 0i8, Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9))))],
                 world_seed: 7,
                 next_entity_id: 1,
                 player_entity_hints: None,
@@ -3999,26 +4078,12 @@ mod tests {
             root_node_id: 0,
             entity_root_node_id: None,
             nodes: vec![
-                IndexNode {
-                    node_id: 0,
-                    bounds_min_chunk: [0, 0, 0, 0],
-                    bounds_max_chunk: [1, 0, 0, 0],
-                    kind: IndexNodeKind::Branch {
-                        child_node_ids: vec![1, 2],
-                    },
-                },
-                IndexNode {
-                    node_id: 1,
-                    bounds_min_chunk: [0, 0, 0, 0],
-                    bounds_max_chunk: [0, 0, 0, 0],
-                    kind: IndexNodeKind::LeafEmpty,
-                },
-                IndexNode {
-                    node_id: 2,
-                    bounds_min_chunk: [0, 0, 0, 0],
-                    bounds_max_chunk: [0, 0, 0, 0],
-                    kind: IndexNodeKind::LeafEmpty,
-                },
+                test_index_node(0, [0, 0, 0, 0], [1, 0, 0, 0],
+                    IndexNodeKind::Branch { child_node_ids: vec![1, 2] }),
+                test_index_node(1, [0, 0, 0, 0], [0, 0, 0, 0],
+                    IndexNodeKind::LeafEmpty),
+                test_index_node(2, [0, 0, 0, 0], [0, 0, 0, 0],
+                    IndexNodeKind::LeafEmpty),
             ],
         };
 
@@ -4032,23 +4097,27 @@ mod tests {
         // sibling union bounds. The temp-tree builder must avoid that pattern.
         let leaves = vec![
             LeafDescriptor {
-                min: [0, 0, 0, 0],
-                max: [100, 0, 0, 0],
+                min: [0, 0, 0, 0].map(ChunkCoord::from_num),
+                max: [100, 0, 0, 0].map(ChunkCoord::from_num),
+                scale_exp: 0,
                 kind: IndexNodeKind::LeafUniform { block: BlockData::simple(0, 1) },
             },
             LeafDescriptor {
-                min: [0, 2, 0, 0],
-                max: [100, 2, 0, 0],
+                min: [0, 2, 0, 0].map(ChunkCoord::from_num),
+                max: [100, 2, 0, 0].map(ChunkCoord::from_num),
+                scale_exp: 0,
                 kind: IndexNodeKind::LeafUniform { block: BlockData::simple(0, 1) },
             },
             LeafDescriptor {
-                min: [50, 1, 0, 0],
-                max: [150, 1, 0, 0],
+                min: [50, 1, 0, 0].map(ChunkCoord::from_num),
+                max: [150, 1, 0, 0].map(ChunkCoord::from_num),
+                scale_exp: 0,
                 kind: IndexNodeKind::LeafUniform { block: BlockData::simple(0, 1) },
             },
             LeafDescriptor {
-                min: [50, 3, 0, 0],
-                max: [150, 3, 0, 0],
+                min: [50, 3, 0, 0].map(ChunkCoord::from_num),
+                max: [150, 3, 0, 0].map(ChunkCoord::from_num),
+                scale_exp: 0,
                 kind: IndexNodeKind::LeafUniform { block: BlockData::simple(0, 1) },
             },
         ];
@@ -4075,26 +4144,12 @@ mod tests {
             root_node_id: 0,
             entity_root_node_id: None,
             nodes: vec![
-                IndexNode {
-                    node_id: 0,
-                    bounds_min_chunk: [0, 0, 0, 0],
-                    bounds_max_chunk: [1, 0, 0, 0],
-                    kind: IndexNodeKind::Branch {
-                        child_node_ids: vec![2, 1],
-                    },
-                },
-                IndexNode {
-                    node_id: 1,
-                    bounds_min_chunk: [0, 0, 0, 0],
-                    bounds_max_chunk: [0, 0, 0, 0],
-                    kind: IndexNodeKind::LeafEmpty,
-                },
-                IndexNode {
-                    node_id: 2,
-                    bounds_min_chunk: [1, 0, 0, 0],
-                    bounds_max_chunk: [1, 0, 0, 0],
-                    kind: IndexNodeKind::LeafEmpty,
-                },
+                test_index_node(0, [0, 0, 0, 0], [1, 0, 0, 0],
+                    IndexNodeKind::Branch { child_node_ids: vec![2, 1] }),
+                test_index_node(1, [0, 0, 0, 0], [0, 0, 0, 0],
+                    IndexNodeKind::LeafEmpty),
+                test_index_node(2, [1, 0, 0, 0], [1, 0, 0, 0],
+                    IndexNodeKind::LeafEmpty),
             ],
         };
 
@@ -4108,11 +4163,8 @@ mod tests {
             generation: 1,
             root_node_id: 0,
             entity_root_node_id: None,
-            nodes: vec![IndexNode {
-                node_id: 0,
-                bounds_min_chunk: [0, 0, 0, 0],
-                bounds_max_chunk: [0, 0, 0, 0],
-                kind: IndexNodeKind::LeafChunkArray {
+            nodes: vec![test_index_node(0, [0, 0, 0, 0], [0, 0, 0, 0],
+                IndexNodeKind::LeafChunkArray {
                     chunk_array_ref: BlobRef {
                         data_file_id: 1,
                         record_offset: 12,
@@ -4122,7 +4174,7 @@ mod tests {
                         blob_version: ENTITY_BLOB_VERSION,
                     },
                 },
-            }],
+            )],
         };
 
         let err = validate_index_payload(&index).expect_err("wrong blob type should fail");
@@ -4641,7 +4693,7 @@ mod tests {
             blocks[1] = BlockData::simple(0, (x + 10) as u32);
             let resolved =
                 ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
-            initial_payloads.push((chunk_key_from_i32([x, 0, 0, 0]), resolved));
+            initial_payloads.push((chunk_key_from_i32([x, 0, 0, 0]), 0i8, resolved));
         }
 
         let initial = save_state_from_chunk_payloads(
@@ -4674,7 +4726,7 @@ mod tests {
             blocks[1] = BlockData::simple(0, (x + 200) as u32);
             let resolved =
                 ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
-            patch1_dirty.push((chunk_key_from_i32([x, 0, 0, 0]), Some(resolved)));
+            patch1_dirty.push((chunk_key_from_i32([x, 0, 0, 0]), 0i8, Some(resolved)));
         }
 
         let patch1 = save_state_from_chunk_payload_patch(
@@ -4729,7 +4781,7 @@ mod tests {
             blocks[0] = BlockData::simple(0, (x + 300) as u32);
             let resolved =
                 ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
-            patch2_dirty.push((chunk_key_from_i32([x, 0, 0, 0]), Some(resolved)));
+            patch2_dirty.push((chunk_key_from_i32([x, 0, 0, 0]), 0i8, Some(resolved)));
         }
 
         let patch2 = save_state_from_chunk_payload_patch(
@@ -4788,7 +4840,7 @@ mod tests {
             &root,
             SaveChunkPayloadPatchRequest {
                 base_world_kind: BaseWorldKind::Empty,
-                dirty_chunk_payloads: vec![(chunk_key_from_i32([3, 0, 0, 0]), None)],
+                dirty_chunk_payloads: vec![(chunk_key_from_i32([3, 0, 0, 0]), 0i8, None)],
                 world_seed: 99,
                 next_entity_id: 1,
                 player_entity_hints: None,
@@ -4815,6 +4867,77 @@ mod tests {
             assert!(
                 loaded_map_3.contains_key(&key),
                 "chunk {key:?} missing after patch 3 (should have survived)"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_load_roundtrip_preserves_multi_scale_chunks() {
+        use crate::shared::spatial::chunk_key_from_lattice;
+
+        let root = test_root("multi-scale-roundtrip");
+        let now_ms = now_unix_ms();
+        let empty_regions = HashSet::new();
+
+        // Place one unique block per scale at distinct lattice positions.
+        // scale_exp: -2, -1, 0, 1, 2
+        let scales: &[(i8, [i32; 4], u32)] = &[
+            (-2, [1, 0, 0, 0], 10),
+            (-1, [1, 0, 0, 0], 20),
+            ( 0, [5, 0, 0, 0], 30),
+            ( 1, [1, 0, 0, 0], 40),
+            ( 2, [1, 0, 0, 0], 50),
+        ];
+
+        let mut payloads = Vec::new();
+        for &(scale_exp, lattice, block_type) in scales {
+            let key = chunk_key_from_lattice(lattice, scale_exp);
+            let resolved = ResolvedChunkPayload::uniform(BlockData::simple(0, block_type));
+            payloads.push((key, scale_exp, resolved));
+        }
+
+        save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: payloads,
+                entities: &[],
+                players: &[],
+                world_seed: 42,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms,
+            },
+        )
+        .expect("save multi-scale state");
+
+        // Query with a wide bounds that covers all scales.
+        let bounds = Aabb4i::from_i32([-10, -10, -10, -10], [10, 10, 10, 10]);
+        let loaded = load_world_chunk_payloads_for_bounds(&root, bounds)
+            .expect("load multi-scale state");
+        let loaded_map: HashMap<ChunkKey, ResolvedChunkPayload> =
+            loaded.into_iter().collect();
+
+        for &(scale_exp, lattice, expected_block_type) in scales {
+            let key = chunk_key_from_lattice(lattice, scale_exp);
+            let resolved = loaded_map
+                .get(&key)
+                .unwrap_or_else(|| panic!(
+                    "chunk at scale_exp={scale_exp} lattice={lattice:?} (key={key:?}) missing after load"
+                ));
+            let blocks = resolved.dense_blocks();
+            assert_eq!(
+                blocks[0],
+                BlockData::simple(0, expected_block_type),
+                "block mismatch at scale_exp={scale_exp} lattice={lattice:?}"
             );
         }
 
