@@ -157,6 +157,20 @@ impl BlockData {
     pub fn is_air(&self) -> bool {
         self.namespace == 0 && self.block_type == 0
     }
+
+    /// Compare two blocks ignoring `scale_exp`.
+    ///
+    /// Useful for pruning override chunks against virgin data: the tree's
+    /// Uniform storage normalises `scale_exp` to the chunk's scale via
+    /// `kind_from_resolved_value_at_scale`, so stored blocks may have a
+    /// different `scale_exp` than the original virgin blocks even though
+    /// they are semantically identical.
+    pub fn matches_ignoring_scale(&self, other: &Self) -> bool {
+        self.namespace == other.namespace
+            && self.block_type == other.block_type
+            && self.orientation == other.orientation
+            && self.extra_data == other.extra_data
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +178,14 @@ pub enum BaseWorldKind {
     Empty,
     FlatFloor { material: BlockData },
     MassivePlatforms { material: BlockData },
+}
+
+/// Compute a linear index from 4D coordinates and dimension extents.
+///
+/// Layout: `x + dims[0] * (y + dims[1] * (z + dims[2] * w))`
+#[inline]
+pub fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
+    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
 /// Convert world coordinates to a fixed-point ChunkKey and local voxel index.

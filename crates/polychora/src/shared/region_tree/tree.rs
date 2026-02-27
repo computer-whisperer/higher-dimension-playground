@@ -3,7 +3,7 @@ use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::spatial::{
     chunk_key_from_lattice, lattice_from_fixed, step_for_scale, ChunkCoord,
 };
-use crate::shared::voxel::BlockData;
+use crate::shared::voxel::{linear_cell_index, BlockData};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -2692,23 +2692,26 @@ fn find_leaf_chunks_in_spatial_range_recursive(
                 return;
             }
             let se = block.scale_exp;
-            let spatial = chunk_spatial_extent(kind_bounds, se);
+            // Uniform nodes use step_for_scale(0) for tree operations (carving,
+            // expanding), so their bounds are at scale-0 alignment regardless of
+            // block.scale_exp. Use scale 0 for spatial extent and enumeration so
+            // keys and extents are consistent, but report block.scale_exp.
+            let spatial = chunk_spatial_extent(kind_bounds, 0);
             if !spatial.intersects(query) {
                 return;
             }
             if is_single_chunk_bounds(kind_bounds) {
                 out.push((kind_bounds.min, se));
             } else {
-                // Enumerate each chunk position within bounds at this scale.
-                let (lmin, lmax) = kind_bounds.to_lattice_bounds(se);
+                let (lmin, lmax) = kind_bounds.to_lattice_bounds(0);
                 for lw in lmin[3]..=lmax[3] {
                     for lz in lmin[2]..=lmax[2] {
                         for ly in lmin[1]..=lmax[1] {
                             for lx in lmin[0]..=lmax[0] {
-                                let ck = chunk_key_from_lattice([lx, ly, lz, lw], se);
+                                let ck = chunk_key_from_lattice([lx, ly, lz, lw], 0);
                                 let ck_spatial = chunk_spatial_extent(
                                     Aabb4i::new(ck, ck),
-                                    se,
+                                    0,
                                 );
                                 if ck_spatial.intersects(query) {
                                     out.push((ck, se));
@@ -2725,22 +2728,44 @@ fn find_leaf_chunks_in_spatial_range_recursive(
             if !spatial.intersects(query) {
                 return;
             }
-            if is_single_chunk_bounds(ca.bounds) {
-                out.push((ca.bounds.min, se));
-            } else {
-                let (lmin, lmax) = ca.bounds.to_lattice_bounds(se);
-                for lw in lmin[3]..=lmax[3] {
-                    for lz in lmin[2]..=lmax[2] {
-                        for ly in lmin[1]..=lmax[1] {
-                            for lx in lmin[0]..=lmax[0] {
-                                let ck = chunk_key_from_lattice([lx, ly, lz, lw], se);
-                                let ck_spatial = chunk_spatial_extent(
-                                    Aabb4i::new(ck, ck),
-                                    se,
-                                );
-                                if ck_spatial.intersects(query) {
-                                    out.push((ck, se));
+            // Decode indices and build non-empty mask so we skip empty/air cells.
+            let Ok(indices) = ca.decode_dense_indices() else {
+                return;
+            };
+            let palette_non_empty = chunk_array_palette_non_empty_mask(ca);
+            let Some(extents) = ca.bounds.chunk_extents_at_scale(se) else {
+                return;
+            };
+            let (ca_lmin, _) = ca.bounds.to_lattice_bounds(se);
+            let (lmin, lmax) = ca.bounds.to_lattice_bounds(se);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            // Check if this cell is non-empty before reporting it.
+                            let local = [
+                                (lx - ca_lmin[0]) as usize,
+                                (ly - ca_lmin[1]) as usize,
+                                (lz - ca_lmin[2]) as usize,
+                                (lw - ca_lmin[3]) as usize,
+                            ];
+                            let linear = linear_cell_index(local, extents);
+                            if let Some(&palette_idx) = indices.get(linear) {
+                                if !palette_non_empty
+                                    .get(palette_idx as usize)
+                                    .copied()
+                                    .unwrap_or(true)
+                                {
+                                    continue;
                                 }
+                            }
+                            let ck = chunk_key_from_lattice([lx, ly, lz, lw], se);
+                            let ck_spatial = chunk_spatial_extent(
+                                Aabb4i::new(ck, ck),
+                                se,
+                            );
+                            if ck_spatial.intersects(query) {
+                                out.push((ck, se));
                             }
                         }
                     }
@@ -2758,10 +2783,6 @@ fn find_leaf_chunks_in_spatial_range_recursive(
             }
         }
     }
-}
-
-fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
-    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
 fn branch_matches_split(bounds: Aabb4i, children: &[RegionTreeCore], step: ChunkCoord) -> bool {

@@ -8,7 +8,8 @@ use crate::shared::spatial::{
     chunk_key_from_lattice, lattice_from_fixed, Aabb4i, ChunkCoord,
 };
 use crate::shared::voxel::{
-    world_to_chunk, world_to_chunk_at_scale, BaseWorldKind, BlockData, CHUNK_SIZE, CHUNK_VOLUME,
+    linear_cell_index, world_to_chunk, world_to_chunk_at_scale, BaseWorldKind, BlockData,
+    CHUNK_SIZE, CHUNK_VOLUME,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -407,6 +408,109 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         chunk_payload_from_core(core.as_ref(), chunk_key)
     }
 
+    /// Query the virgin worldgen data for a chunk at any scale, returning 8^4 dense blocks.
+    ///
+    /// For `scale_exp == 0`, delegates to [`query_virgin_chunk_payload`].
+    /// For other scales, queries the virgin tree for the encompassing spatial region
+    /// and resamples by mapping each cell back to its corresponding scale-0 position.
+    fn query_virgin_blocks_at_scale(&self, chunk_key: ChunkKey, scale_exp: i8) -> Vec<BlockData> {
+        // Fast path for scale 0.
+        if scale_exp == 0 {
+            return self
+                .query_virgin_chunk_payload(chunk_key)
+                .map(|p| p.dense_blocks())
+                .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+        }
+
+        // Compute the global lattice origin of this chunk at its scale.
+        let lattice_origin: [i32; 4] =
+            std::array::from_fn(|ax| lattice_from_fixed(chunk_key[ax], scale_exp));
+
+        // Each cell's global lattice position at this scale.
+        let cell_min: [i64; 4] =
+            std::array::from_fn(|ax| lattice_origin[ax] as i64 * CHUNK_SIZE as i64);
+
+        // Compute the world-space integer range (scale-0 lattice positions)
+        // that our cells map to.
+        let (world_min, world_max) = if scale_exp > 0 {
+            let shift = scale_exp as u32;
+            let wmin = cell_min.map(|v| (v << shift) as i32);
+            let cell_max: [i64; 4] =
+                std::array::from_fn(|ax| cell_min[ax] + (CHUNK_SIZE as i64 - 1));
+            let wmax = cell_max.map(|v| ((v << shift) + ((1i64 << shift) - 1)) as i32);
+            (wmin, wmax)
+        } else {
+            let shift = (-scale_exp) as u32;
+            let wmin = cell_min.map(|v| v.div_euclid(1i64 << shift) as i32);
+            let cell_max: [i64; 4] =
+                std::array::from_fn(|ax| cell_min[ax] + (CHUNK_SIZE as i64 - 1));
+            let wmax = cell_max.map(|v| v.div_euclid(1i64 << shift) as i32);
+            (wmin, wmax)
+        };
+
+        // Query the virgin tree for the encompassing scale-0 chunk region.
+        let cs = CHUNK_SIZE as i32;
+        let query_min: [i32; 4] = world_min.map(|v| v.div_euclid(cs));
+        let query_max: [i32; 4] = world_max.map(|v| v.div_euclid(cs));
+        let query_bounds = Aabb4i::from_i32(query_min, query_max);
+        let virgin_core = self
+            .field
+            .query_region_core(QueryVolume { bounds: query_bounds }, QueryDetail::Exact);
+
+        // Cache resolved payloads per scale-0 chunk to avoid redundant tree lookups.
+        let mut payload_cache: HashMap<ChunkKey, Option<ResolvedChunkPayload>> = HashMap::new();
+        let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+
+        for lw in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for ly in 0..CHUNK_SIZE {
+                    for lx in 0..CHUNK_SIZE {
+                        let cell_lat: [i64; 4] = [
+                            cell_min[0] + lx as i64,
+                            cell_min[1] + ly as i64,
+                            cell_min[2] + lz as i64,
+                            cell_min[3] + lw as i64,
+                        ];
+
+                        let world_pos: [i32; 4] = if scale_exp > 0 {
+                            let shift = scale_exp as u32;
+                            cell_lat.map(|v| (v << shift) as i32)
+                        } else {
+                            let shift = (-scale_exp) as u32;
+                            cell_lat.map(|v| v.div_euclid(1i64 << shift) as i32)
+                        };
+
+                        let (s0_key, s0_idx) = world_to_chunk(
+                            world_pos[0],
+                            world_pos[1],
+                            world_pos[2],
+                            world_pos[3],
+                        );
+
+                        let payload = payload_cache
+                            .entry(s0_key)
+                            .or_insert_with(|| {
+                                chunk_payload_from_core(virgin_core.as_ref(), s0_key)
+                            });
+
+                        let block = payload
+                            .as_ref()
+                            .map(|p| p.block_at(s0_idx))
+                            .unwrap_or(BlockData::AIR);
+
+                        let idx = lw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                            + lz * CHUNK_SIZE * CHUNK_SIZE
+                            + ly * CHUNK_SIZE
+                            + lx;
+                        blocks[idx] = block;
+                    }
+                }
+            }
+        }
+
+        blocks
+    }
+
     pub fn prepare_query_bounds(&mut self, bounds: Aabb4i) -> io::Result<usize> {
         self.ensure_persisted_bounds_loaded(bounds)
     }
@@ -436,129 +540,65 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         position: [i32; 4],
         block: BlockData,
     ) -> Option<ChunkKey> {
-        let (chunk_key, voxel_index) =
-            world_to_chunk(position[0], position[1], position[2], position[3]);
-        let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
-        if let Err(error) = self.ensure_persisted_bounds_loaded(chunk_bounds) {
-            eprintln!(
-                "failed to hydrate persisted world chunk {:?} before edit: {}",
-                chunk_key, error
-            );
-        }
-
-        let override_payload = self.override_chunks.chunk_payload(chunk_key);
-        let virgin_payload = self.query_virgin_chunk_payload(chunk_key);
-        let current = override_payload.as_ref().or(virgin_payload.as_ref());
-
-        let current_block = current
-            .map(|r| r.block_at(voxel_index))
-            .unwrap_or(BlockData::AIR);
-        if current_block == block {
-            return None;
-        }
-
-        let mut blocks = current
-            .map(|r| r.dense_blocks())
-            .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
-        blocks[voxel_index] = block;
-
-        let should_remove_override = if let Some(virgin) = virgin_payload.as_ref() {
-            blocks == virgin.dense_blocks()
-        } else {
-            blocks.iter().all(|b| b.is_air())
-        };
-
-        let desired_payload = if should_remove_override {
-            None
-        } else {
-            ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
-        };
-        let previous_payload = self.override_chunks.chunk_payload(chunk_key);
-        let changed_by_api = self
-            .override_chunks
-            .set_chunk(chunk_key, desired_payload.clone());
-        let current_payload = self.override_chunks.chunk_payload(chunk_key);
-        let mut changed = changed_by_api || previous_payload != current_payload;
-        if !changed {
-            if current_payload != desired_payload {
-                let mut repair_tree = RegionChunkTree::new();
-                if let Some(payload) = desired_payload.clone() {
-                    let _ = repair_tree.set_chunk(chunk_key, Some(payload));
-                }
-                let repair_core = repair_tree.root().cloned().unwrap_or(RegionTreeCore {
-                    bounds: chunk_bounds,
-                    kind: RegionNodeKind::Empty,
-                    generator_version_hash: 0,
-                });
-                if self
-                    .override_chunks
-                    .splice_non_empty_core_in_bounds(chunk_bounds, &repair_core)
-                    .is_some()
-                {
-                    changed = true;
-                    eprintln!(
-                        "[server-world-repair] forced override chunk repair at {:?} (expected={:?} current={:?})",
-                        chunk_key, desired_payload, current_payload
-                    );
-                }
-            }
-        }
-
-        if !changed {
-            return None;
-        }
-
-        self.mark_dirty_chunk(chunk_key);
-        self.dirty_save_chunks.insert(chunk_key, 0i8);
-        Some(chunk_key)
+        self.apply_voxel_edit_at_scale(position, block, 0)
     }
 
     /// Edit a voxel at a specific scale, resolving cross-scale spatial overlaps.
     ///
-    /// When the edit's chunk spatially overlaps existing content at a different
-    /// scale, the overlapping content is cascade-rechunked to the finest scale
-    /// (one level at a time) before the edit is applied.
-    ///
-    /// For `scale_exp = 0` with no cross-scale overlap, delegates to
-    /// [`apply_voxel_edit`] for its virgin-chunk fallback logic.
+    /// This is the **unified edit path** for all scales. It:
+    /// 1. Detects spatial overlaps between the edit's chunk and existing override
+    ///    **and** virgin content at different scales.
+    /// 2. Cascade-rechunks coarser overlapping overrides to the finest scale.
+    /// 3. Consults virgin data when initializing an override chunk (so virgin
+    ///    terrain is preserved, not replaced by air).
+    /// 4. After rechunking, prunes override fragments that are identical to
+    ///    virgin data (so the override set only contains actual deltas).
+    /// 5. Compares the final result to virgin: if the edit restores virgin state,
+    ///    the override is removed entirely.
     pub fn apply_voxel_edit_at_scale(
         &mut self,
         position: [i32; 4],
         block: BlockData,
         scale_exp: i8,
     ) -> Option<ChunkKey> {
-        let (edit_key, _edit_voxel_idx) =
+        let (edit_key, _) =
             world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
 
-        // Compute the spatial extent of the edit's chunk.
-        let edit_extent = chunk_spatial_extent(Aabb4i::new(edit_key, edit_key), scale_exp);
-
-        // Find all existing non-empty leaf chunks that spatially overlap.
-        let overlapping = self
-            .override_chunks
-            .find_leaf_chunks_in_spatial_range(&edit_extent);
-
-        // Determine if there's any cross-scale conflict.
-        let has_cross_scale = overlapping.iter().any(|(_, es)| *es != scale_exp);
-
-        // For pure scale-0 edits with no cross-scale overlap, use the original
-        // path which has virgin-chunk fallback logic.
-        if scale_exp == 0 && !has_cross_scale {
-            return self.apply_voxel_edit(position, block);
+        // Ensure persisted overrides are loaded for the spatial region of the
+        // edit (covers both the edit chunk and any cross-scale overlaps).
+        let edit_bounds = Aabb4i::new(edit_key, edit_key);
+        let edit_spatial = chunk_spatial_extent(edit_bounds, scale_exp);
+        if let Err(e) = self.ensure_persisted_bounds_loaded(edit_spatial) {
+            eprintln!("failed to hydrate spatial region before edit: {}", e);
         }
 
-        // Find the finest (most negative) scale among the edit and all overlapping.
-        let target_scale = overlapping
-            .iter()
-            .map(|(_, es)| *es)
-            .min()
-            .unwrap_or(scale_exp)
-            .min(scale_exp);
+        // --- Determine target scale ---
+        // The target scale is the finest (most negative) among:
+        //   (a) the edit's own scale,
+        //   (b) any overlapping override chunks,
+        //   (c) any overlapping non-empty virgin content.
+        let overlapping = self
+            .override_chunks
+            .find_leaf_chunks_in_spatial_range(&edit_spatial);
 
-        // Rechunk any overlapping chunks that are coarser than the target scale.
+        let finest_override = overlapping.iter().map(|(_, es)| *es).min();
+
+        let virgin_core = self
+            .field
+            .query_region_core(QueryVolume { bounds: edit_spatial }, QueryDetail::Exact);
+        let finest_virgin = finest_non_empty_scale_in_core(&virgin_core);
+
+        let target_scale = [Some(scale_exp), finest_override, finest_virgin]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(scale_exp);
+
+        // --- Rechunk coarser override chunks ---
+        let has_coarser_overrides = overlapping.iter().any(|(_, es)| *es > target_scale);
         let mut any_rechunked = false;
-        if has_cross_scale {
-            // Collect coarser chunks (those with scale > target_scale).
+
+        if has_coarser_overrides {
             let coarser: Vec<_> = overlapping
                 .iter()
                 .filter(|(_, es)| *es > target_scale)
@@ -571,20 +611,44 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                     coarser_key,
                     coarser_scale,
                     target_scale,
-                    &edit_extent,
+                    &edit_spatial,
                 );
-                for (new_key, new_scale) in &created {
-                    self.mark_dirty_chunk(*new_key);
-                    self.dirty_save_chunks.insert(*new_key, *new_scale);
+
+                // Prune rechunked fragments that are identical to virgin data.
+                // Only process final-level entries; intermediate entries (from
+                // earlier cascade passes) were consumed by subsequent passes and
+                // no longer exist in the tree at their original scale.
+                for &(new_key, new_scale) in &created {
+                    if new_scale != target_scale {
+                        continue;
+                    }
+                    let virgin_blocks =
+                        self.query_virgin_blocks_at_scale(new_key, new_scale);
+                    let override_blocks = self
+                        .override_chunks
+                        .chunk_payload(new_key)
+                        .map(|p| p.dense_blocks());
+                    let matches_virgin = match override_blocks {
+                        Some(ref ob) => blocks_match_ignoring_scale(ob, &virgin_blocks),
+                        None => virgin_blocks.iter().all(|b| b.is_air()),
+                    };
+                    if matches_virgin {
+                        self.override_chunks
+                            .set_chunk_at_scale(new_key, None, new_scale);
+                    } else {
+                        self.mark_dirty_chunk(new_key);
+                        self.dirty_save_chunks.insert(new_key, new_scale);
+                    }
                 }
-                // Also mark the removed coarser chunk dirty (as deleted).
+
+                // Mark removed coarser chunk dirty.
                 self.mark_dirty_chunk(coarser_key);
                 self.dirty_save_chunks.insert(coarser_key, coarser_scale);
                 any_rechunked = true;
             }
         }
 
-        // Now perform the edit at the target scale.
+        // --- Apply the edit at the target scale ---
         let (target_key, target_voxel_idx) = world_to_chunk_at_scale(
             position[0],
             position[1],
@@ -592,18 +656,31 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             position[3],
             target_scale,
         );
+        let target_bounds = Aabb4i::new(target_key, target_key);
 
-        let current_payload = self.override_chunks.chunk_payload(target_key);
-        let mut blocks = current_payload
-            .map(|r| r.dense_blocks())
-            .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+        // Read effective state: override if present, virgin otherwise.
+        let override_payload = self.override_chunks.chunk_payload(target_key);
+        let virgin_blocks = self.query_virgin_blocks_at_scale(target_key, target_scale);
+        let mut blocks = override_payload
+            .as_ref()
+            .map(|p| p.dense_blocks())
+            .unwrap_or_else(|| virgin_blocks.clone());
 
+        // No-op check for single-cell edits.
+        if scale_exp <= target_scale {
+            let current_block = blocks
+                .get(target_voxel_idx)
+                .cloned()
+                .unwrap_or(BlockData::AIR);
+            if current_block == block && !any_rechunked {
+                return None;
+            }
+        }
+
+        // Apply the edit.
         if scale_exp > target_scale {
             // Coarser edit into finer grid: fill multiple cells.
             let cells_per_axis = 1usize << (scale_exp - target_scale) as u32;
-            // Compute base local coordinates for the multi-cell fill.
-            // The target_voxel_idx corresponds to a single cell; we need the
-            // base coordinates (aligned to cells_per_axis boundary).
             let lx = target_voxel_idx % CHUNK_SIZE;
             let ly = (target_voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
             let lz = (target_voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
@@ -619,15 +696,55 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             blocks[target_voxel_idx] = block;
         }
 
-        let desired_payload = if blocks.iter().all(|b| b.is_air()) {
+        // Compare result to virgin: if identical, remove/skip the override.
+        let should_remove_override = blocks_match_ignoring_scale(&blocks, &virgin_blocks);
+        let desired_payload = if should_remove_override {
             None
         } else {
             ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
         };
 
-        let changed = self
+        // Store or remove the override chunk.
+        let previous_payload = self.override_chunks.chunk_payload(target_key);
+        let changed_by_api = self
             .override_chunks
-            .set_chunk_at_scale(target_key, desired_payload, target_scale);
+            .set_chunk_at_scale(target_key, desired_payload.clone(), target_scale);
+        let current_payload = self.override_chunks.chunk_payload(target_key);
+        let mut changed = changed_by_api || previous_payload != current_payload;
+
+        // Repair: if set_chunk_at_scale didn't produce the expected result,
+        // force via splice as a fallback for tree-normalization edge cases.
+        if !changed {
+            if current_payload != desired_payload {
+                let mut repair_tree = RegionChunkTree::new();
+                if let Some(payload) = desired_payload.clone() {
+                    let _ = repair_tree.set_chunk_at_scale(
+                        target_key,
+                        Some(payload),
+                        target_scale,
+                    );
+                }
+                let repair_core = repair_tree.root().cloned().unwrap_or(RegionTreeCore {
+                    bounds: target_bounds,
+                    kind: RegionNodeKind::Empty,
+                    generator_version_hash: 0,
+                });
+                // Use splice_core_in_bounds (not splice_non_empty) so that
+                // Empty cores can clear stale overrides.
+                if self
+                    .override_chunks
+                    .splice_core_in_bounds(target_bounds, &repair_core)
+                    .is_some()
+                {
+                    changed = true;
+                    eprintln!(
+                        "[server-world-repair] forced override chunk repair at {:?} scale={}",
+                        target_key, target_scale
+                    );
+                }
+            }
+        }
+
         if !changed && !any_rechunked {
             return None;
         }
@@ -859,6 +976,18 @@ fn cascade_rechunk_to_scale(
     all_created
 }
 
+/// Compare two block slices ignoring `scale_exp` on each block.
+///
+/// The tree's Uniform storage normalises `scale_exp` to the chunk's grid scale,
+/// so override blocks read back from the tree may differ from virgin blocks only
+/// in `scale_exp`. For pruning purposes this difference is irrelevant.
+fn blocks_match_ignoring_scale(a: &[BlockData], b: &[BlockData]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.matches_ignoring_scale(y))
+}
+
 /// Fill multiple cells in a chunk when placing a coarser block into a finer grid.
 ///
 /// A block at `edit_scale` placed into a chunk at `chunk_scale` (where
@@ -934,10 +1063,6 @@ fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: ChunkKey) -> Op
     chunk_array.chunk_palette.get(palette_idx).cloned()
 }
 
-fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
-    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
-}
-
 fn resolved_to_effective(
     resolved: ResolvedChunkPayload,
     preserve_explicit_empty_chunk: bool,
@@ -958,6 +1083,22 @@ fn resolved_to_effective(
             }
             _ => Some(resolved),
         }
+    }
+}
+
+/// Walk a `RegionTreeCore` and return the finest (most negative) `scale_exp`
+/// among all non-empty leaf nodes.  Returns `None` when every leaf is empty/air.
+fn finest_non_empty_scale_in_core(core: &RegionTreeCore) -> Option<i8> {
+    match &core.kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => None,
+        // Uniform fills are scale-agnostic: the same block everywhere, resampled
+        // identically at any scale. They should not constrain target_scale.
+        RegionNodeKind::Uniform(_) => None,
+        RegionNodeKind::ChunkArray(ca) => Some(ca.scale_exp),
+        RegionNodeKind::Branch(children) => children
+            .iter()
+            .filter_map(finest_non_empty_scale_in_core)
+            .min(),
     }
 }
 
@@ -1527,5 +1668,283 @@ mod tests {
             .map(|r| r.block_at(finer_idx))
             .unwrap_or(BlockData::AIR);
         assert_eq!(read.block_type, 1, "stone should survive rechunking");
+    }
+
+    #[test]
+    fn placing_finer_block_near_multiple_coarser_blocks_preserves_all() {
+        let mut overlay = make_empty_overlay();
+
+        // Build up a set of blocks at scale -1 (simulating a wall).
+        let positions_s1 = [
+            [0, 0, 0, 0],
+            [1, 0, 0, 0],
+            [2, 0, 0, 0],
+            [3, 0, 0, 0],
+            [0, 1, 0, 0],
+            [1, 1, 0, 0],
+            [2, 1, 0, 0],
+            [3, 1, 0, 0],
+        ];
+        for (i, &pos) in positions_s1.iter().enumerate() {
+            let block = BlockData::simple(0, 10 + i as u32);
+            overlay.apply_voxel_edit_at_scale(pos, block, -1);
+        }
+
+        // Verify all blocks are present before the finer edit.
+        for (i, &pos) in positions_s1.iter().enumerate() {
+            let read = read_block_from_overlay(&overlay, pos, -1);
+            assert_eq!(
+                read.block_type,
+                10 + i as u32,
+                "pre-edit: block at {:?} scale -1 missing (got type {})",
+                pos,
+                read.block_type
+            );
+        }
+
+        // Now place a finer block (scale -2) nearby.
+        let finer_block = BlockData::simple(0, 99);
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], finer_block, -2);
+
+        // ALL original scale -1 blocks should survive (rechunked to scale -2).
+        // Read them back at scale -2 (they should still be present as multi-cell
+        // populations at the finer scale).
+        //
+        // At scale -1 → -2, each -1 cell maps to 2 finer cells per axis.
+        // The original -1 block at world pos [X,Y,Z,W] occupies a specific cell
+        // in the -1 chunk. After rechunking to -2, that cell becomes a 2×2×2×2
+        // block of -2 cells, all with the original block data.
+        //
+        // We verify by reading at scale -2 at positions that should be within
+        // the rechunked cells.
+        for (i, &pos) in positions_s1.iter().enumerate() {
+            let read = read_block_from_overlay(&overlay, pos, -2);
+            let expected = if pos == [0, 0, 0, 0] {
+                99 // overwritten by the finer edit
+            } else {
+                10 + i as u32
+            };
+            assert_eq!(
+                read.block_type, expected,
+                "post-edit: block at {:?} scale -2 wrong (expected {}, got {})",
+                pos, expected, read.block_type
+            );
+        }
+    }
+
+    #[test]
+    fn placing_finer_block_does_not_lose_distant_same_scale_chunks() {
+        let mut overlay = make_empty_overlay();
+
+        // Place blocks at scale -1 in two DIFFERENT chunks.
+        // At scale -1, chunk size is 4 world units, so world pos 0 and 4
+        // fall in different chunks.
+        let block_a = BlockData::simple(0, 10);
+        let block_b = BlockData::simple(0, 20);
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block_a.clone(), -1);
+        overlay.apply_voxel_edit_at_scale([4, 0, 0, 0], block_b.clone(), -1);
+
+        // Verify both exist.
+        assert_eq!(
+            read_block_from_overlay(&overlay, [0, 0, 0, 0], -1).block_type,
+            10
+        );
+        assert_eq!(
+            read_block_from_overlay(&overlay, [4, 0, 0, 0], -1).block_type,
+            20
+        );
+
+        // Place a finer block in the first chunk's region.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], BlockData::simple(0, 99), -2);
+
+        // The second chunk should be completely unaffected.
+        let read_b = read_block_from_overlay(&overlay, [4, 0, 0, 0], -1);
+        assert_eq!(
+            read_b.block_type, 20,
+            "distant chunk at scale -1 should survive finer edit in another chunk"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Virgin-aware multi-scale edit tests
+    // -----------------------------------------------------------------------
+
+    fn make_flat_floor_overlay() -> ServerWorldOverlay {
+        ServerWorldOverlay::from_chunk_payloads(
+            BaseWorldKind::FlatFloor {
+                material: BlockData::simple(0, 11),
+            },
+            Vec::<([i32; 4], ResolvedChunkPayload)>::new(),
+            42,
+            false,
+            HashSet::new(),
+        )
+    }
+
+    /// Read a block through the full compositing pipeline (virgin + override).
+    fn read_composed_block(
+        overlay: &ServerWorldOverlay,
+        pos: [i32; 4],
+    ) -> BlockData {
+        let (chunk_key, voxel_idx) = world_to_chunk(pos[0], pos[1], pos[2], pos[3]);
+        let bounds = Aabb4i::new(chunk_key, chunk_key);
+        let core = overlay.query_region_core(
+            QueryVolume { bounds },
+            QueryDetail::Exact,
+        );
+        chunk_payload_from_core(core.as_ref(), chunk_key)
+            .map(|p| p.block_at(voxel_idx))
+            .unwrap_or(BlockData::AIR)
+    }
+
+    #[test]
+    fn scale_minus_one_edit_preserves_virgin_floor() {
+        let mut overlay = make_flat_floor_overlay();
+
+        // The flat floor is at chunk y=-1, so world y=-8..-1 all have
+        // the floor material. Editing at scale -1 near the floor should
+        // NOT cause the floor to disappear.
+        let edit_pos = [0, -1, 0, 0]; // on the floor
+        let brick = BlockData::simple(0, 2);
+        overlay.apply_voxel_edit_at_scale(edit_pos, brick.clone(), -1);
+
+        // The edited block should be present (read from override).
+        let read_edited = read_block_from_overlay(&overlay, edit_pos, -1);
+        assert_eq!(
+            read_edited.block_type, 2,
+            "edited block should be readable at scale -1"
+        );
+
+        // Nearby floor blocks should still be present in the composed view.
+        // World pos [1, -1, 0, 0] is adjacent to the edit but should still be floor.
+        let neighbor = read_composed_block(&overlay, [1, -1, 0, 0]);
+        assert!(
+            !neighbor.is_air(),
+            "neighboring floor block at [1,-1,0,0] should survive the scale -1 edit"
+        );
+    }
+
+    #[test]
+    fn scale_minus_two_edit_preserves_virgin_floor() {
+        let mut overlay = make_flat_floor_overlay();
+
+        // Edit at scale -2 on the floor — the override chunk should be
+        // initialized with virgin floor data, not air.
+        let edit_pos = [0, -1, 0, 0];
+        overlay.apply_voxel_edit_at_scale(edit_pos, BlockData::simple(0, 5), -2);
+
+        // The edit should be there.
+        let read_edited = read_block_from_overlay(&overlay, edit_pos, -2);
+        assert_eq!(read_edited.block_type, 5);
+
+        // Other cells in the same chunk should still have the floor material,
+        // not air. At scale -2, the chunk covers a small region. World pos
+        // [0, -1, 1, 0] is nearby and should have floor material in the override.
+        // (Because the override was initialized from virgin data.)
+        let (chunk_key, _) = world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], -2);
+        let payload = overlay.override_chunks.chunk_payload(chunk_key);
+        assert!(
+            payload.is_some(),
+            "override chunk should exist at {:?}",
+            chunk_key
+        );
+        // The override chunk should NOT be all-air except for the edit.
+        // Since the floor covers this region, most cells should be floor material.
+        let blocks = payload.unwrap().dense_blocks();
+        let non_air_count = blocks.iter().filter(|b| !b.is_air()).count();
+        assert!(
+            non_air_count > 1,
+            "override chunk should have multiple non-air blocks (got {non_air_count}), \
+             proving virgin floor data was preserved"
+        );
+    }
+
+    #[test]
+    fn query_virgin_blocks_at_scale_returns_floor_for_finer_scales() {
+        let overlay = make_flat_floor_overlay();
+
+        // Query virgin data at scale -1 for a chunk on the floor.
+        // World y=-1 is in scale-0 chunk y=-1. At scale -1, a chunk at
+        // the appropriate key should contain floor material.
+        let (chunk_key, _) = world_to_chunk_at_scale(0, -1, 0, 0, -1);
+        let blocks = overlay.query_virgin_blocks_at_scale(chunk_key, -1);
+
+        let non_air = blocks.iter().filter(|b| !b.is_air()).count();
+        assert!(
+            non_air > 0,
+            "virgin blocks at scale -1 on the floor should contain floor material, \
+             got {non_air} non-air blocks out of {}",
+            CHUNK_VOLUME
+        );
+    }
+
+    #[test]
+    fn query_virgin_blocks_at_scale_returns_air_above_floor() {
+        let overlay = make_flat_floor_overlay();
+
+        // Above the floor (y=0 in scale-0 chunks), everything should be air.
+        let (chunk_key, _) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
+        let blocks = overlay.query_virgin_blocks_at_scale(chunk_key, -1);
+
+        assert!(
+            blocks.iter().all(|b| b.is_air()),
+            "virgin blocks at scale -1 above floor should all be air"
+        );
+    }
+
+    #[test]
+    fn edit_restoring_virgin_state_removes_override() {
+        let mut overlay = make_flat_floor_overlay();
+
+        // Place a block on the floor, then place the floor material back.
+        let edit_pos = [0, -1, 0, 0];
+        let floor_material = BlockData::simple(0, 11);
+
+        // First edit: change floor to brick.
+        overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 2));
+        let (chunk_key, _) = world_to_chunk(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3]);
+        assert!(
+            overlay.override_chunks.chunk_payload(chunk_key).is_some(),
+            "override should exist after edit"
+        );
+
+        // Second edit: change back to floor material.
+        overlay.apply_voxel_edit(edit_pos, floor_material);
+        let still_overridden = overlay.override_chunks.chunk_payload(chunk_key);
+        assert!(
+            still_overridden.is_none(),
+            "override should be removed when edit restores virgin state"
+        );
+    }
+
+    #[test]
+    fn rechunked_virgin_matching_fragments_are_pruned() {
+        let mut overlay = make_flat_floor_overlay();
+
+        // Place a scale-0 block on the floor — this creates a scale-0 override.
+        let edit_pos = [0, -1, 0, 0];
+        overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 2));
+
+        let chunks_before = overlay.override_chunks.non_empty_chunk_count();
+        assert!(chunks_before >= 1, "should have override chunk(s)");
+
+        // Now place a scale -1 block — triggers rechunking of the scale-0
+        // override to scale -1 (16 finer chunks). Many of those should be
+        // pruned because they match virgin floor data.
+        overlay.apply_voxel_edit_at_scale(edit_pos, BlockData::simple(0, 3), -1);
+
+        let chunks_after = overlay.override_chunks.non_empty_chunk_count();
+        // Without pruning, we'd have up to 16 chunks from the rechunked
+        // scale-0 override. With pruning, only chunks that differ from
+        // virgin survive — at minimum the edited chunk.
+        assert!(
+            chunks_after < 16,
+            "rechunked fragments matching virgin should be pruned \
+             (got {chunks_after} chunks, expected fewer than 16)"
+        );
+        assert!(
+            chunks_after >= 1,
+            "at least the edited chunk should remain"
+        );
     }
 }

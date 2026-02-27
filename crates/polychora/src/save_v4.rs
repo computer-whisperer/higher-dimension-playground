@@ -10,9 +10,9 @@ use crate::shared::region_tree::{
     chunk_key_i32, slice_region_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::{chunk_key_from_lattice, lattice_from_fixed, Aabb4, Aabb4i, ChunkCoord};
+use crate::shared::voxel::{linear_cell_index, BaseWorldKind, BlockData, CHUNK_SIZE};
 #[cfg(test)]
 use crate::shared::voxel::CHUNK_VOLUME;
-use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -2254,10 +2254,6 @@ fn chunk_key_to_lattice(key: &ChunkKey, scale_exp: i8) -> [i32; 4] {
         lattice_from_fixed(key[2], scale_exp),
         lattice_from_fixed(key[3], scale_exp),
     ]
-}
-
-fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
-    coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
 fn bounds_key(min: ChunkKey, max: ChunkKey) -> [i64; 8] {
