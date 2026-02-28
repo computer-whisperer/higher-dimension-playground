@@ -1,9 +1,9 @@
 use super::*;
 use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::spatial::{
-    chunk_key_from_lattice, lattice_from_fixed, step_for_scale, ChunkCoord,
+    chunk_key_from_lattice, fixed_from_lattice, lattice_from_fixed, step_for_scale, ChunkCoord,
 };
-use crate::shared::voxel::{linear_cell_index, BlockData};
+use crate::shared::voxel::{linear_cell_index, BlockData, CHUNK_SIZE};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -39,6 +39,44 @@ impl RegionChunkTree {
         self.root
             .as_ref()
             .and_then(|node| query_chunk_payload_in_node(node, key))
+    }
+
+    /// Look up the block at a fixed-point position by walking the BVH.
+    ///
+    /// Returns `BlockData::AIR` if no solid block covers the position.
+    pub fn block_at(&self, pos: [ChunkCoord; 4]) -> BlockData {
+        match self.root.as_ref() {
+            Some(node) => bvh_point_query(&node.kind, node.bounds, pos)
+                .map(|hit| hit.block)
+                .unwrap_or(BlockData::AIR),
+            None => BlockData::AIR,
+        }
+    }
+
+    /// Look up the block and its spatial AABB at a fixed-point position.
+    ///
+    /// The returned AABB reflects the block's own `scale_exp`, not the
+    /// chunk cell size — a coarse block stored in a fine-scale chunk will
+    /// return the full coarse-block extent.
+    pub fn block_and_bounds_at(&self, pos: [ChunkCoord; 4]) -> Option<BvhBlockHit> {
+        self.root
+            .as_ref()
+            .and_then(|node| bvh_point_query(&node.kind, node.bounds, pos))
+    }
+
+    /// Cast a ray through the BVH and return the nearest solid block hit.
+    ///
+    /// `origin` and `direction` are in fixed-point coordinates.
+    /// `max_t` is the maximum ray parameter (in the same units as the
+    /// coordinates — i.e. a `max_t` of 10.0 means 10 world units for scale 0).
+    pub fn raycast(
+        &self,
+        origin: [ChunkCoord; 4],
+        direction: [ChunkCoord; 4],
+        max_t: ChunkCoord,
+    ) -> Option<BvhRayHit> {
+        let root = self.root.as_ref()?;
+        bvh_raycast(&root.kind, root.bounds, origin, direction, max_t)
     }
 
     /// Set a chunk at scale 0 (the standard unit-scale lattice).
@@ -2677,6 +2715,335 @@ pub fn chunk_spatial_extent(bounds: Aabb4i, scale_exp: i8) -> Aabb4i {
             bounds.max[3].saturating_add(offset),
         ],
     )
+}
+
+// ---------------------------------------------------------------------------
+// BVH spatial queries — point query and raycast
+// ---------------------------------------------------------------------------
+
+/// Result of a BVH point query: the block and its world-space AABB.
+#[derive(Clone, Debug)]
+pub struct BvhBlockHit {
+    pub block: BlockData,
+    /// World-space extent of the block, accounting for `block.scale_exp`.
+    pub bounds: Aabb4i,
+}
+
+/// Result of a BVH raycast: block hit info plus the ray parameter.
+#[derive(Clone, Debug)]
+pub struct BvhRayHit {
+    pub block: BlockData,
+    /// World-space extent of the hit block.
+    pub bounds: Aabb4i,
+    /// Ray parameter at entry to the block's AABB.
+    pub t: ChunkCoord,
+}
+
+/// Given a fixed-point position and a leaf's scale, compute the chunk key,
+/// voxel index, and the cell's own AABB (at the chunk's cell resolution).
+fn cell_at_point(pos: [ChunkCoord; 4], scale_exp: i8) -> (ChunkKey, usize, Aabb4i) {
+    let step = step_for_scale(scale_exp);
+    let cs = CHUNK_SIZE as i32;
+    let mut chunk_key = [ChunkCoord::ZERO; 4];
+    let mut local = [0usize; 4];
+    let mut cell_min = [ChunkCoord::ZERO; 4];
+    let mut cell_max = [ChunkCoord::ZERO; 4];
+    for axis in 0..4 {
+        // Cell lattice coordinate at this scale
+        let cell_lat = lattice_from_fixed(pos[axis], scale_exp);
+        // Chunk lattice coordinate
+        let chunk_lat = (cell_lat as i64).div_euclid(cs as i64) as i32;
+        chunk_key[axis] = fixed_from_lattice(chunk_lat, scale_exp);
+        local[axis] = (cell_lat as i64).rem_euclid(cs as i64) as usize;
+        cell_min[axis] = fixed_from_lattice(cell_lat, scale_exp);
+        cell_max[axis] = cell_min[axis].saturating_add(step);
+    }
+    let idx = local[3] * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+        + local[2] * CHUNK_SIZE * CHUNK_SIZE
+        + local[1] * CHUNK_SIZE
+        + local[0];
+    (chunk_key, idx, Aabb4i::new(cell_min, cell_max))
+}
+
+/// Expand a cell-level AABB to the full block extent using `block.scale_exp`.
+///
+/// When a block has a coarser `scale_exp` than the chunk it's stored in, it
+/// occupies multiple cells. This snaps the cell bounds outward to the block's
+/// own grid.
+fn block_bounds(cell_min: [ChunkCoord; 4], chunk_scale_exp: i8, block: &BlockData) -> Aabb4i {
+    let bs = block.scale_exp;
+    if bs <= chunk_scale_exp {
+        // Block is at same or finer resolution than the chunk cell — the cell
+        // AABB is already the block extent.
+        let step = step_for_scale(chunk_scale_exp);
+        return Aabb4i::new(cell_min, std::array::from_fn(|i| cell_min[i].saturating_add(step)));
+    }
+    // Block is coarser than the cell: snap to the block's grid.
+    let block_step = step_for_scale(bs);
+    let mut bmin = [ChunkCoord::ZERO; 4];
+    let mut bmax = [ChunkCoord::ZERO; 4];
+    for axis in 0..4 {
+        let lat = lattice_from_fixed(cell_min[axis], bs);
+        bmin[axis] = fixed_from_lattice(lat, bs);
+        bmax[axis] = bmin[axis].saturating_add(block_step);
+    }
+    Aabb4i::new(bmin, bmax)
+}
+
+/// Compute the half-open world-space AABB of a set of chunks given their
+/// key-space bounds and scale.
+///
+/// A chunk at key K with scale s starts at world position K * CHUNK_SIZE
+/// (in the fixed-point coordinate system where world integers map 1:1 to
+/// ChunkCoord integers at scale 0).  The chunk spans CHUNK_SIZE cells of
+/// width `step_for_scale(s)` each, so its world extent is
+/// `[K * CS, K * CS + CS * step)` per axis.
+fn world_aabb(bounds: Aabb4i, scale_exp: i8) -> Aabb4i {
+    let cs = ChunkCoord::from_num(CHUNK_SIZE as i32);
+    let step = step_for_scale(scale_exp);
+    let chunk_world_size = cs.saturating_mul(step);
+    Aabb4i::new(
+        std::array::from_fn(|i| bounds.min[i].saturating_mul(cs)),
+        std::array::from_fn(|i| bounds.max[i].saturating_mul(cs).saturating_add(chunk_world_size)),
+    )
+}
+
+/// Does the half-open AABB `[min, max)` contain the point?
+fn aabb_contains_point(bounds: &Aabb4i, pos: [ChunkCoord; 4]) -> bool {
+    bounds.is_valid()
+        && pos[0] >= bounds.min[0] && pos[0] < bounds.max[0]
+        && pos[1] >= bounds.min[1] && pos[1] < bounds.max[1]
+        && pos[2] >= bounds.min[2] && pos[2] < bounds.max[2]
+        && pos[3] >= bounds.min[3] && pos[3] < bounds.max[3]
+}
+
+/// Compute the half-open world-space AABB of a node for point/ray tests.
+fn node_spatial_aabb(kind: &RegionNodeKind, bounds: Aabb4i) -> Aabb4i {
+    match kind {
+        RegionNodeKind::Uniform(_) => world_aabb(bounds, 0),
+        RegionNodeKind::ChunkArray(ca) => world_aabb(ca.bounds, ca.scale_exp),
+        _ => world_aabb(bounds, 0),
+    }
+}
+
+/// Recursive BVH point query.
+fn bvh_point_query(
+    kind: &RegionNodeKind,
+    bounds: Aabb4i,
+    pos: [ChunkCoord; 4],
+) -> Option<BvhBlockHit> {
+    match kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => None,
+
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
+                return None;
+            }
+            if !aabb_contains_point(&world_aabb(bounds, 0), pos) {
+                return None;
+            }
+            // For Uniform, every cell has the same block. Compute cell bounds
+            // at scale 0 and expand to the block's own scale.
+            let (_, _, cell_aabb) = cell_at_point(pos, 0);
+            let bb = block_bounds(cell_aabb.min, 0, block);
+            Some(BvhBlockHit { block: block.clone(), bounds: bb })
+        }
+
+        RegionNodeKind::ChunkArray(ca) => {
+            let se = ca.scale_exp;
+            if !aabb_contains_point(&world_aabb(ca.bounds, se), pos) {
+                return None;
+            }
+            let (chunk_key, cell_idx, cell_aabb) = cell_at_point(pos, se);
+            if !ca.bounds.contains_chunk(chunk_key) {
+                return None;
+            }
+            let resolved = chunk_array_resolved_payload_at(ca, chunk_key)?;
+            let block = resolved.block_at(cell_idx);
+            if block.is_air() {
+                return None;
+            }
+            let bb = block_bounds(cell_aabb.min, se, &block);
+            Some(BvhBlockHit { block, bounds: bb })
+        }
+
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                if let Some(hit) = bvh_point_query(&child.kind, child.bounds, pos) {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// 4D ray–AABB slab intersection. Returns `(t_enter, t_exit)` or `None`.
+///
+/// `direction` components may be zero; those axes use position-only checks.
+fn ray_aabb_intersect(
+    origin: [ChunkCoord; 4],
+    direction: [ChunkCoord; 4],
+    aabb: &Aabb4i,
+) -> Option<(ChunkCoord, ChunkCoord)> {
+    let mut t_min = ChunkCoord::MIN;
+    let mut t_max = ChunkCoord::MAX;
+    for axis in 0..4 {
+        let d = direction[axis];
+        if d == ChunkCoord::ZERO {
+            // Ray is parallel to this axis — check if origin is inside slab.
+            if origin[axis] < aabb.min[axis] || origin[axis] >= aabb.max[axis] {
+                return None;
+            }
+        } else {
+            let inv_d_positive = d > ChunkCoord::ZERO;
+            let (t_near, t_far) = if inv_d_positive {
+                (
+                    (aabb.min[axis] - origin[axis]) / d,
+                    (aabb.max[axis] - origin[axis]) / d,
+                )
+            } else {
+                (
+                    (aabb.max[axis] - origin[axis]) / d,
+                    (aabb.min[axis] - origin[axis]) / d,
+                )
+            };
+            if t_near > t_min { t_min = t_near; }
+            if t_far < t_max { t_max = t_far; }
+            if t_min > t_max {
+                return None;
+            }
+        }
+    }
+    Some((t_min, t_max))
+}
+
+/// Recursive BVH raycast. Returns the nearest solid hit.
+fn bvh_raycast(
+    kind: &RegionNodeKind,
+    bounds: Aabb4i,
+    origin: [ChunkCoord; 4],
+    direction: [ChunkCoord; 4],
+    max_t: ChunkCoord,
+) -> Option<BvhRayHit> {
+    match kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => None,
+
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
+                return None;
+            }
+            let (t_enter, _) = ray_aabb_intersect(origin, direction, &world_aabb(bounds, 0))?;
+            if t_enter > max_t {
+                return None;
+            }
+            // Compute the point where the ray enters the uniform region.
+            // Nudge t_sample slightly past t_enter so the sample lands just
+            // inside the AABB rather than on its boundary (where cell_at_point
+            // could snap to a cell outside the region).
+            let nudge = ChunkCoord::from_bits(1);
+            let t_sample = (if t_enter > ChunkCoord::ZERO { t_enter } else { ChunkCoord::ZERO })
+                .saturating_add(nudge);
+            let hit_pos: [ChunkCoord; 4] = std::array::from_fn(|i| {
+                origin[i].saturating_add(direction[i].saturating_mul(t_sample))
+            });
+            let (_, _, cell_aabb) = cell_at_point(hit_pos, 0);
+            let bb = block_bounds(cell_aabb.min, 0, block);
+            Some(BvhRayHit { block: block.clone(), bounds: bb, t: t_enter.max(ChunkCoord::ZERO) })
+        }
+
+        RegionNodeKind::ChunkArray(ca) => {
+            let se = ca.scale_exp;
+            let ca_world = world_aabb(ca.bounds, se);
+            let (t_enter, t_exit) = ray_aabb_intersect(origin, direction, &ca_world)?;
+            if t_enter > max_t {
+                return None;
+            }
+            // Step through cells along the ray within this ChunkArray.
+            // Use a simple parametric march: sample cells at each crossing.
+            let step = step_for_scale(se);
+            let cell_size_f64 = step.to_num::<f64>();
+            let dir_f64: [f64; 4] = std::array::from_fn(|i| direction[i].to_num::<f64>());
+
+            // Compute step size: half a cell diagonal to avoid skipping cells.
+            let dir_len_sq: f64 = dir_f64.iter().map(|d| d * d).sum();
+            if dir_len_sq < 1e-20 {
+                return None;
+            }
+            let dt = cell_size_f64 * 0.4 / dir_len_sq.sqrt();
+
+            let t_start = t_enter.max(ChunkCoord::ZERO).to_num::<f64>();
+            let t_end = t_exit.min(max_t).to_num::<f64>();
+            if t_start > t_end {
+                return None;
+            }
+
+            let mut t = t_start;
+            let mut prev_cell = ([ChunkCoord::MIN; 4], usize::MAX); // sentinel
+            while t <= t_end {
+                let hit_pos: [ChunkCoord; 4] = std::array::from_fn(|i| {
+                    ChunkCoord::from_num(origin[i].to_num::<f64>() + dir_f64[i] * t)
+                });
+                let (chunk_key, cell_idx, cell_aabb) = cell_at_point(hit_pos, se);
+                // Skip if we're still in the same cell as last step.
+                if (chunk_key, cell_idx) != prev_cell || t == t_start {
+                    prev_cell = (chunk_key, cell_idx);
+                    if ca.bounds.contains_chunk(chunk_key) {
+                        if let Some(resolved) = chunk_array_resolved_payload_at(ca, chunk_key) {
+                            let block = resolved.block_at(cell_idx);
+                            if !block.is_air() {
+                                let bb = block_bounds(cell_aabb.min, se, &block);
+                                // Compute true t_enter for the block's bounds.
+                                let block_t = ray_aabb_intersect(origin, direction, &bb)
+                                    .map(|(te, _)| te.max(ChunkCoord::ZERO))
+                                    .unwrap_or(ChunkCoord::from_num(t));
+                                return Some(BvhRayHit { block, bounds: bb, t: block_t });
+                            }
+                        }
+                    }
+                }
+                t += dt;
+            }
+            None
+        }
+
+        RegionNodeKind::Branch(children) => {
+            // Collect children that the ray intersects, sorted by t_enter.
+            let mut candidates: Vec<(ChunkCoord, usize)> = Vec::new();
+            for (idx, child) in children.iter().enumerate() {
+                // Use a conservative spatial extent for branches.
+                let child_spatial = node_spatial_aabb(&child.kind, child.bounds);
+                if let Some((t_enter, _)) = ray_aabb_intersect(origin, direction, &child_spatial) {
+                    if t_enter <= max_t {
+                        candidates.push((t_enter, idx));
+                    }
+                }
+            }
+            candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            let mut best: Option<BvhRayHit> = None;
+            for (_, idx) in candidates {
+                let child = &children[idx];
+                if let Some(ref b) = best {
+                    // Prune: if this child's entry is already past our best hit, skip.
+                    let child_spatial = node_spatial_aabb(&child.kind, child.bounds);
+                    if let Some((t_enter, _)) = ray_aabb_intersect(origin, direction, &child_spatial) {
+                        if t_enter > b.t {
+                            continue;
+                        }
+                    }
+                }
+                let effective_max = best.as_ref().map(|b| b.t).unwrap_or(max_t);
+                if let Some(hit) = bvh_raycast(&child.kind, child.bounds, origin, direction, effective_max) {
+                    best = Some(match best {
+                        Some(prev) if prev.t <= hit.t => prev,
+                        _ => hit,
+                    });
+                }
+            }
+            best
+        }
+    }
 }
 
 fn find_leaf_chunks_in_spatial_range_recursive(

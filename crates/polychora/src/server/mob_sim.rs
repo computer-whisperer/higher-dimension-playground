@@ -97,7 +97,7 @@ fn sample_effective_voxel_for_collision(
     wz: i32,
     ww: i32,
 ) -> bool {
-    let (chunk_pos, voxel_index) = voxel::world_to_chunk(wx, wy, wz, ww);
+    let (chunk_pos, voxel_index) = voxel::world_to_chunk_at_scale(wx, wy, wz, ww, 0);
     if let Some(entry) = cache.get(&chunk_pos) {
         return match entry {
             CollisionChunkCacheEntry::Explicit(payload) => !payload.block_at(voxel_index).is_air(),

@@ -188,12 +188,6 @@ pub fn linear_cell_index(coords: [usize; 4], dims: [usize; 4]) -> usize {
     coords[0] + dims[0] * (coords[1] + dims[1] * (coords[2] + dims[2] * coords[3]))
 }
 
-/// Convert world coordinates to a fixed-point ChunkKey and local voxel index.
-#[inline]
-pub fn world_to_chunk(wx: i32, wy: i32, wz: i32, ww: i32) -> (ChunkKey, usize) {
-    world_to_chunk_at_scale(wx, wy, wz, ww, 0)
-}
-
 /// Convert world coordinates to chunk key and local voxel index at a given scale.
 ///
 /// - `scale_exp = 0`: cell_size = 1, chunk spans 8 world units (default behavior)
@@ -258,22 +252,6 @@ mod tests {
     use super::*;
     use crate::shared::region_tree::chunk_key_i32;
     use crate::shared::spatial::{fixed_from_lattice, ChunkCoord};
-
-    #[test]
-    fn world_to_chunk_at_scale_zero_matches_world_to_chunk() {
-        for &(wx, wy, wz, ww) in &[
-            (0, 0, 0, 0),
-            (7, 7, 7, 7),
-            (8, 0, 0, 0),
-            (-1, 0, 0, 0),
-            (-8, -8, -8, -8),
-            (15, 3, -4, 10),
-        ] {
-            let a = world_to_chunk(wx, wy, wz, ww);
-            let b = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
-            assert_eq!(a, b, "mismatch for ({wx},{wy},{wz},{ww})");
-        }
-    }
 
     #[test]
     fn world_to_chunk_at_scale_negative_one() {

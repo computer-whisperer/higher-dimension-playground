@@ -29,71 +29,29 @@ impl Scene {
             ray_origin[3] + dir[3] * EDIT_RAY_EPSILON,
         ];
 
-        let mut cell = [
-            origin[0].floor() as i32,
-            origin[1].floor() as i32,
-            origin[2].floor() as i32,
-            origin[3].floor() as i32,
-        ];
+        let fp_origin = origin.map(ChunkCoord::from_num);
+        let fp_dir = dir.map(ChunkCoord::from_num);
+        let fp_max_t = ChunkCoord::from_num(max_distance);
 
-        let mut step = [0i32; 4];
-        let mut t_max = [f32::INFINITY; 4];
-        let mut t_delta = [f32::INFINITY; 4];
+        let hit = self.world_tree.raycast(fp_origin, fp_dir, fp_max_t)?;
 
-        for axis in 0..4 {
-            let d = dir[axis];
-            if d > 1e-8 {
-                step[axis] = 1;
-                let next_boundary = cell[axis] as f32 + 1.0;
-                t_max[axis] = (next_boundary - origin[axis]) / d;
-                t_delta[axis] = 1.0 / d;
-            } else if d < -1e-8 {
-                step[axis] = -1;
-                let next_boundary = cell[axis] as f32;
-                t_max[axis] = (next_boundary - origin[axis]) / d;
-                t_delta[axis] = -1.0 / d;
-            }
-        }
+        let solid_voxel: [i32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
 
-        let mut last_empty_voxel = None;
-        let v0 = self.get_block_data(cell[0], cell[1], cell[2], cell[3]);
-        if !v0.is_air() {
-            return Some(VoxelRayHit {
-                solid_voxel: cell,
-                last_empty_voxel,
-                hit_block: v0,
-            });
-        }
-        last_empty_voxel = Some(cell);
+        let t_f32: f32 = hit.t.to_num::<f32>();
+        let last_empty_voxel = if t_f32 > EDIT_RAY_EPSILON {
+            let step_back = t_f32 - EDIT_RAY_EPSILON;
+            Some(std::array::from_fn(|i| {
+                (origin[i] + dir[i] * step_back).floor() as i32
+            }))
+        } else {
+            None
+        };
 
-        for _ in 0..EDIT_RAY_MAX_STEPS {
-            let mut axis = 0usize;
-            for candidate in 1..4 {
-                if t_max[candidate] < t_max[axis] {
-                    axis = candidate;
-                }
-            }
-
-            let traversed_t = t_max[axis];
-            if !traversed_t.is_finite() || traversed_t > max_distance {
-                break;
-            }
-
-            cell[axis] += step[axis];
-            t_max[axis] += t_delta[axis];
-
-            let voxel = self.get_block_data(cell[0], cell[1], cell[2], cell[3]);
-            if !voxel.is_air() {
-                return Some(VoxelRayHit {
-                    solid_voxel: cell,
-                    last_empty_voxel,
-                    hit_block: voxel,
-                });
-            }
-            last_empty_voxel = Some(cell);
-        }
-
-        None
+        Some(VoxelRayHit {
+            solid_voxel,
+            last_empty_voxel,
+            hit_block: hit.block,
+        })
     }
 
     /// Remove the first solid block intersected by a camera ray.

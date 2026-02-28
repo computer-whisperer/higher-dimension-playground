@@ -12,7 +12,7 @@ use polychora::shared::region_tree::{
 };
 use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
 use polychora::shared::spatial::{Aabb4i, ChunkCoord};
-use polychora::shared::voxel::{world_to_chunk, world_to_chunk_at_scale, BlockData};
+use polychora::shared::voxel::{world_to_chunk_at_scale, BlockData};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
@@ -33,7 +33,6 @@ const MACRO_CELLS_PER_CHUNK: usize =
     MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS * MACRO_CELLS_PER_AXIS;
 const MACRO_WORDS_PER_CHUNK: usize = MACRO_CELLS_PER_CHUNK / 32;
 const EDIT_RAY_EPSILON: f32 = 1e-4;
-const EDIT_RAY_MAX_STEPS: usize = 4096;
 const VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET: usize = 4;
 const COLLISION_PUSHUP_STEP: f32 = 0.05;
 const COLLISION_MAX_PUSHUP_STEPS: usize = 80;
@@ -200,7 +199,7 @@ impl Scene {
         ww: i32,
         block: BlockData,
     ) {
-        let (cp, idx) = world_to_chunk(wx, wy, wz, ww);
+        let (cp, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
         let should_remove = {
             let chunk = chunks.entry(cp).or_insert_with(|| vec![BlockData::AIR; CHUNK_VOLUME]);
             chunk[idx] = block;
@@ -351,7 +350,8 @@ impl Scene {
 
     #[cfg(test)]
     fn world_set_block(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, block: BlockData) {
-        let (key, idx) = world_to_chunk(wx, wy, wz, ww);
+        let scale_exp = block.scale_exp;
+        let (key, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, scale_exp);
         let old = self.get_block_data(wx, wy, wz, ww);
         if old == block {
             return;
@@ -376,7 +376,7 @@ impl Scene {
         };
 
         let previous_payload = self.world_tree.chunk_payload(key);
-        let changed_by_api = self.world_tree.set_chunk(key, payload.clone());
+        let changed_by_api = self.world_tree.set_chunk_at_scale(key, payload.clone(), scale_exp);
         let current_payload = self.world_tree.chunk_payload(key);
         let mut changed = changed_by_api || previous_payload != current_payload;
         if !changed {
@@ -418,30 +418,13 @@ impl Scene {
     }
 
     pub fn get_block_data(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> BlockData {
-        let (key, idx) = world_to_chunk(wx, wy, wz, ww);
-        if let Some(payload) = self.world_tree.chunk_payload(key) {
-            return payload.block_at(idx);
-        }
-        BlockData::AIR
-    }
-
-    /// Look up block at world position, querying a specific scale.
-    pub fn get_block_data_at_scale(
-        &self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-        ww: i32,
-        scale_exp: i8,
-    ) -> BlockData {
-        if scale_exp == 0 {
-            return self.get_block_data(wx, wy, wz, ww);
-        }
-        let (key, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, scale_exp);
-        if let Some(payload) = self.world_tree.chunk_payload(key) {
-            return payload.block_at(idx);
-        }
-        BlockData::AIR
+        let pos = [
+            ChunkCoord::from_num(wx),
+            ChunkCoord::from_num(wy),
+            ChunkCoord::from_num(wz),
+            ChunkCoord::from_num(ww),
+        ];
+        self.world_tree.block_at(pos)
     }
 
     pub fn debug_world_tree_chunk_payload(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
@@ -686,8 +669,8 @@ mod tests {
     }
 
     fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) -> Option<u8> {
-        let (chunk_key_fixed, voxel_idx) = world_to_chunk(wx, wy, wz, ww);
-        let chunk_key: [i32; 4] = chunk_key_fixed.map(|c| c.to_num::<i32>());
+        let (chunk_key_fixed, voxel_idx) = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
+        let chunk_key: [i32; 4] = chunk_key_fixed.map(|c: ChunkCoord| c.to_num::<i32>());
 
         for leaf in &scene.voxel_frame_data.leaf_headers {
             if chunk_key[0] < leaf.min_chunk_coord[0]

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::shared::voxel::{
-    world_to_chunk, BaseWorldKind, CHUNK_SIZE, CHUNK_VOLUME,
+    world_to_chunk_at_scale, BaseWorldKind, CHUNK_SIZE, CHUNK_VOLUME,
 };
 
 /// Legacy chunk position used only during migration from old save formats.
@@ -218,7 +218,7 @@ impl RegionChunkWorld {
     }
 
     pub fn set_voxel(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, v: LegacyVoxel) {
-        let (ck, idx) = world_to_chunk(wx, wy, wz, ww);
+        let (ck, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
         let cp = chunk_key_to_legacy(ck);
         if self.chunks.contains_key(&cp) {
             {
@@ -279,7 +279,7 @@ impl RegionChunkWorld {
     }
 
     pub fn get_voxel(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> LegacyVoxel {
-        let (ck, idx) = world_to_chunk(wx, wy, wz, ww);
+        let (ck, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
         let cp = chunk_key_to_legacy(ck);
         match self.chunks.get(&cp) {
             Some(chunk) => chunk.voxels[idx],

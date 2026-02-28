@@ -8,7 +8,7 @@ use crate::shared::spatial::{
     chunk_key_from_lattice, lattice_from_fixed, Aabb4i, ChunkCoord,
 };
 use crate::shared::voxel::{
-    linear_cell_index, world_to_chunk, world_to_chunk_at_scale, BaseWorldKind, BlockData,
+    linear_cell_index, world_to_chunk_at_scale, BaseWorldKind, BlockData,
     CHUNK_SIZE, CHUNK_VOLUME,
 };
 use std::collections::{HashMap, HashSet};
@@ -480,11 +480,12 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                             cell_lat.map(|v| v.div_euclid(1i64 << shift) as i32)
                         };
 
-                        let (s0_key, s0_idx) = world_to_chunk(
+                        let (s0_key, s0_idx) = world_to_chunk_at_scale(
                             world_pos[0],
                             world_pos[1],
                             world_pos[2],
                             world_pos[3],
+                            0,
                         );
 
                         let payload = payload_cache
@@ -1264,7 +1265,7 @@ mod tests {
             HashSet::new(),
         );
 
-        let (chunk_key, voxel_idx) = world_to_chunk(0, -1, 0, 0);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, -1, 0, 0, 0);
         let bounds = Aabb4i::new(chunk_key, chunk_key);
 
         let virgin_before = overlay
@@ -1292,7 +1293,7 @@ mod tests {
 
     #[test]
     fn query_region_core_applies_explicit_empty_override_over_virgin_content() {
-        let (chunk_key, voxel_idx) = world_to_chunk(0, -1, 0, 0);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, -1, 0, 0, 0);
         let bounds = Aabb4i::new(chunk_key, chunk_key);
         let chunk_key_i32 = [0i32, -1, 0, 0];
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
@@ -1356,7 +1357,7 @@ mod tests {
         );
         let edit_pos = [0, -1, 0, 0];
         let (chunk_key, voxel_idx) =
-            world_to_chunk(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3]);
+            world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], 0);
         let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
         assert_eq!(
             overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 5)),
@@ -1507,7 +1508,7 @@ mod tests {
 
         let edit_pos = [-1, 0, -6, -4];
         let (edit_chunk_key, edit_voxel_idx) =
-            world_to_chunk(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3]);
+            world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], 0);
 
         // Place a different block.
         let edit_block = BlockData::simple(0, 42);
@@ -1786,7 +1787,7 @@ mod tests {
         overlay: &ServerWorldOverlay,
         pos: [i32; 4],
     ) -> BlockData {
-        let (chunk_key, voxel_idx) = world_to_chunk(pos[0], pos[1], pos[2], pos[3]);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
         let bounds = Aabb4i::new(chunk_key, chunk_key);
         let core = overlay.query_region_core(
             QueryVolume { bounds },
@@ -1902,7 +1903,7 @@ mod tests {
 
         // First edit: change floor to brick.
         overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 2));
-        let (chunk_key, _) = world_to_chunk(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3]);
+        let (chunk_key, _) = world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], 0);
         assert!(
             overlay.override_chunks.chunk_payload(chunk_key).is_some(),
             "override should exist after edit"

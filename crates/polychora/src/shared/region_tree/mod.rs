@@ -43,7 +43,7 @@ mod tree;
 pub use tree::{
     chunk_spatial_extent, collect_non_empty_chunks_from_core_in_bounds,
     slice_non_empty_region_core_in_bounds, slice_region_core_in_bounds,
-    validate_region_core_world_space_non_overlapping, RegionChunkTree,
+    validate_region_core_world_space_non_overlapping, BvhBlockHit, BvhRayHit, RegionChunkTree,
 };
 
 #[cfg(test)]
