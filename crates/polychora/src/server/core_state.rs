@@ -205,6 +205,13 @@ impl ServerState {
     ) -> Option<Aabb4i> {
         self.client_world_interest_bounds.insert(client_id, bounds)
     }
+
+    pub(super) fn clear_client_world_interest_bounds(
+        &mut self,
+        client_id: u64,
+    ) -> Option<Aabb4i> {
+        self.client_world_interest_bounds.remove(&client_id)
+    }
 }
 
 fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {

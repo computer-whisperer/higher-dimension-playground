@@ -4026,3 +4026,151 @@ fn find_leaf_chunks_no_overlap_when_spatially_disjoint() {
         "disjoint chunks should not overlap"
     );
 }
+
+/// Simulates a flat world floor (scale-0 chunks) then placing a scale-2 block.
+/// The scale-2 chunk covers a 4×4×4×4 region of scale-0 chunks, so the tree
+/// must carve the floor data and insert the coarser chunk without creating
+/// overlapping siblings.
+#[test]
+fn set_chunk_at_scale2_over_scale0_floor_non_overlapping() {
+    let mut tree = RegionChunkTree::new();
+
+    // Create a floor: a grid of scale-0 chunks at y=0.
+    // Scale-0 chunk at key [x,0,z,w] covers world [x*8, x*8+8) etc.
+    let floor_block = BlockData::simple(0, 1);
+    for w in 0..4 {
+        for z in 0..4 {
+            for x in 0..4 {
+                tree.set_chunk(
+                    key(x, 0, z, w),
+                    Some(ResolvedChunkPayload::uniform(floor_block.clone())),
+                );
+            }
+        }
+    }
+
+    // Verify tree is valid before the multi-scale edit.
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+
+    // Place a scale-2 chunk at key [0,1,0,0].
+    // Scale-2 step = 4, so world bounds = [0*8, 0*8+8*4) = [0, 32) in each axis.
+    // This is above the floor (y=1 in chunk coords = y=8 in world coords).
+    let scale2_block = BlockData::simple(0, 42);
+    tree.set_chunk_at_scale(
+        key(0, 1, 0, 0),
+        Some(ResolvedChunkPayload::uniform(scale2_block.clone())),
+        2,
+    );
+
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}
+
+/// Place a scale-2 chunk that OVERLAPS with existing scale-0 floor chunks.
+/// The tree must carve the floor and produce non-overlapping siblings.
+#[test]
+fn set_chunk_at_scale2_overlapping_scale0_floor() {
+    let mut tree = RegionChunkTree::new();
+
+    // Create a floor: scale-0 chunks covering a 4x1x4x4 region at y=0.
+    let floor_block = BlockData::simple(0, 1);
+    for w in 0..4 {
+        for z in 0..4 {
+            for x in 0..4 {
+                tree.set_chunk(
+                    key(x, 0, z, w),
+                    Some(ResolvedChunkPayload::uniform(floor_block.clone())),
+                );
+            }
+        }
+    }
+
+    // Place a scale-2 chunk at key [0,0,0,0] — this directly overlaps floor chunks.
+    // Scale-2 world bounds = [0, 32) in all axes. The floor chunks occupy
+    // y ∈ [0, 8), so the scale-2 chunk overlaps them spatially.
+    let scale2_block = BlockData::simple(0, 42);
+    tree.set_chunk_at_scale(
+        key(0, 0, 0, 0),
+        Some(ResolvedChunkPayload::uniform(scale2_block.clone())),
+        2,
+    );
+
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}
+
+/// Multiple scale-2 placements in sequence.
+#[test]
+fn multiple_scale2_placements_non_overlapping() {
+    let mut tree = RegionChunkTree::new();
+
+    // Floor
+    let floor_block = BlockData::simple(0, 1);
+    for w in 0..4 {
+        for z in 0..4 {
+            for x in 0..4 {
+                tree.set_chunk(
+                    key(x, 0, z, w),
+                    Some(ResolvedChunkPayload::uniform(floor_block.clone())),
+                );
+            }
+        }
+    }
+
+    // Place several scale-2 chunks at different positions
+    let block_a = BlockData::simple(0, 10);
+    let block_b = BlockData::simple(0, 20);
+    let block_c = BlockData::simple(0, 30);
+
+    tree.set_chunk_at_scale(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(block_a)), 2);
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+
+    // Adjacent scale-2 chunk (key [4,0,0,0] at scale 2 = world [32, 64))
+    tree.set_chunk_at_scale(key(4, 0, 0, 0), Some(ResolvedChunkPayload::uniform(block_b)), 2);
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+
+    // Another at a different y level
+    tree.set_chunk_at_scale(key(0, 4, 0, 0), Some(ResolvedChunkPayload::uniform(block_c)), 2);
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}
+
+/// Scale-3 placement over scale-0 floor.
+#[test]
+fn set_chunk_at_scale3_over_scale0_floor() {
+    let mut tree = RegionChunkTree::new();
+
+    // Floor — larger to cover more of the scale-3 region
+    let floor_block = BlockData::simple(0, 1);
+    for w in 0..8 {
+        for z in 0..8 {
+            for x in 0..8 {
+                tree.set_chunk(
+                    key(x, 0, z, w),
+                    Some(ResolvedChunkPayload::uniform(floor_block.clone())),
+                );
+            }
+        }
+    }
+
+    // Scale-3: step = 8, world bounds = [0, 64) in each axis.
+    let scale3_block = BlockData::simple(0, 99);
+    tree.set_chunk_at_scale(
+        key(0, 0, 0, 0),
+        Some(ResolvedChunkPayload::uniform(scale3_block)),
+        3,
+    );
+
+    if let Some(root) = tree.root() {
+        assert_tree_non_overlapping(root);
+    }
+}

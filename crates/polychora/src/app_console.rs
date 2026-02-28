@@ -125,6 +125,9 @@ impl App {
             self.append_dev_console_log_line(
                 "  /spawn <entity-kind> [x y z w] [material-id|material-name]",
             );
+            self.append_dev_console_log_line(
+                "  /resync  -- force full server resync and report deltas",
+            );
             return;
         }
 
@@ -146,6 +149,16 @@ impl App {
                 "Teleported to ({:.2}, {:.2}, {:.2}, {:.2}).",
                 pos[0], pos[1], pos[2], pos[3]
             ));
+            return;
+        }
+
+        if command_name.eq_ignore_ascii_case("resync") {
+            if self.multiplayer_resync_snapshot.is_some() {
+                self.append_dev_console_log_line("Resync already in progress.");
+                return;
+            }
+            self.trigger_world_force_resync();
+            self.append_dev_console_log_line("Force resync initiated. Results will appear in stderr and console.");
             return;
         }
 

@@ -882,7 +882,10 @@ pub fn save_state_from_chunk_payload_patch(
         return Ok(None);
     }
 
-    let dirty_keys_set: HashSet<ChunkKey> = dirty_chunk_payloads.keys().copied().collect();
+    let dirty_keys_map: HashMap<ChunkKey, i8> = dirty_chunk_payloads
+        .iter()
+        .map(|(k, (se, _))| (*k, *se))
+        .collect();
     let node_by_id = build_node_lookup(&loaded_index);
     let mut preserved_world_leaves = Vec::<LeafDescriptor>::new();
     let mut reencode_chunk_payloads = Vec::<(ChunkKey, i8, ResolvedChunkPayload)>::new();
@@ -891,7 +894,7 @@ pub fn save_state_from_chunk_payload_patch(
         root,
         &node_by_id,
         loaded_index.root_node_id,
-        &dirty_keys_set,
+        &dirty_keys_map,
         &mut payload_cache,
         &mut preserved_world_leaves,
         &mut reencode_chunk_payloads,
@@ -1957,21 +1960,20 @@ fn subtract_aabb(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
 
 fn carve_bounds_excluding_dirty_chunks(
     bounds: Aabb4i,
-    dirty_chunks: &HashSet<ChunkKey>,
+    dirty_chunks: &HashMap<ChunkKey, i8>,
 ) -> Vec<Aabb4i> {
-    let mut dirty_in_bounds: Vec<ChunkKey> = dirty_chunks
+    let mut dirty_bounds: Vec<Aabb4i> = dirty_chunks
         .iter()
-        .copied()
-        .filter(|chunk| bounds.contains_chunk_world_min(*chunk))
+        .map(|(chunk, &scale)| Aabb4i::chunk_world_bounds(*chunk, scale))
+        .filter(|cb| bounds.intersects(cb))
         .collect();
-    if dirty_in_bounds.is_empty() {
+    if dirty_bounds.is_empty() {
         return vec![bounds];
     }
-    dirty_in_bounds.sort_unstable();
+    dirty_bounds.sort_unstable_by_key(|b| (b.min, b.max));
 
     let mut pieces = vec![bounds];
-    for chunk in dirty_in_bounds {
-        let chunk_bounds = Aabb4i::chunk_world_bounds(chunk, 0);
+    for chunk_bounds in dirty_bounds {
         let mut next = Vec::new();
         for piece in pieces {
             next.extend(subtract_aabb(piece, chunk_bounds));
@@ -1988,7 +1990,7 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
     root: &Path,
     node_by_id: &HashMap<u32, &IndexNode>,
     node_id: u32,
-    dirty_chunks: &HashSet<ChunkKey>,
+    dirty_chunks: &HashMap<ChunkKey, i8>,
     payload_cache: &mut HashMap<(u32, u64, u32, u32, u8, u16), FieldChunkPayload>,
     preserved_out: &mut Vec<LeafDescriptor>,
     reencode_payloads_out: &mut Vec<(ChunkKey, i8, ResolvedChunkPayload)>,
@@ -2012,7 +2014,10 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
 
     let has_dirty = dirty_chunks
         .iter()
-        .any(|chunk| bounds.contains_chunk_world_min(*chunk));
+        .any(|(chunk, &scale)| {
+            let dirty_wb = Aabb4i::chunk_world_bounds(*chunk, scale);
+            bounds.intersects(&dirty_wb)
+        });
     match &node.kind {
         IndexNodeKind::Branch { child_node_ids } => {
             for child_id in child_node_ids {
@@ -2113,7 +2118,12 @@ fn collect_world_leaf_descriptors_with_chunk_patch(
                         for x in lat_min[0]..=lat_max[0] {
                             let chunk = [x, y, z, w];
                             let chunk_key = chunk_key_from_lattice(chunk, blob.scale_exp);
-                            if dirty_chunks.contains(&chunk_key) {
+                            let this_wb = Aabb4i::chunk_world_bounds(chunk_key, blob.scale_exp);
+                            let is_dirty = dirty_chunks.iter().any(|(dk, &ds)| {
+                                let dirty_wb = Aabb4i::chunk_world_bounds(*dk, ds);
+                                this_wb.intersects(&dirty_wb)
+                            });
+                            if is_dirty {
                                 continue;
                             }
                             let local = [

@@ -1299,6 +1299,14 @@ pub(super) fn handle_message(
         ClientMessage::Ping { nonce } => {
             send_to_client(state, client_id, ServerMessage::Pong { nonce });
         }
+        ClientMessage::WorldForceResync { bounds } => {
+            // Reset interest tracking so the full region is re-streamed.
+            {
+                let mut guard = state.lock().expect("server state lock poisoned");
+                guard.clear_client_world_interest_bounds(client_id);
+            }
+            handle_world_interest_update(state, client_id, bounds);
+        }
     }
     record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None, None);
 }

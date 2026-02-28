@@ -147,6 +147,12 @@ pub enum ClientMessage {
     Ping {
         nonce: u64,
     },
+    /// Force the server to re-stream the entire interest region.
+    /// Resets the server's tracking of what this client has received,
+    /// then re-sends all subtree patches for the given bounds.
+    WorldForceResync {
+        bounds: Aabb4i,
+    },
 }
 
 // ---------------------------------------------------------------------------

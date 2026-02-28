@@ -527,6 +527,8 @@ impl App {
     }
 
     pub(super) fn poll_multiplayer_events(&mut self) {
+        const MAX_MESSAGES_PER_FRAME: usize = 64;
+        let mut processed = 0usize;
         loop {
             let event = match self
                 .multiplayer
@@ -544,6 +546,10 @@ impl App {
                     self.reset_multiplayer_connection_state();
                     break;
                 }
+            }
+            processed += 1;
+            if processed >= MAX_MESSAGES_PER_FRAME {
+                break;
             }
         }
     }
@@ -862,6 +868,84 @@ impl App {
             return;
         };
         client.send(MultiplayerClientMessage::WorldChunkSampleRequest { request_id, chunk, scale_exp: 0 });
+    }
+
+    pub(super) fn trigger_world_force_resync(&mut self) {
+        let Some(bounds) = self.multiplayer_last_world_request_bounds else {
+            eprintln!("[resync] no interest bounds — cannot resync");
+            return;
+        };
+        if !bounds.is_valid() {
+            eprintln!("[resync] invalid interest bounds — cannot resync");
+            return;
+        }
+        let Some(client) = self.multiplayer.as_ref() else {
+            eprintln!("[resync] not connected — cannot resync");
+            return;
+        };
+
+        // Snapshot current client tree state before the resync.
+        let snapshot = self.scene.collect_chunk_payload_hashes();
+        eprintln!(
+            "[resync] starting force resync: bounds={:?}->{:?}, snapshot has {} chunks",
+            bounds.min, bounds.max, snapshot.len()
+        );
+        self.multiplayer_resync_snapshot = Some(snapshot);
+        self.multiplayer_resync_countdown = 60; // compare after 60 frames of no patches
+
+        client.send(MultiplayerClientMessage::WorldForceResync { bounds });
+    }
+
+    pub(super) fn tick_resync_comparison(&mut self) {
+        if self.multiplayer_resync_snapshot.is_none() {
+            return;
+        }
+        if self.multiplayer_resync_countdown > 0 {
+            self.multiplayer_resync_countdown -= 1;
+            if self.multiplayer_resync_countdown > 0 {
+                return;
+            }
+        }
+
+        let Some(before) = self.multiplayer_resync_snapshot.take() else {
+            return;
+        };
+        let after = self.scene.collect_chunk_payload_hashes();
+
+        let mut added = 0u32;
+        let mut removed = 0u32;
+        let mut changed = 0u32;
+        let mut unchanged = 0u32;
+
+        for (key, hash) in &after {
+            match before.get(key) {
+                None => added += 1,
+                Some(prev_hash) if prev_hash != hash => changed += 1,
+                _ => unchanged += 1,
+            }
+        }
+        for key in before.keys() {
+            if !after.contains_key(key) {
+                removed += 1;
+            }
+        }
+
+        let summary = format!(
+            "Resync complete: before={} after={} added={} removed={} changed={} unchanged={}",
+            before.len(),
+            after.len(),
+            added,
+            removed,
+            changed,
+            unchanged
+        );
+        eprintln!("[resync] {summary}");
+        self.append_dev_console_log_line(summary);
+        if added + removed + changed == 0 {
+            let msg = "Trees are identical — no deltas.";
+            eprintln!("[resync] {msg}");
+            self.append_dev_console_log_line(msg);
+        }
     }
 
     fn record_multiplayer_chunk_sample_diag_patch(
@@ -1358,6 +1442,12 @@ impl App {
             self.scene.apply_region_patch_fast(authoritative_bounds, &patch)
         };
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
+
+        // Reset resync countdown when patches arrive so comparison waits until patches stop.
+        if self.multiplayer_resync_snapshot.is_some() && scene_patch_stats.changed_chunks > 0 {
+            self.multiplayer_resync_countdown = 60;
+        }
+
         let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
             || self.multiplayer_stream_tree_compare_diag_enabled)
             && scene_patch_stats.changed_chunks > 0
