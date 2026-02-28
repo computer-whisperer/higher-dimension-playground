@@ -120,7 +120,7 @@ impl ServerState {
                 continue;
             };
             let center = world_chunk_from_position(snapshot.entity.pose.position);
-            let player_keep = Aabb4i::from_i32(
+            let player_keep = Aabb4i::from_lattice_bounds(
                 [
                     center[0] - radius,
                     center[1] - radius,
@@ -133,6 +133,7 @@ impl ServerState {
                     center[2] + radius,
                     center[3] + radius,
                 ],
+                0,
             );
             keep_bounds = Some(match keep_bounds {
                 Some(acc) => union_bounds(acc, player_keep),

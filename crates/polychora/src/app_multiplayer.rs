@@ -91,20 +91,11 @@ fn region_tree_diag_style(kind: RegionTreeDiagKind) -> RegionTreeDiagStyle {
 }
 
 fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
-    let one = ChunkCoord::from_num(1);
     let span = [
-        node.bounds.max[0]
-            .saturating_sub(node.bounds.min[0])
-            .saturating_add(one).to_num::<i32>(),
-        node.bounds.max[1]
-            .saturating_sub(node.bounds.min[1])
-            .saturating_add(one).to_num::<i32>(),
-        node.bounds.max[2]
-            .saturating_sub(node.bounds.min[2])
-            .saturating_add(one).to_num::<i32>(),
-        node.bounds.max[3]
-            .saturating_sub(node.bounds.min[3])
-            .saturating_add(one).to_num::<i32>(),
+        node.bounds.max[0].saturating_sub(node.bounds.min[0]).to_num::<i32>(),
+        node.bounds.max[1].saturating_sub(node.bounds.min[1]).to_num::<i32>(),
+        node.bounds.max[2].saturating_sub(node.bounds.min[2]).to_num::<i32>(),
+        node.bounds.max[3].saturating_sub(node.bounds.min[3]).to_num::<i32>(),
     ];
     let (kind_label, kind_suffix) = match node.kind {
         RegionTreeDiagKind::Branch => ("Branch", String::new()),
@@ -129,20 +120,8 @@ fn project_chunk_bounds_to_ndc(
         return None;
     }
 
-    let chunk_size = ChunkCoord::from_num(voxel::CHUNK_SIZE as i32);
-    let one = ChunkCoord::from_num(1);
-    let min_world = [
-        (bounds.min[0].saturating_mul(chunk_size)).to_num::<f32>(),
-        (bounds.min[1].saturating_mul(chunk_size)).to_num::<f32>(),
-        (bounds.min[2].saturating_mul(chunk_size)).to_num::<f32>(),
-        (bounds.min[3].saturating_mul(chunk_size)).to_num::<f32>(),
-    ];
-    let max_world = [
-        ((bounds.max[0].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
-        ((bounds.max[1].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
-        ((bounds.max[2].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
-        ((bounds.max[3].saturating_add(one)).saturating_mul(chunk_size)).to_num::<f32>(),
-    ];
+    let min_world = bounds.min.map(|v| v.to_num::<f32>());
+    let max_world = bounds.max.map(|v| v.to_num::<f32>());
 
     let mut min_ndc = [f32::INFINITY; 2];
     let mut max_ndc = [f32::NEG_INFINITY; 2];
@@ -360,20 +339,12 @@ fn world_chunk_from_position(position: [f32; 4]) -> ChunkKey {
 }
 
 fn world_request_bounds_for_center_chunk(center_chunk: ChunkKey, radius_chunks: i32) -> Aabb4i {
-    let radius = ChunkCoord::from_num(radius_chunks.max(0));
+    let cs = ChunkCoord::from_num(voxel::CHUNK_SIZE as i32);
+    let radius_world = ChunkCoord::from_num(radius_chunks.max(0)).saturating_mul(cs);
+    let center_world = center_chunk.map(|k| k.saturating_mul(cs));
     Aabb4i::new(
-        [
-            center_chunk[0].saturating_sub(radius),
-            center_chunk[1].saturating_sub(radius),
-            center_chunk[2].saturating_sub(radius),
-            center_chunk[3].saturating_sub(radius),
-        ],
-        [
-            center_chunk[0].saturating_add(radius),
-            center_chunk[1].saturating_add(radius),
-            center_chunk[2].saturating_add(radius),
-            center_chunk[3].saturating_add(radius),
-        ],
+        center_world.map(|c| c.saturating_sub(radius_world)),
+        center_world.map(|c| c.saturating_add(radius_world)),
     )
 }
 
@@ -386,15 +357,7 @@ fn world_request_radius_chunks_for_distance(distance_world: f32) -> i32 {
 }
 
 fn bounds_contains_chunk(bounds: Aabb4i, chunk: ChunkKey) -> bool {
-    bounds.is_valid()
-        && chunk[0] >= bounds.min[0]
-        && chunk[0] <= bounds.max[0]
-        && chunk[1] >= bounds.min[1]
-        && chunk[1] <= bounds.max[1]
-        && chunk[2] >= bounds.min[2]
-        && chunk[2] <= bounds.max[2]
-        && chunk[3] >= bounds.min[3]
-        && chunk[3] <= bounds.max[3]
+    bounds.contains_chunk_world_min(chunk)
 }
 
 fn zero_dense_chunk_blocks() -> Vec<polychora::shared::voxel::BlockData> {
@@ -429,7 +392,7 @@ fn dense_blocks_from_region_core_chunk(
     core: &RegionTreeCore,
     chunk: ChunkKey,
 ) -> Vec<polychora::shared::voxel::BlockData> {
-    let bounds = Aabb4i::new(chunk, chunk);
+    let bounds = Aabb4i::chunk_world_bounds(chunk, 0);
     let chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
     for (key, resolved) in chunks {
         if key == chunk {
@@ -951,7 +914,7 @@ impl App {
             dense_blocks_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk));
         let render_bounds = self
             .multiplayer_last_world_request_bounds
-            .unwrap_or_else(|| Aabb4i::new(chunk, chunk));
+            .unwrap_or_else(|| Aabb4i::chunk_world_bounds(chunk, 0));
         let render_payloads = self
             .scene
             .debug_render_bvh_chunk_payloads_in_bounds(render_bounds, chunk);
@@ -995,7 +958,7 @@ impl App {
             .iter()
             .rev()
         {
-            if !authoritative_bounds.contains_chunk(chunk) {
+            if !authoritative_bounds.contains_chunk_world_min(chunk) {
                 continue;
             }
             let patch_dense = dense_blocks_from_region_core_chunk(patch, chunk);
@@ -1379,7 +1342,7 @@ impl App {
         let world_before =
             patch_single_chunk_key.and_then(|key| self.scene.debug_world_tree_chunk_payload(key));
         let patch_payload = patch_single_chunk_key.and_then(|key| {
-            collect_non_empty_chunks_from_core_in_bounds(&patch, Aabb4i::new(key, key))
+            collect_non_empty_chunks_from_core_in_bounds(&patch, Aabb4i::chunk_world_bounds(key, 0))
                 .into_iter()
                 .find(|(chunk_key, _)| *chunk_key == key)
                 .map(|(_, payload)| payload)

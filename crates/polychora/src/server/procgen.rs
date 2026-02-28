@@ -887,20 +887,10 @@ fn chunk_bounds(chunk_key: ChunkKey) -> ([i32; 4], [i32; 4]) {
     (chunk_min, chunk_max)
 }
 
+/// Convert world-space half-open bounds to inclusive integer world bounds.
 fn world_bounds_from_chunk_bounds(bounds: Aabb4i) -> ([i32; 4], [i32; 4]) {
-    let chunk_size = CHUNK_SIZE as i32;
-    let min = [
-        bounds.min[0].to_num::<i32>() * chunk_size,
-        bounds.min[1].to_num::<i32>() * chunk_size,
-        bounds.min[2].to_num::<i32>() * chunk_size,
-        bounds.min[3].to_num::<i32>() * chunk_size,
-    ];
-    let max = [
-        bounds.max[0].to_num::<i32>() * chunk_size + (chunk_size - 1),
-        bounds.max[1].to_num::<i32>() * chunk_size + (chunk_size - 1),
-        bounds.max[2].to_num::<i32>() * chunk_size + (chunk_size - 1),
-        bounds.max[3].to_num::<i32>() * chunk_size + (chunk_size - 1),
-    ];
+    let min = bounds.min.map(|v| v.to_num::<i32>());
+    let max = bounds.max.map(|v| v.to_num::<i32>() - 1);
     (min, max)
 }
 
@@ -954,7 +944,7 @@ fn intersect_world_bounds_as_chunk_bounds(
     {
         return None;
     }
-    Some(Aabb4i::from_i32(chunk_min, chunk_max))
+    Some(Aabb4i::from_lattice_bounds(chunk_min, chunk_max, 0))
 }
 
 fn collect_structure_placements_for_chunk_bounds(
@@ -1130,7 +1120,7 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
         else {
             continue;
         };
-        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
+        let (cc_min, cc_max) = covered_chunks.to_chunk_lattice_bounds(0);
         for w in cc_min[3]..=cc_max[3] {
             for z in cc_min[2]..=cc_max[2] {
                 for y in cc_min[1]..=cc_max[1] {
@@ -1149,7 +1139,7 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
         else {
             continue;
         };
-        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
+        let (cc_min, cc_max) = covered_chunks.to_chunk_lattice_bounds(0);
         for w in cc_min[3]..=cc_max[3] {
             for z in cc_min[2]..=cc_max[2] {
                 for y in cc_min[1]..=cc_max[1] {
@@ -1202,7 +1192,7 @@ pub fn generate_structure_placements_for_bounds(
 
         // Convert placement world bounds to chunk coordinates
         let chunk_size = CHUNK_SIZE as i32;
-        let full_chunk_bounds = Aabb4i::from_i32(
+        let full_chunk_bounds = Aabb4i::from_lattice_bounds(
             [
                 placement_world_min[0].div_euclid(chunk_size),
                 placement_world_min[1].div_euclid(chunk_size),
@@ -1215,6 +1205,7 @@ pub fn generate_structure_placements_for_bounds(
                 placement_world_max[2].div_euclid(chunk_size),
                 placement_world_max[3].div_euclid(chunk_size),
             ],
+            0,
         );
 
         // Clip to query bounds
@@ -1236,7 +1227,7 @@ pub fn generate_structure_placements_for_bounds(
             continue;
         }
 
-        let (cl_min, cl_max) = clipped.to_lattice_bounds(0);
+        let (cl_min, cl_max) = clipped.to_chunk_lattice_bounds(0);
         let mut chunks = HashMap::new();
         for cw in cl_min[3]..=cl_max[3] {
             for cz in cl_min[2]..=cl_max[2] {
@@ -2276,7 +2267,7 @@ pub fn maze_chunk_positions_for_bounds(
         else {
             continue;
         };
-        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
+        let (cc_min, cc_max) = covered_chunks.to_chunk_lattice_bounds(0);
         for w in cc_min[3]..=cc_max[3] {
             for z in cc_min[2]..=cc_max[2] {
                 for y in cc_min[1]..=cc_max[1] {
@@ -2318,7 +2309,7 @@ pub fn generate_maze_placements_for_bounds(
             continue;
         };
 
-        let (cc_min, cc_max) = covered_chunks.to_lattice_bounds(0);
+        let (cc_min, cc_max) = covered_chunks.to_chunk_lattice_bounds(0);
         let mut chunks = HashMap::new();
         for cw in cc_min[3]..=cc_max[3] {
             for cz in cc_min[2]..=cc_max[2] {
@@ -2853,10 +2844,10 @@ mod tests {
     #[test]
     fn structure_chunk_positions_for_bounds_matches_bruteforce() {
         let seed = 0x4e73_9ac1_2f07_118du64;
-        let bounds = Aabb4i::from_i32([-3, -2, -3, -3], [3, 3, 3, 3]);
+        let bounds = Aabb4i::from_lattice_bounds([-3, -2, -3, -3], [3, 3, 3, 3], 0);
 
         let mut brute = Vec::new();
-        let (bmin, bmax) = bounds.to_lattice_bounds(0);
+        let (bmin, bmax) = bounds.to_chunk_lattice_bounds(0);
         for w in bmin[3]..=bmax[3] {
             for z in bmin[2]..=bmax[2] {
                 for y in bmin[1]..=bmax[1] {
@@ -2904,15 +2895,16 @@ mod tests {
             target_pos[2].to_num::<i32>(),
             target_pos[3].to_num::<i32>(),
         ];
-        let bounds = Aabb4i::from_i32(
+        let bounds = Aabb4i::from_lattice_bounds(
             [tp[0] - 2, tp[1] - 2, tp[2] - 2, tp[3] - 2],
             [tp[0] + 2, tp[1] + 2, tp[2] + 2, tp[3] + 2],
+            0,
         );
         let mut blocked = HashSet::new();
         blocked.insert(blocked_cell);
 
         let mut brute = Vec::new();
-        let (bmin, bmax) = bounds.to_lattice_bounds(0);
+        let (bmin, bmax) = bounds.to_chunk_lattice_bounds(0);
         for w in bmin[3]..=bmax[3] {
             for z in bmin[2]..=bmax[2] {
                 for y in bmin[1]..=bmax[1] {

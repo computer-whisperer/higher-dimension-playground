@@ -4,7 +4,7 @@ use crate::shared::region_tree::{
     ChunkKey, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::{Aabb4i, ChunkCoord, fixed_from_lattice, lattice_from_fixed};
-use crate::shared::voxel::{BlockData, CHUNK_SIZE};
+use crate::shared::voxel::BlockData;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RenderTreeCore {
@@ -371,7 +371,7 @@ pub fn collect_non_empty_chunk_keys_from_bvh_in_bounds(
 }
 
 pub fn sample_chunk_payloads_from_bvh(bvh: &RenderBvh, key: ChunkKey) -> Vec<ResolvedChunkPayload> {
-    if !bvh.bounds.contains_chunk(key) {
+    if !bvh.bounds.contains_chunk_world_min(key) {
         return Vec::new();
     }
     let Some(root) = bvh.root else {
@@ -386,7 +386,7 @@ pub fn sample_chunk_payloads_from_bvh(bvh: &RenderBvh, key: ChunkKey) -> Vec<Res
         let Some(node) = bvh.nodes.get(node_idx as usize) else {
             continue;
         };
-        if !node.bounds.contains_chunk(key) {
+        if !node.bounds.contains_chunk_world_min(key) {
             continue;
         }
         match node.kind {
@@ -455,7 +455,7 @@ fn sample_leaf_payload_at_scaled_key(
     match &leaf.kind {
         RenderLeafKind::Uniform(block) => Some(ResolvedChunkPayload::uniform(block.clone())),
         RenderLeafKind::VoxelChunkArray(chunk_array) => {
-            if !chunk_array.bounds.contains_chunk(key) {
+            if !chunk_array.bounds.contains_chunk_world_min(key) {
                 return None;
             }
             sample_chunkarray_payload_at_key(chunk_array, key)
@@ -476,10 +476,10 @@ pub fn apply_chunk_payload_mutations_with_deltas_in_bvh(
 ) -> Result<Vec<RenderBvhChunkMutationDelta>, String> {
     let mut deltas = Vec::<RenderBvhChunkMutationDelta>::new();
     for (key, payload, block_palette) in mutations {
-        if !bvh.bounds.contains_chunk(*key) {
+        if !bvh.bounds.contains_chunk_world_min(*key) {
             continue;
         }
-        let key_bounds = Aabb4i::new(*key, *key);
+        let key_bounds = Aabb4i::chunk_world_bounds(*key, 0);
         let patch_core = if let Some(payload) = payload.clone() {
             repeated_voxel_leaf(key_bounds, payload, block_palette)
                 .unwrap_or_else(|| RenderTreeCore::empty(key_bounds))
@@ -732,7 +732,7 @@ fn collect_render_leaves_in_bounds(
 }
 
 fn sample_leaf_payload_at_key(leaf: &RenderLeaf, key: ChunkKey) -> Option<ResolvedChunkPayload> {
-    if !leaf.bounds.contains_chunk(key) {
+    if !leaf.bounds.contains_chunk_world_min(key) {
         return None;
     }
     match &leaf.kind {
@@ -747,16 +747,17 @@ fn sample_chunkarray_payload_at_key(
     chunk_array: &ChunkArrayData,
     key: ChunkKey,
 ) -> Option<ResolvedChunkPayload> {
-    if !chunk_array.bounds.contains_chunk(key) {
+    if !chunk_array.bounds.contains_chunk_world_min(key) {
         return None;
     }
     let se = chunk_array.scale_exp;
     let dims = chunk_array.bounds.chunk_extents_at_scale(se)?;
     let dense_indices = chunk_array.decode_dense_indices().ok()?;
-    let lx = lattice_from_fixed(key[0] - chunk_array.bounds.min[0], se) as usize;
-    let ly = lattice_from_fixed(key[1] - chunk_array.bounds.min[1], se) as usize;
-    let lz = lattice_from_fixed(key[2] - chunk_array.bounds.min[2], se) as usize;
-    let lw = lattice_from_fixed(key[3] - chunk_array.bounds.min[3], se) as usize;
+    let (arr_min, _) = chunk_array.bounds.to_chunk_lattice_bounds(se);
+    let lx = (lattice_from_fixed(key[0], se) - arr_min[0]) as usize;
+    let ly = (lattice_from_fixed(key[1], se) - arr_min[1]) as usize;
+    let lz = (lattice_from_fixed(key[2], se) - arr_min[2]) as usize;
+    let lw = (lattice_from_fixed(key[3], se) - arr_min[3]) as usize;
     let linear = lx + dims[0] * (ly + dims[1] * (lz + dims[2] * lw));
     let palette_idx = *dense_indices.get(linear)? as usize;
     let payload = chunk_array.chunk_palette.get(palette_idx)?.clone();
@@ -892,13 +893,13 @@ fn split_bounds_excluding_bounds(bounds: Aabb4i, excluded_bounds: Aabb4i) -> Vec
     for axis in 0..4 {
         if rem_min[axis] < clipped_excluded.min[axis] {
             let mut piece_max = rem_max;
-            piece_max[axis] = clipped_excluded.min[axis] - ChunkCoord::from_num(1);
+            piece_max[axis] = clipped_excluded.min[axis];
             pieces.push(Aabb4i::new(rem_min, piece_max));
             rem_min[axis] = clipped_excluded.min[axis];
         }
         if rem_max[axis] > clipped_excluded.max[axis] {
             let mut piece_min = rem_min;
-            piece_min[axis] = clipped_excluded.max[axis] + ChunkCoord::from_num(1);
+            piece_min[axis] = clipped_excluded.max[axis];
             pieces.push(Aabb4i::new(piece_min, rem_max));
             rem_max[axis] = clipped_excluded.max[axis];
         }
@@ -936,20 +937,16 @@ fn slice_chunk_array_kind_to_bounds(
         .collect();
     let mut any_non_empty = false;
 
+    let (piece_lat_min, _) = bounds.to_chunk_lattice_bounds(se);
+    let (arr_lat_min, _) = chunk_array.bounds.to_chunk_lattice_bounds(se);
     for w in 0..piece_dims[3] {
         for z in 0..piece_dims[2] {
             for y in 0..piece_dims[1] {
                 for x in 0..piece_dims[0] {
-                    let src_coord = [
-                        bounds.min[0] + fixed_from_lattice(x as i32, se),
-                        bounds.min[1] + fixed_from_lattice(y as i32, se),
-                        bounds.min[2] + fixed_from_lattice(z as i32, se),
-                        bounds.min[3] + fixed_from_lattice(w as i32, se),
-                    ];
-                    let lx = lattice_from_fixed(src_coord[0] - chunk_array.bounds.min[0], se) as usize;
-                    let ly = lattice_from_fixed(src_coord[1] - chunk_array.bounds.min[1], se) as usize;
-                    let lz = lattice_from_fixed(src_coord[2] - chunk_array.bounds.min[2], se) as usize;
-                    let lw = lattice_from_fixed(src_coord[3] - chunk_array.bounds.min[3], se) as usize;
+                    let lx = ((piece_lat_min[0] + x as i32) - arr_lat_min[0]) as usize;
+                    let ly = ((piece_lat_min[1] + y as i32) - arr_lat_min[1]) as usize;
+                    let lz = ((piece_lat_min[2] + z as i32) - arr_lat_min[2]) as usize;
+                    let lw = ((piece_lat_min[3] + w as i32) - arr_lat_min[3]) as usize;
                     let src_linear =
                         lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
                     let Some(&palette_index) = source_indices.get(src_linear) else {
@@ -1268,19 +1265,17 @@ fn ray_intersects_chunk_bounds(
     if !chunk_bounds.is_valid() {
         return None;
     }
-    let chunk_size = CHUNK_SIZE as f32;
-    let one = ChunkCoord::from_num(1);
     let min = [
-        chunk_bounds.min[0].to_num::<f32>() * chunk_size,
-        chunk_bounds.min[1].to_num::<f32>() * chunk_size,
-        chunk_bounds.min[2].to_num::<f32>() * chunk_size,
-        chunk_bounds.min[3].to_num::<f32>() * chunk_size,
+        chunk_bounds.min[0].to_num::<f32>(),
+        chunk_bounds.min[1].to_num::<f32>(),
+        chunk_bounds.min[2].to_num::<f32>(),
+        chunk_bounds.min[3].to_num::<f32>(),
     ];
     let max = [
-        (chunk_bounds.max[0] + one).to_num::<f32>() * chunk_size,
-        (chunk_bounds.max[1] + one).to_num::<f32>() * chunk_size,
-        (chunk_bounds.max[2] + one).to_num::<f32>() * chunk_size,
-        (chunk_bounds.max[3] + one).to_num::<f32>() * chunk_size,
+        chunk_bounds.max[0].to_num::<f32>(),
+        chunk_bounds.max[1].to_num::<f32>(),
+        chunk_bounds.max[2].to_num::<f32>(),
+        chunk_bounds.max[3].to_num::<f32>(),
     ];
 
     let mut t_near = 0.0f32;
@@ -1360,19 +1355,16 @@ fn collect_non_empty_chunkarray_chunk_keys_in_bounds(
         .map(|p| chunk_payload_has_solid_material_in_context(p, &chunk_array.block_palette))
         .collect();
 
-    let (cb_min, cb_max) = clipped_bounds.to_lattice_bounds(se);
+    let (cb_min, cb_max) = clipped_bounds.to_chunk_lattice_bounds(se);
+    let (arr_min, _) = chunk_array.bounds.to_chunk_lattice_bounds(se);
     for iw in cb_min[3]..=cb_max[3] {
         for iz in cb_min[2]..=cb_max[2] {
             for iy in cb_min[1]..=cb_max[1] {
                 for ix in cb_min[0]..=cb_max[0] {
-                    let x = fixed_from_lattice(ix, se);
-                    let y = fixed_from_lattice(iy, se);
-                    let z = fixed_from_lattice(iz, se);
-                    let w = fixed_from_lattice(iw, se);
-                    let lx = lattice_from_fixed(x - chunk_array.bounds.min[0], se) as usize;
-                    let ly = lattice_from_fixed(y - chunk_array.bounds.min[1], se) as usize;
-                    let lz = lattice_from_fixed(z - chunk_array.bounds.min[2], se) as usize;
-                    let lw = lattice_from_fixed(w - chunk_array.bounds.min[3], se) as usize;
+                    let lx = (ix - arr_min[0]) as usize;
+                    let ly = (iy - arr_min[1]) as usize;
+                    let lz = (iz - arr_min[2]) as usize;
+                    let lw = (iw - arr_min[3]) as usize;
                     let linear = lx + dims[0] * (ly + dims[1] * (lz + dims[2] * lw));
                     let Some(&palette_index) = indices.get(linear) else {
                         continue;
@@ -1383,6 +1375,10 @@ fn collect_non_empty_chunkarray_chunk_keys_in_bounds(
                         .copied()
                         .unwrap_or(false)
                     {
+                        let x = fixed_from_lattice(ix, se);
+                        let y = fixed_from_lattice(iy, se);
+                        let z = fixed_from_lattice(iz, se);
+                        let w = fixed_from_lattice(iw, se);
                         out.push([x, y, z, w]);
                     }
                 }
@@ -1407,7 +1403,7 @@ fn chunk_payload_has_solid_material_in_context(payload: &ChunkPayload, block_pal
 }
 
 fn enumerate_chunk_keys(bounds: Aabb4i, out: &mut Vec<ChunkKey>) {
-    let (bmin, bmax) = bounds.to_lattice_bounds(0);
+    let (bmin, bmax) = bounds.to_chunk_lattice_bounds(0);
     for iw in bmin[3]..=bmax[3] {
         for iz in bmin[2]..=bmax[2] {
             for iy in bmin[1]..=bmax[1] {
@@ -1429,11 +1425,10 @@ fn enumerate_chunk_keys(bounds: Aabb4i, out: &mut Vec<ChunkKey>) {
 /// 3-face volumes: dy*dz*dw + dx*dz*dw + dx*dy*dw + dx*dy*dz.
 /// This measures how likely a random ray is to intersect the box.
 fn half_surface_area_4d(bounds: Aabb4i) -> f64 {
-    let one = ChunkCoord::from_num(1);
-    let dx = (bounds.max[0] - bounds.min[0] + one).to_num::<f64>().max(0.0);
-    let dy = (bounds.max[1] - bounds.min[1] + one).to_num::<f64>().max(0.0);
-    let dz = (bounds.max[2] - bounds.min[2] + one).to_num::<f64>().max(0.0);
-    let dw = (bounds.max[3] - bounds.min[3] + one).to_num::<f64>().max(0.0);
+    let dx = (bounds.max[0] - bounds.min[0]).to_num::<f64>().max(0.0);
+    let dy = (bounds.max[1] - bounds.min[1]).to_num::<f64>().max(0.0);
+    let dz = (bounds.max[2] - bounds.min[2]).to_num::<f64>().max(0.0);
+    let dw = (bounds.max[3] - bounds.min[3]).to_num::<f64>().max(0.0);
     dy * dz * dw + dx * dz * dw + dx * dy * dw + dx * dy * dz
 }
 
@@ -1516,14 +1511,14 @@ mod tests {
 
     #[test]
     fn from_region_core_drops_procedural_and_keeps_chunk_content() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0);
         let uniform_child = RegionTreeCore {
-            bounds: Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]),
+            bounds: Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0),
             kind: RegionNodeKind::Uniform(BlockData::simple(0, 7)),
             generator_version_hash: 1,
         };
         let procedural_child = RegionTreeCore {
-            bounds: Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]),
+            bounds: Aabb4i::from_lattice_bounds([1, 0, 0, 0], [1, 0, 0, 0], 0),
             kind: RegionNodeKind::ProceduralRef(GeneratorRef {
                 generator_id: "test".into(),
                 params: vec![],
@@ -1549,8 +1544,8 @@ mod tests {
 
     #[test]
     fn collect_non_empty_chunks_handles_uniform_and_voxel_chunk_array() {
-        let uniform_bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
-        let voxel_bounds = Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]);
+        let uniform_bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0);
+        let voxel_bounds = Aabb4i::from_lattice_bounds([1, 0, 0, 0], [1, 0, 0, 0], 0);
         let block_palette = vec![BlockData::AIR, BlockData::simple(0, 11)];
         let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
             voxel_bounds,
@@ -1562,7 +1557,7 @@ mod tests {
         )
         .expect("chunk array");
         let core = RenderTreeCore {
-            bounds: Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]),
+            bounds: Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0),
             kind: RenderNodeKind::Branch(vec![
                 RenderTreeCore {
                     bounds: uniform_bounds,
@@ -1576,14 +1571,14 @@ mod tests {
         };
         let chunks = collect_non_empty_chunks_in_bounds(&core, core.bounds);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].0, [0, 0, 0, 0]);
-        assert_eq!(chunks[1].0, [1, 0, 0, 0]);
+        assert_eq!(chunks[0].0, chunk_key_i32(0, 0, 0, 0));
+        assert_eq!(chunks[1].0, chunk_key_i32(1, 0, 0, 0));
     }
 
     #[test]
     fn bvh_collect_matches_core_collect_for_mixed_leaves() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [3, 0, 0, 0]);
-        let chunk_array_bounds = Aabb4i::from_i32([2, 0, 0, 0], [3, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [3, 0, 0, 0], 0);
+        let chunk_array_bounds = Aabb4i::from_lattice_bounds([2, 0, 0, 0], [3, 0, 0, 0], 0);
         let block_palette = vec![BlockData::AIR, BlockData::simple(0, 9)];
         let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
             chunk_array_bounds,
@@ -1598,7 +1593,7 @@ mod tests {
             bounds,
             kind: RenderNodeKind::Branch(vec![
                 RenderTreeCore {
-                    bounds: Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]),
+                    bounds: Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0),
                     kind: RenderNodeKind::Uniform(BlockData::simple(0, 7)),
                 },
                 RenderTreeCore {
@@ -1616,21 +1611,21 @@ mod tests {
 
     #[test]
     fn bvh_collect_respects_query_bounds_clipping() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [4, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [4, 0, 0, 0], 0);
         let core = RenderTreeCore {
             bounds,
             kind: RenderNodeKind::Uniform(BlockData::simple(0, 3)),
         };
         let bvh = build_bvh_in_bounds(&core, bounds);
 
-        let query = Aabb4i::from_i32([2, 0, 0, 0], [3, 0, 0, 0]);
+        let query = Aabb4i::from_lattice_bounds([2, 0, 0, 0], [3, 0, 0, 0], 0);
         let keys = collect_non_empty_chunk_keys_from_bvh_in_bounds(&bvh, query);
-        assert_eq!(keys, vec![[2, 0, 0, 0], [3, 0, 0, 0]]);
+        assert_eq!(keys, vec![chunk_key_i32(2, 0, 0, 0), chunk_key_i32(3, 0, 0, 0)]);
     }
 
     #[test]
     fn bvh_build_skips_air_uniform_leaves() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0);
         let core = RenderTreeCore {
             bounds,
             kind: RenderNodeKind::Uniform(BlockData::AIR),
@@ -1643,10 +1638,10 @@ mod tests {
 
     #[test]
     fn validate_render_core_rejects_mixed_scale_world_overlap() {
-        let coarse_bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
-        // scale-(-1) lattice [1,0,0,0] = fixed [0.5, 0, 0, 0] — overlaps coarse [0,0,0,0]
+        let coarse_bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0);
+        // scale-(-1) lattice [1,0,0,0] = world-space [4, 0, 0, 0]..[8, 0, 0, 0) — overlaps coarse [0,0,0,0]..[8,8,8,8)
         let fine_key = chunk_key_from_lattice([1, 0, 0, 0], -1);
-        let fine_bounds = Aabb4i::new(fine_key, fine_key);
+        let fine_bounds = Aabb4i::chunk_world_bounds(fine_key, -1);
         let coarse = ChunkArrayData::from_dense_indices_with_block_palette(
             coarse_bounds,
             vec![ChunkPayload::Uniform(1)],
@@ -1666,7 +1661,7 @@ mod tests {
         )
         .expect("fine chunk array");
 
-        let parent_bounds = Aabb4i::new(coarse_bounds.min, fine_bounds.max);
+        let parent_bounds = union_bounds(coarse_bounds, fine_bounds);
         let core = RenderTreeCore {
             bounds: parent_bounds,
             kind: RenderNodeKind::Branch(vec![
@@ -1686,8 +1681,8 @@ mod tests {
 
     #[test]
     fn sample_chunk_payloads_from_bvh_reads_uniform_and_chunk_array_leaves() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
-        let chunk_array_bounds = Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0);
+        let chunk_array_bounds = Aabb4i::from_lattice_bounds([1, 0, 0, 0], [1, 0, 0, 0], 0);
         let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
             chunk_array_bounds,
             vec![ChunkPayload::Uniform(11)],
@@ -1701,7 +1696,7 @@ mod tests {
             bounds,
             kind: RenderNodeKind::Branch(vec![
                 RenderTreeCore {
-                    bounds: Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]),
+                    bounds: Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0),
                     kind: RenderNodeKind::Uniform(BlockData::simple(0, 7)),
                 },
                 RenderTreeCore {
@@ -1726,11 +1721,11 @@ mod tests {
 
     #[test]
     fn bvh_chunk_mutation_delta_reports_root_change_for_outside_insert() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [2, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [2, 0, 0, 0], 0);
         let core = RenderTreeCore {
             bounds,
             kind: RenderNodeKind::Branch(vec![RenderTreeCore {
-                bounds: Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]),
+                bounds: Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0),
                 kind: RenderNodeKind::Uniform(BlockData::simple(0, 7)),
             }]),
         };
@@ -1743,7 +1738,7 @@ mod tests {
         .expect("apply mutation");
         assert_eq!(deltas.len(), 1);
         let delta = &deltas[0];
-        assert_eq!(delta.key, chunk_key_i32(2, 0, 0, 0));
+        assert_eq!(delta.key, chunk_key_i32(16, 0, 0, 0));
         assert_eq!(delta.expected_root, old_root);
         assert_eq!(delta.new_root, bvh.root);
         assert!(delta.root_changed());
@@ -1753,16 +1748,16 @@ mod tests {
 
     #[test]
     fn bvh_chunk_mutation_delta_reports_touched_ancestors() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0);
         let core = RenderTreeCore {
             bounds,
             kind: RenderNodeKind::Branch(vec![
                 RenderTreeCore {
-                    bounds: Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]),
+                    bounds: Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0),
                     kind: RenderNodeKind::Uniform(BlockData::simple(0, 7)),
                 },
                 RenderTreeCore {
-                    bounds: Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]),
+                    bounds: Aabb4i::from_lattice_bounds([1, 0, 0, 0], [1, 0, 0, 0], 0),
                     kind: RenderNodeKind::Uniform(BlockData::simple(0, 7)),
                 },
             ]),
@@ -1786,7 +1781,7 @@ mod tests {
 
     #[test]
     fn bvh_patch_reuses_freed_ids_instead_of_append_only_growth() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [2, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [2, 0, 0, 0], 0);
         let core = RenderTreeCore {
             bounds,
             kind: RenderNodeKind::Uniform(BlockData::simple(0, 7)),
@@ -1846,7 +1841,7 @@ mod tests {
 
     #[test]
     fn ray_bvh_hits_uniform_leaf() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0);
         let core = RenderTreeCore {
             bounds,
             kind: RenderNodeKind::Uniform(BlockData::simple(0, 7)),
@@ -1869,16 +1864,16 @@ mod tests {
 
     #[test]
     fn ray_bvh_hits_internal_then_near_leaf() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0);
         let core = RenderTreeCore {
             bounds,
             kind: RenderNodeKind::Branch(vec![
                 RenderTreeCore {
-                    bounds: Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]),
+                    bounds: Aabb4i::from_lattice_bounds([0, 0, 0, 0], [0, 0, 0, 0], 0),
                     kind: RenderNodeKind::Uniform(BlockData::simple(0, 3)),
                 },
                 RenderTreeCore {
-                    bounds: Aabb4i::from_i32([1, 0, 0, 0], [1, 0, 0, 0]),
+                    bounds: Aabb4i::from_lattice_bounds([1, 0, 0, 0], [1, 0, 0, 0], 0),
                     kind: RenderNodeKind::Uniform(BlockData::simple(0, 9)),
                 },
             ]),

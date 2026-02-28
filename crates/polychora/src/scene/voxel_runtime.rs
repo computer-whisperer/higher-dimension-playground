@@ -1,7 +1,7 @@
 use super::*;
 use polychora::content_registry::MaterialResolver;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
-use polychora::shared::spatial::{ChunkCoord, step_for_scale, fixed_from_lattice};
+use polychora::shared::spatial::{ChunkCoord, fixed_from_lattice};
 use polychora::shared::voxel::BlockData;
 use polychora::shared::render_tree::{
     RenderBvh, RenderBvhChunkMutationDelta, RenderBvhNodeKind, RenderLeaf, RenderLeafKind,
@@ -15,24 +15,13 @@ fn chunk_coord_to_i32(c: [ChunkCoord; 4]) -> [i32; 4] {
 
 /// Compute world-space AABB for a leaf's bounds at a given scale.
 ///
-/// `bounds.min/max` are in fixed-point chunk coordinates.
-/// The returned `[f32; 4]` pairs are in world-space units.
-fn leaf_world_bounds(bounds: &polychora::shared::spatial::Aabb4, scale_exp: i8) -> ([f32; 4], [f32; 4]) {
-    let cs = CHUNK_SIZE as f32;
-    let step: f32 = step_for_scale(scale_exp).to_num::<f32>();
-    let world_min = [
-        bounds.min[0].to_num::<f32>() * cs,
-        bounds.min[1].to_num::<f32>() * cs,
-        bounds.min[2].to_num::<f32>() * cs,
-        bounds.min[3].to_num::<f32>() * cs,
-    ];
-    let world_max = [
-        (bounds.max[0].to_num::<f32>() + step) * cs,
-        (bounds.max[1].to_num::<f32>() + step) * cs,
-        (bounds.max[2].to_num::<f32>() + step) * cs,
-        (bounds.max[3].to_num::<f32>() + step) * cs,
-    ];
-    (world_min, world_max)
+/// Bounds are already world-space half-open `[min, max)`.
+/// Convert fixed-point to f32 for GPU consumption.
+fn leaf_world_bounds(bounds: &polychora::shared::spatial::Aabb4, _scale_exp: i8) -> ([f32; 4], [f32; 4]) {
+    (
+        bounds.min.map(|v| v.to_num::<f32>()),
+        bounds.max.map(|v| v.to_num::<f32>()),
+    )
 }
 
 /// Pack a scale_exp (i8) into the upper 8 bits (24-31) of a u32.
@@ -608,8 +597,8 @@ impl Scene {
             .chunk_extents_at_scale(scale_exp)
             .ok_or_else(|| "chunk-array source extents missing".to_string())?;
 
-        let (leaf_lattice_min, _leaf_lattice_max) = leaf.bounds.to_lattice_bounds(scale_exp);
-        let (src_lattice_min, _src_lattice_max) = chunk_array.bounds.to_lattice_bounds(scale_exp);
+        let (leaf_lattice_min, _leaf_lattice_max) = leaf.bounds.to_chunk_lattice_bounds(scale_exp);
+        let (src_lattice_min, _src_lattice_max) = chunk_array.bounds.to_chunk_lattice_bounds(scale_exp);
 
         let mut encoded = Vec::<u32>::with_capacity(leaf.bounds.chunk_cell_count_at_scale(scale_exp).unwrap_or(0));
         for w in 0..leaf_extents[3] {
@@ -635,14 +624,7 @@ impl Scene {
                         let lz = (lat[2] - src_lattice_min[2]) as usize;
                         let lw = (lat[3] - src_lattice_min[3]) as usize;
                         let in_src_bounds =
-                            chunk_coord[0] >= chunk_array.bounds.min[0]
-                            && chunk_coord[0] <= chunk_array.bounds.max[0]
-                            && chunk_coord[1] >= chunk_array.bounds.min[1]
-                            && chunk_coord[1] <= chunk_array.bounds.max[1]
-                            && chunk_coord[2] >= chunk_array.bounds.min[2]
-                            && chunk_coord[2] <= chunk_array.bounds.max[2]
-                            && chunk_coord[3] >= chunk_array.bounds.min[3]
-                            && chunk_coord[3] <= chunk_array.bounds.max[3];
+                            chunk_array.bounds.contains_chunk_world_min(chunk_coord);
                         if !in_src_bounds {
                             encoded.push(higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY);
                             continue;
@@ -899,7 +881,7 @@ impl Scene {
                 match &leaf.kind {
                     RenderLeafKind::Uniform(block) => {
                         let scale_exp = block.scale_exp;
-                        let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
+                        let (lat_min, lat_max) = leaf.bounds.to_chunk_lattice_bounds(scale_exp);
                         let mat = resolver.resolve_block(block.namespace, block.block_type);
                         self.voxel_frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
                             min_chunk_coord: lat_min,
@@ -916,7 +898,7 @@ impl Scene {
                     }
                     RenderLeafKind::VoxelChunkArray(chunk_array) => {
                         let scale_exp = chunk_array.scale_exp;
-                        let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
+                        let (lat_min, lat_max) = leaf.bounds.to_chunk_lattice_bounds(scale_exp);
                         let entries = Self::encode_leaf_chunk_entries(
                             &mut self.voxel_frame_data,
                             &mut self.voxel_dense_payload_encoded_cache,
@@ -1057,7 +1039,7 @@ impl Scene {
 
             match &leaf.kind {
                 RenderLeafKind::Uniform(block) => {
-                    let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
+                    let (lat_min, lat_max) = leaf.bounds.to_chunk_lattice_bounds(scale_exp);
                     let mat = resolver.resolve_block(block.namespace, block.block_type);
                     leaf_headers.push(GpuVoxelLeafHeader {
                         min_chunk_coord: lat_min,
@@ -1072,7 +1054,7 @@ impl Scene {
                     });
                 }
                 RenderLeafKind::VoxelChunkArray(chunk_array) => {
-                    let (lat_min, lat_max) = leaf.bounds.to_lattice_bounds(scale_exp);
+                    let (lat_min, lat_max) = leaf.bounds.to_chunk_lattice_bounds(scale_exp);
                     let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(scale_exp) else {
                         leaf_headers.push(GpuVoxelLeafHeader {
                             min_chunk_coord: lat_min,
@@ -1090,7 +1072,7 @@ impl Scene {
 
                     let src_indices = chunk_array.decode_dense_indices().ok();
                     let src_dims = chunk_array.bounds.chunk_extents_at_scale(scale_exp);
-                    let (src_lattice_min, _src_lattice_max) = chunk_array.bounds.to_lattice_bounds(scale_exp);
+                    let (src_lattice_min, _src_lattice_max) = chunk_array.bounds.to_chunk_lattice_bounds(scale_exp);
                     let mut palette_encoded_cache =
                         vec![None::<u32>; chunk_array.chunk_palette.len()];
 
@@ -1114,14 +1096,7 @@ impl Scene {
                                     if let (Some(indices), Some(src_dims)) =
                                         (src_indices.as_ref(), src_dims)
                                     {
-                                        if chunk_coord[0] >= chunk_array.bounds.min[0]
-                                            && chunk_coord[0] <= chunk_array.bounds.max[0]
-                                            && chunk_coord[1] >= chunk_array.bounds.min[1]
-                                            && chunk_coord[1] <= chunk_array.bounds.max[1]
-                                            && chunk_coord[2] >= chunk_array.bounds.min[2]
-                                            && chunk_coord[2] <= chunk_array.bounds.max[2]
-                                            && chunk_coord[3] >= chunk_array.bounds.min[3]
-                                            && chunk_coord[3] <= chunk_array.bounds.max[3]
+                                        if chunk_array.bounds.contains_chunk_world_min(chunk_coord)
                                         {
                                             let lx = (lat[0] - src_lattice_min[0]) as usize;
                                             let ly = (lat[1] - src_lattice_min[1]) as usize;
@@ -1383,7 +1358,7 @@ impl Scene {
         let active_distance = max_trace_distance.max(VOXEL_NEAR_ACTIVE_DISTANCE);
         let chunk_radius = (active_distance / CHUNK_SIZE as f32).ceil() as i32 + 1;
         let cam_chunk = Self::camera_chunk_key(cam_pos);
-        let view_bounds = Aabb4i::from_i32(
+        let view_bounds = Aabb4i::from_lattice_bounds(
             [
                 cam_chunk[0] - chunk_radius,
                 cam_chunk[1] - chunk_radius,
@@ -1396,12 +1371,13 @@ impl Scene {
                 cam_chunk[2] + chunk_radius,
                 cam_chunk[3] + chunk_radius,
             ],
+            0,
         );
         let resident_radius = chunk_radius
             .saturating_mul(SCENE_RESIDENCY_RADIUS_MULTIPLIER)
             .saturating_add(SCENE_RESIDENCY_EXTRA_CHUNKS)
             .max(chunk_radius + 1);
-        let desired_scene_bounds = Aabb4i::from_i32(
+        let desired_scene_bounds = Aabb4i::from_lattice_bounds(
             [
                 cam_chunk[0] - resident_radius,
                 cam_chunk[1] - resident_radius,
@@ -1414,6 +1390,7 @@ impl Scene {
                 cam_chunk[2] + resident_radius,
                 cam_chunk[3] + resident_radius,
             ],
+            0,
         );
         let scene_bounds = self
             .voxel_cached_visibility_bounds

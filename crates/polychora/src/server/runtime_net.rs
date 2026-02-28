@@ -192,11 +192,10 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
 
     let mut pieces = Vec::with_capacity(8);
     let mut core = outer;
-    let one = ChunkCoord::from_num(1);
     for axis in 0..4 {
         if core.min[axis] < inner.min[axis] {
             let mut piece = core;
-            piece.max[axis] = inner.min[axis] - one;
+            piece.max[axis] = inner.min[axis];
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -204,7 +203,7 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
         }
         if core.max[axis] > inner.max[axis] {
             let mut piece = core;
-            piece.min[axis] = inner.max[axis] + one;
+            piece.min[axis] = inner.max[axis];
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -238,13 +237,12 @@ fn split_bounds_for_streaming(
             continue;
         }
 
-        let one = ChunkCoord::from_num(1);
         let two = ChunkCoord::from_num(2);
         let extents = [
-            current.max[0] - current.min[0] + one,
-            current.max[1] - current.min[1] + one,
-            current.max[2] - current.min[2] + one,
-            current.max[3] - current.min[3] + one,
+            current.max[0] - current.min[0],
+            current.max[1] - current.min[1],
+            current.max[2] - current.min[2],
+            current.max[3] - current.min[3],
         ];
         let mut split_axis = 0usize;
         for axis in 1..4 {
@@ -252,17 +250,17 @@ fn split_bounds_for_streaming(
                 split_axis = axis;
             }
         }
-        if extents[split_axis] <= one {
+        if extents[split_axis] <= ChunkCoord::ZERO {
             out.push(current);
             continue;
         }
 
         let half_extent = (extents[split_axis] / two).floor();
-        let mid = current.min[split_axis] + half_extent - one;
+        let mid = current.min[split_axis] + half_extent;
         let mut left = current;
         let mut right = current;
         left.max[split_axis] = mid;
-        right.min[split_axis] = mid + one;
+        right.min[split_axis] = mid;
         if left.is_valid() {
             stack.push(left);
         }
@@ -389,7 +387,7 @@ fn dense_blocks_from_region_core_chunk(
 ) -> Vec<voxel::BlockData> {
     use crate::shared::region_tree::chunk_key_i32;
     let ck = chunk_key_i32(chunk_key[0], chunk_key[1], chunk_key[2], chunk_key[3]);
-    let chunk_bounds = Aabb4i::new(ck, ck);
+    let chunk_bounds = Aabb4i::chunk_world_bounds(ck, 0);
     let chunks = crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds(
         core,
         chunk_bounds,
@@ -408,7 +406,8 @@ fn handle_world_chunk_sample_request(
     request_id: u64,
     chunk: [i32; 4],
 ) {
-    let chunk_bounds = Aabb4i::from_i32(chunk, chunk);
+    let ck = crate::shared::region_tree::chunk_key_i32(chunk[0], chunk[1], chunk[2], chunk[3]);
+    let chunk_bounds = Aabb4i::chunk_world_bounds(ck, 0);
     if !chunk_bounds.is_valid() {
         send_to_client(
             state,

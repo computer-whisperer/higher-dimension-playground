@@ -381,7 +381,7 @@ impl Scene {
         let mut changed = changed_by_api || previous_payload != current_payload;
         if !changed {
             if current_payload != payload {
-                let bounds = Aabb4i::new(key, key);
+                let bounds = Aabb4i::chunk_world_bounds(key, scale_exp);
                 let mut repair_tree = RegionChunkTree::new();
                 if let Some(repair_payload) = payload.clone() {
                     let _ = repair_tree.set_chunk(key, Some(repair_payload));
@@ -406,7 +406,7 @@ impl Scene {
         }
         if changed {
             self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
-            self.mark_voxel_scene_region_dirty(Aabb4i::new(key, key));
+            self.mark_voxel_scene_region_dirty(Aabb4i::chunk_world_bounds(key, scale_exp));
             let _ = self.world_queue_chunk_update(key);
         }
     }
@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn apply_region_patch_splices_chunk_and_queues_update() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0);
         let mut patch_tree = RegionChunkTree::new();
         let changed = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         assert!(changed);
@@ -986,7 +986,7 @@ mod tests {
     #[test]
     fn apply_region_patch_removes_chunk_and_queues_update() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0);
         let mut seed_tree = RegionChunkTree::new();
         let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 5))));
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
@@ -1019,7 +1019,7 @@ mod tests {
     #[test]
     fn apply_region_patch_identical_patch_is_noop() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0]);
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0);
         let mut patch_tree = RegionChunkTree::new();
         let _ = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn apply_region_patch_semantic_noop_skips_splice() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [16, 8, 8, 8]);
 
         let mut seed_tree = RegionChunkTree::new();
         let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
@@ -1093,7 +1093,7 @@ mod tests {
 
     #[test]
     fn apply_region_patch_fast_matches_full_splice_state() {
-        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [1, 0, 0, 0]);
+        let bounds = Aabb4i::from_i32([0, 0, 0, 0], [16, 8, 8, 8]);
         let mut full_scene = Scene::new(ScenePreset::Empty);
         let mut fast_scene = Scene::new(ScenePreset::Empty);
 
@@ -1134,8 +1134,8 @@ mod tests {
     fn apply_region_patch_fast_updates_render_bvh_for_chunk_payload_changes() {
         let mut scene = Scene::new(ScenePreset::Empty);
         let chunk_key = chunk_key_i32(0, 0, 0, 0);
-        let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
-        let view_bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, 2, 2, 2]);
+        let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
+        let view_bounds = Aabb4i::from_i32([-16, -16, -16, -16], [16, 16, 16, 16]);
 
         // Seed one non-empty chunk.
         let mut initial_patch = RegionChunkTree::new();
@@ -1172,7 +1172,7 @@ mod tests {
     #[test]
     fn voxel_scene_dirty_tracking_rebuild_clears_only_overlapping_chunks() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, 2, 2, 2]);
+        let bounds = Aabb4i::from_i32([-16, -16, -16, -16], [24, 24, 24, 24]);
 
         // Prime cache.
         scene.ensure_render_bvh_cache_for_bounds(bounds);
@@ -1189,11 +1189,11 @@ mod tests {
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
-            .any(|region| region.contains_chunk(chunk_key_i32(0, 0, 0, 0))));
+            .any(|region| region.contains_chunk_world_min(chunk_key_i32(0, 0, 0, 0))));
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
-            .any(|region| region.contains_chunk(far_key)));
+            .any(|region| region.contains_chunk_world_min(far_key)));
 
         // Rebuild for local bounds should consume local dirty key only.
         scene.ensure_render_bvh_cache_for_bounds(bounds);
@@ -1201,13 +1201,13 @@ mod tests {
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
-            .any(|region| region.contains_chunk(far_key)));
+            .any(|region| region.contains_chunk_world_min(far_key)));
     }
 
     #[test]
     fn voxel_scene_dirty_tracking_offscreen_edits_do_not_invalidate_local_cache() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::from_i32([-2, -2, -2, -2], [2, 2, 2, 2]);
+        let bounds = Aabb4i::from_i32([-16, -16, -16, -16], [24, 24, 24, 24]);
 
         // Prime cache once.
         scene.ensure_render_bvh_cache_for_bounds(bounds);
@@ -1220,7 +1220,7 @@ mod tests {
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
-            .any(|region| region.contains_chunk(far_key)));
+            .any(|region| region.contains_chunk_world_min(far_key)));
         assert!(!scene.voxel_scene_bounds_has_pending_dirty_regions(bounds));
 
         // Re-requesting local cache should keep far dirty queued.
@@ -1228,14 +1228,14 @@ mod tests {
         assert!(scene
             .voxel_pending_scene_dirty_regions
             .iter()
-            .any(|region| region.contains_chunk(far_key)));
+            .any(|region| region.contains_chunk_world_min(far_key)));
         assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
     }
 
     #[test]
     fn voxel_scene_dirty_budget_limits_chunks_per_rebuild() {
         let mut scene = Scene::new(ScenePreset::Empty);
-        let bounds = Aabb4i::from_i32([-2, -2, -2, -2], [200, 2, 2, 2]);
+        let bounds = Aabb4i::from_i32([-16, -16, -16, -16], [1608, 24, 24, 24]);
 
         // Prime cache.
         scene.ensure_render_bvh_cache_for_bounds(bounds);
@@ -1396,20 +1396,21 @@ mod tests {
 
         let mut scene = Scene::new(ScenePreset::Empty);
         let stone = BlockData::simple(0, 7);
-        let floor_y = ChunkCoord::from_num(-1i32);
-        let floor_min = [
-            ChunkCoord::from_num(-10i32),
-            floor_y,
-            ChunkCoord::from_num(-10i32),
-            ChunkCoord::from_num(-10i32),
-        ];
-        let floor_max = [
-            ChunkCoord::from_num(10i32),
-            floor_y,
-            ChunkCoord::from_num(10i32),
-            ChunkCoord::from_num(10i32),
-        ];
-        let floor_bounds = Aabb4i::new(floor_min, floor_max);
+        let cs = ChunkCoord::from_num(CHUNK_SIZE as i32);
+        let floor_bounds = Aabb4i::new(
+            [
+                ChunkCoord::from_num(-10i32) * cs,
+                ChunkCoord::from_num(-1i32) * cs,
+                ChunkCoord::from_num(-10i32) * cs,
+                ChunkCoord::from_num(-10i32) * cs,
+            ],
+            [
+                (ChunkCoord::from_num(10i32) + ChunkCoord::from_num(1)) * cs,
+                (ChunkCoord::from_num(-1i32) + ChunkCoord::from_num(1)) * cs,
+                (ChunkCoord::from_num(10i32) + ChunkCoord::from_num(1)) * cs,
+                (ChunkCoord::from_num(10i32) + ChunkCoord::from_num(1)) * cs,
+            ],
+        );
         let floor_core = RegionTreeCore {
             bounds: floor_bounds,
             kind: RegionNodeKind::Uniform(stone.clone()),
@@ -1493,8 +1494,8 @@ mod tests {
         // Simulate server sending a flat floor response:
         // - Client requests bounds [-5,-5,-5,-5] to [5,5,5,5] (the authoritative_bounds)
         // - Server responds with Uniform(stone) floor at Y=-1 only (subtree bounds thinner)
-        let authoritative_bounds = Aabb4i::from_i32([-5, -5, -5, -5], [5, 5, 5, 5]);
-        let floor_bounds = Aabb4i::from_i32([-5, -1, -5, -5], [5, -1, 5, 5]);
+        let authoritative_bounds = Aabb4i::from_i32([-40, -40, -40, -40], [48, 48, 48, 48]);
+        let floor_bounds = Aabb4i::from_i32([-40, -8, -40, -40], [48, 0, 48, 48]);
         let subtree = RegionTreeCore {
             bounds: floor_bounds,
             kind: RegionNodeKind::Uniform(stone.clone()),
@@ -1598,8 +1599,8 @@ mod tests {
             std::collections::HashSet::new(),
         );
 
-        // 200 blocks / 8 = 25 chunks radius
-        let radius = 25;
+        // 200 world units radius
+        let radius = 200;
         let authoritative_bounds = Aabb4i::from_i32(
             [-radius, -radius, -radius, -radius],
             [radius, radius, radius, radius],

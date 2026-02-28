@@ -115,12 +115,11 @@ impl Scene {
 
     fn dump_region_cache_tree(&self) {
         fn bounds_size(b: &Aabb4i) -> [i32; 4] {
-            let one = ChunkCoord::from_num(1);
             [
-                (b.max[0] - b.min[0] + one).to_num::<i32>(),
-                (b.max[1] - b.min[1] + one).to_num::<i32>(),
-                (b.max[2] - b.min[2] + one).to_num::<i32>(),
-                (b.max[3] - b.min[3] + one).to_num::<i32>(),
+                (b.max[0] - b.min[0]).to_num::<i32>(),
+                (b.max[1] - b.min[1]).to_num::<i32>(),
+                (b.max[2] - b.min[2]).to_num::<i32>(),
+                (b.max[3] - b.min[3]).to_num::<i32>(),
             ]
         }
 
@@ -160,12 +159,11 @@ impl Scene {
         stats: &mut RegionDumpStats,
     ) {
         fn bounds_size(b: &Aabb4i) -> [i32; 4] {
-            let one = ChunkCoord::from_num(1);
             [
-                (b.max[0] - b.min[0] + one).to_num::<i32>(),
-                (b.max[1] - b.min[1] + one).to_num::<i32>(),
-                (b.max[2] - b.min[2] + one).to_num::<i32>(),
-                (b.max[3] - b.min[3] + one).to_num::<i32>(),
+                (b.max[0] - b.min[0]).to_num::<i32>(),
+                (b.max[1] - b.min[1]).to_num::<i32>(),
+                (b.max[2] - b.min[2]).to_num::<i32>(),
+                (b.max[3] - b.min[3]).to_num::<i32>(),
             ]
         }
 

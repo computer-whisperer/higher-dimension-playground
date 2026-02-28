@@ -245,13 +245,12 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
         return Vec::new();
     }
 
-    let one = ChunkCoord::from_num(1);
     let mut pieces = Vec::with_capacity(8);
     let mut core = outer;
     for axis in 0..4 {
         if core.min[axis] < inner.min[axis] {
             let mut piece = core;
-            piece.max[axis] = inner.min[axis] - one;
+            piece.max[axis] = inner.min[axis];
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -259,7 +258,7 @@ fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
         }
         if core.max[axis] > inner.max[axis] {
             let mut piece = core;
-            piece.min[axis] = inner.max[axis] + one;
+            piece.min[axis] = inner.max[axis];
             if piece.is_valid() {
                 pieces.push(piece);
             }
@@ -401,7 +400,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     }
 
     fn query_virgin_chunk_payload(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
-        let bounds = Aabb4i::new(chunk_key, chunk_key);
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         let core = self
             .field
             .query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -452,7 +451,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         let cs = CHUNK_SIZE as i32;
         let query_min: [i32; 4] = world_min.map(|v| v.div_euclid(cs));
         let query_max: [i32; 4] = world_max.map(|v| v.div_euclid(cs));
-        let query_bounds = Aabb4i::from_i32(query_min, query_max);
+        let query_bounds = Aabb4i::from_lattice_bounds(query_min, query_max, 0);
         let virgin_core = self
             .field
             .query_region_core(QueryVolume { bounds: query_bounds }, QueryDetail::Exact);
@@ -567,8 +566,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
 
         // Ensure persisted overrides are loaded for the spatial region of the
         // edit (covers both the edit chunk and any cross-scale overlaps).
-        let edit_bounds = Aabb4i::new(edit_key, edit_key);
-        let edit_spatial = chunk_spatial_extent(edit_bounds, scale_exp);
+        let edit_spatial = chunk_spatial_extent(edit_key, scale_exp);
         if let Err(e) = self.ensure_persisted_bounds_loaded(edit_spatial) {
             eprintln!("failed to hydrate spatial region before edit: {}", e);
         }
@@ -657,7 +655,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             position[3],
             target_scale,
         );
-        let target_bounds = Aabb4i::new(target_key, target_key);
+        let target_bounds = Aabb4i::chunk_world_bounds(target_key, target_scale);
 
         // Read effective state: override if present, virgin otherwise.
         let override_payload = self.override_chunks.chunk_payload(target_key);
@@ -960,10 +958,7 @@ fn cascade_rechunk_to_scale(
                 // Check if this newly created chunk overlaps the edit extent.
                 // If so, and it's still coarser than target, queue it for the next pass.
                 if new_scale > target_scale {
-                    let new_spatial = chunk_spatial_extent(
-                        Aabb4i::new(new_key, new_key),
-                        new_scale,
-                    );
+                    let new_spatial = chunk_spatial_extent(new_key, new_scale);
                     if new_spatial.intersects(edit_spatial_extent) {
                         next_keys.push((new_key, new_scale));
                     }
@@ -1024,7 +1019,7 @@ fn chunk_payload_from_core(
     core: &RegionTreeCore,
     key_pos: ChunkKey,
 ) -> Option<ResolvedChunkPayload> {
-    if !core.bounds.contains_chunk(key_pos) {
+    if !core.bounds.contains_chunk_world_min(key_pos) {
         return None;
     }
 
@@ -1041,13 +1036,13 @@ fn chunk_payload_from_core(
         }
         RegionNodeKind::Branch(children) => children
             .iter()
-            .find(|child| child.bounds.contains_chunk(key_pos))
+            .find(|child| child.bounds.contains_chunk_world_min(key_pos))
             .and_then(|child| chunk_payload_from_core(child, key_pos)),
     }
 }
 
 fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: ChunkKey) -> Option<ChunkPayload> {
-    if !chunk_array.bounds.contains_chunk(key_pos) {
+    if !chunk_array.bounds.contains_chunk_world_min(key_pos) {
         return None;
     }
     let dense_indices = chunk_array.decode_dense_indices().ok()?;
@@ -1153,7 +1148,7 @@ mod tests {
             world_seed,
             procgen_structures,
             key,
-            Aabb4i::new(key, key),
+            Aabb4i::chunk_world_bounds(key, 0),
         )
     }
 
@@ -1166,7 +1161,7 @@ mod tests {
     ) -> Vec<u16> {
         let field =
             build_server_world_field(base_kind.clone(), world_seed, procgen_structures, HashSet::new());
-        assert!(query_bounds.contains_chunk(chunk_key));
+        assert!(query_bounds.contains_chunk_world_min(chunk_key));
         let core = field.query_region_core(
             QueryVolume {
                 bounds: query_bounds,
@@ -1179,7 +1174,7 @@ mod tests {
     fn collect_chunk_keys(bounds_list: &[Aabb4i]) -> Vec<ChunkKey> {
         let mut keys = Vec::new();
         for bounds in bounds_list {
-            let (bmin, bmax) = bounds.to_lattice_bounds(0);
+            let (bmin, bmax) = bounds.to_chunk_lattice_bounds(0);
             for w in bmin[3]..=bmax[3] {
                 for z in bmin[2]..=bmax[2] {
                     for y in bmin[1]..=bmax[1] {
@@ -1212,7 +1207,7 @@ mod tests {
         assert_eq!(changed_b, Some(chunk_key_i32(0, 0, 0, 0)));
 
         let dirty = overlay.take_dirty_bounds();
-        assert_eq!(dirty, vec![Aabb4i::from_i32([0, 0, 0, 0], [0, 0, 0, 0])]);
+        assert_eq!(dirty, vec![Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0)]);
         assert!(overlay.take_dirty_bounds().is_empty());
     }
 
@@ -1266,7 +1261,7 @@ mod tests {
         );
 
         let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, -1, 0, 0, 0);
-        let bounds = Aabb4i::new(chunk_key, chunk_key);
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
 
         let virgin_before = overlay
             .field()
@@ -1294,7 +1289,7 @@ mod tests {
     #[test]
     fn query_region_core_applies_explicit_empty_override_over_virgin_content() {
         let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, -1, 0, 0, 0);
-        let bounds = Aabb4i::new(chunk_key, chunk_key);
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         let chunk_key_i32 = [0i32, -1, 0, 0];
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
             BaseWorldKind::FlatFloor {
@@ -1332,15 +1327,15 @@ mod tests {
             false,
             HashSet::new(),
         );
-        let query_bounds = Aabb4i::from_i32([0, -1, 0, 0], [0, -1, 0, 0]);
+        let chunk_key = [0, -1, 0, 0].map(ChunkCoord::from_num);
+        let query_bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         let core = overlay.query_region_core(
             QueryVolume {
                 bounds: query_bounds,
             },
             QueryDetail::Exact,
         );
-        assert!(core.bounds.contains_chunk(query_bounds.min));
-        assert!(core.bounds.contains_chunk(query_bounds.max));
+        assert!(core.bounds.contains_chunk_world_min(chunk_key));
         assert_ne!(core.bounds, query_bounds);
     }
 
@@ -1358,7 +1353,7 @@ mod tests {
         let edit_pos = [0, -1, 0, 0];
         let (chunk_key, voxel_idx) =
             world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], 0);
-        let chunk_bounds = Aabb4i::new(chunk_key, chunk_key);
+        let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         assert_eq!(
             overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 5)),
             Some(chunk_key)
@@ -1437,7 +1432,7 @@ mod tests {
             for chunk_key in observed_chunks {
                 let baseline = sample_virgin_chunk_dense(base_kind, 0xD1A6_2026, true, chunk_key);
                 for radius in query_radii {
-                    let query_bounds = Aabb4i::from_i32(
+                    let query_bounds = Aabb4i::from_lattice_bounds(
                         [
                             chunk_key[0] - radius,
                             chunk_key[1] - radius,
@@ -1450,6 +1445,7 @@ mod tests {
                             chunk_key[2] + radius,
                             chunk_key[3] + radius,
                         ],
+                        0,
                     );
                     let key = chunk_key.map(ChunkCoord::from_num);
                     let sample = sample_virgin_chunk_dense_with_query_bounds(
@@ -1640,7 +1636,7 @@ mod tests {
         tree.set_chunk_at_scale(chunk_key, Some(payload), -1);
 
         // Rechunk to scale -2.
-        let edit_extent = chunk_spatial_extent(Aabb4i::new(chunk_key, chunk_key), -1);
+        let edit_extent = chunk_spatial_extent(chunk_key, -1);
         let created = cascade_rechunk_to_scale(
             &mut tree,
             chunk_key,
@@ -1788,7 +1784,7 @@ mod tests {
         pos: [i32; 4],
     ) -> BlockData {
         let (chunk_key, voxel_idx) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
-        let bounds = Aabb4i::new(chunk_key, chunk_key);
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         let core = overlay.query_region_core(
             QueryVolume { bounds },
             QueryDetail::Exact,
