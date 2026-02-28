@@ -2927,6 +2927,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             let mut highlight_flags = 0u32;
             let mut highlight_hit_voxel = [0; 4];
             let mut highlight_place_voxel = [0; 4];
+            let mut highlight_hit_scale = 0u32;
+            let mut highlight_place_scale = 0u32;
             let highlight_mode_supported = matches!(
                 render_options.vte_display_mode,
                 VteDisplayMode::Integral | VteDisplayMode::Slice | VteDisplayMode::ThickSlice
@@ -2935,10 +2937,12 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 if let Some(hit_voxel) = render_options.vte_highlight_hit_voxel {
                     highlight_flags |= vte::VTE_HIGHLIGHT_FLAG_HIT_VOXEL;
                     highlight_hit_voxel = hit_voxel;
+                    highlight_hit_scale = render_options.vte_highlight_hit_scale;
                 }
                 if let Some(place_voxel) = render_options.vte_highlight_place_voxel {
                     highlight_flags |= vte::VTE_HIGHLIGHT_FLAG_PLACE_VOXEL;
                     highlight_place_voxel = place_voxel;
+                    highlight_place_scale = render_options.vte_highlight_place_scale;
                 }
             }
             // Reuse frame-meta padding words for fused-integral controls.
@@ -3018,6 +3022,9 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 ],
                 highlight_hit_voxel,
                 highlight_place_voxel,
+                highlight_hit_scale,
+                highlight_place_scale,
+                _highlight_scale_padding: [0; 2],
             };
             *writer = written_voxel_frame_meta;
         }

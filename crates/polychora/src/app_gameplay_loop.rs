@@ -527,13 +527,15 @@ impl App {
                 let remove_requested = self.input.take_remove_block();
                 let place_requested = self.input.take_place_block();
                 if pick_requested {
-                    if let Some([x, y, z, w]) = self
-                        .scene
-                        .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
-                        .hit_voxel
-                    {
-                        let picked = self.scene.get_block_data(x, y, z, w);
+                    let pick_targets = self.scene.block_edit_targets(
+                        self.camera.position,
+                        look_dir_for_edit,
+                        edit_reach,
+                        self.selected_block.scale_exp,
+                    );
+                    if let Some(picked) = pick_targets.hit_block {
                         if !picked.is_air() {
+                            let origin = pick_targets.hit.unwrap().origin;
                             self.hotbar_slots[self.hotbar_selected_index] =
                                 Some(polychora::shared::protocol::ItemStack::block(
                                     picked.namespace,
@@ -542,43 +544,43 @@ impl App {
                                 ));
                             self.selected_block = picked;
                             eprintln!(
-                                "Picked voxel {} ({}) from ({x}, {y}, {z}, {w})",
+                                "Picked voxel {} ({}) from ({}, {}, {}, {})",
                                 self.selected_block.block_type,
                                 self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
+                                origin[0], origin[1], origin[2], origin[3],
                             );
                         }
                     }
                 }
                 if remove_requested || place_requested {
+                    let edit_targets = self.scene.block_edit_targets(
+                        self.camera.position,
+                        look_dir_for_edit,
+                        edit_reach,
+                        self.selected_block.scale_exp,
+                    );
                     if remove_requested {
-                        let removed = self
-                            .scene
-                            .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
-                            .hit_voxel;
-                        if let Some([x, y, z, w]) = removed {
-                            eprintln!("Removed voxel at ({x}, {y}, {z}, {w})");
-                            self.play_spatial_sound_voxel(SoundEffect::Break, [x, y, z, w], 1.0);
-                            self.send_multiplayer_voxel_update(
-                                now,
-                                [x, y, z, w],
-                                polychora::shared::voxel::BlockData::AIR,
-                            );
+                        if let Some(hit) = &edit_targets.hit {
+                            let [x, y, z, w] = hit.origin;
+                            let air = polychora::shared::voxel::BlockData::AIR
+                                .at_scale(hit.scale_exp);
+                            eprintln!("Removed block at ({x}, {y}, {z}, {w}) scale={}", hit.scale_exp);
+                            self.play_spatial_sound_voxel(SoundEffect::Break, hit.origin, 1.0);
+                            self.send_multiplayer_voxel_update(now, hit.origin, air);
                         }
                     } else if place_requested {
-                        let placed = self
-                            .scene
-                            .block_edit_targets(self.camera.position, look_dir_for_edit, edit_reach)
-                            .place_voxel;
-                        if let Some([x, y, z, w]) = placed {
+                        if let Some(place) = &edit_targets.place {
+                            let [x, y, z, w] = place.origin;
                             eprintln!(
-                                "Placed voxel {} ({}) at ({x}, {y}, {z}, {w})",
+                                "Placed voxel {} ({}) at ({x}, {y}, {z}, {w}) scale={}",
                                 self.selected_block.block_type,
                                 self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
+                                place.scale_exp,
                             );
-                            self.play_spatial_sound_voxel(SoundEffect::Place, [x, y, z, w], 1.0);
+                            self.play_spatial_sound_voxel(SoundEffect::Place, place.origin, 1.0);
                             self.send_multiplayer_voxel_update(
                                 now,
-                                [x, y, z, w],
+                                place.origin,
                                 self.selected_block.clone(),
                             );
                         }
@@ -648,26 +650,45 @@ impl App {
             && self.mouse_grabbed
             && (highlight_mode.uses_faces() || highlight_mode.uses_edges())
         {
-            Some(
-                self.scene
-                    .block_edit_targets(self.camera.position, look_dir, edit_reach),
-            )
+            Some(self.scene.block_edit_targets(
+                self.camera.position,
+                look_dir,
+                edit_reach,
+                self.selected_block.scale_exp,
+            ))
         } else {
             None
         };
         let mut hud_target_hit_voxel = None;
         let mut hud_target_hit_face = None;
-        if let Some(targets) = targets {
-            hud_target_hit_voxel = targets.hit_voxel;
-            if let (Some(hit), Some(place)) = (targets.hit_voxel, targets.place_voxel) {
-                let face = [
-                    place[0] - hit[0],
-                    place[1] - hit[1],
-                    place[2] - hit[2],
-                    place[3] - hit[3],
-                ];
-                let manhattan = face[0].abs() + face[1].abs() + face[2].abs() + face[3].abs();
-                if manhattan == 1 {
+        if let Some(targets) = &targets {
+            hud_target_hit_voxel = targets.hit.map(|h| h.origin);
+            if let (Some(hit), Some(place)) = (&targets.hit, &targets.place) {
+                // Scale-aware face detection: exactly one axis where blocks are
+                // adjacent (place_origin == hit_max or place_max == hit_min)
+                let hit_size = hit.size();
+                let place_size = place.size();
+                let mut face_axis = None;
+                let mut face_sign = 0i32;
+                for axis in 0..4 {
+                    let delta = place.origin[axis] - hit.origin[axis];
+                    if delta == hit_size {
+                        // Positive face
+                        if face_axis.is_none() {
+                            face_axis = Some(axis);
+                            face_sign = 1;
+                        }
+                    } else if delta == -place_size {
+                        // Negative face
+                        if face_axis.is_none() {
+                            face_axis = Some(axis);
+                            face_sign = -1;
+                        }
+                    }
+                }
+                if let Some(axis) = face_axis {
+                    let mut face = [0i32; 4];
+                    face[axis] = face_sign;
                     hud_target_hit_face = Some(face);
                 }
             }
@@ -706,27 +727,29 @@ impl App {
                 &self.remote_entities,
                 &self.remote_players,
             );
-            let waila_targets =
-                self.scene
-                    .block_edit_targets(self.camera.position, look_dir, edit_reach);
-            let block_target = waila_targets.hit_voxel.and_then(|[x, y, z, w]| {
-                let block = self.scene.get_block_data(x, y, z, w);
-                if !block.is_air() {
-                    // Estimate block distance for comparison with entity hits
-                    let block_center = [
-                        x as f32 + 0.5,
-                        y as f32 + 0.5,
-                        z as f32 + 0.5,
-                        w as f32 + 0.5,
-                    ];
-                    let block_dist = distance4(self.camera.position, block_center);
-                    Some((WailaTarget::Block {
-                        coords: [x, y, z, w],
-                        block,
-                    }, block_dist))
-                } else {
-                    None
+            let waila_targets = self.scene.block_edit_targets(
+                self.camera.position,
+                look_dir,
+                edit_reach,
+                self.selected_block.scale_exp,
+            );
+            let block_target = waila_targets.hit.and_then(|hit| {
+                let block = waila_targets.hit_block?;
+                if block.is_air() {
+                    return None;
                 }
+                let half = hit.size() as f32 * 0.5;
+                let block_center = [
+                    hit.origin[0] as f32 + half,
+                    hit.origin[1] as f32 + half,
+                    hit.origin[2] as f32 + half,
+                    hit.origin[3] as f32 + half,
+                ];
+                let block_dist = distance4(self.camera.position, block_center);
+                Some((WailaTarget::Block {
+                    coords: hit.origin,
+                    block,
+                }, block_dist))
             });
 
             match (&entity_hit, &block_target) {
@@ -814,18 +837,20 @@ impl App {
             });
         let mut custom_overlay_edge_instances = Vec::with_capacity(overlay_edge_capacity);
         if highlight_mode.uses_edges() {
-            if let Some(targets) = targets {
-                if let Some(hit_voxel) = targets.hit_voxel {
-                    append_voxel_outline_edge_instance(
+            if let Some(targets) = &targets {
+                if let Some(hit) = &targets.hit {
+                    append_axis_aligned_outline_edge_instance(
                         &mut custom_overlay_edge_instances,
-                        hit_voxel,
+                        hit.world_min(),
+                        hit.world_max(),
                         OVERLAY_EDGE_TAG_TARGET,
                     );
                 }
-                if let Some(place_voxel) = targets.place_voxel {
-                    append_voxel_outline_edge_instance(
+                if let Some(place) = &targets.place {
+                    append_axis_aligned_outline_edge_instance(
                         &mut custom_overlay_edge_instances,
-                        place_voxel,
+                        place.world_min(),
+                        place.world_max(),
                         OVERLAY_EDGE_TAG_PLACE,
                     );
                 }
@@ -853,10 +878,18 @@ impl App {
 
         let mut vte_highlight_hit_voxel = None;
         let mut vte_highlight_place_voxel = None;
+        let mut vte_highlight_hit_scale = 0u32;
+        let mut vte_highlight_place_scale = 0u32;
         if backend == RenderBackend::VoxelTraversal && highlight_mode.uses_faces() {
-            if let Some(targets) = targets {
-                vte_highlight_hit_voxel = targets.hit_voxel;
-                vte_highlight_place_voxel = targets.place_voxel;
+            if let Some(targets) = &targets {
+                if let Some(hit) = &targets.hit {
+                    vte_highlight_hit_voxel = Some(hit.origin);
+                    vte_highlight_hit_scale = hit.scale_exp.max(0) as u32;
+                }
+                if let Some(place) = &targets.place {
+                    vte_highlight_place_voxel = Some(place.origin);
+                    vte_highlight_place_scale = place.scale_exp.max(0) as u32;
+                }
             }
         }
 
@@ -965,6 +998,16 @@ impl App {
                 None
             } else {
                 vte_highlight_place_voxel
+            },
+            vte_highlight_hit_scale: if self.args.no_hud {
+                0
+            } else {
+                vte_highlight_hit_scale
+            },
+            vte_highlight_place_scale: if self.args.no_hud {
+                0
+            } else {
+                vte_highlight_place_scale
             },
             do_navigation_hud,
             custom_overlay_lines: Vec::new(),

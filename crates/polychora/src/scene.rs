@@ -136,16 +136,42 @@ pub struct Scene {
     voxel_frame_data: VoxelFrameData,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 struct VoxelRayHit {
     solid_voxel: [i32; 4],
     last_empty_voxel: Option<[i32; 4]>,
+    hit_block: BlockData,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScaleAwareBlockTarget {
+    /// Block-aligned world origin (each component is a multiple of 2^scale_exp).
+    pub origin: [i32; 4],
+    /// Scale exponent. Block occupies 2^scale_exp world units per axis.
+    pub scale_exp: i8,
+}
+
+impl ScaleAwareBlockTarget {
+    /// Side length in world units: `2^scale_exp` (clamped to >= 1 for scale_exp >= 0).
+    pub fn size(&self) -> i32 {
+        1i32 << self.scale_exp.max(0)
+    }
+
+    pub fn world_min(&self) -> [f32; 4] {
+        std::array::from_fn(|i| self.origin[i] as f32)
+    }
+
+    pub fn world_max(&self) -> [f32; 4] {
+        let s = self.size() as f32;
+        std::array::from_fn(|i| self.origin[i] as f32 + s)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockEditTargets {
-    pub hit_voxel: Option<[i32; 4]>,
-    pub place_voxel: Option<[i32; 4]>,
+    pub hit: Option<ScaleAwareBlockTarget>,
+    pub hit_block: Option<BlockData>,
+    pub place: Option<ScaleAwareBlockTarget>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -772,15 +798,121 @@ mod tests {
     fn block_edit_targets_reports_hit_and_placement_voxels() {
         let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
 
-        let targets = scene.block_edit_targets([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0);
+        let targets =
+            scene.block_edit_targets([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0, 0);
 
         assert_eq!(
             targets,
             BlockEditTargets {
-                hit_voxel: Some([0, 0, 0, 0]),
-                place_voxel: Some([0, 0, -1, 0]),
+                hit: Some(ScaleAwareBlockTarget {
+                    origin: [0, 0, 0, 0],
+                    scale_exp: 0,
+                }),
+                hit_block: Some(BlockData::simple(0, 7)),
+                place: Some(ScaleAwareBlockTarget {
+                    origin: [0, 0, -1, 0],
+                    scale_exp: 0,
+                }),
             }
         );
+    }
+
+    #[test]
+    fn block_edit_targets_scale1_hit_scale0_place() {
+        // A 2x2x2x2 block at origin, hit from -Z direction.
+        // Placement at scale 0 should be adjacent to the 2-unit face.
+        let block = BlockData::simple(0, 7).at_scale(1);
+        let mut scene = make_scene_with_blocks(&[]);
+        // Fill the 2x2x2x2 region with this scale-1 block
+        for dx in 0..2 {
+            for dy in 0..2 {
+                for dz in 0..2 {
+                    for dw in 0..2 {
+                        scene.world_set_block(dx, dy, dz, dw, block.clone());
+                    }
+                }
+            }
+        }
+
+        let targets = scene.block_edit_targets(
+            [0.5, 0.5, -2.0, 0.5],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            0, // placement scale 0
+        );
+
+        let hit = targets.hit.unwrap();
+        assert_eq!(hit.origin, [0, 0, 0, 0]);
+        assert_eq!(hit.scale_exp, 1);
+        assert_eq!(hit.size(), 2);
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, 0);
+        // Should be placed at z=-1, adjacent to the 2-unit block's -Z face
+        assert_eq!(place.origin[2], -1);
+    }
+
+    #[test]
+    fn block_edit_targets_scale0_hit_scale1_place() {
+        // A scale-0 block at origin, hit from -Z direction.
+        // Placement at scale 1 should snap to 2-unit grid.
+        let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
+
+        let targets = scene.block_edit_targets(
+            [0.5, 0.5, -2.0, 0.5],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            1, // placement scale 1
+        );
+
+        let hit = targets.hit.unwrap();
+        assert_eq!(hit.origin, [0, 0, 0, 0]);
+        assert_eq!(hit.scale_exp, 0);
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, 1);
+        // Should be placed adjacent to the -Z face, snapped to 2-unit grid
+        assert_eq!(place.origin[2], -2);
+        assert_eq!(place.size(), 2);
+    }
+
+    #[test]
+    fn block_edit_targets_scale2_hit_origin_aligned() {
+        // A 4x4x4x4 block, verify origin is 4-unit aligned.
+        let block = BlockData::simple(0, 7).at_scale(2);
+        let mut scene = make_scene_with_blocks(&[]);
+        for dx in 0..4 {
+            for dy in 0..4 {
+                for dz in 0..4 {
+                    for dw in 0..4 {
+                        scene.world_set_block(dx, dy, dz, dw, block.clone());
+                    }
+                }
+            }
+        }
+
+        let targets = scene.block_edit_targets(
+            [1.5, 1.5, -2.0, 1.5],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            0,
+        );
+
+        let hit = targets.hit.unwrap();
+        assert_eq!(hit.origin, [0, 0, 0, 0]);
+        assert_eq!(hit.scale_exp, 2);
+        assert_eq!(hit.size(), 4);
+    }
+
+    #[test]
+    fn scale_aware_block_target_helpers() {
+        let target = ScaleAwareBlockTarget {
+            origin: [2, 4, -6, 0],
+            scale_exp: 1,
+        };
+        assert_eq!(target.size(), 2);
+        assert_eq!(target.world_min(), [2.0, 4.0, -6.0, 0.0]);
+        assert_eq!(target.world_max(), [4.0, 6.0, -4.0, 2.0]);
     }
 
     #[test]
@@ -1337,12 +1469,12 @@ mod tests {
         for x in [-40, 0, 40] {
             let origin = [x as f32 + 0.5, 2.0, 0.5, 0.5];
             let direction = [0.0, -1.0, 0.0, 0.0];
-            let targets = scene.block_edit_targets(origin, direction, 20.0);
+            let targets = scene.block_edit_targets(origin, direction, 20.0, 0);
             assert!(
-                targets.hit_voxel.is_some(),
+                targets.hit.is_some(),
                 "look-ray at x={x} should hit the floor, got None"
             );
-            let hit = targets.hit_voxel.unwrap();
+            let hit = targets.hit.unwrap().origin;
             assert_eq!(
                 hit[1], -1,
                 "look-ray at x={x} should hit at y=-1, got y={}",
@@ -1424,12 +1556,12 @@ mod tests {
         );
 
         // Verify look-ray hits floor
-        let targets = scene.block_edit_targets([0.5, 2.0, 0.5, 0.5], [0.0, -1.0, 0.0, 0.0], 20.0);
+        let targets = scene.block_edit_targets([0.5, 2.0, 0.5, 0.5], [0.0, -1.0, 0.0, 0.0], 20.0, 0);
         assert!(
-            targets.hit_voxel.is_some(),
+            targets.hit.is_some(),
             "look-ray should hit floor"
         );
-        assert_eq!(targets.hit_voxel.unwrap()[1], -1, "look-ray should hit at y=-1");
+        assert_eq!(targets.hit.unwrap().origin[1], -1, "look-ray should hit at y=-1");
     }
 
     fn dump_tree_structure(core: &RegionTreeCore, indent: usize) -> String {

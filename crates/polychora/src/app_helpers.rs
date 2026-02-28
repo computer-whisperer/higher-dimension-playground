@@ -227,7 +227,7 @@ fn overlay_edge_material_ids(tag: u32) -> [u32; 8] {
     [encoded_tag; 8]
 }
 
-fn append_axis_aligned_outline_edge_instance(
+pub(super) fn append_axis_aligned_outline_edge_instance(
     overlay_edge_instances: &mut Vec<common::ModelInstance>,
     min_world: [f32; 4],
     max_world: [f32; 4],

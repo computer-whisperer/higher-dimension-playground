@@ -120,6 +120,9 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) _highlight_padding: [u32; 3],
     pub(super) highlight_hit_voxel: [i32; 4],
     pub(super) highlight_place_voxel: [i32; 4],
+    pub(super) highlight_hit_scale: u32,
+    pub(super) highlight_place_scale: u32,
+    pub(super) _highlight_scale_padding: [u32; 2],
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]

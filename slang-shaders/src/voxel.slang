@@ -185,6 +185,10 @@ struct VoxelFrameMeta
     uint highlightPadding2;
     int4 highlightHitVoxel;
     int4 highlightPlaceVoxel;
+    uint highlightHitScale;
+    uint highlightPlaceScale;
+    uint highlightScalePadding0;
+    uint highlightScalePadding1;
 }
 
 struct VoxelChunkHeader
@@ -1367,15 +1371,19 @@ int4 hitVoxelCoordFromHitPos(float4 hitPos, float4 rayDir)
 
 uint highlightKindForVoxel(int4 voxelCoord, VoxelFrameMeta meta)
 {
-    if ((meta.highlightFlags & HIGHLIGHT_FLAG_HIT_VOXEL) != 0u
-        && all(voxelCoord == meta.highlightHitVoxel))
+    if ((meta.highlightFlags & HIGHLIGHT_FLAG_HIT_VOXEL) != 0u)
     {
-        return HIGHLIGHT_FLAG_HIT_VOXEL;
+        int blockSize = 1 << int(meta.highlightHitScale);
+        int4 rel = voxelCoord - meta.highlightHitVoxel;
+        if (all(rel >= 0) && all(rel < blockSize))
+            return HIGHLIGHT_FLAG_HIT_VOXEL;
     }
-    if ((meta.highlightFlags & HIGHLIGHT_FLAG_PLACE_VOXEL) != 0u
-        && all(voxelCoord == meta.highlightPlaceVoxel))
+    if ((meta.highlightFlags & HIGHLIGHT_FLAG_PLACE_VOXEL) != 0u)
     {
-        return HIGHLIGHT_FLAG_PLACE_VOXEL;
+        int blockSize = 1 << int(meta.highlightPlaceScale);
+        int4 rel = voxelCoord - meta.highlightPlaceVoxel;
+        if (all(rel >= 0) && all(rel < blockSize))
+            return HIGHLIGHT_FLAG_PLACE_VOXEL;
     }
     return 0u;
 }
@@ -1420,39 +1428,28 @@ bool decodePlacementFace(VoxelFrameMeta meta, out uint axis, out int sign)
         return false;
     }
 
+    int hitBlockSize = 1 << int(meta.highlightHitScale);
+    int placeBlockSize = 1 << int(meta.highlightPlaceScale);
     int4 delta = meta.highlightPlaceVoxel - meta.highlightHitVoxel;
-    uint nonZeroAxes = 0u;
+    uint faceAxes = 0u;
 
-    if (delta.x != 0)
-    {
-        if (abs(delta.x) != 1) return false;
-        axis = 0u;
-        sign = delta.x;
-        nonZeroAxes++;
-    }
-    if (delta.y != 0)
-    {
-        if (abs(delta.y) != 1) return false;
-        axis = 1u;
-        sign = delta.y;
-        nonZeroAxes++;
-    }
-    if (delta.z != 0)
-    {
-        if (abs(delta.z) != 1) return false;
-        axis = 2u;
-        sign = delta.z;
-        nonZeroAxes++;
-    }
-    if (delta.w != 0)
-    {
-        if (abs(delta.w) != 1) return false;
-        axis = 3u;
-        sign = delta.w;
-        nonZeroAxes++;
-    }
+    // For each axis, check for scale-aware adjacency:
+    //   positive face: delta == +hitBlockSize
+    //   negative face: delta == -placeBlockSize
+    //   other non-zero deltas: grid-alignment offset (ignored, not a face axis)
+    if (delta.x == hitBlockSize) { axis = 0u; sign = 1; faceAxes++; }
+    else if (delta.x == -placeBlockSize) { axis = 0u; sign = -1; faceAxes++; }
 
-    return nonZeroAxes == 1u;
+    if (delta.y == hitBlockSize) { axis = 1u; sign = 1; faceAxes++; }
+    else if (delta.y == -placeBlockSize) { axis = 1u; sign = -1; faceAxes++; }
+
+    if (delta.z == hitBlockSize) { axis = 2u; sign = 1; faceAxes++; }
+    else if (delta.z == -placeBlockSize) { axis = 2u; sign = -1; faceAxes++; }
+
+    if (delta.w == hitBlockSize) { axis = 3u; sign = 1; faceAxes++; }
+    else if (delta.w == -placeBlockSize) { axis = 3u; sign = -1; faceAxes++; }
+
+    return faceAxes == 1u;
 }
 
 float3 faceAxisSignColor(uint axis, int sign)
@@ -1482,17 +1479,22 @@ float3 shadeHighlightedVoxelSample(
     float4 hitNormal,
     uint highlightKind)
 {
-    // 4D up-convert of "black edge lines":
-    // draw a contrasting band near 2D face boundaries of the 3D cell (the hit hyperface),
-    // so we intentionally ignore the entered axis.
-    float4 local = frac(hitPos + rayDir * 1e-4);
+    // Determine block origin and size for the highlighted block.
+    int4 blockMin = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
+        ? meta.highlightHitVoxel : meta.highlightPlaceVoxel;
+    int blockSize = 1 << int((highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
+        ? meta.highlightHitScale : meta.highlightPlaceScale);
+    float fBlockSize = float(blockSize);
+
+    // 4D block-relative local coordinates in [0,1].
+    float4 local = (hitPos + rayDir * 1e-4 - float4(blockMin)) / fBlockSize;
     float4 faceDist = min(local, 1.0 - local);
     uint guideAxis = dominantAxisFromNormal(hitNormal);
     int guideSign = normalSignOnAxis(hitNormal, guideAxis);
 
-    // If this is the currently selected cell, prefer the explicit placement face
+    // For the hit block, prefer the explicit placement face
     // inferred from hit/place voxel relation so the guide marks "where placement goes".
-    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL && all(voxelCoord == meta.highlightHitVoxel))
+    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
     {
         uint placementAxis = 0u;
         int placementSign = 0;
@@ -1521,7 +1523,7 @@ float3 shadeHighlightedVoxelSample(
     float blackBlend = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL) ? 0.98 : 0.55;
     float3 shaded = lerp(litColor, float3(0.0, 0.0, 0.0), edgeWeight * blackBlend);
 
-    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL && all(voxelCoord == meta.highlightHitVoxel))
+    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
     {
         float guideFaceDist = 0.0;
         if (guideAxis == 0u) guideFaceDist = (guideSign < 0) ? local.x : (1.0 - local.x);
