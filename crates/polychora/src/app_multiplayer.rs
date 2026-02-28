@@ -1336,8 +1336,10 @@ impl App {
             return None;
         }
         let patch_envelope_bounds = patch.bounds;
-        let patch_single_chunk_key = (authoritative_bounds.min == authoritative_bounds.max)
-            .then_some(authoritative_bounds.min);
+        let patch_single_chunk_key = authoritative_bounds
+            .chunk_extents_at_scale(0)
+            .filter(|e| *e == [1, 1, 1, 1])
+            .map(|_| authoritative_bounds.chunk_key_from_world_bounds());
         let sync_diag_enabled = std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some();
         let world_before =
             patch_single_chunk_key.and_then(|key| self.scene.debug_world_tree_chunk_payload(key));

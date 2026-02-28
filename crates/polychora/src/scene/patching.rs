@@ -42,26 +42,26 @@ impl Scene {
         let previous_total_chunks = previous_non_empty;
         let desired_total_chunks = desired_non_empty;
         let diff_ms = 0.0;
-        let single_chunk_bounds = bounds.min == bounds.max;
-        let previous_single_chunk_payload = if single_chunk_bounds {
-            self.world_tree.chunk_payload(bounds.min)
-        } else {
-            None
-        };
+        let single_chunk = bounds.chunk_extents_at_scale(0) == Some([1, 1, 1, 1]);
+        let single_chunk_key = single_chunk.then(|| bounds.chunk_key_from_world_bounds());
+        let previous_single_chunk_payload = single_chunk_key
+            .and_then(|key| self.world_tree.chunk_payload(key));
 
         let splice_start = Instant::now();
         let mut changed_bounds = self
             .world_tree
             .splice_non_empty_core_in_bounds(bounds, &desired_core);
         let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
-        if changed_bounds.is_none() && single_chunk_bounds {
-            let current_single_chunk_payload = self.world_tree.chunk_payload(bounds.min);
-            if previous_single_chunk_payload != current_single_chunk_payload {
-                changed_bounds = Some(bounds);
-                eprintln!(
-                    "[scene-region-repair] detected payload change with empty changed-bounds at chunk {:?} (before={:?} after={:?})",
-                    bounds.min, previous_single_chunk_payload, current_single_chunk_payload
-                );
+        if changed_bounds.is_none() {
+            if let Some(key) = single_chunk_key {
+                let current_single_chunk_payload = self.world_tree.chunk_payload(key);
+                if previous_single_chunk_payload != current_single_chunk_payload {
+                    changed_bounds = Some(bounds);
+                    eprintln!(
+                        "[scene-region-repair] detected payload change with empty changed-bounds at chunk {:?} (before={:?} after={:?})",
+                        key, previous_single_chunk_payload, current_single_chunk_payload
+                    );
+                }
             }
         }
         let Some(changed_bounds) = changed_bounds else {
@@ -134,26 +134,26 @@ impl Scene {
                 ..RegionPatchStats::default()
             };
         }
-        let single_chunk_bounds = bounds.min == bounds.max;
-        let previous_single_chunk_payload = if single_chunk_bounds {
-            self.world_tree.chunk_payload(bounds.min)
-        } else {
-            None
-        };
+        let single_chunk = bounds.chunk_extents_at_scale(0) == Some([1, 1, 1, 1]);
+        let single_chunk_key = single_chunk.then(|| bounds.chunk_key_from_world_bounds());
+        let previous_single_chunk_payload = single_chunk_key
+            .and_then(|key| self.world_tree.chunk_payload(key));
 
         let splice_start = Instant::now();
         let mut changed_bounds = self
             .world_tree
             .splice_non_empty_core_in_bounds(bounds, desired_core);
         let splice_ms = splice_start.elapsed().as_secs_f64() * 1000.0;
-        if changed_bounds.is_none() && single_chunk_bounds {
-            let current_single_chunk_payload = self.world_tree.chunk_payload(bounds.min);
-            if previous_single_chunk_payload != current_single_chunk_payload {
-                changed_bounds = Some(bounds);
-                eprintln!(
-                    "[scene-region-repair] detected payload change with empty changed-bounds at chunk {:?} (before={:?} after={:?})",
-                    bounds.min, previous_single_chunk_payload, current_single_chunk_payload
-                );
+        if changed_bounds.is_none() {
+            if let Some(key) = single_chunk_key {
+                let current_single_chunk_payload = self.world_tree.chunk_payload(key);
+                if previous_single_chunk_payload != current_single_chunk_payload {
+                    changed_bounds = Some(bounds);
+                    eprintln!(
+                        "[scene-region-repair] detected payload change with empty changed-bounds at chunk {:?} (before={:?} after={:?})",
+                        key, previous_single_chunk_payload, current_single_chunk_payload
+                    );
+                }
             }
         }
         let Some(changed_bounds) = changed_bounds else {
