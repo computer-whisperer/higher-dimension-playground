@@ -518,6 +518,10 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
         }
         for slice_bounds in add_slices {
             send_world_subtree_patch_to_client(state, client_id, slice_bounds, allow_empty_add);
+            // Yield between slices so the tick thread and other message handlers
+            // can acquire the server state lock (resync can produce hundreds of
+            // slices, each holding the lock for an expensive query).
+            thread::yield_now();
         }
     }
 }
@@ -1301,11 +1305,17 @@ pub(super) fn handle_message(
         }
         ClientMessage::WorldForceResync { bounds } => {
             // Reset interest tracking so the full region is re-streamed.
+            // Spawn onto a separate thread so the message handler can continue
+            // processing player updates and the tick thread isn't starved of
+            // lock access.
             {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 guard.clear_client_world_interest_bounds(client_id);
             }
-            handle_world_interest_update(state, client_id, bounds);
+            let state_for_resync = state.clone();
+            thread::spawn(move || {
+                handle_world_interest_update(&state_for_resync, client_id, bounds);
+            });
         }
     }
     record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None, None);

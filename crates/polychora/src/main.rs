@@ -1161,8 +1161,6 @@ fn main() {
         multiplayer_chunk_sample_diag_next_request_id: 1,
         multiplayer_chunk_sample_diag_recent_patches: VecDeque::new(),
         multiplayer_chunk_sample_diag_patch_seq: 0,
-        multiplayer_resync_snapshot: None,
-        multiplayer_resync_countdown: 0,
         pending_player_movement_modifiers: VecDeque::new(),
         player_modifier_external_velocity: [0.0; 4],
         remote_players: HashMap::new(),
@@ -1486,11 +1484,6 @@ struct App {
             polychora::shared::region_tree::RegionTreeCore,
         )>,
     multiplayer_chunk_sample_diag_patch_seq: u64,
-    /// Pre-resync snapshot: chunk key → payload hash. When set, a deferred
-    /// comparison runs after the countdown reaches zero.
-    multiplayer_resync_snapshot: Option<HashMap<polychora::shared::region_tree::ChunkKey, u64>>,
-    /// Frames remaining before comparing post-resync tree against snapshot.
-    multiplayer_resync_countdown: u32,
     pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,
     player_modifier_external_velocity: [f32; 4],
     remote_players: HashMap<u64, RemotePlayerState>,

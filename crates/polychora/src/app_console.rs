@@ -153,12 +153,7 @@ impl App {
         }
 
         if command_name.eq_ignore_ascii_case("resync") {
-            if self.multiplayer_resync_snapshot.is_some() {
-                self.append_dev_console_log_line("Resync already in progress.");
-                return;
-            }
             self.trigger_world_force_resync();
-            self.append_dev_console_log_line("Force resync initiated. Results will appear in stderr and console.");
             return;
         }
 

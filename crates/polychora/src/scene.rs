@@ -601,26 +601,7 @@ impl Scene {
         out
     }
 
-    /// Collect all chunk positions and payload hashes from the world tree.
-    pub fn collect_chunk_payload_hashes(
-        &self,
-    ) -> std::collections::HashMap<ChunkKey, u64> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
-        let positions = self.collect_non_empty_explicit_chunk_positions();
-        let mut map = std::collections::HashMap::with_capacity(positions.len());
-        for key in positions {
-            let mut hasher = DefaultHasher::new();
-            if let Some((payload, _)) = self.world_tree.chunk_payload(key) {
-                for i in 0..CHUNK_VOLUME {
-                    payload.block_at(i).hash(&mut hasher);
-                }
-            }
-            map.insert(key, hasher.finish());
-        }
-        map
-    }
 
     pub fn new(preset: ScenePreset) -> Self {
         let world_tree = Self::build_scene_preset_world(preset);
