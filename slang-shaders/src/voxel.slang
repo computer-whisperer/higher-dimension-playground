@@ -1288,6 +1288,23 @@ float4 applyTesseractOrientation(float4 pos, uint orientation)
     return r;
 }
 
+/// Unpack a per-voxel orientation+scale value into the u32 format used by
+/// voxelMaterialSampleCoords.
+///
+/// Input layout (15 bits): bits 0-8 = tesseract orientation (0-383),
+///                         bits 9-14 = scale_exp (6-bit signed, range [-32, +31]).
+/// Output u32 layout:      bits 0-15 = tesseract orientation,
+///                         bits 24-31 = scale_exp (8-bit signed, sign-extended).
+uint unpackOrientationScale(uint packed)
+{
+    uint orientation = packed & 0x1FFu;         // 9 bits
+    uint scaleBits = (packed >> 9) & 0x3Fu;     // 6 bits
+    // Sign-extend 6-bit to 8-bit: if bit 5 is set, fill bits 6-7.
+    if ((scaleBits & 0x20u) != 0u)
+        scaleBits |= 0xC0u;
+    return orientation | (scaleBits << 24);
+}
+
 float4 voxelMaterialSampleCoords(float4 hitPos, float4 rayDir, float4 hitNormal, uint orientationPacked)
 {
     // Bits 0-15: tesseract orientation, bits 24-31: scale_exp as signed i8.
@@ -2032,7 +2049,8 @@ bool sampleVoxelInChunk(
     if (orientIdx < meta.orientationWordCount)
     {
         uint orientWord = voxelOrientationWords[orientIdx];
-        orientation = (orientWord >> shift) & 0xFFFFu;
+        uint packed16 = (orientWord >> shift) & 0xFFFFu;
+        orientation = unpackOrientationScale(packed16);
     }
 
     return materialId != 0;
@@ -2624,11 +2642,11 @@ bool traceVoxelRayDDA(
                 if ((encoded & LEAF_CHUNK_ENTRY_UNIFORM_FLAG) != 0u)
                 {
                     uint uniformMaterial = encoded & 0xFFFFu;
-                    uint uniformChunkOrientation = (encoded >> 16u) & 0x7FFFu;
+                    uint uniformChunkOrientPacked16 = (encoded >> 16u) & 0x7FFFu;
                     if (uniformMaterial != 0u)
                     {
                         hitMaterial = uniformMaterial;
-                        hitOrientation = uniformChunkOrientation | (leaf.uniformOrientation & 0xFF000000u);
+                        hitOrientation = unpackOrientationScale(uniformChunkOrientPacked16);
                         hitPos = rayOrigin + rayDir * currentT;
                         hitChunkCoord = chunkCoord;
                         hitLodLevel = targetLodLevel;
@@ -2685,7 +2703,7 @@ bool traceVoxelRayDDA(
                                 chunkHitChunkCoord))
                             {
                                 hitMaterial = chunkMaterial;
-                                hitOrientation = chunkOrientation | (leaf.uniformOrientation & 0xFF000000u);
+                                hitOrientation = chunkOrientation;
                                 hitPos = chunkHitPos;
                                 hitChunkCoord = chunkHitChunkCoord;
                                 hitLodLevel = targetLodLevel;

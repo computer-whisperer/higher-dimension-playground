@@ -25,9 +25,23 @@ fn leaf_world_bounds(bounds: &polychora::shared::spatial::Aabb4, _scale_exp: i8)
 }
 
 /// Pack a scale_exp (i8) into the upper 8 bits (24-31) of a u32.
+/// Used for the leaf header's `uniformOrientation` field (traversal grid scale).
 #[inline]
 fn pack_scale_exp_into_orientation(orientation: u32, scale_exp: i8) -> u32 {
     (orientation & 0x00FFFFFFu32) | ((scale_exp as u8 as u32) << 24)
+}
+
+/// Pack tesseract orientation (9 bits, 0-383) and scale_exp (6 bits, signed)
+/// into a 15-bit value for per-voxel and uniform chunk entry storage.
+///
+/// Layout: bits 0-8 = orientation, bits 9-14 = scale_exp (6-bit signed, range [-32, +31]).
+/// Bit 15 is always 0 so the value fits in 15 bits (required for uniform chunk entries
+/// where bit 15 of the u16 slot shares the UNIFORM_FLAG at bit 31 of the u32).
+#[inline]
+fn pack_orientation_scale_u16(orientation: u16, scale_exp: i8) -> u16 {
+    let ori = orientation & 0x1FF; // 9 bits
+    let scale_bits = (scale_exp as u8 as u16) & 0x3F; // 6 bits
+    ori | (scale_bits << 9)
 }
 
 use std::time::Instant;
@@ -64,10 +78,10 @@ fn pack_dense_materials_words(
         material_words[mat_word_idx] &= !(0xFFFFu32 << mat_shift);
         material_words[mat_word_idx] |= u32::from(mat_u16) << mat_shift;
 
-        // Pack orientation (u16) the same way as material tokens: 2 per u32
-        let orient_u16 = block.orientation.0;
+        // Pack orientation + scale into u16: bits 0-8 orientation, bits 9-15 scale_exp
+        let orient_scale_u16 = pack_orientation_scale_u16(block.orientation.0, block.scale_exp);
         orientation_words[mat_word_idx] &= !(0xFFFFu32 << mat_shift);
-        orientation_words[mat_word_idx] |= u32::from(orient_u16) << mat_shift;
+        orientation_words[mat_word_idx] |= u32::from(orient_scale_u16) << mat_shift;
 
         if mat_u16 == 0 {
             continue;
@@ -651,7 +665,7 @@ impl Scene {
                                     higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                 } else {
                                     higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
-                                        | (u32::from(block.orientation.0) << 16)
+                                        | (u32::from(pack_orientation_scale_u16(block.orientation.0, block.scale_exp)) << 16)
                                         | u32::from(mat)
                                 }
                             }
@@ -1125,7 +1139,7 @@ impl Scene {
                                                                 higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                                                             } else {
                                                                 higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_UNIFORM_FLAG
-                                                                    | (u32::from(block.orientation.0) << 16)
+                                                                    | (u32::from(pack_orientation_scale_u16(block.orientation.0, block.scale_exp)) << 16)
                                                                     | u32::from(mat)
                                                             }
                                                         }
