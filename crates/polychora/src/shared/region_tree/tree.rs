@@ -2654,8 +2654,10 @@ fn kind_from_resolved_value_at_scale(
                 .block_palette
                 .get(*idx as usize)
                 .cloned()
-                .unwrap_or(BlockData::AIR)
-                .at_scale(scale_exp);
+                .unwrap_or(BlockData::AIR);
+            // Preserve the block's original scale_exp — it's metadata about the
+            // block's visual/semantic scale (e.g. a scale-3 block placed by the
+            // player), not the tree node's storage granularity.
             RegionNodeKind::Uniform(block)
         }
         _ => repeated_payload_kind_resolved_at_scale(bounds, resolved, scale_exp),

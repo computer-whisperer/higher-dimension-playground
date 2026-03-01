@@ -671,10 +671,14 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 .get(target_voxel_idx)
                 .cloned()
                 .unwrap_or(BlockData::AIR);
-            if current_block == block && !any_rechunked {
+            if current_block == block.clone().at_scale(scale_exp) && !any_rechunked {
                 return None;
             }
         }
+
+        // Stamp the edit's scale onto the block metadata so downstream consumers
+        // (WAILIA, highlight) know the intended visual scale.
+        let block = block.at_scale(scale_exp);
 
         // Apply the edit.
         if scale_exp > target_scale {
@@ -690,7 +694,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 lz - (lz % cells_per_axis),
                 lw - (lw % cells_per_axis),
             ];
-            fill_multi_cell_block(&mut blocks, base, block.at_scale(scale_exp), cells_per_axis);
+            fill_multi_cell_block(&mut blocks, base, block.clone(), cells_per_axis);
         } else {
             blocks[target_voxel_idx] = block;
         }
@@ -1942,6 +1946,84 @@ mod tests {
         assert!(
             chunks_after >= 1,
             "at least the edited chunk should remain"
+        );
+    }
+
+    /// Place a scale-2 block into an empty world and verify that the stored
+    /// blocks carry scale_exp=2 (not 0 or some other value).
+    #[test]
+    fn scale2_edit_stores_correct_scale_exp_on_blocks() {
+        let mut overlay = make_empty_overlay();
+        let block = BlockData::simple(0, 42);
+
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 2);
+
+        // The edit is at scale 2 into an empty world (no finer data).
+        // target_scale should be 2 (the edit's own scale).
+        // Read back at scale 2.
+        let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], 2);
+        assert_eq!(read.block_type, 42, "scale-2 block should be stored");
+        assert_eq!(
+            read.scale_exp, 2,
+            "block should carry scale_exp=2, got {}",
+            read.scale_exp
+        );
+    }
+
+    /// Place a scale-3 block into an empty world and verify scale_exp=3.
+    #[test]
+    fn scale3_edit_stores_correct_scale_exp_on_blocks() {
+        let mut overlay = make_empty_overlay();
+        let block = BlockData::simple(0, 99);
+
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 3);
+
+        let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], 3);
+        assert_eq!(read.block_type, 99, "scale-3 block should be stored");
+        assert_eq!(
+            read.scale_exp, 3,
+            "block should carry scale_exp=3, got {}",
+            read.scale_exp
+        );
+    }
+
+    /// Place a scale-2 block over a scale-0 floor.
+    /// The floor forces rechunking to scale 0, so the scale-2 block fills
+    /// multiple scale-0 cells. Each cell should carry scale_exp=2.
+    #[test]
+    fn scale2_edit_over_floor_fills_cells_with_correct_scale_exp() {
+        let mut overlay = make_flat_floor_overlay();
+
+        // Place a scale-2 block on the floor. The floor is at scale 0, so
+        // target_scale = 0. The edit fills (1<<(2-0))^4 = 256 cells per chunk.
+        let block = BlockData::simple(0, 42);
+        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 2);
+
+        // Read back one of the filled cells at scale 0.
+        let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
+        assert_eq!(read.block_type, 42, "scale-2 block should fill scale-0 cells");
+        assert_eq!(
+            read.scale_exp, 2,
+            "filled cells should carry the original scale_exp=2, got {}",
+            read.scale_exp
+        );
+    }
+
+    /// Place a scale-3 block over a scale-0 floor.
+    /// Each filled cell should carry scale_exp=3.
+    #[test]
+    fn scale3_edit_over_floor_fills_cells_with_correct_scale_exp() {
+        let mut overlay = make_flat_floor_overlay();
+
+        let block = BlockData::simple(0, 99);
+        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 3);
+
+        let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
+        assert_eq!(read.block_type, 99, "scale-3 block should fill scale-0 cells");
+        assert_eq!(
+            read.scale_exp, 3,
+            "filled cells should carry the original scale_exp=3, got {}",
+            read.scale_exp
         );
     }
 }

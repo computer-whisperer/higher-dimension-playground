@@ -160,11 +160,10 @@ impl BlockData {
 
     /// Compare two blocks ignoring `scale_exp`.
     ///
-    /// Useful for pruning override chunks against virgin data: the tree's
-    /// Uniform storage normalises `scale_exp` to the chunk's scale via
-    /// `kind_from_resolved_value_at_scale`, so stored blocks may have a
-    /// different `scale_exp` than the original virgin blocks even though
-    /// they are semantically identical.
+    /// Useful for pruning override chunks against virgin data: blocks may
+    /// carry different `scale_exp` values (e.g. a scale-2 player edit vs
+    /// scale-0 worldgen) while being semantically identical for the purpose
+    /// of deciding whether an override can be removed.
     pub fn matches_ignoring_scale(&self, other: &Self) -> bool {
         self.namespace == other.namespace
             && self.block_type == other.block_type
