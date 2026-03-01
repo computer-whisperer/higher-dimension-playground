@@ -111,10 +111,11 @@ impl<F> PassthroughWorldOverlay<F> {
         self.field
     }
 
-    pub fn mark_dirty_chunk(&mut self, chunk_key: ChunkKey) {
-        let _ = self.dirty_chunks.set_chunk(
+    pub fn mark_dirty_chunk(&mut self, chunk_key: ChunkKey, scale_exp: i8) {
+        let _ = self.dirty_chunks.set_chunk_at_scale(
             chunk_key,
             Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 1))),
+            scale_exp,
         );
     }
 
@@ -635,13 +636,13 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                         self.override_chunks
                             .set_chunk_at_scale(new_key, None, new_scale);
                     } else {
-                        self.mark_dirty_chunk(new_key);
+                        self.mark_dirty_chunk(new_key, new_scale);
                         self.dirty_save_chunks.insert(new_key, new_scale);
                     }
                 }
 
                 // Mark removed coarser chunk dirty.
-                self.mark_dirty_chunk(coarser_key);
+                self.mark_dirty_chunk(coarser_key, coarser_scale);
                 self.dirty_save_chunks.insert(coarser_key, coarser_scale);
                 any_rechunked = true;
             }
@@ -752,7 +753,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             return None;
         }
 
-        self.mark_dirty_chunk(target_key);
+        self.mark_dirty_chunk(target_key, target_scale);
         self.dirty_save_chunks.insert(target_key, target_scale);
         Some(target_key)
     }
@@ -2024,6 +2025,141 @@ mod tests {
             read.scale_exp, 3,
             "filled cells should carry the original scale_exp=3, got {}",
             read.scale_exp
+        );
+    }
+
+    /// Dirty bounds for a scale-3 edit should cover the full scale-3 chunk
+    /// extent, and the composited view for those bounds should include the
+    /// override data.
+    #[test]
+    fn scale3_edit_dirty_bounds_cover_full_chunk_extent() {
+        let mut overlay = make_empty_overlay();
+        let block = BlockData::simple(0, 99);
+
+        // Place a scale-3 block.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 3);
+
+        // Take the dirty bounds — these are what the server broadcasts to clients.
+        let dirty_bounds = overlay.take_dirty_bounds();
+        assert!(
+            !dirty_bounds.is_empty(),
+            "dirty bounds should be non-empty after edit"
+        );
+
+        // The dirty bounds should cover the full scale-3 chunk extent (64^4).
+        let (chunk_key_s3, _) = world_to_chunk_at_scale(0, 0, 0, 0, 3);
+        let expected_bounds = Aabb4i::chunk_world_bounds(chunk_key_s3, 3);
+        let covers_expected = dirty_bounds.iter().any(|b| {
+            b.min[0] <= expected_bounds.min[0]
+                && b.max[0] >= expected_bounds.max[0]
+                && b.min[1] <= expected_bounds.min[1]
+                && b.max[1] >= expected_bounds.max[1]
+                && b.min[2] <= expected_bounds.min[2]
+                && b.max[2] >= expected_bounds.max[2]
+                && b.min[3] <= expected_bounds.min[3]
+                && b.max[3] >= expected_bounds.max[3]
+        });
+        assert!(
+            covers_expected,
+            "dirty bounds should cover the full scale-3 extent {:?}->{:?}, got {:?}",
+            expected_bounds.min, expected_bounds.max, dirty_bounds
+        );
+
+        // Query the composited view using the dirty bounds (what the server
+        // actually sends to the client).
+        for bounds in &dirty_bounds {
+            let core = overlay.query_region_core(
+                QueryVolume { bounds: *bounds },
+                QueryDetail::Exact,
+            );
+
+            // The scale-0 chunk at origin should contain the block.
+            let (chunk_key_s0, voxel_idx) = world_to_chunk_at_scale(0, 0, 0, 0, 0);
+            let payload = chunk_payload_from_core(core.as_ref(), chunk_key_s0);
+            if let Some(payload) = payload {
+                let block_at_origin = payload.block_at(voxel_idx);
+                assert_eq!(
+                    block_at_origin.block_type, 99,
+                    "scale-3 block should be visible at origin in composited view"
+                );
+            }
+        }
+    }
+
+    /// Place then break a scale-3 block in an empty world.
+    /// Breaking should remove the block entirely.
+    #[test]
+    fn break_scale3_block_removes_it_empty_world() {
+        let mut overlay = make_empty_overlay();
+        let block = BlockData::simple(0, 99);
+
+        // Place at scale 3.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 3);
+
+        // Verify it's there.
+        let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], 3);
+        assert_eq!(read.block_type, 99, "block should be placed");
+
+        // Break: send AIR at scale 3.
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], BlockData::AIR, 3);
+
+        // The block at the break position should be gone.
+        let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], 3);
+        assert!(
+            read.is_air(),
+            "broken block should be air, got block_type={}",
+            read.block_type
+        );
+
+        // And the rest of the chunk should still be air (not filled with blocks).
+        let read2 = read_block_from_overlay(&overlay, [8, 0, 0, 0], 3);
+        assert!(
+            read2.is_air(),
+            "neighboring cell at scale 3 should remain air, got block_type={}",
+            read2.block_type
+        );
+
+        // Override should be removed entirely since all AIR matches empty virgin.
+        assert_eq!(
+            overlay.override_chunks.non_empty_chunk_count(),
+            0,
+            "override should be removed when edit restores virgin (empty) state"
+        );
+    }
+
+    /// Place then break a scale-3 block over a floor.
+    /// Breaking should remove the block but preserve the floor.
+    #[test]
+    fn break_scale3_block_over_floor() {
+        let mut overlay = make_flat_floor_overlay();
+        let block = BlockData::simple(0, 99);
+
+        // Place at scale 3 on the floor (y=-1).
+        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 3);
+
+        // Verify it's there (floor forces target_scale=0, so read at scale 0).
+        let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
+        assert_eq!(read.block_type, 99, "block should be placed");
+
+        // Break: send AIR at scale 3.
+        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], BlockData::AIR, 3);
+
+        // The block at the break position should be gone.
+        let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
+        assert!(
+            read.is_air(),
+            "broken block should be air, got block_type={}",
+            read.block_type
+        );
+
+        // Read via composition: the floor should still be visible outside the
+        // edit area (the override only covers the area the scale-3 block occupied).
+        let floor_pos = [8, -1, 0, 0];
+        let composed = read_composed_block(&overlay, floor_pos);
+        assert_eq!(
+            composed.block_type, 11,
+            "floor outside the edit area should be preserved, got block_type={}",
+            composed.block_type
         );
     }
 }
