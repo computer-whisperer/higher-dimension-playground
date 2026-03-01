@@ -666,28 +666,44 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         // 3. Read effective (override + virgin) world state for this chunk region.
         let mut blocks = self.read_effective_blocks_at_scale(chunk_key, chunk_scale);
 
-        // 4. Stamp the block with its scale metadata.
-        let block = block.at_scale(scale_exp);
-
-        if scale_exp > chunk_scale {
-            // Coarser block into finer grid: fill multiple cells.
+        // 4. Compute multi-cell footprint for coarser-than-chunk placements.
+        let multi_cell = if scale_exp > chunk_scale {
             let cells_per_axis = 1usize << (scale_exp - chunk_scale) as u32;
             let lx = voxel_idx % CHUNK_SIZE;
             let ly = (voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
             let lz = (voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
             let lw = voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
-            let base = [
+            Some(([
                 lx - (lx % cells_per_axis),
                 ly - (ly % cells_per_axis),
                 lz - (lz % cells_per_axis),
                 lw - (lw % cells_per_axis),
-            ];
+            ], cells_per_axis))
+        } else {
+            None
+        };
+
+        // 5. Collision check: non-air placements require all target cells to be air.
+        if !block.is_air() {
+            if let Some((base, cells_per_axis)) = multi_cell {
+                if !all_cells_air(&blocks, base, cells_per_axis) {
+                    return None;
+                }
+            } else if !blocks[voxel_idx].is_air() {
+                return None;
+            }
+        }
+
+        // 6. Stamp the block with its scale metadata.
+        let block = block.at_scale(scale_exp);
+
+        if let Some((base, cells_per_axis)) = multi_cell {
             fill_multi_cell_block(&mut blocks, base, block.clone(), cells_per_axis);
         } else {
             blocks[voxel_idx] = block;
         }
 
-        // 5. Compare to virgin: prune if identical.
+        // 7. Compare to virgin: prune if identical.
         let virgin_blocks = self.query_virgin_blocks_at_scale(chunk_key, chunk_scale);
         let should_remove = blocks_match_ignoring_scale(&blocks, &virgin_blocks);
         let payload = if should_remove {
@@ -696,7 +712,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
         };
 
-        // 6. Store — the tree handles carving and gap-filling.
+        // 7. Store — the tree handles carving and gap-filling.
         let changed = self
             .override_chunks
             .set_chunk_at_scale(chunk_key, payload, chunk_scale);
@@ -704,7 +720,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             return None;
         }
 
-        // 7. Dirty tracking.
+        // 8. Dirty tracking.
         self.mark_dirty_chunk(chunk_key, chunk_scale);
         self.dirty_save_chunks.insert(chunk_key, chunk_scale);
         Some(chunk_key)
@@ -875,6 +891,36 @@ fn fill_multi_cell_block(
             }
         }
     }
+}
+
+/// Check that all cells in a multi-cell region are air.
+fn all_cells_air(
+    blocks: &[BlockData],
+    edit_local_base: [usize; 4],
+    cells_per_axis: usize,
+) -> bool {
+    for dw in 0..cells_per_axis {
+        for dz in 0..cells_per_axis {
+            for dy in 0..cells_per_axis {
+                for dx in 0..cells_per_axis {
+                    let x = edit_local_base[0] + dx;
+                    let y = edit_local_base[1] + dy;
+                    let z = edit_local_base[2] + dz;
+                    let w = edit_local_base[3] + dw;
+                    if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE && w < CHUNK_SIZE {
+                        let idx = w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                            + z * CHUNK_SIZE * CHUNK_SIZE
+                            + y * CHUNK_SIZE
+                            + x;
+                        if !blocks[idx].is_air() {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 fn chunk_payload_from_core(
