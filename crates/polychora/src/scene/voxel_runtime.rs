@@ -1,7 +1,7 @@
 use super::*;
 use polychora::content_registry::MaterialResolver;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
-use polychora::shared::spatial::{ChunkCoord, fixed_from_lattice};
+use polychora::shared::spatial::{Aabb4i, ChunkCoord, fixed_from_lattice};
 use polychora::shared::voxel::BlockData;
 use polychora::shared::render_tree::{
     RenderBvh, RenderBvhChunkMutationDelta, RenderBvhNodeKind, RenderLeaf, RenderLeafKind,
@@ -603,6 +603,20 @@ impl Scene {
         let Some(leaf_extents) = leaf.bounds.chunk_extents_at_scale(scale_exp) else {
             return Ok(Vec::new());
         };
+        // Leaf bounds must be grid-aligned at scale_exp. Misaligned bounds
+        // produce empty entries (the chunk world-origin falls outside the
+        // bounds). The render tree guarantees alignment; assert it here so
+        // regressions are caught in development.
+        debug_assert_eq!(
+            Aabb4i::from_lattice_bounds(
+                leaf.bounds.to_chunk_lattice_bounds(scale_exp).0,
+                leaf.bounds.to_chunk_lattice_bounds(scale_exp).1,
+                scale_exp,
+            ),
+            leaf.bounds,
+            "encode_leaf_chunk_entries: leaf bounds misaligned at scale_exp={}",
+            scale_exp,
+        );
         let src_indices = chunk_array
             .decode_dense_indices()
             .map_err(|error| format!("decode chunk-array leaf failed: {error:?}"))?;
@@ -637,12 +651,11 @@ impl Scene {
                         let ly = (lat[1] - src_lattice_min[1]) as usize;
                         let lz = (lat[2] - src_lattice_min[2]) as usize;
                         let lw = (lat[3] - src_lattice_min[3]) as usize;
-                        let in_src_bounds =
-                            chunk_array.bounds.contains_chunk_world_min(chunk_coord);
-                        if !in_src_bounds {
-                            encoded.push(higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY);
-                            continue;
-                        }
+                        debug_assert!(
+                            chunk_array.bounds.contains_chunk_world_min(chunk_coord),
+                            "chunk at lattice {:?} (world {:?}) outside source bounds {:?}",
+                            lat, chunk_coord, chunk_array.bounds,
+                        );
                         let linear =
                             lx + src_dims[0] * (ly + src_dims[1] * (lz + src_dims[2] * lw));
                         let palette_index = src_indices

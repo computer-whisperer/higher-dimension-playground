@@ -1264,9 +1264,11 @@ fn collect_non_overlapping_remnants(
 /// alignment splitting so remnants stay at their original scale when
 /// possible, falling back to resample only for non-aligned pieces.
 ///
-/// When existing non-empty leaf data is carved (e.g. a ChunkArray split into
-/// pieces), returns the full node bounds so the renderer invalidates the
-/// entire restructured area.  Otherwise returns just `patch_bounds`.
+/// Always returns `patch_bounds` — the carved remnants have identical voxel
+/// content (just reorganized in the tree), so only the patch region is
+/// semantically changed.  Note: callers that feed this into the render BVH
+/// delta path may need wider dirty bounds if the BVH can't correctly
+/// represent misaligned remnants (see `build_leaf_outside_bounds_pieces`).
 fn splice_carve_and_replace(
     node: &mut RegionTreeCore,
     patch_bounds: Aabb4i,

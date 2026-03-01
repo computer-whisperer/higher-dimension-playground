@@ -112,32 +112,6 @@ pub fn collect_non_empty_chunk_keys_in_bounds(
     keys
 }
 
-pub fn compose_in_bounds(bounds: Aabb4i, mut children: Vec<RenderTreeCore>) -> RenderTreeCore {
-    if !bounds.is_valid() {
-        return RenderTreeCore::empty(bounds);
-    }
-    children
-        .retain(|child| child.bounds.is_valid() && !matches!(child.kind, RenderNodeKind::Empty));
-    if children.is_empty() {
-        return RenderTreeCore::empty(bounds);
-    }
-    if children.len() == 1 && children[0].bounds == bounds {
-        return children.pop().expect("single child");
-    }
-    let mut out = RenderTreeCore {
-        bounds,
-        kind: RenderNodeKind::Branch(children),
-    };
-    normalize_render_core(&mut out);
-    if let Err(error) = validate_render_core_world_space_non_overlapping(&out) {
-        eprintln!(
-            "[render-tree-scale-overlap] BUG: compose_in_bounds produced overlap: {}",
-            error
-        );
-    }
-    out
-}
-
 pub fn repeated_voxel_leaf(bounds: Aabb4i, payload: ChunkPayload, block_palette: &[BlockData]) -> Option<RenderTreeCore> {
     if !bounds.is_valid() {
         return None;
@@ -405,69 +379,6 @@ pub fn sample_chunk_payloads_from_bvh(bvh: &RenderBvh, key: ChunkKey) -> Vec<Res
         }
     }
     out
-}
-
-/// Sample chunk payloads at a scaled key from the BVH.
-///
-/// For `scale_exp = 0`, this behaves identically to [`sample_chunk_payloads_from_bvh`].
-/// For non-zero scales, only leaves whose `ChunkArrayData.scale_exp` matches will
-/// be returned; `Uniform` leaves are treated as scale_exp=0.
-pub fn sample_chunk_payloads_from_bvh_scaled(
-    bvh: &RenderBvh,
-    key: ChunkKey,
-) -> Vec<ResolvedChunkPayload> {
-    // With fixed-point ChunkKey, scale is encoded in fractional bits.
-    // Traverse the BVH looking for matching leaves.
-    let Some(root) = bvh.root else {
-        return Vec::new();
-    };
-
-    let mut out = Vec::<ResolvedChunkPayload>::new();
-    let mut stack = Vec::<u32>::with_capacity(64);
-    stack.push(root);
-
-    while let Some(node_idx) = stack.pop() {
-        let Some(node) = bvh.nodes.get(node_idx as usize) else {
-            continue;
-        };
-        match node.kind {
-            RenderBvhNodeKind::Internal { left, right } => {
-                stack.push(right);
-                stack.push(left);
-            }
-            RenderBvhNodeKind::Leaf { leaf_index } => {
-                let Some(leaf) = bvh.leaves.get(leaf_index as usize) else {
-                    continue;
-                };
-                if let Some(payload) = sample_leaf_payload_at_scaled_key(leaf, key) {
-                    out.push(payload);
-                }
-            }
-        }
-    }
-    out
-}
-
-fn sample_leaf_payload_at_scaled_key(
-    leaf: &RenderLeaf,
-    key: ChunkKey,
-) -> Option<ResolvedChunkPayload> {
-    match &leaf.kind {
-        RenderLeafKind::Uniform(block) => Some(ResolvedChunkPayload::uniform(block.clone())),
-        RenderLeafKind::VoxelChunkArray(chunk_array) => {
-            if !chunk_array.bounds.contains_chunk_world_min(key) {
-                return None;
-            }
-            sample_chunkarray_payload_at_key(chunk_array, key)
-        }
-    }
-}
-
-pub fn apply_chunk_payload_mutations_in_bvh(
-    bvh: &mut RenderBvh,
-    mutations: &[(ChunkKey, Option<ChunkPayload>, Vec<BlockData>)],
-) -> Result<usize, String> {
-    Ok(apply_chunk_payload_mutations_with_deltas_in_bvh(bvh, mutations)?.len())
 }
 
 pub fn apply_chunk_payload_mutations_with_deltas_in_bvh(
