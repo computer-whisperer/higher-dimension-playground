@@ -471,6 +471,83 @@ impl RegionChunkTree {
 
 }
 
+/// Summary of tree structure and integrity issues.
+#[derive(Debug, Default)]
+pub struct TreeIntegrityReport {
+    pub root_bounds: Option<Aabb4i>,
+    pub max_depth: usize,
+    pub branch_count: usize,
+    pub chunk_array_count: usize,
+    pub uniform_count: usize,
+    pub empty_count: usize,
+    pub procedural_ref_count: usize,
+    pub total_chunk_cells: usize,
+    /// Pairs of sibling nodes whose BOUNDS overlap (query-routing hazard).
+    pub bounds_overlaps: Vec<(Aabb4i, Aabb4i)>,
+    /// Data-level overlaps (non-empty cells claimed by multiple leaves).
+    pub data_overlap_error: Option<String>,
+    /// Scale distribution: (scale_exp, count_of_chunk_arrays_at_that_scale).
+    pub scale_histogram: Vec<(i8, usize)>,
+}
+
+pub fn validate_tree_integrity(tree: &RegionChunkTree) -> TreeIntegrityReport {
+    let mut report = TreeIntegrityReport::default();
+    let Some(root) = tree.root() else {
+        return report;
+    };
+    report.root_bounds = Some(root.bounds);
+
+    let mut scale_counts: std::collections::HashMap<i8, usize> = std::collections::HashMap::new();
+    collect_integrity_stats(root, 0, &mut report, &mut scale_counts);
+
+    let mut hist: Vec<(i8, usize)> = scale_counts.into_iter().collect();
+    hist.sort_by_key(|(s, _)| *s);
+    report.scale_histogram = hist;
+
+    match validate_region_core_world_space_non_overlapping(root) {
+        Ok(()) => {}
+        Err(e) => report.data_overlap_error = Some(e),
+    }
+
+    report
+}
+
+fn collect_integrity_stats(
+    node: &RegionTreeCore,
+    depth: usize,
+    report: &mut TreeIntegrityReport,
+    scale_counts: &mut std::collections::HashMap<i8, usize>,
+) {
+    if depth > report.max_depth {
+        report.max_depth = depth;
+    }
+    match &node.kind {
+        RegionNodeKind::Empty => report.empty_count += 1,
+        RegionNodeKind::Uniform(_) => report.uniform_count += 1,
+        RegionNodeKind::ProceduralRef(_) => report.procedural_ref_count += 1,
+        RegionNodeKind::ChunkArray(ca) => {
+            report.chunk_array_count += 1;
+            let cells = ca.bounds.chunk_cell_count_at_scale(ca.scale_exp).unwrap_or(0);
+            report.total_chunk_cells += cells;
+            *scale_counts.entry(ca.scale_exp).or_default() += 1;
+        }
+        RegionNodeKind::Branch(children) => {
+            report.branch_count += 1;
+            // Check sibling bounds overlaps.
+            for i in 0..children.len() {
+                for j in (i + 1)..children.len() {
+                    if children[i].bounds.intersects(&children[j].bounds) {
+                        report.bounds_overlaps.push((children[i].bounds, children[j].bounds));
+                    }
+                }
+            }
+            for child in children {
+                collect_integrity_stats(child, depth + 1, report, scale_counts);
+            }
+        }
+    }
+}
+
 pub fn validate_region_core_world_space_non_overlapping(
     core: &RegionTreeCore,
 ) -> Result<(), String> {
@@ -727,7 +804,7 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
 /// - `Uniform` if all resampled cells contain the same block
 /// - `ChunkArray` otherwise
 /// - `Empty` if target_bounds doesn't intersect source_bounds
-fn resample_chunk_array_to_bounds(
+pub fn resample_chunk_array_to_bounds(
     source: &ChunkArrayData,
     target_bounds: Aabb4i,
     target_scale: i8,
@@ -819,6 +896,7 @@ fn resample_chunk_array_to_bounds(
                     let src_linear = linear_cell_index(src_local, source_extents);
                     let chunk_palette_idx = source_indices[src_linear] as usize;
                     let src_materials = &chunk_materials[chunk_palette_idx];
+                    let cs = CHUNK_SIZE;
 
                     if scale_diff == 0 {
                         // Same scale — the source chunk maps 1:1 to the target chunk.
@@ -844,37 +922,45 @@ fn resample_chunk_array_to_bounds(
                             chunk_blocks.push(block);
                         }
                         target_blocks.push(chunk_blocks);
+                    } else if ratio >= cs {
+                        // Fast path: ratio >= CHUNK_SIZE means every cell in the
+                        // target chunk maps to the same single source voxel.
+                        // Skip the O(CHUNK_VOLUME) inner loop entirely.
+                        let src_voxel = [
+                            ((tx as usize).rem_euclid(ratio) * cs) / ratio,
+                            ((ty as usize).rem_euclid(ratio) * cs) / ratio,
+                            ((tz as usize).rem_euclid(ratio) * cs) / ratio,
+                            ((tw as usize).rem_euclid(ratio) * cs) / ratio,
+                        ];
+                        let src_voxel_idx = src_voxel[3] * cs * cs * cs
+                            + src_voxel[2] * cs * cs
+                            + src_voxel[1] * cs
+                            + src_voxel[0];
+                        let block_palette_idx = src_materials[src_voxel_idx] as usize;
+                        let block = source
+                            .block_palette
+                            .get(block_palette_idx)
+                            .cloned()
+                            .unwrap_or(BlockData::AIR);
+                        if all_uniform {
+                            match &first_block {
+                                None => first_block = Some(block.clone()),
+                                Some(fb) => {
+                                    if !fb.matches_ignoring_scale(&block) {
+                                        all_uniform = false;
+                                    }
+                                }
+                            }
+                        }
+                        // Uniform chunk: all CHUNK_VOLUME cells are the same block.
+                        let mut chunk_blocks = Vec::with_capacity(CHUNK_VOLUME);
+                        chunk_blocks.resize(CHUNK_VOLUME, block);
+                        target_blocks.push(chunk_blocks);
                     } else {
                         // Target is finer — each target chunk maps to a sub-region
-                        // of one source chunk. Multiple target cells map to one source cell.
-                        //
-                        // Within the source chunk, we need to find which source cell(s)
-                        // this target chunk covers. The target chunk at [tx,ty,tz,tw]
-                        // covers target cells that map to source voxels within the source chunk.
-                        //
-                        // Target chunk's cell range in target-scale coordinates:
-                        //   cell [tx*CS..(tx+1)*CS) per axis (in absolute target lattice units * CS)
-                        //
-                        // But within a chunk, voxels are indexed 0..CS per axis.
-                        // The source chunk at src_abs contains voxels whose absolute
-                        // target-scale cell coordinates are:
-                        //   src_abs * ratio * CS + src_voxel_local * ratio
-                        //
-                        // The target chunk at [tx,ty,tz,tw] contains target voxels:
-                        //   tx * CS + target_voxel_local  (per axis, at target scale)
-                        //
-                        // So for each target voxel, source voxel index per axis:
-                        //   target_abs_cell = tx * CS + target_voxel_local
-                        //   source_abs_cell = target_abs_cell / ratio  (which is within src_abs * CS)
-                        //   source_voxel_local = source_abs_cell - src_abs * CS
-                        //       = (tx * CS + tvl) / ratio - src_abs * CS
-                        //
-                        // Since tx / ratio = src_abs (integer), and the remainder maps
-                        // target voxels to source voxels:
-                        //   offset_in_source = (tx % ratio) * CS / ratio
-                        //   ... but CS and ratio are both powers of 2, so this simplifies.
+                        // of one source chunk. Multiple target cells may map to
+                        // different source cells.
 
-                        let cs = CHUNK_SIZE;
                         let mut chunk_blocks = Vec::with_capacity(CHUNK_VOLUME);
 
                         // Offset of target chunk within source chunk, in target-scale cells.
@@ -889,15 +975,12 @@ fn resample_chunk_array_to_bounds(
                             for vz in 0..cs {
                                 for vy in 0..cs {
                                     for vx in 0..cs {
-                                        // Target cell's position in target-scale cells,
-                                        // relative to the source chunk's origin.
                                         let tgt_cell = [
                                             tgt_offset_in_src[0] + vx,
                                             tgt_offset_in_src[1] + vy,
                                             tgt_offset_in_src[2] + vz,
                                             tgt_offset_in_src[3] + vw,
                                         ];
-                                        // Source voxel local coords (integer divide by ratio).
                                         let src_voxel = [
                                             tgt_cell[0] / ratio,
                                             tgt_cell[1] / ratio,
@@ -1097,37 +1180,352 @@ fn splice_node_with_non_empty_core(
         return Some(node.bounds);
     }
 
-    // Save original bounds: clear_node_region may shrink them via normalize,
-    // but insert needs the full extent to place replacement data correctly.
-    let original_bounds = node.bounds;
-    let mut changed = clear_node_region(node, intersection);
-    if node.bounds != original_bounds {
-        // Normalize inside clear shrunk the node (single-child collapse).
-        // Re-wrap so the node keeps its original spatial extent.
-        let gen_hash = node.generator_version_hash;
-        if matches!(node.kind, RegionNodeKind::Empty) {
-            node.bounds = original_bounds;
-        } else {
-            let inner = std::mem::replace(
-                node,
-                RegionTreeCore {
-                    bounds: original_bounds,
-                    kind: RegionNodeKind::Empty,
-                    generator_version_hash: gen_hash,
-                },
-            );
-            node.kind = RegionNodeKind::Branch(vec![inner]);
+    // --- Partial overlap: carve existing data, insert replacement. ---
+
+    // For Branch nodes, try to recurse into a single child that fully
+    // contains the intersection.  This avoids re-projecting all siblings
+    // when only one child is affected.
+    if let RegionNodeKind::Branch(children) = &mut node.kind {
+        let containing_idx = children
+            .iter()
+            .position(|child| aabb_contains_aabb(child.bounds, intersection));
+        if let Some(idx) = containing_idx {
+            let result =
+                splice_node_with_non_empty_core(&mut children[idx], bounds, replacement);
+            if result.is_some() {
+                normalize_chunk_node(node);
+            }
+            return result;
         }
-    }
-    if !matches!(replacement_slice.kind, RegionNodeKind::Empty) {
-        changed |= insert_replacement_slice_into_node(node, replacement_slice);
+        // No single child contains it — fall through to leaf-style carve
+        // on the node itself.
     }
 
-    if !changed {
-        return None;
+    // Single-pass carve-and-replace for leaf nodes (or Branch nodes where
+    // the patch spans multiple children).  Modelled on carve_leaf_for_chunk_edit
+    // to produce correctly-scaled remnants.
+    splice_carve_and_replace(node, intersection, replacement_slice)
+}
+
+/// Recursively collect tree nodes whose bounds don't overlap `patch_bounds`.
+/// For Branch nodes that partially overlap the patch, descend into children
+/// rather than pushing the Branch itself (whose bounds may still claim coverage
+/// over the carved-out region, creating false overlap with the replacement).
+/// For leaf nodes that partially overlap, carve them and recurse on the result.
+fn collect_non_overlapping_remnants(
+    node: &RegionTreeCore,
+    patch_bounds: Aabb4i,
+    out: &mut Vec<RegionTreeCore>,
+) {
+    if !node.bounds.intersects(&patch_bounds) {
+        out.push(node.clone());
+        return;
     }
-    normalize_chunk_node(node);
-    Some(intersection)
+    if aabb_contains_aabb(patch_bounds, node.bounds) {
+        // Fully covered by the patch — drop.
+        return;
+    }
+    // Partially overlapping.
+    match &node.kind {
+        RegionNodeKind::Branch(children) => {
+            // Recurse into children — each child either doesn't overlap,
+            // is fully covered, or is handled recursively.
+            for child in children {
+                collect_non_overlapping_remnants(child, patch_bounds, out);
+            }
+        }
+        _ => {
+            // Non-Branch leaf that partially overlaps: produce remnant pieces
+            // via subtract_aabb + project_node_to_bounds.  We intentionally
+            // avoid carve_region_with_rechunk here because its normalize step
+            // can consolidate ChunkArray pieces back to the original bounds,
+            // restoring the overlap we're trying to eliminate.
+            let intersection = match intersect_aabb(node.bounds, patch_bounds) {
+                Some(i) => i,
+                None => return,
+            };
+            for piece_bounds in subtract_aabb(node.bounds, intersection) {
+                let piece = project_node_to_bounds(
+                    &node.kind,
+                    node.bounds,
+                    piece_bounds,
+                    node.generator_version_hash,
+                );
+                if !matches!(piece.kind, RegionNodeKind::Empty) {
+                    out.push(piece);
+                }
+            }
+        }
+    }
+}
+
+/// Single-pass carve: split the existing node around `patch_bounds`, then
+/// insert `replacement` for the patched region.  Uses ChunkArray-aware
+/// alignment splitting so remnants stay at their original scale when
+/// possible, falling back to resample only for non-aligned pieces.
+///
+/// When existing non-empty leaf data is carved (e.g. a ChunkArray split into
+/// pieces), returns the full node bounds so the renderer invalidates the
+/// entire restructured area.  Otherwise returns just `patch_bounds`.
+fn splice_carve_and_replace(
+    node: &mut RegionTreeCore,
+    patch_bounds: Aabb4i,
+    replacement: RegionTreeCore,
+) -> Option<Aabb4i> {
+    let source_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
+    let gen_hash = node.generator_version_hash;
+
+    let mut children = Vec::with_capacity(9);
+
+    match &source_kind {
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            // ChunkArray-aware carving: keep remnants at original scale where
+            // possible (aligned pieces), resample only for non-aligned pieces.
+            if let Ok(source_indices) = chunk_array.decode_dense_indices() {
+                let se = chunk_array.scale_exp;
+                for piece_bounds in subtract_aabb(node.bounds, patch_bounds) {
+                    let piece_aligned = piece_bounds
+                        .chunk_extents_at_scale(se)
+                        .map(|_| {
+                            let (lmin, lmax) = piece_bounds.to_chunk_lattice_bounds(se);
+                            Aabb4i::from_lattice_bounds(lmin, lmax, se) == piece_bounds
+                        })
+                        .unwrap_or(false);
+
+                    if piece_aligned {
+                        if let Some(chunk_array_piece) =
+                            slice_chunk_array_to_bounds_with_dense_indices(
+                                chunk_array,
+                                &source_indices,
+                                piece_bounds,
+                            )
+                        {
+                            children.push(RegionTreeCore {
+                                bounds: piece_bounds,
+                                kind: RegionNodeKind::ChunkArray(chunk_array_piece),
+                                generator_version_hash: gen_hash,
+                            });
+                            continue;
+                        }
+                    }
+                    // Non-aligned: resample at coarsest aligned finer scale.
+                    let aligned_scale =
+                        coarsest_aligned_scale(piece_bounds, chunk_array.scale_exp);
+                    let resampled = resample_chunk_array_to_bounds(
+                        chunk_array,
+                        piece_bounds,
+                        aligned_scale,
+                        gen_hash,
+                    );
+                    if !matches!(resampled.kind, RegionNodeKind::Empty) {
+                        children.push(resampled);
+                    }
+                }
+            } else {
+                // Fallback: can't decode indices, use generic projection.
+                for piece_bounds in subtract_aabb(node.bounds, patch_bounds) {
+                    let projected = project_node_to_bounds(
+                        &source_kind,
+                        node.bounds,
+                        piece_bounds,
+                        gen_hash,
+                    );
+                    if !matches!(projected.kind, RegionNodeKind::Empty) {
+                        children.push(projected);
+                    }
+                }
+            }
+        }
+        RegionNodeKind::Branch(branch_children) => {
+            // Recursively collect remnant pieces whose bounds don't overlap
+            // the patch.  A simple one-level flatten is insufficient because
+            // nested Branches may have bounds that still span the patch region
+            // even though their data was carved away — the query would enter
+            // the wrong Branch and miss the replacement.
+            for child in branch_children {
+                collect_non_overlapping_remnants(child, patch_bounds, &mut children);
+            }
+        }
+        RegionNodeKind::Uniform(block) if !block.is_air() => {
+            for piece_bounds in subtract_aabb(node.bounds, patch_bounds) {
+                let projected = project_node_to_bounds(
+                    &source_kind,
+                    node.bounds,
+                    piece_bounds,
+                    gen_hash,
+                );
+                if !matches!(projected.kind, RegionNodeKind::Empty) {
+                    children.push(projected);
+                }
+            }
+        }
+        _ => {
+            // Empty or air Uniform — no existing data to carve.
+            // ProceduralRef — shouldn't appear on client scene trees.
+            for piece_bounds in subtract_aabb(node.bounds, patch_bounds) {
+                let projected = project_node_to_bounds(
+                    &source_kind,
+                    node.bounds,
+                    piece_bounds,
+                    gen_hash,
+                );
+                if !matches!(projected.kind, RegionNodeKind::Empty) {
+                    children.push(projected);
+                }
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    for child in &children {
+        debug_assert!(
+            !child.bounds.intersects(&patch_bounds),
+            "remnant child overlaps patch: child={:?} patch={:?}",
+            child.bounds,
+            patch_bounds,
+        );
+    }
+
+    // Insert the replacement data.
+    if !matches!(replacement.kind, RegionNodeKind::Empty) {
+        children.push(replacement);
+    }
+
+    if children.is_empty() {
+        node.kind = RegionNodeKind::Empty;
+    } else {
+        node.kind = RegionNodeKind::Branch(children);
+        normalize_chunk_node(node);
+    }
+
+    #[cfg(debug_assertions)]
+    if let RegionNodeKind::Branch(ref ch) = node.kind {
+        for i in 0..ch.len() {
+            for j in (i + 1)..ch.len() {
+                debug_assert!(
+                    !ch[i].bounds.intersects(&ch[j].bounds),
+                    "post-normalize overlap: ch[{}]={:?} ch[{}]={:?}",
+                    i, ch[i].bounds, j, ch[j].bounds
+                );
+            }
+        }
+    }
+
+    // Return the patch bounds — carved remnants have the same voxel content
+    // (just reorganized in the tree), so only the patch region changed.
+    Some(patch_bounds)
+}
+
+/// Carve `clear_bounds` out of `node`, preserving data outside the cleared
+/// region with proper ChunkArray-aware rechunking.
+fn carve_region_with_rechunk(node: &mut RegionTreeCore, clear_bounds: Aabb4i) {
+    let Some(intersection) = intersect_aabb(node.bounds, clear_bounds) else {
+        return;
+    };
+    if matches!(node.kind, RegionNodeKind::Empty) {
+        return;
+    }
+    if intersection == node.bounds {
+        node.kind = RegionNodeKind::Empty;
+        return;
+    }
+
+    match &mut node.kind {
+        RegionNodeKind::Branch(children) => {
+            let mut retained = Vec::with_capacity(children.len());
+            for mut child in std::mem::take(children) {
+                if !child.bounds.intersects(&intersection) {
+                    retained.push(child);
+                    continue;
+                }
+                if aabb_contains_aabb(intersection, child.bounds) {
+                    continue;
+                }
+                carve_region_with_rechunk(&mut child, intersection);
+                if !matches!(child.kind, RegionNodeKind::Empty) {
+                    retained.push(child);
+                }
+            }
+            *children = retained;
+            normalize_chunk_node(node);
+        }
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            let gen_hash = node.generator_version_hash;
+            let se = chunk_array.scale_exp;
+            let mut pieces = Vec::new();
+            if let Ok(source_indices) = chunk_array.decode_dense_indices() {
+                for piece_bounds in subtract_aabb(node.bounds, intersection) {
+                    let piece_aligned = piece_bounds
+                        .chunk_extents_at_scale(se)
+                        .map(|_| {
+                            let (lmin, lmax) = piece_bounds.to_chunk_lattice_bounds(se);
+                            Aabb4i::from_lattice_bounds(lmin, lmax, se) == piece_bounds
+                        })
+                        .unwrap_or(false);
+
+                    if piece_aligned {
+                        if let Some(chunk_array_piece) =
+                            slice_chunk_array_to_bounds_with_dense_indices(
+                                chunk_array,
+                                &source_indices,
+                                piece_bounds,
+                            )
+                        {
+                            pieces.push(RegionTreeCore {
+                                bounds: piece_bounds,
+                                kind: RegionNodeKind::ChunkArray(chunk_array_piece),
+                                generator_version_hash: gen_hash,
+                            });
+                            continue;
+                        }
+                    }
+                    let aligned_scale = coarsest_aligned_scale(piece_bounds, se);
+                    let resampled = resample_chunk_array_to_bounds(
+                        chunk_array,
+                        piece_bounds,
+                        aligned_scale,
+                        gen_hash,
+                    );
+                    if !matches!(resampled.kind, RegionNodeKind::Empty) {
+                        pieces.push(resampled);
+                    }
+                }
+            } else {
+                let old_kind = node.kind.clone();
+                for piece_bounds in subtract_aabb(node.bounds, intersection) {
+                    let projected = project_node_to_bounds(
+                        &old_kind,
+                        node.bounds,
+                        piece_bounds,
+                        gen_hash,
+                    );
+                    if !matches!(projected.kind, RegionNodeKind::Empty) {
+                        pieces.push(projected);
+                    }
+                }
+            }
+            node.kind = RegionNodeKind::Branch(pieces);
+            normalize_chunk_node(node);
+        }
+        _ => {
+            // Uniform, ProceduralRef — generic projection.
+            let old_kind = node.kind.clone();
+            let mut pieces = Vec::new();
+            for piece_bounds in subtract_aabb(node.bounds, intersection) {
+                let projected = project_node_to_bounds(
+                    &old_kind,
+                    node.bounds,
+                    piece_bounds,
+                    node.generator_version_hash,
+                );
+                if !matches!(projected.kind, RegionNodeKind::Empty) {
+                    pieces.push(projected);
+                }
+            }
+            node.kind = RegionNodeKind::Branch(pieces);
+            normalize_chunk_node(node);
+        }
+    }
 }
 
 fn splice_node_with_core(
@@ -1150,176 +1548,23 @@ fn splice_node_with_core(
         return Some(node.bounds);
     }
 
-    let original_bounds = node.bounds;
-    let mut changed = clear_node_region(node, intersection);
-    if node.bounds != original_bounds {
-        let gen_hash = node.generator_version_hash;
-        if matches!(node.kind, RegionNodeKind::Empty) {
-            node.bounds = original_bounds;
-        } else {
-            let inner = std::mem::replace(
-                node,
-                RegionTreeCore {
-                    bounds: original_bounds,
-                    kind: RegionNodeKind::Empty,
-                    generator_version_hash: gen_hash,
-                },
-            );
-            node.kind = RegionNodeKind::Branch(vec![inner]);
-        }
-    }
-    if !matches!(replacement_slice.kind, RegionNodeKind::Empty) {
-        changed |= insert_replacement_slice_into_node(node, replacement_slice);
-    }
-
-    if !changed {
-        return None;
-    }
-    normalize_chunk_node(node);
-    Some(intersection)
-}
-
-fn clear_node_region(node: &mut RegionTreeCore, clear_bounds: Aabb4i) -> bool {
-    let Some(intersection) = intersect_aabb(node.bounds, clear_bounds) else {
-        return false;
-    };
-
-    if matches!(node.kind, RegionNodeKind::Empty) {
-        return false;
-    }
-
-    if intersection == node.bounds {
-        node.kind = RegionNodeKind::Empty;
-        return true;
-    }
-
-    match &mut node.kind {
-        RegionNodeKind::Branch(children) => {
-            let mut changed = false;
-            let mut retained = Vec::with_capacity(children.len());
-            for mut child in std::mem::take(children) {
-                if !child.bounds.intersects(&intersection) {
-                    retained.push(child);
-                    continue;
-                }
-                if aabb_contains_aabb(intersection, child.bounds) {
-                    changed = true;
-                    continue;
-                }
-                if clear_node_region(&mut child, intersection) {
-                    changed = true;
-                }
-                if !matches!(child.kind, RegionNodeKind::Empty) {
-                    retained.push(child);
-                }
-            }
-            *children = retained;
-            if changed {
+    // For Branch nodes, try to recurse into a single child that fully
+    // contains the intersection.
+    if let RegionNodeKind::Branch(children) = &mut node.kind {
+        let containing_idx = children
+            .iter()
+            .position(|child| aabb_contains_aabb(child.bounds, intersection));
+        if let Some(idx) = containing_idx {
+            let result = splice_node_with_core(&mut children[idx], bounds, replacement);
+            if result.is_some() {
                 normalize_chunk_node(node);
             }
-            changed
-        }
-        _ => {
-            let old_kind = node.kind.clone();
-            let mut pieces = Vec::new();
-            for piece_bounds in subtract_aabb(node.bounds, intersection) {
-                let projected = project_node_to_bounds(
-                    &old_kind,
-                    node.bounds,
-                    piece_bounds,
-                    node.generator_version_hash,
-                );
-                if !matches!(projected.kind, RegionNodeKind::Empty) {
-                    pieces.push(projected);
-                }
-            }
-            node.kind = RegionNodeKind::Branch(pieces);
-            normalize_chunk_node(node);
-            true
+            return result;
         }
     }
-}
 
-fn insert_replacement_slice_into_node(
-    node: &mut RegionTreeCore,
-    replacement_slice: RegionTreeCore,
-) -> bool {
-    if matches!(replacement_slice.kind, RegionNodeKind::Empty) {
-        return false;
-    }
-
-    if replacement_slice.bounds == node.bounds {
-        if node.kind == replacement_slice.kind {
-            return false;
-        }
-        *node = replacement_slice;
-        return true;
-    }
-
-    let replacement_bounds = replacement_slice.bounds;
-    match &mut node.kind {
-        RegionNodeKind::Empty => {
-            node.kind = RegionNodeKind::Branch(vec![replacement_slice]);
-            normalize_chunk_node(node);
-            return !matches!(node.kind, RegionNodeKind::Empty);
-        }
-        RegionNodeKind::Branch(children)
-            if !children
-                .iter()
-                .any(|child| child.bounds.intersects(&replacement_bounds)) =>
-        {
-            children.push(replacement_slice);
-            normalize_chunk_node(node);
-            return true;
-        }
-        _ => {}
-    }
-
-    insert_replacement_slice_into_node_with_rebuild(node, replacement_slice)
-}
-
-fn insert_replacement_slice_into_node_with_rebuild(
-    node: &mut RegionTreeCore,
-    replacement_slice: RegionTreeCore,
-) -> bool {
-    let old_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
-    let old_kind_snapshot = old_kind.clone();
-    let mut children = Vec::new();
-    match old_kind {
-        RegionNodeKind::Empty => {}
-        RegionNodeKind::Branch(existing_children) => {
-            for child in existing_children {
-                for piece_bounds in subtract_aabb(child.bounds, replacement_slice.bounds) {
-                    let projected = project_node_to_bounds(
-                        &child.kind,
-                        child.bounds,
-                        piece_bounds,
-                        node.generator_version_hash,
-                    );
-                    if !matches!(projected.kind, RegionNodeKind::Empty) {
-                        children.push(projected);
-                    }
-                }
-            }
-        }
-        other_kind => {
-            for piece_bounds in subtract_aabb(node.bounds, replacement_slice.bounds) {
-                let projected = project_node_to_bounds(
-                    &other_kind,
-                    node.bounds,
-                    piece_bounds,
-                    node.generator_version_hash,
-                );
-                if !matches!(projected.kind, RegionNodeKind::Empty) {
-                    children.push(projected);
-                }
-            }
-        }
-    }
-    children.push(replacement_slice);
-    node.kind = RegionNodeKind::Branch(children);
-    normalize_chunk_node(node);
-    node.kind != old_kind_snapshot
+    // Single-pass carve-and-replace.
+    splice_carve_and_replace(node, intersection, replacement_slice)
 }
 
 fn lazy_drop_outside_node(
@@ -3121,7 +3366,7 @@ pub fn chunk_spatial_extent(key: ChunkKey, scale_exp: i8) -> Aabb4i {
 /// Searches from `ceiling` downward (finer scales). Panics if no valid scale is
 /// found within 10 levels — this is structurally impossible for bounds produced by
 /// `subtract_aabb` against chunk-aligned inputs.
-fn coarsest_aligned_scale(bounds: Aabb4i, ceiling: i8) -> i8 {
+pub fn coarsest_aligned_scale(bounds: Aabb4i, ceiling: i8) -> i8 {
     for s in (ceiling.saturating_sub(10)..=ceiling).rev() {
         if bounds.chunk_extents_at_scale(s).is_some() {
             // Verify the bounds actually align: the lattice round-trip must

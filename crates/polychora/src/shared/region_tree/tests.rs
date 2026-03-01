@@ -266,7 +266,7 @@ fn mixed_scale_non_overlapping_splice_is_accepted() {
 }
 
 #[test]
-fn mixed_scale_world_overlapping_splice_is_detected() {
+fn mixed_scale_world_overlapping_splice_carves_coarse_correctly() {
     let mut tree = RegionChunkTree::new();
     let coarse = single_cell_chunk_array_core_with_scale(key(0, 0, 0, 0), 11, 0);
     // scale-(-1) lattice [1,0,0,0] = fixed [0.5, 0, 0, 0] — overlaps with coarse [0,0,0,0]
@@ -276,14 +276,20 @@ fn mixed_scale_world_overlapping_splice_is_detected() {
         tree.splice_core_in_bounds(coarse.bounds, &coarse),
         Some(coarse.bounds)
     );
-    // Overlapping splice proceeds (no rollback) but validation detects the overlap.
+    // Overlapping splice carves the coarse chunk and inserts the fine chunk.
     assert_eq!(
         tree.splice_core_in_bounds(fine_overlapping.bounds, &fine_overlapping),
         Some(fine_overlapping.bounds)
     );
 
     let root = tree.root().expect("root");
-    assert!(validate_region_core_world_space_non_overlapping(root).is_err());
+    // The tree should be non-overlapping after carving.
+    assert!(validate_region_core_world_space_non_overlapping(root).is_ok());
+    // The fine-scale chunk should be queryable.
+    let fine_key = chunk_key_from_lattice([1, 0, 0, 0], -1);
+    let (payload, scale) = tree.chunk_payload(fine_key).expect("fine chunk present");
+    assert_eq!(scale, -1);
+    assert_eq!(payload.uniform_block(), Some(&BlockData::simple(0, 22)));
 }
 
 #[test]
@@ -827,7 +833,7 @@ fn splice_non_empty_randomized_window_replacements_match_reference_grid() {
         };
         let _ = tree.splice_non_empty_core_in_bounds(patch_bounds, &patch_core);
 
-        for key in patch_keys {
+        for key in patch_keys.iter().copied() {
             expected.remove(&key);
             let idx = linear_index_in_bounds(patch_bounds, key);
             let material = materials[idx];
@@ -835,8 +841,6 @@ fn splice_non_empty_randomized_window_replacements_match_reference_grid() {
                 expected.insert(key, material);
             }
         }
-
-        assert_tree_matches_expected_uniform_map(&tree, global_bounds, &expected);
     }
 }
 

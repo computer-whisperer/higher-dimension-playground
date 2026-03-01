@@ -128,6 +128,9 @@ impl App {
             self.append_dev_console_log_line(
                 "  /resync  -- force full server resync and report deltas",
             );
+            self.append_dev_console_log_line(
+                "  /check   -- run world tree integrity check",
+            );
             return;
         }
 
@@ -154,6 +157,84 @@ impl App {
 
         if command_name.eq_ignore_ascii_case("resync") {
             self.trigger_world_force_resync();
+            return;
+        }
+
+        if command_name.eq_ignore_ascii_case("check") {
+            self.append_dev_console_log_line("Running world tree integrity check...");
+            let report = self.scene.check_world_tree_integrity();
+
+            // Summary to console
+            if let Some(rb) = report.root_bounds {
+                self.append_dev_console_log_line(format!(
+                    "  root=[{},{},{},{}]->[{},{},{},{}]",
+                    rb.min[0].to_num::<i32>(), rb.min[1].to_num::<i32>(),
+                    rb.min[2].to_num::<i32>(), rb.min[3].to_num::<i32>(),
+                    rb.max[0].to_num::<i32>(), rb.max[1].to_num::<i32>(),
+                    rb.max[2].to_num::<i32>(), rb.max[3].to_num::<i32>(),
+                ));
+            } else {
+                self.append_dev_console_log_line("  tree is empty");
+            }
+            self.append_dev_console_log_line(format!(
+                "  depth={} branches={} chunks={} uniforms={} empty={} procref={} cells={}",
+                report.max_depth,
+                report.branch_count,
+                report.chunk_array_count,
+                report.uniform_count,
+                report.empty_count,
+                report.procedural_ref_count,
+                report.total_chunk_cells,
+            ));
+            if !report.scale_histogram.is_empty() {
+                let scales: Vec<String> = report
+                    .scale_histogram
+                    .iter()
+                    .map(|(s, c)| format!("s{}={}", s, c))
+                    .collect();
+                self.append_dev_console_log_line(format!(
+                    "  scales: {}", scales.join(" "),
+                ));
+            }
+
+            let bounds_overlap_count = report.bounds_overlaps.len();
+            if bounds_overlap_count > 0 {
+                self.append_dev_console_log_line(format!(
+                    "  FAIL: {} sibling bounds overlap(s) detected!", bounds_overlap_count,
+                ));
+                // Detailed report to stderr
+                eprintln!("[/check] BOUNDS OVERLAPS ({} total):", bounds_overlap_count);
+                for (i, (a, b)) in report.bounds_overlaps.iter().enumerate() {
+                    eprintln!(
+                        "  [{i}] [{},{},{},{}]->[{},{},{},{}] vs [{},{},{},{}]->[{},{},{},{}]",
+                        a.min[0].to_num::<i32>(), a.min[1].to_num::<i32>(),
+                        a.min[2].to_num::<i32>(), a.min[3].to_num::<i32>(),
+                        a.max[0].to_num::<i32>(), a.max[1].to_num::<i32>(),
+                        a.max[2].to_num::<i32>(), a.max[3].to_num::<i32>(),
+                        b.min[0].to_num::<i32>(), b.min[1].to_num::<i32>(),
+                        b.min[2].to_num::<i32>(), b.min[3].to_num::<i32>(),
+                        b.max[0].to_num::<i32>(), b.max[1].to_num::<i32>(),
+                        b.max[2].to_num::<i32>(), b.max[3].to_num::<i32>(),
+                    );
+                    if i >= 19 {
+                        eprintln!("  ... ({} more)", bounds_overlap_count - 20);
+                        break;
+                    }
+                }
+            } else {
+                self.append_dev_console_log_line("  OK: no sibling bounds overlaps");
+            }
+
+            if let Some(ref e) = report.data_overlap_error {
+                self.append_dev_console_log_line(format!("  FAIL: data overlap: {e}"));
+                eprintln!("[/check] DATA OVERLAP: {e}");
+            } else {
+                self.append_dev_console_log_line("  OK: no data overlaps");
+            }
+
+            // Also dump full tree to stderr for offline analysis
+            self.scene.dump_world_tree();
+            self.append_dev_console_log_line("  (full tree dumped to stderr)");
             return;
         }
 

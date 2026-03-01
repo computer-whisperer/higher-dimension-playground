@@ -7,8 +7,8 @@ use higher_dimension_playground::render::{
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::protocol::WorldBounds;
 use polychora::shared::region_tree::{
-    chunk_key_i32, slice_non_empty_region_core_in_bounds, ChunkKey, RegionChunkTree,
-    RegionNodeKind, RegionTreeCore,
+    chunk_key_i32, slice_non_empty_region_core_in_bounds, validate_tree_integrity, ChunkKey,
+    RegionChunkTree, RegionNodeKind, RegionTreeCore, TreeIntegrityReport,
 };
 use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
 use polychora::shared::spatial::{Aabb4i, ChunkCoord};
@@ -448,6 +448,10 @@ impl Scene {
 
     pub fn debug_world_tree_root_bounds(&self) -> Option<Aabb4i> {
         self.world_tree.root().map(|root| root.bounds)
+    }
+
+    pub fn check_world_tree_integrity(&self) -> TreeIntegrityReport {
+        validate_tree_integrity(&self.world_tree)
     }
 
     pub fn dump_world_tree(&self) {
