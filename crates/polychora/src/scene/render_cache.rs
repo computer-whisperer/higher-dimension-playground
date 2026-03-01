@@ -2,6 +2,7 @@ use super::*;
 use higher_dimension_playground::render::{
     VTE_LEAF_KIND_UNIFORM, VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY, VTE_REGION_BVH_NODE_FLAG_LEAF,
 };
+use polychora::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
 
 #[derive(Default)]
 struct RegionDumpStats {
@@ -630,6 +631,136 @@ impl Scene {
             .unwrap_or_default()
     }
 
+    /// Comprehensive render tree integrity check: validates the render region
+    /// cache, CPU BVH, and GPU BVH buffers, and cross-validates against the
+    /// world tree.
+    pub fn check_render_tree_integrity(&self) -> RenderTreeReport {
+        let mut report = RenderTreeReport::default();
+
+        // --- Render region cache ---
+        let cache_bounds = self.render_region_cache_bounds;
+        report.cache_bounds = cache_bounds;
+        if let Some(cache) = self.render_region_cache.as_ref() {
+            report.cache_tree_report = Some(validate_tree_integrity(cache));
+        }
+
+        // --- CPU BVH ---
+        if let Some(bvh) = self.render_bvh_cache.as_ref() {
+            report.cpu_bvh_bounds = Some(bvh.bounds);
+            report.cpu_bvh_root = bvh.root;
+            report.cpu_bvh_node_count = bvh.nodes.len();
+            report.cpu_bvh_leaf_count = bvh.leaves.len();
+
+            // Walk CPU BVH and validate structure
+            if let Some(root_idx) = bvh.root {
+                let mut ctx = CpuBvhWalkCtx::default();
+                walk_cpu_bvh_node(bvh, root_idx, 0, &mut ctx);
+                report.cpu_bvh_reachable_nodes = ctx.reachable_nodes;
+                report.cpu_bvh_reachable_leaves = ctx.reachable_leaves;
+                report.cpu_bvh_max_depth = ctx.max_depth;
+                report.cpu_bvh_uniform_leaves = ctx.uniform_leaves;
+                report.cpu_bvh_chunk_array_leaves = ctx.chunk_array_leaves;
+                report.cpu_bvh_errors = ctx.errors;
+            }
+        }
+
+        // --- GPU BVH buffers ---
+        let fd = &self.voxel_frame_data;
+        report.gpu_bvh_root = fd.region_bvh_root_index;
+        report.gpu_bvh_node_count = fd.region_bvh_nodes.len();
+        report.gpu_bvh_leaf_count = fd.leaf_headers.len();
+
+        if fd.region_bvh_root_index != VTE_REGION_BVH_INVALID_NODE
+            && (fd.region_bvh_root_index as usize) < fd.region_bvh_nodes.len()
+        {
+            let mut ctx = GpuBvhWalkCtx::default();
+            walk_gpu_bvh_node(fd, fd.region_bvh_root_index, 0, &mut ctx);
+            report.gpu_bvh_reachable_nodes = ctx.reachable_nodes;
+            report.gpu_bvh_reachable_leaves = ctx.reachable_leaves;
+            report.gpu_bvh_max_depth = ctx.max_depth;
+            report.gpu_bvh_uniform_leaves = ctx.uniform_leaves;
+            report.gpu_bvh_chunk_array_leaves = ctx.chunk_array_leaves;
+            report.gpu_bvh_sibling_overlaps = ctx.sibling_overlaps;
+            report.gpu_bvh_errors = ctx.errors;
+        }
+
+        // --- Cross-validate: render cache vs world tree ---
+        if let (Some(bounds), Some(cache)) =
+            (cache_bounds, self.render_region_cache.as_ref())
+        {
+            let fresh = self.build_render_region_tree_in_bounds(bounds);
+            let fresh_core = fresh.slice_non_empty_core_in_bounds(bounds);
+            let cached_core = cache.slice_non_empty_core_in_bounds(bounds);
+
+            // Compare by collecting all non-empty chunks from both
+            let mut fresh_chunks = collect_non_empty_chunks_from_core_in_bounds(
+                &fresh_core, bounds,
+            );
+            fresh_chunks.sort_unstable_by_key(|(key, _)| *key);
+
+            let mut cached_chunks = collect_non_empty_chunks_from_core_in_bounds(
+                &cached_core, bounds,
+            );
+            cached_chunks.sort_unstable_by_key(|(key, _)| *key);
+
+            report.cross_validate_fresh_chunk_count = fresh_chunks.len();
+            report.cross_validate_cached_chunk_count = cached_chunks.len();
+
+            // Find mismatches
+            let mut fi = 0;
+            let mut ci = 0;
+            while fi < fresh_chunks.len() && ci < cached_chunks.len() {
+                let (fk, fp) = &fresh_chunks[fi];
+                let (ck, cp) = &cached_chunks[ci];
+                match fk.cmp(ck) {
+                    std::cmp::Ordering::Less => {
+                        report.cross_validate_errors.push(format!(
+                            "chunk {:?} in world_tree but missing from render cache",
+                            fk,
+                        ));
+                        fi += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        report.cross_validate_errors.push(format!(
+                            "chunk {:?} in render cache but missing from world_tree",
+                            ck,
+                        ));
+                        ci += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if fp != cp {
+                            report.cross_validate_errors.push(format!(
+                                "chunk {:?} payload mismatch: fresh={:?} cached={:?}",
+                                fk, fp, cp,
+                            ));
+                        }
+                        fi += 1;
+                        ci += 1;
+                    }
+                }
+            }
+            while fi < fresh_chunks.len() {
+                report.cross_validate_errors.push(format!(
+                    "chunk {:?} in world_tree but missing from render cache",
+                    fresh_chunks[fi].0,
+                ));
+                fi += 1;
+            }
+            while ci < cached_chunks.len() {
+                report.cross_validate_errors.push(format!(
+                    "chunk {:?} in render cache but missing from world_tree",
+                    cached_chunks[ci].0,
+                ));
+                ci += 1;
+            }
+        }
+
+        // Dump full trees to stderr for offline analysis
+        self.dump_render_trees();
+
+        report
+    }
+
     pub fn debug_render_bvh_ray_node_hits(
         &mut self,
         ray_origin_world: [f32; 4],
@@ -655,5 +786,281 @@ impl Scene {
                 )
             })
             .unwrap_or_default()
+    }
+}
+
+// --- Render tree integrity report ---
+
+#[derive(Default)]
+pub struct RenderTreeReport {
+    // Render region cache
+    pub cache_bounds: Option<Aabb4i>,
+    pub cache_tree_report: Option<TreeIntegrityReport>,
+
+    // CPU BVH
+    pub cpu_bvh_bounds: Option<Aabb4i>,
+    pub cpu_bvh_root: Option<u32>,
+    pub cpu_bvh_node_count: usize,
+    pub cpu_bvh_leaf_count: usize,
+    pub cpu_bvh_reachable_nodes: usize,
+    pub cpu_bvh_reachable_leaves: usize,
+    pub cpu_bvh_max_depth: usize,
+    pub cpu_bvh_uniform_leaves: usize,
+    pub cpu_bvh_chunk_array_leaves: usize,
+    pub cpu_bvh_errors: Vec<String>,
+
+    // GPU BVH buffers
+    pub gpu_bvh_root: u32,
+    pub gpu_bvh_node_count: usize,
+    pub gpu_bvh_leaf_count: usize,
+    pub gpu_bvh_reachable_nodes: usize,
+    pub gpu_bvh_reachable_leaves: usize,
+    pub gpu_bvh_max_depth: usize,
+    pub gpu_bvh_uniform_leaves: usize,
+    pub gpu_bvh_chunk_array_leaves: usize,
+    pub gpu_bvh_sibling_overlaps: usize,
+    pub gpu_bvh_errors: Vec<String>,
+
+    // Cross-validation: render cache vs world tree
+    pub cross_validate_fresh_chunk_count: usize,
+    pub cross_validate_cached_chunk_count: usize,
+    pub cross_validate_errors: Vec<String>,
+}
+
+// --- CPU BVH walk helpers ---
+
+#[derive(Default)]
+struct CpuBvhWalkCtx {
+    reachable_nodes: usize,
+    reachable_leaves: usize,
+    max_depth: usize,
+    uniform_leaves: usize,
+    chunk_array_leaves: usize,
+    errors: Vec<String>,
+}
+
+fn walk_cpu_bvh_node(
+    bvh: &render_tree::RenderBvh,
+    node_idx: u32,
+    depth: usize,
+    ctx: &mut CpuBvhWalkCtx,
+) {
+    if node_idx as usize >= bvh.nodes.len() {
+        ctx.errors.push(format!(
+            "node index {} out of range (len={})",
+            node_idx,
+            bvh.nodes.len()
+        ));
+        return;
+    }
+    ctx.reachable_nodes += 1;
+    ctx.max_depth = ctx.max_depth.max(depth);
+
+    let node = &bvh.nodes[node_idx as usize];
+    match node.kind {
+        render_tree::RenderBvhNodeKind::Leaf { leaf_index } => {
+            if leaf_index as usize >= bvh.leaves.len() {
+                ctx.errors.push(format!(
+                    "leaf index {} out of range (len={}) at node {}",
+                    leaf_index,
+                    bvh.leaves.len(),
+                    node_idx
+                ));
+                return;
+            }
+            ctx.reachable_leaves += 1;
+            let leaf = &bvh.leaves[leaf_index as usize];
+
+            // Validate leaf bounds match node bounds
+            if leaf.bounds != node.bounds {
+                ctx.errors.push(format!(
+                    "node {} bounds {:?}->{:?} != leaf {} bounds {:?}->{:?}",
+                    node_idx,
+                    node.bounds.min,
+                    node.bounds.max,
+                    leaf_index,
+                    leaf.bounds.min,
+                    leaf.bounds.max,
+                ));
+            }
+
+            match &leaf.kind {
+                render_tree::RenderLeafKind::Uniform(_) => ctx.uniform_leaves += 1,
+                render_tree::RenderLeafKind::VoxelChunkArray(ca) => {
+                    ctx.chunk_array_leaves += 1;
+                    // Validate ChunkArrayData bounds vs leaf bounds
+                    if ca.bounds != leaf.bounds {
+                        ctx.errors.push(format!(
+                            "leaf {} bounds {:?}->{:?} != chunk_array bounds {:?}->{:?}",
+                            leaf_index,
+                            leaf.bounds.min,
+                            leaf.bounds.max,
+                            ca.bounds.min,
+                            ca.bounds.max,
+                        ));
+                    }
+                }
+            }
+        }
+        render_tree::RenderBvhNodeKind::Internal { left, right } => {
+            // Validate children bounds within parent
+            if (left as usize) < bvh.nodes.len() {
+                let l = &bvh.nodes[left as usize];
+                if !bounds_within(l.bounds, node.bounds) {
+                    ctx.errors.push(format!(
+                        "left child {} bounds {:?}->{:?} not within parent {} bounds {:?}->{:?}",
+                        left, l.bounds.min, l.bounds.max,
+                        node_idx, node.bounds.min, node.bounds.max,
+                    ));
+                }
+            }
+            if (right as usize) < bvh.nodes.len() {
+                let r = &bvh.nodes[right as usize];
+                if !bounds_within(r.bounds, node.bounds) {
+                    ctx.errors.push(format!(
+                        "right child {} bounds {:?}->{:?} not within parent {} bounds {:?}->{:?}",
+                        right, r.bounds.min, r.bounds.max,
+                        node_idx, node.bounds.min, node.bounds.max,
+                    ));
+                }
+            }
+            walk_cpu_bvh_node(bvh, left, depth + 1, ctx);
+            walk_cpu_bvh_node(bvh, right, depth + 1, ctx);
+        }
+    }
+}
+
+fn bounds_within(inner: Aabb4i, outer: Aabb4i) -> bool {
+    inner.min[0] >= outer.min[0]
+        && inner.min[1] >= outer.min[1]
+        && inner.min[2] >= outer.min[2]
+        && inner.min[3] >= outer.min[3]
+        && inner.max[0] <= outer.max[0]
+        && inner.max[1] <= outer.max[1]
+        && inner.max[2] <= outer.max[2]
+        && inner.max[3] <= outer.max[3]
+}
+
+// --- GPU BVH walk helpers ---
+
+#[derive(Default)]
+struct GpuBvhWalkCtx {
+    reachable_nodes: usize,
+    reachable_leaves: usize,
+    max_depth: usize,
+    uniform_leaves: usize,
+    chunk_array_leaves: usize,
+    sibling_overlaps: usize,
+    errors: Vec<String>,
+}
+
+fn walk_gpu_bvh_node(fd: &VoxelFrameData, node_idx: u32, depth: usize, ctx: &mut GpuBvhWalkCtx) {
+    if node_idx == VTE_REGION_BVH_INVALID_NODE {
+        return;
+    }
+    if node_idx as usize >= fd.region_bvh_nodes.len() {
+        ctx.errors.push(format!(
+            "gpu node index {} out of range (len={})",
+            node_idx,
+            fd.region_bvh_nodes.len()
+        ));
+        return;
+    }
+    ctx.reachable_nodes += 1;
+    ctx.max_depth = ctx.max_depth.max(depth);
+
+    let node = &fd.region_bvh_nodes[node_idx as usize];
+    let is_leaf = (node.flags & VTE_REGION_BVH_NODE_FLAG_LEAF) != 0;
+
+    // Validate bounds are finite and non-degenerate
+    for i in 0..4 {
+        if !node.world_min[i].is_finite() || !node.world_max[i].is_finite() {
+            ctx.errors.push(format!(
+                "gpu node {} has non-finite bounds: min={:?} max={:?}",
+                node_idx, node.world_min, node.world_max,
+            ));
+            break;
+        }
+        if node.world_min[i] > node.world_max[i] {
+            ctx.errors.push(format!(
+                "gpu node {} has inverted bounds on axis {}: min={} max={}",
+                node_idx, i, node.world_min[i], node.world_max[i],
+            ));
+            break;
+        }
+    }
+
+    if is_leaf {
+        let leaf_idx = node.leaf_index;
+        if leaf_idx as usize >= fd.leaf_headers.len() {
+            ctx.errors.push(format!(
+                "gpu leaf index {} out of range (len={}) at node {}",
+                leaf_idx,
+                fd.leaf_headers.len(),
+                node_idx,
+            ));
+            return;
+        }
+        ctx.reachable_leaves += 1;
+        let lh = &fd.leaf_headers[leaf_idx as usize];
+        if lh.leaf_kind == VTE_LEAF_KIND_UNIFORM {
+            ctx.uniform_leaves += 1;
+        } else if lh.leaf_kind == VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY {
+            ctx.chunk_array_leaves += 1;
+        } else {
+            ctx.errors.push(format!(
+                "gpu leaf {} has unknown kind {}",
+                leaf_idx, lh.leaf_kind,
+            ));
+        }
+
+        // Validate leaf header bounds vs node bounds (approximate — leaf uses
+        // integer chunk coords, node uses float world coords)
+        let leaf_min = lh.min_chunk_coord;
+        let leaf_max = lh.max_chunk_coord;
+        let node_min = node.world_min;
+        let node_max = node.world_max;
+        for i in 0..4 {
+            if (leaf_min[i] as f32 - node_min[i]).abs() > 1.0
+                || (leaf_max[i] as f32 - node_max[i]).abs() > 1.0
+            {
+                ctx.errors.push(format!(
+                    "gpu node {} bounds {:?}->{:?} diverges from leaf {} coords {:?}->{:?}",
+                    node_idx, node_min, node_max, leaf_idx, leaf_min, leaf_max,
+                ));
+                break;
+            }
+        }
+    } else {
+        let left = node.left_child;
+        let right = node.right_child;
+
+        // Check sibling overlap
+        if left != VTE_REGION_BVH_INVALID_NODE
+            && right != VTE_REGION_BVH_INVALID_NODE
+            && (left as usize) < fd.region_bvh_nodes.len()
+            && (right as usize) < fd.region_bvh_nodes.len()
+        {
+            let l = &fd.region_bvh_nodes[left as usize];
+            let r = &fd.region_bvh_nodes[right as usize];
+            // Check child bounds within parent
+            for (child_name, child_idx, c) in [("left", left, l), ("right", right, r)] {
+                for i in 0..4 {
+                    if c.world_min[i] < node.world_min[i] - 0.01
+                        || c.world_max[i] > node.world_max[i] + 0.01
+                    {
+                        ctx.errors.push(format!(
+                            "gpu {} child {} bounds {:?}->{:?} outside parent {} bounds {:?}->{:?}",
+                            child_name, child_idx, c.world_min, c.world_max,
+                            node_idx, node.world_min, node.world_max,
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        walk_gpu_bvh_node(fd, left, depth + 1, ctx);
+        walk_gpu_bvh_node(fd, right, depth + 1, ctx);
     }
 }

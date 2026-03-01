@@ -21,7 +21,7 @@ use std::time::Instant;
 mod collision;
 mod editing;
 mod patching;
-mod render_cache;
+pub(crate) mod render_cache;
 mod voxel_runtime;
 
 const VOXEL_NEAR_ACTIVE_DISTANCE: f32 = 32.0;
@@ -452,6 +452,10 @@ impl Scene {
 
     pub fn check_world_tree_integrity(&self) -> TreeIntegrityReport {
         validate_tree_integrity(&self.world_tree)
+    }
+
+    pub fn force_render_rebuild(&mut self) {
+        self.force_render_bvh_rebuild();
     }
 
     pub fn dump_world_tree(&self) {

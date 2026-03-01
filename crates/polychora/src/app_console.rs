@@ -129,7 +129,10 @@ impl App {
                 "  /resync  -- force full server resync and report deltas",
             );
             self.append_dev_console_log_line(
-                "  /check   -- run world tree integrity check",
+                "  /resync-render  -- rebuild render tree from world tree",
+            );
+            self.append_dev_console_log_line(
+                "  /check   -- run world + render tree integrity check",
             );
             return;
         }
@@ -157,6 +160,13 @@ impl App {
 
         if command_name.eq_ignore_ascii_case("resync") {
             self.trigger_world_force_resync();
+            return;
+        }
+
+        if command_name.eq_ignore_ascii_case("resync-render") {
+            self.append_dev_console_log_line("Rebuilding render tree from world tree...");
+            self.scene.force_render_rebuild();
+            self.append_dev_console_log_line("Render tree rebuilt.");
             return;
         }
 
@@ -234,7 +244,97 @@ impl App {
 
             // Also dump full tree to stderr for offline analysis
             self.scene.dump_world_tree();
-            self.append_dev_console_log_line("  (full tree dumped to stderr)");
+            self.append_dev_console_log_line("  (world tree dumped to stderr)");
+
+            // --- Render tree integrity ---
+            self.append_dev_console_log_line("Running render tree integrity check...");
+            let rr = self.scene.check_render_tree_integrity();
+
+            // Render region cache
+            if let Some(ref ct) = rr.cache_tree_report {
+                self.append_dev_console_log_line(format!(
+                    "  render-cache: depth={} branches={} chunks={} uniforms={} cells={}",
+                    ct.max_depth, ct.branch_count, ct.chunk_array_count,
+                    ct.uniform_count, ct.total_chunk_cells,
+                ));
+                if !ct.scale_histogram.is_empty() {
+                    let scales: Vec<String> = ct.scale_histogram.iter()
+                        .map(|(s, c)| format!("s{}={}", s, c)).collect();
+                    self.append_dev_console_log_line(format!(
+                        "  render-cache scales: {}", scales.join(" "),
+                    ));
+                }
+                let cache_overlaps = ct.bounds_overlaps.len();
+                if cache_overlaps > 0 {
+                    self.append_dev_console_log_line(format!(
+                        "  FAIL: render-cache has {} bounds overlap(s)", cache_overlaps,
+                    ));
+                }
+                if let Some(ref e) = ct.data_overlap_error {
+                    self.append_dev_console_log_line(format!(
+                        "  FAIL: render-cache data overlap: {e}",
+                    ));
+                }
+            } else {
+                self.append_dev_console_log_line("  render-cache: (none)");
+            }
+
+            // CPU BVH
+            self.append_dev_console_log_line(format!(
+                "  cpu-bvh: root={:?} nodes={}/{} leaves={}/{} depth={} (uniform={} ca={})",
+                rr.cpu_bvh_root,
+                rr.cpu_bvh_reachable_nodes, rr.cpu_bvh_node_count,
+                rr.cpu_bvh_reachable_leaves, rr.cpu_bvh_leaf_count,
+                rr.cpu_bvh_max_depth,
+                rr.cpu_bvh_uniform_leaves, rr.cpu_bvh_chunk_array_leaves,
+            ));
+            for err in &rr.cpu_bvh_errors {
+                self.append_dev_console_log_line(format!("  FAIL cpu-bvh: {err}"));
+                eprintln!("[/check] CPU-BVH ERROR: {err}");
+            }
+
+            // GPU BVH
+            self.append_dev_console_log_line(format!(
+                "  gpu-bvh: root={} nodes={}/{} leaves={}/{} depth={} overlaps={} (uniform={} ca={})",
+                if rr.gpu_bvh_root == u32::MAX { "INVALID".to_string() } else { rr.gpu_bvh_root.to_string() },
+                rr.gpu_bvh_reachable_nodes, rr.gpu_bvh_node_count,
+                rr.gpu_bvh_reachable_leaves, rr.gpu_bvh_leaf_count,
+                rr.gpu_bvh_max_depth,
+                rr.gpu_bvh_sibling_overlaps,
+                rr.gpu_bvh_uniform_leaves, rr.gpu_bvh_chunk_array_leaves,
+            ));
+            for err in &rr.gpu_bvh_errors {
+                self.append_dev_console_log_line(format!("  FAIL gpu-bvh: {err}"));
+                eprintln!("[/check] GPU-BVH ERROR: {err}");
+            }
+
+            // Cross-validation
+            if rr.cross_validate_fresh_chunk_count > 0 || rr.cross_validate_cached_chunk_count > 0 {
+                let mismatch_count = rr.cross_validate_errors.len();
+                if mismatch_count > 0 {
+                    self.append_dev_console_log_line(format!(
+                        "  FAIL: {} cache-vs-world mismatch(es) (fresh={} cached={})",
+                        mismatch_count,
+                        rr.cross_validate_fresh_chunk_count,
+                        rr.cross_validate_cached_chunk_count,
+                    ));
+                    eprintln!("[/check] CACHE-VS-WORLD MISMATCHES ({} total):", mismatch_count);
+                    for (i, err) in rr.cross_validate_errors.iter().enumerate() {
+                        eprintln!("  [{i}] {err}");
+                        if i >= 19 {
+                            eprintln!("  ... ({} more)", mismatch_count - 20);
+                            break;
+                        }
+                    }
+                } else {
+                    self.append_dev_console_log_line(format!(
+                        "  OK: cache matches world ({} chunks)",
+                        rr.cross_validate_fresh_chunk_count,
+                    ));
+                }
+            }
+
+            self.append_dev_console_log_line("  (render trees dumped to stderr)");
             return;
         }
 
