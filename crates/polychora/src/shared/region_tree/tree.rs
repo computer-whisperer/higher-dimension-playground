@@ -4,7 +4,7 @@ use crate::shared::spatial::{
     chunk_key_from_lattice, fixed_from_lattice, lattice_from_fixed, step_for_scale, Aabb4i,
     ChunkCoord,
 };
-use crate::shared::voxel::{linear_cell_index, BlockData, CHUNK_SIZE};
+use crate::shared::voxel::{linear_cell_index, BlockData, CHUNK_SIZE, CHUNK_VOLUME};
 use std::collections::HashMap;
 
 /// A spatial tree storing voxel chunk data with world-space half-open AABB bounds.
@@ -47,7 +47,14 @@ impl RegionChunkTree {
         self.chunk_payload(key).is_some()
     }
 
-    pub fn chunk_payload(&self, key: ChunkKey) -> Option<ResolvedChunkPayload> {
+    /// Look up the chunk payload at a fixed-point key, returning the payload
+    /// alongside the scale it is stored at.
+    ///
+    /// The returned `i8` is the `scale_exp` of the underlying data.  Callers
+    /// that index into the payload via `block_at(voxel_index)` **must** ensure
+    /// that `voxel_index` was computed at the returned scale, not at some
+    /// assumed scale.
+    pub fn chunk_payload(&self, key: ChunkKey) -> Option<(ResolvedChunkPayload, i8)> {
         self.root
             .as_ref()
             .and_then(|node| query_chunk_payload_in_node(node, key))
@@ -74,6 +81,18 @@ impl RegionChunkTree {
         self.root
             .as_ref()
             .and_then(|node| bvh_point_query(&node.kind, node.bounds, pos))
+    }
+
+    /// Look up the block at a fixed-point position, distinguishing "no data"
+    /// from "data says air".
+    ///
+    /// Returns `Some(block)` (including `Some(AIR)`) when the tree has data
+    /// covering the position. Returns `None` only when no data-containing
+    /// node covers the position.
+    pub fn block_data_at(&self, pos: [ChunkCoord; 4]) -> Option<BlockData> {
+        self.root
+            .as_ref()
+            .and_then(|node| bvh_block_data_at_point(&node.kind, node.bounds, pos))
     }
 
     /// Cast a ray through the BVH and return the nearest solid block hit.
@@ -696,6 +715,300 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
         chunk_array.scale_exp,
     )
     .ok()
+}
+
+/// Re-encode a ChunkArray's blocks into target_bounds at a (possibly finer) target_scale.
+///
+/// Used during tree carving to fill gap regions that don't align to the source's
+/// scale grid. Rather than losing data (returning Empty), this resamples the source
+/// blocks at a finer scale that does align to the target bounds.
+///
+/// Returns a full `RegionTreeCore`:
+/// - `Uniform` if all resampled cells contain the same block
+/// - `ChunkArray` otherwise
+/// - `Empty` if target_bounds doesn't intersect source_bounds
+fn resample_chunk_array_to_bounds(
+    source: &ChunkArrayData,
+    target_bounds: Aabb4i,
+    target_scale: i8,
+    generator_version_hash: u64,
+) -> RegionTreeCore {
+    // Intersect to get only the overlapping region.
+    let Some(intersection) = intersect_aabb(target_bounds, source.bounds) else {
+        return RegionTreeCore {
+            bounds: target_bounds,
+            kind: RegionNodeKind::Empty,
+            generator_version_hash,
+        };
+    };
+
+    // The target bounds must align to target_scale (caller guarantees via coarsest_aligned_scale).
+    let target_extents = intersection
+        .chunk_extents_at_scale(target_scale)
+        .expect("resample_chunk_array_to_bounds: target_bounds must align to target_scale");
+    let target_cell_count = target_extents[0] * target_extents[1] * target_extents[2] * target_extents[3];
+
+    // Source geometry.
+    let source_scale = source.scale_exp;
+    let source_extents = source.bounds
+        .chunk_extents_at_scale(source_scale)
+        .expect("resample_chunk_array_to_bounds: source bounds must align to source scale");
+
+    // Decode source: indices → chunk payloads → dense block materials per chunk.
+    let source_indices = source
+        .decode_dense_indices()
+        .expect("resample_chunk_array_to_bounds: failed to decode source indices");
+
+    // Pre-expand each unique chunk payload to dense block palette indices.
+    let chunk_materials: Vec<Vec<u16>> = source
+        .chunk_palette
+        .iter()
+        .map(|cp| cp.dense_materials().unwrap_or_else(|_| vec![0u16; CHUNK_VOLUME]))
+        .collect();
+
+    // Scale ratio: how many target cells per source cell per axis.
+    // target_scale <= source_scale (target is finer or equal).
+    assert!(
+        target_scale <= source_scale,
+        "resample_chunk_array_to_bounds: target_scale ({}) must be <= source_scale ({})",
+        target_scale,
+        source_scale,
+    );
+    let scale_diff = (source_scale - target_scale) as u32;
+    let ratio = 1usize << scale_diff; // target cells per source cell per axis
+
+    // Lattice bounds for source and target at their respective scales.
+    let (src_lmin, _) = source.bounds.to_chunk_lattice_bounds(source_scale);
+    let (tgt_lmin, tgt_lmax) = intersection.to_chunk_lattice_bounds(target_scale);
+
+    // Track uniformity: first block seen, and whether all match.
+    let mut first_block: Option<BlockData> = None;
+    let mut all_uniform = true;
+
+    // Build dense block indices for the target. We build per-chunk payloads.
+    // Target may span multiple chunks at target_scale.
+    let target_chunk_count = target_cell_count;
+    let mut target_blocks = Vec::with_capacity(target_chunk_count);
+
+    for tw in tgt_lmin[3]..=tgt_lmax[3] {
+        for tz in tgt_lmin[2]..=tgt_lmax[2] {
+            for ty in tgt_lmin[1]..=tgt_lmax[1] {
+                for tx in tgt_lmin[0]..=tgt_lmax[0] {
+                    // This is a chunk position in the target grid at target_scale.
+                    // Each chunk position contains CHUNK_SIZE^4 cells.
+                    // But in a ChunkArrayData, each "chunk" in the grid is one
+                    // entry in dense_indices pointing to a ChunkPayload.
+                    // We need to build one ChunkPayload per target grid position.
+
+                    // Map target chunk to source: each target chunk position maps
+                    // to a region inside one source chunk.
+                    // Target chunk abs lattice at target_scale: [tx, ty, tz, tw]
+                    // Source chunk abs lattice at source_scale: [tx/ratio, ty/ratio, ...]
+                    let src_abs = [
+                        (tx as isize).div_euclid(ratio as isize) as i32,
+                        (ty as isize).div_euclid(ratio as isize) as i32,
+                        (tz as isize).div_euclid(ratio as isize) as i32,
+                        (tw as isize).div_euclid(ratio as isize) as i32,
+                    ];
+                    let src_local = [
+                        (src_abs[0] - src_lmin[0]) as usize,
+                        (src_abs[1] - src_lmin[1]) as usize,
+                        (src_abs[2] - src_lmin[2]) as usize,
+                        (src_abs[3] - src_lmin[3]) as usize,
+                    ];
+                    let src_linear = linear_cell_index(src_local, source_extents);
+                    let chunk_palette_idx = source_indices[src_linear] as usize;
+                    let src_materials = &chunk_materials[chunk_palette_idx];
+
+                    if scale_diff == 0 {
+                        // Same scale — the source chunk maps 1:1 to the target chunk.
+                        // Just resolve all blocks directly.
+                        let mut chunk_blocks = Vec::with_capacity(CHUNK_VOLUME);
+                        for voxel_idx in 0..CHUNK_VOLUME {
+                            let block_palette_idx = src_materials[voxel_idx] as usize;
+                            let block = source
+                                .block_palette
+                                .get(block_palette_idx)
+                                .cloned()
+                                .unwrap_or(BlockData::AIR);
+                            if all_uniform {
+                                match &first_block {
+                                    None => first_block = Some(block.clone()),
+                                    Some(fb) => {
+                                        if !fb.matches_ignoring_scale(&block) {
+                                            all_uniform = false;
+                                        }
+                                    }
+                                }
+                            }
+                            chunk_blocks.push(block);
+                        }
+                        target_blocks.push(chunk_blocks);
+                    } else {
+                        // Target is finer — each target chunk maps to a sub-region
+                        // of one source chunk. Multiple target cells map to one source cell.
+                        //
+                        // Within the source chunk, we need to find which source cell(s)
+                        // this target chunk covers. The target chunk at [tx,ty,tz,tw]
+                        // covers target cells that map to source voxels within the source chunk.
+                        //
+                        // Target chunk's cell range in target-scale coordinates:
+                        //   cell [tx*CS..(tx+1)*CS) per axis (in absolute target lattice units * CS)
+                        //
+                        // But within a chunk, voxels are indexed 0..CS per axis.
+                        // The source chunk at src_abs contains voxels whose absolute
+                        // target-scale cell coordinates are:
+                        //   src_abs * ratio * CS + src_voxel_local * ratio
+                        //
+                        // The target chunk at [tx,ty,tz,tw] contains target voxels:
+                        //   tx * CS + target_voxel_local  (per axis, at target scale)
+                        //
+                        // So for each target voxel, source voxel index per axis:
+                        //   target_abs_cell = tx * CS + target_voxel_local
+                        //   source_abs_cell = target_abs_cell / ratio  (which is within src_abs * CS)
+                        //   source_voxel_local = source_abs_cell - src_abs * CS
+                        //       = (tx * CS + tvl) / ratio - src_abs * CS
+                        //
+                        // Since tx / ratio = src_abs (integer), and the remainder maps
+                        // target voxels to source voxels:
+                        //   offset_in_source = (tx % ratio) * CS / ratio
+                        //   ... but CS and ratio are both powers of 2, so this simplifies.
+
+                        let cs = CHUNK_SIZE;
+                        let mut chunk_blocks = Vec::with_capacity(CHUNK_VOLUME);
+
+                        // Offset of target chunk within source chunk, in target-scale cells.
+                        let tgt_offset_in_src = [
+                            (tx as usize).rem_euclid(ratio) * cs,
+                            (ty as usize).rem_euclid(ratio) * cs,
+                            (tz as usize).rem_euclid(ratio) * cs,
+                            (tw as usize).rem_euclid(ratio) * cs,
+                        ];
+
+                        for vw in 0..cs {
+                            for vz in 0..cs {
+                                for vy in 0..cs {
+                                    for vx in 0..cs {
+                                        // Target cell's position in target-scale cells,
+                                        // relative to the source chunk's origin.
+                                        let tgt_cell = [
+                                            tgt_offset_in_src[0] + vx,
+                                            tgt_offset_in_src[1] + vy,
+                                            tgt_offset_in_src[2] + vz,
+                                            tgt_offset_in_src[3] + vw,
+                                        ];
+                                        // Source voxel local coords (integer divide by ratio).
+                                        let src_voxel = [
+                                            tgt_cell[0] / ratio,
+                                            tgt_cell[1] / ratio,
+                                            tgt_cell[2] / ratio,
+                                            tgt_cell[3] / ratio,
+                                        ];
+                                        let src_voxel_idx = src_voxel[3] * cs * cs * cs
+                                            + src_voxel[2] * cs * cs
+                                            + src_voxel[1] * cs
+                                            + src_voxel[0];
+                                        let block_palette_idx =
+                                            src_materials[src_voxel_idx] as usize;
+                                        let block = source
+                                            .block_palette
+                                            .get(block_palette_idx)
+                                            .cloned()
+                                            .unwrap_or(BlockData::AIR);
+                                        if all_uniform {
+                                            match &first_block {
+                                                None => first_block = Some(block.clone()),
+                                                Some(fb) => {
+                                                    if !fb.matches_ignoring_scale(&block) {
+                                                        all_uniform = false;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        chunk_blocks.push(block);
+                                    }
+                                }
+                            }
+                        }
+                        target_blocks.push(chunk_blocks);
+                    }
+                }
+            }
+        }
+    }
+
+    // If all cells are the same block, return Uniform.
+    if all_uniform {
+        let block = first_block.unwrap_or(BlockData::AIR);
+        return RegionTreeCore {
+            bounds: intersection,
+            kind: RegionNodeKind::Uniform(block),
+            generator_version_hash,
+        };
+    }
+
+    // Build ChunkArrayData from per-chunk block vectors.
+    // Each target_blocks entry is one chunk's worth of blocks (CHUNK_VOLUME).
+    // We need to build chunk_palette + block_palette + dense_indices.
+    let mut block_palette = vec![BlockData::AIR];
+    let mut block_to_idx: HashMap<BlockData, u16> = HashMap::new();
+    block_to_idx.insert(BlockData::AIR, 0);
+
+    let mut chunk_palette = Vec::new();
+    let mut chunk_to_idx: HashMap<Vec<u16>, u16> = HashMap::new();
+    let mut dense_indices = Vec::with_capacity(target_cell_count);
+
+    for chunk_blocks in &target_blocks {
+        // Convert blocks to block palette indices.
+        let mut voxel_indices = Vec::with_capacity(CHUNK_VOLUME);
+        for block in chunk_blocks {
+            let idx = match block_to_idx.get(block) {
+                Some(&idx) => idx,
+                None => {
+                    let idx = block_palette.len() as u16;
+                    block_palette.push(block.clone());
+                    block_to_idx.insert(block.clone(), idx);
+                    idx
+                }
+            };
+            voxel_indices.push(idx);
+        }
+
+        // Deduplicate chunk payloads.
+        let chunk_idx = match chunk_to_idx.get(&voxel_indices) {
+            Some(&idx) => idx,
+            None => {
+                let idx = chunk_palette.len() as u16;
+                let payload = ChunkPayload::from_dense_materials_compact(&voxel_indices)
+                    .unwrap_or(ChunkPayload::Empty);
+                chunk_palette.push(payload);
+                chunk_to_idx.insert(voxel_indices, idx);
+                idx
+            }
+        };
+        dense_indices.push(chunk_idx);
+    }
+
+    match ChunkArrayData::from_dense_indices_with_block_palette(
+        intersection,
+        chunk_palette,
+        dense_indices,
+        None,
+        block_palette,
+        target_scale,
+    ) {
+        Ok(chunk_array) => RegionTreeCore {
+            bounds: intersection,
+            kind: RegionNodeKind::ChunkArray(chunk_array),
+            generator_version_hash,
+        },
+        Err(e) => {
+            panic!(
+                "resample_chunk_array_to_bounds: failed to build ChunkArrayData: {:?}",
+                e
+            );
+        }
+    }
 }
 
 fn prune_empty_subtrees(core: &mut RegionTreeCore) -> bool {
@@ -1560,18 +1873,46 @@ fn carve_leaf_for_chunk_edit(
                 return false;
             }
             for piece_bounds in subtract_aabb(node.bounds, chunk_bounds) {
-                let Some(chunk_array_piece) = slice_chunk_array_to_bounds_with_dense_indices(
+                // Check if piece_bounds align to the source scale's chunk grid.
+                // If not, the slice would produce semantically wrong data (sub-chunk
+                // bounds with a full-chunk payload). Use resample instead.
+                let se = chunk_array.scale_exp;
+                let piece_aligned = piece_bounds
+                    .chunk_extents_at_scale(se)
+                    .map(|_| {
+                        let (lmin, lmax) = piece_bounds.to_chunk_lattice_bounds(se);
+                        Aabb4i::from_lattice_bounds(lmin, lmax, se) == piece_bounds
+                    })
+                    .unwrap_or(false);
+
+                if piece_aligned {
+                    if let Some(chunk_array_piece) =
+                        slice_chunk_array_to_bounds_with_dense_indices(
+                            chunk_array,
+                            &source_indices,
+                            piece_bounds,
+                        )
+                    {
+                        children.push(RegionTreeCore {
+                            bounds: piece_bounds,
+                            kind: RegionNodeKind::ChunkArray(chunk_array_piece),
+                            generator_version_hash: node.generator_version_hash,
+                        });
+                        continue;
+                    }
+                }
+                // Bounds don't align to source scale — resample at coarsest aligned finer scale.
+                let aligned_scale =
+                    coarsest_aligned_scale(piece_bounds, chunk_array.scale_exp);
+                let resampled = resample_chunk_array_to_bounds(
                     chunk_array,
-                    &source_indices,
                     piece_bounds,
-                ) else {
-                    continue;
-                };
-                children.push(RegionTreeCore {
-                    bounds: piece_bounds,
-                    kind: RegionNodeKind::ChunkArray(chunk_array_piece),
-                    generator_version_hash: node.generator_version_hash,
-                });
+                    aligned_scale,
+                    node.generator_version_hash,
+                );
+                if !matches!(resampled.kind, RegionNodeKind::Empty) {
+                    children.push(resampled);
+                }
             }
         } else {
             let existing_resolved =
@@ -2065,9 +2406,18 @@ fn project_node_to_bounds(
             RegionNodeKind::ProceduralRef(generator_ref.clone())
         }
         RegionNodeKind::ChunkArray(chunk_array) => {
-            match slice_chunk_array_to_bounds(chunk_array, target_bounds) {
-                Some(sliced) => RegionNodeKind::ChunkArray(sliced),
-                None => RegionNodeKind::Empty,
+            if let Some(sliced) = slice_chunk_array_to_bounds(chunk_array, target_bounds) {
+                RegionNodeKind::ChunkArray(sliced)
+            } else {
+                // Bounds don't align to source scale — resample at coarsest aligned finer scale.
+                let aligned_scale =
+                    coarsest_aligned_scale(target_bounds, chunk_array.scale_exp);
+                return resample_chunk_array_to_bounds(
+                    chunk_array,
+                    target_bounds,
+                    aligned_scale,
+                    generator_version_hash,
+                );
             }
         }
         RegionNodeKind::Branch(children) => {
@@ -2106,7 +2456,7 @@ fn project_node_to_bounds(
 fn query_chunk_payload_in_node(
     node: &RegionTreeCore,
     key_pos: ChunkKey,
-) -> Option<ResolvedChunkPayload> {
+) -> Option<(ResolvedChunkPayload, i8)> {
     query_chunk_payload_in_kind(&node.kind, node.bounds, key_pos)
 }
 
@@ -2114,13 +2464,15 @@ fn query_chunk_payload_in_kind(
     kind: &RegionNodeKind,
     bounds: Aabb4i,
     key_pos: ChunkKey,
-) -> Option<ResolvedChunkPayload> {
+) -> Option<(ResolvedChunkPayload, i8)> {
     if !bounds.contains_chunk_world_min(key_pos) {
         return None;
     }
     match kind {
         RegionNodeKind::Empty => None,
-        RegionNodeKind::Uniform(block) => Some(ResolvedChunkPayload::uniform(block.clone())),
+        RegionNodeKind::Uniform(block) => {
+            Some((ResolvedChunkPayload::uniform(block.clone()), block.scale_exp))
+        }
         RegionNodeKind::ProceduralRef(_) => None,
         RegionNodeKind::ChunkArray(chunk_array) => {
             chunk_array_resolved_payload_at(chunk_array, key_pos)
@@ -2139,12 +2491,15 @@ fn query_chunk_payload_in_kind(
 fn chunk_array_resolved_payload_at(
     chunk_array: &ChunkArrayData,
     key_pos: ChunkKey,
-) -> Option<ResolvedChunkPayload> {
+) -> Option<(ResolvedChunkPayload, i8)> {
     let payload = chunk_array_payload_at(chunk_array, key_pos)?;
-    Some(ResolvedChunkPayload {
-        payload,
-        block_palette: chunk_array.block_palette.clone(),
-    })
+    Some((
+        ResolvedChunkPayload {
+            payload,
+            block_palette: chunk_array.block_palette.clone(),
+        },
+        chunk_array.scale_exp,
+    ))
 }
 
 fn kind_has_non_empty_chunk_intersection(
@@ -2758,6 +3113,33 @@ pub fn chunk_spatial_extent(key: ChunkKey, scale_exp: i8) -> Aabb4i {
     Aabb4i::chunk_world_bounds(key, scale_exp)
 }
 
+/// Find the coarsest scale at which `bounds` aligns to the chunk grid.
+///
+/// A bounds "aligns" at scale `s` when `bounds.chunk_extents_at_scale(s)` returns
+/// `Some` — i.e. each axis extent is an exact integer number of chunks at that scale.
+///
+/// Searches from `ceiling` downward (finer scales). Panics if no valid scale is
+/// found within 10 levels — this is structurally impossible for bounds produced by
+/// `subtract_aabb` against chunk-aligned inputs.
+fn coarsest_aligned_scale(bounds: Aabb4i, ceiling: i8) -> i8 {
+    for s in (ceiling.saturating_sub(10)..=ceiling).rev() {
+        if bounds.chunk_extents_at_scale(s).is_some() {
+            // Verify the bounds actually align: the lattice round-trip must
+            // reconstruct the original bounds exactly. A sub-chunk overlap
+            // produces valid extents but a different reconstructed AABB.
+            let (lmin, lmax) = bounds.to_chunk_lattice_bounds(s);
+            let reconstructed = Aabb4i::from_lattice_bounds(lmin, lmax, s);
+            if reconstructed == bounds {
+                return s;
+            }
+        }
+    }
+    panic!(
+        "coarsest_aligned_scale: no valid scale found for bounds {:?} with ceiling {}",
+        bounds, ceiling
+    );
+}
+
 // ---------------------------------------------------------------------------
 // BVH spatial queries — point query and raycast
 // ---------------------------------------------------------------------------
@@ -2868,7 +3250,7 @@ fn bvh_point_query(
             if !ca.bounds.contains_chunk_world_min(chunk_key) {
                 return None;
             }
-            let resolved = chunk_array_resolved_payload_at(ca, chunk_key)?;
+            let (resolved, _) = chunk_array_resolved_payload_at(ca, chunk_key)?;
             let block = resolved.block_at(cell_idx);
             if block.is_air() {
                 return None;
@@ -2881,6 +3263,50 @@ fn bvh_point_query(
             for child in children {
                 if let Some(hit) = bvh_point_query(&child.kind, child.bounds, pos) {
                     return Some(hit);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// BVH point query that distinguishes "no data" from "data says air".
+///
+/// Returns `Some(block)` when a data-containing node covers `pos`, including
+/// `Some(AIR)` for air cells within ChunkArrays/Uniforms. Returns `None` only
+/// when no data node covers the position (Empty or out of bounds).
+fn bvh_block_data_at_point(
+    kind: &RegionNodeKind,
+    bounds: Aabb4i,
+    pos: [ChunkCoord; 4],
+) -> Option<BlockData> {
+    match kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => None,
+
+        RegionNodeKind::Uniform(block) => {
+            if !aabb_contains_point(&bounds, pos) {
+                return None;
+            }
+            Some(block.clone())
+        }
+
+        RegionNodeKind::ChunkArray(ca) => {
+            let se = ca.scale_exp;
+            if !aabb_contains_point(&ca.bounds, pos) {
+                return None;
+            }
+            let (chunk_key, cell_idx, _) = cell_at_point(pos, se);
+            if !ca.bounds.contains_chunk_world_min(chunk_key) {
+                return None;
+            }
+            let (resolved, _) = chunk_array_resolved_payload_at(ca, chunk_key)?;
+            Some(resolved.block_at(cell_idx))
+        }
+
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                if let Some(block) = bvh_block_data_at_point(&child.kind, child.bounds, pos) {
+                    return Some(block);
                 }
             }
             None
@@ -2998,7 +3424,7 @@ fn bvh_raycast(
                 if (chunk_key, cell_idx) != prev_cell || t == t_start {
                     prev_cell = (chunk_key, cell_idx);
                     if ca.bounds.contains_chunk_world_min(chunk_key) {
-                        if let Some(resolved) = chunk_array_resolved_payload_at(ca, chunk_key) {
+                        if let Some((resolved, _)) = chunk_array_resolved_payload_at(ca, chunk_key) {
                             let block = resolved.block_at(cell_idx);
                             if !block.is_air() {
                                 let bb = block_bounds(cell_aabb.min, se, &block);

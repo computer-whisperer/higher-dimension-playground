@@ -175,7 +175,7 @@ fn assert_tree_matches_expected_uniform_map(
 ) {
     for key in keys_in_bounds(global_bounds) {
         let actual = match tree.chunk_payload(key) {
-            Some(resolved) => match resolved.uniform_block() {
+            Some((resolved, _)) => match resolved.uniform_block() {
                 Some(block) if !block.is_air() => Some(block.block_type as u16),
                 _ => None,
             },
@@ -314,7 +314,7 @@ fn set_get_remove_single_chunk_roundtrip() {
     assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 12)))));
     assert!(tree.has_chunk(key(0, 0, 0, 0)));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 12))
     );
 
@@ -328,7 +328,7 @@ fn set_chunk_uniform_zero_on_empty_tree_is_explicit_override() {
     let mut tree = RegionChunkTree::new();
     assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::empty())));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::AIR)
     );
 }
@@ -344,11 +344,11 @@ fn uniform_merge_and_fragment_behavior_is_stable() {
 
     assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 7))
     );
 
@@ -364,11 +364,11 @@ fn non_covering_uniform_children_do_not_fill_parent_gaps() {
     assert!(tree.set_chunk(key(2, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 11)))));
 
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 11))
     );
     assert_eq!(
-        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 11))
     );
     assert_eq!(tree.chunk_payload(key(1, 0, 0, 0)), None);
@@ -484,15 +484,15 @@ fn splice_non_empty_core_replaces_window_contents() {
     let changed_bounds = tree.splice_non_empty_core_in_bounds(bounds, &patch_core);
     assert_eq!(changed_bounds, Some(bounds));
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 2))
     );
     assert_eq!(
-        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 4))
     );
 }
@@ -517,7 +517,7 @@ fn take_non_empty_core_extracts_and_clears_region() {
     assert_eq!(tree.chunk_payload(key(1, 0, 0, 0)), None);
     assert_eq!(tree.chunk_payload(key(2, 0, 0, 0)), None);
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 2))
     );
 }
@@ -568,11 +568,11 @@ fn set_chunk_carves_large_uniform_leaf_locally() {
 
     assert!(tree.set_chunk(key(3, 4, 2, 5), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9)))));
     assert_eq!(
-        tree.chunk_payload(key(3, 4, 2, 5)).unwrap().uniform_block(),
+        tree.chunk_payload(key(3, 4, 2, 5)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 4))
     );
 
@@ -634,7 +634,7 @@ fn set_chunk_carves_large_procedural_leaf_locally() {
 
     assert!(tree.set_chunk(key(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 12)))));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 12))
     );
 
@@ -719,11 +719,11 @@ fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
     );
     assert_eq!(tree.root(), Some(&before));
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 3))
     );
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 4))
     );
 }
@@ -763,19 +763,19 @@ fn overlay_core_applies_explicit_uniform_zero_and_non_zero_leaves() {
 
     assert!(tree.overlay_core_in_bounds(bounds, &overlay).is_some());
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 7))
     );
     assert_eq!(
-        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(1, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::AIR)
     );
     assert_eq!(
-        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(2, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 9))
     );
     assert_eq!(
-        tree.chunk_payload(key(3, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(3, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 7))
     );
 }
@@ -1052,7 +1052,7 @@ fn consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     let resolved_a = ResolvedChunkPayload::from_dense_blocks(&blocks_a).expect("dense blocks");
     assert!(tree.set_chunk(key(3, 0, 3, 0), Some(resolved_a.clone())));
     {
-        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("chunk must exist");
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("chunk must exist").0;
         assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
         assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
     }
@@ -1065,18 +1065,18 @@ fn consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
 
     // Both edits must survive consolidation.
     {
-        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("first edit disappeared after second edit");
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("first edit disappeared after second edit").0;
         assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
         assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
     }
     {
-        let retrieved_b = tree.chunk_payload(key(4, 0, 3, 0)).expect("second edit not present");
+        let retrieved_b = tree.chunk_payload(key(4, 0, 3, 0)).expect("second edit not present").0;
         assert_eq!(retrieved_b.block_at(0), BlockData::simple(0, 10));
         assert_eq!(retrieved_b.block_at(1), BlockData::AIR);
     }
     // Platform Uniform elsewhere must be intact.
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 4))
     );
 }
@@ -1118,7 +1118,7 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
     };
     tree.splice_non_empty_core_in_bounds(a_bounds, &a_core);
     {
-        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("chunk A must exist after splice");
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("chunk A must exist after splice").0;
         assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
         assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
     }
@@ -1149,17 +1149,17 @@ fn splice_consolidation_preserves_dense_chunk_edits_on_uniform_platform() {
 
     // Both must survive.
     {
-        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("first splice disappeared after second splice");
+        let retrieved_a = tree.chunk_payload(key(3, 0, 3, 0)).expect("first splice disappeared after second splice").0;
         assert_eq!(retrieved_a.block_at(0), BlockData::simple(0, 9));
         assert_eq!(retrieved_a.block_at(1), BlockData::AIR);
     }
     {
-        let retrieved_b = tree.chunk_payload(key(4, 0, 3, 0)).expect("second splice not present");
+        let retrieved_b = tree.chunk_payload(key(4, 0, 3, 0)).expect("second splice not present").0;
         assert_eq!(retrieved_b.block_at(0), BlockData::simple(0, 10));
         assert_eq!(retrieved_b.block_at(1), BlockData::AIR);
     }
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 4))
     );
 }
@@ -1196,6 +1196,7 @@ fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
         for prev_x in 2..=x {
             let payload = tree
                 .chunk_payload(key(prev_x, 0, 3, 0))
+                .map(|(p, _)| p)
                 .unwrap_or_else(|| {
                     panic!(
                         "chunk [{prev_x},0,3,0] disappeared after editing [{x},0,3,0]"
@@ -1216,11 +1217,11 @@ fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
 
     // Verify platform chunks are still uniform.
     assert_eq!(
-        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 4))
     );
     assert_eq!(
-        tree.chunk_payload(key(7, 0, 7, 0)).unwrap().uniform_block(),
+        tree.chunk_payload(key(7, 0, 7, 0)).unwrap().0.uniform_block(),
         Some(&BlockData::simple(0, 4))
     );
 
@@ -1230,6 +1231,7 @@ fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
         let mut blocks = tree
             .chunk_payload(key(3, 0, 3, 0))
             .expect("chunk should exist")
+            .0
             .dense_blocks();
         blocks[2] = BlockData::simple(0, 99);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense blocks");
@@ -1241,6 +1243,7 @@ fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
     for x in 2..=5i32 {
         let payload = tree
             .chunk_payload(key(x, 0, 3, 0))
+            .map(|(p, _)| p)
             .unwrap_or_else(|| {
                 panic!(
                     "chunk [{x},0,3,0] disappeared after re-editing [3,0,3,0]"
@@ -1271,6 +1274,7 @@ fn cluster_edits_on_uniform_platform_survive_consolidation_and_recarve() {
     for (&k, expected) in &expected_blocks {
         let payload = tree
             .chunk_payload(k)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {k:?} missing in final check"));
         let actual = payload.dense_blocks();
         assert_eq!(
@@ -1307,6 +1311,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_siblings() {
     for x in 0..8i32 {
         let payload = tree
             .chunk_payload(key(x, 0, 0, 0))
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk [{x},0,0,0] missing before any edit"));
         assert_eq!(
             payload.uniform_block(),
@@ -1325,6 +1330,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_siblings() {
     assert_eq!(
         tree.chunk_payload(key(3, 0, 0, 0))
             .expect("edited chunk missing")
+            .0
             .uniform_block(),
         Some(&BlockData::simple(0, 99))
     );
@@ -1336,6 +1342,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_siblings() {
         }
         let payload = tree
             .chunk_payload(key(x, 0, 0, 0))
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk [{x},0,0,0] disappeared after editing chunk [3,0,0,0]"));
         assert_eq!(
             payload.uniform_block(),
@@ -1361,6 +1368,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_siblings() {
     for (x, &expected_mat) in expected.iter().enumerate() {
         let payload = tree
             .chunk_payload(key(x as i32, 0, 0, 0))
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk [{x},0,0,0] missing after cluster edits"));
         assert_eq!(
             payload.uniform_block(),
@@ -1421,6 +1429,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_dense_siblings() {
     for x in 0..4i32 {
         let payload = tree
             .chunk_payload(key(x, 0, 0, 0))
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk [{x},0,0,0] missing before edit"));
         let blocks = payload.dense_blocks();
         assert_eq!(
@@ -1439,7 +1448,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_dense_siblings() {
 
     // Verify edited chunk.
     {
-        let payload = tree
+        let (payload, _) = tree
             .chunk_payload(key(1, 0, 0, 0))
             .expect("edited chunk missing");
         let blocks = payload.dense_blocks();
@@ -1451,6 +1460,7 @@ fn set_chunk_in_spliced_chunk_array_preserves_dense_siblings() {
     for x in [0, 2, 3] {
         let payload = tree
             .chunk_payload(key(x, 0, 0, 0))
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk [{x},0,0,0] disappeared after edit"));
         let blocks = payload.dense_blocks();
         assert_eq!(
@@ -1468,22 +1478,22 @@ fn set_chunk_in_spliced_chunk_array_preserves_dense_siblings() {
 
     // Verify ALL chunks.
     {
-        let p0 = tree.chunk_payload(key(0, 0, 0, 0)).expect("x=0 missing after second edit");
+        let p0 = tree.chunk_payload(key(0, 0, 0, 0)).expect("x=0 missing after second edit").0;
         assert_eq!(p0.dense_blocks()[0], BlockData::simple(0, 1));
     }
     {
-        let p1 = tree.chunk_payload(key(1, 0, 0, 0)).expect("x=1 missing after second edit");
+        let p1 = tree.chunk_payload(key(1, 0, 0, 0)).expect("x=1 missing after second edit").0;
         assert_eq!(p1.dense_blocks()[0], BlockData::simple(0, 50));
     }
     {
-        let p2 = tree.chunk_payload(key(2, 0, 0, 0)).expect("x=2 missing after second edit");
+        let p2 = tree.chunk_payload(key(2, 0, 0, 0)).expect("x=2 missing after second edit").0;
         assert_eq!(
             p2.uniform_block(),
             Some(&BlockData::simple(0, 60))
         );
     }
     {
-        let p3 = tree.chunk_payload(key(3, 0, 0, 0)).expect("x=3 missing after second edit");
+        let p3 = tree.chunk_payload(key(3, 0, 0, 0)).expect("x=3 missing after second edit").0;
         assert_eq!(p3.dense_blocks()[0], BlockData::simple(0, 4));
     }
 }
@@ -1561,6 +1571,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
     for pos in &positions {
         let payload = tree
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {pos:?} missing after bulk load"));
         let blocks = payload.dense_blocks();
         let expected = &original_blocks[pos];
@@ -1575,6 +1586,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
         let mut blocks = tree
             .chunk_payload(*pos)
             .expect("chunk should exist for edit")
+            .0
             .dense_blocks();
         blocks[0] = BlockData::simple(0, 999);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
@@ -1587,6 +1599,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
     for pos in &positions {
         let payload = tree
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {pos:?} missing after edits"));
         let blocks = payload.dense_blocks();
         let expected = &original_blocks[pos];
@@ -1603,7 +1616,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
     // Phase 3: Simulate persist_dirty_overrides — query only dirty chunks.
     let mut dirty_payloads: Vec<(ChunkKey, Option<ResolvedChunkPayload>)> = Vec::new();
     for pos in &dirty_save_chunks {
-        let resolved = tree.chunk_payload(*pos);
+        let resolved = tree.chunk_payload(*pos).map(|(p, _)| p);
         dirty_payloads.push((*pos, resolved));
     }
 
@@ -1648,6 +1661,7 @@ fn server_lifecycle_bulk_load_edit_save_reload_preserves_all_chunks() {
     for pos in &positions {
         let payload = reload_tree
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {pos:?} missing after reload"));
         let blocks = payload.dense_blocks();
         let expected = &original_blocks[pos];
@@ -1734,7 +1748,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
 
         // After each load, verify ALL previously loaded chunks are still correct.
         for prev_pos in &positions[..=load_idx] {
-            let payload = tree.chunk_payload(*prev_pos).unwrap_or_else(|| {
+            let (payload, _) = tree.chunk_payload(*prev_pos).unwrap_or_else(|| {
                 panic!(
                     "chunk {prev_pos:?} disappeared after loading {pos:?} (load #{load_idx})"
                 )
@@ -1753,6 +1767,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
         let mut blocks = tree
             .chunk_payload(key(1, 0, 0, 0))
             .expect("chunk should exist")
+            .0
             .dense_blocks();
         blocks[0] = BlockData::simple(0, 777);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
@@ -1764,6 +1779,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
     for pos in &positions {
         let payload = tree
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {pos:?} missing after editing [1,0,0,0]"));
         let blocks = payload.dense_blocks();
         let expected = &expected_blocks[pos];
@@ -1778,6 +1794,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
         let mut blocks = tree
             .chunk_payload(key(3, 0, 0, 0))
             .expect("chunk should exist")
+            .0
             .dense_blocks();
         blocks[0] = BlockData::simple(0, 888);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
@@ -1789,6 +1806,7 @@ fn individual_chunk_loads_with_progressive_consolidation_preserve_data() {
     for pos in &positions {
         let payload = tree
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {pos:?} missing after editing [3,0,0,0]"));
         let blocks = payload.dense_blocks();
         let expected = &expected_blocks[pos];
@@ -1826,7 +1844,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
 
     // Cycle 1: edit chunk [1,0,0,0] → carves consolidated array
     {
-        let mut blocks = tree.chunk_payload(key(1, 0, 0, 0)).unwrap().dense_blocks();
+        let mut blocks = tree.chunk_payload(key(1, 0, 0, 0)).unwrap().0.dense_blocks();
         blocks[2] = BlockData::simple(0, 42);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
@@ -1837,6 +1855,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
     for (pos, exp) in &expected {
         let payload = tree
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {pos:?} missing after cycle 1"));
         let blocks = payload.dense_blocks();
         assert_eq!(blocks[0], exp[0], "cycle 1: chunk {pos:?} block[0]");
@@ -1846,7 +1865,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
 
     // Cycle 2: edit chunk [3,0,0,0] → carves again
     {
-        let mut blocks = tree.chunk_payload(key(3, 0, 0, 0)).unwrap().dense_blocks();
+        let mut blocks = tree.chunk_payload(key(3, 0, 0, 0)).unwrap().0.dense_blocks();
         blocks[3] = BlockData::simple(0, 77);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(3, 0, 0, 0), Some(resolved));
@@ -1855,7 +1874,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
 
     // Cycle 3: edit chunk [0,0,0,0] → carves again
     {
-        let mut blocks = tree.chunk_payload(key(0, 0, 0, 0)).unwrap().dense_blocks();
+        let mut blocks = tree.chunk_payload(key(0, 0, 0, 0)).unwrap().0.dense_blocks();
         blocks[4] = BlockData::simple(0, 55);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(0, 0, 0, 0), Some(resolved));
@@ -1864,7 +1883,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
 
     // Cycle 4: edit chunk [2,0,0,0] → carves again
     {
-        let mut blocks = tree.chunk_payload(key(2, 0, 0, 0)).unwrap().dense_blocks();
+        let mut blocks = tree.chunk_payload(key(2, 0, 0, 0)).unwrap().0.dense_blocks();
         blocks[5] = BlockData::simple(0, 33);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(2, 0, 0, 0), Some(resolved));
@@ -1873,7 +1892,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
 
     // Cycle 5: re-edit chunk [1,0,0,0] again
     {
-        let mut blocks = tree.chunk_payload(key(1, 0, 0, 0)).unwrap().dense_blocks();
+        let mut blocks = tree.chunk_payload(key(1, 0, 0, 0)).unwrap().0.dense_blocks();
         blocks[6] = BlockData::simple(0, 11);
         let resolved = ResolvedChunkPayload::from_dense_blocks(&blocks).expect("from dense");
         tree.set_chunk(key(1, 0, 0, 0), Some(resolved));
@@ -1884,6 +1903,7 @@ fn repeated_carve_consolidation_cycles_preserve_dense_data() {
     for (pos, exp) in &expected {
         let payload = tree
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("chunk {pos:?} missing after 5 carve cycles"));
         let blocks = payload.dense_blocks();
         for voxel_idx in 0..7 {
@@ -1952,6 +1972,7 @@ fn overlay_preserves_virgin_terrain_at_chunk_array_gaps() {
     for pos in &overridden_positions {
         let payload = composed
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("overridden chunk {pos:?} missing"));
         let blocks = payload.dense_blocks();
         assert_eq!(
@@ -1965,6 +1986,7 @@ fn overlay_preserves_virgin_terrain_at_chunk_array_gaps() {
     for pos in &gap_positions {
         let payload = composed
             .chunk_payload(*pos)
+            .map(|(p, _)| p)
             .unwrap_or_else(|| panic!("virgin chunk {pos:?} missing after overlay"));
         let blocks = payload.dense_blocks();
         assert_eq!(
@@ -2052,7 +2074,7 @@ fn set_and_get_chunk_at_scale_round_trip() {
     assert!(tree.set_chunk_at_scale(key, Some(payload.clone()), -1));
     assert!(tree.has_chunk(key));
 
-    let result = tree.chunk_payload(key).unwrap();
+    let (result, _) = tree.chunk_payload(key).unwrap();
     // Block preserves its original scale_exp (0 from BlockData::simple),
     // NOT the chunk's storage scale. scale_exp is block metadata, not tree metadata.
     assert_eq!(result.uniform_block(), Some(&block));
@@ -2076,11 +2098,11 @@ fn scaled_chunks_at_non_overlapping_positions() {
     tree.set_chunk_at_scale(half_key, Some(ResolvedChunkPayload::uniform(block_b.clone())), -1);
 
     // Both should be retrievable
-    let result_unit = tree.chunk_payload(unit_key).unwrap();
+    let (result_unit, _) = tree.chunk_payload(unit_key).unwrap();
     assert_eq!(result_unit.uniform_block(), Some(&block_a));
 
     // Block preserves its original scale_exp (0), not the chunk's storage scale.
-    let result_half = tree.chunk_payload(half_key).unwrap();
+    let (result_half, _) = tree.chunk_payload(half_key).unwrap();
     assert_eq!(result_half.uniform_block(), Some(&block_b));
 }
 
@@ -2095,7 +2117,7 @@ fn set_chunk_at_scale_zero_delegates_to_set_chunk() {
 
     // Should be queryable via both set_chunk and set_chunk_at_scale APIs
     assert!(tree.has_chunk(key));
-    let result = tree.chunk_payload(key).unwrap();
+    let (result, _) = tree.chunk_payload(key).unwrap();
     assert_eq!(result.uniform_block(), Some(&block));
 }
 
@@ -2629,8 +2651,8 @@ fn bulk_set_chunk_completes_in_reasonable_time() {
 /// not just a Uniform leaf.
 #[test]
 fn splice_chunk_array_over_existing_chunk_array() {
-    let stone = BlockData::simple(0, 11);
-    let dirt = BlockData::simple(0, 3);
+    let _stone = BlockData::simple(0, 11);
+    let _dirt = BlockData::simple(0, 3);
 
     let mut tree = RegionChunkTree::new();
 
@@ -3044,13 +3066,13 @@ fn client_bootstrap_split_patches_both_y_halves_preserve_uniform_platform() {
     );
 
     // Spot-check: both should return the platform material
-    let payload_neg1 = client_tree.chunk_payload(key(0, -1, 0, 0)).unwrap();
+    let (payload_neg1, _) = client_tree.chunk_payload(key(0, -1, 0, 0)).unwrap();
     assert_eq!(
         payload_neg1.block_at(0),
         platform_material,
         "y=-1 payload should be platform material"
     );
-    let payload_0 = client_tree.chunk_payload(key(0, 0, 0, 0)).unwrap();
+    let (payload_0, _) = client_tree.chunk_payload(key(0, 0, 0, 0)).unwrap();
     assert_eq!(
         payload_0.block_at(0),
         platform_material,
@@ -3328,7 +3350,7 @@ fn full_server_client_flow_with_procgen_no_fractional_bounds() {
     }
 
     // === Client side: receive patches ===
-    let interest_bounds = Aabb4i::from_lattice_bounds([-10, -5, -10, -10], [10, 5, 10, 10], 0);
+    let _interest_bounds = Aabb4i::from_lattice_bounds([-10, -5, -10, -10], [10, 5, 10, 10], 0);
 
     // Simulate split_bounds_for_streaming: split interest into halves along x
     let left_bounds = Aabb4i::from_lattice_bounds([-10, -5, -10, -10], [-1, 5, 10, 10], 0);
@@ -3442,15 +3464,36 @@ fn place_block_at_scale(
     block: BlockData,
     scale_exp: i8,
 ) {
-    use crate::shared::voxel::{world_to_chunk_at_scale, CHUNK_VOLUME};
+    use crate::shared::spatial::{step_for_scale, ChunkCoord};
+    use crate::shared::voxel::{world_to_chunk_at_scale, CHUNK_SIZE, CHUNK_VOLUME};
 
     let (chunk_key, voxel_index) =
         world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
 
-    let current_payload = tree.chunk_payload(chunk_key);
-    let mut blocks = current_payload
-        .map(|r| r.dense_blocks())
-        .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+    // Read existing blocks via BVH point queries (scale-agnostic).
+    let step = step_for_scale(scale_exp);
+    let cs = ChunkCoord::from_num(CHUNK_SIZE as i32);
+    let origin = chunk_key.map(|k| k.saturating_mul(cs));
+    let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+    for lw in 0..CHUNK_SIZE {
+        for lz in 0..CHUNK_SIZE {
+            for ly in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    let pos = [
+                        origin[0] + step * ChunkCoord::from_num(lx as i32),
+                        origin[1] + step * ChunkCoord::from_num(ly as i32),
+                        origin[2] + step * ChunkCoord::from_num(lz as i32),
+                        origin[3] + step * ChunkCoord::from_num(lw as i32),
+                    ];
+                    let idx = lw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                        + lz * CHUNK_SIZE * CHUNK_SIZE
+                        + ly * CHUNK_SIZE
+                        + lx;
+                    blocks[idx] = tree.block_at(pos);
+                }
+            }
+        }
+    }
     blocks[voxel_index] = block;
 
     let desired_payload = if blocks.iter().all(|b| b.is_air()) {
@@ -3485,20 +3528,20 @@ fn assert_tree_integrity_strict(tree: &RegionChunkTree, context: &str) {
     }
 }
 
-/// Helper: read back a block at a world position and scale.
+/// Helper: read back a block at a world position using BVH point query (scale-agnostic).
 fn read_block_at_scale(
     tree: &RegionChunkTree,
     position: [i32; 4],
-    scale_exp: i8,
+    _scale_exp: i8,
 ) -> BlockData {
-    use crate::shared::voxel::world_to_chunk_at_scale;
-
-    let (chunk_key, voxel_index) =
-        world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
-
-    tree.chunk_payload(chunk_key)
-        .map(|r| r.block_at(voxel_index))
-        .unwrap_or(BlockData::AIR)
+    use crate::shared::spatial::ChunkCoord;
+    let pos = [
+        ChunkCoord::from_num(position[0]),
+        ChunkCoord::from_num(position[1]),
+        ChunkCoord::from_num(position[2]),
+        ChunkCoord::from_num(position[3]),
+    ];
+    tree.block_at(pos)
 }
 
 #[test]
@@ -3735,8 +3778,8 @@ fn adjacent_chunks_at_same_non_zero_scale_stay_distinct() {
     tree.set_chunk_at_scale(key_b, Some(ResolvedChunkPayload::uniform(block_b.clone())), -1);
     assert_tree_structure(&tree, "adjacent_s-1");
 
-    let read_a = tree.chunk_payload(key_a).unwrap();
-    let read_b = tree.chunk_payload(key_b).unwrap();
+    let (read_a, _) = tree.chunk_payload(key_a).unwrap();
+    let (read_b, _) = tree.chunk_payload(key_b).unwrap();
     assert_eq!(read_a.uniform_block().unwrap().block_type, 10);
     assert_eq!(read_b.uniform_block().unwrap().block_type, 20);
 }
@@ -4174,4 +4217,105 @@ fn set_chunk_at_scale3_over_scale0_floor() {
     if let Some(root) = tree.root() {
         assert_tree_non_overlapping(root);
     }
+}
+
+/// Inserting a fine-scale chunk into a region covered by a coarser ChunkArray
+/// must resample gap pieces instead of dropping them.
+#[test]
+fn carve_chunk_array_resamples_unaligned_gaps() {
+    use crate::shared::spatial::ChunkCoord;
+
+    let mut tree = RegionChunkTree::new();
+
+    // Place two scale-1 blocks in the same chunk. Scale-1 chunk at origin
+    // covers [0, 16)^4 in world space. Place one at [0,0,0,0] (cell [0,...])
+    // and one at [8,0,0,0] (cell [4,0,0,0] in scale-1 lattice, since 8/2=4).
+    let coarse_a = BlockData::simple(0, 10);
+    let coarse_b = BlockData::simple(0, 11);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], coarse_a.clone(), 1);
+    place_block_at_scale(&mut tree, [8, 0, 0, 0], coarse_b.clone(), 1);
+
+    // Verify both blocks are present.
+    assert_eq!(read_block_at_scale(&tree, [0, 0, 0, 0], 1).block_type, 10);
+    assert_eq!(read_block_at_scale(&tree, [8, 0, 0, 0], 1).block_type, 11);
+
+    // Now place a scale-0 block at [0,0,0,0]. The scale-0 chunk covers [0, 8)^4,
+    // which cuts into the scale-1 chunk [0, 16)^4. The gap piece covering
+    // [8, 16) in the x-axis doesn't align to the scale-1 grid and must be
+    // resampled to preserve coarse_b.
+    let fine_block = BlockData::simple(0, 20);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], fine_block.clone(), 0);
+
+    // The fine block should be readable.
+    assert_eq!(
+        read_block_at_scale(&tree, [0, 0, 0, 0], 0).block_type, 20,
+        "fine block lost after carve"
+    );
+
+    // Coarse block B at [8,0,0,0] is OUTSIDE the scale-0 chunk [0,8)^4
+    // but inside the original scale-1 chunk. It must survive the carve.
+    let read_b = tree.block_at([
+        ChunkCoord::from_num(8),
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+    ]);
+    assert_eq!(
+        read_b.block_type, 11,
+        "coarse block outside edit chunk was lost during carve — gap resample failed"
+    );
+
+    assert_tree_structure(&tree, "carve_resample_gaps");
+}
+
+/// `project_node_to_bounds` on a ChunkArray with bounds that don't align to
+/// the ChunkArray's scale must resample instead of returning Empty.
+#[test]
+fn project_to_unaligned_bounds_resamples() {
+    use crate::shared::spatial::ChunkCoord;
+
+    let mut tree = RegionChunkTree::new();
+
+    // Create a scale-1 ChunkArray by placing two blocks at different positions.
+    // This ensures the data is non-uniform (can't be collapsed to Uniform).
+    let block_a = BlockData::simple(0, 11);
+    let block_b = BlockData::simple(0, 22);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], block_a.clone(), 1);
+    place_block_at_scale(&mut tree, [2, 0, 0, 0], block_b.clone(), 1);
+
+    // Place a scale-0 block that forces the tree to carve and project.
+    // The scale-0 chunk at origin covers [0, 8)^4, which cuts into the
+    // scale-1 chunk covering [0, 16)^4.
+    let fine_block = BlockData::simple(0, 33);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], fine_block.clone(), 0);
+
+    // Block A at [0,0,0,0] was overwritten by the fine edit.
+    let read_fine = read_block_at_scale(&tree, [0, 0, 0, 0], 0);
+    assert_eq!(read_fine.block_type, 33, "fine block should overwrite");
+
+    // Block B at [2,0,0,0] should survive — it's in the scale-1 chunk
+    // but may be in a gap piece that requires resample.
+    let read_b = tree.block_at([
+        ChunkCoord::from_num(2),
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+    ]);
+    assert_eq!(
+        read_b.block_type, 22,
+        "block B outside edit region was lost — project_node_to_bounds returned Empty"
+    );
+
+    // Verify a position in the scale-1 region beyond the scale-0 chunk
+    // (world x=8..16 is definitely outside the scale-0 [0,8) chunk).
+    let read_far = tree.block_at([
+        ChunkCoord::from_num(8),
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+    ]);
+    // This was AIR in the original placement, so should still be AIR.
+    assert!(read_far.is_air(), "position [8,0,0,0] should be air");
+
+    assert_tree_structure(&tree, "project_resample");
 }

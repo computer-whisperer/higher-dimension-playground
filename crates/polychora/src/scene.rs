@@ -358,7 +358,7 @@ impl Scene {
         }
 
         // Read the current chunk payload, decode it to dense blocks, edit, and write back.
-        let mut blocks = if let Some(payload) = self.world_tree.chunk_payload(key) {
+        let mut blocks = if let Some((payload, _)) = self.world_tree.chunk_payload(key) {
             (0..CHUNK_VOLUME).map(|i| payload.block_at(i)).collect::<Vec<_>>()
         } else {
             vec![BlockData::AIR; CHUNK_VOLUME]
@@ -380,7 +380,7 @@ impl Scene {
         let current_payload = self.world_tree.chunk_payload(key);
         let mut changed = changed_by_api || previous_payload != current_payload;
         if !changed {
-            if current_payload != payload {
+            if current_payload.map(|(p, _)| p) != payload {
                 let bounds = Aabb4i::chunk_world_bounds(key, scale_exp);
                 let mut repair_tree = RegionChunkTree::new();
                 if let Some(repair_payload) = payload.clone() {
@@ -427,7 +427,7 @@ impl Scene {
         self.world_tree.block_at(pos)
     }
 
-    pub fn debug_world_tree_chunk_payload(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
+    pub fn debug_world_tree_chunk_payload(&self, chunk_key: ChunkKey) -> Option<(ResolvedChunkPayload, i8)> {
         self.world_tree.chunk_payload(chunk_key)
     }
 
@@ -612,7 +612,7 @@ impl Scene {
         let mut map = std::collections::HashMap::with_capacity(positions.len());
         for key in positions {
             let mut hasher = DefaultHasher::new();
-            if let Some(payload) = self.world_tree.chunk_payload(key) {
+            if let Some((payload, _)) = self.world_tree.chunk_payload(key) {
                 for i in 0..CHUNK_VOLUME {
                     payload.block_at(i).hash(&mut hasher);
                 }
@@ -1185,7 +1185,7 @@ mod tests {
         assert_eq!(edited_stats.changed_chunks, 1);
 
         // Verify the edit is visible through the world tree.
-        let edited_world = scene.debug_world_tree_chunk_payload(chunk_key).expect("edited chunk");
+        let (edited_world, _) = scene.debug_world_tree_chunk_payload(chunk_key).expect("edited chunk");
         assert_eq!(edited_world.block_at(0), BlockData::simple(0, 4));
         assert_eq!(scene.get_block_data(0, 0, 0, 0), BlockData::simple(0, 4));
     }

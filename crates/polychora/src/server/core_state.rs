@@ -88,7 +88,7 @@ impl ServerState {
     pub(super) fn mob_nav_cached_chunk_at(
         &self,
         chunk_key: ChunkKey,
-    ) -> Option<ResolvedChunkPayload> {
+    ) -> Option<(ResolvedChunkPayload, i8)> {
         self.mob_nav_chunk_cache
             .chunk_payload(chunk_key)
     }
@@ -156,7 +156,7 @@ impl ServerState {
         self.world.non_empty_chunk_count()
     }
 
-    pub(super) fn world_chunk_at(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
+    pub(super) fn world_chunk_at(&self, chunk_key: ChunkKey) -> Option<(ResolvedChunkPayload, i8)> {
         self.world.chunk_at(chunk_key)
     }
 

@@ -1563,11 +1563,11 @@ impl Scene {
                     );
                     for delta in deltas.iter().take(8) {
                         let key = delta.key;
-                        let world_payload = self.world_tree.chunk_payload(key);
+                        let world_payload = self.world_tree.chunk_payload(key).map(|(p, _)| p);
                         let cache_payload = self
                             .render_region_cache
                             .as_ref()
-                            .and_then(|cache| cache.chunk_payload(key));
+                            .and_then(|cache| cache.chunk_payload(key).map(|(p, _)| p));
                         let bvh_payloads = self
                             .render_bvh_cache
                             .as_ref()

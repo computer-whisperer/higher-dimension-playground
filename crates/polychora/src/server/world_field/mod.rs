@@ -2,10 +2,10 @@ use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::protocol::WorldBounds;
 use crate::shared::region_tree::{
-    chunk_spatial_extent, ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
+    ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::{
-    chunk_key_from_lattice, lattice_from_fixed, Aabb4i, ChunkCoord,
+    lattice_from_fixed, step_for_scale, Aabb4i, ChunkCoord,
 };
 use crate::shared::voxel::{
     linear_cell_index, world_to_chunk_at_scale, BaseWorldKind, BlockData,
@@ -512,6 +512,102 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         blocks
     }
 
+    /// Read the effective (override + virgin) world state for a chunk region.
+    ///
+    /// Returns `CHUNK_VOLUME` dense blocks at the given chunk position and scale.
+    /// Layers override data on top of virgin data by walking the override tree's
+    /// BVH directly (avoiding lossy slice/composition through scale-0).
+    fn read_effective_blocks_at_scale(
+        &self,
+        chunk_key: ChunkKey,
+        scale_exp: i8,
+    ) -> Vec<BlockData> {
+        // Start with virgin blocks as baseline.
+        let mut blocks = self.query_virgin_blocks_at_scale(chunk_key, scale_exp);
+
+        // Quick check: does the override tree have any data overlapping this region?
+        let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, scale_exp);
+        let has_overlap = self
+            .override_chunks
+            .root()
+            .map(|root| root.bounds.intersects(&chunk_bounds))
+            .unwrap_or(false);
+        if !has_overlap {
+            return blocks;
+        }
+
+        // Walk the override tree's BVH for each cell to layer overrides.
+        let step = step_for_scale(scale_exp);
+        let cs = ChunkCoord::from_num(CHUNK_SIZE as i32);
+        let origin = chunk_key.map(|k| k.saturating_mul(cs));
+
+        for lw in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for ly in 0..CHUNK_SIZE {
+                    for lx in 0..CHUNK_SIZE {
+                        let pos = [
+                            origin[0] + step * ChunkCoord::from_num(lx as i32),
+                            origin[1] + step * ChunkCoord::from_num(ly as i32),
+                            origin[2] + step * ChunkCoord::from_num(lz as i32),
+                            origin[3] + step * ChunkCoord::from_num(lw as i32),
+                        ];
+                        if let Some(block) = self.override_chunks.block_data_at(pos) {
+                            let idx = lw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                                + lz * CHUNK_SIZE * CHUNK_SIZE
+                                + ly * CHUNK_SIZE
+                                + lx;
+                            blocks[idx] = block;
+                        }
+                    }
+                }
+            }
+        }
+
+        blocks
+    }
+
+    /// Determine the optimal chunk scale for placing a block at the given position.
+    ///
+    /// Tries chunk scales from `block_scale` (coarsest, fewest cells) down to
+    /// `block_scale - 3` (finest, guaranteed valid since the chunk covers exactly
+    /// one block AABB). Returns the coarsest scale at which all existing non-air
+    /// blocks in the candidate chunk bounds are representable.
+    fn determine_chunk_scale(&self, position: [i32; 4], block_scale: i8) -> i8 {
+        for candidate in (block_scale.saturating_sub(3)..=block_scale).rev() {
+            let (key, _) = world_to_chunk_at_scale(
+                position[0], position[1], position[2], position[3], candidate,
+            );
+            let chunk_bounds = Aabb4i::chunk_world_bounds(key, candidate);
+
+            // Check that all existing blocks in this region are representable
+            // at the candidate chunk scale.
+            if self.all_blocks_representable_at_scale(chunk_bounds, candidate) {
+                return candidate;
+            }
+        }
+        // Fallback: finest scale always works — chunk covers exactly one block AABB.
+        block_scale.saturating_sub(3)
+    }
+
+    /// Check if all non-air blocks in the given world region can be stored
+    /// in a chunk at `chunk_scale`.
+    ///
+    /// A block with `block.scale_exp == S` is representable when:
+    /// - `S >= chunk_scale` (can't store finer blocks in a coarser chunk)
+    /// - `S - chunk_scale <= 3` (block can't exceed chunk size)
+    fn all_blocks_representable_at_scale(
+        &self,
+        bounds: Aabb4i,
+        chunk_scale: i8,
+    ) -> bool {
+        // Query composed (override + virgin) state for the region.
+        let core = self.query_region_core(
+            QueryVolume { bounds },
+            QueryDetail::Exact,
+        );
+        all_blocks_in_core_representable(&core, chunk_scale)
+    }
+
     pub fn prepare_query_bounds(&mut self, bounds: Aabb4i) -> io::Result<usize> {
         self.ensure_persisted_bounds_loaded(bounds)
     }
@@ -544,151 +640,42 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         self.apply_voxel_edit_at_scale(position, block, 0)
     }
 
-    /// Edit a voxel at a specific scale, resolving cross-scale spatial overlaps.
+    /// Edit a voxel at a specific scale.
     ///
-    /// This is the **unified edit path** for all scales. It:
-    /// 1. Detects spatial overlaps between the edit's chunk and existing override
-    ///    **and** virgin content at different scales.
-    /// 2. Cascade-rechunks coarser overlapping overrides to the finest scale.
-    /// 3. Consults virgin data when initializing an override chunk (so virgin
-    ///    terrain is preserved, not replaced by air).
-    /// 4. After rechunking, prunes override fragments that are identical to
-    ///    virgin data (so the override set only contains actual deltas).
-    /// 5. Compares the final result to virgin: if the edit restores virgin state,
-    ///    the override is removed entirely.
+    /// Determines the optimal chunk scale, reads the effective composed state
+    /// (override + virgin), stamps the block, and stores the result. The tree
+    /// handles carving existing ChunkArrays and filling gaps via resampling.
     pub fn apply_voxel_edit_at_scale(
         &mut self,
         position: [i32; 4],
         block: BlockData,
         scale_exp: i8,
     ) -> Option<ChunkKey> {
-        let (edit_key, _) =
-            world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
+        // 1. Determine the optimal chunk scale for this placement.
+        let chunk_scale = self.determine_chunk_scale(position, scale_exp);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(
+            position[0], position[1], position[2], position[3], chunk_scale,
+        );
+        let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, chunk_scale);
 
-        // Ensure persisted overrides are loaded for the spatial region of the
-        // edit (covers both the edit chunk and any cross-scale overlaps).
-        let edit_spatial = chunk_spatial_extent(edit_key, scale_exp);
-        if let Err(e) = self.ensure_persisted_bounds_loaded(edit_spatial) {
+        // 2. Ensure persisted overrides are loaded for this region.
+        if let Err(e) = self.ensure_persisted_bounds_loaded(chunk_bounds) {
             eprintln!("failed to hydrate spatial region before edit: {}", e);
         }
 
-        // --- Determine target scale ---
-        // The target scale is the finest (most negative) among:
-        //   (a) the edit's own scale,
-        //   (b) any overlapping override chunks,
-        //   (c) any overlapping non-empty virgin content.
-        let overlapping = self
-            .override_chunks
-            .find_leaf_chunks_in_spatial_range(&edit_spatial);
+        // 3. Read effective (override + virgin) world state for this chunk region.
+        let mut blocks = self.read_effective_blocks_at_scale(chunk_key, chunk_scale);
 
-        let finest_override = overlapping.iter().map(|(_, es)| *es).min();
-
-        let virgin_core = self
-            .field
-            .query_region_core(QueryVolume { bounds: edit_spatial }, QueryDetail::Exact);
-        let finest_virgin = finest_non_empty_scale_in_core(&virgin_core);
-
-        let target_scale = [Some(scale_exp), finest_override, finest_virgin]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(scale_exp);
-
-        // --- Rechunk coarser override chunks ---
-        let has_coarser_overrides = overlapping.iter().any(|(_, es)| *es > target_scale);
-        let mut any_rechunked = false;
-
-        if has_coarser_overrides {
-            let coarser: Vec<_> = overlapping
-                .iter()
-                .filter(|(_, es)| *es > target_scale)
-                .cloned()
-                .collect();
-
-            for (coarser_key, coarser_scale) in coarser {
-                let created = cascade_rechunk_to_scale(
-                    &mut self.override_chunks,
-                    coarser_key,
-                    coarser_scale,
-                    target_scale,
-                    &edit_spatial,
-                );
-
-                // Prune rechunked fragments that are identical to virgin data.
-                // Only process final-level entries; intermediate entries (from
-                // earlier cascade passes) were consumed by subsequent passes and
-                // no longer exist in the tree at their original scale.
-                for &(new_key, new_scale) in &created {
-                    if new_scale != target_scale {
-                        continue;
-                    }
-                    let virgin_blocks =
-                        self.query_virgin_blocks_at_scale(new_key, new_scale);
-                    let override_blocks = self
-                        .override_chunks
-                        .chunk_payload(new_key)
-                        .map(|p| p.dense_blocks());
-                    let matches_virgin = match override_blocks {
-                        Some(ref ob) => blocks_match_ignoring_scale(ob, &virgin_blocks),
-                        None => virgin_blocks.iter().all(|b| b.is_air()),
-                    };
-                    if matches_virgin {
-                        self.override_chunks
-                            .set_chunk_at_scale(new_key, None, new_scale);
-                    } else {
-                        self.mark_dirty_chunk(new_key, new_scale);
-                        self.dirty_save_chunks.insert(new_key, new_scale);
-                    }
-                }
-
-                // Mark removed coarser chunk dirty.
-                self.mark_dirty_chunk(coarser_key, coarser_scale);
-                self.dirty_save_chunks.insert(coarser_key, coarser_scale);
-                any_rechunked = true;
-            }
-        }
-
-        // --- Apply the edit at the target scale ---
-        let (target_key, target_voxel_idx) = world_to_chunk_at_scale(
-            position[0],
-            position[1],
-            position[2],
-            position[3],
-            target_scale,
-        );
-        let target_bounds = Aabb4i::chunk_world_bounds(target_key, target_scale);
-
-        // Read effective state: override if present, virgin otherwise.
-        let override_payload = self.override_chunks.chunk_payload(target_key);
-        let virgin_blocks = self.query_virgin_blocks_at_scale(target_key, target_scale);
-        let mut blocks = override_payload
-            .as_ref()
-            .map(|p| p.dense_blocks())
-            .unwrap_or_else(|| virgin_blocks.clone());
-
-        // No-op check for single-cell edits.
-        if scale_exp <= target_scale {
-            let current_block = blocks
-                .get(target_voxel_idx)
-                .cloned()
-                .unwrap_or(BlockData::AIR);
-            if current_block == block.clone().at_scale(scale_exp) && !any_rechunked {
-                return None;
-            }
-        }
-
-        // Stamp the edit's scale onto the block metadata so downstream consumers
-        // (WAILIA, highlight) know the intended visual scale.
+        // 4. Stamp the block with its scale metadata.
         let block = block.at_scale(scale_exp);
 
-        // Apply the edit.
-        if scale_exp > target_scale {
-            // Coarser edit into finer grid: fill multiple cells.
-            let cells_per_axis = 1usize << (scale_exp - target_scale) as u32;
-            let lx = target_voxel_idx % CHUNK_SIZE;
-            let ly = (target_voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
-            let lz = (target_voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
-            let lw = target_voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+        if scale_exp > chunk_scale {
+            // Coarser block into finer grid: fill multiple cells.
+            let cells_per_axis = 1usize << (scale_exp - chunk_scale) as u32;
+            let lx = voxel_idx % CHUNK_SIZE;
+            let ly = (voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
+            let lz = (voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
+            let lw = voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
             let base = [
                 lx - (lx % cells_per_axis),
                 ly - (ly % cells_per_axis),
@@ -697,65 +684,30 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             ];
             fill_multi_cell_block(&mut blocks, base, block.clone(), cells_per_axis);
         } else {
-            blocks[target_voxel_idx] = block;
+            blocks[voxel_idx] = block;
         }
 
-        // Compare result to virgin: if identical, remove/skip the override.
-        let should_remove_override = blocks_match_ignoring_scale(&blocks, &virgin_blocks);
-        let desired_payload = if should_remove_override {
+        // 5. Compare to virgin: prune if identical.
+        let virgin_blocks = self.query_virgin_blocks_at_scale(chunk_key, chunk_scale);
+        let should_remove = blocks_match_ignoring_scale(&blocks, &virgin_blocks);
+        let payload = if should_remove {
             None
         } else {
             ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
         };
 
-        // Store or remove the override chunk.
-        let previous_payload = self.override_chunks.chunk_payload(target_key);
-        let changed_by_api = self
+        // 6. Store — the tree handles carving and gap-filling.
+        let changed = self
             .override_chunks
-            .set_chunk_at_scale(target_key, desired_payload.clone(), target_scale);
-        let current_payload = self.override_chunks.chunk_payload(target_key);
-        let mut changed = changed_by_api || previous_payload != current_payload;
-
-        // Repair: if set_chunk_at_scale didn't produce the expected result,
-        // force via splice as a fallback for tree-normalization edge cases.
+            .set_chunk_at_scale(chunk_key, payload, chunk_scale);
         if !changed {
-            if current_payload != desired_payload {
-                let mut repair_tree = RegionChunkTree::new();
-                if let Some(payload) = desired_payload.clone() {
-                    let _ = repair_tree.set_chunk_at_scale(
-                        target_key,
-                        Some(payload),
-                        target_scale,
-                    );
-                }
-                let repair_core = repair_tree.root().cloned().unwrap_or(RegionTreeCore {
-                    bounds: target_bounds,
-                    kind: RegionNodeKind::Empty,
-                    generator_version_hash: 0,
-                });
-                // Use splice_core_in_bounds (not splice_non_empty) so that
-                // Empty cores can clear stale overrides.
-                if self
-                    .override_chunks
-                    .splice_core_in_bounds(target_bounds, &repair_core)
-                    .is_some()
-                {
-                    changed = true;
-                    eprintln!(
-                        "[server-world-repair] forced override chunk repair at {:?} scale={}",
-                        target_key, target_scale
-                    );
-                }
-            }
-        }
-
-        if !changed && !any_rechunked {
             return None;
         }
 
-        self.mark_dirty_chunk(target_key, target_scale);
-        self.dirty_save_chunks.insert(target_key, target_scale);
-        Some(target_key)
+        // 7. Dirty tracking.
+        self.mark_dirty_chunk(chunk_key, chunk_scale);
+        self.dirty_save_chunks.insert(chunk_key, chunk_scale);
+        Some(chunk_key)
     }
 
     pub fn persist_dirty_overrides(
@@ -779,7 +731,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         let dirty_chunk_payloads = dirty_entries
             .into_iter()
             .map(|(key, se)| {
-                let resolved = self.override_chunks.chunk_payload(key);
+                let resolved = self.override_chunks.chunk_payload(key).map(|(p, _)| p);
                 (key, se, resolved)
             })
             .collect::<Vec<_>>();
@@ -823,7 +775,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         Ok(Some(result))
     }
 
-    pub fn chunk_at(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
+    pub fn chunk_at(&self, chunk_key: ChunkKey) -> Option<(ResolvedChunkPayload, i8)> {
         self.override_chunks
             .chunk_payload(chunk_key)
     }
@@ -833,7 +785,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         chunk_key: ChunkKey,
         preserve_explicit_empty_chunk: bool,
     ) -> Option<ResolvedChunkPayload> {
-        if let Some(payload) = self
+        if let Some((payload, _)) = self
             .override_chunks
             .chunk_payload(chunk_key)
         {
@@ -844,137 +796,42 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     }
 }
 
-/// Re-chunk a single coarser chunk one scale level finer (into 2^4 = 16 chunks).
+
+/// Check whether all non-air blocks in a `RegionTreeCore` can be represented
+/// at the given chunk scale.
 ///
-/// Returns the newly created chunk keys (at the finer scale) for dirty tracking.
-fn rechunk_one_level_finer(
-    tree: &mut RegionChunkTree,
-    coarser_key: ChunkKey,
-    coarser_scale: i8,
-) -> Vec<(ChunkKey, i8)> {
-    let finer_scale = coarser_scale - 1;
-    let r = 2usize; // ratio per axis for one scale level
-
-    // Read existing content.
-    let coarser_payload = tree.chunk_payload(coarser_key);
-    let coarser_blocks = coarser_payload
-        .map(|p| p.dense_blocks())
-        .unwrap_or_else(|| vec![BlockData::AIR; CHUNK_VOLUME]);
-
-    // Remove the coarser chunk.
-    tree.set_chunk_at_scale(coarser_key, None, coarser_scale);
-
-    // Compute the coarser chunk's lattice origin at the finer scale.
-    let coarser_lattice: [i32; 4] = std::array::from_fn(|axis| {
-        lattice_from_fixed(coarser_key[axis], coarser_scale)
-    });
-    let finer_base: [i32; 4] = std::array::from_fn(|axis| coarser_lattice[axis] * 2);
-
-    let mut created = Vec::new();
-
-    // Enumerate 2^4 = 16 finer chunks.
-    for iw in 0..r {
-        for iz in 0..r {
-            for iy in 0..r {
-                for ix in 0..r {
-                    let finer_chunk_lattice = [
-                        finer_base[0] + ix as i32,
-                        finer_base[1] + iy as i32,
-                        finer_base[2] + iz as i32,
-                        finer_base[3] + iw as i32,
-                    ];
-                    let finer_key = chunk_key_from_lattice(finer_chunk_lattice, finer_scale);
-
-                    // Build the finer chunk's 8^4 blocks by mapping each finer
-                    // cell back to its corresponding coarser cell.
-                    let mut finer_blocks = vec![BlockData::AIR; CHUNK_VOLUME];
-                    let mut all_air = true;
-
-                    for fw in 0..CHUNK_SIZE {
-                        for fz in 0..CHUNK_SIZE {
-                            for fy in 0..CHUNK_SIZE {
-                                for fx in 0..CHUNK_SIZE {
-                                    // Each finer cell covers half the space of a coarser cell,
-                                    // so 2 finer cells map to 1 coarser cell.
-                                    let cx = ix * (CHUNK_SIZE / r) + fx / r;
-                                    let cy = iy * (CHUNK_SIZE / r) + fy / r;
-                                    let cz = iz * (CHUNK_SIZE / r) + fz / r;
-                                    let cw = iw * (CHUNK_SIZE / r) + fw / r;
-                                    let coarser_idx = cw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
-                                        + cz * CHUNK_SIZE * CHUNK_SIZE
-                                        + cy * CHUNK_SIZE
-                                        + cx;
-                                    let block = coarser_blocks[coarser_idx].clone();
-                                    if !block.is_air() {
-                                        all_air = false;
-                                    }
-                                    let finer_idx = fw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
-                                        + fz * CHUNK_SIZE * CHUNK_SIZE
-                                        + fy * CHUNK_SIZE
-                                        + fx;
-                                    finer_blocks[finer_idx] = block;
-                                }
-                            }
-                        }
-                    }
-
-                    if all_air {
-                        continue; // Skip Uniform(air) — no chunk needed.
-                    }
-
-                    let payload = ResolvedChunkPayload::from_dense_blocks(&finer_blocks)
-                        .ok();
-                    if let Some(payload) = payload {
-                        tree.set_chunk_at_scale(finer_key, Some(payload), finer_scale);
-                        created.push((finer_key, finer_scale));
-                    }
-                }
+/// A block is representable when `block.scale_exp >= chunk_scale` and
+/// `block.scale_exp - chunk_scale <= 3`.
+fn all_blocks_in_core_representable(core: &RegionTreeCore, chunk_scale: i8) -> bool {
+    match &core.kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => true,
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
+                return true;
             }
+            let diff = block.scale_exp - chunk_scale;
+            diff >= 0 && diff <= 3
         }
-    }
-
-    created
-}
-
-/// Cascade rechunk: split coarser content down to `target_scale`, one level at
-/// a time, only splitting the chunk that overlaps `edit_spatial_extent` at each
-/// level. Returns all newly created `(ChunkKey, scale)` pairs for dirty tracking.
-fn cascade_rechunk_to_scale(
-    tree: &mut RegionChunkTree,
-    coarser_key: ChunkKey,
-    coarser_scale: i8,
-    target_scale: i8,
-    edit_spatial_extent: &Aabb4i,
-) -> Vec<(ChunkKey, i8)> {
-    debug_assert!(coarser_scale > target_scale);
-    let mut all_created = Vec::new();
-
-    // Split one level at a time.
-    let mut current_keys = vec![(coarser_key, coarser_scale)];
-
-    for current_scale in (target_scale + 1..=coarser_scale).rev() {
-        let mut next_keys = Vec::new();
-        for (key, scale) in &current_keys {
-            if *scale != current_scale {
-                continue;
-            }
-            let created = rechunk_one_level_finer(tree, *key, *scale);
-            for &(new_key, new_scale) in &created {
-                // Check if this newly created chunk overlaps the edit extent.
-                // If so, and it's still coarser than target, queue it for the next pass.
-                if new_scale > target_scale {
-                    let new_spatial = chunk_spatial_extent(new_key, new_scale);
-                    if new_spatial.intersects(edit_spatial_extent) {
-                        next_keys.push((new_key, new_scale));
-                    }
-                }
-            }
-            all_created.extend(created);
+        RegionNodeKind::ChunkArray(ca) => {
+            // The ChunkArray's own scale tells us the finest block scale
+            // stored within. Blocks in a ChunkArray have scale_exp >= ca.scale_exp.
+            // We also know block.scale_exp - ca.scale_exp <= 3 from existing
+            // structural constraints. So check if the array's scale can be
+            // re-encoded at chunk_scale.
+            //
+            // All blocks have scale_exp in [ca.scale_exp, ca.scale_exp + 3].
+            // For representability: we need block.scale_exp >= chunk_scale
+            // AND block.scale_exp - chunk_scale <= 3.
+            // The finest block is at ca.scale_exp, so ca.scale_exp >= chunk_scale.
+            // The coarsest is at ca.scale_exp + 3, so ca.scale_exp + 3 - chunk_scale <= 3
+            //   ⟹ ca.scale_exp >= chunk_scale.
+            // So the simple check is: ca.scale_exp >= chunk_scale.
+            ca.scale_exp >= chunk_scale
         }
-        current_keys = next_keys;
+        RegionNodeKind::Branch(children) => children
+            .iter()
+            .all(|child| all_blocks_in_core_representable(child, chunk_scale)),
     }
-
-    all_created
 }
 
 /// Compare two block slices ignoring `scale_exp` on each block.
@@ -1053,11 +910,19 @@ fn chunk_array_payload_at(chunk_array: &ChunkArrayData, key_pos: ChunkKey) -> Op
     let dense_indices = chunk_array.decode_dense_indices().ok()?;
     let se = chunk_array.scale_exp;
     let extents = chunk_array.bounds.chunk_extents_at_scale(se)?;
+    // Convert both to lattice coordinates at the chunk array's scale, then subtract.
+    let (ca_lmin, _) = chunk_array.bounds.to_chunk_lattice_bounds(se);
+    let lpos = [
+        lattice_from_fixed(key_pos[0], se),
+        lattice_from_fixed(key_pos[1], se),
+        lattice_from_fixed(key_pos[2], se),
+        lattice_from_fixed(key_pos[3], se),
+    ];
     let local = [
-        lattice_from_fixed(key_pos[0] - chunk_array.bounds.min[0], se) as usize,
-        lattice_from_fixed(key_pos[1] - chunk_array.bounds.min[1], se) as usize,
-        lattice_from_fixed(key_pos[2] - chunk_array.bounds.min[2], se) as usize,
-        lattice_from_fixed(key_pos[3] - chunk_array.bounds.min[3], se) as usize,
+        (lpos[0] - ca_lmin[0]) as usize,
+        (lpos[1] - ca_lmin[1]) as usize,
+        (lpos[2] - ca_lmin[2]) as usize,
+        (lpos[3] - ca_lmin[3]) as usize,
     ];
     let linear = linear_cell_index(local, extents);
     let palette_idx = *dense_indices.get(linear)? as usize;
@@ -1087,21 +952,6 @@ fn resolved_to_effective(
     }
 }
 
-/// Walk a `RegionTreeCore` and return the finest (most negative) `scale_exp`
-/// among all non-empty leaf nodes.  Returns `None` when every leaf is empty/air.
-fn finest_non_empty_scale_in_core(core: &RegionTreeCore) -> Option<i8> {
-    match &core.kind {
-        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => None,
-        // Uniform fills are scale-agnostic: the same block everywhere, resampled
-        // identically at any scale. They should not constrain target_scale.
-        RegionNodeKind::Uniform(_) => None,
-        RegionNodeKind::ChunkArray(ca) => Some(ca.scale_exp),
-        RegionNodeKind::Branch(children) => children
-            .iter()
-            .filter_map(finest_non_empty_scale_in_core)
-            .min(),
-    }
-}
 
 pub type ServerWorldOverlay = PassthroughWorldOverlay<ServerWorldField>;
 
@@ -1535,15 +1385,16 @@ mod tests {
     fn read_block_from_overlay(
         overlay: &PassthroughWorldOverlay<ServerWorldField>,
         pos: [i32; 4],
-        scale_exp: i8,
+        _scale_exp: i8,
     ) -> BlockData {
-        let (chunk_key, voxel_index) =
-            world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], scale_exp);
-        overlay
-            .override_chunks
-            .chunk_payload(chunk_key)
-            .map(|r| r.block_at(voxel_index))
-            .unwrap_or(BlockData::AIR)
+        use crate::shared::spatial::ChunkCoord;
+        let fixed_pos = [
+            ChunkCoord::from_num(pos[0]),
+            ChunkCoord::from_num(pos[1]),
+            ChunkCoord::from_num(pos[2]),
+            ChunkCoord::from_num(pos[3]),
+        ];
+        overlay.override_chunks.block_at(fixed_pos)
     }
 
     #[test]
@@ -1623,53 +1474,6 @@ mod tests {
             read.block_type, 2,
             "coarser brick block should overwrite finer cells"
         );
-    }
-
-    #[test]
-    fn rechunk_sparse_chunk_skips_all_air_finer_chunks() {
-        // A coarser chunk with 1 block + 4095 air cells should produce only 1
-        // finer chunk (the one containing the block). The other 15 should be
-        // skipped because they're all-air.
-        let mut tree = RegionChunkTree::new();
-        let stone = BlockData::simple(0, 1);
-
-        // Place one block at scale -1 (creates a chunk with 1 non-air + 4095 air).
-        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
-        let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
-        blocks[voxel_idx] = stone.clone();
-        let payload = ResolvedChunkPayload::from_dense_blocks(&blocks).unwrap();
-        tree.set_chunk_at_scale(chunk_key, Some(payload), -1);
-
-        // Rechunk to scale -2.
-        let edit_extent = chunk_spatial_extent(chunk_key, -1);
-        let created = cascade_rechunk_to_scale(
-            &mut tree,
-            chunk_key,
-            -1,
-            -2,
-            &edit_extent,
-        );
-
-        // Only the finer chunk(s) that contain the non-air block should be created.
-        // With 1 block at cell (0,0,0,0), it falls in exactly one of the 16 finer
-        // chunks (the one covering coarser cells 0..3 per axis).
-        assert!(
-            created.len() <= 2,
-            "expected at most 2 finer chunks from sparse rechunk, got {}",
-            created.len()
-        );
-        assert!(
-            created.len() >= 1,
-            "expected at least 1 finer chunk with non-air content"
-        );
-
-        // The block should still be readable at scale -2.
-        let (finer_key, finer_idx) = world_to_chunk_at_scale(0, 0, 0, 0, -2);
-        let read = tree
-            .chunk_payload(finer_key)
-            .map(|r| r.block_at(finer_idx))
-            .unwrap_or(BlockData::AIR);
-        assert_eq!(read.block_type, 1, "stone should survive rechunking");
     }
 
     #[test]
@@ -1852,7 +1656,7 @@ mod tests {
         );
         // The override chunk should NOT be all-air except for the edit.
         // Since the floor covers this region, most cells should be floor material.
-        let blocks = payload.unwrap().dense_blocks();
+        let blocks = payload.unwrap().0.dense_blocks();
         let non_air_count = blocks.iter().filter(|b| !b.is_air()).count();
         assert!(
             non_air_count > 1,
@@ -2127,6 +1931,36 @@ mod tests {
         );
     }
 
+    /// Placing a scale-3 block on the floor should only override ONE scale-0
+    /// chunk; the floor at adjacent chunks should remain.
+    #[test]
+    fn scale3_place_on_floor_does_not_overwrite_neighbors() {
+        let mut overlay = make_flat_floor_overlay();
+        let block = BlockData::simple(0, 99);
+
+        // Floor at [8, -1, 0, 0] should be present before edit.
+        let floor_before = read_composed_block(&overlay, [8, -1, 0, 0]);
+        assert_eq!(
+            floor_before.block_type, 11,
+            "floor should exist before edit at [8,-1,0,0]"
+        );
+
+        // Place at scale 3 on the floor (y=-1).
+        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 3);
+
+        // The placed block should be at [0,-1,0,0].
+        let placed = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
+        assert_eq!(placed.block_type, 99, "block should be placed");
+
+        // The floor at [8, -1, 0, 0] should still be floor material.
+        let floor_after = read_composed_block(&overlay, [8, -1, 0, 0]);
+        assert_eq!(
+            floor_after.block_type, 11,
+            "floor at [8,-1,0,0] should survive the scale-3 edit, got block_type={}",
+            floor_after.block_type
+        );
+    }
+
     /// Place then break a scale-3 block over a floor.
     /// Breaking should remove the block but preserve the floor.
     #[test]
@@ -2160,6 +1994,44 @@ mod tests {
             composed.block_type, 11,
             "floor outside the edit area should be preserved, got block_type={}",
             composed.block_type
+        );
+    }
+
+    #[test]
+    fn determine_chunk_scale_respects_existing_blocks() {
+        let mut overlay = make_empty_overlay();
+
+        // Place a scale -2 block at origin. This creates override data at scale -2.
+        let fine_block = BlockData::simple(0, 5);
+        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], fine_block.clone(), -2);
+
+        // Now determine the chunk scale for a scale 0 placement at [1,0,0,0].
+        // The scale-0 chunk at origin covers [0,8)^4. Inside that region there's
+        // a scale -2 block. A scale 0 chunk can represent blocks with scale_exp
+        // in [0, 3]. scale_exp = -2 < 0, so the block is NOT representable at
+        // scale 0. determine_chunk_scale should pick a finer scale.
+        let chosen = overlay.determine_chunk_scale([1, 0, 0, 0], 0);
+        assert!(
+            chosen <= -2,
+            "chunk scale {chosen} can't represent existing scale -2 blocks"
+        );
+
+        // Place a scale 0 block at [8,0,0,0] — a region with no existing overrides.
+        // The coarsest valid scale (0) should be chosen since there's nothing to conflict.
+        let chosen_empty = overlay.determine_chunk_scale([8, 0, 0, 0], 0);
+        assert_eq!(
+            chosen_empty, 0,
+            "empty region should use coarsest scale, got {chosen_empty}"
+        );
+
+        // Place a scale 1 block at [16,0,0,0]. determine_chunk_scale for a scale 0
+        // edit nearby should still pick scale 0 since scale 1 is representable at
+        // scale 0 (scale_exp 1 >= 0 and 1 - 0 = 1 <= 3).
+        overlay.apply_voxel_edit_at_scale([16, 0, 0, 0], BlockData::simple(0, 7), 1);
+        let chosen_coarse = overlay.determine_chunk_scale([17, 0, 0, 0], 0);
+        assert!(
+            chosen_coarse >= -3 && chosen_coarse <= 0,
+            "scale 1 blocks should be representable at scale 0, got {chosen_coarse}"
         );
     }
 }

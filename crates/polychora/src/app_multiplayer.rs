@@ -995,7 +995,7 @@ impl App {
         }
 
         let world_dense =
-            dense_blocks_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk));
+            dense_blocks_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk).map(|(p, _)| p));
         let render_bounds = self
             .multiplayer_last_world_request_bounds
             .unwrap_or_else(|| Aabb4i::chunk_world_bounds(chunk, 0));
@@ -1426,7 +1426,7 @@ impl App {
             .map(|_| authoritative_bounds.chunk_key_from_world_bounds());
         let sync_diag_enabled = std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some();
         let world_before =
-            patch_single_chunk_key.and_then(|key| self.scene.debug_world_tree_chunk_payload(key));
+            patch_single_chunk_key.and_then(|key| self.scene.debug_world_tree_chunk_payload(key).map(|(p, _)| p));
         let patch_payload = patch_single_chunk_key.and_then(|key| {
             collect_non_empty_chunks_from_core_in_bounds(&patch, Aabb4i::chunk_world_bounds(key, 0))
                 .into_iter()
@@ -1507,7 +1507,7 @@ impl App {
         );
         if sync_diag_enabled {
             if let Some(key) = patch_single_chunk_key {
-                let world_after = self.scene.debug_world_tree_chunk_payload(key);
+                let world_after = self.scene.debug_world_tree_chunk_payload(key).map(|(p, _)| p);
                 let render_cache_payloads = self.scene.debug_render_bvh_cache_chunk_payloads(key);
                 let frame_payloads: Vec<ResolvedChunkPayload> = self
                     .scene
