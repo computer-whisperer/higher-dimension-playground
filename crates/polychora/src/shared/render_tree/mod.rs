@@ -1,8 +1,7 @@
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
-    coarsest_aligned_scale, collect_non_empty_chunks_from_core_in_bounds,
-    resample_chunk_array_to_bounds, validate_region_core_world_space_non_overlapping, ChunkKey,
-    RegionNodeKind, RegionTreeCore,
+    collect_non_empty_chunks_from_core_in_bounds,
+    validate_region_core_world_space_non_overlapping, ChunkKey, RegionNodeKind, RegionTreeCore,
 };
 use crate::shared::spatial::{Aabb4i, ChunkCoord, fixed_from_lattice, lattice_from_fixed};
 use crate::shared::voxel::BlockData;
@@ -862,10 +861,24 @@ fn build_leaf_outside_bounds_pieces(
             }
         }
         RenderLeafKind::VoxelChunkArray(chunk_array) => {
+            let se = chunk_array.scale_exp;
             let source_indices = chunk_array
                 .decode_dense_indices()
                 .map_err(|error| format!("decode chunk-array leaf failed: {error:?}"))?;
             for piece_bounds in split_bounds {
+                // Verify piece bounds align to the chunk grid at this scale.
+                // Misaligned bounds (e.g. [1,8) at scale=0) cannot be correctly
+                // encoded for the GPU — the chunk world-space origins would fall
+                // outside the piece bounds, producing empty entries. Signal an
+                // error so the caller falls back to a full rebuild from the
+                // authoritative render region cache.
+                let (lmin, lmax) = piece_bounds.to_chunk_lattice_bounds(se);
+                if Aabb4i::from_lattice_bounds(lmin, lmax, se) != piece_bounds {
+                    return Err(format!(
+                        "remnant bounds {:?}->{:?} misaligned at scale_exp={}, needs full rebuild",
+                        piece_bounds.min, piece_bounds.max, se
+                    ));
+                }
                 if let Some(piece_kind) =
                     slice_chunk_array_kind_to_bounds(chunk_array, &source_indices, piece_bounds)?
                 {
@@ -873,61 +886,11 @@ fn build_leaf_outside_bounds_pieces(
                         bounds: piece_bounds,
                         kind: piece_kind,
                     });
-                } else {
-                    // Piece bounds don't align to source scale — resample at
-                    // the coarsest aligned finer scale, then collect leaves
-                    // from the resampled region tree node.
-                    let aligned_scale =
-                        coarsest_aligned_scale(piece_bounds, chunk_array.scale_exp);
-                    let resampled = resample_chunk_array_to_bounds(
-                        chunk_array,
-                        piece_bounds,
-                        aligned_scale,
-                        0,
-                    );
-                    collect_render_leaves_from_region_core(&resampled, piece_bounds, &mut out);
                 }
             }
         }
     }
     Ok(out)
-}
-
-/// Convert a `RegionTreeCore` (e.g. from resample) into `RenderLeaf`s.
-fn collect_render_leaves_from_region_core(
-    core: &RegionTreeCore,
-    bounds: Aabb4i,
-    out: &mut Vec<RenderLeaf>,
-) {
-    if !core.bounds.intersects(&bounds) {
-        return;
-    }
-    match &core.kind {
-        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
-        RegionNodeKind::Uniform(block) => {
-            if !block.is_air() {
-                let intersection = intersect_bounds(core.bounds, bounds)
-                    .unwrap_or(core.bounds);
-                out.push(RenderLeaf {
-                    bounds: intersection,
-                    kind: RenderLeafKind::Uniform(block.clone()),
-                });
-            }
-        }
-        RegionNodeKind::ChunkArray(chunk_array) => {
-            let intersection = intersect_bounds(core.bounds, bounds)
-                .unwrap_or(core.bounds);
-            out.push(RenderLeaf {
-                bounds: intersection,
-                kind: RenderLeafKind::VoxelChunkArray(chunk_array.clone()),
-            });
-        }
-        RegionNodeKind::Branch(children) => {
-            for child in children {
-                collect_render_leaves_from_region_core(child, bounds, out);
-            }
-        }
-    }
 }
 
 fn split_bounds_excluding_bounds(bounds: Aabb4i, excluded_bounds: Aabb4i) -> Vec<Aabb4i> {
