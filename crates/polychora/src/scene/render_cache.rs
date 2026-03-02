@@ -1019,45 +1019,31 @@ fn walk_gpu_bvh_node(fd: &VoxelFrameData, node_idx: u32, depth: usize, ctx: &mut
 
         // Validate leaf header lattice bounds vs node world bounds.
         // Leaf stores inclusive lattice coords; node stores half-open world floats.
-        // Relationship: world_min = lat_min * cell_size, world_max = (lat_max+1) * cell_size
-        // where cell_size = CHUNK_SIZE * 2^scale_exp.
-        // Derive cell_size from the data, then verify all axes are consistent.
+        // scale_exp is packed into bits 24-31 of uniform_orientation.
+        // cell_size = CHUNK_SIZE * 2^scale_exp.
+        // Lattice coords are: lat_min[i] = floor(world_min[i] / cell_size)
+        //                     lat_max[i] = floor(world_max[i] / cell_size) - 1
         let leaf_min = lh.min_chunk_coord;
         let leaf_max = lh.max_chunk_coord;
         let node_min = node.world_min;
         let node_max = node.world_max;
-        let mut cell_size: Option<f32> = None;
+        let scale_exp = (lh.uniform_orientation >> 24) as u8 as i8;
+        let cell_size = (CHUNK_SIZE as f32) * (2.0f32).powi(scale_exp as i32);
         let mut bounds_ok = true;
         for i in 0..4 {
-            let lat_cells = (leaf_max[i] - leaf_min[i] + 1) as f32;
-            let world_ext = node_max[i] - node_min[i];
-            if lat_cells > 0.0 && world_ext > 0.0 {
-                let cs = world_ext / lat_cells;
-                if let Some(prev) = cell_size {
-                    if (cs - prev).abs() > 0.5 {
-                        bounds_ok = false;
-                    }
-                } else {
-                    cell_size = Some(cs);
-                }
-            }
-        }
-        if let Some(cs) = cell_size {
-            for i in 0..4 {
-                let expected_min = leaf_min[i] as f32 * cs;
-                let expected_max = (leaf_max[i] + 1) as f32 * cs;
-                if (expected_min - node_min[i]).abs() > 1.0
-                    || (expected_max - node_max[i]).abs() > 1.0
-                {
-                    bounds_ok = false;
-                    break;
-                }
+            let expected_min = (node_min[i] / cell_size).floor() as i32;
+            let expected_max = (node_max[i] / cell_size).floor() as i32 - 1;
+            if leaf_min[i] != expected_min || leaf_max[i] != expected_max {
+                bounds_ok = false;
+                break;
             }
         }
         if !bounds_ok {
+            let expected_min: [i32; 4] = std::array::from_fn(|i| (node_min[i] / cell_size).floor() as i32);
+            let expected_max: [i32; 4] = std::array::from_fn(|i| (node_max[i] / cell_size).floor() as i32 - 1);
             ctx.errors.push(format!(
-                "gpu node {} bounds {:?}->{:?} diverges from leaf {} coords {:?}->{:?} (cell_size={:?})",
-                node_idx, node_min, node_max, leaf_idx, leaf_min, leaf_max, cell_size,
+                "gpu node {} bounds {:?}->{:?} diverges from leaf {} coords {:?}->{:?} (scale_exp={}, cell_size={}, expected {:?}->{:?})",
+                node_idx, node_min, node_max, leaf_idx, leaf_min, leaf_max, scale_exp, cell_size, expected_min, expected_max,
             ));
         }
     } else {
