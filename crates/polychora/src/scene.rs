@@ -11,7 +11,7 @@ use polychora::shared::region_tree::{
     RegionChunkTree, RegionNodeKind, RegionTreeCore, TreeIntegrityReport,
 };
 use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
-use polychora::shared::spatial::{Aabb4i, ChunkCoord};
+use polychora::shared::spatial::{step_for_scale, Aabb4i, ChunkCoord};
 use polychora::shared::voxel::{world_to_chunk_at_scale, BlockData};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -150,34 +150,32 @@ pub struct Scene {
     voxel_frame_data: VoxelFrameData,
 }
 
-#[derive(Clone)]
-struct VoxelRayHit {
-    solid_voxel: [i32; 4],
-    last_empty_voxel: Option<[i32; 4]>,
-    hit_block: BlockData,
-}
-
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScaleAwareBlockTarget {
-    /// Block-aligned world origin (each component is a multiple of 2^scale_exp).
-    pub origin: [i32; 4],
+    /// Block-aligned world origin as fixed-point coordinates.
+    pub origin: [ChunkCoord; 4],
     /// Scale exponent. Block occupies 2^scale_exp world units per axis.
     pub scale_exp: i8,
 }
 
 impl ScaleAwareBlockTarget {
-    /// Side length in world units: `2^scale_exp` (clamped to >= 1 for scale_exp >= 0).
-    pub fn size(&self) -> i32 {
-        1i32 << self.scale_exp.max(0)
+    /// Side length as a fixed-point value: `2^scale_exp`.
+    pub fn size(&self) -> ChunkCoord {
+        step_for_scale(self.scale_exp)
+    }
+
+    /// Integer origin for legacy code paths.
+    pub fn origin_i32(&self) -> [i32; 4] {
+        self.origin.map(|c| c.to_num::<i32>())
     }
 
     pub fn world_min(&self) -> [f32; 4] {
-        std::array::from_fn(|i| self.origin[i] as f32)
+        self.origin.map(|c| c.to_num::<f32>())
     }
 
     pub fn world_max(&self) -> [f32; 4] {
-        let s = self.size() as f32;
-        std::array::from_fn(|i| self.origin[i] as f32 + s)
+        let s = self.size();
+        std::array::from_fn(|i| (self.origin[i] + s).to_num::<f32>())
     }
 }
 
@@ -186,6 +184,10 @@ pub struct BlockEditTargets {
     pub hit: Option<ScaleAwareBlockTarget>,
     pub hit_block: Option<BlockData>,
     pub place: Option<ScaleAwareBlockTarget>,
+    /// Which axis (0..3) the ray crossed to enter the hit block.
+    pub face_axis: u8,
+    /// -1 = entered through the min face, +1 = entered through the max face.
+    pub face_sign: i8,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -809,20 +811,15 @@ mod tests {
         let targets =
             scene.block_edit_targets([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0, 0);
 
-        assert_eq!(
-            targets,
-            BlockEditTargets {
-                hit: Some(ScaleAwareBlockTarget {
-                    origin: [0, 0, 0, 0],
-                    scale_exp: 0,
-                }),
-                hit_block: Some(BlockData::simple(0, 7)),
-                place: Some(ScaleAwareBlockTarget {
-                    origin: [0, 0, -1, 0],
-                    scale_exp: 0,
-                }),
-            }
-        );
+        let cc = |v: i32| ChunkCoord::from_num(v);
+        let hit = targets.hit.unwrap();
+        assert_eq!(hit.origin, [cc(0), cc(0), cc(0), cc(0)]);
+        assert_eq!(hit.scale_exp, 0);
+        assert_eq!(targets.hit_block, Some(BlockData::simple(0, 7)));
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.origin, [cc(0), cc(0), cc(-1), cc(0)]);
+        assert_eq!(place.scale_exp, 0);
     }
 
     #[test]
@@ -849,15 +846,16 @@ mod tests {
             0, // placement scale 0
         );
 
+        let cc = |v: i32| ChunkCoord::from_num(v);
         let hit = targets.hit.unwrap();
-        assert_eq!(hit.origin, [0, 0, 0, 0]);
+        assert_eq!(hit.origin, [cc(0), cc(0), cc(0), cc(0)]);
         assert_eq!(hit.scale_exp, 1);
-        assert_eq!(hit.size(), 2);
+        assert_eq!(hit.size(), step_for_scale(1));
 
         let place = targets.place.unwrap();
         assert_eq!(place.scale_exp, 0);
         // Should be placed at z=-1, adjacent to the 2-unit block's -Z face
-        assert_eq!(place.origin[2], -1);
+        assert_eq!(place.origin[2], cc(-1));
     }
 
     #[test]
@@ -873,15 +871,16 @@ mod tests {
             1, // placement scale 1
         );
 
+        let cc = |v: i32| ChunkCoord::from_num(v);
         let hit = targets.hit.unwrap();
-        assert_eq!(hit.origin, [0, 0, 0, 0]);
+        assert_eq!(hit.origin, [cc(0), cc(0), cc(0), cc(0)]);
         assert_eq!(hit.scale_exp, 0);
 
         let place = targets.place.unwrap();
         assert_eq!(place.scale_exp, 1);
         // Should be placed adjacent to the -Z face, snapped to 2-unit grid
-        assert_eq!(place.origin[2], -2);
-        assert_eq!(place.size(), 2);
+        assert_eq!(place.origin[2], cc(-2));
+        assert_eq!(place.size(), step_for_scale(1));
     }
 
     #[test]
@@ -906,19 +905,21 @@ mod tests {
             0,
         );
 
+        let cc = |v: i32| ChunkCoord::from_num(v);
         let hit = targets.hit.unwrap();
-        assert_eq!(hit.origin, [0, 0, 0, 0]);
+        assert_eq!(hit.origin, [cc(0), cc(0), cc(0), cc(0)]);
         assert_eq!(hit.scale_exp, 2);
-        assert_eq!(hit.size(), 4);
+        assert_eq!(hit.size(), step_for_scale(2));
     }
 
     #[test]
     fn scale_aware_block_target_helpers() {
+        let cc = |v: i32| ChunkCoord::from_num(v);
         let target = ScaleAwareBlockTarget {
-            origin: [2, 4, -6, 0],
+            origin: [cc(2), cc(4), cc(-6), cc(0)],
             scale_exp: 1,
         };
-        assert_eq!(target.size(), 2);
+        assert_eq!(target.size(), step_for_scale(1));
         assert_eq!(target.world_min(), [2.0, 4.0, -6.0, 0.0]);
         assert_eq!(target.world_max(), [4.0, 6.0, -4.0, 2.0]);
     }
@@ -1534,7 +1535,7 @@ mod tests {
                 targets.hit.is_some(),
                 "look-ray at x={x} should hit the floor, got None"
             );
-            let hit = targets.hit.unwrap().origin;
+            let hit = targets.hit.unwrap().origin_i32();
             assert_eq!(
                 hit[1], -1,
                 "look-ray at x={x} should hit at y=-1, got y={}",
@@ -1621,7 +1622,7 @@ mod tests {
             targets.hit.is_some(),
             "look-ray should hit floor"
         );
-        assert_eq!(targets.hit.unwrap().origin[1], -1, "look-ray should hit at y=-1");
+        assert_eq!(targets.hit.unwrap().origin_i32()[1], -1, "look-ray should hit at y=-1");
     }
 
     fn dump_tree_structure(core: &RegionTreeCore, indent: usize) -> String {

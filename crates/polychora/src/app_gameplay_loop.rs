@@ -525,7 +525,7 @@ impl App {
                     );
                     if let Some(picked) = pick_targets.hit_block {
                         if !picked.is_air() {
-                            let origin = pick_targets.hit.unwrap().origin;
+                            let origin = pick_targets.hit.unwrap().origin_i32();
                             self.hotbar_slots[self.hotbar_selected_index] =
                                 Some(polychora::shared::protocol::ItemStack::block(
                                     picked.namespace,
@@ -551,26 +551,26 @@ impl App {
                     );
                     if remove_requested {
                         if let Some(hit) = &edit_targets.hit {
-                            let [x, y, z, w] = hit.origin;
+                            let [x, y, z, w] = hit.origin_i32();
                             let air = polychora::shared::voxel::BlockData::AIR
                                 .at_scale(hit.scale_exp);
                             eprintln!("Removed block at ({x}, {y}, {z}, {w}) scale={}", hit.scale_exp);
-                            self.play_spatial_sound_voxel(SoundEffect::Break, hit.origin, 1.0);
-                            self.send_multiplayer_voxel_update(now, hit.origin, air);
+                            self.play_spatial_sound_voxel(SoundEffect::Break, hit.origin_i32(), 1.0);
+                            self.send_multiplayer_voxel_update(now, hit.origin_i32(), air);
                         }
                     } else if place_requested {
                         if let Some(place) = &edit_targets.place {
-                            let [x, y, z, w] = place.origin;
+                            let [x, y, z, w] = place.origin_i32();
                             eprintln!(
                                 "Placed voxel {} ({}) at ({x}, {y}, {z}, {w}) scale={}",
                                 self.selected_block.block_type,
                                 self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
                                 place.scale_exp,
                             );
-                            self.play_spatial_sound_voxel(SoundEffect::Place, place.origin, 1.0);
+                            self.play_spatial_sound_voxel(SoundEffect::Place, place.origin_i32(), 1.0);
                             self.send_multiplayer_voxel_update(
                                 now,
-                                place.origin,
+                                place.origin_i32(),
                                 self.selected_block.clone(),
                             );
                         }
@@ -652,35 +652,11 @@ impl App {
         let mut hud_target_hit_voxel = None;
         let mut hud_target_hit_face = None;
         if let Some(targets) = &targets {
-            hud_target_hit_voxel = targets.hit.map(|h| h.origin);
-            if let (Some(hit), Some(place)) = (&targets.hit, &targets.place) {
-                // Scale-aware face detection: exactly one axis where blocks are
-                // adjacent (place_origin == hit_max or place_max == hit_min)
-                let hit_size = hit.size();
-                let place_size = place.size();
-                let mut face_axis = None;
-                let mut face_sign = 0i32;
-                for axis in 0..4 {
-                    let delta = place.origin[axis] - hit.origin[axis];
-                    if delta == hit_size {
-                        // Positive face
-                        if face_axis.is_none() {
-                            face_axis = Some(axis);
-                            face_sign = 1;
-                        }
-                    } else if delta == -place_size {
-                        // Negative face
-                        if face_axis.is_none() {
-                            face_axis = Some(axis);
-                            face_sign = -1;
-                        }
-                    }
-                }
-                if let Some(axis) = face_axis {
-                    let mut face = [0i32; 4];
-                    face[axis] = face_sign;
-                    hud_target_hit_face = Some(face);
-                }
+            hud_target_hit_voxel = targets.hit.map(|h| h.origin_i32());
+            if targets.face_sign != 0 && targets.hit.is_some() {
+                let mut face = [0i32; 4];
+                face[targets.face_axis as usize] = targets.face_sign as i32;
+                hud_target_hit_face = Some(face);
             }
         }
         let sample_ray_node_hits = if !self.menu_open && self.mouse_grabbed {
@@ -728,16 +704,17 @@ impl App {
                 if block.is_air() {
                     return None;
                 }
-                let half = hit.size() as f32 * 0.5;
+                let half = hit.size().to_num::<f32>() * 0.5;
+                let wmin = hit.world_min();
                 let block_center = [
-                    hit.origin[0] as f32 + half,
-                    hit.origin[1] as f32 + half,
-                    hit.origin[2] as f32 + half,
-                    hit.origin[3] as f32 + half,
+                    wmin[0] + half,
+                    wmin[1] + half,
+                    wmin[2] + half,
+                    wmin[3] + half,
                 ];
                 let block_dist = distance4(self.camera.position, block_center);
                 Some((WailaTarget::Block {
-                    coords: hit.origin,
+                    coords: hit.origin_i32(),
                     block,
                 }, block_dist))
             });
@@ -873,11 +850,11 @@ impl App {
         if backend == RenderBackend::VoxelTraversal && highlight_mode.uses_faces() {
             if let Some(targets) = &targets {
                 if let Some(hit) = &targets.hit {
-                    vte_highlight_hit_voxel = Some(hit.origin);
+                    vte_highlight_hit_voxel = Some(hit.origin_i32());
                     vte_highlight_hit_scale = hit.scale_exp.max(0) as u32;
                 }
                 if let Some(place) = &targets.place {
-                    vte_highlight_place_voxel = Some(place.origin);
+                    vte_highlight_place_voxel = Some(place.origin_i32());
                     vte_highlight_place_scale = place.scale_exp.max(0) as u32;
                 }
             }

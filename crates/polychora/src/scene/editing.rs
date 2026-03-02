@@ -1,12 +1,14 @@
 use super::*;
+use polychora::shared::region_tree::BvhRayHit;
 
 impl Scene {
-    fn trace_first_solid_voxel(
+    /// Cast a ray into the world tree, returning the first solid block hit.
+    fn raycast_solid(
         &self,
         ray_origin: [f32; 4],
         ray_direction: [f32; 4],
         max_distance: f32,
-    ) -> Option<VoxelRayHit> {
+    ) -> Option<BvhRayHit> {
         let dir_len_sq = ray_direction[0] * ray_direction[0]
             + ray_direction[1] * ray_direction[1]
             + ray_direction[2] * ray_direction[2]
@@ -33,43 +35,7 @@ impl Scene {
         let fp_dir = dir.map(ChunkCoord::from_num);
         let fp_max_t = ChunkCoord::from_num(max_distance);
 
-        let hit = self.world_tree.raycast(fp_origin, fp_dir, fp_max_t)?;
-
-        let solid_voxel: [i32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
-
-        // Compute last_empty_voxel using the block's AABB to find the true
-        // entry face.  The BVH's `hit.t` can be clamped to an interior march
-        // position for multi-cell blocks (scale_exp > chunk scale), making the
-        // old step-back-from-t approach land inside the block.  Recomputing the
-        // AABB entry time from the block bounds avoids this.
-        let block_min: [f32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<f32>());
-        let block_max: [f32; 4] = std::array::from_fn(|i| hit.bounds.max[i].to_num::<f32>());
-        let mut t_entry = f32::NEG_INFINITY;
-        for axis in 0..4 {
-            if dir[axis].abs() > 1e-10 {
-                let t_near = if dir[axis] > 0.0 {
-                    (block_min[axis] - origin[axis]) / dir[axis]
-                } else {
-                    (block_max[axis] - origin[axis]) / dir[axis]
-                };
-                t_entry = t_entry.max(t_near);
-            }
-        }
-        let t_entry = t_entry.max(0.0);
-        let last_empty_voxel = if t_entry > EDIT_RAY_EPSILON {
-            let step_back = t_entry - EDIT_RAY_EPSILON;
-            Some(std::array::from_fn(|i| {
-                (origin[i] + dir[i] * step_back).floor() as i32
-            }))
-        } else {
-            None
-        };
-
-        Some(VoxelRayHit {
-            solid_voxel,
-            last_empty_voxel,
-            hit_block: hit.block,
-        })
+        self.world_tree.raycast(fp_origin, fp_dir, fp_max_t)
     }
 
     /// Remove the first solid block intersected by a camera ray.
@@ -81,27 +47,28 @@ impl Scene {
         ray_direction: [f32; 4],
         max_distance: f32,
     ) -> Option<[i32; 4]> {
-        let hit = self.trace_first_solid_voxel(ray_origin, ray_direction, max_distance)?;
-        let size = 1i32 << hit.hit_block.scale_exp.max(0);
-        let origin: [i32; 4] =
-            std::array::from_fn(|i| hit.solid_voxel[i].div_euclid(size) * size);
-        // Clear all cells of the block
+        let hit = self.raycast_solid(ray_origin, ray_direction, max_distance)?;
+        if hit.block.is_air() {
+            return None;
+        }
+        let origin_i32: [i32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
+        let size = 1i32 << hit.block.scale_exp.max(0);
         for dx in 0..size {
             for dy in 0..size {
                 for dz in 0..size {
                     for dw in 0..size {
                         self.world_set_block(
-                            origin[0] + dx,
-                            origin[1] + dy,
-                            origin[2] + dz,
-                            origin[3] + dw,
+                            origin_i32[0] + dx,
+                            origin_i32[1] + dy,
+                            origin_i32[2] + dz,
+                            origin_i32[3] + dw,
                             BlockData::AIR,
                         );
                     }
                 }
             }
         }
-        Some(origin)
+        Some(origin_i32)
     }
 
     /// Query edit ray targets without mutating the world.
@@ -112,25 +79,32 @@ impl Scene {
         max_distance: f32,
         placement_scale_exp: i8,
     ) -> BlockEditTargets {
-        match self.trace_first_solid_voxel(ray_origin, ray_direction, max_distance) {
-            Some(hit) => {
-                let size = 1i32 << hit.hit_block.scale_exp.max(0);
-                let hit_origin: [i32; 4] =
-                    std::array::from_fn(|i| hit.solid_voxel[i].div_euclid(size) * size);
-                let hit_target = ScaleAwareBlockTarget {
-                    origin: hit_origin,
-                    scale_exp: hit.hit_block.scale_exp,
-                };
-                let place_target = hit.last_empty_voxel.and_then(|empty_cell| {
-                    compute_placement_target(&hit_target, empty_cell, placement_scale_exp)
-                });
-                BlockEditTargets {
-                    hit: Some(hit_target),
-                    hit_block: Some(hit.hit_block),
-                    place: place_target,
-                }
-            }
-            None => BlockEditTargets::default(),
+        let hit = match self.raycast_solid(ray_origin, ray_direction, max_distance) {
+            Some(h) if !h.block.is_air() => h,
+            _ => return BlockEditTargets::default(),
+        };
+
+        let hit_target = ScaleAwareBlockTarget {
+            origin: hit.bounds.min,
+            scale_exp: hit.block.scale_exp,
+        };
+        let place_target = if hit.face_sign != 0 {
+            Some(compute_placement_target(
+                &hit_target,
+                hit.hit_point,
+                hit.face_axis,
+                hit.face_sign,
+                placement_scale_exp,
+            ))
+        } else {
+            None
+        };
+        BlockEditTargets {
+            hit: Some(hit_target),
+            hit_block: Some(hit.block),
+            place: place_target,
+            face_axis: hit.face_axis,
+            face_sign: hit.face_sign,
         }
     }
 
@@ -174,10 +148,13 @@ impl Scene {
                 cz * view_z[3] + sw * view_w[3],
             ];
 
-            if let Some(hit) = self.trace_first_solid_voxel(ray_origin, dir, max_distance) {
-                let size = 1i32 << hit.hit_block.scale_exp.max(0);
+            if let Some(hit) = self.raycast_solid(ray_origin, dir, max_distance) {
+                if hit.block.is_air() {
+                    continue;
+                }
                 let origin: [i32; 4] =
-                    std::array::from_fn(|i| hit.solid_voxel[i].div_euclid(size) * size);
+                    std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
+                let size = 1i32 << hit.block.scale_exp.max(0);
                 let half = size as f32 * 0.5;
                 let dx = origin[0] as f32 + half - ray_origin[0];
                 let dy = origin[1] as f32 + half - ray_origin[1];
@@ -206,20 +183,22 @@ impl Scene {
         if material.is_air() {
             return None;
         }
-        let targets = self.block_edit_targets(ray_origin, ray_direction, max_distance, material.scale_exp);
+        let targets =
+            self.block_edit_targets(ray_origin, ray_direction, max_distance, material.scale_exp);
         let place = targets.place?;
+        let place_i32 = place.origin_i32();
+        let size = 1i32 << place.scale_exp.max(0);
         // Verify all cells of the placement target are air
-        let size = place.size();
         for dx in 0..size {
             for dy in 0..size {
                 for dz in 0..size {
                     for dw in 0..size {
                         if !self
                             .get_block_data(
-                                place.origin[0] + dx,
-                                place.origin[1] + dy,
-                                place.origin[2] + dz,
-                                place.origin[3] + dw,
+                                place_i32[0] + dx,
+                                place_i32[1] + dy,
+                                place_i32[2] + dz,
+                                place_i32[3] + dw,
                             )
                             .is_air()
                         {
@@ -235,71 +214,48 @@ impl Scene {
                 for dz in 0..size {
                     for dw in 0..size {
                         self.world_set_block(
-                            place.origin[0] + dx,
-                            place.origin[1] + dy,
-                            place.origin[2] + dz,
-                            place.origin[3] + dw,
+                            place_i32[0] + dx,
+                            place_i32[1] + dy,
+                            place_i32[2] + dz,
+                            place_i32[3] + dw,
                             material.clone(),
                         );
                     }
                 }
             }
         }
-        Some(place.origin)
+        Some(place_i32)
     }
 }
 
 /// Compute scale-aware placement target adjacent to a hit block face.
 fn compute_placement_target(
     hit: &ScaleAwareBlockTarget,
-    empty_cell: [i32; 4],
+    hit_point: [ChunkCoord; 4],
+    face_axis: u8,
+    face_sign: i8,
     placement_scale_exp: i8,
-) -> Option<ScaleAwareBlockTarget> {
+) -> ScaleAwareBlockTarget {
     let hit_size = hit.size();
-    let place_size = 1i32 << placement_scale_exp.max(0);
-    let hit_min = hit.origin;
-    let hit_max: [i32; 4] = std::array::from_fn(|i| hit_min[i] + hit_size);
-
-    // Find the face axis: the axis where empty_cell is outside the hit block's extent.
-    let mut face_axis = None;
-    let mut face_negative = false;
+    let place_step = step_for_scale(placement_scale_exp);
+    let mut origin = [ChunkCoord::ZERO; 4];
     for axis in 0..4 {
-        if empty_cell[axis] < hit_min[axis] {
-            if face_axis.is_some() {
-                // Ambiguous — empty cell is outside on multiple axes (corner).
-                // Fall back to the first found axis.
+        if axis == face_axis as usize {
+            origin[axis] = if face_sign < 0 {
+                hit.origin[axis] - place_step
             } else {
-                face_axis = Some(axis);
-                face_negative = true;
-            }
-        } else if empty_cell[axis] >= hit_max[axis] {
-            if face_axis.is_none() {
-                face_axis = Some(axis);
-                face_negative = false;
-            }
-        }
-    }
-
-    let face_axis = face_axis?;
-
-    // Compute placement origin:
-    // Non-face axes: snap empty_cell to placement grid via div_euclid
-    // Face axis: place adjacent to the hit face
-    let mut place_origin = [0i32; 4];
-    for axis in 0..4 {
-        if axis == face_axis {
-            if face_negative {
-                place_origin[axis] = hit_min[axis] - place_size;
-            } else {
-                place_origin[axis] = hit_max[axis];
-            }
+                hit.origin[axis] + hit_size
+            };
         } else {
-            place_origin[axis] = empty_cell[axis].div_euclid(place_size) * place_size;
+            // Snap hit_point to placement grid
+            let bits = hit_point[axis].to_bits();
+            let step_bits = place_step.to_bits();
+            origin[axis] =
+                ChunkCoord::from_bits(bits.div_euclid(step_bits) * step_bits);
         }
     }
-
-    Some(ScaleAwareBlockTarget {
-        origin: place_origin,
+    ScaleAwareBlockTarget {
+        origin,
         scale_exp: placement_scale_exp,
-    })
+    }
 }
