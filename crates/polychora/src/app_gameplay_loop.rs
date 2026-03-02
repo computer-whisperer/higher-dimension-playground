@@ -1022,6 +1022,19 @@ impl App {
                 // BVH query (including preview) is fused off for isolation profiling.
                 vte_non_voxel_instances.push(preview_instance);
             }
+            // Ghost placement preview: render a semi-transparent block at the
+            // placement target position via the entity pipeline.
+            if !vte_disable_entities && self.args.placement_preview == PlacementPreviewMode::Ghost {
+                if let Some(targets) = &targets {
+                    if let Some(place) = &targets.place {
+                        vte_non_voxel_instances.push(build_ghost_placement_instance(
+                            place,
+                            &self.selected_block,
+                            &self.material_resolver,
+                        ));
+                    }
+                }
+            }
             let voxel_build_start = Instant::now();
             let voxel_frame = self.scene.build_voxel_frame_data(
                 self.camera.position,

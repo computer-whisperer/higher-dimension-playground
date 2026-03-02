@@ -573,6 +573,38 @@ pub(super) fn build_place_preview_instance(
     )
 }
 
+/// Build a ghost entity instance for the placement preview at the target's
+/// world position. Uses the existing entity rendering pipeline with
+/// `PREVIEW_MATERIAL_FLAG` for semi-transparent rendering.
+pub(super) fn build_ghost_placement_instance(
+    target: &scene::ScaleAwareBlockTarget,
+    block: &polychora::shared::voxel::BlockData,
+    material_resolver: &polychora::content_registry::MaterialResolver,
+) -> common::ModelInstance {
+    let material_token = material_resolver.resolve_block(block.namespace, block.block_type);
+    let preview_material = material_token as u32 | PREVIEW_MATERIAL_FLAG;
+    let size = target.size().to_num::<f32>();
+    let wmin = target.world_min();
+    let center = [
+        wmin[0] + size * 0.5,
+        wmin[1] + size * 0.5,
+        wmin[2] + size * 0.5,
+        wmin[3] + size * 0.5,
+    ];
+    let basis = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    build_centered_model_instance(
+        center,
+        &basis,
+        [size; 4],
+        [preview_material; 8],
+    )
+}
+
 pub(super) fn build_remote_player_avatar_instances(
     client_id: u64,
     name_hash: u32,

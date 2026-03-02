@@ -409,6 +409,13 @@ impl EditHighlightModeArg {
     }
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum PlacementPreviewMode {
+    Off,
+    Ghost,
+    Wireframe,
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum SingleplayerWorldTypeArg {
     FlatFloor,
@@ -556,6 +563,11 @@ struct Args {
     /// `edges` keeps the legacy overlay-line outline debug view.
     #[arg(long, value_enum, default_value_t = EditHighlightModeArg::Faces)]
     edit_highlight_mode: EditHighlightModeArg,
+
+    /// Placement preview mode. `ghost` renders a semi-transparent entity at
+    /// the placement position. `wireframe` shows an outline box.
+    #[arg(long, value_enum, default_value_t = PlacementPreviewMode::Ghost)]
+    placement_preview: PlacementPreviewMode,
 
     /// Block interaction reach limit in world units.
     #[arg(long, default_value_t = BLOCK_EDIT_REACH_DEFAULT)]
