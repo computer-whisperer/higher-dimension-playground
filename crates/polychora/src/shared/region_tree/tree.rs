@@ -1277,11 +1277,12 @@ fn collect_non_overlapping_remnants(
 /// alignment splitting so remnants stay at their original scale when
 /// possible, falling back to resample only for non-aligned pieces.
 ///
-/// Always returns `patch_bounds` — the carved remnants have identical voxel
-/// content (just reorganized in the tree), so only the patch region is
-/// semantically changed.  Note: callers that feed this into the render BVH
-/// delta path may need wider dirty bounds if the BVH can't correctly
-/// represent misaligned remnants (see `build_leaf_outside_bounds_pieces`).
+/// When carving a ChunkArray, returns `node.bounds` (the full restructured
+/// region) so that the render BVH delta path replaces the whole area rather
+/// than trying to carve narrow edit bounds from a render leaf that may not
+/// be grid-aligned at the edit scale.  For other node kinds (Branch, Uniform,
+/// Empty) the remnant structure doesn't have scale-alignment constraints, so
+/// the narrow `patch_bounds` is returned.
 fn splice_carve_and_replace(
     node: &mut RegionTreeCore,
     patch_bounds: Aabb4i,
@@ -1289,6 +1290,9 @@ fn splice_carve_and_replace(
 ) -> Option<Aabb4i> {
     let source_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
     let gen_hash = node.generator_version_hash;
+    // Track whether we carved a ChunkArray — remnants may be at different
+    // scales, so the render tree needs the full restructured bounds.
+    let mut carved_chunk_array = false;
 
     let mut children = Vec::with_capacity(9);
 
@@ -1297,6 +1301,7 @@ fn splice_carve_and_replace(
             // ChunkArray-aware carving: keep remnants at original scale where
             // possible (aligned pieces), hierarchically resample non-aligned pieces.
             if let Ok(source_indices) = chunk_array.decode_dense_indices() {
+                carved_chunk_array = true;
                 let se = chunk_array.scale_exp;
                 let min_block_scale =
                     chunk_array_min_block_scale(chunk_array, se).unwrap_or(se);
@@ -1425,9 +1430,14 @@ fn splice_carve_and_replace(
         }
     }
 
-    // Return the patch bounds — carved remnants have the same voxel content
-    // (just reorganized in the tree), so only the patch region changed.
-    Some(patch_bounds)
+    // ChunkArray carves produce multi-scale remnants — return the full
+    // restructured bounds so the render BVH delta replaces the whole region.
+    // Other kinds (Branch, Uniform) don't have scale-alignment issues.
+    if carved_chunk_array {
+        Some(node.bounds)
+    } else {
+        Some(patch_bounds)
+    }
 }
 
 /// Carve `clear_bounds` out of `node`, preserving data outside the cleared

@@ -276,10 +276,17 @@ fn mixed_scale_world_overlapping_splice_carves_coarse_correctly() {
         tree.splice_core_in_bounds(coarse.bounds, &coarse),
         Some(coarse.bounds)
     );
-    // Overlapping splice carves the coarse chunk and inserts the fine chunk.
-    assert_eq!(
-        tree.splice_core_in_bounds(fine_overlapping.bounds, &fine_overlapping),
-        Some(fine_overlapping.bounds)
+    // Overlapping splice carves the coarse ChunkArray and inserts the fine chunk.
+    // Returns the full ChunkArray bounds (wider than the splice) so the render
+    // BVH delta replaces the entire restructured region.
+    let splice_result = tree.splice_core_in_bounds(fine_overlapping.bounds, &fine_overlapping);
+    assert!(splice_result.is_some());
+    let changed = splice_result.unwrap();
+    assert!(
+        changed.min.iter().zip(fine_overlapping.bounds.min.iter()).all(|(a, b)| a <= b)
+            && changed.max.iter().zip(fine_overlapping.bounds.max.iter()).all(|(a, b)| a >= b),
+        "changed bounds {:?} must contain splice bounds {:?}",
+        changed, fine_overlapping.bounds
     );
 
     let root = tree.root().expect("root");
