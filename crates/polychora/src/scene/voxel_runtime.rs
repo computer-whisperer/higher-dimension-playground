@@ -344,12 +344,13 @@ impl Scene {
 
     fn append_dense_payload_encoded(
         voxel_frame_data: &mut VoxelFrameData,
-        dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
+        dense_payload_cache: &mut std::collections::HashMap<DensePayloadCacheKey, u32>,
         payload: &ChunkPayload,
         block_palette: &[BlockData],
         resolver: &MaterialResolver,
     ) -> Result<u32, String> {
-        if let Some(&encoded) = dense_payload_cache.get(payload) {
+        let cache_key = DensePayloadCacheKey::new(payload, block_palette);
+        if let Some(&encoded) = dense_payload_cache.get(&cache_key) {
             return Ok(encoded);
         }
         let dense_palette_indices = payload
@@ -392,7 +393,7 @@ impl Scene {
             _padding: 0,
         });
         let encoded = chunk_index.saturating_add(1);
-        dense_payload_cache.insert(payload.clone(), encoded);
+        dense_payload_cache.insert(cache_key, encoded);
         Ok(encoded)
     }
 
@@ -592,7 +593,7 @@ impl Scene {
 
     fn encode_leaf_chunk_entries(
         voxel_frame_data: &mut VoxelFrameData,
-        dense_payload_cache: &mut std::collections::HashMap<ChunkPayload, u32>,
+        dense_payload_cache: &mut std::collections::HashMap<DensePayloadCacheKey, u32>,
         leaf: &RenderLeaf,
         resolver: &MaterialResolver,
     ) -> Result<Vec<u32>, String> {
@@ -1052,7 +1053,7 @@ impl Scene {
         let mut leaf_chunk_entries = Vec::<u32>::new();
         let mut region_bvh_nodes =
             Vec::<GpuVoxelChunkBvhNode>::with_capacity(render_bvh.nodes.len());
-        let mut dense_payload_encoded_cache = std::collections::HashMap::<ChunkPayload, u32>::new();
+        let mut dense_payload_encoded_cache = std::collections::HashMap::<DensePayloadCacheKey, u32>::new();
 
         // Pre-compute leaf world bounds for BVH node encoding.
         let mut per_leaf_world_bounds = Vec::<([f32; 4], [f32; 4])>::with_capacity(render_bvh.leaves.len());
@@ -1157,9 +1158,13 @@ impl Scene {
                                                             }
                                                         }
                                                         _ => {
+                                                            let cache_key = DensePayloadCacheKey::new(
+                                                                payload,
+                                                                &chunk_array.block_palette,
+                                                            );
                                                             if let Some(&cached_dense_encoded) =
                                                                 dense_payload_encoded_cache
-                                                                    .get(payload)
+                                                                    .get(&cache_key)
                                                             {
                                                                 cached_dense_encoded
                                                             } else {
@@ -1236,10 +1241,7 @@ impl Scene {
                                                                     let encoded_dense =
                                                                         chunk_index.saturating_add(1);
                                                                     dense_payload_encoded_cache
-                                                                        .insert(
-                                                                            payload.clone(),
-                                                                            encoded_dense,
-                                                                        );
+                                                                        .insert(cache_key, encoded_dense);
                                                                     encoded_dense
                                                                 }
                                                             }

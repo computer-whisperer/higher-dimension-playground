@@ -80,7 +80,7 @@ pub struct VoxelFrameData {
 
 struct VoxelFrameDataBuffers {
     region_bvh_root_index: u32,
-    dense_payload_encoded_cache: HashMap<ChunkPayload, u32>,
+    dense_payload_encoded_cache: HashMap<DensePayloadCacheKey, u32>,
     chunk_headers: Vec<GpuVoxelChunkHeader>,
     occupancy_words: Vec<u32>,
     material_words: Vec<u32>,
@@ -89,6 +89,21 @@ struct VoxelFrameDataBuffers {
     region_bvh_nodes: Vec<GpuVoxelChunkBvhNode>,
     leaf_headers: Vec<GpuVoxelLeafHeader>,
     leaf_chunk_entries: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DensePayloadCacheKey {
+    payload: ChunkPayload,
+    block_palette: Vec<BlockData>,
+}
+
+impl DensePayloadCacheKey {
+    fn new(payload: &ChunkPayload, block_palette: &[BlockData]) -> Self {
+        Self {
+            payload: payload.clone(),
+            block_palette: block_palette.to_vec(),
+        }
+    }
 }
 
 impl VoxelFrameData {
@@ -128,7 +143,7 @@ pub struct Scene {
     render_bvh_cache: Option<render_tree::RenderBvh>,
     voxel_pending_render_bvh_rebuild: bool,
     voxel_pending_render_bvh_mutation_deltas: Vec<RenderBvhChunkMutationDelta>,
-    voxel_dense_payload_encoded_cache: HashMap<ChunkPayload, u32>,
+    voxel_dense_payload_encoded_cache: HashMap<DensePayloadCacheKey, u32>,
     voxel_leaf_entry_spans: Vec<Option<std::ops::Range<usize>>>,
     voxel_leaf_entry_free_spans: Vec<std::ops::Range<usize>>,
     voxel_last_rebuild_failure_signature: Option<(Aabb4i, usize, usize)>,
@@ -380,7 +395,7 @@ impl Scene {
         let current_payload = self.world_tree.chunk_payload(key);
         let mut changed = changed_by_api || previous_payload != current_payload;
         if !changed {
-            if current_payload.map(|(p, _)| p) != payload {
+            if current_payload.as_ref().map(|(p, _)| p) != payload.as_ref() {
                 let bounds = Aabb4i::chunk_world_bounds(key, scale_exp);
                 let mut repair_tree = RegionChunkTree::new();
                 if let Some(repair_payload) = payload.clone() {
@@ -1395,6 +1410,57 @@ mod tests {
             edit_voxel[3],
         );
         assert!(after_frame.is_none());
+    }
+
+    #[test]
+    fn voxel_frame_dense_cache_respects_block_palette_at_scale_neg3() {
+        fn first_non_air_material(payloads: &[ChunkPayload]) -> Option<u16> {
+            payloads.iter().find_map(|payload| match payload {
+                ChunkPayload::Empty => None,
+                ChunkPayload::Uniform(material) => (*material != 0).then_some(*material),
+                _ => payload
+                    .dense_materials()
+                    .ok()
+                    .and_then(|dense| dense.into_iter().find(|material| *material != 0)),
+            })
+        }
+
+        let mut scene = Scene::new(ScenePreset::Empty);
+        let resolver = test_resolver();
+        let cobblestone = polychora::content_registry::block_data_from_material_token(28).at_scale(-3);
+        let red = polychora::content_registry::block_data_from_material_token(1).at_scale(-3);
+
+        // Place two scale=-3 chunks with identical sparse payload shape but
+        // different block palettes/material IDs.
+        scene.world_set_block(0, 0, 0, 0, cobblestone.clone());
+        scene.world_set_block(1, 0, 0, 0, red.clone());
+
+        let _ = scene.build_voxel_frame_data(
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            64.0,
+            &resolver,
+        );
+
+        let cobblestone_expected = resolver.resolve_block(cobblestone.namespace, cobblestone.block_type);
+        let red_expected = resolver.resolve_block(red.namespace, red.block_type);
+        assert_ne!(cobblestone_expected, red_expected);
+
+        let cobblestone_frame = scene.debug_voxel_frame_chunk_payloads([0, 0, 0, 0]);
+        let red_frame = scene.debug_voxel_frame_chunk_payloads([1, 0, 0, 0]);
+        let cobblestone_material = first_non_air_material(&cobblestone_frame);
+        let red_material = first_non_air_material(&red_frame);
+
+        assert_eq!(
+            cobblestone_material,
+            Some(cobblestone_expected),
+            "unexpected material in scale=-3 chunk [0,0,0,0], payloads={cobblestone_frame:?}",
+        );
+        assert_eq!(
+            red_material,
+            Some(red_expected),
+            "unexpected material in scale=-3 chunk [1,0,0,0], payloads={red_frame:?}",
+        );
     }
 
     /// Simulate the multiplayer FlatFloor scenario: server sends a Uniform(stone)
