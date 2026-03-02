@@ -3955,6 +3955,18 @@ pub struct BvhBlockHit {
     pub bounds: Aabb4i,
 }
 
+/// Result of a 4D ray–AABB slab intersection with face tracking.
+#[derive(Clone, Debug)]
+pub struct RayAabbHit {
+    pub t_enter: ChunkCoord,
+    pub t_exit: ChunkCoord,
+    /// Which axis (0..3) the ray last crossed to enter the AABB.
+    pub face_axis: u8,
+    /// -1 = entered through the min face, +1 = entered through the max face.
+    /// 0 = ray started inside the AABB.
+    pub face_sign: i8,
+}
+
 /// Result of a BVH raycast: block hit info plus the ray parameter.
 #[derive(Clone, Debug)]
 pub struct BvhRayHit {
@@ -3963,6 +3975,12 @@ pub struct BvhRayHit {
     pub bounds: Aabb4i,
     /// Ray parameter at entry to the block's AABB.
     pub t: ChunkCoord,
+    /// World-space hit point: `origin + direction * t`.
+    pub hit_point: [ChunkCoord; 4],
+    /// Which axis (0..3) the ray crossed to enter the hit block.
+    pub face_axis: u8,
+    /// -1 = entered through the min face, +1 = entered through the max face.
+    pub face_sign: i8,
 }
 
 /// Given a fixed-point position and a leaf's scale, compute the chunk key,
@@ -4117,16 +4135,20 @@ fn bvh_block_data_at_point(
     }
 }
 
-/// 4D ray–AABB slab intersection. Returns `(t_enter, t_exit)` or `None`.
+/// 4D ray–AABB slab intersection with face tracking.
 ///
-/// `direction` components may be zero; those axes use position-only checks.
+/// Returns the entry/exit ray parameters plus which face the ray entered
+/// through. `direction` components may be zero; those axes use position-only
+/// checks.
 fn ray_aabb_intersect(
     origin: [ChunkCoord; 4],
     direction: [ChunkCoord; 4],
     aabb: &Aabb4i,
-) -> Option<(ChunkCoord, ChunkCoord)> {
+) -> Option<RayAabbHit> {
     let mut t_min = ChunkCoord::MIN;
     let mut t_max = ChunkCoord::MAX;
+    let mut face_axis: u8 = 0;
+    let mut face_sign: i8 = 0;
     for axis in 0..4 {
         let d = direction[axis];
         if d == ChunkCoord::ZERO {
@@ -4147,14 +4169,21 @@ fn ray_aabb_intersect(
                     (aabb.min[axis] - origin[axis]) / d,
                 )
             };
-            if t_near > t_min { t_min = t_near; }
+            if t_near > t_min {
+                t_min = t_near;
+                face_axis = axis as u8;
+                // The ray enters through the face it approaches:
+                // positive direction → enters through min face (-1),
+                // negative direction → enters through max face (+1).
+                face_sign = if inv_d_positive { -1 } else { 1 };
+            }
             if t_far < t_max { t_max = t_far; }
             if t_min > t_max {
                 return None;
             }
         }
     }
-    Some((t_min, t_max))
+    Some(RayAabbHit { t_enter: t_min, t_exit: t_max, face_axis, face_sign })
 }
 
 /// Recursive BVH raycast. Returns the nearest solid hit.
@@ -4172,8 +4201,8 @@ fn bvh_raycast(
             if block.is_air() {
                 return None;
             }
-            let (t_enter, t_exit) = ray_aabb_intersect(origin, direction, &bounds)?;
-            if t_enter > max_t || t_exit < ChunkCoord::ZERO {
+            let region_hit = ray_aabb_intersect(origin, direction, &bounds)?;
+            if region_hit.t_enter > max_t || region_hit.t_exit < ChunkCoord::ZERO {
                 return None;
             }
             // Compute the point where the ray enters the uniform region.
@@ -4181,20 +4210,31 @@ fn bvh_raycast(
             // inside the AABB rather than on its boundary (where cell_at_point
             // could snap to a cell outside the region).
             let nudge = ChunkCoord::from_bits(1);
-            let t_sample = (if t_enter > ChunkCoord::ZERO { t_enter } else { ChunkCoord::ZERO })
+            let t_sample = (if region_hit.t_enter > ChunkCoord::ZERO { region_hit.t_enter } else { ChunkCoord::ZERO })
                 .saturating_add(nudge);
             let hit_pos: [ChunkCoord; 4] = std::array::from_fn(|i| {
                 origin[i].saturating_add(direction[i].saturating_mul(t_sample))
             });
             let (_, _, cell_aabb) = cell_at_point(hit_pos, 0);
             let bb = block_bounds(cell_aabb.min, 0, block);
-            Some(BvhRayHit { block: block.clone(), bounds: bb, t: t_enter.max(ChunkCoord::ZERO) })
+            let t = region_hit.t_enter.max(ChunkCoord::ZERO);
+            let hit_point = std::array::from_fn(|i| {
+                origin[i].saturating_add(direction[i].saturating_mul(t))
+            });
+            Some(BvhRayHit {
+                block: block.clone(),
+                bounds: bb,
+                t,
+                hit_point,
+                face_axis: region_hit.face_axis,
+                face_sign: region_hit.face_sign,
+            })
         }
 
         RegionNodeKind::ChunkArray(ca) => {
             let se = ca.scale_exp;
-            let (t_enter, t_exit) = ray_aabb_intersect(origin, direction, &ca.bounds)?;
-            if t_enter > max_t {
+            let ca_hit = ray_aabb_intersect(origin, direction, &ca.bounds)?;
+            if ca_hit.t_enter > max_t {
                 return None;
             }
             // Step through cells along the ray within this ChunkArray.
@@ -4210,8 +4250,8 @@ fn bvh_raycast(
             }
             let dt = cell_size_f64 * 0.4 / dir_len_sq.sqrt();
 
-            let t_start = t_enter.max(ChunkCoord::ZERO).to_num::<f64>();
-            let t_end = t_exit.min(max_t).to_num::<f64>();
+            let t_start = ca_hit.t_enter.max(ChunkCoord::ZERO).to_num::<f64>();
+            let t_end = ca_hit.t_exit.min(max_t).to_num::<f64>();
             if t_start > t_end {
                 return None;
             }
@@ -4239,16 +4279,28 @@ fn bvh_raycast(
                                 // would claim a hit at a point the march already
                                 // passed through (possibly air cells of the same
                                 // logical block).
-                                let block_t = ray_aabb_intersect(origin, direction, &bb)
-                                    .map(|(te, _)| te.max(ChunkCoord::ZERO))
-                                    .unwrap_or(ChunkCoord::from_num(t));
+                                let block_hit = ray_aabb_intersect(origin, direction, &bb);
+                                let (block_t, block_face_axis, block_face_sign) = match block_hit {
+                                    Some(bh) => (bh.t_enter.max(ChunkCoord::ZERO), bh.face_axis, bh.face_sign),
+                                    None => (ChunkCoord::from_num(t), 0, 0),
+                                };
                                 let march_t = ChunkCoord::from_num(t);
                                 let block_t = if block.scale_exp > se && block_t < march_t {
                                     march_t
                                 } else {
                                     block_t
                                 };
-                                return Some(BvhRayHit { block, bounds: bb, t: block_t });
+                                let hit_point = std::array::from_fn(|i| {
+                                    origin[i].saturating_add(direction[i].saturating_mul(block_t))
+                                });
+                                return Some(BvhRayHit {
+                                    block,
+                                    bounds: bb,
+                                    t: block_t,
+                                    hit_point,
+                                    face_axis: block_face_axis,
+                                    face_sign: block_face_sign,
+                                });
                             }
                         }
                     }
@@ -4262,9 +4314,9 @@ fn bvh_raycast(
             // Collect children that the ray intersects, sorted by t_enter.
             let mut candidates: Vec<(ChunkCoord, usize)> = Vec::new();
             for (idx, child) in children.iter().enumerate() {
-                if let Some((t_enter, t_exit)) = ray_aabb_intersect(origin, direction, &child.bounds) {
-                    if t_enter <= max_t && t_exit >= ChunkCoord::ZERO {
-                        candidates.push((t_enter, idx));
+                if let Some(ch) = ray_aabb_intersect(origin, direction, &child.bounds) {
+                    if ch.t_enter <= max_t && ch.t_exit >= ChunkCoord::ZERO {
+                        candidates.push((ch.t_enter, idx));
                     }
                 }
             }
@@ -4274,8 +4326,8 @@ fn bvh_raycast(
             for (_, idx) in candidates {
                 let child = &children[idx];
                 if let Some(ref b) = best {
-                    if let Some((t_enter, _)) = ray_aabb_intersect(origin, direction, &child.bounds) {
-                        if t_enter > b.t {
+                    if let Some(ch) = ray_aabb_intersect(origin, direction, &child.bounds) {
+                        if ch.t_enter > b.t {
                             continue;
                         }
                     }
@@ -4531,4 +4583,78 @@ fn intersect_aabb(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
     ];
     (min[0] < max[0] && min[1] < max[1] && min[2] < max[2] && min[3] < max[3])
         .then_some(Aabb4i::new(min, max))
+}
+
+#[cfg(test)]
+mod ray_aabb_tests {
+    use super::*;
+
+    fn cc(v: i32) -> ChunkCoord {
+        ChunkCoord::from_num(v)
+    }
+
+    fn unit_aabb() -> Aabb4i {
+        Aabb4i::new([cc(0); 4], [cc(1); 4])
+    }
+
+    #[test]
+    fn ray_from_each_face_direction() {
+        let aabb = unit_aabb();
+        // 4 axes × 2 signs = 8 directions
+        for axis in 0..4u8 {
+            for &(sign, start_val, expected_face_sign) in
+                &[(-1i8, 2, 1i8), (1i8, -1, -1i8)]
+            {
+                let mut origin = [cc(0); 4];
+                // Center on non-face axes to guarantee clean hit
+                for a in 0..4 {
+                    if a != axis as usize {
+                        origin[a] = ChunkCoord::from_num(0.5f32);
+                    }
+                }
+                origin[axis as usize] = cc(start_val);
+
+                let mut direction = [cc(0); 4];
+                direction[axis as usize] = cc(sign as i32);
+
+                let hit = ray_aabb_intersect(origin, direction, &aabb)
+                    .unwrap_or_else(|| {
+                        panic!("Expected hit for axis={axis} sign={sign}")
+                    });
+
+                assert_eq!(
+                    hit.face_axis, axis,
+                    "face_axis: axis={axis} sign={sign}"
+                );
+                assert_eq!(
+                    hit.face_sign, expected_face_sign,
+                    "face_sign: axis={axis} sign={sign}"
+                );
+                assert!(
+                    hit.t_enter <= hit.t_exit,
+                    "t_enter <= t_exit: axis={axis} sign={sign}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ray_starting_inside_has_zero_face_sign() {
+        let aabb = unit_aabb();
+        let origin = [ChunkCoord::from_num(0.5f32); 4];
+        let direction = [cc(1), cc(0), cc(0), cc(0)];
+        let hit = ray_aabb_intersect(origin, direction, &aabb).unwrap();
+        // t_enter should be negative (ray started inside)
+        assert!(hit.t_enter < cc(0));
+        assert_eq!(hit.face_sign, -1); // face_sign tracks the last slab update
+    }
+
+    #[test]
+    fn miss_returns_none() {
+        let aabb = unit_aabb();
+        // Ray parallel to axis 0, but outside on axis 1
+        let origin = [cc(0), cc(5), cc(0), cc(0)];
+        let direction = [cc(1), cc(0), cc(0), cc(0)];
+        assert!(ray_aabb_intersect(origin, direction, &aabb).is_none());
+    }
 }
