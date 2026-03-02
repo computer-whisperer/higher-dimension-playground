@@ -441,6 +441,19 @@ impl RegionChunkTree {
         out
     }
 
+    /// Optimize the subtree rooted at this tree by coarsening ChunkArrays
+    /// where all contained blocks have a `scale_exp` above the chunk's own
+    /// scale, allowing representation with fewer, coarser chunks.
+    ///
+    /// Also collapses uniform and empty regions.  This is a general-purpose
+    /// post-pass: run it after any operation that produces correct-but-suboptimal
+    /// geometry (e.g., gap-filling during voxel edits).
+    pub fn optimize_subtree_in_bounds(&mut self, bounds: Aabb4i) {
+        if let Some(root) = self.root.as_mut() {
+            optimize_subtree_in_bounds(root, bounds);
+        }
+    }
+
     fn ensure_root_contains_bounds(&mut self, bounds: Aabb4i) {
         if !bounds.is_valid() {
             return;
@@ -2197,6 +2210,15 @@ fn carve_leaf_for_chunk_edit(
         }
     }
 
+    // Optimize gap-fill children: coarsen ChunkArrays that were resampled at
+    // a finer scale than necessary (e.g., scale -3 chunks whose blocks are
+    // all scale 0 can be rebuilt as scale 0 chunks).
+    for child in &mut children {
+        if matches!(child.kind, RegionNodeKind::ChunkArray(_)) {
+            try_coarsen_chunk_array(child);
+        }
+    }
+
     if let Some(payload) = payload {
         children.push(RegionTreeCore {
             bounds: chunk_bounds,
@@ -3385,6 +3407,426 @@ pub fn coarsest_aligned_scale(bounds: Aabb4i, ceiling: i8) -> i8 {
         "coarsest_aligned_scale: no valid scale found for bounds {:?} with ceiling {}",
         bounds, ceiling
     );
+}
+
+// ---------------------------------------------------------------------------
+// Subtree scale optimizer
+// ---------------------------------------------------------------------------
+
+/// Optimize a subtree, coarsening ChunkArrays and collapsing empty/uniform
+/// regions where the data permits.  Recurses into Branch children, then
+/// re-normalizes.
+pub fn optimize_subtree(node: &mut RegionTreeCore) {
+    match &mut node.kind {
+        RegionNodeKind::Branch(children) => {
+            for child in children.iter_mut() {
+                optimize_subtree(child);
+            }
+            normalize_chunk_node(node);
+        }
+        RegionNodeKind::ChunkArray(_) => {
+            try_coarsen_chunk_array(node);
+        }
+        _ => {}
+    }
+}
+
+/// Like [`optimize_subtree`] but only descends into nodes that overlap `bounds`.
+fn optimize_subtree_in_bounds(node: &mut RegionTreeCore, bounds: Aabb4i) {
+    if !node.bounds.intersects(&bounds) {
+        return;
+    }
+    match &mut node.kind {
+        RegionNodeKind::Branch(children) => {
+            for child in children.iter_mut() {
+                optimize_subtree_in_bounds(child, bounds);
+            }
+            normalize_chunk_node(node);
+        }
+        RegionNodeKind::ChunkArray(_) => {
+            try_coarsen_chunk_array(node);
+        }
+        _ => {}
+    }
+}
+
+/// Scan a ChunkArray's block palette references to find the minimum
+/// `scale_exp` across all voxels.  Returns `None` if the array is empty
+/// or if the minimum equals or is below `floor`.
+fn chunk_array_min_block_scale(ca: &ChunkArrayData, floor: i8) -> Option<i8> {
+    let mut min_s = i8::MAX;
+    for cp in &ca.chunk_palette {
+        match cp {
+            ChunkPayload::Empty => {
+                if let Some(b) = ca.block_palette.first() {
+                    min_s = min_s.min(b.scale_exp);
+                }
+            }
+            ChunkPayload::Uniform(idx) => {
+                if let Some(b) = ca.block_palette.get(*idx as usize) {
+                    min_s = min_s.min(b.scale_exp);
+                }
+            }
+            ChunkPayload::PalettePacked { palette, .. } => {
+                for &idx in palette {
+                    if let Some(b) = ca.block_palette.get(idx as usize) {
+                        min_s = min_s.min(b.scale_exp);
+                    }
+                }
+            }
+            ChunkPayload::Dense16 { materials } => {
+                for &idx in materials {
+                    if let Some(b) = ca.block_palette.get(idx as usize) {
+                        min_s = min_s.min(b.scale_exp);
+                    }
+                }
+            }
+        }
+        if min_s <= floor {
+            return None;
+        }
+    }
+    if min_s <= floor || min_s == i8::MAX {
+        None
+    } else {
+        Some(min_s)
+    }
+}
+
+/// Find the coarsest scale in `(source_scale, ceiling]` at which `bounds`
+/// aligns to a chunk lattice.  Returns `None` if no coarser alignment exists.
+fn coarsest_aligned_scale_in_range(bounds: Aabb4i, source_scale: i8, ceiling: i8) -> Option<i8> {
+    for s in (source_scale + 1..=ceiling).rev() {
+        if bounds.chunk_extents_at_scale(s).is_some() {
+            let (lmin, lmax) = bounds.to_chunk_lattice_bounds(s);
+            let reconstructed = Aabb4i::from_lattice_bounds(lmin, lmax, s);
+            if reconstructed == bounds {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// Try to coarsen a ChunkArray node to a coarser scale.
+///
+/// Scans all voxel data to find the minimum `scale_exp` of referenced blocks.
+/// If the minimum is above the current chunk scale **and** the node bounds
+/// align at a coarser scale, rebuilds the ChunkArray with fewer chunks.
+///
+/// When the bounds don't align as a whole, hierarchically splits the array
+/// along power-of-2-aligned boundaries so that sub-regions can be independently
+/// coarsened.  For example, a 7-chunk extent at scale -3 becomes:
+/// - 4 chunks at scale -1 (extent 4, aligned)
+/// - 2 chunks at scale -2 (extent 2, aligned)
+/// - 1 chunk  at scale -3 (extent 1, remainder)
+///
+/// Also collapses to `Empty` or `Uniform` when all voxels are identical.
+///
+/// Relies on the soft invariant that a block with `scale_exp = S` in a chunk
+/// at finer scale occupies a complete, modulus-aligned hypervolume of cells.
+/// Any violation may result in data loss (representative cells are sampled).
+fn try_coarsen_chunk_array(node: &mut RegionTreeCore) -> bool {
+    let RegionNodeKind::ChunkArray(ca) = &node.kind else {
+        return false;
+    };
+    let source_scale = ca.scale_exp;
+
+    // --- Phase 1: find min block scale_exp across all referenced voxels ---
+    let Some(min_block_scale) = chunk_array_min_block_scale(ca, source_scale) else {
+        return false;
+    };
+
+    // --- Phase 2: try direct coarsening (bounds align at a coarser scale) ---
+    if let Some(target_scale) =
+        coarsest_aligned_scale_in_range(node.bounds, source_scale, min_block_scale)
+    {
+        return rebuild_chunk_array_at_scale(node, target_scale);
+    }
+
+    // --- Phase 3: hierarchical split ---
+    //
+    // The bounds don't align as a whole at any coarser scale.  Find the best
+    // axis + boundary to split on: the coarsest-scale-aligned boundary that
+    // exists within the open interval of some axis.
+    try_split_and_coarsen(node, source_scale, min_block_scale)
+}
+
+/// Split a ChunkArray node along a power-of-2-aligned boundary, creating a
+/// Branch, then recursively optimize each half.
+fn try_split_and_coarsen(
+    node: &mut RegionTreeCore,
+    source_scale: i8,
+    min_block_scale: i8,
+) -> bool {
+    let bounds = node.bounds;
+
+    // For each axis, find the coarsest-scale boundary within (min, max).
+    let mut best_axis = None;
+    let mut best_scale = source_scale;
+    let mut best_boundary = ChunkCoord::ZERO;
+
+    let cs_fp = ChunkCoord::from_num(CHUNK_SIZE as i32);
+
+    for axis in 0..4 {
+        let lo = bounds.min[axis];
+        let hi = bounds.max[axis];
+        if lo >= hi {
+            continue;
+        }
+
+        for s in (source_scale + 1..=min_block_scale).rev() {
+            let step = step_for_scale(s);
+            let chunk_world_size = cs_fp.saturating_mul(step);
+            let cws_bits = chunk_world_size.to_bits();
+            if cws_bits <= 0 {
+                continue;
+            }
+
+            // Smallest multiple of chunk_world_size that's strictly > lo.
+            let lo_bits = lo.to_bits();
+            let boundary_lattice = lo_bits.div_euclid(cws_bits) + 1;
+            let boundary_bits = boundary_lattice.checked_mul(cws_bits);
+            let Some(boundary_bits) = boundary_bits else {
+                continue;
+            };
+            let boundary = ChunkCoord::from_bits(boundary_bits);
+
+            if boundary > lo && boundary < hi {
+                if s > best_scale {
+                    best_axis = Some(axis);
+                    best_scale = s;
+                    best_boundary = boundary;
+                }
+                break; // Found for this axis at this scale, try next axis
+            }
+        }
+    }
+
+    let Some(axis) = best_axis else {
+        return false;
+    };
+
+    // Split the bounds.
+    let mut left_bounds = bounds;
+    left_bounds.max[axis] = best_boundary;
+    let mut right_bounds = bounds;
+    right_bounds.min[axis] = best_boundary;
+
+    // Take the old ChunkArray and slice it.
+    let old_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
+    let RegionNodeKind::ChunkArray(ca) = old_kind else {
+        unreachable!();
+    };
+    let gen_hash = node.generator_version_hash;
+
+    let left = RegionTreeCore {
+        bounds: left_bounds,
+        kind: slice_chunk_array_to_bounds(&ca, left_bounds)
+            .map(RegionNodeKind::ChunkArray)
+            .unwrap_or(RegionNodeKind::Empty),
+        generator_version_hash: gen_hash,
+    };
+    let right = RegionTreeCore {
+        bounds: right_bounds,
+        kind: slice_chunk_array_to_bounds(&ca, right_bounds)
+            .map(RegionNodeKind::ChunkArray)
+            .unwrap_or(RegionNodeKind::Empty),
+        generator_version_hash: gen_hash,
+    };
+
+    let mut children = vec![left, right];
+
+    // Recursively optimize each half (may coarsen or split further).
+    for child in &mut children {
+        optimize_subtree(child);
+    }
+
+    children.retain(|c| !matches!(c.kind, RegionNodeKind::Empty));
+
+    if children.is_empty() {
+        node.kind = RegionNodeKind::Empty;
+    } else if children.len() == 1 {
+        let child = children.pop().unwrap();
+        node.bounds = child.bounds;
+        node.kind = child.kind;
+    } else {
+        node.kind = RegionNodeKind::Branch(children);
+        normalize_chunk_node(node);
+    }
+
+    true
+}
+
+/// Rebuild a ChunkArray node at a coarser scale by sampling representative
+/// cells.  Assumes the caller has verified that target_scale > source_scale
+/// and that the bounds align at target_scale.
+fn rebuild_chunk_array_at_scale(node: &mut RegionTreeCore, target_scale: i8) -> bool {
+    let old_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
+    let RegionNodeKind::ChunkArray(ca) = old_kind else {
+        unreachable!();
+    };
+    let source_scale = ca.scale_exp;
+
+    let source_extents = match ca.bounds.chunk_extents_at_scale(source_scale) {
+        Some(e) => e,
+        None => {
+            node.kind = RegionNodeKind::ChunkArray(ca);
+            return false;
+        }
+    };
+    let source_indices = match ca.decode_dense_indices() {
+        Ok(i) => i,
+        Err(_) => {
+            node.kind = RegionNodeKind::ChunkArray(ca);
+            return false;
+        }
+    };
+
+    // Pre-expand each unique source chunk payload to dense block palette indices.
+    let chunk_materials: Vec<Vec<u16>> = ca
+        .chunk_palette
+        .iter()
+        .map(|cp| cp.dense_materials().unwrap_or_else(|_| vec![0u16; CHUNK_VOLUME]))
+        .collect();
+
+    let scale_diff = (target_scale - source_scale) as u32;
+    let ratio = 1usize << scale_diff;
+    let cs = CHUNK_SIZE;
+
+    let (src_lmin, _) = ca.bounds.to_chunk_lattice_bounds(source_scale);
+    let (tgt_lmin, tgt_lmax) = ca.bounds.to_chunk_lattice_bounds(target_scale);
+
+    let mut first_block_idx: Option<u16> = None;
+    let mut all_uniform = true;
+    let mut target_chunk_voxels: Vec<Vec<u16>> = Vec::new();
+
+    for tw in tgt_lmin[3]..=tgt_lmax[3] {
+        for tz in tgt_lmin[2]..=tgt_lmax[2] {
+            for ty in tgt_lmin[1]..=tgt_lmax[1] {
+                for tx in tgt_lmin[0]..=tgt_lmax[0] {
+                    let mut voxels = Vec::with_capacity(CHUNK_VOLUME);
+
+                    for vw in 0..cs {
+                        for vz in 0..cs {
+                            for vy in 0..cs {
+                                for vx in 0..cs {
+                                    let tgt_abs = [
+                                        tx as isize * cs as isize + vx as isize,
+                                        ty as isize * cs as isize + vy as isize,
+                                        tz as isize * cs as isize + vz as isize,
+                                        tw as isize * cs as isize + vw as isize,
+                                    ];
+                                    let src_abs = [
+                                        tgt_abs[0] * ratio as isize,
+                                        tgt_abs[1] * ratio as isize,
+                                        tgt_abs[2] * ratio as isize,
+                                        tgt_abs[3] * ratio as isize,
+                                    ];
+                                    let src_chunk_rel = [
+                                        (src_abs[0].div_euclid(cs as isize) as i32
+                                            - src_lmin[0]) as usize,
+                                        (src_abs[1].div_euclid(cs as isize) as i32
+                                            - src_lmin[1]) as usize,
+                                        (src_abs[2].div_euclid(cs as isize) as i32
+                                            - src_lmin[2]) as usize,
+                                        (src_abs[3].div_euclid(cs as isize) as i32
+                                            - src_lmin[3]) as usize,
+                                    ];
+                                    let src_voxel = [
+                                        src_abs[0].rem_euclid(cs as isize) as usize,
+                                        src_abs[1].rem_euclid(cs as isize) as usize,
+                                        src_abs[2].rem_euclid(cs as isize) as usize,
+                                        src_abs[3].rem_euclid(cs as isize) as usize,
+                                    ];
+
+                                    let src_linear =
+                                        linear_cell_index(src_chunk_rel, source_extents);
+                                    let cp_idx = source_indices[src_linear] as usize;
+                                    let src_mat = &chunk_materials[cp_idx];
+                                    let sv_idx = src_voxel[3] * cs * cs * cs
+                                        + src_voxel[2] * cs * cs
+                                        + src_voxel[1] * cs
+                                        + src_voxel[0];
+                                    let block_idx = src_mat[sv_idx];
+
+                                    if all_uniform {
+                                        match first_block_idx {
+                                            None => first_block_idx = Some(block_idx),
+                                            Some(fb) if fb != block_idx => {
+                                                all_uniform = false;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    voxels.push(block_idx);
+                                }
+                            }
+                        }
+                    }
+                    target_chunk_voxels.push(voxels);
+                }
+            }
+        }
+    }
+
+    // Collapse to Empty or Uniform if possible.
+    if all_uniform {
+        let block_idx = first_block_idx.unwrap_or(0);
+        let block = ca
+            .block_palette
+            .get(block_idx as usize)
+            .cloned()
+            .unwrap_or(BlockData::AIR);
+        node.kind = if block.is_air() {
+            RegionNodeKind::Empty
+        } else {
+            RegionNodeKind::Uniform(block)
+        };
+        return true;
+    }
+
+    // Build new ChunkArrayData at the coarser scale.
+    let mut new_chunk_palette = Vec::new();
+    let mut chunk_to_idx: HashMap<Vec<u16>, u16> = HashMap::new();
+    let mut dense_indices = Vec::with_capacity(target_chunk_voxels.len());
+
+    for chunk_voxels in &target_chunk_voxels {
+        let chunk_idx = match chunk_to_idx.get(chunk_voxels) {
+            Some(&idx) => idx,
+            None => {
+                let idx = new_chunk_palette.len() as u16;
+                let payload = ChunkPayload::from_dense_materials_compact(chunk_voxels)
+                    .unwrap_or(ChunkPayload::Empty);
+                new_chunk_palette.push(payload);
+                chunk_to_idx.insert(chunk_voxels.clone(), idx);
+                idx
+            }
+        };
+        dense_indices.push(chunk_idx);
+    }
+
+    match ChunkArrayData::from_dense_indices_with_block_palette(
+        node.bounds,
+        new_chunk_palette,
+        dense_indices,
+        None,
+        ca.block_palette,
+        target_scale,
+    ) {
+        Ok(new_ca) => {
+            node.kind = RegionNodeKind::ChunkArray(new_ca);
+            true
+        }
+        Err(e) => {
+            // This path should be unreachable: bounds alignment and palette
+            // indices are validated before reaching here.
+            panic!(
+                "rebuild_chunk_array_at_scale: failed to build coarsened ChunkArray: {:?}",
+                e
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

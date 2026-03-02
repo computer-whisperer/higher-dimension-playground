@@ -42,7 +42,7 @@ pub enum RegionNodeKind {
 mod tree;
 pub use tree::{
     chunk_spatial_extent, coarsest_aligned_scale, collect_non_empty_chunks_from_core_in_bounds,
-    resample_chunk_array_to_bounds, slice_non_empty_region_core_in_bounds,
+    optimize_subtree, resample_chunk_array_to_bounds, slice_non_empty_region_core_in_bounds,
     slice_region_core_in_bounds, validate_region_core_world_space_non_overlapping,
     validate_tree_integrity, BvhBlockHit, BvhRayHit, RegionChunkTree, TreeIntegrityReport,
 };
