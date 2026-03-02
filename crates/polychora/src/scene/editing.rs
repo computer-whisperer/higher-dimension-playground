@@ -37,9 +37,27 @@ impl Scene {
 
         let solid_voxel: [i32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
 
-        let t_f32: f32 = hit.t.to_num::<f32>();
-        let last_empty_voxel = if t_f32 > EDIT_RAY_EPSILON {
-            let step_back = t_f32 - EDIT_RAY_EPSILON;
+        // Compute last_empty_voxel using the block's AABB to find the true
+        // entry face.  The BVH's `hit.t` can be clamped to an interior march
+        // position for multi-cell blocks (scale_exp > chunk scale), making the
+        // old step-back-from-t approach land inside the block.  Recomputing the
+        // AABB entry time from the block bounds avoids this.
+        let block_min: [f32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<f32>());
+        let block_max: [f32; 4] = std::array::from_fn(|i| hit.bounds.max[i].to_num::<f32>());
+        let mut t_entry = f32::NEG_INFINITY;
+        for axis in 0..4 {
+            if dir[axis].abs() > 1e-10 {
+                let t_near = if dir[axis] > 0.0 {
+                    (block_min[axis] - origin[axis]) / dir[axis]
+                } else {
+                    (block_max[axis] - origin[axis]) / dir[axis]
+                };
+                t_entry = t_entry.max(t_near);
+            }
+        }
+        let t_entry = t_entry.max(0.0);
+        let last_empty_voxel = if t_entry > EDIT_RAY_EPSILON {
+            let step_back = t_entry - EDIT_RAY_EPSILON;
             Some(std::array::from_fn(|i| {
                 (origin[i] + dir[i] * step_back).floor() as i32
             }))
