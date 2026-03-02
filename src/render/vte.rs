@@ -119,10 +119,11 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) highlight_flags: u32,
     pub(super) _highlight_padding: [u32; 3],
     pub(super) highlight_hit_voxel: [i32; 4],
-    pub(super) highlight_place_voxel: [i32; 4],
+    pub(super) highlight_face_axis: u32,
+    pub(super) highlight_face_sign: i32,
+    pub(super) _highlight_reserved: [u32; 2],
     pub(super) highlight_hit_scale: u32,
-    pub(super) highlight_place_scale: u32,
-    pub(super) _highlight_scale_padding: [u32; 2],
+    pub(super) _highlight_tail_padding: [u32; 3],
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
@@ -262,7 +263,6 @@ pub(super) const VTE_DEBUG_FLAG_ENTITY_BVH_COMPARE: u32 = 1 << 5;
 pub(super) const VTE_DEBUG_FLAG_WORLD_BVH_RAY_DIAG: u32 = 1 << 6;
 pub(super) const VTE_DEBUG_FLAG_STAGE_A_BREAKDOWN: u32 = 1 << 7;
 pub(super) const VTE_HIGHLIGHT_FLAG_HIT_VOXEL: u32 = 1 << 0;
-pub(super) const VTE_HIGHLIGHT_FLAG_PLACE_VOXEL: u32 = 1 << 1;
 pub(super) const VTE_COMPARE_STATS_WORD_COUNT: usize = 48;
 pub(super) const VTE_COMPARE_STAT_COMPARED: usize = 0;
 pub(super) const VTE_COMPARE_STAT_MATCHES: usize = 1;

@@ -844,18 +844,16 @@ impl App {
         }
 
         let mut vte_highlight_hit_voxel = None;
-        let mut vte_highlight_place_voxel = None;
         let mut vte_highlight_hit_scale = 0u32;
-        let mut vte_highlight_place_scale = 0u32;
+        let mut vte_highlight_face_axis = 0u32;
+        let mut vte_highlight_face_sign = 0i32;
         if backend == RenderBackend::VoxelTraversal && highlight_mode.uses_faces() {
             if let Some(targets) = &targets {
                 if let Some(hit) = &targets.hit {
                     vte_highlight_hit_voxel = Some(hit.origin_i32());
                     vte_highlight_hit_scale = hit.scale_exp.max(0) as u32;
-                }
-                if let Some(place) = &targets.place {
-                    vte_highlight_place_voxel = Some(place.origin_i32());
-                    vte_highlight_place_scale = place.scale_exp.max(0) as u32;
+                    vte_highlight_face_axis = targets.face_axis as u32;
+                    vte_highlight_face_sign = targets.face_sign as i32;
                 }
             }
         }
@@ -961,20 +959,20 @@ impl App {
             } else {
                 vte_highlight_hit_voxel
             },
-            vte_highlight_place_voxel: if self.args.no_hud {
-                None
-            } else {
-                vte_highlight_place_voxel
-            },
             vte_highlight_hit_scale: if self.args.no_hud {
                 0
             } else {
                 vte_highlight_hit_scale
             },
-            vte_highlight_place_scale: if self.args.no_hud {
+            vte_highlight_face_axis: if self.args.no_hud {
                 0
             } else {
-                vte_highlight_place_scale
+                vte_highlight_face_axis
+            },
+            vte_highlight_face_sign: if self.args.no_hud {
+                0
+            } else {
+                vte_highlight_face_sign
             },
             do_navigation_hud,
             custom_overlay_lines: Vec::new(),

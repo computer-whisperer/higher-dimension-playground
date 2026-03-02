@@ -19,7 +19,6 @@ static const uint STAGE_B_MODE_INTEGRAL = 0u;
 static const uint STAGE_B_MODE_SLICE = 1u;
 static const uint STAGE_B_MODE_THICK_SLICE = 2u;
 static const uint HIGHLIGHT_FLAG_HIT_VOXEL = 1u << 0u;
-static const uint HIGHLIGHT_FLAG_PLACE_VOXEL = 1u << 1u;
 static const uint MATERIAL_ID_GROUND = 11u;
 static const float INTEGRAL_HIGHLIGHT_WEIGHT_BOOST = 15.0;
 // Keep shader-side traversal policy aligned with CPU-side BVH build policy:
@@ -184,11 +183,14 @@ struct VoxelFrameMeta
     uint highlightPadding1;
     uint highlightPadding2;
     int4 highlightHitVoxel;
-    int4 highlightPlaceVoxel;
+    uint highlightFaceAxis;
+    int highlightFaceSign;
+    uint highlightReserved0;
+    uint highlightReserved1;
     uint highlightHitScale;
-    uint highlightPlaceScale;
-    uint highlightScalePadding0;
-    uint highlightScalePadding1;
+    uint highlightTailPadding0;
+    uint highlightTailPadding1;
+    uint highlightTailPadding2;
 }
 
 struct VoxelChunkHeader
@@ -1395,13 +1397,6 @@ uint highlightKindForVoxel(int4 voxelCoord, VoxelFrameMeta meta)
         if (all(rel >= 0) && all(rel < blockSize))
             return HIGHLIGHT_FLAG_HIT_VOXEL;
     }
-    if ((meta.highlightFlags & HIGHLIGHT_FLAG_PLACE_VOXEL) != 0u)
-    {
-        int blockSize = 1 << int(meta.highlightPlaceScale);
-        int4 rel = voxelCoord - meta.highlightPlaceVoxel;
-        if (all(rel >= 0) && all(rel < blockSize))
-            return HIGHLIGHT_FLAG_PLACE_VOXEL;
-    }
     return 0u;
 }
 
@@ -1437,36 +1432,9 @@ int normalSignOnAxis(float4 n, uint axis)
 
 bool decodePlacementFace(VoxelFrameMeta meta, out uint axis, out int sign)
 {
-    axis = 0u;
-    sign = 0;
-    uint required = HIGHLIGHT_FLAG_HIT_VOXEL | HIGHLIGHT_FLAG_PLACE_VOXEL;
-    if ((meta.highlightFlags & required) != required)
-    {
-        return false;
-    }
-
-    int hitBlockSize = 1 << int(meta.highlightHitScale);
-    int placeBlockSize = 1 << int(meta.highlightPlaceScale);
-    int4 delta = meta.highlightPlaceVoxel - meta.highlightHitVoxel;
-    uint faceAxes = 0u;
-
-    // For each axis, check for scale-aware adjacency:
-    //   positive face: delta == +hitBlockSize
-    //   negative face: delta == -placeBlockSize
-    //   other non-zero deltas: grid-alignment offset (ignored, not a face axis)
-    if (delta.x == hitBlockSize) { axis = 0u; sign = 1; faceAxes++; }
-    else if (delta.x == -placeBlockSize) { axis = 0u; sign = -1; faceAxes++; }
-
-    if (delta.y == hitBlockSize) { axis = 1u; sign = 1; faceAxes++; }
-    else if (delta.y == -placeBlockSize) { axis = 1u; sign = -1; faceAxes++; }
-
-    if (delta.z == hitBlockSize) { axis = 2u; sign = 1; faceAxes++; }
-    else if (delta.z == -placeBlockSize) { axis = 2u; sign = -1; faceAxes++; }
-
-    if (delta.w == hitBlockSize) { axis = 3u; sign = 1; faceAxes++; }
-    else if (delta.w == -placeBlockSize) { axis = 3u; sign = -1; faceAxes++; }
-
-    return faceAxes == 1u;
+    axis = meta.highlightFaceAxis;
+    sign = meta.highlightFaceSign;
+    return sign != 0 && (meta.highlightFlags & HIGHLIGHT_FLAG_HIT_VOXEL) != 0u;
 }
 
 float3 faceAxisSignColor(uint axis, int sign)
@@ -1496,30 +1464,27 @@ float3 shadeHighlightedVoxelSample(
     float4 hitNormal,
     uint highlightKind)
 {
-    // Determine block origin and size for the highlighted block.
-    int4 blockMin = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
-        ? meta.highlightHitVoxel : meta.highlightPlaceVoxel;
-    int blockSize = 1 << int((highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
-        ? meta.highlightHitScale : meta.highlightPlaceScale);
+    // Block origin and size for the hit block.
+    int4 blockMin = meta.highlightHitVoxel;
+    int blockSize = 1 << int(meta.highlightHitScale);
     float fBlockSize = float(blockSize);
 
     // 4D block-relative local coordinates in [0,1].
     float4 local = (hitPos + rayDir * 1e-4 - float4(blockMin)) / fBlockSize;
     float4 faceDist = min(local, 1.0 - local);
-    uint guideAxis = dominantAxisFromNormal(hitNormal);
-    int guideSign = normalSignOnAxis(hitNormal, guideAxis);
 
-    // For the hit block, prefer the explicit placement face
-    // inferred from hit/place voxel relation so the guide marks "where placement goes".
-    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
+    // Use the explicit face axis/sign from the raycast when available,
+    // otherwise fall back to the surface normal.
+    uint guideAxis = 0u;
+    int guideSign = 0;
+    if (decodePlacementFace(meta, guideAxis, guideSign))
     {
-        uint placementAxis = 0u;
-        int placementSign = 0;
-        if (decodePlacementFace(meta, placementAxis, placementSign))
-        {
-            guideAxis = placementAxis;
-            guideSign = placementSign;
-        }
+        // guideAxis/guideSign are set by decodePlacementFace
+    }
+    else
+    {
+        guideAxis = dominantAxisFromNormal(hitNormal);
+        guideSign = normalSignOnAxis(hitNormal, guideAxis);
     }
 
     float minCellFaceDist = 1e30;
@@ -1532,15 +1497,11 @@ float3 shadeHighlightedVoxelSample(
     const float BAND_OUTER = 0.16;
     float faceBand = 1.0 - smoothstep(BAND_INNER, BAND_OUTER, minCellFaceDist);
 
-    // Pure high-contrast treatment: drive edges toward black, but keep
-    // center contribution unchanged.
+    // Near-black edge bands for the hit block highlight.
     float edgeWeight = saturate(faceBand);
-    // Keep hit and place guides visually distinct:
-    // hit voxel gets near-black edge bands, placement voxel stays darker-gray.
-    float blackBlend = (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL) ? 0.98 : 0.55;
-    float3 shaded = lerp(litColor, float3(0.0, 0.0, 0.0), edgeWeight * blackBlend);
+    float3 shaded = lerp(litColor, float3(0.0, 0.0, 0.0), edgeWeight * 0.98);
 
-    if (highlightKind == HIGHLIGHT_FLAG_HIT_VOXEL)
+    // Accent the entry face with an axis-colored tint.
     {
         float guideFaceDist = 0.0;
         if (guideAxis == 0u) guideFaceDist = (guideSign < 0) ? local.x : (1.0 - local.x);
@@ -1548,11 +1509,9 @@ float3 shadeHighlightedVoxelSample(
         else if (guideAxis == 2u) guideFaceDist = (guideSign < 0) ? local.z : (1.0 - local.z);
         else guideFaceDist = (guideSign < 0) ? local.w : (1.0 - local.w);
 
-        // Accent only the boundary of the currently looked-at 3D face.
         float faceMask = 1.0 - smoothstep(0.01, 0.06, guideFaceDist);
         float edgeMask = 1.0 - smoothstep(0.05, 0.13, minCellFaceDist);
         float accentMask = faceMask * edgeMask;
-        // Signed axis tint so +/− X/Y/Z/W are immediately recognizable.
         float3 axisTint = faceAxisSignColor(guideAxis, guideSign);
         shaded = lerp(shaded, axisTint, accentMask * 0.94);
     }
