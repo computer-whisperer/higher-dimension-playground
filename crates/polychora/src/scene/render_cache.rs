@@ -728,7 +728,10 @@ impl Scene {
                         ci += 1;
                     }
                     std::cmp::Ordering::Equal => {
-                        if fp != cp {
+                        // Compare resolved block data, not internal palette
+                        // structure — the cache may flatten branches into a
+                        // single ChunkArray with a shared (larger) palette.
+                        if fp.dense_blocks() != cp.dense_blocks() {
                             report.cross_validate_errors.push(format!(
                                 "chunk {:?} payload mismatch: fresh={:?} cached={:?}",
                                 fk, fp, cp,
