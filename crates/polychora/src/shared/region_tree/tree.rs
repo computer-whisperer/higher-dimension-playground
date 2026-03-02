@@ -1295,9 +1295,11 @@ fn splice_carve_and_replace(
     match &source_kind {
         RegionNodeKind::ChunkArray(chunk_array) => {
             // ChunkArray-aware carving: keep remnants at original scale where
-            // possible (aligned pieces), resample only for non-aligned pieces.
+            // possible (aligned pieces), hierarchically resample non-aligned pieces.
             if let Ok(source_indices) = chunk_array.decode_dense_indices() {
                 let se = chunk_array.scale_exp;
+                let min_block_scale =
+                    chunk_array_min_block_scale(chunk_array, se).unwrap_or(se);
                 for piece_bounds in subtract_aabb(node.bounds, patch_bounds) {
                     let piece_aligned = piece_bounds
                         .chunk_extents_at_scale(se)
@@ -1323,18 +1325,15 @@ fn splice_carve_and_replace(
                             continue;
                         }
                     }
-                    // Non-aligned: resample at coarsest aligned finer scale.
-                    let aligned_scale =
-                        coarsest_aligned_scale(piece_bounds, chunk_array.scale_exp);
-                    let resampled = resample_chunk_array_to_bounds(
+                    // Non-aligned: hierarchically resample at the coarsest
+                    // possible scales to avoid dense fine-scale intermediates.
+                    resample_chunk_array_hierarchical(
                         chunk_array,
                         piece_bounds,
-                        aligned_scale,
+                        min_block_scale,
                         gen_hash,
+                        &mut children,
                     );
-                    if !matches!(resampled.kind, RegionNodeKind::Empty) {
-                        children.push(resampled);
-                    }
                 }
             } else {
                 // Fallback: can't decode indices, use generic projection.
