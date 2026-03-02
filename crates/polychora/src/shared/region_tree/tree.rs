@@ -2132,10 +2132,11 @@ fn carve_leaf_for_chunk_edit(
                 node.kind = source_kind;
                 return false;
             }
+            let min_block_scale = chunk_array_min_block_scale(chunk_array, chunk_array.scale_exp)
+                .unwrap_or(chunk_array.scale_exp);
             for piece_bounds in subtract_aabb(node.bounds, chunk_bounds) {
                 // Check if piece_bounds align to the source scale's chunk grid.
-                // If not, the slice would produce semantically wrong data (sub-chunk
-                // bounds with a full-chunk payload). Use resample instead.
+                // If so, we can cheaply slice the existing chunk data.
                 let se = chunk_array.scale_exp;
                 let piece_aligned = piece_bounds
                     .chunk_extents_at_scale(se)
@@ -2161,18 +2162,16 @@ fn carve_leaf_for_chunk_edit(
                         continue;
                     }
                 }
-                // Bounds don't align to source scale — resample at coarsest aligned finer scale.
-                let aligned_scale =
-                    coarsest_aligned_scale(piece_bounds, chunk_array.scale_exp);
-                let resampled = resample_chunk_array_to_bounds(
+                // Bounds don't align to source scale — hierarchically resample
+                // at the coarsest possible scales to avoid a dense fine-scale
+                // intermediate.
+                resample_chunk_array_hierarchical(
                     chunk_array,
                     piece_bounds,
-                    aligned_scale,
+                    min_block_scale,
                     node.generator_version_hash,
+                    &mut children,
                 );
-                if !matches!(resampled.kind, RegionNodeKind::Empty) {
-                    children.push(resampled);
-                }
             }
         } else {
             let existing_resolved =
@@ -2210,9 +2209,8 @@ fn carve_leaf_for_chunk_edit(
         }
     }
 
-    // Optimize gap-fill children: coarsen ChunkArrays that were resampled at
-    // a finer scale than necessary (e.g., scale -3 chunks whose blocks are
-    // all scale 0 can be rebuilt as scale 0 chunks).
+    // Optimize aligned-sliced children that may be at a finer scale than
+    // necessary (the hierarchical resample already handles non-aligned pieces).
     for child in &mut children {
         if matches!(child.kind, RegionNodeKind::ChunkArray(_)) {
             try_coarsen_chunk_array(child);
@@ -3506,6 +3504,113 @@ fn coarsest_aligned_scale_in_range(bounds: Aabb4i, source_scale: i8, ceiling: i8
         }
     }
     None
+}
+
+/// Hierarchically resample a ChunkArray into sub-pieces at the coarsest possible
+/// scales, avoiding a monolithic fine-scale intermediate.
+///
+/// For a piece that doesn't align at the source scale, finds the coarsest aligned
+/// scale for the whole piece.  If a coarser-than-finest scale exists, resamples
+/// directly at that scale.  If not, splits the piece at the coarsest available
+/// power-of-2 boundary and recurses on each half.
+///
+/// This produces the same result as resample-then-optimize but without generating
+/// the dense fine-scale ChunkArray first — e.g. a 7-extent at scale -3 directly
+/// becomes 4@-1 + 2@-2 + 1@-3 instead of 7@-3 → optimize.
+fn resample_chunk_array_hierarchical(
+    source: &ChunkArrayData,
+    piece_bounds: Aabb4i,
+    min_block_scale: i8,
+    gen_hash: u64,
+    children: &mut Vec<RegionTreeCore>,
+) {
+    let source_scale = source.scale_exp;
+
+    // Try direct coarsening: check if the whole piece aligns at a coarser scale.
+    if let Some(target_scale) =
+        coarsest_aligned_scale_in_range(piece_bounds, source_scale, min_block_scale)
+    {
+        let resampled =
+            resample_chunk_array_to_bounds(source, piece_bounds, target_scale, gen_hash);
+        if !matches!(resampled.kind, RegionNodeKind::Empty) {
+            children.push(resampled);
+        }
+        return;
+    }
+
+    // Find the finest aligned scale (base case for resampling).
+    let finest_aligned = coarsest_aligned_scale(piece_bounds, source_scale);
+
+    // Try to find a split boundary at a scale coarser than finest_aligned.
+    if finest_aligned < min_block_scale {
+        let cs_fp = ChunkCoord::from_num(CHUNK_SIZE as i32);
+        let mut best_axis = None;
+        let mut best_scale = finest_aligned;
+        let mut best_boundary = ChunkCoord::ZERO;
+
+        for axis in 0..4 {
+            let lo = piece_bounds.min[axis];
+            let hi = piece_bounds.max[axis];
+            if lo >= hi {
+                continue;
+            }
+
+            for s in (finest_aligned + 1..=min_block_scale).rev() {
+                let step = step_for_scale(s);
+                let chunk_world_size = cs_fp.saturating_mul(step);
+                let cws_bits = chunk_world_size.to_bits();
+                if cws_bits <= 0 {
+                    continue;
+                }
+
+                let lo_bits = lo.to_bits();
+                let boundary_lattice = lo_bits.div_euclid(cws_bits) + 1;
+                let Some(boundary_bits) = boundary_lattice.checked_mul(cws_bits) else {
+                    continue;
+                };
+                let boundary = ChunkCoord::from_bits(boundary_bits);
+
+                if boundary > lo && boundary < hi {
+                    if s > best_scale {
+                        best_axis = Some(axis);
+                        best_scale = s;
+                        best_boundary = boundary;
+                    }
+                    break;
+                }
+            }
+        }
+
+        if let Some(axis) = best_axis {
+            let mut left_bounds = piece_bounds;
+            left_bounds.max[axis] = best_boundary;
+            let mut right_bounds = piece_bounds;
+            right_bounds.min[axis] = best_boundary;
+
+            resample_chunk_array_hierarchical(
+                source,
+                left_bounds,
+                min_block_scale,
+                gen_hash,
+                children,
+            );
+            resample_chunk_array_hierarchical(
+                source,
+                right_bounds,
+                min_block_scale,
+                gen_hash,
+                children,
+            );
+            return;
+        }
+    }
+
+    // No coarser representation possible. Resample at the finest aligned scale.
+    let resampled =
+        resample_chunk_array_to_bounds(source, piece_bounds, finest_aligned, gen_hash);
+    if !matches!(resampled.kind, RegionNodeKind::Empty) {
+        children.push(resampled);
+    }
 }
 
 /// Try to coarsen a ChunkArray node to a coarser scale.

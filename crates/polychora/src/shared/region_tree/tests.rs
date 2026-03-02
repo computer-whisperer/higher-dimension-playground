@@ -4571,6 +4571,74 @@ fn optimize_collapses_uniform_chunk_array() {
     assert_tree_structure(&tree, "optimize_uniform_collapse");
 }
 
+/// Verify that placing a fine-scale block into a coarse ChunkArray directly
+/// produces multi-scale gap-fill chunks via hierarchical resampling, without
+/// needing the post-pass optimizer to reduce them.
+///
+/// Places a scale -3 block into a scale 0 checkerboard chunk and checks that
+/// the resulting tree has chunks at multiple scales (not all at scale -3).
+#[test]
+fn hierarchical_resample_produces_multi_scale_gap_fill() {
+    use crate::shared::voxel::CHUNK_SIZE;
+
+    let mut tree = RegionChunkTree::new();
+
+    // Fill with non-uniform checkerboard at scale 0.
+    let stone = BlockData::simple(1, 1).at_scale(0);
+    let dirt = BlockData::simple(1, 2).at_scale(0);
+    let mut blocks = Vec::with_capacity(CHUNK_VOLUME);
+    for idx in 0..CHUNK_VOLUME {
+        blocks.push(if idx % 2 == 0 {
+            stone.clone()
+        } else {
+            dirt.clone()
+        });
+    }
+    let payload = ResolvedChunkPayload::from_dense_blocks(&blocks).unwrap();
+    tree.set_chunk_at_scale(chunk_key_from_lattice([0, 0, 0, 0], 0), Some(payload), 0);
+
+    // Place a single fine block at scale -3.
+    let fine = BlockData::simple(1, 10).at_scale(-3);
+    place_block_at_scale(&mut tree, [0, 0, 0, 0], fine.clone(), -3);
+
+    // Collect all ChunkArray scales present in the tree.
+    let scales = chunk_array_scales(&tree);
+
+    // The hierarchical resample should produce chunks at multiple scales,
+    // not all at scale -3.  scales is Vec<(scale_exp, chunk_count)>.
+    assert!(
+        scales.len() > 1,
+        "expected multi-scale output from hierarchical resample, got scales: {:?}",
+        scales
+    );
+
+    // Should have some chunks coarser than -3 (the finest).
+    let has_coarser = scales.iter().any(|&(s, _)| s > -3);
+    assert!(
+        has_coarser,
+        "expected some chunks coarser than -3, got scales: {:?}",
+        scales
+    );
+
+    // Total chunk count should be reasonable (not the ~3584 from flat resample).
+    let cells = total_chunk_cells(&tree);
+    assert!(
+        cells < 1500,
+        "expected fewer than 1500 chunk cells with hierarchical resample, got {}",
+        cells
+    );
+
+    // Verify data integrity: fine block readable.
+    let r = read_block_at_scale(&tree, [0, 0, 0, 0], -3);
+    assert_eq!(r.block_type, 10, "fine block should be readable");
+
+    // Verify original data: position [1,0,0,0] at scale 0 should be dirt (odd idx).
+    let r2 = read_block_at_scale(&tree, [1, 0, 0, 0], 0);
+    assert_eq!(r2.block_type, 2, "original dirt should survive");
+
+    assert_tree_structure(&tree, "hierarchical_resample");
+}
+
 /// Multiple fine edits in the same region — verify optimizer handles
 /// the mixed-scale scenario where some chunks have fine blocks and
 /// others are pure coarse.
