@@ -3616,8 +3616,8 @@ fn bvh_raycast(
             if block.is_air() {
                 return None;
             }
-            let (t_enter, _) = ray_aabb_intersect(origin, direction, &bounds)?;
-            if t_enter > max_t {
+            let (t_enter, t_exit) = ray_aabb_intersect(origin, direction, &bounds)?;
+            if t_enter > max_t || t_exit < ChunkCoord::ZERO {
                 return None;
             }
             // Compute the point where the ray enters the uniform region.
@@ -3675,10 +3675,23 @@ fn bvh_raycast(
                             let block = resolved.block_at(cell_idx);
                             if !block.is_air() {
                                 let bb = block_bounds(cell_aabb.min, se, &block);
-                                // Compute true t_enter for the block's bounds.
+                                // Compute t_enter for the block's bounds, but never
+                                // earlier than the march's current t.  When
+                                // block.scale_exp > chunk scale_exp, block_bounds
+                                // expands the AABB beyond the cell that was
+                                // actually hit.  Using the raw AABB entry time
+                                // would claim a hit at a point the march already
+                                // passed through (possibly air cells of the same
+                                // logical block).
                                 let block_t = ray_aabb_intersect(origin, direction, &bb)
                                     .map(|(te, _)| te.max(ChunkCoord::ZERO))
                                     .unwrap_or(ChunkCoord::from_num(t));
+                                let march_t = ChunkCoord::from_num(t);
+                                let block_t = if block.scale_exp > se && block_t < march_t {
+                                    march_t
+                                } else {
+                                    block_t
+                                };
                                 return Some(BvhRayHit { block, bounds: bb, t: block_t });
                             }
                         }
@@ -3693,8 +3706,8 @@ fn bvh_raycast(
             // Collect children that the ray intersects, sorted by t_enter.
             let mut candidates: Vec<(ChunkCoord, usize)> = Vec::new();
             for (idx, child) in children.iter().enumerate() {
-                if let Some((t_enter, _)) = ray_aabb_intersect(origin, direction, &child.bounds) {
-                    if t_enter <= max_t {
+                if let Some((t_enter, t_exit)) = ray_aabb_intersect(origin, direction, &child.bounds) {
+                    if t_enter <= max_t && t_exit >= ChunkCoord::ZERO {
                         candidates.push((t_enter, idx));
                     }
                 }
