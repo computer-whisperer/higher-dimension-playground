@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 // Well-known item type constants: (namespace, item_type)
 // ---------------------------------------------------------------------------
 
-pub const ITEM_BLOCK_STACK: (u32, u32) = (0, 1);
+pub const ITEM_BLOCK: (u32, u32) = (0, 1);
 
 // ---------------------------------------------------------------------------
 // Item type registry entry
@@ -25,18 +25,18 @@ pub const ITEM_TYPE_ENTRIES: &[ItemTypeEntry] = &[ItemTypeEntry {
 }];
 
 // ---------------------------------------------------------------------------
-// BlockStackMeta — CBOR schema for block_stack item data
+// BlockItemMeta — CBOR schema for block_stack item data
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct BlockStackMeta {
+pub struct BlockItemMeta {
     pub namespace: u32,
     pub block_type: u32,
     #[serde(default)]
     pub extra_data: Vec<u8>,
 }
 
-impl BlockStackMeta {
+impl BlockItemMeta {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf).expect("CBOR encode should not fail");
@@ -58,15 +58,15 @@ impl BlockStackMeta {
 impl ItemStack {
     /// Create a block_stack item for the given block type.
     pub fn block(namespace: u32, block_type: u32, count: u32) -> Self {
-        let meta = BlockStackMeta {
+        let meta = BlockItemMeta {
             namespace,
             block_type,
             extra_data: Vec::new(),
         };
         Self {
             item: Item {
-                namespace: ITEM_BLOCK_STACK.0,
-                item_type: ITEM_BLOCK_STACK.1,
+                namespace: ITEM_BLOCK.0,
+                item_type: ITEM_BLOCK.1,
                 data: meta.encode(),
             },
             count,
@@ -75,10 +75,10 @@ impl ItemStack {
 
     /// If this is a block_stack item, decode the block data (with default orientation).
     pub fn to_block_data(&self) -> Option<BlockData> {
-        if (self.item.namespace, self.item.item_type) != ITEM_BLOCK_STACK {
+        if (self.item.namespace, self.item.item_type) != ITEM_BLOCK {
             return None;
         }
-        let meta = BlockStackMeta::decode(&self.item.data)?;
+        let meta = BlockItemMeta::decode(&self.item.data)?;
         Some(BlockData {
             namespace: meta.namespace,
             block_type: meta.block_type,
@@ -90,10 +90,10 @@ impl ItemStack {
 
     /// If this is a block_stack item, return the (namespace, block_type).
     pub fn block_type_key(&self) -> Option<(u32, u32)> {
-        if (self.item.namespace, self.item.item_type) != ITEM_BLOCK_STACK {
+        if (self.item.namespace, self.item.item_type) != ITEM_BLOCK {
             return None;
         }
-        let meta = BlockStackMeta::decode(&self.item.data)?;
+        let meta = BlockItemMeta::decode(&self.item.data)?;
         Some((meta.namespace, meta.block_type))
     }
 }

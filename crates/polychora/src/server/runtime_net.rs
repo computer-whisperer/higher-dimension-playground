@@ -1329,6 +1329,9 @@ pub(super) fn handle_message(
                 handle_world_interest_update(&state_for_resync, client_id, bounds);
             });
         }
+        ClientMessage::InventorySync { .. } => {
+            // TODO: handle inventory sync from client
+        }
     }
     record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None, None);
 }

@@ -153,6 +153,10 @@ pub enum ClientMessage {
     WorldForceResync {
         bounds: Aabb4i,
     },
+    /// Sync full inventory state to the server.
+    InventorySync {
+        payload: Vec<u8>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -212,5 +216,14 @@ pub enum ServerMessage {
         delta_position: [f32; 4],
         delta_velocity_y: f32,
         source_entity_id: Option<u64>,
+    },
+    /// Sync full inventory state to the client.
+    InventorySync {
+        payload: Vec<u8>,
+    },
+    /// Update a single inventory slot on the client.
+    InventorySlotUpdate {
+        slot_index: u8,
+        stack: Option<ItemStack>,
     },
 }

@@ -1723,6 +1723,12 @@ impl App {
                     source_entity_id,
                 );
             }
+            multiplayer::ServerMessage::InventorySync { .. } => {
+                // TODO: apply server inventory state
+            }
+            multiplayer::ServerMessage::InventorySlotUpdate { .. } => {
+                // TODO: apply single-slot update from server
+            }
         }
     }
 
