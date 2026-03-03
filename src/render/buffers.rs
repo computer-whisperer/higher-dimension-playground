@@ -249,8 +249,8 @@ impl SizedBuffers {
         .unwrap();
 
         // Tile binning buffers
-        let tiles_x = (render_dimensions[0] + 7) / 8;
-        let tiles_y = (render_dimensions[1] + 7) / 8;
+        let tiles_x = render_dimensions[0].div_ceil(8);
+        let tiles_y = render_dimensions[1].div_ceil(8);
         let tile_count = tiles_x * tiles_y;
 
         let tile_tet_counts_buffer = Buffer::from_iter(

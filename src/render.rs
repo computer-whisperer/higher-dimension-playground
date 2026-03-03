@@ -3439,7 +3439,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(non_voxel_leaf_count as u32 + 63) / 64u32, 1, 1])
+                            builder.dispatch([(non_voxel_leaf_count as u32).div_ceil(64u32), 1, 1])
                         }
                         .unwrap();
                         {
@@ -3473,9 +3473,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                             self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                         )
                                         .unwrap();
-                                    unsafe {
-                                        builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
-                                    }
+                                    unsafe { builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1]) }
                                     .unwrap();
                                 }
                                 builder
@@ -3483,7 +3481,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
                                 {
                                     let q =
                                         self.profiler.next_query_index("vte_non_voxel_bvh_refit");
@@ -3516,11 +3514,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe { builder.dispatch([(n_pow2 + 63) / 64u32, 1, 1]) }.unwrap();
+                                unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }.unwrap();
 
                                 let num_stages = n_pow2.trailing_zeros();
                                 let local_stages = 6u32.min(num_stages);
-                                let workgroups = (n_pow2 + 63) / 64;
+                                let workgroups = n_pow2.div_ceil(64);
 
                                 let push_data: [u32; 4] = [0, 0, n_pow2, 0];
                                 builder
@@ -3580,14 +3578,14 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
 
                                 builder
                                     .bind_pipeline_compute(
                                         self.compute_pipeline.bvh_build_tree_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
 
                                 let num_internal_nodes = n.saturating_sub(1);
                                 if num_internal_nodes > 0 {
@@ -3596,9 +3594,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                             self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                         )
                                         .unwrap();
-                                    unsafe {
-                                        builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1])
-                                    }
+                                    unsafe { builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1]) }
                                     .unwrap();
                                 }
                                 builder
@@ -3606,7 +3602,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe { builder.dispatch([(n + 63) / 64u32, 1, 1]) }.unwrap();
+                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
 
                                 {
                                     let q = self.profiler.next_query_index("vte_non_voxel_bvh");
@@ -3667,8 +3663,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 unsafe {
                     builder.dispatch([
-                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                        self.sized_buffers.render_dimensions[0].div_ceil(8),
+                        self.sized_buffers.render_dimensions[1].div_ceil(8),
                         if fuse_integral_in_stage_a {
                             1
                         } else {
@@ -3708,8 +3704,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         .unwrap();
                     unsafe {
                         builder.dispatch([
-                            (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                            (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                            self.sized_buffers.render_dimensions[0].div_ceil(8),
+                            self.sized_buffers.render_dimensions[1].div_ceil(8),
                             1,
                         ])
                     }
@@ -3732,8 +3728,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 unsafe {
                     builder.dispatch([
-                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                        self.sized_buffers.render_dimensions[0].div_ceil(8),
+                        self.sized_buffers.render_dimensions[1].div_ceil(8),
                         1,
                     ])
                 }
@@ -3791,7 +3787,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 unsafe {
                     builder.dispatch([
-                        (raster_preprocess_tetrahedron_count as u32 + 63) / 64u32,
+                        (raster_preprocess_tetrahedron_count as u32).div_ceil(64u32),
                         1,
                         1,
                     ])
@@ -3859,7 +3855,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         .unwrap();
                     unsafe {
                         builder.dispatch([
-                            (self.sized_buffers.max_tetrahedrons as u32 + 63) / 64,
+                            (self.sized_buffers.max_tetrahedrons as u32).div_ceil(64),
                             1,
                             1,
                         ])
@@ -3884,10 +3880,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 let (raster_dispatch_push, raster_dispatch_dims) = if do_voxel_vte {
                     let region = self.vte_overlay_raster_region();
-                    let overlay_work_w =
-                        (region[2] + VTE_OVERLAY_RASTER_SCALE - 1) / VTE_OVERLAY_RASTER_SCALE;
-                    let overlay_work_h =
-                        (region[3] + VTE_OVERLAY_RASTER_SCALE - 1) / VTE_OVERLAY_RASTER_SCALE;
+                    let overlay_work_w = region[2].div_ceil(VTE_OVERLAY_RASTER_SCALE);
+                    let overlay_work_h = region[3].div_ceil(VTE_OVERLAY_RASTER_SCALE);
                     if self.frames_rendered == 0 {
                         println!(
                             "VTE overlay raster region: origin=({}, {}) size={}x{} (work {}x{} @{}x upsample)",
@@ -3896,14 +3890,14 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     }
                     (
                         region,
-                        [(overlay_work_w + 7) / 8, (overlay_work_h + 7) / 8, 1],
+                        [overlay_work_w.div_ceil(8), overlay_work_h.div_ceil(8), 1],
                     )
                 } else {
                     (
                         [0, 0, 0, 0],
                         [
-                            (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                            (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                            self.sized_buffers.render_dimensions[0].div_ceil(8),
+                            self.sized_buffers.render_dimensions[1].div_ceil(8),
                             1,
                         ],
                     )
@@ -3961,7 +3955,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 )
                                 .unwrap();
                             unsafe {
-                                builder.dispatch([((edge_line_count as u32) + 63) / 64u32, 1, 1])
+                                builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
                             }
                             .unwrap();
                             line_render_count += edge_line_count;
@@ -3990,7 +3984,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 )
                                 .unwrap();
                             unsafe {
-                                builder.dispatch([((edge_line_count as u32) + 63) / 64u32, 1, 1])
+                                builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
                             }
                             .unwrap();
                             line_render_count += edge_line_count;
@@ -4038,8 +4032,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         .unwrap();
                     unsafe {
                         builder.dispatch([
-                            (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                            (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                            self.sized_buffers.render_dimensions[0].div_ceil(8),
+                            self.sized_buffers.render_dimensions[1].div_ceil(8),
                             1,
                         ])
                     }
@@ -4070,7 +4064,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         .bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone())
                         .unwrap();
                     unsafe {
-                        builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
+                        builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                     }
                     .unwrap();
                     {
@@ -4103,13 +4097,13 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
                             )
                             .unwrap();
-                        unsafe { builder.dispatch([(n_pow2 + 63) / 64u32, 1, 1]) }.unwrap();
+                        unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }.unwrap();
 
                         // 2c. Bitonic sort using shared memory optimization
                         // Sort all n_pow2 elements (including sentinel-padded entries)
                         let num_stages = n_pow2.trailing_zeros(); // log2(n_pow2)
                         let local_stages = 6u32.min(num_stages); // stages 0-5 fit in 64-element workgroups
-                        let workgroups = (n_pow2 + 63) / 64;
+                        let workgroups = n_pow2.div_ceil(64);
 
                         // Phase 1: Sort each 64-element block in shared memory (stages 0-5)
                         let push_data: [u32; 4] = [0, 0, n_pow2, 0];
@@ -4174,7 +4168,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
+                            builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                         }
                         .unwrap();
 
@@ -4185,7 +4179,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
+                            builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                         }
                         .unwrap();
 
@@ -4197,7 +4191,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                 )
                                 .unwrap();
-                            unsafe { builder.dispatch([(num_internal_nodes + 63) / 64, 1, 1]) }
+                            unsafe { builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1]) }
                                 .unwrap();
                         }
 
@@ -4208,7 +4202,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(total_tetrahedron_count as u32 + 63) / 64u32, 1, 1])
+                            builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                         }
                         .unwrap();
                     }
@@ -4250,8 +4244,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 unsafe {
                     builder.dispatch([
-                        (self.sized_buffers.render_dimensions[0] + 7) / 8,
-                        (self.sized_buffers.render_dimensions[1] + 7) / 8,
+                        self.sized_buffers.render_dimensions[0].div_ceil(8),
+                        self.sized_buffers.render_dimensions[1].div_ceil(8),
                         1,
                     ])
                 }

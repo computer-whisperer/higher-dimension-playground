@@ -112,7 +112,7 @@ pub fn generate_material_icon_sheet_gpu(
     material_resolver: &MaterialResolver,
 ) -> Option<MaterialIconSheet> {
     let num_materials = content_registry.block_count() as u32;
-    let rows = (num_materials + SHEET_COLUMNS - 1) / SHEET_COLUMNS;
+    let rows = num_materials.div_ceil(SHEET_COLUMNS);
     let sheet_w = SHEET_COLUMNS * ICON_SIZE;
     let sheet_h = rows * ICON_SIZE;
 
