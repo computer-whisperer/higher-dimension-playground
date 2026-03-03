@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug)]
 pub(super) struct PlayerState {
     pub(super) entity_id: u64,
+    pub(super) inventory_payload: Vec<u8>,
 }
 
 pub(super) type MobNavCell = [i32; 4];

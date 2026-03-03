@@ -22,6 +22,11 @@ pub(super) struct ServerState {
     pub(super) client_visible_entities: HashMap<u64, HashSet<u64>>,
     pub(super) cpu_profile: ServerCpuProfile,
     pub(super) content_registry: Arc<ContentRegistry>,
+    /// Persisted player records loaded from save file at startup.
+    /// Used to restore inventory when a player reconnects.
+    pub(super) persisted_player_records: Vec<crate::save_v4::PlayerRecord>,
+    /// Set when a player's inventory_payload is updated and needs persisting.
+    pub(super) player_inventory_dirty: bool,
 }
 
 impl ServerState {
@@ -32,6 +37,7 @@ impl ServerState {
         mob_nav_simple_steer: bool,
         start: Instant,
         content_registry: Arc<ContentRegistry>,
+        persisted_player_records: Vec<crate::save_v4::PlayerRecord>,
     ) -> Self {
         Self {
             next_object_id,
@@ -48,6 +54,8 @@ impl ServerState {
             client_visible_entities: HashMap::new(),
             cpu_profile: ServerCpuProfile::new(start),
             content_registry,
+            persisted_player_records,
+            player_inventory_dirty: false,
         }
     }
 
@@ -201,8 +209,39 @@ impl ServerState {
         &mut self,
         now_ms: u64,
     ) -> io::Result<Option<crate::save_v4::SaveResult>> {
+        let player_records = if self.player_inventory_dirty {
+            self.player_inventory_dirty = false;
+            self.build_player_records(now_ms)
+        } else {
+            Vec::new()
+        };
         self.world
-            .persist_dirty_overrides(self.next_object_id, now_ms)
+            .persist_dirty_overrides_with_players(self.next_object_id, now_ms, player_records)
+    }
+
+    /// Build current player records for persistence.
+    fn build_player_records(&self, now_ms: u64) -> Vec<crate::save_v4::PlayerRecord> {
+        let mut records = Vec::new();
+        for (&client_id, player) in &self.players {
+            let snapshot = self.entity_store.snapshot(player.entity_id);
+            let position = snapshot
+                .as_ref()
+                .map(|s| s.entity.pose.position)
+                .unwrap_or([0.0; 4]);
+            let orientation = snapshot
+                .as_ref()
+                .map(|s| s.entity.pose.orientation)
+                .unwrap_or([0.0; 4]);
+            records.push(crate::save_v4::PlayerRecord {
+                player_id: client_id,
+                position,
+                orientation,
+                tags: Vec::new(),
+                inventory_payload: player.inventory_payload.clone(),
+                last_saved_ms: now_ms,
+            });
+        }
+        records
     }
 
     pub(super) fn set_client_world_interest_bounds(

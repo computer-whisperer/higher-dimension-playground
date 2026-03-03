@@ -1378,7 +1378,7 @@ mod tests {
             false,
             HashSet::new(),
         );
-        ServerState::new(world, 1, false, false, Instant::now(), test_registry())
+        ServerState::new(world, 1, false, false, Instant::now(), test_registry(), Vec::new())
     }
 
     fn set_solid_voxel(state: &mut ServerState, x: i32, y: i32, z: i32, w: i32) {

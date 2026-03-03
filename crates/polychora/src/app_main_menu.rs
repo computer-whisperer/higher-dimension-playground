@@ -341,8 +341,6 @@ impl App {
                 {
                     Ok(()) => {
                         self.world_file = path.clone();
-                        // Try to restore inventory from save file
-                        self.try_load_inventory_from_save(&path);
                         self.enter_play_state(window);
                         eprintln!(
                             "Loaded integrated singleplayer world from {}",
@@ -370,80 +368,9 @@ impl App {
         }
     }
 
-    /// Try to load inventory from a save file's PlayerRecord.
-    fn try_load_inventory_from_save(&mut self, path: &std::path::Path) {
-        match polychora::save_v4::load_state_metadata(path) {
-            Ok(metadata) => {
-                if let Some(player) = metadata.players.players.first() {
-                    if !player.inventory_payload.is_empty() {
-                        if let Some(inv) = polychora::shared::inventory::Inventory::from_payload(
-                            &player.inventory_payload,
-                        ) {
-                            self.inventory = inv;
-                            self.selected_block = block_data_from_slot(
-                                self.inventory.hotbar_slot(self.hotbar_selected_index),
-                            );
-                            eprintln!("Restored inventory from save file");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Could not load save metadata for inventory: {e}");
-            }
-        }
-    }
-
-    /// Save inventory to the world file's PlayerRecord.
-    fn try_save_inventory_to_save(&self) {
-        if self.world_file.as_os_str().is_empty() {
-            return;
-        }
-        let payload = self.inventory.to_payload();
-        match polychora::save_v4::load_state_metadata(&self.world_file) {
-            Ok(mut metadata) => {
-                if metadata.players.players.is_empty() {
-                    metadata.players.players.push(polychora::save_v4::PlayerRecord {
-                        player_id: 0,
-                        position: self.camera.position,
-                        orientation: [0.0; 4],
-                        tags: Vec::new(),
-                        inventory_payload: payload,
-                        last_saved_ms: 0,
-                    });
-                } else {
-                    metadata.players.players[0].inventory_payload = payload;
-                }
-                let result = polychora::save_v4::save_state_from_chunk_payload_patch(
-                    &self.world_file,
-                    polychora::save_v4::SaveChunkPayloadPatchRequest {
-                        base_world_kind: metadata.global.base_world_kind.to_runtime(),
-                        dirty_chunk_payloads: Vec::new(),
-                        world_seed: metadata.global.world_seed,
-                        next_entity_id: metadata.global.next_entity_id,
-                        player_entity_hints: None,
-                        custom_global_payload: None,
-                        players: Some(metadata.players.players),
-                        now_ms: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0),
-                    },
-                );
-                match result {
-                    Ok(_) => eprintln!("Saved inventory to world file"),
-                    Err(e) => eprintln!("Failed to save inventory: {e}"),
-                }
-            }
-            Err(e) => {
-                eprintln!("Could not load save metadata for inventory save: {e}");
-            }
-        }
-    }
-
     pub(super) fn transition_to_main_menu(&mut self, window: &Window) {
-        // Save inventory before disconnecting
-        self.try_save_inventory_to_save();
+        // Send final inventory sync before disconnecting so the server persists it.
+        self.send_inventory_sync();
         // Disconnect multiplayer if connected
         if self.multiplayer.is_some() {
             self.reset_multiplayer_connection_state();

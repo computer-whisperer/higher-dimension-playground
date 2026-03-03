@@ -42,6 +42,7 @@ impl App {
                     1,
                 )),
             );
+            self.inventory_dirty = true;
             eprintln!(
                 "Hotbar slot {} block: ({:#x}, {:#x}) ({})",
                 self.hotbar_selected_index + 1,
@@ -74,6 +75,7 @@ impl App {
                     1,
                 )),
             );
+            self.inventory_dirty = true;
             eprintln!(
                 "Hotbar slot {} block: ({:#x}, {:#x}) ({})",
                 self.hotbar_selected_index + 1,

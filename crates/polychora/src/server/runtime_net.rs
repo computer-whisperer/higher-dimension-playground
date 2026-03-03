@@ -974,12 +974,22 @@ fn install_or_update_player(
         }
     };
 
+    // Pre-fetch persisted inventory before entering the entry match (avoids borrow conflict).
+    let persisted_inventory = guard
+        .persisted_player_records
+        .first()
+        .map(|r| r.inventory_payload.clone())
+        .unwrap_or_default();
+
     let entity_id = match guard.players.entry(client_id) {
         Entry::Occupied(entry) => entry.get().entity_id,
         Entry::Vacant(entry) => {
             spawned_now = true;
             let entity_id = client_id;
-            entry.insert(PlayerState { entity_id });
+            entry.insert(PlayerState {
+                entity_id,
+                inventory_payload: persisted_inventory,
+            });
             let entity = make_player_entity(
                 position.unwrap_or([0.0, 0.0, 0.0, 0.0]),
                 look.unwrap_or(default_orientation),
@@ -1229,6 +1239,19 @@ pub(super) fn handle_message(
         ClientMessage::Hello { name } => {
             let (_snapshot, _spawned_now) =
                 install_or_update_player(state, client_id, Some(name), None, None, start);
+            let (world_summary, inventory_payload) = {
+                let guard = state.lock().expect("server state lock poisoned");
+                let ws = WorldSummary {
+                    non_empty_chunks: guard.world_non_empty_chunk_count(),
+                    bounds: guard.world_bounds(),
+                };
+                let inv = guard
+                    .players
+                    .get(&client_id)
+                    .map(|p| p.inventory_payload.clone())
+                    .unwrap_or_default();
+                (ws, inv)
+            };
             send_to_client(
                 state,
                 client_id,
@@ -1236,15 +1259,18 @@ pub(super) fn handle_message(
                     client_id,
                     server_time_ms: monotonic_ms(start),
                     tick_hz,
-                    world: {
-                        let guard = state.lock().expect("server state lock poisoned");
-                        WorldSummary {
-                            non_empty_chunks: guard.world_non_empty_chunk_count(),
-                            bounds: guard.world_bounds(),
-                        }
-                    },
+                    world: world_summary,
                 },
             );
+            if !inventory_payload.is_empty() {
+                send_to_client(
+                    state,
+                    client_id,
+                    ServerMessage::InventorySync {
+                        payload: inventory_payload,
+                    },
+                );
+            }
         }
         ClientMessage::UpdatePlayer { position, look } => {
             let safe_position = if position.iter().all(|axis| axis.is_finite()) {
@@ -1329,8 +1355,12 @@ pub(super) fn handle_message(
                 handle_world_interest_update(&state_for_resync, client_id, bounds);
             });
         }
-        ClientMessage::InventorySync { .. } => {
-            // TODO: handle inventory sync from client
+        ClientMessage::InventorySync { payload } => {
+            let mut guard = state.lock().expect("server state lock poisoned");
+            if let Some(player) = guard.players.get_mut(&client_id) {
+                player.inventory_payload = payload;
+                guard.player_inventory_dirty = true;
+            }
         }
     }
     record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None, None);

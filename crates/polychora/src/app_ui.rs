@@ -146,6 +146,7 @@ impl App {
                             1,
                         )),
                     );
+                    self.inventory_dirty = true;
                 }
             }
         }
@@ -901,6 +902,7 @@ impl App {
         if let Some(slot_idx) = clicked_slot {
             if slot_idx != self.hotbar_selected_index {
                 self.inventory.swap_slots(slot_idx, self.hotbar_selected_index);
+                self.inventory_dirty = true;
             }
             self.selected_block = block_data_from_slot(
                 self.inventory.hotbar_slot(self.hotbar_selected_index),
@@ -1203,6 +1205,7 @@ impl App {
                 self.hotbar_selected_index,
                 Some(polychora::shared::protocol::ItemStack::block(ns, bt, 1)),
             );
+            self.inventory_dirty = true;
             self.selected_block = block;
             eprintln!(
                 "Inventory: set hotbar slot {} to ({:#x}, {:#x}) ({})",

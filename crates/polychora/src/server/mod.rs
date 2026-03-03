@@ -306,6 +306,21 @@ fn initialize_state(
         runtime_world_seed, initial_chunks,
     );
     eprintln!("v4 save streaming root={}", config.world_file.display());
+
+    // Load persisted player records (for inventory restoration on reconnect).
+    let persisted_players = match crate::save_v4::load_state_metadata(&config.world_file) {
+        Ok(metadata) => {
+            if !metadata.players.players.is_empty() {
+                eprintln!(
+                    "loaded {} persisted player record(s)",
+                    metadata.players.players.len()
+                );
+            }
+            metadata.players.players
+        }
+        Err(_) => Vec::new(),
+    };
+
     let mob_nav_debug = env_flag_enabled("R4D_MOB_NAV_DEBUG");
     let mob_nav_simple_steer = env_flag_enabled("R4D_MOB_NAV_SIMPLE_STEER");
     if mob_nav_debug {
@@ -322,6 +337,7 @@ fn initialize_state(
         mob_nav_simple_steer,
         start,
         config.content_registry.clone(),
+        persisted_players,
     )));
 
     let entity_interest_radius_chunks = config.procgen_far_chunk_radius.max(1)

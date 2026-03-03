@@ -738,15 +738,21 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         Some(chunk_key)
     }
 
-    pub fn persist_dirty_overrides(
+    pub fn persist_dirty_overrides_with_players(
         &mut self,
         next_entity_id: u64,
         now_ms: u64,
+        players: Vec<save_v4::PlayerRecord>,
     ) -> io::Result<Option<save_v4::SaveResult>> {
+        let players_opt = if players.is_empty() {
+            None
+        } else {
+            Some(players)
+        };
         if self.save_stream.is_none() {
             return Ok(None);
         }
-        if self.dirty_save_chunks.is_empty() {
+        if self.dirty_save_chunks.is_empty() && players_opt.is_none() {
             if let Some(stream) = self.save_stream.as_mut() {
                 stream.next_entity_id = stream.next_entity_id.max(next_entity_id).max(1);
             }
@@ -788,7 +794,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                     next_entity_id: next_entity_id.max(stream.next_entity_id).max(1),
                     player_entity_hints: None,
                     custom_global_payload: None,
-                    players: None,
+                    players: players_opt,
                     now_ms,
                 },
             )?

@@ -626,6 +626,7 @@ impl App {
                                     1,
                                 )),
                             );
+                            self.inventory_dirty = true;
                             self.selected_block = picked;
                             eprintln!(
                                 "Picked voxel {} ({}) from ({}, {}, {}, {})",
@@ -675,6 +676,7 @@ impl App {
                                             1,
                                         );
                                         self.inventory.try_add(stack);
+                                        self.inventory_dirty = true;
                                     }
                                 }
                             }
@@ -704,6 +706,7 @@ impl App {
                             // Survival: decrement placed block from inventory
                             if self.game_mode == polychora::shared::inventory::GameMode::Survival {
                                 self.inventory.decrement_slot(self.hotbar_selected_index);
+                                self.inventory_dirty = true;
                                 self.selected_block = block_data_from_slot(
                                     self.inventory.hotbar_slot(self.hotbar_selected_index),
                                 );
@@ -735,6 +738,10 @@ impl App {
 
         let look_dir = self.current_look_direction();
         self.send_multiplayer_player_update(now, look_dir);
+        if self.inventory_dirty {
+            self.inventory_dirty = false;
+            self.send_inventory_sync();
+        }
         self.send_multiplayer_chunk_sample_diag_request();
         let preview_elapsed = now - self.start_time;
         let preview_time_s = preview_elapsed.as_secs_f32();

@@ -1723,11 +1723,28 @@ impl App {
                     source_entity_id,
                 );
             }
-            multiplayer::ServerMessage::InventorySync { .. } => {
-                // TODO: apply server inventory state
+            multiplayer::ServerMessage::InventorySync { payload } => {
+                if let Some(inv) =
+                    polychora::shared::inventory::Inventory::from_payload(&payload)
+                {
+                    self.inventory = inv;
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
+                    eprintln!("Restored inventory from server");
+                }
             }
-            multiplayer::ServerMessage::InventorySlotUpdate { .. } => {
-                // TODO: apply single-slot update from server
+            multiplayer::ServerMessage::InventorySlotUpdate {
+                slot_index,
+                stack,
+            } => {
+                self.inventory
+                    .set_slot(slot_index as usize, stack);
+                if (slot_index as usize) == self.hotbar_selected_index {
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
+                }
             }
         }
     }
@@ -1746,6 +1763,14 @@ impl App {
             });
         }
         self.maybe_request_multiplayer_world_for_position(self.camera.position, "player_update");
+    }
+
+    pub(super) fn send_inventory_sync(&self) {
+        if let Some(client) = self.multiplayer.as_ref() {
+            client.send(MultiplayerClientMessage::InventorySync {
+                payload: self.inventory.to_payload(),
+            });
+        }
     }
 
     pub(super) fn send_multiplayer_voxel_update(

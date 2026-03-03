@@ -1194,6 +1194,7 @@ fn main() {
         inventory_tab: polychora::shared::inventory::InventoryTab::Creative,
         hotbar_selected_index: 0,
         inventory_open: false,
+        inventory_dirty: false,
         teleport_dialog_open: false,
         teleport_coords: [
             "0".to_string(),
@@ -1554,6 +1555,7 @@ struct App {
     inventory_tab: polychora::shared::inventory::InventoryTab,
     hotbar_selected_index: usize,
     inventory_open: bool,
+    inventory_dirty: bool,
     teleport_dialog_open: bool,
     teleport_coords: [String; 4],
     dev_console_open: bool,
