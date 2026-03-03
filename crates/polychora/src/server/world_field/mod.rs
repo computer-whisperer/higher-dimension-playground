@@ -1,15 +1,10 @@
 use crate::save_v4::{self, SaveChunkPayloadPatchRequest};
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::protocol::WorldBounds;
-use crate::shared::region_tree::{
-    ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
-};
-use crate::shared::spatial::{
-    lattice_from_fixed, step_for_scale, Aabb4i, ChunkCoord,
-};
+use crate::shared::region_tree::{ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore};
+use crate::shared::spatial::{lattice_from_fixed, step_for_scale, Aabb4i, ChunkCoord};
 use crate::shared::voxel::{
-    linear_cell_index, world_to_chunk_at_scale, BaseWorldKind, BlockData,
-    CHUNK_SIZE, CHUNK_VOLUME,
+    linear_cell_index, world_to_chunk_at_scale, BaseWorldKind, BlockData, CHUNK_SIZE, CHUNK_VOLUME,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -320,14 +315,18 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
     ) -> Self {
-        let field =
-            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, blocked_cells);
+        let field = build_server_world_field(
+            base_kind.clone(),
+            world_seed,
+            procgen_structures,
+            blocked_cells,
+        );
         Self {
             field,
             override_chunks: RegionChunkTree::from_chunks(
-                chunk_payloads.into_iter().map(|(pos, payload)| {
-                    (pos.map(ChunkCoord::from_num), payload)
-                }),
+                chunk_payloads
+                    .into_iter()
+                    .map(|(pos, payload)| (pos.map(ChunkCoord::from_num), payload)),
             ),
             dirty_chunks: RegionChunkTree::new(),
             dirty_save_chunks: HashMap::new(),
@@ -453,9 +452,12 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         let query_min: [i32; 4] = world_min.map(|v| v.div_euclid(cs));
         let query_max: [i32; 4] = world_max.map(|v| v.div_euclid(cs));
         let query_bounds = Aabb4i::from_lattice_bounds(query_min, query_max, 0);
-        let virgin_core = self
-            .field
-            .query_region_core(QueryVolume { bounds: query_bounds }, QueryDetail::Exact);
+        let virgin_core = self.field.query_region_core(
+            QueryVolume {
+                bounds: query_bounds,
+            },
+            QueryDetail::Exact,
+        );
 
         // Cache resolved payloads per scale-0 chunk to avoid redundant tree lookups.
         let mut payload_cache: HashMap<ChunkKey, Option<ResolvedChunkPayload>> = HashMap::new();
@@ -484,11 +486,9 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                             0,
                         );
 
-                        let payload = payload_cache
-                            .entry(s0_key)
-                            .or_insert_with(|| {
-                                chunk_payload_from_core(virgin_core.as_ref(), s0_key)
-                            });
+                        let payload = payload_cache.entry(s0_key).or_insert_with(|| {
+                            chunk_payload_from_core(virgin_core.as_ref(), s0_key)
+                        });
 
                         let block = payload
                             .as_ref()
@@ -513,11 +513,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     /// Returns `CHUNK_VOLUME` dense blocks at the given chunk position and scale.
     /// Layers override data on top of virgin data by walking the override tree's
     /// BVH directly (avoiding lossy slice/composition through scale-0).
-    fn read_effective_blocks_at_scale(
-        &self,
-        chunk_key: ChunkKey,
-        scale_exp: i8,
-    ) -> Vec<BlockData> {
+    fn read_effective_blocks_at_scale(&self, chunk_key: ChunkKey, scale_exp: i8) -> Vec<BlockData> {
         // Start with virgin blocks as baseline.
         let mut blocks = self.query_virgin_blocks_at_scale(chunk_key, scale_exp);
 
@@ -571,7 +567,11 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     fn determine_chunk_scale(&self, position: [ChunkCoord; 4], block_scale: i8) -> i8 {
         for candidate in (block_scale.saturating_sub(3)..=block_scale).rev() {
             let (key, _) = world_to_chunk_at_scale(
-                position[0], position[1], position[2], position[3], candidate,
+                position[0],
+                position[1],
+                position[2],
+                position[3],
+                candidate,
             );
             let chunk_bounds = Aabb4i::chunk_world_bounds(key, candidate);
 
@@ -591,16 +591,9 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     /// A block with `block.scale_exp == S` is representable when:
     /// - `S >= chunk_scale` (can't store finer blocks in a coarser chunk)
     /// - `S - chunk_scale <= 3` (block can't exceed chunk size)
-    fn all_blocks_representable_at_scale(
-        &self,
-        bounds: Aabb4i,
-        chunk_scale: i8,
-    ) -> bool {
+    fn all_blocks_representable_at_scale(&self, bounds: Aabb4i, chunk_scale: i8) -> bool {
         // Query composed (override + virgin) state for the region.
-        let core = self.query_region_core(
-            QueryVolume { bounds },
-            QueryDetail::Exact,
-        );
+        let core = self.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         all_blocks_in_core_representable(&core, chunk_scale)
     }
 
@@ -655,7 +648,11 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         // 1. Determine the optimal chunk scale for this placement.
         let chunk_scale = self.determine_chunk_scale(position, scale_exp);
         let (chunk_key, voxel_idx) = world_to_chunk_at_scale(
-            position[0], position[1], position[2], position[3], chunk_scale,
+            position[0],
+            position[1],
+            position[2],
+            position[3],
+            chunk_scale,
         );
         let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, chunk_scale);
 
@@ -674,12 +671,15 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             let ly = (voxel_idx / CHUNK_SIZE) % CHUNK_SIZE;
             let lz = (voxel_idx / (CHUNK_SIZE * CHUNK_SIZE)) % CHUNK_SIZE;
             let lw = voxel_idx / (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
-            Some(([
-                lx - (lx % cells_per_axis),
-                ly - (ly % cells_per_axis),
-                lz - (lz % cells_per_axis),
-                lw - (lw % cells_per_axis),
-            ], cells_per_axis))
+            Some((
+                [
+                    lx - (lx % cells_per_axis),
+                    ly - (ly % cells_per_axis),
+                    lz - (lz % cells_per_axis),
+                    lw - (lw % cells_per_axis),
+                ],
+                cells_per_axis,
+            ))
         } else {
             None
         };
@@ -714,9 +714,9 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         };
 
         // 7. Store — the tree handles carving and gap-filling.
-        let affected_bounds = self
-            .override_chunks
-            .set_chunk_at_scale(chunk_key, payload, chunk_scale);
+        let affected_bounds =
+            self.override_chunks
+                .set_chunk_at_scale(chunk_key, payload, chunk_scale);
         let Some(affected_bounds) = affected_bounds else {
             return None;
         };
@@ -729,7 +729,10 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         // covers the full carved region — including fragments that hold the
         // old data re-encoded at the new scale.  Without this, those fragments
         // would not be persisted and the old data would be lost on reload.
-        for (key, se) in self.override_chunks.collect_chunk_entries_in_bounds(affected_bounds) {
+        for (key, se) in self
+            .override_chunks
+            .collect_chunk_entries_in_bounds(affected_bounds)
+        {
             self.dirty_save_chunks.insert(key, se);
         }
         Some(chunk_key)
@@ -750,22 +753,26 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             return Ok(None);
         }
 
-        let mut dirty_entries: Vec<(ChunkKey, i8)> =
-            self.dirty_save_chunks.iter().map(|(&k, &se)| (k, se)).collect();
+        let mut dirty_entries: Vec<(ChunkKey, i8)> = self
+            .dirty_save_chunks
+            .iter()
+            .map(|(&k, &se)| (k, se))
+            .collect();
         dirty_entries.sort_unstable();
-        let dirty_chunk_payloads = dirty_entries
-            .into_iter()
-            .map(|(key, se)| {
-                let tree_result = self.override_chunks.chunk_payload(key);
-                debug_assert!(
+        let dirty_chunk_payloads =
+            dirty_entries
+                .into_iter()
+                .map(|(key, se)| {
+                    let tree_result = self.override_chunks.chunk_payload(key);
+                    debug_assert!(
                     tree_result.as_ref().map(|(_, tree_se)| *tree_se == se).unwrap_or(true),
                     "dirty_save_chunks scale {se} disagrees with tree scale {:?} for key {key:?}",
                     tree_result.as_ref().map(|(_, s)| s),
                 );
-                let resolved = tree_result.map(|(p, _)| p);
-                (key, se, resolved)
-            })
-            .collect::<Vec<_>>();
+                    let resolved = tree_result.map(|(p, _)| p);
+                    (key, se, resolved)
+                })
+                .collect::<Vec<_>>();
 
         let result = {
             let stream = self
@@ -807,8 +814,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     }
 
     pub fn chunk_at(&self, chunk_key: ChunkKey) -> Option<(ResolvedChunkPayload, i8)> {
-        self.override_chunks
-            .chunk_payload(chunk_key)
+        self.override_chunks.chunk_payload(chunk_key)
     }
 
     pub fn effective_chunk(
@@ -816,17 +822,13 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         chunk_key: ChunkKey,
         preserve_explicit_empty_chunk: bool,
     ) -> Option<ResolvedChunkPayload> {
-        if let Some((payload, _)) = self
-            .override_chunks
-            .chunk_payload(chunk_key)
-        {
+        if let Some((payload, _)) = self.override_chunks.chunk_payload(chunk_key) {
             return resolved_to_effective(payload, preserve_explicit_empty_chunk);
         }
         let virgin_payload = self.query_virgin_chunk_payload(chunk_key)?;
         resolved_to_effective(virgin_payload, preserve_explicit_empty_chunk)
     }
 }
-
 
 /// Check whether all non-air blocks in a `RegionTreeCore` can be represented
 /// at the given chunk scale.
@@ -909,11 +911,7 @@ fn fill_multi_cell_block(
 }
 
 /// Check that all cells in a multi-cell region are air.
-fn all_cells_air(
-    blocks: &[BlockData],
-    edit_local_base: [usize; 4],
-    cells_per_axis: usize,
-) -> bool {
+fn all_cells_air(blocks: &[BlockData], edit_local_base: [usize; 4], cells_per_axis: usize) -> bool {
     for dw in 0..cells_per_axis {
         for dz in 0..cells_per_axis {
             for dy in 0..cells_per_axis {
@@ -1006,13 +1004,16 @@ fn resolved_to_effective(
                     .get(*idx as usize)
                     .map(|b| b.is_air())
                     .unwrap_or(true);
-                if is_air { None } else { Some(resolved) }
+                if is_air {
+                    None
+                } else {
+                    Some(resolved)
+                }
             }
             _ => Some(resolved),
         }
     }
 }
-
 
 pub type ServerWorldOverlay = PassthroughWorldOverlay<ServerWorldField>;
 
@@ -1048,10 +1049,7 @@ mod tests {
                 .iter()
                 .map(|&idx| {
                     let air = BlockData::AIR;
-                    let block = payload
-                        .block_palette
-                        .get(idx as usize)
-                        .unwrap_or(&air);
+                    let block = payload.block_palette.get(idx as usize).unwrap_or(&air);
                     reg.block_material_token(block.namespace, block.block_type)
                 })
                 .collect()
@@ -1083,8 +1081,12 @@ mod tests {
         chunk_key: ChunkKey,
         query_bounds: Aabb4i,
     ) -> Vec<u16> {
-        let field =
-            build_server_world_field(base_kind.clone(), world_seed, procgen_structures, HashSet::new());
+        let field = build_server_world_field(
+            base_kind.clone(),
+            world_seed,
+            procgen_structures,
+            HashSet::new(),
+        );
         assert!(query_bounds.contains_chunk_world_min(chunk_key));
         let core = field.query_region_core(
             QueryVolume {
@@ -1131,7 +1133,10 @@ mod tests {
         assert_eq!(changed_b, Some(chunk_key_i32(0, 0, 0, 0)));
 
         let dirty = overlay.take_dirty_bounds();
-        assert_eq!(dirty, vec![Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0)]);
+        assert_eq!(
+            dirty,
+            vec![Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0)]
+        );
         assert!(overlay.take_dirty_bounds().is_empty());
     }
 
@@ -1153,7 +1158,11 @@ mod tests {
         use crate::shared::region_tree::chunk_key_i32;
         assert_eq!(
             collect_chunk_keys(&dirty),
-            vec![chunk_key_i32(0, 0, 0, 0), chunk_key_i32(0, 1, 0, 0), chunk_key_i32(1, 0, 0, 0)]
+            vec![
+                chunk_key_i32(0, 0, 0, 0),
+                chunk_key_i32(0, 1, 0, 0),
+                chunk_key_i32(1, 0, 0, 0)
+            ]
         );
     }
 
@@ -1275,8 +1284,13 @@ mod tests {
             HashSet::new(),
         );
         let edit_pos = [0, -1, 0, 0];
-        let (chunk_key, voxel_idx) =
-            world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), 0);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(
+            cc(edit_pos[0]),
+            cc(edit_pos[1]),
+            cc(edit_pos[2]),
+            cc(edit_pos[3]),
+            0,
+        );
         let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         // Break the platform block first (collision check allows air placement).
         overlay.apply_voxel_edit(cc4(edit_pos), BlockData::AIR);
@@ -1410,7 +1424,10 @@ mod tests {
         // Edit within the platform, placing the same material.
         let edit_pos = [-1, 0, -6, -4];
         let changed = overlay.apply_voxel_edit(cc4(edit_pos), platform_material);
-        assert_eq!(changed, None, "placing same block as platform should be no-op");
+        assert_eq!(
+            changed, None,
+            "placing same block as platform should be no-op"
+        );
         assert!(overlay.take_dirty_bounds().is_empty());
     }
 
@@ -1429,8 +1446,13 @@ mod tests {
         );
 
         let edit_pos = [-1, 0, -6, -4];
-        let (edit_chunk_key, edit_voxel_idx) =
-            world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), 0);
+        let (edit_chunk_key, _edit_voxel_idx) = world_to_chunk_at_scale(
+            cc(edit_pos[0]),
+            cc(edit_pos[1]),
+            cc(edit_pos[2]),
+            cc(edit_pos[3]),
+            0,
+        );
 
         // Break the platform block first (collision check rejects non-air on non-air).
         overlay.apply_voxel_edit(cc4(edit_pos), BlockData::AIR);
@@ -1448,12 +1470,7 @@ mod tests {
     // ── Cross-scale overlap resolution tests ────────────────────────────
 
     fn make_empty_overlay() -> PassthroughWorldOverlay<ServerWorldField> {
-        let field = build_server_world_field(
-            BaseWorldKind::Empty,
-            42,
-            false,
-            HashSet::new(),
-        );
+        let field = build_server_world_field(BaseWorldKind::Empty, 42, false, HashSet::new());
         PassthroughWorldOverlay::new(field, BaseWorldKind::Empty, 42)
     }
 
@@ -1663,16 +1680,11 @@ mod tests {
     }
 
     /// Read a block through the full compositing pipeline (virgin + override).
-    fn read_composed_block(
-        overlay: &ServerWorldOverlay,
-        pos: [i32; 4],
-    ) -> BlockData {
-        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(cc(pos[0]), cc(pos[1]), cc(pos[2]), cc(pos[3]), 0);
+    fn read_composed_block(overlay: &ServerWorldOverlay, pos: [i32; 4]) -> BlockData {
+        let (chunk_key, voxel_idx) =
+            world_to_chunk_at_scale(cc(pos[0]), cc(pos[1]), cc(pos[2]), cc(pos[3]), 0);
         let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
-        let core = overlay.query_region_core(
-            QueryVolume { bounds },
-            QueryDetail::Exact,
-        );
+        let core = overlay.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         chunk_payload_from_core(core.as_ref(), chunk_key)
             .map(|p| p.block_at(voxel_idx))
             .unwrap_or(BlockData::AIR)
@@ -1724,7 +1736,13 @@ mod tests {
         // not air. At scale -2, the chunk covers a small region. World pos
         // [0, -1, 1, 0] is nearby and should have floor material in the override.
         // (Because the override was initialized from virgin data.)
-        let (chunk_key, _) = world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), -2);
+        let (chunk_key, _) = world_to_chunk_at_scale(
+            cc(edit_pos[0]),
+            cc(edit_pos[1]),
+            cc(edit_pos[2]),
+            cc(edit_pos[3]),
+            -2,
+        );
         let payload = overlay.override_chunks.chunk_payload(chunk_key);
         assert!(
             payload.is_some(),
@@ -1786,7 +1804,13 @@ mod tests {
 
         // First edit: break the floor (air ≠ virgin floor → override created).
         overlay.apply_voxel_edit(cc4(edit_pos), BlockData::AIR);
-        let (chunk_key, _) = world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), 0);
+        let (chunk_key, _) = world_to_chunk_at_scale(
+            cc(edit_pos[0]),
+            cc(edit_pos[1]),
+            cc(edit_pos[2]),
+            cc(edit_pos[3]),
+            0,
+        );
         assert!(
             overlay.override_chunks.chunk_payload(chunk_key).is_some(),
             "override should exist after edit"
@@ -1828,10 +1852,7 @@ mod tests {
             "rechunked fragments matching virgin should be pruned \
              (got {chunks_after} chunks, expected fewer than 16)"
         );
-        assert!(
-            chunks_after >= 1,
-            "at least the edited chunk should remain"
-        );
+        assert!(chunks_after >= 1, "at least the edited chunk should remain");
     }
 
     /// Place a scale-2 block into an empty world and verify that the stored
@@ -1887,7 +1908,10 @@ mod tests {
 
         // Read back one of the filled cells at scale 0.
         let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
-        assert_eq!(read.block_type, 42, "scale-2 block should fill scale-0 cells");
+        assert_eq!(
+            read.block_type, 42,
+            "scale-2 block should fill scale-0 cells"
+        );
         assert_eq!(
             read.scale_exp, 2,
             "filled cells should carry the original scale_exp=2, got {}",
@@ -1906,7 +1930,10 @@ mod tests {
         overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), block.clone(), 3);
 
         let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
-        assert_eq!(read.block_type, 99, "scale-3 block should fill scale-0 cells");
+        assert_eq!(
+            read.block_type, 99,
+            "scale-3 block should fill scale-0 cells"
+        );
         assert_eq!(
             read.scale_exp, 3,
             "filled cells should carry the original scale_exp=3, got {}",
@@ -1954,10 +1981,8 @@ mod tests {
         // Query the composited view using the dirty bounds (what the server
         // actually sends to the client).
         for bounds in &dirty_bounds {
-            let core = overlay.query_region_core(
-                QueryVolume { bounds: *bounds },
-                QueryDetail::Exact,
-            );
+            let core =
+                overlay.query_region_core(QueryVolume { bounds: *bounds }, QueryDetail::Exact);
 
             // The scale-0 chunk at origin should contain the block.
             let (chunk_key_s0, voxel_idx) = world_to_chunk_at_scale(cc(0), cc(0), cc(0), cc(0), 0);
@@ -2141,7 +2166,10 @@ mod tests {
 
         // Verify blocks are present.
         assert_eq!(
-            overlay.override_chunks.block_at(cc4([8, 0, 0, 0])).block_type,
+            overlay
+                .override_chunks
+                .block_at(cc4([8, 0, 0, 0]))
+                .block_type,
             block_a.block_type
         );
 
@@ -2188,15 +2216,14 @@ mod tests {
         // is represented in dirty_save_chunks.
         let all_entries = overlay
             .override_chunks
-            .collect_chunk_entries_in_bounds(
-                overlay.override_chunks.root().unwrap().bounds,
-            );
+            .collect_chunk_entries_in_bounds(overlay.override_chunks.root().unwrap().bounds);
         for (key, se) in &all_entries {
             assert!(
                 dirty.contains_key(key),
                 "chunk {:?} at scale {} is in the tree but NOT in dirty_save_chunks — \
                  it would be lost on save",
-                key, se
+                key,
+                se
             );
         }
         assert!(
@@ -2260,5 +2287,4 @@ mod tests {
             payload_se
         );
     }
-
 }

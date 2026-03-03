@@ -79,14 +79,7 @@ fn dense_chunk_new() -> DenseChunk {
 }
 
 #[inline]
-fn dense_chunk_set(
-    chunk: &mut DenseChunk,
-    x: usize,
-    y: usize,
-    z: usize,
-    w: usize,
-    material: u16,
-) {
+fn dense_chunk_set(chunk: &mut DenseChunk, x: usize, y: usize, z: usize, w: usize, material: u16) {
     let idx =
         w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE + y * CHUNK_SIZE + x;
     chunk[idx] = material;
@@ -658,16 +651,37 @@ fn structure_set() -> &'static StructureSet {
                 fill.palette_idx = intern_block(&mut block_palette, &mut block_to_idx, &fill.block);
             }
             for voxel in &mut blueprint.voxels {
-                voxel.palette_idx = intern_block(&mut block_palette, &mut block_to_idx, &voxel.block);
+                voxel.palette_idx =
+                    intern_block(&mut block_palette, &mut block_to_idx, &voxel.block);
             }
         }
 
         // Intern maze materials.
-        let maze_floor_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_BASALT_TILES));
-        let maze_ceiling_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_SMOKED_GLASS));
-        let maze_wall_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_RUNIC_ALLOY));
-        let maze_gate_frame_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_OBSIDIAN));
-        let maze_beacon_idx = intern_block(&mut block_palette, &mut block_to_idx, &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_EVENTIDE_ALLOY));
+        let maze_floor_idx = intern_block(
+            &mut block_palette,
+            &mut block_to_idx,
+            &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_BASALT_TILES),
+        );
+        let maze_ceiling_idx = intern_block(
+            &mut block_palette,
+            &mut block_to_idx,
+            &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_SMOKED_GLASS),
+        );
+        let maze_wall_idx = intern_block(
+            &mut block_palette,
+            &mut block_to_idx,
+            &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_RUNIC_ALLOY),
+        );
+        let maze_gate_frame_idx = intern_block(
+            &mut block_palette,
+            &mut block_to_idx,
+            &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_OBSIDIAN),
+        );
+        let maze_beacon_idx = intern_block(
+            &mut block_palette,
+            &mut block_to_idx,
+            &BlockData::simple(content_ids::CONTENT_NS, content_ids::BLOCK_EVENTIDE_ALLOY),
+        );
 
         let total_weight = blueprints
             .iter()
@@ -1182,7 +1196,8 @@ pub fn generate_structure_placements_for_bounds(
         return Vec::new();
     }
     let set = structure_set();
-    let placements = collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells);
+    let placements =
+        collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells);
 
     let mut results = Vec::with_capacity(placements.len());
     for placement in placements {
@@ -1964,7 +1979,12 @@ fn collect_maze_placements_for_chunk(world_seed: u64, chunk_key: ChunkKey) -> Ve
     placements
 }
 
-fn place_maze_into_chunk(placement: MazePlacement, chunk_min: [i32; 4], chunk: &mut DenseChunk, set: &StructureSet) {
+fn place_maze_into_chunk(
+    placement: MazePlacement,
+    chunk_min: [i32; 4],
+    chunk: &mut DenseChunk,
+    set: &StructureSet,
+) {
     let chunk_max = [
         chunk_min[0] + CHUNK_SIZE as i32 - 1,
         chunk_min[1] + CHUNK_SIZE as i32 - 1,
@@ -2252,10 +2272,8 @@ pub fn intern_block_into_palette(palette: &mut Vec<BlockData>, block: &BlockData
 /// Returns chunk positions that contain maze content within the given bounds.
 /// This is the maze counterpart of structure_chunk_positions — excludes structures.
 #[cfg(test)]
-pub fn maze_chunk_positions_for_bounds(
-    world_seed: u64,
-    bounds: Aabb4i,
-) -> Vec<ChunkKey> {
+#[allow(dead_code)]
+pub fn maze_chunk_positions_for_bounds(world_seed: u64, bounds: Aabb4i) -> Vec<ChunkKey> {
     if !bounds.is_valid() {
         return Vec::new();
     }
@@ -2349,10 +2367,8 @@ pub fn generate_maze_placements_for_bounds(
 
 /// Generate maze-only chunk content for a single chunk position (no structures).
 #[cfg(test)]
-pub fn generate_maze_chunk(
-    world_seed: u64,
-    chunk_key: ChunkKey,
-) -> Option<DenseChunk> {
+#[allow(dead_code)]
+pub fn generate_maze_chunk(world_seed: u64, chunk_key: ChunkKey) -> Option<DenseChunk> {
     let (chunk_min, _) = chunk_bounds(chunk_key);
     let maze_placements = collect_maze_placements_for_chunk(world_seed, chunk_key);
     if maze_placements.is_empty() {
@@ -2430,7 +2446,8 @@ pub fn structure_chunk_has_content_for_scale_with_keepout(
                         cy * scale + dy,
                         cz * scale + dz,
                         cw * scale + dw,
-                    ].map(ChunkCoord::from_num);
+                    ]
+                    .map(ChunkCoord::from_num);
                     if structure_chunk_has_content_with_keepout(world_seed, child, blocked_cells) {
                         return true;
                     }
@@ -2525,7 +2542,8 @@ mod tests {
                         shape.world_y_min.div_euclid(CHUNK_SIZE as i32),
                         origin_z.div_euclid(CHUNK_SIZE as i32),
                         origin_w.div_euclid(CHUNK_SIZE as i32),
-                    ].map(ChunkCoord::from_num);
+                    ]
+                    .map(ChunkCoord::from_num);
                     if !collect_maze_placements_for_chunk(seed, chunk_key).is_empty() {
                         return Some(chunk_key);
                     }

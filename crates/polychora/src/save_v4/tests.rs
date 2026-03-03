@@ -701,10 +701,7 @@ fn save_state_from_chunk_payload_patch_persists_without_overlapping_children() {
     let loaded = load_state(&root).expect("load patched state");
     let loaded_world = materialize_loaded_world(&loaded);
     let chunk_size = CHUNK_SIZE as i32;
-    assert_eq!(
-        loaded_world.get_voxel(1 * chunk_size, 0, 0, 0),
-        LegacyVoxel(9)
-    );
+    assert_eq!(loaded_world.get_voxel(chunk_size, 0, 0, 0), LegacyVoxel(9));
     assert_eq!(loaded_world.get_voxel(0, chunk_size, 0, 0), LegacyVoxel(2));
 
     let _ = std::fs::remove_dir_all(root);
@@ -1769,7 +1766,7 @@ fn patch_save_carved_uniform_materializes_correctly() {
     let payload_a = ResolvedChunkPayload::uniform(block_a.clone());
     let key_origin = chunk_key_from_lattice([0, 0, 0, 0], 0);
     let empty_regions = HashSet::new();
-    let initial = save_state_from_chunk_payloads(
+    let _initial = save_state_from_chunk_payloads(
         &root,
         SaveChunkPayloadRequest {
             base_world_kind: BaseWorldKind::Empty,
@@ -1980,7 +1977,7 @@ fn patch_save_preserves_uniform_with_mismatched_block_scale() {
                         b.block_type, b.scale_exp
                     )
                 } else {
-                    format!("ChunkArray")
+                    "ChunkArray".to_string()
                 };
                 format!("({k:?}, chunk_scale={se}, {desc})")
             })
