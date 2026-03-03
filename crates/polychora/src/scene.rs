@@ -414,7 +414,7 @@ impl Scene {
         };
 
         let previous_payload = self.world_tree.chunk_payload(key);
-        let changed_by_api = self.world_tree.set_chunk_at_scale(key, payload.clone(), scale_exp);
+        let changed_by_api = self.world_tree.set_chunk_at_scale(key, payload.clone(), scale_exp).is_some();
         let current_payload = self.world_tree.chunk_payload(key);
         let mut changed = changed_by_api || previous_payload != current_payload;
         if !changed {

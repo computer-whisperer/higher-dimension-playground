@@ -628,6 +628,11 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         self.dirty_save_chunks.clear();
     }
 
+    #[cfg(test)]
+    pub fn dirty_save_chunk_entries(&self) -> &HashMap<ChunkKey, i8> {
+        &self.dirty_save_chunks
+    }
+
     pub fn apply_voxel_edit(
         &mut self,
         position: [ChunkCoord; 4],
@@ -709,16 +714,24 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         };
 
         // 7. Store — the tree handles carving and gap-filling.
-        let changed = self
+        let affected_bounds = self
             .override_chunks
             .set_chunk_at_scale(chunk_key, payload, chunk_scale);
-        if !changed {
+        let Some(affected_bounds) = affected_bounds else {
             return None;
-        }
+        };
 
         // 8. Dirty tracking.
+        // Mark the directly-edited chunk for BVH delta updates.
         self.mark_dirty_chunk(chunk_key, chunk_scale);
-        self.dirty_save_chunks.insert(chunk_key, chunk_scale);
+        // Mark ALL chunks in the affected region dirty for save.  When the
+        // edit carves an existing chunk at a different scale, `affected_bounds`
+        // covers the full carved region — including fragments that hold the
+        // old data re-encoded at the new scale.  Without this, those fragments
+        // would not be persisted and the old data would be lost on reload.
+        for (key, se) in self.override_chunks.collect_chunk_entries_in_bounds(affected_bounds) {
+            self.dirty_save_chunks.insert(key, se);
+        }
         Some(chunk_key)
     }
 
@@ -2097,6 +2110,93 @@ mod tests {
         assert!(
             chosen_coarse >= -3 && chosen_coarse <= 0,
             "scale 1 blocks should be representable at scale 0, got {chosen_coarse}"
+        );
+    }
+
+    /// Regression test: placing a fine-scale block into a coarse-scale chunk
+    /// carves the coarse chunk into fragments.  ALL fragments (not just the
+    /// directly-edited chunk) must appear in dirty_save_chunks so they are
+    /// persisted.  Without this, the fragments holding the original coarse
+    /// data are lost on save/reload.
+    #[test]
+    fn cross_scale_edit_marks_carved_fragments_dirty_for_save() {
+        let mut overlay = make_empty_overlay();
+
+        let block_a = BlockData::simple(0, 1); // scale 0
+        let block_b = BlockData::simple(0, 2).at_scale(-2); // scale -2
+
+        // 1. Place several scale-0 blocks spread across the chunk region
+        //    [0..16, 0..16, 0..16, 0..16].  Blocks at positions far apart
+        //    ensure the carve produces non-empty fragments.
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), block_a.clone(), 0);
+        overlay.apply_voxel_edit_at_scale(cc4([8, 0, 0, 0]), block_a.clone(), 0);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 8, 0, 0]), block_a.clone(), 0);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 8, 0]), block_a.clone(), 0);
+
+        // Verify blocks are present.
+        assert_eq!(
+            overlay.override_chunks.block_at(cc4([8, 0, 0, 0])).block_type,
+            block_a.block_type
+        );
+
+        // Clear dirty state to simulate having already saved.
+        overlay.clear_dirty();
+        assert!(overlay.dirty_save_chunk_entries().is_empty());
+
+        // 2. Place a scale-(-2) block at [1,1,1,1].  At scale -2, chunk cell
+        //    size is 0.25, so the chunk covers [0..4, 0..4, 0..4, 0..4].
+        //    The existing scale-0 chunk [0..16,...] must be carved: the
+        //    [0..4,...] region becomes the new scale-2 chunk, and the rest
+        //    ([4..16,...] etc.) becomes fragments that hold the blocks at
+        //    [8,0,0,0], [0,8,0,0], and [0,0,8,0].
+        overlay.apply_voxel_edit_at_scale(cc4([1, 1, 1, 1]), block_b.clone(), -2);
+
+        let dirty = overlay.dirty_save_chunk_entries();
+        assert!(
+            !dirty.is_empty(),
+            "fine-scale edit should produce dirty save entries"
+        );
+
+        // The original blocks must still be retrievable from the tree
+        // (they were re-encoded into fragments, not deleted).
+        for pos in [[0, 0, 0, 0], [8, 0, 0, 0], [0, 8, 0, 0], [0, 0, 8, 0]] {
+            let readback = overlay.override_chunks.block_at(cc4(pos));
+            assert_eq!(
+                readback.block_type, block_a.block_type,
+                "original block at {:?} should survive carve: got {:?}",
+                pos, readback
+            );
+        }
+
+        // The new block_b data must be present.
+        let readback_b = overlay.override_chunks.block_at(cc4([1, 1, 1, 1]));
+        assert_eq!(
+            readback_b.block_type, block_b.block_type,
+            "edited block should be present: got {:?}",
+            readback_b
+        );
+
+        // Critical: dirty_save_chunks must contain entries that cover the
+        // ENTIRE affected region — not just the single edit chunk.  We
+        // verify this by checking that every non-empty chunk in the tree
+        // is represented in dirty_save_chunks.
+        let all_entries = overlay
+            .override_chunks
+            .collect_chunk_entries_in_bounds(
+                overlay.override_chunks.root().unwrap().bounds,
+            );
+        for (key, se) in &all_entries {
+            assert!(
+                dirty.contains_key(key),
+                "chunk {:?} at scale {} is in the tree but NOT in dirty_save_chunks — \
+                 it would be lost on save",
+                key, se
+            );
+        }
+        assert!(
+            all_entries.len() >= 2,
+            "expected at least 2 non-empty chunks (edit + fragments), got {}",
+            all_entries.len()
         );
     }
 }

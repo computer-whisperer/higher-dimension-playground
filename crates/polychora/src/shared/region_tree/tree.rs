@@ -112,7 +112,7 @@ impl RegionChunkTree {
 
     /// Set a chunk at scale 0 (the standard unit-scale lattice).
     pub fn set_chunk(&mut self, key: ChunkKey, resolved: Option<ResolvedChunkPayload>) -> bool {
-        self.set_chunk_at_scale(key, resolved, 0)
+        self.set_chunk_at_scale(key, resolved, 0).is_some()
     }
 
     /// Set a chunk at a specific scale. The key is already in fixed-point coordinates.
@@ -122,24 +122,30 @@ impl RegionChunkTree {
     /// of what scale it was stored at. Passing `None` for `resolved` clears
     /// the region (sets it to empty/air).
     /// `scale_exp` is needed to create ChunkArrayData with correct cell resolution.
+    ///
+    /// Returns `Some(affected_bounds)` if the tree was modified, where
+    /// `affected_bounds` is the world-space region that was carved or replaced.
+    /// This may be larger than the edit's own chunk bounds when existing data
+    /// at a different scale is split into fragments.  Returns `None` if no
+    /// change was made.
     pub fn set_chunk_at_scale(
         &mut self,
         key: ChunkKey,
         resolved: Option<ResolvedChunkPayload>,
         scale_exp: i8,
-    ) -> bool {
+    ) -> Option<Aabb4i> {
         let payload = resolved.map(|r| canonicalize_resolved_payload(r));
         let chunk_bounds = Aabb4i::chunk_world_bounds(key, scale_exp);
         if self.root.is_none() {
             let Some(payload) = payload else {
-                return false;
+                return None;
             };
             self.root = Some(Box::new(RegionTreeCore {
                 bounds: chunk_bounds,
                 kind: kind_from_resolved_value_at_scale(chunk_bounds, Some(payload), scale_exp),
                 generator_version_hash: 0,
             }));
-            return true;
+            return Some(chunk_bounds);
         }
 
         if payload.is_none()
@@ -149,7 +155,7 @@ impl RegionChunkTree {
                 .map(|root| !aabb_contains_aabb(root.bounds, chunk_bounds))
                 .unwrap_or(false)
         {
-            return false;
+            return None;
         }
 
         while self
@@ -166,13 +172,13 @@ impl RegionChunkTree {
             self.root = Some(expand_root_once(root, chunk_bounds, expand_alignment));
         }
 
-        let changed = if let Some(root) = self.root.as_mut() {
+        let affected = if let Some(root) = self.root.as_mut() {
             set_chunk_recursive(root, key, chunk_bounds, payload, scale_exp)
         } else {
-            false
+            None
         };
 
-        if changed
+        if affected.is_some()
             && self
                 .root
                 .as_ref()
@@ -182,7 +188,7 @@ impl RegionChunkTree {
             self.root = None;
         }
 
-        changed
+        affected
     }
 
     pub fn remove_chunk(&mut self, key: ChunkKey) -> bool {
@@ -252,6 +258,27 @@ impl RegionChunkTree {
             );
         }
         out.sort_unstable_by_key(|key| *key);
+        out
+    }
+
+    /// Enumerate all non-empty leaf chunks in `bounds`, returning each chunk's
+    /// key and the scale it is stored at.
+    pub fn collect_chunk_entries_in_bounds(
+        &self,
+        bounds: Aabb4i,
+    ) -> Vec<(ChunkKey, i8)> {
+        if !bounds.is_valid() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if let Some(root) = self.root.as_ref() {
+            collect_chunk_entries_from_kind_in_bounds(
+                &root.kind,
+                root.bounds,
+                bounds,
+                &mut out,
+            );
+        }
         out
     }
 
@@ -1996,15 +2023,106 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
     }
 }
 
+fn collect_chunk_entries_from_kind_in_bounds(
+    kind: &RegionNodeKind,
+    bounds: Aabb4i,
+    query_bounds: Aabb4i,
+    out: &mut Vec<(ChunkKey, i8)>,
+) {
+    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
+        return;
+    };
+
+    match kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() {
+                return;
+            }
+            let se = block.scale_exp;
+            let (lmin, lmax) = intersection.to_chunk_lattice_bounds(se);
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            out.push((chunk_key_from_lattice([lx, ly, lz, lw], se), se));
+                        }
+                    }
+                }
+            }
+        }
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            let Some(chunk_array_intersection) =
+                intersect_aabb(chunk_array.bounds, query_bounds)
+            else {
+                return;
+            };
+            let Ok(indices) = chunk_array.decode_dense_indices() else {
+                return;
+            };
+            let Some(extents) =
+                chunk_array.bounds.chunk_extents_at_scale(chunk_array.scale_exp)
+            else {
+                return;
+            };
+            let se = chunk_array.scale_exp;
+            let palette_non_empty = chunk_array_palette_non_empty_mask(chunk_array);
+            let (ca_lmin, _) = chunk_array.bounds.to_chunk_lattice_bounds(se);
+            let (int_lmin, int_lmax) = chunk_array_intersection.to_chunk_lattice_bounds(se);
+            for lw in int_lmin[3]..=int_lmax[3] {
+                for lz in int_lmin[2]..=int_lmax[2] {
+                    for ly in int_lmin[1]..=int_lmax[1] {
+                        for lx in int_lmin[0]..=int_lmax[0] {
+                            let local = [
+                                (lx - ca_lmin[0]) as usize,
+                                (ly - ca_lmin[1]) as usize,
+                                (lz - ca_lmin[2]) as usize,
+                                (lw - ca_lmin[3]) as usize,
+                            ];
+                            let linear = linear_cell_index(local, extents);
+                            let Some(palette_idx) = indices.get(linear) else {
+                                continue;
+                            };
+                            let palette_idx = *palette_idx as usize;
+                            if !palette_non_empty
+                                .get(palette_idx)
+                                .copied()
+                                .unwrap_or(true)
+                            {
+                                continue;
+                            }
+                            out.push((chunk_key_from_lattice([lx, ly, lz, lw], se), se));
+                        }
+                    }
+                }
+            }
+        }
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                collect_chunk_entries_from_kind_in_bounds(
+                    &child.kind,
+                    child.bounds,
+                    query_bounds,
+                    out,
+                );
+            }
+        }
+    }
+}
+
+/// Returns `Some(affected_bounds)` if the tree was modified, `None` otherwise.
+/// The affected bounds encompass the entire region that was carved or modified,
+/// which may be larger than `chunk_bounds` when existing data is split into
+/// fragments.
 fn set_chunk_recursive(
     node: &mut RegionTreeCore,
     key_pos: ChunkKey,
     chunk_bounds: Aabb4i,
     payload: Option<ResolvedChunkPayload>,
     scale_exp: i8,
-) -> bool {
+) -> Option<Aabb4i> {
     if !aabb_contains_aabb(node.bounds, chunk_bounds) {
-        return false;
+        return None;
     }
 
     if is_single_chunk_bounds(node.bounds, scale_exp) {
@@ -2019,10 +2137,10 @@ fn set_chunk_recursive(
         }
         let new_kind = kind_from_resolved_value_at_scale(node.bounds, payload, scale_exp);
         if node.kind == new_kind {
-            return false;
+            return None;
         }
         node.kind = new_kind;
-        return true;
+        return Some(node.bounds);
     }
 
     if matches!(node.kind, RegionNodeKind::Branch(_)) {
@@ -2038,15 +2156,15 @@ fn set_chunk_recursive_in_branch(
     chunk_bounds: Aabb4i,
     payload: Option<ResolvedChunkPayload>,
     scale_exp: i8,
-) -> bool {
+) -> Option<Aabb4i> {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
-        return false;
+        return None;
     };
     // Find a child that fully contains the chunk bounds.
     let target_idx = children
         .iter()
         .position(|child| aabb_contains_aabb(child.bounds, chunk_bounds));
-    let changed = if let Some(target_idx) = target_idx {
+    let affected = if let Some(target_idx) = target_idx {
         set_chunk_recursive(&mut children[target_idx], key_pos, chunk_bounds, payload, scale_exp)
     } else {
         // No child fully contains the chunk — it spans multiple children
@@ -2093,13 +2211,13 @@ fn set_chunk_recursive_in_branch(
             changed = true;
         }
         *children = new_children;
-        changed
+        if changed { Some(node.bounds) } else { None }
     };
 
-    if changed {
+    if affected.is_some() {
         normalize_chunk_node(node);
     }
-    changed
+    affected
 }
 
 fn carve_leaf_for_chunk_edit(
@@ -2108,7 +2226,7 @@ fn carve_leaf_for_chunk_edit(
     chunk_bounds: Aabb4i,
     payload: Option<ResolvedChunkPayload>,
     scale_exp: i8,
-) -> bool {
+) -> Option<Aabb4i> {
     let source_kind = std::mem::replace(&mut node.kind, RegionNodeKind::Empty);
 
     let no_change = match &source_kind {
@@ -2122,7 +2240,7 @@ fn carve_leaf_for_chunk_edit(
     };
     if no_change {
         node.kind = source_kind;
-        return false;
+        return None;
     }
 
     let mut children = Vec::with_capacity(9);
@@ -2139,7 +2257,7 @@ fn carve_leaf_for_chunk_edit(
             });
             if resolved_option_matches_existing(existing_resolved, payload.as_ref()) {
                 node.kind = source_kind;
-                return false;
+                return None;
             }
             let min_block_scale = chunk_array_min_block_scale(chunk_array, chunk_array.scale_exp)
                 .unwrap_or(chunk_array.scale_exp);
@@ -2190,7 +2308,7 @@ fn carve_leaf_for_chunk_edit(
                 });
             if resolved_option_matches_existing(existing_resolved, payload.as_ref()) {
                 node.kind = source_kind;
-                return false;
+                return None;
             }
             for piece_bounds in subtract_aabb(node.bounds, chunk_bounds) {
                 let projected = project_node_to_bounds(
@@ -2236,7 +2354,9 @@ fn carve_leaf_for_chunk_edit(
 
     node.kind = RegionNodeKind::Branch(children);
     normalize_chunk_node(node);
-    true
+    // Return the full node bounds — all fragments produced by the carve
+    // live within this region and must be tracked by the caller.
+    Some(node.bounds)
 }
 
 fn ensure_binary_children(node: &mut RegionTreeCore) {

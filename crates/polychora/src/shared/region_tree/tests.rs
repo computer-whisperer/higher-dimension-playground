@@ -2082,7 +2082,7 @@ fn set_and_get_chunk_at_scale_round_trip() {
     let key = chunk_key_from_lattice([0, 0, 0, 0], -1);
 
     assert!(!tree.has_chunk(key));
-    assert!(tree.set_chunk_at_scale(key, Some(payload.clone()), -1));
+    assert!(tree.set_chunk_at_scale(key, Some(payload.clone()), -1).is_some());
     assert!(tree.has_chunk(key));
 
     let (result, _) = tree.chunk_payload(key).unwrap();
