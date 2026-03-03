@@ -300,8 +300,8 @@ fn bvh_patch_reuses_freed_ids_instead_of_append_only_growth() {
         !remove[0].freed_node_ids.is_empty() || !remove[0].freed_leaf_ids.is_empty(),
         "expected removal to release at least one id"
     );
-    let free_node_count_after_remove = bvh.free_node_ids.len();
-    let free_leaf_count_after_remove = bvh.free_leaf_ids.len();
+    let free_node_count_after_remove = bvh.free_node_count();
+    let free_leaf_count_after_remove = bvh.free_leaf_count();
     assert!(free_node_count_after_remove > 0 || free_leaf_count_after_remove > 0);
 
     let insert = apply_chunk_payload_mutations_with_deltas_in_bvh(
@@ -332,15 +332,15 @@ fn bvh_patch_reuses_freed_ids_instead_of_append_only_growth() {
     // subtrees provide 2N-2 (one short since the old join node doesn't
     // exist). Allow a small margin for this extra allocation.
     assert!(
-        bvh.free_node_ids.len() <= free_node_count_after_remove + 2,
+        bvh.free_node_count() <= free_node_count_after_remove + 2,
         "free_node_ids grew too much: {} (was {})",
-        bvh.free_node_ids.len(),
+        bvh.free_node_count(),
         free_node_count_after_remove,
     );
     assert!(
-        bvh.free_leaf_ids.len() <= free_leaf_count_after_remove + 2,
+        bvh.free_leaf_count() <= free_leaf_count_after_remove + 2,
         "free_leaf_ids grew too much: {} (was {})",
-        bvh.free_leaf_ids.len(),
+        bvh.free_leaf_count(),
         free_leaf_count_after_remove,
     );
 }
