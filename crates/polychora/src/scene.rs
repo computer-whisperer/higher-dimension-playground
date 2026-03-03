@@ -224,7 +224,9 @@ impl Scene {
             0,
         );
         let should_remove = {
-            let chunk = chunks.entry(cp).or_insert_with(|| vec![BlockData::AIR; CHUNK_VOLUME]);
+            let chunk = chunks
+                .entry(cp)
+                .or_insert_with(|| vec![BlockData::AIR; CHUNK_VOLUME]);
             chunk[idx] = block;
             chunk.iter().all(|b| b.is_air())
         };
@@ -260,7 +262,12 @@ impl Scene {
                 origin[2] + row * 4,
                 origin[3],
             ];
-            Self::fill_hypercube(chunks, min, 2, polychora::content_registry::block_data_from_material_token(token));
+            Self::fill_hypercube(
+                chunks,
+                min,
+                2,
+                polychora::content_registry::block_data_from_material_token(token),
+            );
         }
     }
 
@@ -271,14 +278,15 @@ impl Scene {
             ScenePreset::Empty => {}
             ScenePreset::Flat => {
                 Self::place_material_showcase(&mut chunks, [-10, 0, -14, -4]);
-                let floor_payload = Self::build_flat_floor_payload(FLAT_PRESET_FLOOR_MATERIAL_BLOCK.clone());
+                let floor_payload =
+                    Self::build_flat_floor_payload(FLAT_PRESET_FLOOR_MATERIAL_BLOCK.clone());
                 for x in -2..=2 {
                     for z in -2..=2 {
                         for w in -2..=2 {
                             let key = chunk_key_i32(x, FLAT_FLOOR_CHUNK_Y, z, w);
                             // Insert a dummy entry so we know to emit this chunk;
                             // the actual payload is already built.
-                            chunks.entry(key).or_insert_with(Vec::new);
+                            chunks.entry(key).or_default();
                         }
                     }
                 }
@@ -297,7 +305,7 @@ impl Scene {
                         tree_entries.push((key, payload));
                     }
                 }
-                return RegionChunkTree::from_chunks(tree_entries.into_iter());
+                return RegionChunkTree::from_chunks(tree_entries);
             }
             ScenePreset::DemoCubes => {
                 // Cycle through the first 5 block tokens for variety
@@ -308,7 +316,10 @@ impl Scene {
                             for w in 0..2 {
                                 let base = [x * 4 - 2, y * 4 - 2, z * 4 - 2, w * 4 - 2];
                                 let token = (texture_rot % 5) + 1;
-                                let block = polychora::content_registry::block_data_from_material_token(token);
+                                let block =
+                                    polychora::content_registry::block_data_from_material_token(
+                                        token,
+                                    );
                                 Self::fill_hypercube(&mut chunks, base, 2, block);
                                 texture_rot = (texture_rot + 1) % 5;
                             }
@@ -327,13 +338,13 @@ impl Scene {
         Self::dense_blocks_map_to_tree(chunks)
     }
 
-    fn dense_blocks_map_to_tree(
-        chunks: HashMap<ChunkKey, Vec<BlockData>>,
-    ) -> RegionChunkTree {
+    fn dense_blocks_map_to_tree(chunks: HashMap<ChunkKey, Vec<BlockData>>) -> RegionChunkTree {
         RegionChunkTree::from_chunks(
             chunks
                 .into_iter()
-                .filter(|(_, blocks)| blocks.len() == CHUNK_VOLUME && !blocks.iter().all(|b| b.is_air()))
+                .filter(|(_, blocks)| {
+                    blocks.len() == CHUNK_VOLUME && !blocks.iter().all(|b| b.is_air())
+                })
                 .map(|(key, blocks)| {
                     let payload = ResolvedChunkPayload::from_dense_blocks(&blocks)
                         .unwrap_or_else(|_| ResolvedChunkPayload::empty());
@@ -397,7 +408,9 @@ impl Scene {
 
         // Read the current chunk payload, decode it to dense blocks, edit, and write back.
         let mut blocks = if let Some((payload, _)) = self.world_tree.chunk_payload(key) {
-            (0..CHUNK_VOLUME).map(|i| payload.block_at(i)).collect::<Vec<_>>()
+            (0..CHUNK_VOLUME)
+                .map(|i| payload.block_at(i))
+                .collect::<Vec<_>>()
         } else {
             vec![BlockData::AIR; CHUNK_VOLUME]
         };
@@ -414,32 +427,33 @@ impl Scene {
         };
 
         let previous_payload = self.world_tree.chunk_payload(key);
-        let changed_by_api = self.world_tree.set_chunk_at_scale(key, payload.clone(), scale_exp).is_some();
+        let changed_by_api = self
+            .world_tree
+            .set_chunk_at_scale(key, payload.clone(), scale_exp)
+            .is_some();
         let current_payload = self.world_tree.chunk_payload(key);
         let mut changed = changed_by_api || previous_payload != current_payload;
-        if !changed {
-            if current_payload.as_ref().map(|(p, _)| p) != payload.as_ref() {
-                let bounds = Aabb4i::chunk_world_bounds(key, scale_exp);
-                let mut repair_tree = RegionChunkTree::new();
-                if let Some(repair_payload) = payload.clone() {
-                    let _ = repair_tree.set_chunk(key, Some(repair_payload));
-                }
-                let repair_core = repair_tree.root().cloned().unwrap_or(RegionTreeCore {
-                    bounds,
-                    kind: RegionNodeKind::Empty,
-                    generator_version_hash: 0,
-                });
-                if self
-                    .world_tree
-                    .splice_non_empty_core_in_bounds(bounds, &repair_core)
-                    .is_some()
-                {
-                    changed = true;
-                    eprintln!(
-                        "[scene-world-repair] forced chunk repair at {:?} (expected={:?} current={:?})",
-                        key, payload, current_payload
-                    );
-                }
+        if !changed && current_payload.as_ref().map(|(p, _)| p) != payload.as_ref() {
+            let bounds = Aabb4i::chunk_world_bounds(key, scale_exp);
+            let mut repair_tree = RegionChunkTree::new();
+            if let Some(repair_payload) = payload.clone() {
+                let _ = repair_tree.set_chunk(key, Some(repair_payload));
+            }
+            let repair_core = repair_tree.root().cloned().unwrap_or(RegionTreeCore {
+                bounds,
+                kind: RegionNodeKind::Empty,
+                generator_version_hash: 0,
+            });
+            if self
+                .world_tree
+                .splice_non_empty_core_in_bounds(bounds, &repair_core)
+                .is_some()
+            {
+                changed = true;
+                eprintln!(
+                    "[scene-world-repair] forced chunk repair at {:?} (expected={:?} current={:?})",
+                    key, payload, current_payload
+                );
             }
         }
         if changed {
@@ -468,11 +482,17 @@ impl Scene {
         self.world_tree.block_at(pos)
     }
 
-    pub fn debug_world_tree_chunk_payload(&self, chunk_key: ChunkKey) -> Option<(ResolvedChunkPayload, i8)> {
+    pub fn debug_world_tree_chunk_payload(
+        &self,
+        chunk_key: ChunkKey,
+    ) -> Option<(ResolvedChunkPayload, i8)> {
         self.world_tree.chunk_payload(chunk_key)
     }
 
-    pub fn debug_render_bvh_cache_chunk_payloads(&self, chunk_key: ChunkKey) -> Vec<ResolvedChunkPayload> {
+    pub fn debug_render_bvh_cache_chunk_payloads(
+        &self,
+        chunk_key: ChunkKey,
+    ) -> Vec<ResolvedChunkPayload> {
         self.render_bvh_cache
             .as_ref()
             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
@@ -513,21 +533,35 @@ impl Scene {
         let b = &node.bounds;
         let bounds_str = format!(
             "[{},{},{},{}]->[{},{},{},{}]",
-            b.min[0].to_num::<i32>(), b.min[1].to_num::<i32>(),
-            b.min[2].to_num::<i32>(), b.min[3].to_num::<i32>(),
-            b.max[0].to_num::<i32>(), b.max[1].to_num::<i32>(),
-            b.max[2].to_num::<i32>(), b.max[3].to_num::<i32>(),
+            b.min[0].to_num::<i32>(),
+            b.min[1].to_num::<i32>(),
+            b.min[2].to_num::<i32>(),
+            b.min[3].to_num::<i32>(),
+            b.max[0].to_num::<i32>(),
+            b.max[1].to_num::<i32>(),
+            b.max[2].to_num::<i32>(),
+            b.max[3].to_num::<i32>(),
         );
         match &node.kind {
             RegionNodeKind::Empty => eprintln!("{indent}Empty {bounds_str}"),
             RegionNodeKind::Uniform(block) => {
-                eprintln!("{indent}Uniform(ns={},bt={}) {bounds_str}", block.namespace, block.block_type);
+                eprintln!(
+                    "{indent}Uniform(ns={},bt={}) {bounds_str}",
+                    block.namespace, block.block_type
+                );
             }
             RegionNodeKind::ProceduralRef(_) => eprintln!("{indent}ProceduralRef {bounds_str}"),
             RegionNodeKind::ChunkArray(ca) => {
-                let cells = ca.bounds.chunk_cell_count_at_scale(ca.scale_exp).unwrap_or(0);
-                eprintln!("{indent}ChunkArray(cells={}, palette={}, scale={}) {bounds_str}",
-                    cells, ca.chunk_palette.len(), ca.scale_exp);
+                let cells = ca
+                    .bounds
+                    .chunk_cell_count_at_scale(ca.scale_exp)
+                    .unwrap_or(0);
+                eprintln!(
+                    "{indent}ChunkArray(cells={}, palette={}, scale={}) {bounds_str}",
+                    cells,
+                    ca.chunk_palette.len(),
+                    ca.scale_exp
+                );
             }
             RegionNodeKind::Branch(children) => {
                 eprintln!("{indent}Branch({} children) {bounds_str}", children.len());
@@ -551,7 +585,7 @@ impl Scene {
         let header = self.voxel_frame_data.chunk_headers.get(chunk_index)?;
         let mut out = vec![0u16; CHUNK_VOLUME];
         let is_full = (header.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0;
-        for voxel_idx in 0..CHUNK_VOLUME {
+        for (voxel_idx, material_slot) in out.iter_mut().enumerate().take(CHUNK_VOLUME) {
             if !is_full {
                 let occ_word_idx = header.occupancy_word_offset as usize + (voxel_idx / 32);
                 let occ_word = *self.voxel_frame_data.occupancy_words.get(occ_word_idx)?;
@@ -562,7 +596,7 @@ impl Scene {
             let mat_word_idx = header.material_word_offset as usize + (voxel_idx / 2);
             let mat_word = *self.voxel_frame_data.material_words.get(mat_word_idx)?;
             let material = ((mat_word >> ((voxel_idx % 2) * 16)) & 0xFFFF) as u16;
-            out[voxel_idx] = material;
+            *material_slot = material;
         }
         Some(out)
     }
@@ -650,8 +684,6 @@ impl Scene {
         out
     }
 
-
-
     pub fn new(preset: ScenePreset) -> Self {
         let world_tree = Self::build_scene_preset_world(preset);
 
@@ -707,9 +739,9 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polychora::content_registry::{ContentRegistry, MaterialResolver};
     use polychora::shared::region_tree::chunk_key_i32;
     use polychora::shared::voxel::BlockData;
-    use polychora::content_registry::{ContentRegistry, MaterialResolver};
 
     fn cc(v: i32) -> ChunkCoord {
         ChunkCoord::from_num(v)
@@ -769,9 +801,7 @@ mod tests {
             let local_w = (chunk_key[3] - leaf.min_chunk_coord[3]) as usize;
             let linear = local_x + dim_x * (local_y + dim_y * (local_z + dim_z * local_w));
             let entry_index = leaf.chunk_entry_offset as usize + linear;
-            let Some(&entry) = scene.voxel_frame_data.leaf_chunk_entries.get(entry_index) else {
-                return None;
-            };
+            let &entry = scene.voxel_frame_data.leaf_chunk_entries.get(entry_index)?;
 
             if entry == higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY {
                 return None;
@@ -783,23 +813,16 @@ mod tests {
             }
 
             let chunk_index = entry.saturating_sub(1) as usize;
-            let Some(header) = scene.voxel_frame_data.chunk_headers.get(chunk_index) else {
-                return None;
-            };
+            let header = scene.voxel_frame_data.chunk_headers.get(chunk_index)?;
             if (header.flags & GpuVoxelChunkHeader::FLAG_FULL) == 0 {
                 let occ_word_index = header.occupancy_word_offset as usize + (voxel_idx / 32);
-                let Some(&occ_word) = scene.voxel_frame_data.occupancy_words.get(occ_word_index)
-                else {
-                    return None;
-                };
+                let &occ_word = scene.voxel_frame_data.occupancy_words.get(occ_word_index)?;
                 if (occ_word & (1u32 << (voxel_idx % 32))) == 0 {
                     return None;
                 }
             }
             let mat_word_index = header.material_word_offset as usize + (voxel_idx / 2);
-            let Some(&mat_word) = scene.voxel_frame_data.material_words.get(mat_word_index) else {
-                return None;
-            };
+            let &mat_word = scene.voxel_frame_data.material_words.get(mat_word_index)?;
             let material = ((mat_word >> ((voxel_idx % 2) * 16)) & 0xFFFF) as u8;
             return (material != 0).then_some(material);
         }
@@ -846,8 +869,7 @@ mod tests {
     fn block_edit_targets_reports_hit_and_placement_voxels() {
         let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
 
-        let targets =
-            scene.block_edit_targets([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0, 0);
+        let targets = scene.block_edit_targets([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0, 0);
 
         let cc = |v: i32| ChunkCoord::from_num(v);
         let hit = targets.hit.unwrap();
@@ -936,12 +958,7 @@ mod tests {
             }
         }
 
-        let targets = scene.block_edit_targets(
-            [1.5, 1.5, -2.0, 1.5],
-            [0.0, 0.0, 1.0, 0.0],
-            8.0,
-            0,
-        );
+        let targets = scene.block_edit_targets([1.5, 1.5, -2.0, 1.5], [0.0, 0.0, 1.0, 0.0], 8.0, 0);
 
         let cc = |v: i32| ChunkCoord::from_num(v);
         let hit = targets.hit.unwrap();
@@ -982,8 +999,8 @@ mod tests {
         let place = targets.place.unwrap();
         assert_eq!(place.scale_exp, -1);
         let half = ChunkCoord::from_num(1) / 2; // 0.5
-        // Face axis is Z (axis 2), face_sign = -1 (entered min face).
-        // On face axis: origin[2] = hit.origin[2] - step = 0 - 0.5 = -0.5
+                                                // Face axis is Z (axis 2), face_sign = -1 (entered min face).
+                                                // On face axis: origin[2] = hit.origin[2] - step = 0 - 0.5 = -0.5
         assert_eq!(place.origin[2], -half);
         // Non-face axes: hit_point snapped to 0.5 grid.
         // Ray at x=0.25 → snaps to 0.0 on 0.5 grid.
@@ -999,12 +1016,8 @@ mod tests {
         // half-grid for non-face axes.
         let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
 
-        let targets = scene.block_edit_targets(
-            [0.75, 0.75, -2.0, 0.25],
-            [0.0, 0.0, 1.0, 0.0],
-            8.0,
-            -1,
-        );
+        let targets =
+            scene.block_edit_targets([0.75, 0.75, -2.0, 0.25], [0.0, 0.0, 1.0, 0.0], 8.0, -1);
 
         let place = targets.place.unwrap();
         assert_eq!(place.scale_exp, -1);
@@ -1024,17 +1037,13 @@ mod tests {
         // Place a quarter-size block (scale -2) against a scale-0 block.
         let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
 
-        let targets = scene.block_edit_targets(
-            [0.1, 0.1, -2.0, 0.1],
-            [0.0, 0.0, 1.0, 0.0],
-            8.0,
-            -2,
-        );
+        let targets =
+            scene.block_edit_targets([0.1, 0.1, -2.0, 0.1], [0.0, 0.0, 1.0, 0.0], 8.0, -2);
 
         let place = targets.place.unwrap();
         assert_eq!(place.scale_exp, -2);
         let quarter = ChunkCoord::from_num(1) / 4; // 0.25
-        // On face axis (Z): 0 - 0.25 = -0.25
+                                                   // On face axis (Z): 0 - 0.25 = -0.25
         assert_eq!(place.origin[2], -quarter);
         // x=0.1 snaps to 0.0 on the 0.25 grid
         assert_eq!(place.origin[0], cc(0));
@@ -1049,12 +1058,8 @@ mod tests {
         let mut scene = make_scene_with_blocks(&[]);
         scene.world_set_block_at(cc4([0, 0, 0, 0]), block);
 
-        let targets = scene.block_edit_targets(
-            [0.25, 0.25, -2.0, 0.25],
-            [0.0, 0.0, 1.0, 0.0],
-            8.0,
-            -1,
-        );
+        let targets =
+            scene.block_edit_targets([0.25, 0.25, -2.0, 0.25], [0.0, 0.0, 1.0, 0.0], 8.0, -1);
 
         let hit = targets.hit.unwrap();
         assert_eq!(hit.origin, cc4([0, 0, 0, 0]));
@@ -1072,19 +1077,14 @@ mod tests {
         // Hit a scale-0 block from the +X direction.
         let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
 
-        let targets = scene.block_edit_targets(
-            [3.0, 0.25, 0.25, 0.25],
-            [-1.0, 0.0, 0.0, 0.0],
-            8.0,
-            -1,
-        );
+        let targets =
+            scene.block_edit_targets([3.0, 0.25, 0.25, 0.25], [-1.0, 0.0, 0.0, 0.0], 8.0, -1);
 
         assert_eq!(targets.face_axis, 0); // X axis
-        assert_eq!(targets.face_sign, 1);  // entered through max face
+        assert_eq!(targets.face_sign, 1); // entered through max face
 
         let place = targets.place.unwrap();
         assert_eq!(place.scale_exp, -1);
-        let half = ChunkCoord::from_num(1) / 2;
         // On face axis (X): hit.origin[0] + hit_size = 0 + 1 = 1
         assert_eq!(place.origin[0], cc(1));
         // Non-face axes snapped to 0.5 grid: 0.25 → 0.0
@@ -1123,11 +1123,8 @@ mod tests {
         let mut scene = make_scene_with_blocks(&[]);
         scene.world_set_block_at(cc4([0, 0, 0, 0]), block.clone());
 
-        let removed = scene.remove_block_along_ray(
-            [0.25, 0.25, -2.0, 0.25],
-            [0.0, 0.0, 1.0, 0.0],
-            8.0,
-        );
+        let removed =
+            scene.remove_block_along_ray([0.25, 0.25, -2.0, 0.25], [0.0, 0.0, 1.0, 0.0], 8.0);
 
         assert_eq!(removed, Some(cc4([0, 0, 0, 0])));
         assert!(scene.get_block_data_at(cc4([0, 0, 0, 0])).is_air());
@@ -1140,12 +1137,8 @@ mod tests {
         let scene = make_scene_with_blocks(&[([0, 0, -1, 0], BlockData::simple(0, 7))]);
 
         // Hit the block at [0,0,-1,0] from -Z direction (ray at z=-3)
-        let targets = scene.block_edit_targets(
-            [0.25, 0.25, -3.0, 0.25],
-            [0.0, 0.0, 1.0, 0.0],
-            8.0,
-            -1,
-        );
+        let targets =
+            scene.block_edit_targets([0.25, 0.25, -3.0, 0.25], [0.0, 0.0, 1.0, 0.0], 8.0, -1);
 
         let hit = targets.hit.unwrap();
         assert_eq!(hit.origin, cc4([0, 0, -1, 0]));
@@ -1222,7 +1215,10 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0);
         let mut patch_tree = RegionChunkTree::new();
-        let changed = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
+        let changed = patch_tree.set_chunk(
+            chunk_key_i32(0, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))),
+        );
         assert!(changed);
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
@@ -1249,7 +1245,10 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0);
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 5))));
+        let _ = seed_tree.set_chunk(
+            chunk_key_i32(0, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 5))),
+        );
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
@@ -1282,7 +1281,10 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Empty);
         let bounds = Aabb4i::chunk_world_bounds(chunk_key_i32(0, 0, 0, 0), 0);
         let mut patch_tree = RegionChunkTree::new();
-        let _ = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
+        let _ = patch_tree.set_chunk(
+            chunk_key_i32(0, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))),
+        );
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
         let _ = scene.apply_region_patch(bounds, &patch_core);
@@ -1310,8 +1312,14 @@ mod tests {
         let bounds = Aabb4i::from_i32([0, 0, 0, 0], [16, 8, 8, 8]);
 
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
-        let _ = seed_tree.set_chunk(chunk_key_i32(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
+        let _ = seed_tree.set_chunk(
+            chunk_key_i32(0, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
+        );
+        let _ = seed_tree.set_chunk(
+            chunk_key_i32(1, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))),
+        );
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = scene.apply_region_patch(bounds, &seed_core);
         let _ = scene.world_drain_pending_chunk_updates();
@@ -1359,8 +1367,14 @@ mod tests {
         let mut fast_scene = Scene::new(ScenePreset::Empty);
 
         let mut seed_tree = RegionChunkTree::new();
-        let _ = seed_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))));
-        let _ = seed_tree.set_chunk(chunk_key_i32(1, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))));
+        let _ = seed_tree.set_chunk(
+            chunk_key_i32(0, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 3))),
+        );
+        let _ = seed_tree.set_chunk(
+            chunk_key_i32(1, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4))),
+        );
         let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
         let _ = full_scene.apply_region_patch(bounds, &seed_core);
         let _ = fast_scene.apply_region_patch(bounds, &seed_core);
@@ -1368,7 +1382,10 @@ mod tests {
         let _ = fast_scene.world_drain_pending_chunk_updates();
 
         let mut patch_tree = RegionChunkTree::new();
-        let _ = patch_tree.set_chunk(chunk_key_i32(0, 0, 0, 0), Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))));
+        let _ = patch_tree.set_chunk(
+            chunk_key_i32(0, 0, 0, 0),
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 7))),
+        );
         let patch_core = patch_tree.slice_non_empty_core_in_bounds(bounds);
 
         let full_stats = full_scene.apply_region_patch(bounds, &patch_core);
@@ -1385,10 +1402,20 @@ mod tests {
             full_scene.world_drain_pending_chunk_updates(),
             fast_scene.world_drain_pending_chunk_updates()
         );
-        assert_eq!(full_scene.get_block_data(0, 0, 0, 0), BlockData::simple(0, 7));
-        assert_eq!(fast_scene.get_block_data(0, 0, 0, 0), BlockData::simple(0, 7));
-        assert!(full_scene.get_block_data(CHUNK_SIZE as i32, 0, 0, 0).is_air());
-        assert!(fast_scene.get_block_data(CHUNK_SIZE as i32, 0, 0, 0).is_air());
+        assert_eq!(
+            full_scene.get_block_data(0, 0, 0, 0),
+            BlockData::simple(0, 7)
+        );
+        assert_eq!(
+            fast_scene.get_block_data(0, 0, 0, 0),
+            BlockData::simple(0, 7)
+        );
+        assert!(full_scene
+            .get_block_data(CHUNK_SIZE as i32, 0, 0, 0)
+            .is_air());
+        assert!(fast_scene
+            .get_block_data(CHUNK_SIZE as i32, 0, 0, 0)
+            .is_air());
     }
 
     #[test]
@@ -1396,11 +1423,13 @@ mod tests {
         let mut scene = Scene::new(ScenePreset::Empty);
         let chunk_key = chunk_key_i32(0, 0, 0, 0);
         let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
-        let view_bounds = Aabb4i::from_i32([-16, -16, -16, -16], [16, 16, 16, 16]);
 
         // Seed one non-empty chunk.
         let mut initial_patch = RegionChunkTree::new();
-        let _ = initial_patch.set_chunk(chunk_key, Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 11))));
+        let _ = initial_patch.set_chunk(
+            chunk_key,
+            Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 11))),
+        );
         let initial_core = initial_patch.slice_non_empty_core_in_bounds(chunk_bounds);
         let initial_stats = scene.apply_region_patch_fast(chunk_bounds, &initial_core);
         assert_eq!(initial_stats.changed_chunks, 1);
@@ -1425,7 +1454,9 @@ mod tests {
         assert_eq!(edited_stats.changed_chunks, 1);
 
         // Verify the edit is visible through the world tree.
-        let (edited_world, _) = scene.debug_world_tree_chunk_payload(chunk_key).expect("edited chunk");
+        let (edited_world, _) = scene
+            .debug_world_tree_chunk_payload(chunk_key)
+            .expect("edited chunk");
         assert_eq!(edited_world.block_at(0), BlockData::simple(0, 4));
         assert_eq!(scene.get_block_data(0, 0, 0, 0), BlockData::simple(0, 4));
     }
@@ -1529,7 +1560,12 @@ mod tests {
     fn voxel_frame_snapshot_path_clears_mutation_batch() {
         let mut scene = Scene::new(ScenePreset::Empty);
         scene.world_set_block(0, 0, 0, 0, BlockData::simple(0, 3));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_resolver());
+        let _ = scene.build_voxel_frame_data(
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            64.0,
+            &test_resolver(),
+        );
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
         assert!(scene.voxel_frame_data.mutation_base_generation.is_none());
     }
@@ -1538,12 +1574,22 @@ mod tests {
     fn voxel_frame_delta_path_emits_mutation_batch() {
         let mut scene = Scene::new(ScenePreset::Empty);
         scene.world_set_block(0, 0, 0, 0, BlockData::simple(0, 3));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_resolver());
+        let _ = scene.build_voxel_frame_data(
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            64.0,
+            &test_resolver(),
+        );
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
         let base_generation = scene.voxel_frame_data.metadata_generation;
 
         scene.world_set_block(CHUNK_SIZE as i32, 0, 0, 0, BlockData::simple(0, 4));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_resolver());
+        let _ = scene.build_voxel_frame_data(
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            64.0,
+            &test_resolver(),
+        );
 
         let batch = scene.voxel_frame_data.mutation_batch.as_ref();
         assert!(batch.is_some());
@@ -1567,7 +1613,12 @@ mod tests {
     fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
         let mut scene = Scene::new(ScenePreset::Empty);
         scene.world_set_block(0, 0, 0, 0, BlockData::simple(0, 3));
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_resolver());
+        let _ = scene.build_voxel_frame_data(
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            64.0,
+            &test_resolver(),
+        );
 
         let frame_root = scene.voxel_frame_data.region_bvh_root_index;
         assert_ne!(frame_root, VTE_REGION_BVH_INVALID_NODE);
@@ -1588,7 +1639,12 @@ mod tests {
             });
         scene.voxel_cached_visibility_bounds = None;
 
-        let _ = scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &test_resolver());
+        let _ = scene.build_voxel_frame_data(
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            64.0,
+            &test_resolver(),
+        );
 
         assert!(scene.voxel_pending_render_bvh_mutation_deltas.is_empty());
         assert!(scene.voxel_frame_data.mutation_batch.is_none());
@@ -1620,10 +1676,8 @@ mod tests {
             edit_voxel[3],
         );
         let reg = test_registry();
-        let before_mat = reg.block_material_token(
-            before_world.namespace,
-            before_world.block_type,
-        ) as u8;
+        let before_mat =
+            reg.block_material_token(before_world.namespace, before_world.block_type) as u8;
         assert_eq!(before_frame, Some(before_mat));
 
         scene.world_set_block(
@@ -1663,7 +1717,8 @@ mod tests {
 
         let mut scene = Scene::new(ScenePreset::Empty);
         let resolver = test_resolver();
-        let cobblestone = polychora::content_registry::block_data_from_material_token(28).at_scale(-3);
+        let cobblestone =
+            polychora::content_registry::block_data_from_material_token(28).at_scale(-3);
         let red = polychora::content_registry::block_data_from_material_token(1).at_scale(-3);
 
         // Place two scale=-3 chunks with identical sparse payload shape but
@@ -1678,7 +1733,8 @@ mod tests {
             &resolver,
         );
 
-        let cobblestone_expected = resolver.resolve_block(cobblestone.namespace, cobblestone.block_type);
+        let cobblestone_expected =
+            resolver.resolve_block(cobblestone.namespace, cobblestone.block_type);
         let red_expected = resolver.resolve_block(red.namespace, red.block_type);
         assert_ne!(cobblestone_expected, red_expected);
 
@@ -1783,8 +1839,7 @@ mod tests {
             let old_pos = [x as f32 + 0.5, 2.4, 0.5, 0.5];
             let attempted = [x as f32 + 0.5, -0.5, 0.5, 0.5];
             let mut vel = -5.0;
-            let (resolved, grounded) =
-                scene.resolve_player_collision(old_pos, attempted, &mut vel);
+            let (resolved, grounded) = scene.resolve_player_collision(old_pos, attempted, &mut vel);
             assert!(
                 grounded,
                 "player at x={x} should be grounded, resolved_y={}",
@@ -1798,8 +1853,6 @@ mod tests {
     /// then verifies queries work.
     #[test]
     fn multiplayer_flat_floor_patch_fast_then_query() {
-        use polychora::shared::spatial::ChunkCoord;
-
         let mut scene = Scene::new(ScenePreset::Empty);
         let stone = BlockData::simple(0, 7);
 
@@ -1852,12 +1905,14 @@ mod tests {
         );
 
         // Verify look-ray hits floor
-        let targets = scene.block_edit_targets([0.5, 2.0, 0.5, 0.5], [0.0, -1.0, 0.0, 0.0], 20.0, 0);
-        assert!(
-            targets.hit.is_some(),
-            "look-ray should hit floor"
+        let targets =
+            scene.block_edit_targets([0.5, 2.0, 0.5, 0.5], [0.0, -1.0, 0.0, 0.0], 20.0, 0);
+        assert!(targets.hit.is_some(), "look-ray should hit floor");
+        assert_eq!(
+            targets.hit.unwrap().origin_i32()[1],
+            -1,
+            "look-ray should hit at y=-1"
         );
-        assert_eq!(targets.hit.unwrap().origin_i32()[1], -1, "look-ray should hit at y=-1");
     }
 
     fn dump_tree_structure(core: &RegionTreeCore, indent: usize) -> String {
@@ -1865,21 +1920,35 @@ mod tests {
         let b = &core.bounds;
         let bounds_str = format!(
             "[{},{},{},{}]->[{},{},{},{}]",
-            b.min[0].to_num::<i32>(), b.min[1].to_num::<i32>(),
-            b.min[2].to_num::<i32>(), b.min[3].to_num::<i32>(),
-            b.max[0].to_num::<i32>(), b.max[1].to_num::<i32>(),
-            b.max[2].to_num::<i32>(), b.max[3].to_num::<i32>(),
+            b.min[0].to_num::<i32>(),
+            b.min[1].to_num::<i32>(),
+            b.min[2].to_num::<i32>(),
+            b.min[3].to_num::<i32>(),
+            b.max[0].to_num::<i32>(),
+            b.max[1].to_num::<i32>(),
+            b.max[2].to_num::<i32>(),
+            b.max[3].to_num::<i32>(),
         );
         match &core.kind {
             RegionNodeKind::Empty => format!("{prefix}Empty {bounds_str}\n"),
             RegionNodeKind::Uniform(block) => {
-                format!("{prefix}Uniform(ns={},bt={}) {bounds_str}\n", block.namespace, block.block_type)
+                format!(
+                    "{prefix}Uniform(ns={},bt={}) {bounds_str}\n",
+                    block.namespace, block.block_type
+                )
             }
             RegionNodeKind::ProceduralRef(_) => format!("{prefix}ProceduralRef {bounds_str}\n"),
             RegionNodeKind::ChunkArray(ca) => {
-                let cells = ca.bounds.chunk_cell_count_at_scale(ca.scale_exp).unwrap_or(0);
-                format!("{prefix}ChunkArray(cells={}, palette_len={}, scale={}) {bounds_str}\n",
-                    cells, ca.chunk_palette.len(), ca.scale_exp)
+                let cells = ca
+                    .bounds
+                    .chunk_cell_count_at_scale(ca.scale_exp)
+                    .unwrap_or(0);
+                format!(
+                    "{prefix}ChunkArray(cells={}, palette_len={}, scale={}) {bounds_str}\n",
+                    cells,
+                    ca.chunk_palette.len(),
+                    ca.scale_exp
+                )
             }
             RegionNodeKind::Branch(children) => {
                 let mut s = format!("{prefix}Branch({} children) {bounds_str}\n", children.len());
@@ -1897,7 +1966,9 @@ mod tests {
     /// get_block_data.
     #[test]
     fn massive_platforms_world_query_roundtrip() {
-        use polychora::server::world_field::{MassivePlatformsWorldGenerator, QueryDetail, QueryVolume};
+        use polychora::server::world_field::{
+            MassivePlatformsWorldGenerator, QueryDetail, QueryVolume,
+        };
         use polychora::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
 
         let material = BlockData::simple(0, 11);
@@ -1919,7 +1990,9 @@ mod tests {
         );
 
         let subtree = generator.query_region_core(
-            QueryVolume { bounds: authoritative_bounds },
+            QueryVolume {
+                bounds: authoritative_bounds,
+            },
             QueryDetail::Exact,
         );
 

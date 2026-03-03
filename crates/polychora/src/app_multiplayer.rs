@@ -5,11 +5,11 @@ use higher_dimension_playground::render::{
     OVERLAY_EDGE_TAG_REGION_UNIFORM, OVERLAY_EDGE_TAG_TARGET,
 };
 use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
-use polychora::shared::voxel::BlockData;
 use polychora::shared::region_tree::{
     collect_non_empty_chunks_from_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
 };
 use polychora::shared::spatial::{Aabb4i, ChunkCoord};
+use polychora::shared::voxel::BlockData;
 use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
@@ -50,7 +50,9 @@ fn region_tree_diag_kind(kind: &RegionNodeKind) -> RegionTreeDiagKind {
         RegionNodeKind::Branch(_) => RegionTreeDiagKind::Branch,
         RegionNodeKind::Empty => RegionTreeDiagKind::Empty,
         RegionNodeKind::Uniform(block) => RegionTreeDiagKind::Uniform(block.block_type as u16),
-        RegionNodeKind::ChunkArray(ca) => RegionTreeDiagKind::ChunkArray { scale_exp: ca.scale_exp },
+        RegionNodeKind::ChunkArray(ca) => RegionTreeDiagKind::ChunkArray {
+            scale_exp: ca.scale_exp,
+        },
         RegionNodeKind::ProceduralRef(_) => RegionTreeDiagKind::ProceduralRef,
     }
 }
@@ -92,16 +94,26 @@ fn region_tree_diag_style(kind: RegionTreeDiagKind) -> RegionTreeDiagStyle {
 
 fn region_tree_diag_label_text(node: RegionTreeDiagNode) -> String {
     let span = [
-        node.bounds.max[0].saturating_sub(node.bounds.min[0]).to_num::<i32>(),
-        node.bounds.max[1].saturating_sub(node.bounds.min[1]).to_num::<i32>(),
-        node.bounds.max[2].saturating_sub(node.bounds.min[2]).to_num::<i32>(),
-        node.bounds.max[3].saturating_sub(node.bounds.min[3]).to_num::<i32>(),
+        node.bounds.max[0]
+            .saturating_sub(node.bounds.min[0])
+            .to_num::<i32>(),
+        node.bounds.max[1]
+            .saturating_sub(node.bounds.min[1])
+            .to_num::<i32>(),
+        node.bounds.max[2]
+            .saturating_sub(node.bounds.min[2])
+            .to_num::<i32>(),
+        node.bounds.max[3]
+            .saturating_sub(node.bounds.min[3])
+            .to_num::<i32>(),
     ];
     let (kind_label, kind_suffix) = match node.kind {
         RegionTreeDiagKind::Branch => ("Branch", String::new()),
         RegionTreeDiagKind::Empty => ("Empty", String::new()),
         RegionTreeDiagKind::Uniform(material) => ("Uniform", format!(" material={material}")),
-        RegionTreeDiagKind::ChunkArray { scale_exp } => ("ChunkArray", format!(" scale={scale_exp}")),
+        RegionTreeDiagKind::ChunkArray { scale_exp } => {
+            ("ChunkArray", format!(" scale={scale_exp}"))
+        }
         RegionTreeDiagKind::ProceduralRef => ("ProceduralRef", String::new()),
     };
     format!(
@@ -229,7 +241,7 @@ fn chunk_payload_has_non_empty_block(payload: &ChunkPayload, block_palette: &[Bl
         ChunkPayload::Dense16 { materials } => materials.iter().any(|idx| idx_is_solid(*idx)),
         ChunkPayload::PalettePacked { .. } => payload
             .dense_materials()
-            .map(|indices| indices.into_iter().any(|idx| idx_is_solid(idx)))
+            .map(|indices| indices.into_iter().any(idx_is_solid))
             .unwrap_or(true),
     }
 }
@@ -468,9 +480,16 @@ fn summarize_payload_compact(resolved: Option<&ResolvedChunkPayload>) -> String 
             }
         }
         ChunkPayload::Dense16 { materials } => {
-            let non_empty = materials.iter().filter(|idx| {
-                resolved.block_palette.get(**idx as usize).map(|b| !b.is_air()).unwrap_or(false)
-            }).count();
+            let non_empty = materials
+                .iter()
+                .filter(|idx| {
+                    resolved
+                        .block_palette
+                        .get(**idx as usize)
+                        .map(|b| !b.is_air())
+                        .unwrap_or(false)
+                })
+                .count();
             format!("Dense16(nz={non_empty})")
         }
         ChunkPayload::PalettePacked {
@@ -529,14 +548,13 @@ impl App {
     pub(super) fn poll_multiplayer_events(&mut self) {
         const MAX_MESSAGES_PER_FRAME: usize = 64;
         let mut processed = 0usize;
-        loop {
-            let event = match self
+        while processed < MAX_MESSAGES_PER_FRAME {
+            let Some(event) = self
                 .multiplayer
                 .as_ref()
                 .and_then(|client| client.try_recv())
-            {
-                Some(event) => event,
-                None => break,
+            else {
+                break;
             };
 
             match event {
@@ -548,9 +566,6 @@ impl App {
                 }
             }
             processed += 1;
-            if processed >= MAX_MESSAGES_PER_FRAME {
-                break;
-            }
         }
     }
 
@@ -629,8 +644,8 @@ impl App {
                 .clamp(0.0, REMOTE_PLAYER_MAX_PREDICTION_S);
 
             let mut predicted_position = player.position;
-            for axis in 0..4 {
-                predicted_position[axis] += player.velocity[axis] * predict_time;
+            for (axis, predicted_axis) in predicted_position.iter_mut().enumerate() {
+                *predicted_axis += player.velocity[axis] * predict_time;
             }
 
             let snapped = if distance4(player.render_position, predicted_position)
@@ -705,8 +720,8 @@ impl App {
         let orientation_alpha = 1.0 - (-REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ * dt).exp();
         for entity in self.remote_entities.values_mut() {
             let mut predicted_position = entity.position;
-            for axis in 0..4 {
-                predicted_position[axis] += entity.velocity[axis] * dt;
+            for (axis, predicted_axis) in predicted_position.iter_mut().enumerate() {
+                *predicted_axis += entity.velocity[axis] * dt;
             }
             if distance4(entity.render_position, predicted_position)
                 > REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE
@@ -834,15 +849,15 @@ impl App {
 
     fn next_multiplayer_chunk_sample_diag_chunk_in_bounds(&mut self, bounds: Aabb4i) -> [i32; 4] {
         let mut chunk = [0i32; 4];
-        for axis in 0..4 {
+        for (axis, chunk_axis) in chunk.iter_mut().enumerate() {
             let lo: i32 = bounds.min[axis].to_num();
             let hi: i32 = bounds.max[axis].to_num();
             if hi <= lo {
-                chunk[axis] = lo;
+                *chunk_axis = lo;
                 continue;
             }
             let span = (hi - lo + 1) as u32;
-            chunk[axis] = lo + (self.next_multiplayer_chunk_sample_diag_u32() % span) as i32;
+            *chunk_axis = lo + (self.next_multiplayer_chunk_sample_diag_u32() % span) as i32;
         }
         chunk
     }
@@ -867,7 +882,11 @@ impl App {
         let Some(client) = self.multiplayer.as_ref() else {
             return;
         };
-        client.send(MultiplayerClientMessage::WorldChunkSampleRequest { request_id, chunk, scale_exp: 0 });
+        client.send(MultiplayerClientMessage::WorldChunkSampleRequest {
+            request_id,
+            chunk,
+            scale_exp: 0,
+        });
     }
 
     pub(super) fn trigger_world_force_resync(&mut self) {
@@ -938,8 +957,11 @@ impl App {
             return;
         }
 
-        let world_dense =
-            dense_blocks_from_payload_or_zero(self.scene.debug_world_tree_chunk_payload(chunk).map(|(p, _)| p));
+        let world_dense = dense_blocks_from_payload_or_zero(
+            self.scene
+                .debug_world_tree_chunk_payload(chunk)
+                .map(|(p, _)| p),
+        );
         let render_bounds = self
             .multiplayer_last_world_request_bounds
             .unwrap_or_else(|| Aabb4i::chunk_world_bounds(chunk, 0));
@@ -958,11 +980,20 @@ impl App {
             .iter()
             .skip(1)
             .any(|dense| *dense != render_dense);
-        let frame_payloads = self.scene.debug_voxel_frame_chunk_payloads(chunk.map(|c| c.to_num::<i32>()));
+        let frame_payloads = self
+            .scene
+            .debug_voxel_frame_chunk_payloads(chunk.map(|c| c.to_num::<i32>()));
         let frame_dense_variants: Vec<Vec<polychora::shared::voxel::BlockData>> = frame_payloads
             .iter()
             .cloned()
-            .map(|payload| dense_blocks_from_payload_or_zero(Some(ResolvedChunkPayload::from_payload_with_token_palette(payload, &self.material_resolver))))
+            .map(|payload| {
+                dense_blocks_from_payload_or_zero(Some(
+                    ResolvedChunkPayload::from_payload_with_token_palette(
+                        payload,
+                        &self.material_resolver,
+                    ),
+                ))
+            })
             .collect();
         let frame_dense = frame_dense_variants
             .first()
@@ -1151,8 +1182,8 @@ impl App {
             &mut nodes,
         );
 
-        let mut projected = Vec::<(RegionTreeDiagNode, ProjectedRegionBounds)>::new();
-        projected.reserve(nodes.len());
+        let mut projected =
+            Vec::<(RegionTreeDiagNode, ProjectedRegionBounds)>::with_capacity(nodes.len());
         for node in nodes {
             let Some(projection) =
                 project_chunk_bounds_to_ndc(node.bounds, view_matrix, focal_length_xy, aspect)
@@ -1309,7 +1340,9 @@ impl App {
         let interval = self
             .multiplayer_stream_tree_compare_diag_log_interval
             .max(1) as u64;
-        let interval_due = self.multiplayer_stream_tree_compare_diag_frame_counter % interval == 0;
+        let interval_due = self
+            .multiplayer_stream_tree_compare_diag_frame_counter
+            .is_multiple_of(interval);
         if self.multiplayer_stream_tree_compare_diag_last_hash != Some(summary_hash) || interval_due
         {
             eprintln!(
@@ -1369,8 +1402,11 @@ impl App {
             .filter(|e| *e == [1, 1, 1, 1])
             .map(|_| authoritative_bounds.chunk_key_from_world_bounds());
         let sync_diag_enabled = std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some();
-        let world_before =
-            patch_single_chunk_key.and_then(|key| self.scene.debug_world_tree_chunk_payload(key).map(|(p, _)| p));
+        let world_before = patch_single_chunk_key.and_then(|key| {
+            self.scene
+                .debug_world_tree_chunk_payload(key)
+                .map(|(p, _)| p)
+        });
         let patch_payload = patch_single_chunk_key.and_then(|key| {
             collect_non_empty_chunks_from_core_in_bounds(&patch, Aabb4i::chunk_world_bounds(key, 0))
                 .into_iter()
@@ -1383,11 +1419,10 @@ impl App {
         let scene_patch_stats = if self.multiplayer_world_patch_full_stats_enabled {
             self.scene.apply_region_patch(authoritative_bounds, &patch)
         } else {
-            self.scene.apply_region_patch_fast(authoritative_bounds, &patch)
+            self.scene
+                .apply_region_patch_fast(authoritative_bounds, &patch)
         };
         let scene_patch_elapsed_ms = scene_patch_start.elapsed().as_secs_f64() * 1000.0;
-
-
 
         let diag_splice_elapsed_ms = if (self.multiplayer_stream_tree_diag_enabled
             || self.multiplayer_stream_tree_compare_diag_enabled)
@@ -1448,13 +1483,21 @@ impl App {
         );
         if sync_diag_enabled {
             if let Some(key) = patch_single_chunk_key {
-                let world_after = self.scene.debug_world_tree_chunk_payload(key).map(|(p, _)| p);
+                let world_after = self
+                    .scene
+                    .debug_world_tree_chunk_payload(key)
+                    .map(|(p, _)| p);
                 let render_cache_payloads = self.scene.debug_render_bvh_cache_chunk_payloads(key);
                 let frame_payloads: Vec<ResolvedChunkPayload> = self
                     .scene
                     .debug_voxel_frame_chunk_payloads(key.map(|c| c.to_num::<i32>()))
                     .into_iter()
-                    .map(|p| ResolvedChunkPayload::from_payload_with_token_palette(p, &self.material_resolver))
+                    .map(|p| {
+                        ResolvedChunkPayload::from_payload_with_token_palette(
+                            p,
+                            &self.material_resolver,
+                        )
+                    })
                     .collect();
                 eprintln!(
                     "[edit-sync-patch] key={:?} patch={} world_before={} world_after={} render_cache={} frame={} pending_dirty={} pending_deltas={}",
@@ -1535,8 +1578,14 @@ impl App {
                             let block = self.scene.get_block_data(wx, wy, wz, ww);
                             eprintln!(
                                 "[world-probe] {} ({},{},{},{}) = ns={} bt={} air={}",
-                                label, wx, wy, wz, ww,
-                                block.namespace, block.block_type, block.is_air()
+                                label,
+                                wx,
+                                wy,
+                                wz,
+                                ww,
+                                block.namespace,
+                                block.block_type,
+                                block.is_air()
                             );
                         }
                     }
@@ -1555,10 +1604,9 @@ impl App {
             }
             multiplayer::ServerMessage::Pong { .. } => {}
             multiplayer::ServerMessage::EntitySpawned { entity } => {
-                let category = self.content_registry.entity_category(
-                    entity.entity.namespace,
-                    entity.entity.entity_type,
-                );
+                let category = self
+                    .content_registry
+                    .entity_category(entity.entity.namespace, entity.entity.entity_type);
                 match category {
                     multiplayer::entity_types::EntityCategory::Player => {
                         self.remote_entities.remove(&entity.entity_id);
@@ -1577,8 +1625,7 @@ impl App {
                             entity.entity.pose.orientation,
                             fallback_orientation,
                         );
-                        let sanitized_scale =
-                            sanitize_remote_scale(entity.entity.pose.scale, 1.0);
+                        let sanitized_scale = sanitize_remote_scale(entity.entity.pose.scale, 1.0);
                         self.remote_entities.insert(
                             entity.entity_id,
                             RemoteEntityState {
@@ -1798,27 +1845,23 @@ impl App {
             };
 
             // Try WASM call.
-            let model_output = self
-                .wasm_model_manager
-                .as_mut()
-                .and_then(|mgr| {
-                    let input_bytes = postcard::to_allocvec(&model_input).ok()?;
-                    let result = mgr
-                        .call_slot(WasmPluginSlot::ModelLogic, OP_ENTITY_MODEL as i32, &input_bytes)
-                        .ok()??;
-                    postcard::from_bytes::<EntityModelOutput>(&result.invocation.output).ok()
-                });
+            let model_output = self.wasm_model_manager.as_mut().and_then(|mgr| {
+                let input_bytes = postcard::to_allocvec(&model_input).ok()?;
+                let result = mgr
+                    .call_slot(
+                        WasmPluginSlot::ModelLogic,
+                        OP_ENTITY_MODEL as i32,
+                        &input_bytes,
+                    )
+                    .ok()??;
+                postcard::from_bytes::<EntityModelOutput>(&result.invocation.output).ok()
+            });
 
             if let Some(output) = model_output {
                 for part in &output.parts {
-                    let center = offset_point_along_basis(
-                        entity.render_position,
-                        &basis,
-                        part.offset,
-                    );
-                    let cell_mats = part.cell_materials.map(|idx| {
-                        gpu_mats[idx.min(9) as usize]
-                    });
+                    let center =
+                        offset_point_along_basis(entity.render_position, &basis, part.offset);
+                    let cell_mats = part.cell_materials.map(|idx| gpu_mats[idx.min(9) as usize]);
                     instances.push(build_centered_model_instance(
                         center,
                         &basis,
