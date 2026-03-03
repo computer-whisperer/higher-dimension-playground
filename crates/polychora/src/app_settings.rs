@@ -215,6 +215,9 @@ impl PersistedSettings {
 pub(super) enum PersistedControlScheme {
     IntuitiveUpright,
     LookTransport,
+    TransportUniform,
+    TransportDecoupled,
+    TransportScaled,
     RotorFree,
     LegacySideButtonLayers,
     LegacyScrollCycle,
@@ -225,6 +228,9 @@ impl From<ControlScheme> for PersistedControlScheme {
         match value {
             ControlScheme::IntuitiveUpright => Self::IntuitiveUpright,
             ControlScheme::LookTransport => Self::LookTransport,
+            ControlScheme::TransportUniform => Self::TransportUniform,
+            ControlScheme::TransportDecoupled => Self::TransportDecoupled,
+            ControlScheme::TransportScaled => Self::TransportScaled,
             ControlScheme::RotorFree => Self::RotorFree,
             ControlScheme::LegacySideButtonLayers => Self::LegacySideButtonLayers,
             ControlScheme::LegacyScrollCycle => Self::LegacyScrollCycle,
@@ -237,6 +243,9 @@ impl From<PersistedControlScheme> for ControlScheme {
         match value {
             PersistedControlScheme::IntuitiveUpright => ControlScheme::IntuitiveUpright,
             PersistedControlScheme::LookTransport => ControlScheme::LookTransport,
+            PersistedControlScheme::TransportUniform => ControlScheme::TransportUniform,
+            PersistedControlScheme::TransportDecoupled => ControlScheme::TransportDecoupled,
+            PersistedControlScheme::TransportScaled => ControlScheme::TransportScaled,
             PersistedControlScheme::RotorFree => ControlScheme::RotorFree,
             PersistedControlScheme::LegacySideButtonLayers => ControlScheme::LegacySideButtonLayers,
             PersistedControlScheme::LegacyScrollCycle => ControlScheme::LegacyScrollCycle,

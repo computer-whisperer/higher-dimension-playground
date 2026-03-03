@@ -10,7 +10,11 @@ impl App {
                     RotationPair::Standard
                 }
             }
-            ControlScheme::LookTransport | ControlScheme::RotorFree => RotationPair::Standard,
+            ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => RotationPair::Standard,
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 if self.input.mouse_back_held() && self.input.mouse_forward_held() {
                     RotationPair::DoubleRotation
@@ -28,7 +32,11 @@ impl App {
     pub(super) fn current_look_direction(&self) -> [f32; 4] {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.look_direction_upright(),
-            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+            ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => {
                 self.camera.look_direction_look_frame()
             }
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
@@ -40,7 +48,11 @@ impl App {
     pub(super) fn current_view_matrix(&self) -> ndarray::Array2<f32> {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.view_matrix_upright(),
-            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+            ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => {
                 self.camera.view_matrix_look_frame()
             }
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
@@ -52,7 +64,11 @@ impl App {
     pub(super) fn current_view_basis(&self) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.view_basis_upright(),
-            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+            ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => {
                 self.camera.view_basis_look_frame()
             }
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
@@ -94,7 +110,11 @@ impl App {
     pub(super) fn current_y_inverted(&self) -> bool {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.is_y_inverted_upright(),
-            ControlScheme::LookTransport | ControlScheme::RotorFree => {
+            ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => {
                 self.camera.is_y_inverted_look_frame()
             }
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {

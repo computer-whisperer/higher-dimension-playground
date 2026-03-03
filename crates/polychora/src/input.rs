@@ -12,6 +12,9 @@ const FLY_TOGGLE_COOLDOWN_MS: u128 = 700;
 pub enum ControlScheme {
     IntuitiveUpright,
     LookTransport,
+    TransportUniform,
+    TransportDecoupled,
+    TransportScaled,
     RotorFree,
     LegacySideButtonLayers,
     LegacyScrollCycle,
@@ -21,7 +24,10 @@ impl ControlScheme {
     pub fn next(self) -> Self {
         match self {
             ControlScheme::IntuitiveUpright => ControlScheme::LookTransport,
-            ControlScheme::LookTransport => ControlScheme::RotorFree,
+            ControlScheme::LookTransport => ControlScheme::TransportUniform,
+            ControlScheme::TransportUniform => ControlScheme::TransportDecoupled,
+            ControlScheme::TransportDecoupled => ControlScheme::TransportScaled,
+            ControlScheme::TransportScaled => ControlScheme::RotorFree,
             ControlScheme::RotorFree => ControlScheme::LegacySideButtonLayers,
             ControlScheme::LegacySideButtonLayers => ControlScheme::LegacyScrollCycle,
             ControlScheme::LegacyScrollCycle => ControlScheme::IntuitiveUpright,
@@ -32,6 +38,9 @@ impl ControlScheme {
         match self {
             ControlScheme::IntuitiveUpright => "UPRIGHT",
             ControlScheme::LookTransport => "LOOK-TR",
+            ControlScheme::TransportUniform => "TR-UNI",
+            ControlScheme::TransportDecoupled => "TR-DEC",
+            ControlScheme::TransportScaled => "TR-SCL",
             ControlScheme::RotorFree => "ROTOR",
             ControlScheme::LegacySideButtonLayers => "LEG-SIDE",
             ControlScheme::LegacyScrollCycle => "LEG-SCRL",
@@ -45,7 +54,11 @@ impl ControlScheme {
     pub fn uses_look_frame(self) -> bool {
         matches!(
             self,
-            ControlScheme::LookTransport | ControlScheme::RotorFree
+            ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree
         )
     }
 

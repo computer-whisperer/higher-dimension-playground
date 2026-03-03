@@ -20,6 +20,7 @@ pub const PLAYER_HEIGHT: f32 = 1.7;
 pub const PLAYER_RADIUS_XZW: f32 = 0.30;
 const LOOK_TRANSPORT_UPRIGHT_DAMPING: f32 = 0.06;
 const LOOK_TRANSPORT_YAW_UPRIGHT_LOCK: f32 = 1.0;
+const TRANSPORT_MODERATE_STABILIZATION: f32 = 0.12;
 const ORIENTATION_PULL_RATE_HOME: f32 = 10.0;
 const ORIENTATION_PULL_RATE_3D: f32 = 7.0;
 const UPRIGHT_YAW_ZERO_OFFSET: f32 = 0.0;
@@ -474,6 +475,124 @@ impl Camera4D {
 
         self.reorthonormalize_look_frame();
         // Regular yaw should feel horizon-locked; hidden turns keep the gentler damping.
+        let upright_blend = if !hidden_mode && yaw_delta != 0.0 {
+            LOOK_TRANSPORT_YAW_UPRIGHT_LOCK
+        } else {
+            LOOK_TRANSPORT_UPRIGHT_DAMPING
+        };
+        self.stabilize_look_up_axis(upright_blend);
+    }
+
+    /// Transport Uniform (TR-UNI): full 4D rotations in all modes, uniform stabilization.
+    /// No XZW constraints — pole speed issue cannot occur. Stabilization keeps horizon feel.
+    pub fn apply_mouse_look_transport_uniform(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        hidden_mode: bool,
+        forward_mode: bool,
+    ) {
+        let h_delta = dx * sensitivity;
+        let v_delta = -dy * sensitivity;
+
+        if forward_mode {
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_up, h_delta);
+            Self::rotate_axis_pair(&mut self.look_up, &mut self.look_side, v_delta);
+        } else if hidden_mode {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_side, h_delta);
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_side, v_delta);
+        } else {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_right, h_delta);
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, v_delta);
+        }
+
+        self.reorthonormalize_look_frame();
+        self.stabilize_look_up_axis(TRANSPORT_MODERATE_STABILIZATION);
+    }
+
+    /// Transport Decoupled (TR-DEC): full 4D rotations in all modes, stabilization only
+    /// in default mode. Modifier modes give precise 4D control without the system fighting you.
+    pub fn apply_mouse_look_transport_decoupled(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        hidden_mode: bool,
+        forward_mode: bool,
+    ) {
+        let h_delta = dx * sensitivity;
+        let v_delta = -dy * sensitivity;
+
+        if forward_mode {
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_up, h_delta);
+            Self::rotate_axis_pair(&mut self.look_up, &mut self.look_side, v_delta);
+        } else if hidden_mode {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_side, h_delta);
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_side, v_delta);
+        } else {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_right, h_delta);
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, v_delta);
+        }
+
+        self.reorthonormalize_look_frame();
+        if !hidden_mode && !forward_mode {
+            self.stabilize_look_up_axis(TRANSPORT_MODERATE_STABILIZATION);
+        }
+    }
+
+    /// Transport Scaled (TR-SCL): XZW-constrained yaw like LOOK-TR, but with cos(elevation)
+    /// sensitivity scaling to fix pole speed. Other rotations are full 4D.
+    pub fn apply_mouse_look_transport_scaled(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        hidden_mode: bool,
+        forward_mode: bool,
+    ) {
+        let yaw_delta = dx * sensitivity;
+        let vertical_delta = -dy * sensitivity;
+
+        if forward_mode {
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_up, yaw_delta);
+            Self::rotate_axis_pair(&mut self.look_up, &mut self.look_side, vertical_delta);
+            self.reorthonormalize_look_frame();
+            return;
+        }
+
+        // Scale yaw by cos(elevation) — the XZW magnitude of look_forward.
+        // Near the poles this approaches 0, compensating for the amplification
+        // that XZW-constrained rotation causes when the XZW projection is small.
+        let xzw_mag = (self.look_forward[0].powi(2)
+            + self.look_forward[2].powi(2)
+            + self.look_forward[3].powi(2))
+        .sqrt();
+        let scaled_yaw = yaw_delta * xzw_mag;
+
+        let forward_y_before = self.look_forward[1];
+        if hidden_mode {
+            Self::rotate_axis_pair_xzw(
+                &mut self.look_forward,
+                &mut self.look_side,
+                scaled_yaw,
+            );
+        } else {
+            Self::rotate_axis_pair_xzw(
+                &mut self.look_forward,
+                &mut self.look_right,
+                scaled_yaw,
+            );
+        }
+        self.renormalize_forward_preserve_y(forward_y_before);
+
+        if hidden_mode {
+            Self::rotate_axis_pair(&mut self.look_right, &mut self.look_side, vertical_delta);
+        } else {
+            Self::rotate_axis_pair(&mut self.look_forward, &mut self.look_up, vertical_delta);
+        }
+
+        self.reorthonormalize_look_frame();
         let upright_blend = if !hidden_mode && yaw_delta != 0.0 {
             LOOK_TRANSPORT_YAW_UPRIGHT_LOCK
         } else {

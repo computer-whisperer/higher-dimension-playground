@@ -498,7 +498,11 @@ pub(super) fn build_place_preview_instance(
     let preview_material = material_token as u32 | PREVIEW_MATERIAL_FLAG;
     let (right, up, view_z, view_w) = match control_scheme {
         ControlScheme::IntuitiveUpright => camera.view_basis_upright(),
-        ControlScheme::LookTransport | ControlScheme::RotorFree => camera.view_basis_look_frame(),
+        ControlScheme::LookTransport
+        | ControlScheme::TransportUniform
+        | ControlScheme::TransportDecoupled
+        | ControlScheme::TransportScaled
+        | ControlScheme::RotorFree => camera.view_basis_look_frame(),
         ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
             camera.view_basis()
         }

@@ -257,6 +257,33 @@ impl App {
                             );
                         }
                     }
+                    ControlScheme::TransportUniform => {
+                        self.camera.apply_mouse_look_transport_uniform(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            self.input.mouse_back_held(),
+                            self.input.mouse_forward_held(),
+                        );
+                    }
+                    ControlScheme::TransportDecoupled => {
+                        self.camera.apply_mouse_look_transport_decoupled(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            self.input.mouse_back_held(),
+                            self.input.mouse_forward_held(),
+                        );
+                    }
+                    ControlScheme::TransportScaled => {
+                        self.camera.apply_mouse_look_transport_scaled(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            self.input.mouse_back_held(),
+                            self.input.mouse_forward_held(),
+                        );
+                    }
                     ControlScheme::RotorFree => {
                         self.camera.apply_mouse_look_rotor(
                             dx,
@@ -286,7 +313,11 @@ impl App {
                 let pull_home = self.input.reset_orientation_held();
                 self.look_at_target = None; // Cancel look-at when holding R or F
                 match self.control_scheme {
-                    ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                    ControlScheme::LookTransport
+                    | ControlScheme::TransportUniform
+                    | ControlScheme::TransportDecoupled
+                    | ControlScheme::TransportScaled
+                    | ControlScheme::RotorFree => {
                         if pull_home {
                             self.camera.pull_toward_home_look_frame(dt);
                         } else {
@@ -335,7 +366,11 @@ impl App {
                         target_pos[3] - self.camera.position[3],
                     ];
                     match self.control_scheme {
-                        ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                        ControlScheme::LookTransport
+                        | ControlScheme::TransportUniform
+                        | ControlScheme::TransportDecoupled
+                        | ControlScheme::TransportScaled
+                        | ControlScheme::RotorFree => {
                             self.look_at_target = Some(LookAtTarget::Direction(dir));
                         }
                         _ => {
@@ -382,7 +417,11 @@ impl App {
                         self.camera.auto_level(dt);
                     }
                 }
-                ControlScheme::LookTransport | ControlScheme::RotorFree => {}
+                ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => {}
             }
 
             // Toggle flight mode on double-tap space
@@ -473,7 +512,11 @@ impl App {
                     self.camera
                         .apply_movement_upright(forward, strafe, vertical, w_axis, dt, move_speed);
                 }
-                ControlScheme::LookTransport | ControlScheme::RotorFree => {
+                ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => {
                     self.camera.apply_movement_look_frame(
                         forward, strafe, vertical, w_axis, dt, move_speed,
                     );

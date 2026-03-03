@@ -58,6 +58,9 @@ impl App {
                 for scheme in [
                     ControlScheme::IntuitiveUpright,
                     ControlScheme::LookTransport,
+                    ControlScheme::TransportUniform,
+                    ControlScheme::TransportDecoupled,
+                    ControlScheme::TransportScaled,
                     ControlScheme::RotorFree,
                     ControlScheme::LegacySideButtonLayers,
                     ControlScheme::LegacyScrollCycle,
