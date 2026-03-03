@@ -873,6 +873,27 @@ impl InfoPanelMode {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum SettingsPage {
+    Gameplay,
+    Rendering,
+    Advanced,
+    Debug,
+}
+
+impl SettingsPage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Gameplay => "Gameplay",
+            Self::Rendering => "Rendering",
+            Self::Advanced => "Advanced",
+            Self::Debug => "Debug",
+        }
+    }
+
+    const ALL: [Self; 4] = [Self::Gameplay, Self::Rendering, Self::Advanced, Self::Debug];
+}
+
 fn main() {
     let mut args = Args::parse();
     let settings_file_path = app_settings::settings_file_path();
@@ -1317,6 +1338,7 @@ fn main() {
         placement_preview_mode: initial_placement_preview_mode,
         placement_preview_hide_camera_intersect: true,
         placement_preview_hide_same_scale: true,
+        settings_page: SettingsPage::Gameplay,
         vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
         settings_file_path: settings_file_path.clone(),
         settings_last_saved: app_settings::PersistedSettings::default(),
@@ -1640,6 +1662,7 @@ struct App {
     placement_preview_mode: PlacementPreviewMode,
     placement_preview_hide_camera_intersect: bool,
     placement_preview_hide_same_scale: bool,
+    settings_page: SettingsPage,
     vte_overlay_raster_enabled: bool,
     settings_file_path: PathBuf,
     settings_last_saved: app_settings::PersistedSettings,

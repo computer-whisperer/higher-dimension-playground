@@ -13,10 +13,6 @@ impl App {
             .collapsible(false)
             .fixed_size([460.0, 500.0])
             .show(ctx, |ui| {
-                ui.heading(RichText::new("Immediate Menu").strong());
-                ui.label("Adjust runtime settings while paused.");
-                ui.separator();
-
                 ui.horizontal(|ui| {
                     if ui.button("Resume").clicked() {
                         *close_menu = true;
@@ -34,331 +30,365 @@ impl App {
 
                 ui.separator();
 
-                let mut selected_info_panel = self.info_panel_mode;
-                egui::ComboBox::from_label("Info Panel")
-                    .selected_text(selected_info_panel.label())
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            InfoPanelMode::Full,
-                            InfoPanelMode::VectorTable,
-                            InfoPanelMode::VectorTable2,
-                            InfoPanelMode::Off,
-                        ] {
-                            ui.selectable_value(&mut selected_info_panel, mode, mode.label());
-                        }
-                    });
-                self.info_panel_mode = selected_info_panel;
-
-                let mut selected_control_scheme = self.control_scheme;
-                egui::ComboBox::from_label("Control Scheme")
-                    .selected_text(selected_control_scheme.label())
-                    .show_ui(ui, |ui| {
-                        for scheme in [
-                            ControlScheme::IntuitiveUpright,
-                            ControlScheme::LookTransport,
-                            ControlScheme::RotorFree,
-                            ControlScheme::LegacySideButtonLayers,
-                            ControlScheme::LegacyScrollCycle,
-                        ] {
-                            ui.selectable_value(
-                                &mut selected_control_scheme,
-                                scheme,
-                                scheme.label(),
-                            );
-                        }
-                    });
-                if selected_control_scheme != self.control_scheme {
-                    self.set_control_scheme(selected_control_scheme);
-                }
-
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.focal_length_xy,
-                        FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX,
-                    )
-                    .text("Focal Length XY"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.focal_length_zw,
-                        FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX,
-                    )
-                    .text("Focal Length ZW"),
-                );
-                ui.checkbox(
-                    &mut self.zw_angle_color_shift_enabled,
-                    "ZW Angle Red/Blue Shift",
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.zw_angle_color_shift_strength,
-                        ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN..=ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
-                    )
-                    .text("ZW Shift Strength"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.vte_max_trace_steps,
-                        VTE_TRACE_STEPS_MIN..=VTE_TRACE_STEPS_MAX,
-                    )
-                    .logarithmic(true)
-                    .text("VTE Max Trace Steps"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.vte_max_trace_distance,
-                        VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
-                    )
-                    .text("VTE Max Trace Distance"),
-                );
-                self.vte_max_trace_distance = self
-                    .vte_max_trace_distance
-                    .clamp(VTE_TRACE_DISTANCE_MIN, VTE_TRACE_DISTANCE_MAX);
-                self.zw_angle_color_shift_strength = self.zw_angle_color_shift_strength.clamp(
-                    ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
-                    ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
-                );
-                let mut selected_preview = self.placement_preview_mode;
-                egui::ComboBox::from_label("Placement Preview")
-                    .selected_text(selected_preview.label())
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            PlacementPreviewMode::Ghost,
-                            PlacementPreviewMode::Wireframe,
-                            PlacementPreviewMode::Off,
-                        ] {
-                            ui.selectable_value(&mut selected_preview, mode, mode.label());
-                        }
-                    });
-                self.placement_preview_mode = selected_preview;
-                if self.placement_preview_mode != PlacementPreviewMode::Off {
-                    ui.checkbox(
-                        &mut self.placement_preview_hide_camera_intersect,
-                        "Hide preview when inside camera",
-                    );
-                    ui.checkbox(
-                        &mut self.placement_preview_hide_same_scale,
-                        "Hide preview at same scale as target",
-                    );
-                }
-
-                {
-                    let blocks: Vec<_> = self.content_registry.all_blocks_ordered().collect();
-                    let current_key = (
-                        self.selected_block.namespace,
-                        self.selected_block.block_type,
-                    );
-                    let mut block_idx = blocks
-                        .iter()
-                        .position(|b| (b.namespace, b.block_type) == current_key)
-                        .unwrap_or(0) as u32;
-                    let max_idx = blocks.len().saturating_sub(1) as u32;
-                    let response =
-                        ui.add(egui::Slider::new(&mut block_idx, 0..=max_idx).text("Place Block"));
-                    if response.changed() {
-                        if let Some(entry) = blocks.get(block_idx as usize) {
-                            self.selected_block = polychora::shared::voxel::BlockData::simple(
-                                entry.namespace,
-                                entry.block_type,
-                            );
-                            self.hotbar_slots[self.hotbar_selected_index] =
-                                Some(polychora::shared::protocol::ItemStack::block(
-                                    entry.namespace,
-                                    entry.block_type,
-                                    1,
-                                ));
-                        }
-                    }
-                }
-                ui.add(
-                    egui::Slider::new(&mut self.audio.master_volume, 0.0..=2.0)
-                        .text("Master Volume")
-                        .step_by(0.05),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.audio.spatial_falloff_power,
-                        AUDIO_SPATIAL_FALLOFF_POWER_MIN..=AUDIO_SPATIAL_FALLOFF_POWER_MAX,
-                    )
-                    .text("Spatial Falloff (1/r^N)")
-                    .step_by(0.05),
-                );
-                self.audio.spatial_falloff_power = self.audio.spatial_falloff_power.clamp(
-                    AUDIO_SPATIAL_FALLOFF_POWER_MIN,
-                    AUDIO_SPATIAL_FALLOFF_POWER_MAX,
-                );
-
-                ui.separator();
-                ui.label("Render Resolution");
+                // Page tabs
                 ui.horizontal(|ui| {
-                    ui.label("Width:");
-                    ui.add(
-                        egui::DragValue::new(&mut self.pending_render_width)
-                            .range(128..=3840)
-                            .speed(16),
-                    );
-                    ui.label("Height:");
-                    ui.add(
-                        egui::DragValue::new(&mut self.pending_render_height)
-                            .range(128..=2160)
-                            .speed(16),
-                    );
-                    ui.label("Layers:");
-                    ui.add(
-                        egui::DragValue::new(&mut self.pending_render_layers)
-                            .range(1..=512)
-                            .speed(1),
-                    );
-                });
-                let dims_changed = self.pending_render_width != self.args.width
-                    || self.pending_render_height != self.args.height
-                    || self.pending_render_layers != self.args.layers;
-                ui.horizontal(|ui| {
-                    let apply_btn =
-                        ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
-                    if apply_btn.clicked() {
-                        self.args.width = self.pending_render_width;
-                        self.args.height = self.pending_render_height;
-                        self.args.layers = self.pending_render_layers;
-                        if let Some(rcx) = self.rcx.as_mut() {
-                            rcx.recreate_sized_buffers(
-                                [self.args.width, self.args.height, self.args.layers],
-                                None,
-                            );
-                        }
-                    }
-                    if dims_changed {
-                        ui.label(format!(
-                            "(current: {}x{}x{})",
-                            self.args.width, self.args.height, self.args.layers
-                        ));
+                    for page in SettingsPage::ALL {
+                        ui.selectable_value(&mut self.settings_page, page, page.label());
                     }
                 });
 
                 ui.separator();
 
-                let mut y_cache_enabled = self.vte_y_slice_lookup_cache_enabled;
-                if ui
-                    .checkbox(&mut y_cache_enabled, "VTE Y-Slice Lookup Cache")
-                    .changed()
-                {
-                    self.toggle_vte_y_slice_lookup_cache();
-                }
-                let mut sky_emissive_tweak = self.vte_integral_sky_emissive_enabled;
-                if ui
-                    .checkbox(&mut sky_emissive_tweak, "Integral Sky+Emissive Tweak")
-                    .changed()
-                {
-                    self.toggle_vte_integral_sky_emissive();
-                }
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.vte_integral_sky_scale,
-                        VTE_INTEGRAL_SKY_SCALE_MIN..=VTE_INTEGRAL_SKY_SCALE_MAX,
-                    )
-                    .text("Integral Sky Scale"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.vte_integral_hit_emissive_boost,
-                        VTE_INTEGRAL_HIT_EMISSIVE_MIN..=VTE_INTEGRAL_HIT_EMISSIVE_MAX,
-                    )
-                    .text("Integral Hit Emissive"),
-                );
-                let mut log_merge_tweak = self.vte_integral_log_merge_enabled;
-                if ui
-                    .checkbox(&mut log_merge_tweak, "Integral Log Merge")
-                    .changed()
-                {
-                    self.toggle_vte_integral_log_merge();
-                }
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.vte_integral_log_merge_k,
-                        VTE_INTEGRAL_LOG_MERGE_K_MIN..=VTE_INTEGRAL_LOG_MERGE_K_MAX,
-                    )
-                    .text("Integral Log-Merge K"),
-                );
-
-                ui.separator();
-                ui.label("Region-Tree Bounds Debug");
-                ui.checkbox(
-                    &mut self.multiplayer_stream_tree_diag_enabled,
-                    "Render stream tree bounds",
-                );
-                ui.checkbox(
-                    &mut self.multiplayer_stream_tree_compare_diag_enabled,
-                    "Render stream/world mismatch bounds",
-                );
-                ui.horizontal(|ui| {
-                    ui.checkbox(
-                        &mut self.multiplayer_stream_tree_diag_labels_enabled,
-                        "Labels",
-                    );
-                    ui.checkbox(
-                        &mut self.multiplayer_stream_tree_diag_non_empty_only,
-                        "Non-empty only",
-                    );
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(
-                        &mut self.multiplayer_stream_tree_diag_show_branch_bounds,
-                        "Branch",
-                    );
-                    ui.checkbox(
-                        &mut self.multiplayer_stream_tree_diag_show_uniform_bounds,
-                        "Uniform",
-                    );
-                    ui.checkbox(
-                        &mut self.multiplayer_stream_tree_diag_show_chunk_array_bounds,
-                        "ChunkArray",
-                    );
-                    ui.checkbox(
-                        &mut self.multiplayer_stream_tree_diag_show_procedural_bounds,
-                        "Procedural",
-                    );
-                    ui.checkbox(
-                        &mut self.multiplayer_stream_tree_diag_show_empty_bounds,
-                        "Empty",
-                    );
-                });
-                ui.checkbox(
-                    &mut self.multiplayer_stream_tree_diag_sample_ray_bounds_enabled,
-                    "Render sample-ray BVH node bounds",
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_nodes, 1..=4096)
-                        .text("Bounds max nodes"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.multiplayer_stream_tree_diag_sample_ray_max_nodes,
-                        1..=512,
-                    )
-                    .text("Sample-ray max nodes"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_labels, 1..=512)
-                        .text("Label max count"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.multiplayer_stream_tree_compare_diag_max_chunks,
-                        1..=4096,
-                    )
-                    .text("Mismatch sample cap"),
-                );
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.multiplayer_stream_tree_compare_diag_log_interval,
-                        1..=1200,
-                    )
-                    .text("Mismatch log interval (frames)"),
-                );
-
-                ui.separator();
-                ui.label("Press Esc to close this menu.");
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.settings_page {
+                        SettingsPage::Gameplay => self.draw_settings_gameplay(ui),
+                        SettingsPage::Rendering => self.draw_settings_rendering(ui),
+                        SettingsPage::Advanced => self.draw_settings_advanced(ui),
+                        SettingsPage::Debug => self.draw_settings_debug(ui),
+                    });
             });
+    }
+
+    fn draw_settings_gameplay(&mut self, ui: &mut egui::Ui) {
+        let mut selected_control_scheme = self.control_scheme;
+        egui::ComboBox::from_label("Control Scheme")
+            .selected_text(selected_control_scheme.label())
+            .show_ui(ui, |ui| {
+                for scheme in [
+                    ControlScheme::IntuitiveUpright,
+                    ControlScheme::LookTransport,
+                    ControlScheme::RotorFree,
+                    ControlScheme::LegacySideButtonLayers,
+                    ControlScheme::LegacyScrollCycle,
+                ] {
+                    ui.selectable_value(
+                        &mut selected_control_scheme,
+                        scheme,
+                        scheme.label(),
+                    );
+                }
+            });
+        if selected_control_scheme != self.control_scheme {
+            self.set_control_scheme(selected_control_scheme);
+        }
+
+        let mut selected_info_panel = self.info_panel_mode;
+        egui::ComboBox::from_label("Info Panel")
+            .selected_text(selected_info_panel.label())
+            .show_ui(ui, |ui| {
+                for mode in [
+                    InfoPanelMode::Full,
+                    InfoPanelMode::VectorTable,
+                    InfoPanelMode::VectorTable2,
+                    InfoPanelMode::Off,
+                ] {
+                    ui.selectable_value(&mut selected_info_panel, mode, mode.label());
+                }
+            });
+        self.info_panel_mode = selected_info_panel;
+
+        ui.separator();
+
+        let mut selected_preview = self.placement_preview_mode;
+        egui::ComboBox::from_label("Placement Preview")
+            .selected_text(selected_preview.label())
+            .show_ui(ui, |ui| {
+                for mode in [
+                    PlacementPreviewMode::Ghost,
+                    PlacementPreviewMode::Wireframe,
+                    PlacementPreviewMode::Off,
+                ] {
+                    ui.selectable_value(&mut selected_preview, mode, mode.label());
+                }
+            });
+        self.placement_preview_mode = selected_preview;
+        if self.placement_preview_mode != PlacementPreviewMode::Off {
+            ui.checkbox(
+                &mut self.placement_preview_hide_camera_intersect,
+                "Hide preview when inside camera",
+            );
+            ui.checkbox(
+                &mut self.placement_preview_hide_same_scale,
+                "Hide preview at same scale as target",
+            );
+        }
+
+        ui.separator();
+
+        {
+            let blocks: Vec<_> = self.content_registry.all_blocks_ordered().collect();
+            let current_key = (
+                self.selected_block.namespace,
+                self.selected_block.block_type,
+            );
+            let mut block_idx = blocks
+                .iter()
+                .position(|b| (b.namespace, b.block_type) == current_key)
+                .unwrap_or(0) as u32;
+            let max_idx = blocks.len().saturating_sub(1) as u32;
+            let response =
+                ui.add(egui::Slider::new(&mut block_idx, 0..=max_idx).text("Place Block"));
+            if response.changed() {
+                if let Some(entry) = blocks.get(block_idx as usize) {
+                    self.selected_block = polychora::shared::voxel::BlockData::simple(
+                        entry.namespace,
+                        entry.block_type,
+                    );
+                    self.hotbar_slots[self.hotbar_selected_index] =
+                        Some(polychora::shared::protocol::ItemStack::block(
+                            entry.namespace,
+                            entry.block_type,
+                            1,
+                        ));
+                }
+            }
+        }
+
+        ui.separator();
+
+        ui.add(
+            egui::Slider::new(&mut self.audio.master_volume, 0.0..=2.0)
+                .text("Master Volume")
+                .step_by(0.05),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.audio.spatial_falloff_power,
+                AUDIO_SPATIAL_FALLOFF_POWER_MIN..=AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+            )
+            .text("Spatial Falloff (1/r^N)")
+            .step_by(0.05),
+        );
+        self.audio.spatial_falloff_power = self.audio.spatial_falloff_power.clamp(
+            AUDIO_SPATIAL_FALLOFF_POWER_MIN,
+            AUDIO_SPATIAL_FALLOFF_POWER_MAX,
+        );
+    }
+
+    fn draw_settings_rendering(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::Slider::new(
+                &mut self.focal_length_xy,
+                FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX,
+            )
+            .text("Focal Length XY"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.focal_length_zw,
+                FOCAL_LENGTH_MIN..=FOCAL_LENGTH_MAX,
+            )
+            .text("Focal Length ZW"),
+        );
+        ui.checkbox(
+            &mut self.zw_angle_color_shift_enabled,
+            "ZW Angle Red/Blue Shift",
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.zw_angle_color_shift_strength,
+                ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN..=ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
+            )
+            .text("ZW Shift Strength"),
+        );
+        self.zw_angle_color_shift_strength = self.zw_angle_color_shift_strength.clamp(
+            ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
+            ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
+        );
+
+        ui.separator();
+
+        ui.add(
+            egui::Slider::new(
+                &mut self.vte_max_trace_steps,
+                VTE_TRACE_STEPS_MIN..=VTE_TRACE_STEPS_MAX,
+            )
+            .logarithmic(true)
+            .text("Max Trace Steps"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.vte_max_trace_distance,
+                VTE_TRACE_DISTANCE_MIN..=VTE_TRACE_DISTANCE_MAX,
+            )
+            .text("Max Trace Distance"),
+        );
+        self.vte_max_trace_distance = self
+            .vte_max_trace_distance
+            .clamp(VTE_TRACE_DISTANCE_MIN, VTE_TRACE_DISTANCE_MAX);
+
+        ui.separator();
+        ui.label("Render Resolution");
+        ui.horizontal(|ui| {
+            ui.label("Width:");
+            ui.add(
+                egui::DragValue::new(&mut self.pending_render_width)
+                    .range(128..=3840)
+                    .speed(16),
+            );
+            ui.label("Height:");
+            ui.add(
+                egui::DragValue::new(&mut self.pending_render_height)
+                    .range(128..=2160)
+                    .speed(16),
+            );
+            ui.label("Layers:");
+            ui.add(
+                egui::DragValue::new(&mut self.pending_render_layers)
+                    .range(1..=512)
+                    .speed(1),
+            );
+        });
+        let dims_changed = self.pending_render_width != self.args.width
+            || self.pending_render_height != self.args.height
+            || self.pending_render_layers != self.args.layers;
+        ui.horizontal(|ui| {
+            let apply_btn =
+                ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
+            if apply_btn.clicked() {
+                self.args.width = self.pending_render_width;
+                self.args.height = self.pending_render_height;
+                self.args.layers = self.pending_render_layers;
+                if let Some(rcx) = self.rcx.as_mut() {
+                    rcx.recreate_sized_buffers(
+                        [self.args.width, self.args.height, self.args.layers],
+                        None,
+                    );
+                }
+            }
+            if dims_changed {
+                ui.label(format!(
+                    "(current: {}x{}x{})",
+                    self.args.width, self.args.height, self.args.layers
+                ));
+            }
+        });
+    }
+
+    fn draw_settings_advanced(&mut self, ui: &mut egui::Ui) {
+        let mut y_cache_enabled = self.vte_y_slice_lookup_cache_enabled;
+        if ui
+            .checkbox(&mut y_cache_enabled, "Y-Slice Lookup Cache")
+            .changed()
+        {
+            self.toggle_vte_y_slice_lookup_cache();
+        }
+
+        ui.separator();
+
+        let mut sky_emissive_tweak = self.vte_integral_sky_emissive_enabled;
+        if ui
+            .checkbox(&mut sky_emissive_tweak, "Integral Sky+Emissive Tweak")
+            .changed()
+        {
+            self.toggle_vte_integral_sky_emissive();
+        }
+        ui.add(
+            egui::Slider::new(
+                &mut self.vte_integral_sky_scale,
+                VTE_INTEGRAL_SKY_SCALE_MIN..=VTE_INTEGRAL_SKY_SCALE_MAX,
+            )
+            .text("Sky Scale"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.vte_integral_hit_emissive_boost,
+                VTE_INTEGRAL_HIT_EMISSIVE_MIN..=VTE_INTEGRAL_HIT_EMISSIVE_MAX,
+            )
+            .text("Hit Emissive"),
+        );
+        let mut log_merge_tweak = self.vte_integral_log_merge_enabled;
+        if ui
+            .checkbox(&mut log_merge_tweak, "Integral Log Merge")
+            .changed()
+        {
+            self.toggle_vte_integral_log_merge();
+        }
+        ui.add(
+            egui::Slider::new(
+                &mut self.vte_integral_log_merge_k,
+                VTE_INTEGRAL_LOG_MERGE_K_MIN..=VTE_INTEGRAL_LOG_MERGE_K_MAX,
+            )
+            .text("Log-Merge K"),
+        );
+    }
+
+    fn draw_settings_debug(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Region-Tree Bounds").strong());
+        ui.checkbox(
+            &mut self.multiplayer_stream_tree_diag_enabled,
+            "Render stream tree bounds",
+        );
+        ui.checkbox(
+            &mut self.multiplayer_stream_tree_compare_diag_enabled,
+            "Render stream/world mismatch bounds",
+        );
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.multiplayer_stream_tree_diag_labels_enabled,
+                "Labels",
+            );
+            ui.checkbox(
+                &mut self.multiplayer_stream_tree_diag_non_empty_only,
+                "Non-empty only",
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(
+                &mut self.multiplayer_stream_tree_diag_show_branch_bounds,
+                "Branch",
+            );
+            ui.checkbox(
+                &mut self.multiplayer_stream_tree_diag_show_uniform_bounds,
+                "Uniform",
+            );
+            ui.checkbox(
+                &mut self.multiplayer_stream_tree_diag_show_chunk_array_bounds,
+                "ChunkArray",
+            );
+            ui.checkbox(
+                &mut self.multiplayer_stream_tree_diag_show_procedural_bounds,
+                "Procedural",
+            );
+            ui.checkbox(
+                &mut self.multiplayer_stream_tree_diag_show_empty_bounds,
+                "Empty",
+            );
+        });
+        ui.checkbox(
+            &mut self.multiplayer_stream_tree_diag_sample_ray_bounds_enabled,
+            "Render sample-ray BVH node bounds",
+        );
+        ui.add(
+            egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_nodes, 1..=4096)
+                .text("Bounds max nodes"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.multiplayer_stream_tree_diag_sample_ray_max_nodes,
+                1..=512,
+            )
+            .text("Sample-ray max nodes"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.multiplayer_stream_tree_diag_max_labels, 1..=512)
+                .text("Label max count"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.multiplayer_stream_tree_compare_diag_max_chunks,
+                1..=4096,
+            )
+            .text("Mismatch sample cap"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.multiplayer_stream_tree_compare_diag_log_interval,
+                1..=1200,
+            )
+            .text("Mismatch log interval (frames)"),
+        );
     }
 
     pub(super) fn draw_egui_hotbar(&self, ctx: &egui::Context) {

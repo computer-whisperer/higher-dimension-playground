@@ -207,11 +207,13 @@ impl App {
                     }
                 } else {
                     // Scroll wheel cycles hotbar selection.
+                    // Scroll up (positive) moves left (lower index), matching
+                    // the visual hotbar layout convention.
                     for _ in 0..scroll_steps.abs() {
                         if scroll_steps > 0 {
-                            self.hotbar_selected_index = (self.hotbar_selected_index + 1) % 9;
-                        } else {
                             self.hotbar_selected_index = (self.hotbar_selected_index + 8) % 9;
+                        } else {
+                            self.hotbar_selected_index = (self.hotbar_selected_index + 1) % 9;
                         }
                     }
                     self.selected_block =
