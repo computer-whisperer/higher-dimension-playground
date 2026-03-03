@@ -118,6 +118,30 @@ impl App {
                     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
                     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX,
                 );
+                let mut selected_preview = self.placement_preview_mode;
+                egui::ComboBox::from_label("Placement Preview")
+                    .selected_text(selected_preview.label())
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            PlacementPreviewMode::Ghost,
+                            PlacementPreviewMode::Wireframe,
+                            PlacementPreviewMode::Off,
+                        ] {
+                            ui.selectable_value(&mut selected_preview, mode, mode.label());
+                        }
+                    });
+                self.placement_preview_mode = selected_preview;
+                if self.placement_preview_mode != PlacementPreviewMode::Off {
+                    ui.checkbox(
+                        &mut self.placement_preview_hide_camera_intersect,
+                        "Hide preview when inside camera",
+                    );
+                    ui.checkbox(
+                        &mut self.placement_preview_hide_same_scale,
+                        "Hide preview at same scale as target",
+                    );
+                }
+
                 {
                     let blocks: Vec<_> = self.content_registry.all_blocks_ordered().collect();
                     let current_key = (

@@ -182,15 +182,12 @@ struct VoxelFrameMeta
     uint highlightPadding0;
     uint highlightPadding1;
     uint highlightPadding2;
-    int4 highlightHitVoxel;
+    float4 highlightHitMin;
     uint highlightFaceAxis;
     int highlightFaceSign;
     uint highlightReserved0;
     uint highlightReserved1;
-    uint highlightHitScale;
-    uint highlightTailPadding0;
-    uint highlightTailPadding1;
-    uint highlightTailPadding2;
+    float4 highlightHitMax;
 }
 
 struct VoxelChunkHeader
@@ -1388,13 +1385,12 @@ int4 hitVoxelCoordFromHitPos(float4 hitPos, float4 rayDir)
         int(floor(p.w)));
 }
 
-uint highlightKindForVoxel(int4 voxelCoord, VoxelFrameMeta meta)
+uint highlightKindForHitPos(float4 hitPos, float4 rayDir, VoxelFrameMeta meta)
 {
     if ((meta.highlightFlags & HIGHLIGHT_FLAG_HIT_VOXEL) != 0u)
     {
-        int blockSize = 1 << int(meta.highlightHitScale);
-        int4 rel = voxelCoord - meta.highlightHitVoxel;
-        if (all(rel >= 0) && all(rel < blockSize))
+        float4 p = hitPos + rayDir * 1e-4;
+        if (all(p >= meta.highlightHitMin) && all(p < meta.highlightHitMax))
             return HIGHLIGHT_FLAG_HIT_VOXEL;
     }
     return 0u;
@@ -1457,20 +1453,18 @@ float3 faceAxisSignColor(uint axis, int sign)
 
 float3 shadeHighlightedVoxelSample(
     float3 litColor,
-    int4 voxelCoord,
     VoxelFrameMeta meta,
     float4 hitPos,
     float4 rayDir,
     float4 hitNormal,
     uint highlightKind)
 {
-    // Block origin and size for the hit block.
-    int4 blockMin = meta.highlightHitVoxel;
-    int blockSize = 1 << int(meta.highlightHitScale);
-    float fBlockSize = float(blockSize);
+    // Block bounds for the hit block.
+    float4 blockMin = meta.highlightHitMin;
+    float4 blockSize = meta.highlightHitMax - meta.highlightHitMin;
 
     // 4D block-relative local coordinates in [0,1].
-    float4 local = (hitPos + rayDir * 1e-4 - float4(blockMin)) / fBlockSize;
+    float4 local = (hitPos + rayDir * 1e-4 - blockMin) / blockSize;
     float4 faceDist = min(local, 1.0 - local);
 
     // Use the explicit face axis/sign from the raycast when available,
@@ -3160,8 +3154,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
             }
             else if (hit)
             {
-                int4 hitVoxelCoord = hitVoxelCoordFromHitPos(hitPos, worldDirection);
-                uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
+                uint highlightKind = highlightKindForHitPos(hitPos, worldDirection, meta);
                 if (highlightKind != 0u)
                 {
                     float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
@@ -3172,7 +3165,6 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
                     float3 litColor = shadeVoxelMaterial(mat, hitNormal);
                     float3 highlighted = shadeHighlightedVoxelSample(
                         litColor,
-                        hitVoxelCoord,
                         meta,
                         hitPos,
                         worldDirection,
@@ -3843,8 +3835,7 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
     }
     else if (hit)
     {
-        int4 hitVoxelCoord = hitVoxelCoordFromHitPos(hitPos, worldDirection);
-        uint highlightKind = highlightKindForVoxel(hitVoxelCoord, meta);
+        uint highlightKind = highlightKindForHitPos(hitPos, worldDirection, meta);
         if (highlightKind != 0u)
         {
             float4 hitNormal = estimateVoxelHitNormal(hitPos, worldDirection);
@@ -3855,7 +3846,6 @@ void voxelTraceStageAImpl(uint3 globalId, bool integralFusedDispatch)
             float3 litColor = shadeVoxelMaterial(mat, hitNormal);
             outColor = shadeHighlightedVoxelSample(
                 litColor,
-                hitVoxelCoord,
                 meta,
                 hitPos,
                 worldDirection,

@@ -493,6 +493,20 @@ enum PlacementPreviewMode {
     Wireframe,
 }
 
+impl PlacementPreviewMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Ghost => "ghost",
+            Self::Wireframe => "wireframe",
+        }
+    }
+
+    fn needs_targets(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum SingleplayerWorldTypeArg {
     FlatFloor,
@@ -1084,6 +1098,7 @@ fn main() {
         None
     };
 
+    let initial_placement_preview_mode = args.placement_preview;
     let initial_render_width = args.width;
     let initial_render_height = args.height;
     let initial_render_layers = args.layers;
@@ -1299,6 +1314,9 @@ fn main() {
         perf_suite_default_trace_distance: initial_vte_max_trace_distance,
         perf_suite_entities_spawned: false,
         world_ready: initial_app_state == AppState::MainMenu,
+        placement_preview_mode: initial_placement_preview_mode,
+        placement_preview_hide_camera_intersect: true,
+        placement_preview_hide_same_scale: true,
         vte_overlay_raster_enabled: env_flag_enabled_or(VTE_OVERLAY_RASTER_ENV, false),
         settings_file_path: settings_file_path.clone(),
         settings_last_saved: app_settings::PersistedSettings::default(),
@@ -1619,6 +1637,9 @@ struct App {
     perf_suite_default_trace_distance: f32,
     perf_suite_entities_spawned: bool,
     world_ready: bool,
+    placement_preview_mode: PlacementPreviewMode,
+    placement_preview_hide_camera_intersect: bool,
+    placement_preview_hide_same_scale: bool,
     vte_overlay_raster_enabled: bool,
     settings_file_path: PathBuf,
     settings_last_saved: app_settings::PersistedSettings,

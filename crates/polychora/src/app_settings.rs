@@ -35,6 +35,7 @@ pub(super) struct CliOverrides {
     pub zw_angle_color_shift_strength: bool,
     pub vte_max_trace_steps: bool,
     pub vte_max_trace_distance: bool,
+    pub placement_preview: bool,
 }
 
 impl CliOverrides {
@@ -77,6 +78,7 @@ impl CliOverrides {
             ),
             vte_max_trace_steps: arg_present(&raw_args, "--vte-max-trace-steps", None),
             vte_max_trace_distance: arg_present(&raw_args, "--vte-max-trace-distance", None),
+            placement_preview: arg_present(&raw_args, "--placement-preview", None),
         }
     }
 }
@@ -107,6 +109,9 @@ pub(super) struct PersistedSettings {
     pub vte_integral_log_merge_k: f32,
     pub vte_max_trace_steps: u32,
     pub vte_max_trace_distance: f32,
+    pub placement_preview_mode: PersistedPlacementPreviewMode,
+    pub placement_preview_hide_camera_intersect: bool,
+    pub placement_preview_hide_same_scale: bool,
     pub main_menu_server_address: String,
     pub main_menu_player_name: String,
 }
@@ -137,6 +142,9 @@ impl Default for PersistedSettings {
             vte_integral_log_merge_k: 8.0,
             vte_max_trace_steps: 320,
             vte_max_trace_distance: 160.0,
+            placement_preview_mode: PersistedPlacementPreviewMode::Wireframe,
+            placement_preview_hide_camera_intersect: true,
+            placement_preview_hide_same_scale: true,
             main_menu_server_address: DEFAULT_MAIN_MENU_SERVER_ADDRESS.to_string(),
             main_menu_player_name: default_multiplayer_player_name(),
         }
@@ -267,6 +275,34 @@ impl From<PersistedInfoPanelMode> for InfoPanelMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PersistedPlacementPreviewMode {
+    Off,
+    Ghost,
+    Wireframe,
+}
+
+impl From<PlacementPreviewMode> for PersistedPlacementPreviewMode {
+    fn from(value: PlacementPreviewMode) -> Self {
+        match value {
+            PlacementPreviewMode::Off => Self::Off,
+            PlacementPreviewMode::Ghost => Self::Ghost,
+            PlacementPreviewMode::Wireframe => Self::Wireframe,
+        }
+    }
+}
+
+impl From<PersistedPlacementPreviewMode> for PlacementPreviewMode {
+    fn from(value: PersistedPlacementPreviewMode) -> Self {
+        match value {
+            PersistedPlacementPreviewMode::Off => PlacementPreviewMode::Off,
+            PersistedPlacementPreviewMode::Ghost => PlacementPreviewMode::Ghost,
+            PersistedPlacementPreviewMode::Wireframe => PlacementPreviewMode::Wireframe,
+        }
+    }
+}
+
 pub(super) fn settings_file_path() -> PathBuf {
     if let Some(base) = platform_config_dir() {
         return base.join(SETTINGS_APP_DIR).join(SETTINGS_FILE_NAME);
@@ -361,6 +397,9 @@ pub(super) fn apply_settings_to_args(
     if !cli_overrides.vte_max_trace_distance {
         args.vte_max_trace_distance = settings.vte_max_trace_distance;
     }
+    if !cli_overrides.placement_preview {
+        args.placement_preview = settings.placement_preview_mode.into();
+    }
 }
 
 impl App {
@@ -384,6 +423,9 @@ impl App {
         if self.args.player_name.is_none() {
             self.main_menu_player_name = settings.main_menu_player_name;
         }
+        self.placement_preview_mode = settings.placement_preview_mode.into();
+        self.placement_preview_hide_camera_intersect = settings.placement_preview_hide_camera_intersect;
+        self.placement_preview_hide_same_scale = settings.placement_preview_hide_same_scale;
         self.pending_render_width = self.args.width;
         self.pending_render_height = self.args.height;
         self.pending_render_layers = self.args.layers;
@@ -428,6 +470,9 @@ impl App {
             vte_integral_log_merge_k: self.vte_integral_log_merge_k,
             vte_max_trace_steps: self.vte_max_trace_steps,
             vte_max_trace_distance: self.vte_max_trace_distance,
+            placement_preview_mode: self.placement_preview_mode.into(),
+            placement_preview_hide_camera_intersect: self.placement_preview_hide_camera_intersect,
+            placement_preview_hide_same_scale: self.placement_preview_hide_same_scale,
             main_menu_server_address: self.main_menu_server_address.clone(),
             main_menu_player_name: self.main_menu_player_name.clone(),
         }

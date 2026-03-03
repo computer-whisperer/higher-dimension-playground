@@ -181,6 +181,11 @@ impl Scene {
 }
 
 /// Compute scale-aware placement target adjacent to a hit block face.
+///
+/// The placement origin is snapped to the placement grid on all axes.
+/// On the face axis the snap direction ensures the placed block does not
+/// overlap the hit block: ceil-to-grid when placing on the max side,
+/// floor-to-grid when placing on the min side.
 fn compute_placement_target(
     hit: &ScaleAwareBlockTarget,
     hit_point: [ChunkCoord; 4],
@@ -190,18 +195,31 @@ fn compute_placement_target(
 ) -> ScaleAwareBlockTarget {
     let hit_size = hit.size();
     let place_step = step_for_scale(placement_scale_exp);
+    let step_bits = place_step.to_bits();
     let mut origin = [ChunkCoord::ZERO; 4];
     for axis in 0..4 {
         if axis == face_axis as usize {
-            origin[axis] = if face_sign < 0 {
-                hit.origin[axis] - place_step
+            if face_sign < 0 {
+                // Place on the min side: block must end at or before hit.origin.
+                // origin + place_step <= hit.origin  =>  origin <= hit.origin - place_step
+                // Floor to placement grid.
+                let raw_bits = (hit.origin[axis] - place_step).to_bits();
+                origin[axis] =
+                    ChunkCoord::from_bits(raw_bits.div_euclid(step_bits) * step_bits);
             } else {
-                hit.origin[axis] + hit_size
-            };
+                // Place on the max side: block must start at or after hit.origin + hit_size.
+                // Ceil to placement grid.
+                let raw_bits = (hit.origin[axis] + hit_size).to_bits();
+                let floored = raw_bits.div_euclid(step_bits) * step_bits;
+                origin[axis] = ChunkCoord::from_bits(if floored < raw_bits {
+                    floored + step_bits
+                } else {
+                    floored
+                });
+            }
         } else {
             // Snap hit_point to placement grid
             let bits = hit_point[axis].to_bits();
-            let step_bits = place_step.to_bits();
             origin[axis] = ChunkCoord::from_bits(bits.div_euclid(step_bits) * step_bits);
         }
     }

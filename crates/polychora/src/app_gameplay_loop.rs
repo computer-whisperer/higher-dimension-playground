@@ -76,6 +76,32 @@ fn overlay_edge_tag_for_sample_ray_hit(hit: &DebugRayBvhNodeHit) -> u32 {
 }
 
 impl App {
+    /// Check whether the placement preview (ghost or wireframe) should be
+    /// suppressed this frame based on user-configured conditions.
+    fn should_suppress_placement_preview(
+        &self,
+        place: &scene::ScaleAwareBlockTarget,
+        targets: &scene::BlockEditTargets,
+    ) -> bool {
+        if self.placement_preview_hide_camera_intersect {
+            let wmin = place.world_min();
+            let wmax = place.world_max();
+            let cam = self.camera.position;
+            let inside = (0..4).all(|i| cam[i] >= wmin[i] && cam[i] <= wmax[i]);
+            if inside {
+                return true;
+            }
+        }
+        if self.placement_preview_hide_same_scale {
+            if let Some(hit) = &targets.hit {
+                if hit.scale_exp == place.scale_exp {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub(super) fn update_and_render(&mut self) {
         let frame_start = Instant::now();
         self.begin_runtime_profile_frame();
@@ -664,7 +690,9 @@ impl App {
         );
         let targets = if !self.menu_open
             && self.mouse_grabbed
-            && (highlight_mode.uses_faces() || highlight_mode.uses_edges())
+            && (highlight_mode.uses_faces()
+                || highlight_mode.uses_edges()
+                || self.placement_preview_mode.needs_targets())
         {
             Some(self.scene.block_edit_targets(
                 self.camera.position,
@@ -853,6 +881,22 @@ impl App {
                 }
             }
         }
+        // Wireframe placement preview: add outline edges for the placement
+        // target independently of the edit-highlight edge mode.
+        if self.placement_preview_mode == PlacementPreviewMode::Wireframe {
+            if let Some(targets) = &targets {
+                if let Some(place) = &targets.place {
+                    if !self.should_suppress_placement_preview(place, targets) {
+                        append_axis_aligned_outline_edge_instance(
+                            &mut custom_overlay_edge_instances,
+                            place.world_min(),
+                            place.world_max(),
+                            OVERLAY_EDGE_TAG_PLACE,
+                        );
+                    }
+                }
+            }
+        }
         if self.multiplayer_stream_tree_diag_sample_ray_bounds_enabled {
             for hit in &sample_ray_node_hits {
                 append_chunk_bounds_outline_edge_instance(
@@ -873,15 +917,15 @@ impl App {
             custom_overlay_edge_instances.clear();
         }
 
-        let mut vte_highlight_hit_voxel = None;
-        let mut vte_highlight_hit_scale = 0u32;
+        let mut vte_highlight_hit_min = None;
+        let mut vte_highlight_hit_max = [0.0f32; 4];
         let mut vte_highlight_face_axis = 0u32;
         let mut vte_highlight_face_sign = 0i32;
         if backend == RenderBackend::VoxelTraversal && highlight_mode.uses_faces() {
             if let Some(targets) = &targets {
                 if let Some(hit) = &targets.hit {
-                    vte_highlight_hit_voxel = Some(hit.origin_i32());
-                    vte_highlight_hit_scale = hit.scale_exp.max(0) as u32;
+                    vte_highlight_hit_min = Some(hit.world_min());
+                    vte_highlight_hit_max = hit.world_max();
                     vte_highlight_face_axis = targets.face_axis as u32;
                     vte_highlight_face_sign = targets.face_sign as i32;
                 }
@@ -984,15 +1028,15 @@ impl App {
             vte_integral_log_merge_k: self.vte_integral_log_merge_k,
             zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
             zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
-            vte_highlight_hit_voxel: if self.args.no_hud {
+            vte_highlight_hit_min: if self.args.no_hud {
                 None
             } else {
-                vte_highlight_hit_voxel
+                vte_highlight_hit_min
             },
-            vte_highlight_hit_scale: if self.args.no_hud {
-                0
+            vte_highlight_hit_max: if self.args.no_hud {
+                [0.0; 4]
             } else {
-                vte_highlight_hit_scale
+                vte_highlight_hit_max
             },
             vte_highlight_face_axis: if self.args.no_hud {
                 0
@@ -1054,14 +1098,16 @@ impl App {
             }
             // Ghost placement preview: render a semi-transparent block at the
             // placement target position via the entity pipeline.
-            if !vte_disable_entities && self.args.placement_preview == PlacementPreviewMode::Ghost {
+            if !vte_disable_entities && self.placement_preview_mode == PlacementPreviewMode::Ghost {
                 if let Some(targets) = &targets {
                     if let Some(place) = &targets.place {
-                        vte_non_voxel_instances.push(build_ghost_placement_instance(
-                            place,
-                            &self.selected_block,
-                            &self.material_resolver,
-                        ));
+                        if !self.should_suppress_placement_preview(place, targets) {
+                            vte_non_voxel_instances.push(build_ghost_placement_instance(
+                                place,
+                                &self.selected_block,
+                                &self.material_resolver,
+                            ));
+                        }
                     }
                 }
             }

@@ -2924,8 +2924,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 .unwrap_or(default_slice_layer)
                 .min(layer_count - 1);
             let mut highlight_flags = 0u32;
-            let mut highlight_hit_voxel = [0; 4];
-            let mut highlight_hit_scale = 0u32;
+            let mut highlight_hit_min = [0.0f32; 4];
+            let mut highlight_hit_max = [0.0f32; 4];
             let mut highlight_face_axis = 0u32;
             let mut highlight_face_sign = 0i32;
             let highlight_mode_supported = matches!(
@@ -2933,10 +2933,10 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 VteDisplayMode::Integral | VteDisplayMode::Slice | VteDisplayMode::ThickSlice
             );
             if highlight_mode_supported {
-                if let Some(hit_voxel) = render_options.vte_highlight_hit_voxel {
+                if let Some(hit_min) = render_options.vte_highlight_hit_min {
                     highlight_flags |= vte::VTE_HIGHLIGHT_FLAG_HIT_VOXEL;
-                    highlight_hit_voxel = hit_voxel;
-                    highlight_hit_scale = render_options.vte_highlight_hit_scale;
+                    highlight_hit_min = hit_min;
+                    highlight_hit_max = render_options.vte_highlight_hit_max;
                     highlight_face_axis = render_options.vte_highlight_face_axis;
                     highlight_face_sign = render_options.vte_highlight_face_sign;
                 }
@@ -3016,12 +3016,11 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     integral_hit_emissive_boost.to_bits(),
                     integral_log_merge_k.to_bits(),
                 ],
-                highlight_hit_voxel,
+                highlight_hit_min,
                 highlight_face_axis,
                 highlight_face_sign,
                 _highlight_reserved: [0; 2],
-                highlight_hit_scale,
-                _highlight_tail_padding: [0; 3],
+                highlight_hit_max,
             };
             *writer = written_voxel_frame_meta;
         }

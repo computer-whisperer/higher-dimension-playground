@@ -118,12 +118,11 @@ pub(super) struct GpuVoxelFrameMeta {
     pub(super) visible_world_max: [f32; 4],
     pub(super) highlight_flags: u32,
     pub(super) _highlight_padding: [u32; 3],
-    pub(super) highlight_hit_voxel: [i32; 4],
+    pub(super) highlight_hit_min: [f32; 4],
     pub(super) highlight_face_axis: u32,
     pub(super) highlight_face_sign: i32,
     pub(super) _highlight_reserved: [u32; 2],
-    pub(super) highlight_hit_scale: u32,
-    pub(super) _highlight_tail_padding: [u32; 3],
+    pub(super) highlight_hit_max: [f32; 4],
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
