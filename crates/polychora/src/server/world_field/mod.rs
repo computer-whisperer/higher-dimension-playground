@@ -756,7 +756,13 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         let dirty_chunk_payloads = dirty_entries
             .into_iter()
             .map(|(key, se)| {
-                let resolved = self.override_chunks.chunk_payload(key).map(|(p, _)| p);
+                let tree_result = self.override_chunks.chunk_payload(key);
+                debug_assert!(
+                    tree_result.as_ref().map(|(_, tree_se)| *tree_se == se).unwrap_or(true),
+                    "dirty_save_chunks scale {se} disagrees with tree scale {:?} for key {key:?}",
+                    tree_result.as_ref().map(|(_, s)| s),
+                );
+                let resolved = tree_result.map(|(p, _)| p);
                 (key, se, resolved)
             })
             .collect::<Vec<_>>();

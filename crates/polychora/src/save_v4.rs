@@ -1631,6 +1631,27 @@ fn load_chunk_payload_from_ref(
     Ok(payload_blob.payload)
 }
 
+/// Find the coarsest scale at which `bounds` round-trips through
+/// `to_chunk_lattice_bounds` → `from_lattice_bounds` without loss.
+///
+/// After `carve_bounds_excluding_dirty_chunks` subtracts dirty chunk regions
+/// from a Uniform/Empty index leaf, the resulting pieces may have edges that
+/// don't align to the leaf's original `scale_exp` lattice.  Materialising
+/// those pieces at the original scale would snap them to wider lattice cells,
+/// incorrectly expanding their coverage.  This helper finds the coarsest
+/// scale (starting from `max_scale`) where the bounds are exactly
+/// representable, so callers can iterate the chunk lattice without data loss.
+fn coarsest_lattice_aligned_scale(bounds: &Aabb4i, max_scale: i8) -> i8 {
+    let floor = max_scale.saturating_sub(16);
+    for s in (floor..=max_scale).rev() {
+        let (lat_min, lat_max) = bounds.to_chunk_lattice_bounds(s);
+        if Aabb4i::from_lattice_bounds(lat_min, lat_max, s) == *bounds {
+            return s;
+        }
+    }
+    floor
+}
+
 fn collect_world_chunk_payloads_from_node_filtered(
     root: &Path,
     node_by_id: &HashMap<u32, &IndexNode>,
@@ -1654,11 +1675,8 @@ fn collect_world_chunk_payloads_from_node_filtered(
         }
     }
 
-    // LeafEmpty and LeafUniform nodes store fixed-point bounds and a scale_exp.
-    // Convert bounds to lattice coordinates at the node's scale for iteration.
     let node_bounds = node.bounds_aabb4();
     let leaf_scale = node.scale_exp;
-    let (node_lat_min, node_lat_max) = node_bounds.to_chunk_lattice_bounds(leaf_scale);
 
     match &node.kind {
         IndexNodeKind::Branch { child_node_ids } => {
@@ -1676,24 +1694,31 @@ fn collect_world_chunk_payloads_from_node_filtered(
             }
         }
         IndexNodeKind::LeafEmpty => {
-            for_each_chunk_in_bounds(node_lat_min, node_lat_max, |chunk| {
-                let chunk_key = chunk_key_from_lattice(chunk, leaf_scale);
+            // After patch saves carve dirty regions out of Uniform/Empty
+            // leaves, the residual pieces may have non-lattice-aligned bounds.
+            // Use the coarsest scale where the bounds round-trip exactly.
+            let emit_scale = coarsest_lattice_aligned_scale(&node_bounds, leaf_scale);
+            let (lat_min, lat_max) = node_bounds.to_chunk_lattice_bounds(emit_scale);
+            for_each_chunk_in_bounds(lat_min, lat_max, |chunk| {
+                let chunk_key = chunk_key_from_lattice(chunk, emit_scale);
                 let in_bounds = bounds_filter
                     .map(|filter| filter.contains_chunk_world_min(chunk_key))
                     .unwrap_or(true);
                 if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
-                    out.push((chunk_key, leaf_scale, ResolvedChunkPayload::empty()));
+                    out.push((chunk_key, emit_scale, ResolvedChunkPayload::empty()));
                 }
             });
         }
         IndexNodeKind::LeafUniform { block } => {
-            for_each_chunk_in_bounds(node_lat_min, node_lat_max, |chunk| {
-                let chunk_key = chunk_key_from_lattice(chunk, leaf_scale);
+            let emit_scale = coarsest_lattice_aligned_scale(&node_bounds, leaf_scale);
+            let (lat_min, lat_max) = node_bounds.to_chunk_lattice_bounds(emit_scale);
+            for_each_chunk_in_bounds(lat_min, lat_max, |chunk| {
+                let chunk_key = chunk_key_from_lattice(chunk, emit_scale);
                 let in_bounds = bounds_filter
                     .map(|filter| filter.contains_chunk_world_min(chunk_key))
                     .unwrap_or(true);
                 if in_bounds && include_chunk_for_filter(chunk, region_filter, include_matches) {
-                    out.push((chunk_key, leaf_scale, ResolvedChunkPayload::uniform(block.clone())));
+                    out.push((chunk_key, emit_scale, ResolvedChunkPayload::uniform(block.clone())));
                 }
             });
         }
@@ -5044,6 +5069,146 @@ mod tests {
                 "block mismatch at scale_exp={scale_exp} lattice={lattice:?}"
             );
         }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn coarsest_lattice_aligned_scale_exact_at_scale0() {
+        // Bounds [0, 8) on all axes — exactly one scale-0 chunk.
+        let bounds = Aabb4i::from_lattice_bounds([0; 4], [0; 4], 0);
+        assert_eq!(coarsest_lattice_aligned_scale(&bounds, 0), 0);
+    }
+
+    #[test]
+    fn coarsest_lattice_aligned_scale_non_aligned() {
+        // Bounds [2, 8) on axis 0 — produced by carving [0,2) out of [0,8).
+        // Not aligned at scale 0 (lattice snaps to [0,8)).
+        // At scale -2, chunk world size = 2, so [2,8) maps to lattice [1,3] → exact.
+        let bounds = Aabb4i {
+            min: [ChunkCoord::from_num(2), ChunkCoord::ZERO, ChunkCoord::ZERO, ChunkCoord::ZERO],
+            max: [ChunkCoord::from_num(8), ChunkCoord::from_num(8), ChunkCoord::from_num(8), ChunkCoord::from_num(8)],
+        };
+        let scale = coarsest_lattice_aligned_scale(&bounds, 0);
+        assert!(scale < 0, "non-aligned bounds must use a finer scale, got {scale}");
+        // Verify the chosen scale round-trips correctly.
+        let (lat_min, lat_max) = bounds.to_chunk_lattice_bounds(scale);
+        let reconstructed = Aabb4i::from_lattice_bounds(lat_min, lat_max, scale);
+        assert_eq!(reconstructed, bounds, "round-trip must be exact at scale {scale}");
+    }
+
+    /// Regression test: a patch save that carves a Uniform leaf, followed by
+    /// bulk materialization of the saved index, must correctly represent the
+    /// carved Uniform pieces without expanding them via lattice snapping.
+    #[test]
+    fn patch_save_carved_uniform_materializes_correctly() {
+        let root = test_root("carved-uniform-materialize");
+
+        let block_a = BlockData::simple(0, 1);
+        let block_b = BlockData::simple(0, 2);
+
+        // Initial save: a single scale-0 chunk filled with block_a at [0,0,0,0].
+        let payload_a = ResolvedChunkPayload::uniform(block_a.clone());
+        let key_origin = chunk_key_from_lattice([0, 0, 0, 0], 0);
+        let empty_regions = HashSet::new();
+        let initial = save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: vec![(key_origin, 0, payload_a)],
+                entities: &[],
+                players: &[],
+                world_seed: 42,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms: 1000,
+            },
+        )
+        .expect("initial save");
+
+        // Patch save: overwrite a sub-region with block_b at scale -2.
+        // At scale -2, chunk world size = 2, so one chunk covers [0,2)^4.
+        // This carves the original [0,8)^4 Uniform leaf.
+        let key_fine = chunk_key_from_lattice([0, 0, 0, 0], -2);
+        let payload_b = ResolvedChunkPayload::uniform(block_b.clone());
+        let patch = save_state_from_chunk_payload_patch(
+            &root,
+            SaveChunkPayloadPatchRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                dirty_chunk_payloads: vec![(key_fine, -2, Some(payload_b))],
+                world_seed: 42,
+                next_entity_id: 1,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                now_ms: 2000,
+            },
+        )
+        .expect("patch save");
+        assert!(patch.is_some(), "patch save should produce a result");
+
+        // Bulk-materialize the saved index. This exercises the code path
+        // that was previously broken for non-lattice-aligned Uniform leaves.
+        let metadata = load_state_metadata(&root).expect("load metadata");
+        let materialized = materialize_world_chunk_payloads_from_index_filtered(
+            &root,
+            &metadata.index,
+            None,
+            true,
+            None,
+        )
+        .expect("materialize");
+
+        // The fine-scale edit at [0,2)^4 should be present.
+        let fine_entry = materialized.iter().find(|(k, se, _)| *k == key_fine && *se == -2);
+        assert!(
+            fine_entry.is_some(),
+            "fine-scale edit should be present in materialized output"
+        );
+
+        // The carved Uniform pieces (block_a covering the rest of [0,8)^4)
+        // must NOT expand back to the full [0,8)^4 lattice cell.
+        // Check: no materialized chunk should claim to be at key_origin scale 0
+        // (the original full chunk was carved and no longer exists as a whole).
+        let has_original_full = materialized.iter().any(|(k, se, _)| *k == key_origin && *se == 0);
+        assert!(
+            !has_original_full,
+            "original full scale-0 chunk should not appear — it was carved"
+        );
+
+        // Verify block_a data IS present in the carved pieces.
+        // The carved pieces may be Uniform or may have been re-encoded as
+        // ChunkArrays containing block_a, so check both representations.
+        let block_a_entries: Vec<_> = materialized
+            .iter()
+            .filter(|(_, _, p)| {
+                if let Some(b) = p.uniform_block() {
+                    return b.block_type == block_a.block_type;
+                }
+                // Check dense blocks for non-uniform payloads
+                let blocks = p.dense_blocks();
+                blocks.iter().any(|b| b.block_type == block_a.block_type)
+            })
+            .collect();
+        assert!(
+            !block_a_entries.is_empty(),
+            "block_a data should be present in materialized output; \
+             got {} entries: {:?}",
+            materialized.len(),
+            materialized.iter().map(|(k, se, p)| {
+                let desc = if let Some(b) = p.uniform_block() {
+                    format!("Uniform(type={})", b.block_type)
+                } else {
+                    format!("Chunks(blocks={})", p.dense_blocks().len())
+                };
+                format!("({k:?}, scale={se}, {desc})")
+            }).collect::<Vec<_>>()
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
