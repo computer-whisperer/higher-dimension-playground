@@ -4719,3 +4719,206 @@ fn optimize_mixed_fine_and_coarse_blocks() {
 
     assert_tree_structure(&tree, "optimize_mixed");
 }
+
+// ---------------------------------------------------------------------------
+// Raycast DDA tests
+// ---------------------------------------------------------------------------
+
+/// Build a tree with a single dense chunk at key (0,0,0,0) scale 0 using the
+/// given block array (must be CHUNK_VOLUME elements).
+fn build_single_chunk_tree(blocks: &[BlockData]) -> RegionChunkTree {
+    let mut tree = RegionChunkTree::new();
+    let resolved = ResolvedChunkPayload::from_dense_blocks(blocks).unwrap();
+    assert!(tree.set_chunk(key(0, 0, 0, 0), Some(resolved)));
+    tree
+}
+
+#[test]
+fn raycast_axis_aligned_through_row_of_cells() {
+    use crate::shared::spatial::{fixed_from_lattice, step_for_scale, ChunkCoord};
+    use crate::shared::voxel::CHUNK_SIZE;
+
+    // Fill the first row along X (y=0,z=0,w=0) with alternating stone/air.
+    let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+    let stone = BlockData::simple(1, 1).at_scale(0);
+    for x in 0..CHUNK_SIZE {
+        if x % 2 == 0 {
+            let idx = x; // y=z=w=0 → linear index = x
+            blocks[idx] = stone.clone();
+        }
+    }
+    let tree = build_single_chunk_tree(&blocks);
+
+    // Ray along +X at y=0.5, z=0.5, w=0.5 cell centers.
+    let step = step_for_scale(0);
+    let half = step / ChunkCoord::from_num(2);
+    let origin = [
+        fixed_from_lattice(-1, 0), // start before the chunk
+        half,
+        half,
+        half,
+    ];
+    let direction = [ChunkCoord::from_num(1), ChunkCoord::ZERO, ChunkCoord::ZERO, ChunkCoord::ZERO];
+    let max_t = ChunkCoord::from_num(CHUNK_SIZE as i32 + 2);
+
+    let hit = tree.raycast(origin, direction, max_t).expect("should hit stone at x=0");
+    assert_eq!(hit.block.block_type, 1, "should hit stone");
+    // Face should be -X (entered through min-X face).
+    assert_eq!(hit.face_axis, 0);
+    assert_eq!(hit.face_sign, -1);
+}
+
+#[test]
+fn raycast_diagonal_hits_all_cells() {
+    use crate::shared::spatial::{fixed_from_lattice, step_for_scale, ChunkCoord};
+    use crate::shared::voxel::CHUNK_SIZE;
+
+    // Fill entire chunk with stone.
+    let stone = BlockData::simple(1, 1).at_scale(0);
+    let blocks = vec![stone.clone(); CHUNK_VOLUME];
+    let tree = build_single_chunk_tree(&blocks);
+
+    // Diagonal ray through the chunk — should hit the first cell (0,0,0,0).
+    let origin = [
+        fixed_from_lattice(-1, 0),
+        fixed_from_lattice(-1, 0),
+        fixed_from_lattice(-1, 0),
+        fixed_from_lattice(-1, 0),
+    ];
+    let direction = [
+        ChunkCoord::from_num(1),
+        ChunkCoord::from_num(1),
+        ChunkCoord::from_num(1),
+        ChunkCoord::from_num(1),
+    ];
+    let max_t = ChunkCoord::from_num(CHUNK_SIZE as i32 * 4);
+
+    let hit = tree.raycast(origin, direction, max_t).expect("should hit");
+    assert_eq!(hit.block.block_type, 1);
+    // Entry t should be approximately step (distance from -1 to 0 in each axis).
+    // The ray enters the chunk AABB; first cell is (0,0,0,0).
+    assert!(hit.t >= ChunkCoord::ZERO, "hit t should be non-negative");
+}
+
+#[test]
+fn raycast_misses_air_chunk() {
+    use crate::shared::spatial::{fixed_from_lattice, step_for_scale, ChunkCoord};
+
+    // All air.
+    let blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+    let tree = build_single_chunk_tree(&blocks);
+
+    let step = step_for_scale(0);
+    let half = step / ChunkCoord::from_num(2);
+    let origin = [fixed_from_lattice(-1, 0), half, half, half];
+    let direction = [ChunkCoord::from_num(1), ChunkCoord::ZERO, ChunkCoord::ZERO, ChunkCoord::ZERO];
+    let max_t = ChunkCoord::from_num(100);
+
+    assert!(tree.raycast(origin, direction, max_t).is_none(), "all air should miss");
+}
+
+#[test]
+fn raycast_diagonal_does_not_skip_corner_cells() {
+    use crate::shared::spatial::{fixed_from_lattice, step_for_scale, ChunkCoord};
+    use crate::shared::voxel::CHUNK_SIZE;
+
+    // Place a single stone block at cell (1,1,0,0). A diagonal ray in the XY
+    // plane should hit it — the old parametric march would sometimes skip it.
+    let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+    let stone = BlockData::simple(1, 1).at_scale(0);
+    // linear index for (1,1,0,0): x=1, y=1, z=0, w=0
+    let idx = 1 + CHUNK_SIZE * 1;
+    blocks[idx] = stone.clone();
+    let tree = build_single_chunk_tree(&blocks);
+
+    let step = step_for_scale(0);
+    // Ray from just before (0,0) heading diagonally in +X +Y.
+    // At 45 degrees, the ray passes through exactly the cell corners.
+    // Nudge origin slightly below the diagonal to ensure it passes through (1,1).
+    let nudge = ChunkCoord::from_bits(100);
+    let half = step / ChunkCoord::from_num(2);
+    let origin = [
+        fixed_from_lattice(0, 0) - nudge,
+        fixed_from_lattice(0, 0) - nudge,
+        half,
+        half,
+    ];
+    let direction = [
+        ChunkCoord::from_num(1),
+        ChunkCoord::from_num(1),
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+    ];
+    let max_t = ChunkCoord::from_num(CHUNK_SIZE as i32 * 2);
+
+    let hit = tree.raycast(origin, direction, max_t).expect("DDA should find the corner cell");
+    assert_eq!(hit.block.block_type, 1, "should hit stone at (1,1,0,0)");
+}
+
+#[test]
+fn raycast_negative_direction() {
+    use crate::shared::spatial::{fixed_from_lattice, step_for_scale, ChunkCoord};
+    use crate::shared::voxel::CHUNK_SIZE;
+
+    // Stone at last cell along X.
+    let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+    let stone = BlockData::simple(1, 1).at_scale(0);
+    let last_x = CHUNK_SIZE - 1;
+    blocks[last_x] = stone.clone(); // y=z=w=0
+    let tree = build_single_chunk_tree(&blocks);
+
+    let step = step_for_scale(0);
+    let half = step / ChunkCoord::from_num(2);
+    // Ray from beyond the chunk heading -X.
+    let origin = [
+        fixed_from_lattice(CHUNK_SIZE as i32 + 1, 0),
+        half,
+        half,
+        half,
+    ];
+    let direction = [
+        ChunkCoord::from_num(-1),
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+        ChunkCoord::ZERO,
+    ];
+    let max_t = ChunkCoord::from_num(CHUNK_SIZE as i32 + 5);
+
+    let hit = tree.raycast(origin, direction, max_t).expect("should hit stone at last X");
+    assert_eq!(hit.block.block_type, 1);
+    // Should enter through +X face.
+    assert_eq!(hit.face_axis, 0);
+    assert_eq!(hit.face_sign, 1);
+}
+
+#[test]
+fn raycast_origin_inside_chunk_array() {
+    use crate::shared::spatial::{fixed_from_lattice, step_for_scale, ChunkCoord};
+    use crate::shared::voxel::CHUNK_SIZE;
+
+    // Air at cells 0..3, stone at cell 4 along X (y=z=w=0).
+    let mut blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+    let stone = BlockData::simple(1, 1).at_scale(0);
+    blocks[4] = stone.clone();
+    let tree = build_single_chunk_tree(&blocks);
+
+    // Origin inside the chunk at cell (2, 0, 0, 0) center, shooting +X.
+    let step = step_for_scale(0);
+    let half = step / ChunkCoord::from_num(2);
+    let origin = [
+        fixed_from_lattice(2, 0) + half,
+        half,
+        half,
+        half,
+    ];
+    let direction = [ChunkCoord::from_num(1), ChunkCoord::ZERO, ChunkCoord::ZERO, ChunkCoord::ZERO];
+    let max_t = ChunkCoord::from_num(CHUNK_SIZE as i32);
+
+    let hit = tree.raycast(origin, direction, max_t).expect("should hit stone at x=4");
+    assert_eq!(hit.block.block_type, 1);
+    // t should be positive (ray traveled from cell 2 to cell 4).
+    assert!(hit.t > ChunkCoord::ZERO);
+    // Entry face should be -X (ray traveling +X enters through min face).
+    assert_eq!(hit.face_axis, 0);
+    assert_eq!(hit.face_sign, -1);
+}

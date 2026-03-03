@@ -4366,75 +4366,163 @@ fn bvh_raycast(
             if ca_hit.t_enter > max_t {
                 return None;
             }
-            // Step through cells along the ray within this ChunkArray.
-            // Use a simple parametric march: sample cells at each crossing.
-            let step = step_for_scale(se);
-            let cell_size_f64 = step.to_num::<f64>();
-            let dir_f64: [f64; 4] = std::array::from_fn(|i| direction[i].to_num::<f64>());
-
-            // Compute step size: half a cell diagonal to avoid skipping cells.
-            let dir_len_sq: f64 = dir_f64.iter().map(|d| d * d).sum();
-            if dir_len_sq < 1e-20 {
-                return None;
-            }
-            let dt = cell_size_f64 * 0.4 / dir_len_sq.sqrt();
-
-            let t_start = ca_hit.t_enter.max(ChunkCoord::ZERO).to_num::<f64>();
-            let t_end = ca_hit.t_exit.min(max_t).to_num::<f64>();
+            let t_end = ca_hit.t_exit.min(max_t);
+            let t_start = ca_hit.t_enter.max(ChunkCoord::ZERO);
             if t_start > t_end {
                 return None;
             }
 
-            let mut t = t_start;
-            let mut prev_cell = ([ChunkCoord::MIN; 4], usize::MAX); // sentinel
-            while t <= t_end {
-                let hit_pos: [ChunkCoord; 4] = std::array::from_fn(|i| {
-                    ChunkCoord::from_num(origin[i].to_num::<f64>() + dir_f64[i] * t)
-                });
-                let (chunk_key, cell_idx, cell_aabb) = cell_at_point(hit_pos, se);
-                // Skip if we're still in the same cell as last step.
-                if (chunk_key, cell_idx) != prev_cell || t == t_start {
-                    prev_cell = (chunk_key, cell_idx);
-                    if ca.bounds.contains_chunk_world_min(chunk_key) {
-                        if let Some((resolved, _)) = chunk_array_resolved_payload_at(ca, chunk_key) {
-                            let block = resolved.block_at(cell_idx);
-                            if !block.is_air() {
-                                let bb = block_bounds(cell_aabb.min, se, &block);
-                                // Compute t_enter for the block's bounds, but never
-                                // earlier than the march's current t.  When
-                                // block.scale_exp > chunk scale_exp, block_bounds
-                                // expands the AABB beyond the cell that was
-                                // actually hit.  Using the raw AABB entry time
-                                // would claim a hit at a point the march already
-                                // passed through (possibly air cells of the same
-                                // logical block).
-                                let block_hit = ray_aabb_intersect(origin, direction, &bb);
-                                let (block_t, block_face_axis, block_face_sign) = match block_hit {
-                                    Some(bh) => (bh.t_enter.max(ChunkCoord::ZERO), bh.face_axis, bh.face_sign),
-                                    None => (ChunkCoord::from_num(t), 0, 0),
-                                };
-                                let march_t = ChunkCoord::from_num(t);
-                                let block_t = if block.scale_exp > se && block_t < march_t {
-                                    march_t
-                                } else {
-                                    block_t
-                                };
+            // Decode dense indices once for O(1) chunk lookups.
+            let dense_indices = ca.decode_dense_indices().ok()?;
+            let chunk_extents = ca.bounds.chunk_extents_at_scale(se)?;
+            let step = step_for_scale(se);
+            let cs = CHUNK_SIZE as i64;
+
+            // Cell-level lattice bounds (inclusive) for the ChunkArray.
+            let cell_lmin: [i32; 4] =
+                std::array::from_fn(|i| lattice_from_fixed(ca.bounds.min[i], se));
+            let cell_lmax: [i32; 4] =
+                std::array::from_fn(|i| lattice_from_fixed(ca.bounds.max[i], se) - 1);
+
+            // Compute entry position (nudge slightly past boundary).
+            let nudge = ChunkCoord::from_bits(1);
+            let t_entry_clamped = t_start.saturating_add(nudge);
+            let entry_pos: [ChunkCoord; 4] = std::array::from_fn(|i| {
+                origin[i].saturating_add(direction[i].saturating_mul(t_entry_clamped))
+            });
+
+            // Cell lattice coordinates at entry.
+            let mut cell_lat: [i32; 4] =
+                std::array::from_fn(|i| lattice_from_fixed(entry_pos[i], se));
+
+            // Clamp entry cell to ChunkArray bounds (handles floating-point edge cases).
+            for axis in 0..4 {
+                cell_lat[axis] = cell_lat[axis].clamp(cell_lmin[axis], cell_lmax[axis]);
+            }
+
+            // --- DDA initialization ---
+            let mut step_dir = [0i32; 4];
+            let mut t_max_arr = [ChunkCoord::MAX; 4];
+            let mut t_delta = [ChunkCoord::MAX; 4];
+
+            for axis in 0..4 {
+                let d = direction[axis];
+                if d == ChunkCoord::ZERO {
+                    continue; // parallel — t_max stays MAX, never stepped
+                }
+                if d > ChunkCoord::ZERO {
+                    step_dir[axis] = 1;
+                    // Next boundary is the max edge of the current cell.
+                    let next_boundary = fixed_from_lattice(cell_lat[axis] + 1, se);
+                    t_max_arr[axis] = (next_boundary - origin[axis]) / d;
+                } else {
+                    step_dir[axis] = -1;
+                    // Next boundary is the min edge of the current cell.
+                    let next_boundary = fixed_from_lattice(cell_lat[axis], se);
+                    t_max_arr[axis] = (next_boundary - origin[axis]) / d;
+                }
+                t_delta[axis] = step / d.abs();
+            }
+
+            // Face tracking: first cell uses the ChunkArray AABB entry face.
+            let mut face_axis = ca_hit.face_axis;
+            let mut face_sign = ca_hit.face_sign;
+            let mut current_t = t_start;
+
+            loop {
+                // Bounds check: if any axis is outside the ChunkArray, we're done.
+                if (0..4).any(|i| cell_lat[i] < cell_lmin[i] || cell_lat[i] > cell_lmax[i]) {
+                    break;
+                }
+
+                // Decompose cell lattice coords into chunk-local + voxel-local.
+                let cell_rel: [i64; 4] =
+                    std::array::from_fn(|i| (cell_lat[i] - cell_lmin[i]) as i64);
+                let chunk_local: [usize; 4] =
+                    std::array::from_fn(|i| cell_rel[i].div_euclid(cs) as usize);
+                let voxel_local: [usize; 4] =
+                    std::array::from_fn(|i| cell_rel[i].rem_euclid(cs) as usize);
+
+                let chunk_linear = linear_cell_index(chunk_local, chunk_extents);
+
+                if let Some(&palette_idx) = dense_indices.get(chunk_linear) {
+                    let palette_idx = palette_idx as usize;
+                    if let Some(chunk_payload) = ca.chunk_palette.get(palette_idx) {
+                        let resolved = ResolvedChunkPayload {
+                            payload: chunk_payload.clone(),
+                            block_palette: ca.block_palette.clone(),
+                        };
+                        let voxel_linear = linear_cell_index(voxel_local, [CHUNK_SIZE; 4]);
+                        let block = resolved.block_at(voxel_linear);
+
+                        if !block.is_air() {
+                            let cell_min: [ChunkCoord; 4] = std::array::from_fn(|i| {
+                                fixed_from_lattice(cell_lat[i], se)
+                            });
+                            let bb = block_bounds(cell_min, se, &block);
+
+                            if block.scale_exp > se {
+                                // Multi-cell block: use ray-AABB for precise
+                                // entry face and t.
+                                if let Some(bh) = ray_aabb_intersect(origin, direction, &bb) {
+                                    let block_t = bh.t_enter.max(ChunkCoord::ZERO);
+                                    let hit_point = std::array::from_fn(|i| {
+                                        origin[i].saturating_add(
+                                            direction[i].saturating_mul(block_t),
+                                        )
+                                    });
+                                    return Some(BvhRayHit {
+                                        block,
+                                        bounds: bb,
+                                        t: block_t,
+                                        hit_point,
+                                        face_axis: bh.face_axis,
+                                        face_sign: bh.face_sign,
+                                    });
+                                }
+                                // ray_aabb_intersect returned None on expanded
+                                // bounds — skip (block extends outside CA and
+                                // ray doesn't actually hit it).
+                            } else {
+                                // Single-cell block: face comes from DDA state.
                                 let hit_point = std::array::from_fn(|i| {
-                                    origin[i].saturating_add(direction[i].saturating_mul(block_t))
+                                    origin[i].saturating_add(
+                                        direction[i].saturating_mul(current_t),
+                                    )
                                 });
                                 return Some(BvhRayHit {
                                     block,
                                     bounds: bb,
-                                    t: block_t,
+                                    t: current_t,
                                     hit_point,
-                                    face_axis: block_face_axis,
-                                    face_sign: block_face_sign,
+                                    face_axis,
+                                    face_sign,
                                 });
                             }
                         }
                     }
                 }
-                t += dt;
+
+                // Advance DDA: step the axis with the smallest t_max.
+                let mut min_axis = 0;
+                let mut min_t = t_max_arr[0];
+                for axis in 1..4 {
+                    if t_max_arr[axis] < min_t {
+                        min_t = t_max_arr[axis];
+                        min_axis = axis;
+                    }
+                }
+
+                if min_t > t_end {
+                    break;
+                }
+
+                cell_lat[min_axis] += step_dir[min_axis];
+                current_t = min_t;
+                // Entered new cell through opposite face of step direction.
+                face_axis = min_axis as u8;
+                face_sign = -(step_dir[min_axis] as i8);
+                t_max_arr[min_axis] = t_max_arr[min_axis].saturating_add(t_delta[min_axis]);
             }
             None
         }
