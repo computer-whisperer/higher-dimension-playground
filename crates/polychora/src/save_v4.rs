@@ -361,6 +361,7 @@ pub struct SaveChunkPayloadPatchRequest {
     pub next_entity_id: u64,
     pub player_entity_hints: Option<Vec<PlayerEntityHint>>,
     pub custom_global_payload: Option<Vec<u8>>,
+    pub players: Option<Vec<PlayerRecord>>,
     pub now_ms: u64,
 }
 
@@ -900,7 +901,34 @@ pub fn save_state_from_chunk_payload_patch(
     for (key, scale_exp, payload) in request.dirty_chunk_payloads {
         dirty_chunk_payloads.insert(key, (scale_exp, payload));
     }
+    if dirty_chunk_payloads.is_empty() && request.players.is_none() {
+        return Ok(None);
+    }
+
+    // Players-only save: update only the players payload file without touching chunks.
     if dirty_chunk_payloads.is_empty() {
+        if let Some(player_records) = request.players {
+            let next_generation = manifest.current_generation.saturating_add(1);
+            let next_players_file = players_generation_path(next_generation);
+            let next_players = PlayersPayload {
+                players: player_records,
+            };
+            write_payload_file(
+                root.join(&next_players_file),
+                PLAYERS_MAGIC,
+                PAYLOAD_FILE_VERSION,
+                &next_players,
+            )?;
+            manifest.players_file = next_players_file;
+            manifest.current_generation = next_generation;
+            manifest.last_modified_ms = request.now_ms;
+            save_manifest_atomic(root, &manifest)?;
+            return Ok(Some(SaveResult {
+                generation: next_generation,
+                saved_block_regions: 0,
+                saved_entity_regions: 0,
+            }));
+        }
         return Ok(None);
     }
 
@@ -993,6 +1021,21 @@ pub fn save_state_from_chunk_payload_patch(
         PAYLOAD_FILE_VERSION,
         &next_global,
     )?;
+
+    // Optionally update players payload when provided.
+    if let Some(player_records) = request.players {
+        let next_players_file = players_generation_path(next_generation);
+        let next_players = PlayersPayload {
+            players: player_records,
+        };
+        write_payload_file(
+            root.join(&next_players_file),
+            PLAYERS_MAGIC,
+            PAYLOAD_FILE_VERSION,
+            &next_players,
+        )?;
+        manifest.players_file = next_players_file;
+    }
 
     manifest.current_generation = next_generation;
     manifest.last_modified_ms = request.now_ms;

@@ -788,6 +788,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                     next_entity_id: next_entity_id.max(stream.next_entity_id).max(1),
                     player_entity_hints: None,
                     custom_global_payload: None,
+                    players: None,
                     now_ms,
                 },
             )?

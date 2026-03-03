@@ -691,6 +691,7 @@ fn save_state_from_chunk_payload_patch_persists_without_overlapping_children() {
             next_entity_id: 1,
             player_entity_hints: None,
             custom_global_payload: None,
+            players: None,
             now_ms: now_ms.saturating_add(1),
         },
     )
@@ -1506,6 +1507,7 @@ fn patch_save_cluster_edits_preserve_non_dirty_chunks() {
             next_entity_id: 1,
             player_entity_hints: None,
             custom_global_payload: None,
+            players: None,
             now_ms: now_ms.saturating_add(1),
         },
     )
@@ -1559,6 +1561,7 @@ fn patch_save_cluster_edits_preserve_non_dirty_chunks() {
             next_entity_id: 1,
             player_entity_hints: None,
             custom_global_payload: None,
+            players: None,
             now_ms: now_ms.saturating_add(2),
         },
     )
@@ -1611,6 +1614,7 @@ fn patch_save_cluster_edits_preserve_non_dirty_chunks() {
             next_entity_id: 1,
             player_entity_hints: None,
             custom_global_payload: None,
+            players: None,
             now_ms: now_ms.saturating_add(3),
         },
     )
@@ -1801,6 +1805,7 @@ fn patch_save_carved_uniform_materializes_correctly() {
             next_entity_id: 1,
             player_entity_hints: None,
             custom_global_payload: None,
+            players: None,
             now_ms: 2000,
         },
     )
@@ -1941,6 +1946,7 @@ fn patch_save_preserves_uniform_with_mismatched_block_scale() {
             next_entity_id: 1,
             player_entity_hints: None,
             custom_global_payload: None,
+            players: None,
             now_ms: 2000,
         },
     )
