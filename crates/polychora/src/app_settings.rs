@@ -418,16 +418,13 @@ impl App {
         self.info_panel_mode = settings.info_panel_mode.into();
         self.focal_length_xy = settings.focal_length_xy;
         self.focal_length_zw = settings.focal_length_zw;
-        for (i, &mat) in settings.hotbar_slots.iter().enumerate() {
-            let block = polychora::content_registry::block_data_from_material_token(mat);
-            self.hotbar_slots[i] = Some(polychora::shared::protocol::ItemStack::block(
-                block.namespace,
-                block.block_type,
-                1,
-            ));
-        }
+        self.inventory = polychora::shared::inventory::Inventory::from_legacy_hotbar_tokens(
+            &settings.hotbar_slots,
+        );
         self.hotbar_selected_index = settings.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX);
-        self.selected_block = block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+        self.selected_block = block_data_from_slot(
+            self.inventory.hotbar_slot(self.hotbar_selected_index),
+        );
         self.main_menu_server_address = settings.main_menu_server_address;
         if self.args.player_name.is_none() {
             self.main_menu_player_name = settings.main_menu_player_name;
@@ -457,14 +454,7 @@ impl App {
             place_material: polychora::content_registry::material_token_from_block_data(
                 &self.selected_block,
             ),
-            hotbar_slots: {
-                let mut slots = [3u8; 9];
-                for (i, slot) in self.hotbar_slots.iter().enumerate() {
-                    let block = block_data_from_slot(slot);
-                    slots[i] = polychora::content_registry::material_token_from_block_data(&block);
-                }
-                slots
-            },
+            hotbar_slots: self.inventory.to_legacy_hotbar_tokens(),
             hotbar_selected_index: self.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX),
             render_width: self.args.width,
             render_height: self.args.height,

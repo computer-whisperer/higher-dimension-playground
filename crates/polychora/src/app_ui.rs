@@ -138,12 +138,14 @@ impl App {
                         entry.namespace,
                         entry.block_type,
                     );
-                    self.hotbar_slots[self.hotbar_selected_index] =
+                    self.inventory.set_slot(
+                        self.hotbar_selected_index,
                         Some(polychora::shared::protocol::ItemStack::block(
                             entry.namespace,
                             entry.block_type,
                             1,
-                        ));
+                        )),
+                    );
                 }
             }
         }
@@ -410,7 +412,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
                     for i in 0..9 {
-                        let block = block_data_from_slot(&self.hotbar_slots[i]);
+                        let block = block_data_from_slot(self.inventory.hotbar_slot(i));
                         let [r, g, b] = self
                             .content_registry
                             .block_color(block.namespace, block.block_type);
@@ -986,8 +988,10 @@ impl App {
         }
         if let Some((ns, bt)) = inventory_pick {
             let block = polychora::shared::voxel::BlockData::simple(ns, bt);
-            self.hotbar_slots[self.hotbar_selected_index] =
-                Some(polychora::shared::protocol::ItemStack::block(ns, bt, 1));
+            self.inventory.set_slot(
+                self.hotbar_selected_index,
+                Some(polychora::shared::protocol::ItemStack::block(ns, bt, 1)),
+            );
             self.selected_block = block;
             eprintln!(
                 "Inventory: set hotbar slot {} to ({:#x}, {:#x}) ({})",

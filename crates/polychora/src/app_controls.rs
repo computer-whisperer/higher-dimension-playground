@@ -34,8 +34,13 @@ impl App {
         if let Some(entry) = blocks.get(next_idx) {
             self.selected_block =
                 polychora::shared::voxel::BlockData::simple(entry.namespace, entry.block_type);
-            self.hotbar_slots[self.hotbar_selected_index] = Some(
-                polychora::shared::protocol::ItemStack::block(entry.namespace, entry.block_type, 1),
+            self.inventory.set_slot(
+                self.hotbar_selected_index,
+                Some(polychora::shared::protocol::ItemStack::block(
+                    entry.namespace,
+                    entry.block_type,
+                    1,
+                )),
             );
             eprintln!(
                 "Hotbar slot {} block: ({:#x}, {:#x}) ({})",
@@ -61,8 +66,13 @@ impl App {
         if let Some(entry) = blocks.get(next_idx) {
             self.selected_block =
                 polychora::shared::voxel::BlockData::simple(entry.namespace, entry.block_type);
-            self.hotbar_slots[self.hotbar_selected_index] = Some(
-                polychora::shared::protocol::ItemStack::block(entry.namespace, entry.block_type, 1),
+            self.inventory.set_slot(
+                self.hotbar_selected_index,
+                Some(polychora::shared::protocol::ItemStack::block(
+                    entry.namespace,
+                    entry.block_type,
+                    1,
+                )),
             );
             eprintln!(
                 "Hotbar slot {} block: ({:#x}, {:#x}) ({})",

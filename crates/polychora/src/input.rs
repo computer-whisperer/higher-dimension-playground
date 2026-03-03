@@ -145,6 +145,7 @@ pub struct InputState {
     vte_integral_log_merge_toggle_requested: bool,
     look_at_requested: bool,
     inventory_toggle_requested: bool,
+    inventory_tab_cycle_requested: bool,
     teleport_dialog_requested: bool,
     menu_left_requested: bool,
     menu_right_requested: bool,
@@ -192,6 +193,7 @@ impl InputState {
             vte_integral_log_merge_toggle_requested: false,
             look_at_requested: false,
             inventory_toggle_requested: false,
+            inventory_tab_cycle_requested: false,
             teleport_dialog_requested: false,
             menu_left_requested: false,
             menu_right_requested: false,
@@ -302,8 +304,8 @@ impl InputState {
                     }
                 }
                 KeyCode::Tab => {
-                    if pressed {
-                        self.inventory_toggle_requested = true;
+                    if pressed && !event.repeat {
+                        self.inventory_tab_cycle_requested = true;
                     }
                 }
                 KeyCode::KeyR => {
@@ -594,6 +596,12 @@ impl InputState {
     pub fn take_inventory_toggle(&mut self) -> bool {
         let v = self.inventory_toggle_requested;
         self.inventory_toggle_requested = false;
+        v
+    }
+
+    pub fn take_inventory_tab_cycle(&mut self) -> bool {
+        let v = self.inventory_tab_cycle_requested;
+        self.inventory_tab_cycle_requested = false;
         v
     }
 

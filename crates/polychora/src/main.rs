@@ -60,22 +60,6 @@ const MOUSE_SENSITIVITY: f32 = 0.002;
 const BLOCK_EDIT_REACH_DEFAULT: f32 = 8.0;
 const BLOCK_EDIT_REACH_MIN: f32 = 1.0;
 const BLOCK_EDIT_REACH_MAX: f32 = 48.0;
-fn default_hotbar_slots() -> [Option<polychora::shared::protocol::ItemStack>; 9] {
-    use polychora::shared::protocol::ItemStack;
-    use polychora_plugin_api::content_ids::*;
-    [
-        Some(ItemStack::block(CONTENT_NS, BLOCK_YELLOW_GREEN, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_COBBLESTONE, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_OAK_PLANKS, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_WHITE, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_LIGHT, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_RED, 1)),
-        Some(ItemStack::block(CONTENT_NS, BLOCK_GREEN, 1)),
-    ]
-}
-
 fn block_data_from_slot(
     slot: &Option<polychora::shared::protocol::ItemStack>,
 ) -> polychora::shared::voxel::BlockData {
@@ -1205,7 +1189,9 @@ fn main() {
         vte_max_trace_distance: initial_vte_max_trace_distance,
         vte_sweep_state: None,
         vte_sweep_run_id: 0,
-        hotbar_slots: default_hotbar_slots(),
+        inventory: polychora::shared::inventory::Inventory::default_creative(),
+        game_mode: polychora::shared::inventory::GameMode::Creative,
+        inventory_tab: polychora::shared::inventory::InventoryTab::Creative,
         hotbar_selected_index: 0,
         inventory_open: false,
         teleport_dialog_open: false,
@@ -1563,7 +1549,9 @@ struct App {
     vte_max_trace_distance: f32,
     vte_sweep_state: Option<VteSweepState>,
     vte_sweep_run_id: u32,
-    hotbar_slots: [Option<polychora::shared::protocol::ItemStack>; 9],
+    inventory: polychora::shared::inventory::Inventory,
+    game_mode: polychora::shared::inventory::GameMode,
+    inventory_tab: polychora::shared::inventory::InventoryTab,
     hotbar_selected_index: usize,
     inventory_open: bool,
     teleport_dialog_open: bool,

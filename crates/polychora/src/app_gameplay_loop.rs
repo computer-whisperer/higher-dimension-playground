@@ -217,7 +217,7 @@ impl App {
                         }
                     }
                     self.selected_block =
-                        block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+                        block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
                     eprintln!(
                         "Hotbar slot {} selected: {} ({})",
                         self.hotbar_selected_index + 1,
@@ -445,7 +445,7 @@ impl App {
                 if digit >= 1 && digit <= 9 {
                     self.hotbar_selected_index = (digit - 1) as usize;
                     self.selected_block =
-                        block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+                        block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
                     eprintln!(
                         "Hotbar slot {} selected: {} ({})",
                         digit,
@@ -457,9 +457,20 @@ impl App {
                     );
                 }
             }
-            // E key toggles inventory.
+            // I key toggles inventory.
             if self.input.take_inventory_toggle() {
                 self.toggle_inventory();
+            }
+            // Tab cycles inventory tab when inventory is open.
+            if self.inventory_open && self.input.take_inventory_tab_cycle() {
+                self.inventory_tab = match self.inventory_tab {
+                    polychora::shared::inventory::InventoryTab::Creative => {
+                        polychora::shared::inventory::InventoryTab::Survival
+                    }
+                    polychora::shared::inventory::InventoryTab::Survival => {
+                        polychora::shared::inventory::InventoryTab::Creative
+                    }
+                };
             }
             // T key toggles teleport dialog.
             if self.input.take_teleport_dialog() {
@@ -603,12 +614,14 @@ impl App {
                     if let Some(picked) = pick_targets.hit_block {
                         if !picked.is_air() {
                             let origin = pick_targets.hit.unwrap().origin_i32();
-                            self.hotbar_slots[self.hotbar_selected_index] =
+                            self.inventory.set_slot(
+                                self.hotbar_selected_index,
                                 Some(polychora::shared::protocol::ItemStack::block(
                                     picked.namespace,
                                     picked.block_type,
                                     1,
-                                ));
+                                )),
+                            );
                             self.selected_block = picked;
                             eprintln!(
                                 "Picked voxel {} ({}) from ({}, {}, {}, {})",
@@ -635,6 +648,7 @@ impl App {
                     if remove_requested {
                         if let Some(hit) = &edit_targets.hit {
                             let [x, y, z, w] = hit.origin_i32();
+                            let hit_block = edit_targets.hit_block;
                             let air =
                                 polychora::shared::voxel::BlockData::AIR.at_scale(hit.scale_exp);
                             eprintln!(
@@ -647,6 +661,19 @@ impl App {
                                 1.0,
                             );
                             self.send_multiplayer_voxel_update(now, hit.origin, air);
+                            // Survival: add broken block to inventory
+                            if self.game_mode == polychora::shared::inventory::GameMode::Survival {
+                                if let Some(broken) = hit_block {
+                                    if !broken.is_air() {
+                                        let stack = polychora::shared::protocol::ItemStack::block(
+                                            broken.namespace,
+                                            broken.block_type,
+                                            1,
+                                        );
+                                        self.inventory.try_add(stack);
+                                    }
+                                }
+                            }
                         }
                     } else if place_requested {
                         if let Some(place) = &edit_targets.place {
@@ -670,6 +697,13 @@ impl App {
                                 place.origin,
                                 self.selected_block.clone(),
                             );
+                            // Survival: decrement placed block from inventory
+                            if self.game_mode == polychora::shared::inventory::GameMode::Survival {
+                                self.inventory.decrement_slot(self.hotbar_selected_index);
+                                self.selected_block = block_data_from_slot(
+                                    self.inventory.hotbar_slot(self.hotbar_selected_index),
+                                );
+                            }
                         }
                     }
                 }
