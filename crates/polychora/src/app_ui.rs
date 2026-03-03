@@ -473,6 +473,25 @@ impl App {
                             );
                         }
 
+                        // Stack count badge (survival mode, bottom-right)
+                        if self.game_mode
+                            == polychora::shared::inventory::GameMode::Survival
+                        {
+                            if let Some(stack) = self.inventory.slot(i) {
+                                if stack.count > 1 {
+                                    let badge_pos =
+                                        rect.right_bottom() + egui::vec2(-4.0, -14.0);
+                                    ui.painter().text(
+                                        badge_pos,
+                                        egui::Align2::RIGHT_BOTTOM,
+                                        format!("{}", stack.count),
+                                        egui::FontId::proportional(14.0),
+                                        egui::Color32::WHITE,
+                                    );
+                                }
+                            }
+                        }
+
                         // Slot number label (top-left corner)
                         let label_pos = rect.left_top() + egui::vec2(4.0, 1.3);
                         ui.painter().text(
@@ -673,127 +692,295 @@ impl App {
     }
 
     pub(super) fn draw_egui_inventory(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         close_inventory: &mut bool,
         inventory_pick: &mut Option<(u32, u32)>,
     ) {
+        use polychora::shared::inventory::InventoryTab;
+
         let mut open = true;
-        egui::Window::new("Creative Inventory")
+        egui::Window::new("Inventory")
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .resizable(false)
             .collapsible(false)
             .open(&mut open)
             .default_width(676.0)
             .show(ctx, |ui| {
-                // Category tabs
+                // Tab bar: Creative | Survival
                 ui.horizontal(|ui| {
-                    for cat in polychora_plugin_api::block::BlockCategory::ALL {
-                        if ui
-                            .selectable_label(false, cat.label())
-                            .clicked()
-                        {
-                            // Future: could filter by category. For now just a visual cue.
-                        }
+                    if ui
+                        .selectable_label(
+                            self.inventory_tab == InventoryTab::Creative,
+                            "Creative",
+                        )
+                        .clicked()
+                    {
+                        self.inventory_tab = InventoryTab::Creative;
                     }
-                    ui.label("|");
-                    ui.label("All");
+                    if ui
+                        .selectable_label(
+                            self.inventory_tab == InventoryTab::Survival,
+                            "Survival",
+                        )
+                        .clicked()
+                    {
+                        self.inventory_tab = InventoryTab::Survival;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("Tab to switch")
+                                .small()
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                    });
                 });
                 ui.separator();
 
-                // Material grid
-                let items_per_row = 10;
-                let cell_size = 74.0;
-                let cell_gap = 5.0;
-
-                egui::ScrollArea::vertical()
-                    .max_height(416.0)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
-                            for (idx, entry) in self.content_registry.all_blocks_ordered().enumerate() {
-                                if idx > 0 && idx % items_per_row == 0 {
-                                    ui.end_row();
-                                }
-                                let [r, g, b] = entry.color;
-                                let mat_color = egui::Color32::from_rgb(r, g, b);
-                                let block_key = (entry.namespace, entry.block_type);
-
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(cell_size, cell_size),
-                                    egui::Sense::click(),
-                                );
-
-                                // Background
-                                let bg = if response.hovered() {
-                                    egui::Color32::from_rgba_unmultiplied(80, 80, 80, 200)
-                                } else {
-                                    egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200)
-                                };
-                                ui.painter().rect_filled(rect, 3.0, bg);
-
-                                // Material icon (tesseract image or color fallback)
-                                let icon_rect = rect.shrink(4.0);
-                                if let (Some(sheet), Some(tex_id)) =
-                                    (&self.material_icon_sheet, self.material_icons_texture_id)
-                                {
-                                    if let Some([u0, v0, u1, v1]) = sheet.uv_rect(block_key.0, block_key.1) {
-                                        ui.painter().image(
-                                            tex_id,
-                                            icon_rect,
-                                            egui::Rect::from_min_max(
-                                                egui::pos2(u0, v0),
-                                                egui::pos2(u1, v1),
-                                            ),
-                                            egui::Color32::WHITE,
-                                        );
-                                    } else {
-                                        ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                                    }
-                                } else {
-                                    ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                                }
-
-                                // Material name
-                                let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
-                                ui.painter().text(
-                                    text_pos,
-                                    egui::Align2::CENTER_BOTTOM,
-                                    &entry.name,
-                                    egui::FontId::proportional(10.0),
-                                    egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
-                                );
-                                let category_pos = egui::pos2(rect.center().x, rect.top() + 4.0);
-                                ui.painter().text(
-                                    category_pos,
-                                    egui::Align2::CENTER_TOP,
-                                    entry.category.label(),
-                                    egui::FontId::proportional(8.0),
-                                    egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220),
-                                );
-
-                                if response.hovered() {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        3.0,
-                                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 100)),
-                                        egui::epaint::StrokeKind::Outside,
-                                    );
-                                }
-
-                                if response.clicked() {
-                                    *inventory_pick = Some(block_key);
-                                }
-                            }
-                        });
-                    });
-
-                ui.separator();
-                ui.label("Click a material to place it in the selected hotbar slot. Press I or Esc to close.");
+                match self.inventory_tab {
+                    InventoryTab::Creative => {
+                        self.draw_creative_inventory_tab(ui, inventory_pick);
+                    }
+                    InventoryTab::Survival => {
+                        self.draw_survival_inventory_tab(ui);
+                    }
+                }
             });
 
         if !open {
             *close_inventory = true;
+        }
+    }
+
+    fn draw_creative_inventory_tab(
+        &self,
+        ui: &mut egui::Ui,
+        inventory_pick: &mut Option<(u32, u32)>,
+    ) {
+        // Category tabs
+        ui.horizontal(|ui| {
+            for cat in polychora_plugin_api::block::BlockCategory::ALL {
+                if ui.selectable_label(false, cat.label()).clicked() {
+                    // Future: could filter by category.
+                }
+            }
+            ui.label("|");
+            ui.label("All");
+        });
+        ui.separator();
+
+        // Material grid
+        let items_per_row = 10;
+        let cell_size = 74.0;
+        let cell_gap = 5.0;
+
+        egui::ScrollArea::vertical()
+            .max_height(416.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
+                    for (idx, entry) in self.content_registry.all_blocks_ordered().enumerate() {
+                        if idx > 0 && idx % items_per_row == 0 {
+                            ui.end_row();
+                        }
+                        let [r, g, b] = entry.color;
+                        let mat_color = egui::Color32::from_rgb(r, g, b);
+                        let block_key = (entry.namespace, entry.block_type);
+
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(cell_size, cell_size),
+                            egui::Sense::click(),
+                        );
+
+                        // Background
+                        let bg = if response.hovered() {
+                            egui::Color32::from_rgba_unmultiplied(80, 80, 80, 200)
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200)
+                        };
+                        ui.painter().rect_filled(rect, 3.0, bg);
+
+                        // Material icon (tesseract image or color fallback)
+                        let icon_rect = rect.shrink(4.0);
+                        if let (Some(sheet), Some(tex_id)) =
+                            (&self.material_icon_sheet, self.material_icons_texture_id)
+                        {
+                            if let Some([u0, v0, u1, v1]) =
+                                sheet.uv_rect(block_key.0, block_key.1)
+                            {
+                                ui.painter().image(
+                                    tex_id,
+                                    icon_rect,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(u0, v0),
+                                        egui::pos2(u1, v1),
+                                    ),
+                                    egui::Color32::WHITE,
+                                );
+                            } else {
+                                ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                            }
+                        } else {
+                            ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                        }
+
+                        // Material name
+                        let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
+                        ui.painter().text(
+                            text_pos,
+                            egui::Align2::CENTER_BOTTOM,
+                            &entry.name,
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
+                        );
+                        let category_pos = egui::pos2(rect.center().x, rect.top() + 4.0);
+                        ui.painter().text(
+                            category_pos,
+                            egui::Align2::CENTER_TOP,
+                            entry.category.label(),
+                            egui::FontId::proportional(8.0),
+                            egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220),
+                        );
+
+                        if response.hovered() {
+                            ui.painter().rect_stroke(
+                                rect,
+                                3.0,
+                                egui::Stroke::new(
+                                    2.0,
+                                    egui::Color32::from_rgb(255, 255, 100),
+                                ),
+                                egui::epaint::StrokeKind::Outside,
+                            );
+                        }
+
+                        if response.clicked() {
+                            *inventory_pick = Some(block_key);
+                        }
+                    }
+                });
+            });
+
+        ui.separator();
+        ui.label("Click a material to place it in the selected hotbar slot. Press I or Esc to close.");
+    }
+
+    fn draw_survival_inventory_tab(&self, ui: &mut egui::Ui) {
+        use polychora::shared::inventory::{HOTBAR_SIZE, INVENTORY_COLS};
+
+        let cell_size = 60.0;
+        let cell_gap = 4.0;
+
+        // Draw main inventory rows 3, 2, 1 (slots 27..36, 18..27, 9..18) top-to-bottom
+        for row in (1..4).rev() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
+                for col in 0..INVENTORY_COLS {
+                    let slot_idx = row * INVENTORY_COLS + col;
+                    self.draw_inventory_cell(ui, slot_idx, cell_size, false);
+                }
+            });
+        }
+
+        ui.separator();
+
+        // Draw hotbar row (row 0, slots 0..9) — highlighted
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
+            for col in 0..HOTBAR_SIZE {
+                self.draw_inventory_cell(ui, col, cell_size, col == self.hotbar_selected_index);
+            }
+        });
+
+        ui.separator();
+        ui.label("Click to select. Press I or Esc to close.");
+    }
+
+    fn draw_inventory_cell(
+        &self,
+        ui: &mut egui::Ui,
+        slot_idx: usize,
+        cell_size: f32,
+        is_selected: bool,
+    ) {
+        let slot = self.inventory.slot(slot_idx);
+        let (rect, _response) = ui.allocate_exact_size(
+            egui::vec2(cell_size, cell_size),
+            egui::Sense::click(),
+        );
+
+        // Background
+        let bg = if is_selected {
+            egui::Color32::from_rgba_unmultiplied(60, 60, 40, 200)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200)
+        };
+        ui.painter().rect_filled(rect, 3.0, bg);
+
+        if let Some(stack) = slot {
+            if let Some(block_data) = stack.to_block_data() {
+                let [r, g, b] = self
+                    .content_registry
+                    .block_color(block_data.namespace, block_data.block_type);
+
+                // Block icon
+                let icon_rect = rect.shrink(4.0);
+                if let (Some(sheet), Some(tex_id)) =
+                    (&self.material_icon_sheet, self.material_icons_texture_id)
+                {
+                    if let Some([u0, v0, u1, v1]) =
+                        sheet.uv_rect(block_data.namespace, block_data.block_type)
+                    {
+                        ui.painter().image(
+                            tex_id,
+                            icon_rect,
+                            egui::Rect::from_min_max(
+                                egui::pos2(u0, v0),
+                                egui::pos2(u1, v1),
+                            ),
+                            egui::Color32::WHITE,
+                        );
+                    } else {
+                        let mat_color = egui::Color32::from_rgb(r, g, b);
+                        ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                    }
+                } else {
+                    let mat_color = egui::Color32::from_rgb(r, g, b);
+                    ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                }
+
+                // Count badge (bottom-right)
+                if stack.count > 1 {
+                    let badge_pos = rect.right_bottom() + egui::vec2(-4.0, -3.0);
+                    ui.painter().text(
+                        badge_pos,
+                        egui::Align2::RIGHT_BOTTOM,
+                        format!("{}", stack.count),
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::WHITE,
+                    );
+                }
+            }
+        }
+
+        // Border
+        if is_selected {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 255, 100)),
+                egui::epaint::StrokeKind::Outside,
+            );
+        } else {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(200, 200, 200, 60),
+                ),
+                egui::epaint::StrokeKind::Outside,
+            );
         }
     }
 
@@ -982,7 +1169,7 @@ impl App {
             self.controls_dialog_open = false;
             self.grab_mouse(&window);
         }
-        if close_inventory || inventory_pick.is_some() {
+        if close_inventory {
             self.inventory_open = false;
             self.grab_mouse(&window);
         }
