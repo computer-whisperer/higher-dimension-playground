@@ -862,14 +862,15 @@ impl App {
             });
 
         ui.separator();
-        ui.label("Click a material to place it in the selected hotbar slot. Press I or Esc to close.");
+        ui.label("Click a material to place it in the selected hotbar slot. Tab or Esc to close.");
     }
 
-    fn draw_survival_inventory_tab(&self, ui: &mut egui::Ui) {
+    fn draw_survival_inventory_tab(&mut self, ui: &mut egui::Ui) {
         use polychora::shared::inventory::{HOTBAR_SIZE, INVENTORY_COLS};
 
         let cell_size = 60.0;
         let cell_gap = 4.0;
+        let mut clicked_slot: Option<usize> = None;
 
         // Draw main inventory rows 3, 2, 1 (slots 27..36, 18..27, 9..18) top-to-bottom
         for row in (1..4).rev() {
@@ -877,7 +878,9 @@ impl App {
                 ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
                 for col in 0..INVENTORY_COLS {
                     let slot_idx = row * INVENTORY_COLS + col;
-                    self.draw_inventory_cell(ui, slot_idx, cell_size, false);
+                    if self.draw_inventory_cell(ui, slot_idx, cell_size, false) {
+                        clicked_slot = Some(slot_idx);
+                    }
                 }
             });
         }
@@ -888,12 +891,24 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
             for col in 0..HOTBAR_SIZE {
-                self.draw_inventory_cell(ui, col, cell_size, col == self.hotbar_selected_index);
+                if self.draw_inventory_cell(ui, col, cell_size, col == self.hotbar_selected_index) {
+                    clicked_slot = Some(col);
+                }
             }
         });
 
+        // Handle click: swap clicked slot with selected hotbar slot
+        if let Some(slot_idx) = clicked_slot {
+            if slot_idx != self.hotbar_selected_index {
+                self.inventory.swap_slots(slot_idx, self.hotbar_selected_index);
+            }
+            self.selected_block = block_data_from_slot(
+                self.inventory.hotbar_slot(self.hotbar_selected_index),
+            );
+        }
+
         ui.separator();
-        ui.label("Click to select. Press I or Esc to close.");
+        ui.label("Click to swap with selected hotbar slot. Tab or Esc to close.");
     }
 
     fn draw_inventory_cell(
@@ -902,12 +917,13 @@ impl App {
         slot_idx: usize,
         cell_size: f32,
         is_selected: bool,
-    ) {
+    ) -> bool {
         let slot = self.inventory.slot(slot_idx);
-        let (rect, _response) = ui.allocate_exact_size(
+        let (rect, response) = ui.allocate_exact_size(
             egui::vec2(cell_size, cell_size),
             egui::Sense::click(),
         );
+        let clicked = response.clicked();
 
         // Background
         let bg = if is_selected {
@@ -971,6 +987,13 @@ impl App {
                 egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 255, 100)),
                 egui::epaint::StrokeKind::Outside,
             );
+        } else if response.hovered() {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(200, 200, 100)),
+                egui::epaint::StrokeKind::Outside,
+            );
         } else {
             ui.painter().rect_stroke(
                 rect,
@@ -982,6 +1005,7 @@ impl App {
                 egui::epaint::StrokeKind::Outside,
             );
         }
+        clicked
     }
 
     pub(super) fn draw_egui_controls_dialog(&mut self, ctx: &egui::Context) {

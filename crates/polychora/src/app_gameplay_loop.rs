@@ -461,16 +461,20 @@ impl App {
             if self.input.take_inventory_toggle() {
                 self.toggle_inventory();
             }
-            // Tab cycles inventory tab when inventory is open.
-            if self.inventory_open && self.input.take_inventory_tab_cycle() {
-                self.inventory_tab = match self.inventory_tab {
-                    polychora::shared::inventory::InventoryTab::Creative => {
-                        polychora::shared::inventory::InventoryTab::Survival
-                    }
-                    polychora::shared::inventory::InventoryTab::Survival => {
-                        polychora::shared::inventory::InventoryTab::Creative
-                    }
-                };
+            // Tab opens inventory, or cycles tab if already open.
+            if self.input.take_inventory_tab_cycle() {
+                if self.inventory_open {
+                    self.inventory_tab = match self.inventory_tab {
+                        polychora::shared::inventory::InventoryTab::Creative => {
+                            polychora::shared::inventory::InventoryTab::Survival
+                        }
+                        polychora::shared::inventory::InventoryTab::Survival => {
+                            polychora::shared::inventory::InventoryTab::Creative
+                        }
+                    };
+                } else {
+                    self.toggle_inventory();
+                }
             }
             // T key toggles teleport dialog.
             if self.input.take_teleport_dialog() {
