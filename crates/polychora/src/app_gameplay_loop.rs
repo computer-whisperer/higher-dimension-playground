@@ -556,7 +556,7 @@ impl App {
                                 .at_scale(hit.scale_exp);
                             eprintln!("Removed block at ({x}, {y}, {z}, {w}) scale={}", hit.scale_exp);
                             self.play_spatial_sound_voxel(SoundEffect::Break, hit.origin_i32(), 1.0);
-                            self.send_multiplayer_voxel_update(now, hit.origin_i32(), air);
+                            self.send_multiplayer_voxel_update(now, hit.origin, air);
                         }
                     } else if place_requested {
                         if let Some(place) = &edit_targets.place {
@@ -570,7 +570,7 @@ impl App {
                             self.play_spatial_sound_voxel(SoundEffect::Place, place.origin_i32(), 1.0);
                             self.send_multiplayer_voxel_update(
                                 now,
-                                place.origin_i32(),
+                                place.origin,
                                 self.selected_block.clone(),
                             );
                         }

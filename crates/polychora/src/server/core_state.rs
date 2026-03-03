@@ -3,6 +3,7 @@ use crate::content_registry::ContentRegistry;
 use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::entity_types::EntityCategory;
 use crate::shared::region_tree::{ChunkKey, RegionChunkTree, RegionTreeCore};
+use crate::shared::spatial::ChunkCoord;
 use crate::shared::voxel::BlockData;
 
 pub(super) struct ServerState {
@@ -171,7 +172,7 @@ impl ServerState {
 
     pub(super) fn apply_world_voxel_edit(
         &mut self,
-        position: [i32; 4],
+        position: [ChunkCoord; 4],
         block: BlockData,
     ) -> Option<ChunkKey> {
         self.world.apply_voxel_edit(position, block)
@@ -179,7 +180,7 @@ impl ServerState {
 
     pub(super) fn apply_world_voxel_edit_at_scale(
         &mut self,
-        position: [i32; 4],
+        position: [ChunkCoord; 4],
         block: BlockData,
         scale_exp: i8,
     ) -> Option<ChunkKey> {

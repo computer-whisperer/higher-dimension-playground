@@ -119,7 +119,7 @@ pub enum ClientMessage {
         look: [f32; 4],
     },
     SetVoxel {
-        position: [i32; 4],
+        position: [i64; 4],
         block: BlockData,
     },
     SpawnEntity {

@@ -1698,7 +1698,7 @@ impl App {
     pub(super) fn send_multiplayer_voxel_update(
         &mut self,
         _now: Instant,
-        position: [i32; 4],
+        position: [polychora::shared::spatial::ChunkCoord; 4],
         block: polychora::shared::voxel::BlockData,
     ) {
         if self.multiplayer.is_none() {
@@ -1706,6 +1706,7 @@ impl App {
         }
 
         if let Some(client) = self.multiplayer.as_ref() {
+            let position = position.map(|c| c.to_bits());
             client.send(MultiplayerClientMessage::SetVoxel { position, block });
         }
     }

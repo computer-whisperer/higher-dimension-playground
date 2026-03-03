@@ -46,29 +46,14 @@ impl Scene {
         ray_origin: [f32; 4],
         ray_direction: [f32; 4],
         max_distance: f32,
-    ) -> Option<[i32; 4]> {
+    ) -> Option<[ChunkCoord; 4]> {
         let hit = self.raycast_solid(ray_origin, ray_direction, max_distance)?;
         if hit.block.is_air() {
             return None;
         }
-        let origin_i32: [i32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
-        let size = 1i32 << hit.block.scale_exp.max(0);
-        for dx in 0..size {
-            for dy in 0..size {
-                for dz in 0..size {
-                    for dw in 0..size {
-                        self.world_set_block(
-                            origin_i32[0] + dx,
-                            origin_i32[1] + dy,
-                            origin_i32[2] + dz,
-                            origin_i32[3] + dw,
-                            BlockData::AIR,
-                        );
-                    }
-                }
-            }
-        }
-        Some(origin_i32)
+        let origin = hit.bounds.min;
+        self.world_set_block_at(origin, BlockData::AIR.at_scale(hit.block.scale_exp));
+        Some(origin)
     }
 
     /// Query edit ray targets without mutating the world.
@@ -179,52 +164,20 @@ impl Scene {
         ray_direction: [f32; 4],
         max_distance: f32,
         material: BlockData,
-    ) -> Option<[i32; 4]> {
+    ) -> Option<[ChunkCoord; 4]> {
         if material.is_air() {
             return None;
         }
         let targets =
             self.block_edit_targets(ray_origin, ray_direction, max_distance, material.scale_exp);
         let place = targets.place?;
-        let place_i32 = place.origin_i32();
-        let size = 1i32 << place.scale_exp.max(0);
-        // Verify all cells of the placement target are air
-        for dx in 0..size {
-            for dy in 0..size {
-                for dz in 0..size {
-                    for dw in 0..size {
-                        if !self
-                            .get_block_data(
-                                place_i32[0] + dx,
-                                place_i32[1] + dy,
-                                place_i32[2] + dz,
-                                place_i32[3] + dw,
-                            )
-                            .is_air()
-                        {
-                            return None;
-                        }
-                    }
-                }
-            }
+        // Verify placement target is unoccupied (BVH point query finds any
+        // overlapping block regardless of scale).
+        if !self.get_block_data_at(place.origin).is_air() {
+            return None;
         }
-        // Fill all cells
-        for dx in 0..size {
-            for dy in 0..size {
-                for dz in 0..size {
-                    for dw in 0..size {
-                        self.world_set_block(
-                            place_i32[0] + dx,
-                            place_i32[1] + dy,
-                            place_i32[2] + dz,
-                            place_i32[3] + dw,
-                            material.clone(),
-                        );
-                    }
-                }
-            }
-        }
-        Some(place_i32)
+        self.world_set_block_at(place.origin, material);
+        Some(place.origin)
     }
 }
 

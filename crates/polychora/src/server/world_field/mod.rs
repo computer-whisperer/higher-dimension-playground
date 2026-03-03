@@ -472,13 +472,9 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                             cell_min[3] + lw as i64,
                         ];
 
-                        let world_pos: [i32; 4] = if scale_exp > 0 {
-                            let shift = scale_exp as u32;
-                            cell_lat.map(|v| (v << shift) as i32)
-                        } else {
-                            let shift = (-scale_exp) as u32;
-                            cell_lat.map(|v| v.div_euclid(1i64 << shift) as i32)
-                        };
+                        let step = step_for_scale(scale_exp);
+                        let world_pos: [ChunkCoord; 4] =
+                            cell_lat.map(|v| ChunkCoord::from_num(v as i32) * step);
 
                         let (s0_key, s0_idx) = world_to_chunk_at_scale(
                             world_pos[0],
@@ -572,7 +568,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     /// `block_scale - 3` (finest, guaranteed valid since the chunk covers exactly
     /// one block AABB). Returns the coarsest scale at which all existing non-air
     /// blocks in the candidate chunk bounds are representable.
-    fn determine_chunk_scale(&self, position: [i32; 4], block_scale: i8) -> i8 {
+    fn determine_chunk_scale(&self, position: [ChunkCoord; 4], block_scale: i8) -> i8 {
         for candidate in (block_scale.saturating_sub(3)..=block_scale).rev() {
             let (key, _) = world_to_chunk_at_scale(
                 position[0], position[1], position[2], position[3], candidate,
@@ -634,7 +630,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
 
     pub fn apply_voxel_edit(
         &mut self,
-        position: [i32; 4],
+        position: [ChunkCoord; 4],
         block: BlockData,
     ) -> Option<ChunkKey> {
         self.apply_voxel_edit_at_scale(position, block, 0)
@@ -647,7 +643,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     /// handles carving existing ChunkArrays and filling gaps via resampling.
     pub fn apply_voxel_edit_at_scale(
         &mut self,
-        position: [i32; 4],
+        position: [ChunkCoord; 4],
         block: BlockData,
         scale_exp: i8,
     ) -> Option<ChunkKey> {
@@ -1007,6 +1003,14 @@ mod tests {
     use crate::content_registry::ContentRegistry;
     use crate::shared::voxel::BaseWorldKind;
 
+    fn cc(v: i32) -> ChunkCoord {
+        ChunkCoord::from_num(v)
+    }
+
+    fn cc4(v: [i32; 4]) -> [ChunkCoord; 4] {
+        v.map(|x| ChunkCoord::from_num(x))
+    }
+
     fn test_registry() -> Arc<ContentRegistry> {
         Arc::new(crate::plugin_loader::create_full_registry())
     }
@@ -1101,8 +1105,8 @@ mod tests {
             HashSet::new(),
         );
 
-        let changed_a = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 3));
-        let changed_b = overlay.apply_voxel_edit([1, 0, 0, 0], BlockData::simple(0, 4));
+        let changed_a = overlay.apply_voxel_edit(cc4([0, 0, 0, 0]), BlockData::simple(0, 3));
+        let changed_b = overlay.apply_voxel_edit(cc4([1, 0, 0, 0]), BlockData::simple(0, 4));
         use crate::shared::region_tree::chunk_key_i32;
         assert_eq!(changed_a, Some(chunk_key_i32(0, 0, 0, 0)));
         assert_eq!(changed_b, Some(chunk_key_i32(0, 0, 0, 0)));
@@ -1122,9 +1126,9 @@ mod tests {
             HashSet::new(),
         );
 
-        let _ = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 1));
-        let _ = overlay.apply_voxel_edit([8, 0, 0, 0], BlockData::simple(0, 1));
-        let _ = overlay.apply_voxel_edit([0, 8, 0, 0], BlockData::simple(0, 1));
+        let _ = overlay.apply_voxel_edit(cc4([0, 0, 0, 0]), BlockData::simple(0, 1));
+        let _ = overlay.apply_voxel_edit(cc4([8, 0, 0, 0]), BlockData::simple(0, 1));
+        let _ = overlay.apply_voxel_edit(cc4([0, 8, 0, 0]), BlockData::simple(0, 1));
 
         let dirty = overlay.take_dirty_bounds();
         use crate::shared::region_tree::chunk_key_i32;
@@ -1144,7 +1148,7 @@ mod tests {
             HashSet::new(),
         );
 
-        let _ = overlay.apply_voxel_edit([0, 0, 0, 0], BlockData::simple(0, 5));
+        let _ = overlay.apply_voxel_edit(cc4([0, 0, 0, 0]), BlockData::simple(0, 5));
         overlay.clear_dirty();
         assert!(overlay.take_dirty_bounds().is_empty());
     }
@@ -1161,7 +1165,7 @@ mod tests {
             HashSet::new(),
         );
 
-        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, -1, 0, 0, 0);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(cc(0), cc(-1), cc(0), cc(0), 0);
         let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
 
         let virgin_before = overlay
@@ -1171,7 +1175,7 @@ mod tests {
             chunk_payload_from_core(virgin_before.as_ref(), chunk_key).expect("virgin payload");
         assert!(!virgin_payload_before.block_at(voxel_idx).is_air());
 
-        let changed = overlay.apply_voxel_edit([0, -1, 0, 0], BlockData::AIR);
+        let changed = overlay.apply_voxel_edit(cc4([0, -1, 0, 0]), BlockData::AIR);
         assert_eq!(changed, Some(chunk_key));
 
         let effective_after = overlay
@@ -1189,7 +1193,7 @@ mod tests {
 
     #[test]
     fn query_region_core_applies_explicit_empty_override_over_virgin_content() {
-        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(0, -1, 0, 0, 0);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(cc(0), cc(-1), cc(0), cc(0), 0);
         let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         let chunk_key_i32 = [0i32, -1, 0, 0];
         let mut overlay = ServerWorldOverlay::from_chunk_payloads(
@@ -1253,12 +1257,12 @@ mod tests {
         );
         let edit_pos = [0, -1, 0, 0];
         let (chunk_key, voxel_idx) =
-            world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], 0);
+            world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), 0);
         let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         // Break the platform block first (collision check allows air placement).
-        overlay.apply_voxel_edit(edit_pos, BlockData::AIR);
+        overlay.apply_voxel_edit(cc4(edit_pos), BlockData::AIR);
         assert_eq!(
-            overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 5)),
+            overlay.apply_voxel_edit(cc4(edit_pos), BlockData::simple(0, 5)),
             Some(chunk_key)
         );
 
@@ -1386,7 +1390,7 @@ mod tests {
 
         // Edit within the platform, placing the same material.
         let edit_pos = [-1, 0, -6, -4];
-        let changed = overlay.apply_voxel_edit(edit_pos, platform_material);
+        let changed = overlay.apply_voxel_edit(cc4(edit_pos), platform_material);
         assert_eq!(changed, None, "placing same block as platform should be no-op");
         assert!(overlay.take_dirty_bounds().is_empty());
     }
@@ -1407,15 +1411,15 @@ mod tests {
 
         let edit_pos = [-1, 0, -6, -4];
         let (edit_chunk_key, edit_voxel_idx) =
-            world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], 0);
+            world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), 0);
 
         // Break the platform block first (collision check rejects non-air on non-air).
-        overlay.apply_voxel_edit(edit_pos, BlockData::AIR);
+        overlay.apply_voxel_edit(cc4(edit_pos), BlockData::AIR);
         overlay.take_dirty_bounds(); // drain the break's dirty bounds
 
         // Place a different block into the now-air position.
         let edit_block = BlockData::simple(0, 42);
-        let changed = overlay.apply_voxel_edit(edit_pos, edit_block.clone());
+        let changed = overlay.apply_voxel_edit(cc4(edit_pos), edit_block.clone());
         assert_eq!(changed, Some(edit_chunk_key));
 
         let dirty_bounds = overlay.take_dirty_bounds();
@@ -1456,10 +1460,10 @@ mod tests {
         let brick = BlockData::simple(0, 2);
 
         // Place a scale -2 block at origin.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], stone.clone(), -2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), stone.clone(), -2);
         // Place a scale -1 block at [2,0,0,0] — spatially nearby.
         // The scale -1 chunk at origin covers [0, 3.5], overlapping the -2 chunk.
-        overlay.apply_voxel_edit_at_scale([2, 0, 0, 0], brick.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([2, 0, 0, 0]), brick.clone(), -1);
 
         // The -2 block should still be readable at its position.
         let read_stone = read_block_from_overlay(&overlay, [0, 0, 0, 0], -2);
@@ -1476,10 +1480,10 @@ mod tests {
         let brick = BlockData::simple(0, 2);
 
         // Place a scale -1 block at origin first.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], stone.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), stone.clone(), -1);
         // Place a scale -2 block at an adjacent (non-overlapping) position —
         // triggers rechunking of the -1 chunk to scale -2.
-        overlay.apply_voxel_edit_at_scale([1, 0, 0, 0], brick.clone(), -2);
+        overlay.apply_voxel_edit_at_scale(cc4([1, 0, 0, 0]), brick.clone(), -2);
 
         // The brick at scale -2 should be present at its position.
         let read_brick = read_block_from_overlay(&overlay, [1, 0, 0, 0], -2);
@@ -1503,8 +1507,8 @@ mod tests {
         let brick = BlockData::simple(0, 2);
 
         // Place two blocks at the same scale.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], stone.clone(), -1);
-        overlay.apply_voxel_edit_at_scale([1, 0, 0, 0], brick.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), stone.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([1, 0, 0, 0]), brick.clone(), -1);
 
         let read_stone = read_block_from_overlay(&overlay, [0, 0, 0, 0], -1);
         let read_brick = read_block_from_overlay(&overlay, [1, 0, 0, 0], -1);
@@ -1518,12 +1522,12 @@ mod tests {
         let brick = BlockData::simple(0, 2);
 
         // Place a scale -2 block to anchor the chunk at scale -2.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], BlockData::simple(0, 1), -2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), BlockData::simple(0, 1), -2);
 
         // Place a scale -1 block (coarser) at a non-overlapping position.
         // The chunk is forced to scale -2, so the -1 block fills
         // 2^4 = 16 cells at scale -2 (2 cells per axis).
-        overlay.apply_voxel_edit_at_scale([1, 0, 0, 0], brick.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([1, 0, 0, 0]), brick.clone(), -1);
 
         // The brick should fill cells at scale -2 starting at position [1,0,0,0].
         let read = read_block_from_overlay(&overlay, [1, 0, 0, 0], -2);
@@ -1550,7 +1554,7 @@ mod tests {
         ];
         for (i, &pos) in positions_s1.iter().enumerate() {
             let block = BlockData::simple(0, 10 + i as u32);
-            overlay.apply_voxel_edit_at_scale(pos, block, -1);
+            overlay.apply_voxel_edit_at_scale(cc4(pos), block, -1);
         }
 
         // Verify all blocks are present before the finer edit.
@@ -1568,7 +1572,7 @@ mod tests {
         // Now place a finer block (scale -2) at a position that doesn't overlap
         // any of the scale -1 blocks (all have z=0, so z=1 is safe).
         let finer_block = BlockData::simple(0, 99);
-        overlay.apply_voxel_edit_at_scale([0, 0, 1, 0], finer_block, -2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 1, 0]), finer_block, -2);
 
         // ALL original scale -1 blocks should survive (rechunked to scale -2).
         // Read them back at scale -2 (they should still be present as multi-cell
@@ -1599,8 +1603,8 @@ mod tests {
         // fall in different chunks.
         let block_a = BlockData::simple(0, 10);
         let block_b = BlockData::simple(0, 20);
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block_a.clone(), -1);
-        overlay.apply_voxel_edit_at_scale([4, 0, 0, 0], block_b.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), block_a.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([4, 0, 0, 0]), block_b.clone(), -1);
 
         // Verify both exist.
         assert_eq!(
@@ -1613,7 +1617,7 @@ mod tests {
         );
 
         // Place a finer block in the first chunk's region.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], BlockData::simple(0, 99), -2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), BlockData::simple(0, 99), -2);
 
         // The second chunk should be completely unaffected.
         let read_b = read_block_from_overlay(&overlay, [4, 0, 0, 0], -1);
@@ -1644,7 +1648,7 @@ mod tests {
         overlay: &ServerWorldOverlay,
         pos: [i32; 4],
     ) -> BlockData {
-        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+        let (chunk_key, voxel_idx) = world_to_chunk_at_scale(cc(pos[0]), cc(pos[1]), cc(pos[2]), cc(pos[3]), 0);
         let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         let core = overlay.query_region_core(
             QueryVolume { bounds },
@@ -1663,8 +1667,8 @@ mod tests {
         // the floor material. Break the target cell first, then place.
         let edit_pos = [0, -1, 0, 0]; // on the floor
         let brick = BlockData::simple(0, 2);
-        overlay.apply_voxel_edit_at_scale(edit_pos, BlockData::AIR, -1);
-        overlay.apply_voxel_edit_at_scale(edit_pos, brick.clone(), -1);
+        overlay.apply_voxel_edit_at_scale(cc4(edit_pos), BlockData::AIR, -1);
+        overlay.apply_voxel_edit_at_scale(cc4(edit_pos), brick.clone(), -1);
 
         // The edited block should be present (read from override).
         let read_edited = read_block_from_overlay(&overlay, edit_pos, -1);
@@ -1690,8 +1694,8 @@ mod tests {
         // then place. The override chunk should still contain virgin floor
         // data for surrounding cells.
         let edit_pos = [0, -1, 0, 0];
-        overlay.apply_voxel_edit_at_scale(edit_pos, BlockData::AIR, -2);
-        overlay.apply_voxel_edit_at_scale(edit_pos, BlockData::simple(0, 5), -2);
+        overlay.apply_voxel_edit_at_scale(cc4(edit_pos), BlockData::AIR, -2);
+        overlay.apply_voxel_edit_at_scale(cc4(edit_pos), BlockData::simple(0, 5), -2);
 
         // The edit should be there.
         let read_edited = read_block_from_overlay(&overlay, edit_pos, -2);
@@ -1701,7 +1705,7 @@ mod tests {
         // not air. At scale -2, the chunk covers a small region. World pos
         // [0, -1, 1, 0] is nearby and should have floor material in the override.
         // (Because the override was initialized from virgin data.)
-        let (chunk_key, _) = world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], -2);
+        let (chunk_key, _) = world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), -2);
         let payload = overlay.override_chunks.chunk_payload(chunk_key);
         assert!(
             payload.is_some(),
@@ -1726,7 +1730,7 @@ mod tests {
         // Query virgin data at scale -1 for a chunk on the floor.
         // World y=-1 is in scale-0 chunk y=-1. At scale -1, a chunk at
         // the appropriate key should contain floor material.
-        let (chunk_key, _) = world_to_chunk_at_scale(0, -1, 0, 0, -1);
+        let (chunk_key, _) = world_to_chunk_at_scale(cc(0), cc(-1), cc(0), cc(0), -1);
         let blocks = overlay.query_virgin_blocks_at_scale(chunk_key, -1);
 
         let non_air = blocks.iter().filter(|b| !b.is_air()).count();
@@ -1743,7 +1747,7 @@ mod tests {
         let overlay = make_flat_floor_overlay();
 
         // Above the floor (y=0 in scale-0 chunks), everything should be air.
-        let (chunk_key, _) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
+        let (chunk_key, _) = world_to_chunk_at_scale(cc(0), cc(0), cc(0), cc(0), -1);
         let blocks = overlay.query_virgin_blocks_at_scale(chunk_key, -1);
 
         assert!(
@@ -1762,15 +1766,15 @@ mod tests {
         let floor_material = BlockData::simple(0, 11);
 
         // First edit: break the floor (air ≠ virgin floor → override created).
-        overlay.apply_voxel_edit(edit_pos, BlockData::AIR);
-        let (chunk_key, _) = world_to_chunk_at_scale(edit_pos[0], edit_pos[1], edit_pos[2], edit_pos[3], 0);
+        overlay.apply_voxel_edit(cc4(edit_pos), BlockData::AIR);
+        let (chunk_key, _) = world_to_chunk_at_scale(cc(edit_pos[0]), cc(edit_pos[1]), cc(edit_pos[2]), cc(edit_pos[3]), 0);
         assert!(
             overlay.override_chunks.chunk_payload(chunk_key).is_some(),
             "override should exist after edit"
         );
 
         // Second edit: place floor material back (air → floor = matches virgin).
-        overlay.apply_voxel_edit(edit_pos, floor_material);
+        overlay.apply_voxel_edit(cc4(edit_pos), floor_material);
         let still_overridden = overlay.override_chunks.chunk_payload(chunk_key);
         assert!(
             still_overridden.is_none(),
@@ -1784,8 +1788,8 @@ mod tests {
 
         // Break the floor, then place a block — creates a scale-0 override.
         let edit_pos = [0, -1, 0, 0];
-        overlay.apply_voxel_edit(edit_pos, BlockData::AIR);
-        overlay.apply_voxel_edit(edit_pos, BlockData::simple(0, 2));
+        overlay.apply_voxel_edit(cc4(edit_pos), BlockData::AIR);
+        overlay.apply_voxel_edit(cc4(edit_pos), BlockData::simple(0, 2));
 
         let chunks_before = overlay.override_chunks.non_empty_chunk_count();
         assert!(chunks_before >= 1, "should have override chunk(s)");
@@ -1793,8 +1797,8 @@ mod tests {
         // Place a scale -1 block at a non-overlapping position — triggers
         // rechunking of the scale-0 override to scale -1. Many of the resulting
         // fragments should be pruned because they match virgin floor data.
-        overlay.apply_voxel_edit_at_scale([1, -1, 0, 0], BlockData::AIR, -1);
-        overlay.apply_voxel_edit_at_scale([1, -1, 0, 0], BlockData::simple(0, 3), -1);
+        overlay.apply_voxel_edit_at_scale(cc4([1, -1, 0, 0]), BlockData::AIR, -1);
+        overlay.apply_voxel_edit_at_scale(cc4([1, -1, 0, 0]), BlockData::simple(0, 3), -1);
 
         let chunks_after = overlay.override_chunks.non_empty_chunk_count();
         // Without pruning, we'd have up to 16 chunks from the rechunked
@@ -1818,7 +1822,7 @@ mod tests {
         let mut overlay = make_empty_overlay();
         let block = BlockData::simple(0, 42);
 
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), block.clone(), 2);
 
         // The edit is at scale 2 into an empty world (no finer data).
         // target_scale should be 2 (the edit's own scale).
@@ -1838,7 +1842,7 @@ mod tests {
         let mut overlay = make_empty_overlay();
         let block = BlockData::simple(0, 99);
 
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), block.clone(), 3);
 
         let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], 3);
         assert_eq!(read.block_type, 99, "scale-3 block should be stored");
@@ -1859,8 +1863,8 @@ mod tests {
         // Break the floor at scale 2, then place. The floor is at scale 0, so
         // target_scale = 0. The edit fills (1<<(2-0))^4 = 256 cells per chunk.
         let block = BlockData::simple(0, 42);
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], BlockData::AIR, 2);
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), BlockData::AIR, 2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), block.clone(), 2);
 
         // Read back one of the filled cells at scale 0.
         let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
@@ -1879,8 +1883,8 @@ mod tests {
         let mut overlay = make_flat_floor_overlay();
 
         let block = BlockData::simple(0, 99);
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], BlockData::AIR, 3);
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), BlockData::AIR, 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), block.clone(), 3);
 
         let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
         assert_eq!(read.block_type, 99, "scale-3 block should fill scale-0 cells");
@@ -1900,7 +1904,7 @@ mod tests {
         let block = BlockData::simple(0, 99);
 
         // Place a scale-3 block.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), block.clone(), 3);
 
         // Take the dirty bounds — these are what the server broadcasts to clients.
         let dirty_bounds = overlay.take_dirty_bounds();
@@ -1910,7 +1914,7 @@ mod tests {
         );
 
         // The dirty bounds should cover the full scale-3 chunk extent (64^4).
-        let (chunk_key_s3, _) = world_to_chunk_at_scale(0, 0, 0, 0, 3);
+        let (chunk_key_s3, _) = world_to_chunk_at_scale(cc(0), cc(0), cc(0), cc(0), 3);
         let expected_bounds = Aabb4i::chunk_world_bounds(chunk_key_s3, 3);
         let covers_expected = dirty_bounds.iter().any(|b| {
             b.min[0] <= expected_bounds.min[0]
@@ -1937,7 +1941,7 @@ mod tests {
             );
 
             // The scale-0 chunk at origin should contain the block.
-            let (chunk_key_s0, voxel_idx) = world_to_chunk_at_scale(0, 0, 0, 0, 0);
+            let (chunk_key_s0, voxel_idx) = world_to_chunk_at_scale(cc(0), cc(0), cc(0), cc(0), 0);
             let payload = chunk_payload_from_core(core.as_ref(), chunk_key_s0);
             if let Some(payload) = payload {
                 let block_at_origin = payload.block_at(voxel_idx);
@@ -1957,14 +1961,14 @@ mod tests {
         let block = BlockData::simple(0, 99);
 
         // Place at scale 3.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], block.clone(), 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), block.clone(), 3);
 
         // Verify it's there.
         let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], 3);
         assert_eq!(read.block_type, 99, "block should be placed");
 
         // Break: send AIR at scale 3.
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], BlockData::AIR, 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), BlockData::AIR, 3);
 
         // The block at the break position should be gone.
         let read = read_block_from_overlay(&overlay, [0, 0, 0, 0], 3);
@@ -2005,8 +2009,8 @@ mod tests {
         );
 
         // Break the floor at scale 3, then place.
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], BlockData::AIR, 3);
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), BlockData::AIR, 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), block.clone(), 3);
 
         // The placed block should be at [0,-1,0,0].
         let placed = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
@@ -2029,15 +2033,15 @@ mod tests {
         let block = BlockData::simple(0, 99);
 
         // Break the floor at scale 3, then place.
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], BlockData::AIR, 3);
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], block.clone(), 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), BlockData::AIR, 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), block.clone(), 3);
 
         // Verify it's there (floor forces target_scale=0, so read at scale 0).
         let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
         assert_eq!(read.block_type, 99, "block should be placed");
 
         // Break: send AIR at scale 3.
-        overlay.apply_voxel_edit_at_scale([0, -1, 0, 0], BlockData::AIR, 3);
+        overlay.apply_voxel_edit_at_scale(cc4([0, -1, 0, 0]), BlockData::AIR, 3);
 
         // The block at the break position should be gone.
         let read = read_block_from_overlay(&overlay, [0, -1, 0, 0], 0);
@@ -2064,14 +2068,14 @@ mod tests {
 
         // Place a scale -2 block at origin. This creates override data at scale -2.
         let fine_block = BlockData::simple(0, 5);
-        overlay.apply_voxel_edit_at_scale([0, 0, 0, 0], fine_block.clone(), -2);
+        overlay.apply_voxel_edit_at_scale(cc4([0, 0, 0, 0]), fine_block.clone(), -2);
 
         // Now determine the chunk scale for a scale 0 placement at [1,0,0,0].
         // The scale-0 chunk at origin covers [0,8)^4. Inside that region there's
         // a scale -2 block. A scale 0 chunk can represent blocks with scale_exp
         // in [0, 3]. scale_exp = -2 < 0, so the block is NOT representable at
         // scale 0. determine_chunk_scale should pick a finer scale.
-        let chosen = overlay.determine_chunk_scale([1, 0, 0, 0], 0);
+        let chosen = overlay.determine_chunk_scale(cc4([1, 0, 0, 0]), 0);
         assert!(
             chosen <= -2,
             "chunk scale {chosen} can't represent existing scale -2 blocks"
@@ -2079,7 +2083,7 @@ mod tests {
 
         // Place a scale 0 block at [8,0,0,0] — a region with no existing overrides.
         // The coarsest valid scale (0) should be chosen since there's nothing to conflict.
-        let chosen_empty = overlay.determine_chunk_scale([8, 0, 0, 0], 0);
+        let chosen_empty = overlay.determine_chunk_scale(cc4([8, 0, 0, 0]), 0);
         assert_eq!(
             chosen_empty, 0,
             "empty region should use coarsest scale, got {chosen_empty}"
@@ -2088,8 +2092,8 @@ mod tests {
         // Place a scale 1 block at [16,0,0,0]. determine_chunk_scale for a scale 0
         // edit nearby should still pick scale 0 since scale 1 is representable at
         // scale 0 (scale_exp 1 >= 0 and 1 - 0 = 1 <= 3).
-        overlay.apply_voxel_edit_at_scale([16, 0, 0, 0], BlockData::simple(0, 7), 1);
-        let chosen_coarse = overlay.determine_chunk_scale([17, 0, 0, 0], 0);
+        overlay.apply_voxel_edit_at_scale(cc4([16, 0, 0, 0]), BlockData::simple(0, 7), 1);
+        let chosen_coarse = overlay.determine_chunk_scale(cc4([17, 0, 0, 0]), 0);
         assert!(
             chosen_coarse >= -3 && chosen_coarse <= 0,
             "scale 1 blocks should be representable at scale 0, got {chosen_coarse}"

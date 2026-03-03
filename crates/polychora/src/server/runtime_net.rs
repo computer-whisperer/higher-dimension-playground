@@ -528,7 +528,7 @@ fn handle_world_interest_update(state: &SharedState, client_id: u64, bounds: Aab
 
 fn apply_authoritative_voxel_edit(
     state: &mut ServerState,
-    position: [i32; 4],
+    position: [ChunkCoord; 4],
     block: BlockData,
     scale_exp: i8,
 ) -> Option<crate::shared::region_tree::ChunkKey> {
@@ -578,10 +578,10 @@ pub(super) fn apply_creeper_explosion(
                             continue;
                         }
                         let pos = [
-                            blast_center[0] + dx,
-                            blast_center[1] + dy,
-                            blast_center[2] + dz,
-                            blast_center[3] + dw,
+                            ChunkCoord::from_num(blast_center[0] + dx),
+                            ChunkCoord::from_num(blast_center[1] + dy),
+                            ChunkCoord::from_num(blast_center[2] + dz),
+                            ChunkCoord::from_num(blast_center[3] + dw),
                         ];
                         if let Some(chunk_pos) =
                             apply_authoritative_voxel_edit(state, pos, BlockData::AIR, 0)
@@ -1265,9 +1265,10 @@ pub(super) fn handle_message(
         }
         ClientMessage::SetVoxel { position, block } => {
             let scale_exp = block.scale_exp;
+            let pos = position.map(ChunkCoord::from_bits);
             let _changed_chunk = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                apply_authoritative_voxel_edit(&mut guard, position, block, scale_exp)
+                apply_authoritative_voxel_edit(&mut guard, pos, block, scale_exp)
             };
         }
         ClientMessage::SpawnEntity {

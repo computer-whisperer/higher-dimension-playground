@@ -1,6 +1,7 @@
 use super::runtime_net::{apply_creeper_explosion, apply_explosion_impulse};
 use super::*;
 use crate::shared::region_tree::ChunkKey;
+use crate::shared::spatial::ChunkCoord;
 use crate::shared::wasm::{WasmPluginManager, WasmPluginSlot};
 use polychora_plugin_api::entity_tick_abi::{
     EntityAbilityCheck, EntityAbilityResult, EntityTickInput, EntityTickOutput,
@@ -97,7 +98,13 @@ fn sample_effective_voxel_for_collision(
     wz: i32,
     ww: i32,
 ) -> bool {
-    let (chunk_pos, voxel_index) = voxel::world_to_chunk_at_scale(wx, wy, wz, ww, 0);
+    let (chunk_pos, voxel_index) = voxel::world_to_chunk_at_scale(
+        ChunkCoord::from_num(wx),
+        ChunkCoord::from_num(wy),
+        ChunkCoord::from_num(wz),
+        ChunkCoord::from_num(ww),
+        0,
+    );
     if let Some(entry) = cache.get(&chunk_pos) {
         return match entry {
             CollisionChunkCacheEntry::Explicit(payload) => !payload.block_at(voxel_index).is_air(),
@@ -1336,7 +1343,15 @@ mod tests {
     }
 
     fn set_solid_voxel(state: &mut ServerState, x: i32, y: i32, z: i32, w: i32) {
-        let _ = state.apply_world_voxel_edit([x, y, z, w], BlockData::simple(0, 1));
+        let _ = state.apply_world_voxel_edit(
+            [
+                ChunkCoord::from_num(x),
+                ChunkCoord::from_num(y),
+                ChunkCoord::from_num(z),
+                ChunkCoord::from_num(w),
+            ],
+            BlockData::simple(0, 1),
+        );
     }
 
     #[test]

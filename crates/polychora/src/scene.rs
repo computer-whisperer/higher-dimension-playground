@@ -216,7 +216,13 @@ impl Scene {
         ww: i32,
         block: BlockData,
     ) {
-        let (cp, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
+        let (cp, idx) = world_to_chunk_at_scale(
+            ChunkCoord::from_num(wx),
+            ChunkCoord::from_num(wy),
+            ChunkCoord::from_num(wz),
+            ChunkCoord::from_num(ww),
+            0,
+        );
         let should_remove = {
             let chunk = chunks.entry(cp).or_insert_with(|| vec![BlockData::AIR; CHUNK_VOLUME]);
             chunk[idx] = block;
@@ -367,9 +373,24 @@ impl Scene {
 
     #[cfg(test)]
     fn world_set_block(&mut self, wx: i32, wy: i32, wz: i32, ww: i32, block: BlockData) {
+        self.world_set_block_at(
+            [
+                ChunkCoord::from_num(wx),
+                ChunkCoord::from_num(wy),
+                ChunkCoord::from_num(wz),
+                ChunkCoord::from_num(ww),
+            ],
+            block,
+        );
+    }
+
+    /// Set a block at a fixed-point world position. Supports sub-voxel positions
+    /// for negative `scale_exp`.
+    #[cfg(test)]
+    fn world_set_block_at(&mut self, pos: [ChunkCoord; 4], block: BlockData) {
         let scale_exp = block.scale_exp;
-        let (key, idx) = world_to_chunk_at_scale(wx, wy, wz, ww, scale_exp);
-        let old = self.get_block_data(wx, wy, wz, ww);
+        let (key, idx) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], scale_exp);
+        let old = self.get_block_data_at(pos);
         if old == block {
             return;
         }
@@ -435,12 +456,15 @@ impl Scene {
     }
 
     pub fn get_block_data(&self, wx: i32, wy: i32, wz: i32, ww: i32) -> BlockData {
-        let pos = [
+        self.get_block_data_at([
             ChunkCoord::from_num(wx),
             ChunkCoord::from_num(wy),
             ChunkCoord::from_num(wz),
             ChunkCoord::from_num(ww),
-        ];
+        ])
+    }
+
+    pub fn get_block_data_at(&self, pos: [ChunkCoord; 4]) -> BlockData {
         self.world_tree.block_at(pos)
     }
 
@@ -687,6 +711,14 @@ mod tests {
     use polychora::shared::voxel::BlockData;
     use polychora::content_registry::{ContentRegistry, MaterialResolver};
 
+    fn cc(v: i32) -> ChunkCoord {
+        ChunkCoord::from_num(v)
+    }
+
+    fn cc4(v: [i32; 4]) -> [ChunkCoord; 4] {
+        v.map(|x| ChunkCoord::from_num(x))
+    }
+
     fn test_registry() -> ContentRegistry {
         polychora::plugin_loader::create_full_registry()
     }
@@ -696,7 +728,13 @@ mod tests {
     }
 
     fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) -> Option<u8> {
-        let (chunk_key_fixed, voxel_idx) = world_to_chunk_at_scale(wx, wy, wz, ww, 0);
+        let (chunk_key_fixed, voxel_idx) = world_to_chunk_at_scale(
+            ChunkCoord::from_num(wx),
+            ChunkCoord::from_num(wy),
+            ChunkCoord::from_num(wz),
+            ChunkCoord::from_num(ww),
+            0,
+        );
         let chunk_key: [i32; 4] = chunk_key_fixed.map(|c: ChunkCoord| c.to_num::<i32>());
 
         for leaf in &scene.voxel_frame_data.leaf_headers {
@@ -784,7 +822,7 @@ mod tests {
         let removed =
             scene.remove_block_along_ray([0.5, 0.5, -2.0, 0.5], [0.0, 0.0, 1.0, 0.0], 8.0);
 
-        assert_eq!(removed, Some([0, 0, 0, 0]));
+        assert_eq!(removed, Some(cc4([0, 0, 0, 0])));
         assert!(scene.get_block_data(0, 0, 0, 0).is_air());
     }
 
@@ -799,7 +837,7 @@ mod tests {
             BlockData::simple(0, 3),
         );
 
-        assert_eq!(placed, Some([0, 0, -1, 0]));
+        assert_eq!(placed, Some(cc4([0, 0, -1, 0])));
         assert_eq!(scene.get_block_data(0, 0, -1, 0), BlockData::simple(0, 3));
         assert_eq!(scene.get_block_data(0, 0, 0, 0), BlockData::simple(0, 7));
     }
@@ -922,6 +960,203 @@ mod tests {
         assert_eq!(target.size(), step_for_scale(1));
         assert_eq!(target.world_min(), [2.0, 4.0, -6.0, 0.0]);
         assert_eq!(target.world_max(), [4.0, 6.0, -4.0, 2.0]);
+    }
+
+    #[test]
+    fn block_edit_targets_scale0_hit_scale_neg1_place() {
+        // A scale-0 block at origin, hit from -Z direction.
+        // Placement at scale -1 (half-size) should produce a fractional origin.
+        let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
+
+        let targets = scene.block_edit_targets(
+            [0.25, 0.25, -2.0, 0.25],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            -1, // placement scale -1
+        );
+
+        let hit = targets.hit.unwrap();
+        assert_eq!(hit.origin, cc4([0, 0, 0, 0]));
+        assert_eq!(hit.scale_exp, 0);
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, -1);
+        let half = ChunkCoord::from_num(1) / 2; // 0.5
+        // Face axis is Z (axis 2), face_sign = -1 (entered min face).
+        // On face axis: origin[2] = hit.origin[2] - step = 0 - 0.5 = -0.5
+        assert_eq!(place.origin[2], -half);
+        // Non-face axes: hit_point snapped to 0.5 grid.
+        // Ray at x=0.25 → snaps to 0.0 on 0.5 grid.
+        assert_eq!(place.origin[0], cc(0));
+        assert_eq!(place.origin[1], cc(0));
+        assert_eq!(place.origin[3], cc(0));
+        assert_eq!(place.size(), half);
+    }
+
+    #[test]
+    fn block_edit_targets_scale0_hit_scale_neg1_place_off_center() {
+        // Same as above but ray hits at x=0.75 — should snap to 0.5 on the
+        // half-grid for non-face axes.
+        let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
+
+        let targets = scene.block_edit_targets(
+            [0.75, 0.75, -2.0, 0.25],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            -1,
+        );
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, -1);
+        let half = ChunkCoord::from_num(1) / 2;
+        // On face axis (Z): -0.5
+        assert_eq!(place.origin[2], -half);
+        // x=0.75 snaps to 0.5 on the 0.5 grid
+        assert_eq!(place.origin[0], half);
+        // y=0.75 snaps to 0.5
+        assert_eq!(place.origin[1], half);
+        // w=0.25 snaps to 0.0
+        assert_eq!(place.origin[3], cc(0));
+    }
+
+    #[test]
+    fn block_edit_targets_scale0_hit_scale_neg2_place() {
+        // Place a quarter-size block (scale -2) against a scale-0 block.
+        let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
+
+        let targets = scene.block_edit_targets(
+            [0.1, 0.1, -2.0, 0.1],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            -2,
+        );
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, -2);
+        let quarter = ChunkCoord::from_num(1) / 4; // 0.25
+        // On face axis (Z): 0 - 0.25 = -0.25
+        assert_eq!(place.origin[2], -quarter);
+        // x=0.1 snaps to 0.0 on the 0.25 grid
+        assert_eq!(place.origin[0], cc(0));
+        assert_eq!(place.size(), quarter);
+    }
+
+    #[test]
+    fn block_edit_targets_scale_neg1_hit_scale_neg1_place() {
+        // Place a scale -1 block against another scale -1 block.
+        // The hit block is at [0,0,0,0] with size 0.5.
+        let block = BlockData::simple(0, 7).at_scale(-1);
+        let mut scene = make_scene_with_blocks(&[]);
+        scene.world_set_block_at(cc4([0, 0, 0, 0]), block);
+
+        let targets = scene.block_edit_targets(
+            [0.25, 0.25, -2.0, 0.25],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            -1,
+        );
+
+        let hit = targets.hit.unwrap();
+        assert_eq!(hit.origin, cc4([0, 0, 0, 0]));
+        assert_eq!(hit.scale_exp, -1);
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, -1);
+        let half = ChunkCoord::from_num(1) / 2;
+        // Adjacent to -Z face: 0 - 0.5 = -0.5
+        assert_eq!(place.origin[2], -half);
+    }
+
+    #[test]
+    fn block_edit_targets_scale0_hit_scale_neg1_place_positive_face() {
+        // Hit a scale-0 block from the +X direction.
+        let scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
+
+        let targets = scene.block_edit_targets(
+            [3.0, 0.25, 0.25, 0.25],
+            [-1.0, 0.0, 0.0, 0.0],
+            8.0,
+            -1,
+        );
+
+        assert_eq!(targets.face_axis, 0); // X axis
+        assert_eq!(targets.face_sign, 1);  // entered through max face
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, -1);
+        let half = ChunkCoord::from_num(1) / 2;
+        // On face axis (X): hit.origin[0] + hit_size = 0 + 1 = 1
+        assert_eq!(place.origin[0], cc(1));
+        // Non-face axes snapped to 0.5 grid: 0.25 → 0.0
+        assert_eq!(place.origin[1], cc(0));
+        assert_eq!(place.origin[2], cc(0));
+        assert_eq!(place.origin[3], cc(0));
+    }
+
+    #[test]
+    fn place_block_along_ray_sub_scale() {
+        // Place a half-size block against a full-size block and verify it
+        // lands at the correct fractional position.
+        let mut scene = make_scene_with_blocks(&[([0, 0, 0, 0], BlockData::simple(0, 7))]);
+
+        let material = BlockData::simple(0, 3).at_scale(-1);
+        let placed = scene.place_block_along_ray(
+            [0.25, 0.25, -2.0, 0.25],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            material,
+        );
+
+        let half = ChunkCoord::from_num(1) / 2;
+        let expected_origin = [cc(0), cc(0), -half, cc(0)];
+        assert_eq!(placed, Some(expected_origin));
+        // The block should be readable at the placed position.
+        assert!(!scene.get_block_data_at(expected_origin).is_air());
+        // The original block should still be there.
+        assert_eq!(scene.get_block_data(0, 0, 0, 0), BlockData::simple(0, 7));
+    }
+
+    #[test]
+    fn remove_block_along_ray_sub_scale() {
+        // Place a half-size block, then remove it via raycast.
+        let block = BlockData::simple(0, 5).at_scale(-1);
+        let mut scene = make_scene_with_blocks(&[]);
+        scene.world_set_block_at(cc4([0, 0, 0, 0]), block.clone());
+
+        let removed = scene.remove_block_along_ray(
+            [0.25, 0.25, -2.0, 0.25],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+        );
+
+        assert_eq!(removed, Some(cc4([0, 0, 0, 0])));
+        assert!(scene.get_block_data_at(cc4([0, 0, 0, 0])).is_air());
+    }
+
+    #[test]
+    fn block_edit_targets_negative_coord_scale_neg1() {
+        // Test that sub-scale placement works correctly with negative world
+        // coordinates, ensuring div_euclid snaps properly.
+        let scene = make_scene_with_blocks(&[([0, 0, -1, 0], BlockData::simple(0, 7))]);
+
+        // Hit the block at [0,0,-1,0] from -Z direction (ray at z=-3)
+        let targets = scene.block_edit_targets(
+            [0.25, 0.25, -3.0, 0.25],
+            [0.0, 0.0, 1.0, 0.0],
+            8.0,
+            -1,
+        );
+
+        let hit = targets.hit.unwrap();
+        assert_eq!(hit.origin, cc4([0, 0, -1, 0]));
+        assert_eq!(hit.scale_exp, 0);
+
+        let place = targets.place.unwrap();
+        assert_eq!(place.scale_exp, -1);
+        let half = ChunkCoord::from_num(1) / 2;
+        // On face axis (Z): hit.origin[2] - step = -1 - 0.5 = -1.5
+        let expected_z = cc(-1) - half;
+        assert_eq!(place.origin[2], expected_z);
     }
 
     #[test]

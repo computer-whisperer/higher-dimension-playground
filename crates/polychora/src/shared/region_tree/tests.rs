@@ -3479,7 +3479,13 @@ fn place_block_at_scale(
     use crate::shared::voxel::{world_to_chunk_at_scale, CHUNK_SIZE, CHUNK_VOLUME};
 
     let (chunk_key, voxel_index) =
-        world_to_chunk_at_scale(position[0], position[1], position[2], position[3], scale_exp);
+        world_to_chunk_at_scale(
+            ChunkCoord::from_num(position[0]),
+            ChunkCoord::from_num(position[1]),
+            ChunkCoord::from_num(position[2]),
+            ChunkCoord::from_num(position[3]),
+            scale_exp,
+        );
 
     // Read existing blocks via BVH point queries (scale-agnostic).
     let step = step_for_scale(scale_exp);
@@ -3798,48 +3804,52 @@ fn adjacent_chunks_at_same_non_zero_scale_stay_distinct() {
 #[test]
 fn world_to_chunk_at_scale_coordinate_consistency() {
     use crate::shared::voxel::world_to_chunk_at_scale;
-    use crate::shared::spatial::chunk_key_from_lattice;
+    use crate::shared::spatial::{chunk_key_from_lattice, ChunkCoord};
+
+    fn cc(v: i32) -> ChunkCoord {
+        ChunkCoord::from_num(v)
+    }
 
     // Scale 0: world (0,0,0,0) → chunk (0,0,0,0), voxel 0
-    let (k, idx) = world_to_chunk_at_scale(0, 0, 0, 0, 0);
+    let (k, idx) = world_to_chunk_at_scale(cc(0), cc(0), cc(0), cc(0), 0);
     assert_eq!(k, chunk_key_i32(0, 0, 0, 0));
     assert_eq!(idx, 0);
 
     // Scale 0: world (7,7,7,7) → same chunk, last voxel
-    let (k, idx) = world_to_chunk_at_scale(7, 7, 7, 7, 0);
+    let (k, idx) = world_to_chunk_at_scale(cc(7), cc(7), cc(7), cc(7), 0);
     assert_eq!(k, chunk_key_i32(0, 0, 0, 0));
     assert_eq!(idx, 7 + 8 * (7 + 8 * (7 + 8 * 7)));
 
     // Scale 0: world (8,0,0,0) → chunk (1,0,0,0), voxel 0
-    let (k, _) = world_to_chunk_at_scale(8, 0, 0, 0, 0);
+    let (k, _) = world_to_chunk_at_scale(cc(8), cc(0), cc(0), cc(0), 0);
     assert_eq!(k, chunk_key_i32(1, 0, 0, 0));
 
     // Scale 1: world (0,0,0,0) → lattice (0,0,0,0) at scale 1
-    let (k, idx) = world_to_chunk_at_scale(0, 0, 0, 0, 1);
+    let (k, idx) = world_to_chunk_at_scale(cc(0), cc(0), cc(0), cc(0), 1);
     assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], 1));
     assert_eq!(idx, 0);
 
     // Scale 1: world (2,0,0,0) → scaled lattice x=1 → still chunk 0, voxel index 1
-    let (k, idx) = world_to_chunk_at_scale(2, 0, 0, 0, 1);
+    let (k, idx) = world_to_chunk_at_scale(cc(2), cc(0), cc(0), cc(0), 1);
     assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], 1));
     assert_eq!(idx, 1);
 
     // Scale -1: world (0,0,0,0) → scaled lattice x=0
-    let (k, idx) = world_to_chunk_at_scale(0, 0, 0, 0, -1);
+    let (k, idx) = world_to_chunk_at_scale(cc(0), cc(0), cc(0), cc(0), -1);
     assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], -1));
     assert_eq!(idx, 0);
 
     // Scale -1: world (1,0,0,0) → scaled lattice x=2 → voxel index 2
-    let (k, idx) = world_to_chunk_at_scale(1, 0, 0, 0, -1);
+    let (k, idx) = world_to_chunk_at_scale(cc(1), cc(0), cc(0), cc(0), -1);
     assert_eq!(k, chunk_key_from_lattice([0, 0, 0, 0], -1));
     assert_eq!(idx, 2);
 
     // Scale -1: world (4,0,0,0) → scaled lattice x=8 → chunk lattice 1
-    let (k, _) = world_to_chunk_at_scale(4, 0, 0, 0, -1);
+    let (k, _) = world_to_chunk_at_scale(cc(4), cc(0), cc(0), cc(0), -1);
     assert_eq!(k, chunk_key_from_lattice([1, 0, 0, 0], -1));
 
     // Negative world: scale 0, world (-1,0,0,0) → chunk (-1,0,0,0), last x voxel
-    let (k, idx) = world_to_chunk_at_scale(-1, 0, 0, 0, 0);
+    let (k, idx) = world_to_chunk_at_scale(cc(-1), cc(0), cc(0), cc(0), 0);
     assert_eq!(k, chunk_key_i32(-1, 0, 0, 0));
     assert_eq!(idx, 7); // -1 mod 8 = 7 (Euclidean)
 }
@@ -3847,6 +3857,7 @@ fn world_to_chunk_at_scale_coordinate_consistency() {
 #[test]
 fn randomized_multi_scale_placements_preserve_integrity() {
     use crate::shared::voxel::world_to_chunk_at_scale;
+    use crate::shared::spatial::ChunkCoord;
 
     let mut rng = TestRng::new(0xDEAD_BEEF_CAFE);
     let mut tree = RegionChunkTree::new();
@@ -3876,7 +3887,13 @@ fn randomized_multi_scale_placements_preserve_integrity() {
     let chunk_regions: Vec<Aabb4i> = placed
         .iter()
         .map(|(pos, scale, _)| {
-            let (ck, _) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], *scale);
+            let (ck, _) = world_to_chunk_at_scale(
+                ChunkCoord::from_num(pos[0]),
+                ChunkCoord::from_num(pos[1]),
+                ChunkCoord::from_num(pos[2]),
+                ChunkCoord::from_num(pos[3]),
+                *scale,
+            );
             Aabb4i::chunk_world_bounds(ck, *scale)
         })
         .collect();
