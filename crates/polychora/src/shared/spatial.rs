@@ -105,6 +105,23 @@ impl Aabb4 {
             .checked_mul(extents[3])
     }
 
+    /// Find the coarsest scale at or below `max_scale` where these bounds
+    /// round-trip exactly through chunk lattice conversion.
+    ///
+    /// This determines the "natural" chunk scale of an axis-aligned region:
+    /// the coarsest granularity at which the bounds represent an integer
+    /// number of chunks with no padding or truncation.
+    pub fn coarsest_lattice_aligned_scale(&self, max_scale: i8) -> i8 {
+        let floor = max_scale.saturating_sub(16);
+        for s in (floor..=max_scale).rev() {
+            let (lat_min, lat_max) = self.to_chunk_lattice_bounds(s);
+            if Self::from_lattice_bounds(lat_min, lat_max, s) == *self {
+                return s;
+            }
+        }
+        floor
+    }
+
     /// Half-open point containment: is `pos` in `[min, max)`?
     pub fn contains_point(&self, pos: [ChunkCoord; 4]) -> bool {
         self.is_valid()

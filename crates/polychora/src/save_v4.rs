@@ -1642,14 +1642,7 @@ fn load_chunk_payload_from_ref(
 /// scale (starting from `max_scale`) where the bounds are exactly
 /// representable, so callers can iterate the chunk lattice without data loss.
 fn coarsest_lattice_aligned_scale(bounds: &Aabb4i, max_scale: i8) -> i8 {
-    let floor = max_scale.saturating_sub(16);
-    for s in (floor..=max_scale).rev() {
-        let (lat_min, lat_max) = bounds.to_chunk_lattice_bounds(s);
-        if Aabb4i::from_lattice_bounds(lat_min, lat_max, s) == *bounds {
-            return s;
-        }
-    }
-    floor
+    bounds.coarsest_lattice_aligned_scale(max_scale)
 }
 
 fn collect_world_chunk_payloads_from_node_filtered(
@@ -5208,6 +5201,135 @@ mod tests {
                 };
                 format!("({k:?}, scale={se}, {desc})")
             }).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Regression: a Uniform chunk where block.scale_exp > chunk scale_exp
+    /// (e.g. scale-3 block stored in a scale-0 chunk) must survive a
+    /// two-phase save sequence: first save containing only this block, then
+    /// a second patch save adding blocks at a different scale.
+    #[test]
+    fn patch_save_preserves_uniform_with_mismatched_block_scale() {
+        let root = test_root("uniform-mismatched-block-scale");
+        let empty_regions = HashSet::new();
+
+        // A scale-3 block placed in a scale-0 chunk (fills all 8^4 cells).
+        let block_bottom = BlockData::simple(0, 1).at_scale(3);
+        let payload_bottom = ResolvedChunkPayload::uniform(block_bottom.clone());
+        let key_bottom = chunk_key_from_lattice([1, 1, 0, -1], 0);
+
+        // Initial save: just the bottom block.
+        save_state_from_chunk_payloads(
+            &root,
+            SaveChunkPayloadRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                chunk_payloads: vec![(key_bottom, 0, payload_bottom.clone())],
+                entities: &[],
+                players: &[],
+                world_seed: 42,
+                next_entity_id: 1,
+                dirty_block_regions: &empty_regions,
+                dirty_entity_regions: &empty_regions,
+                force_full_blocks: true,
+                force_full_entities: true,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                disable_block_persistence: false,
+                now_ms: 1000,
+            },
+        )
+        .expect("initial save");
+
+        // Patch save: add upper blocks at scale 1 (disjoint from bottom).
+        let block_upper = BlockData::simple(0, 2).at_scale(3);
+        let mut upper_blocks = vec![BlockData::AIR; CHUNK_VOLUME];
+        // Fill a 4^4 sub-region (scale-3 block in scale-1 chunk).
+        for w in 0..4 {
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+                            + w * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+                        upper_blocks[idx] = block_upper.clone();
+                    }
+                }
+            }
+        }
+        let payload_upper = ResolvedChunkPayload::from_dense_blocks(&upper_blocks)
+            .expect("upper payload");
+        let key_upper = chunk_key_from_lattice([0, 1, -1, -1], 1);
+
+        let patch = save_state_from_chunk_payload_patch(
+            &root,
+            SaveChunkPayloadPatchRequest {
+                base_world_kind: BaseWorldKind::Empty,
+                dirty_chunk_payloads: vec![(key_upper, 1, Some(payload_upper))],
+                world_seed: 42,
+                next_entity_id: 1,
+                player_entity_hints: None,
+                custom_global_payload: None,
+                now_ms: 2000,
+            },
+        )
+        .expect("patch save");
+        assert!(patch.is_some());
+
+        // Materialize and verify both blocks are present.
+        let metadata = load_state_metadata(&root).expect("load metadata");
+        let materialized = materialize_world_chunk_payloads_from_index_filtered(
+            &root,
+            &metadata.index,
+            None,
+            true,
+            None,
+        )
+        .expect("materialize");
+
+        let has_bottom = materialized.iter().any(|(k, se, p)| {
+            *k == key_bottom && *se == 0 && p.uniform_block().map(|b| b.block_type) == Some(1)
+        });
+        let has_upper = materialized.iter().any(|(_, se, _)| *se == 1);
+
+        assert!(
+            has_bottom,
+            "bottom scale-0 Uniform (block.scale_exp=3) must survive patch save; \
+             got {} entries: {:?}",
+            materialized.len(),
+            materialized.iter().map(|(k, se, p)| {
+                let desc = if let Some(b) = p.uniform_block() {
+                    format!("Uniform(type={}, block_scale={})", b.block_type, b.scale_exp)
+                } else {
+                    format!("ChunkArray")
+                };
+                format!("({k:?}, chunk_scale={se}, {desc})")
+            }).collect::<Vec<_>>()
+        );
+        assert!(has_upper, "upper scale-1 chunk must be present");
+
+        // Also verify production load path (streaming).
+        let large_bounds = Aabb4i::from_i32([-200; 4], [200; 4]);
+        let loaded_core = load_world_subtree_core_for_bounds_from_index(
+            &root,
+            &metadata.index,
+            large_bounds,
+        )
+        .expect("streaming load");
+
+        // The loaded core should contain the bottom block somewhere.
+        fn find_uniform_in_core(core: &RegionTreeCore, target_type: u32) -> bool {
+            match &core.kind {
+                RegionNodeKind::Uniform(b) => b.block_type == target_type,
+                RegionNodeKind::Branch(children) => {
+                    children.iter().any(|c| find_uniform_in_core(c, target_type))
+                }
+                _ => false,
+            }
+        }
+        assert!(
+            find_uniform_in_core(&loaded_core, 1),
+            "streaming load must include the bottom Uniform block"
         );
 
         let _ = std::fs::remove_dir_all(root);

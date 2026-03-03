@@ -2039,7 +2039,12 @@ fn collect_chunk_entries_from_kind_in_bounds(
             if block.is_air() {
                 return;
             }
-            let se = block.scale_exp;
+            // Derive the chunk scale from the node bounds — NOT block.scale_exp.
+            // A Uniform node with a scale-3 block stored in a scale-0 chunk has
+            // block.scale_exp=3 but bounds that correspond to scale 0.  Using
+            // block.scale_exp would produce an invalid (empty) lattice range
+            // and silently skip the entry.
+            let se = bounds.coarsest_lattice_aligned_scale(block.scale_exp);
             let (lmin, lmax) = intersection.to_chunk_lattice_bounds(se);
             for lw in lmin[3]..=lmax[3] {
                 for lz in lmin[2]..=lmax[2] {
@@ -2867,7 +2872,11 @@ fn query_chunk_payload_in_kind(
     match kind {
         RegionNodeKind::Empty => None,
         RegionNodeKind::Uniform(block) => {
-            Some((ResolvedChunkPayload::uniform(block.clone()), block.scale_exp))
+            // Derive chunk scale from the node bounds — block.scale_exp is the
+            // *block's* scale which may differ from the chunk's storage scale
+            // (e.g. a scale-3 block filling a scale-0 chunk).
+            let chunk_scale = bounds.coarsest_lattice_aligned_scale(block.scale_exp);
+            Some((ResolvedChunkPayload::uniform(block.clone()), chunk_scale))
         }
         RegionNodeKind::ProceduralRef(_) => None,
         RegionNodeKind::ChunkArray(chunk_array) => {
@@ -4477,21 +4486,21 @@ fn find_leaf_chunks_in_spatial_range_recursive(
             if block.is_air() {
                 return;
             }
-            let se = block.scale_exp;
+            let se = kind_bounds.coarsest_lattice_aligned_scale(block.scale_exp);
             // Bounds are already world-space.
             if !kind_bounds.intersects(query) {
                 return;
             }
-            if is_single_chunk_bounds(kind_bounds, 0) {
+            if is_single_chunk_bounds(kind_bounds, se) {
                 out.push((kind_bounds.chunk_key_from_world_bounds(), se));
             } else {
-                let (lmin, lmax) = kind_bounds.to_chunk_lattice_bounds(0);
+                let (lmin, lmax) = kind_bounds.to_chunk_lattice_bounds(se);
                 for lw in lmin[3]..=lmax[3] {
                     for lz in lmin[2]..=lmax[2] {
                         for ly in lmin[1]..=lmax[1] {
                             for lx in lmin[0]..=lmax[0] {
-                                let ck = chunk_key_from_lattice([lx, ly, lz, lw], 0);
-                                let ck_world = Aabb4i::chunk_world_bounds(ck, 0);
+                                let ck = chunk_key_from_lattice([lx, ly, lz, lw], se);
+                                let ck_world = Aabb4i::chunk_world_bounds(ck, se);
                                 if ck_world.intersects(query) {
                                     out.push((ck, se));
                                 }

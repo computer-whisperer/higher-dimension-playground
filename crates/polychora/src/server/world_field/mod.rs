@@ -2205,4 +2205,60 @@ mod tests {
             all_entries.len()
         );
     }
+
+    /// Regression test: a scale-3 block placed in a scale-0 chunk creates a
+    /// Uniform node with block.scale_exp=3 but bounds sized for scale 0.
+    /// `collect_chunk_entries_in_bounds` must still enumerate the entry at
+    /// scale 0 (derived from bounds), NOT block.scale_exp=3 which would
+    /// produce an invalid lattice range and silently skip the chunk.
+    #[test]
+    fn uniform_with_coarse_block_in_fine_chunk_enumerates_correctly() {
+        use crate::shared::region_tree::{chunk_key_i32, RegionChunkTree};
+
+        // Construct a Uniform node directly: a scale-3 block in scale-0 bounds.
+        let block = BlockData::simple(0, 42).at_scale(3);
+        let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key_i32(1, 1, 0, -1), 0);
+
+        let mut tree = RegionChunkTree::new();
+        tree.set_chunk_at_scale(
+            chunk_key_i32(1, 1, 0, -1),
+            Some(ResolvedChunkPayload::uniform(block.clone())),
+            0,
+        );
+
+        let root = tree.root().expect("tree should have root");
+        assert!(
+            matches!(root.kind, RegionNodeKind::Uniform(_)),
+            "expected Uniform node, got {:?}",
+            std::mem::discriminant(&root.kind),
+        );
+
+        // `collect_chunk_entries_in_bounds` should return exactly one entry at
+        // scale 0 — not zero entries (the old bug with block.scale_exp=3).
+        let entries = tree.collect_chunk_entries_in_bounds(chunk_bounds);
+        assert_eq!(
+            entries.len(),
+            1,
+            "Uniform(scale-3 block in scale-0 bounds) should produce 1 entry, got {}",
+            entries.len()
+        );
+        let (key, se) = &entries[0];
+        assert_eq!(
+            *se, 0,
+            "entry scale should be 0 (chunk scale), not {} (block scale)",
+            se
+        );
+        assert_eq!(*key, chunk_key_i32(1, 1, 0, -1));
+
+        // Also verify chunk_payload returns the correct scale.
+        let (_, payload_se) = tree
+            .chunk_payload(chunk_key_i32(1, 1, 0, -1))
+            .expect("chunk_payload should find the Uniform");
+        assert_eq!(
+            payload_se, 0,
+            "chunk_payload scale should be 0, not {}",
+            payload_se
+        );
+    }
+
 }
