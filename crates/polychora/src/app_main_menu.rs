@@ -193,8 +193,13 @@ impl App {
             self.main_menu_player_name.trim().to_string()
         };
         let wasm_manager = polychora::plugin_loader::create_wasm_manager_for_server();
-        let config =
-            build_singleplayer_runtime_config(&self.args, world_file.clone(), world_generator, self.content_registry.clone(), wasm_manager);
+        let config = build_singleplayer_runtime_config(
+            &self.args,
+            world_file.clone(),
+            world_generator,
+            self.content_registry.clone(),
+            wasm_manager,
+        );
         match MultiplayerClient::connect_local(config, player_name.clone()) {
             Ok(client) => {
                 eprintln!(
@@ -296,8 +301,11 @@ impl App {
         self.world_ready = false;
 
         // Pre-load chunks around spawn position
-        self.scene
-            .preload_spawn_chunks(self.camera.position, self.vte_max_trace_distance, &self.material_resolver);
+        self.scene.preload_spawn_chunks(
+            self.camera.position,
+            self.vte_max_trace_distance,
+            &self.material_resolver,
+        );
 
         if !self.perf_suite_active() {
             self.grab_mouse(window);

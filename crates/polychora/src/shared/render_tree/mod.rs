@@ -1,9 +1,9 @@
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{
-    collect_non_empty_chunks_from_core_in_bounds,
-    validate_region_core_world_space_non_overlapping, ChunkKey, RegionNodeKind, RegionTreeCore,
+    collect_non_empty_chunks_from_core_in_bounds, validate_region_core_world_space_non_overlapping,
+    ChunkKey, RegionNodeKind, RegionTreeCore,
 };
-use crate::shared::spatial::{Aabb4i, ChunkCoord, fixed_from_lattice, lattice_from_fixed};
+use crate::shared::spatial::{fixed_from_lattice, lattice_from_fixed, Aabb4i, ChunkCoord};
 use crate::shared::voxel::BlockData;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -112,14 +112,21 @@ pub fn collect_non_empty_chunk_keys_in_bounds(
     keys
 }
 
-pub fn repeated_voxel_leaf(bounds: Aabb4i, payload: ChunkPayload, block_palette: &[BlockData]) -> Option<RenderTreeCore> {
+pub fn repeated_voxel_leaf(
+    bounds: Aabb4i,
+    payload: ChunkPayload,
+    block_palette: &[BlockData],
+) -> Option<RenderTreeCore> {
     if !bounds.is_valid() {
         return None;
     }
     match payload {
         ChunkPayload::Empty => Some(RenderTreeCore::empty(bounds)),
         ChunkPayload::Uniform(idx) => {
-            let block = block_palette.get(idx as usize).cloned().unwrap_or(BlockData::AIR);
+            let block = block_palette
+                .get(idx as usize)
+                .cloned()
+                .unwrap_or(BlockData::AIR);
             if block.is_air() {
                 Some(RenderTreeCore::empty(bounds))
             } else {
@@ -132,8 +139,15 @@ pub fn repeated_voxel_leaf(bounds: Aabb4i, payload: ChunkPayload, block_palette:
         payload => {
             let cell_count = bounds.chunk_cell_count_at_scale(0)?;
             let indices = vec![0u16; cell_count];
-            let chunk_array =
-                ChunkArrayData::from_dense_indices_with_block_palette(bounds, vec![payload], indices, None, block_palette.to_vec(), 0).ok()?;
+            let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+                bounds,
+                vec![payload],
+                indices,
+                None,
+                block_palette.to_vec(),
+                0,
+            )
+            .ok()?;
             Some(RenderTreeCore {
                 bounds,
                 kind: RenderNodeKind::VoxelChunkArray(chunk_array),
@@ -594,10 +608,12 @@ pub fn collect_ray_intersected_nodes_from_bvh(
                     continue;
                 };
                 match &leaf.kind {
-                    RenderLeafKind::Uniform(block) => {
-                        DebugRayBvhNodeKind::LeafUniform { block: block.clone() }
-                    }
-                    RenderLeafKind::VoxelChunkArray(ca) => DebugRayBvhNodeKind::LeafChunkArray { scale_exp: ca.scale_exp },
+                    RenderLeafKind::Uniform(block) => DebugRayBvhNodeKind::LeafUniform {
+                        block: block.clone(),
+                    },
+                    RenderLeafKind::VoxelChunkArray(ca) => DebugRayBvhNodeKind::LeafChunkArray {
+                        scale_exp: ca.scale_exp,
+                    },
                 }
             }
         };
@@ -1312,7 +1328,10 @@ fn collect_non_empty_chunkarray_chunk_keys_in_bounds(
     }
 }
 
-fn chunk_payload_has_solid_material_in_context(payload: &ChunkPayload, block_palette: &[BlockData]) -> bool {
+fn chunk_payload_has_solid_material_in_context(
+    payload: &ChunkPayload,
+    block_palette: &[BlockData],
+) -> bool {
     let idx_is_solid = |idx: &u16| -> bool {
         block_palette
             .get(*idx as usize)
@@ -1431,7 +1450,7 @@ fn normalize_render_core(core: &mut RenderTreeCore) {
 mod tests {
     use super::*;
     use crate::shared::chunk_payload::ChunkArrayData;
-    use crate::shared::region_tree::{GeneratorRef, chunk_key_i32};
+    use crate::shared::region_tree::{chunk_key_i32, GeneratorRef};
     use crate::shared::spatial::chunk_key_from_lattice;
 
     #[test]
@@ -1461,7 +1480,9 @@ mod tests {
             RenderNodeKind::Uniform(ref b) if *b == BlockData::simple(0, 7) => {}
             RenderNodeKind::Branch(ref children) => {
                 assert_eq!(children.len(), 1);
-                assert!(matches!(children[0].kind, RenderNodeKind::Uniform(ref b) if *b == BlockData::simple(0, 7)));
+                assert!(
+                    matches!(children[0].kind, RenderNodeKind::Uniform(ref b) if *b == BlockData::simple(0, 7))
+                );
             }
             other => panic!("unexpected mapped kind: {other:?}"),
         }
@@ -1545,7 +1566,10 @@ mod tests {
 
         let query = Aabb4i::from_lattice_bounds([2, 0, 0, 0], [3, 0, 0, 0], 0);
         let keys = collect_non_empty_chunk_keys_from_bvh_in_bounds(&bvh, query);
-        assert_eq!(keys, vec![chunk_key_i32(2, 0, 0, 0), chunk_key_i32(3, 0, 0, 0)]);
+        assert_eq!(
+            keys,
+            vec![chunk_key_i32(2, 0, 0, 0), chunk_key_i32(3, 0, 0, 0)]
+        );
     }
 
     #[test]
@@ -1634,10 +1658,7 @@ mod tests {
 
         let results_0 = sample_chunk_payloads_from_bvh(&bvh, chunk_key_i32(0, 0, 0, 0));
         assert_eq!(results_0.len(), 1);
-        assert_eq!(
-            results_0[0].uniform_block(),
-            Some(&BlockData::simple(0, 7))
-        );
+        assert_eq!(results_0[0].uniform_block(), Some(&BlockData::simple(0, 7)));
         let results_1 = sample_chunk_payloads_from_bvh(&bvh, chunk_key_i32(1, 0, 0, 0));
         assert_eq!(results_1.len(), 1);
         assert_eq!(results_1[0].payload, ChunkPayload::Uniform(11));
@@ -1658,7 +1679,11 @@ mod tests {
         let old_root = bvh.root;
         let deltas = apply_chunk_payload_mutations_with_deltas_in_bvh(
             &mut bvh,
-            &[(chunk_key_i32(2, 0, 0, 0), Some(ChunkPayload::Uniform(1)), vec![BlockData::AIR, BlockData::simple(0, 9)])],
+            &[(
+                chunk_key_i32(2, 0, 0, 0),
+                Some(ChunkPayload::Uniform(1)),
+                vec![BlockData::AIR, BlockData::simple(0, 9)],
+            )],
         )
         .expect("apply mutation");
         assert_eq!(deltas.len(), 1);
@@ -1689,9 +1714,11 @@ mod tests {
         };
         let mut bvh = build_bvh_in_bounds(&core, bounds);
         let old_root = bvh.root.expect("root");
-        let deltas =
-            apply_chunk_payload_mutations_with_deltas_in_bvh(&mut bvh, &[(chunk_key_i32(0, 0, 0, 0), None, vec![])])
-                .expect("apply mutation");
+        let deltas = apply_chunk_payload_mutations_with_deltas_in_bvh(
+            &mut bvh,
+            &[(chunk_key_i32(0, 0, 0, 0), None, vec![])],
+        )
+        .expect("apply mutation");
         assert_eq!(deltas.len(), 1);
         let delta = &deltas[0];
         assert_eq!(delta.key, chunk_key_i32(0, 0, 0, 0));
@@ -1715,9 +1742,11 @@ mod tests {
         let old_node_capacity = bvh.nodes.len();
         let old_leaf_capacity = bvh.leaves.len();
 
-        let remove =
-            apply_chunk_payload_mutations_with_deltas_in_bvh(&mut bvh, &[(chunk_key_i32(1, 0, 0, 0), None, vec![])])
-                .expect("remove patch");
+        let remove = apply_chunk_payload_mutations_with_deltas_in_bvh(
+            &mut bvh,
+            &[(chunk_key_i32(1, 0, 0, 0), None, vec![])],
+        )
+        .expect("remove patch");
         assert_eq!(remove.len(), 1);
         assert!(
             !remove[0].freed_node_ids.is_empty() || !remove[0].freed_leaf_ids.is_empty(),
@@ -1729,7 +1758,11 @@ mod tests {
 
         let insert = apply_chunk_payload_mutations_with_deltas_in_bvh(
             &mut bvh,
-            &[(chunk_key_i32(1, 0, 0, 0), Some(ChunkPayload::Uniform(1)), vec![BlockData::AIR, BlockData::simple(0, 9)])],
+            &[(
+                chunk_key_i32(1, 0, 0, 0),
+                Some(ChunkPayload::Uniform(1)),
+                vec![BlockData::AIR, BlockData::simple(0, 9)],
+            )],
         )
         .expect("insert patch");
         assert_eq!(insert.len(), 1);
@@ -1783,7 +1816,9 @@ mod tests {
         assert_eq!(hits[0].bounds, bounds);
         assert_eq!(
             hits[0].kind,
-            DebugRayBvhNodeKind::LeafUniform { block: BlockData::simple(0, 7) }
+            DebugRayBvhNodeKind::LeafUniform {
+                block: BlockData::simple(0, 7)
+            }
         );
     }
 
@@ -1815,7 +1850,9 @@ mod tests {
         assert_eq!(hits[0].kind, DebugRayBvhNodeKind::Internal);
         assert_eq!(
             hits[1].kind,
-            DebugRayBvhNodeKind::LeafUniform { block: BlockData::simple(0, 3) }
+            DebugRayBvhNodeKind::LeafUniform {
+                block: BlockData::simple(0, 3)
+            }
         );
     }
 }

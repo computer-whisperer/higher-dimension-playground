@@ -16,9 +16,7 @@ impl Scene {
         let collect_desired_start = Instant::now();
         let desired_core = slice_non_empty_region_core_in_bounds(subtree, bounds);
         let collect_desired_ms = collect_desired_start.elapsed().as_secs_f64() * 1000.0;
-        if previous_core.kind == desired_core.kind
-            && previous_core.bounds == desired_core.bounds
-        {
+        if previous_core.kind == desired_core.kind && previous_core.bounds == desired_core.bounds {
             let previous_non_empty = Self::count_non_empty_chunks_in_core(&previous_core);
             return RegionPatchStats {
                 previous_non_empty,
@@ -44,8 +42,8 @@ impl Scene {
         let diff_ms = 0.0;
         let single_chunk = bounds.chunk_extents_at_scale(0) == Some([1, 1, 1, 1]);
         let single_chunk_key = single_chunk.then(|| bounds.chunk_key_from_world_bounds());
-        let previous_single_chunk_payload = single_chunk_key
-            .and_then(|key| self.world_tree.chunk_payload(key));
+        let previous_single_chunk_payload =
+            single_chunk_key.and_then(|key| self.world_tree.chunk_payload(key));
 
         let splice_start = Instant::now();
         let mut changed_bounds = self
@@ -126,9 +124,7 @@ impl Scene {
         let collect_previous_start = Instant::now();
         let previous_core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
         let collect_previous_ms = collect_previous_start.elapsed().as_secs_f64() * 1000.0;
-        if previous_core.kind == desired_core.kind
-            && previous_core.bounds == desired_core.bounds
-        {
+        if previous_core.kind == desired_core.kind && previous_core.bounds == desired_core.bounds {
             return RegionPatchStats {
                 collect_previous_ms,
                 ..RegionPatchStats::default()
@@ -136,8 +132,8 @@ impl Scene {
         }
         let single_chunk = bounds.chunk_extents_at_scale(0) == Some([1, 1, 1, 1]);
         let single_chunk_key = single_chunk.then(|| bounds.chunk_key_from_world_bounds());
-        let previous_single_chunk_payload = single_chunk_key
-            .and_then(|key| self.world_tree.chunk_payload(key));
+        let previous_single_chunk_payload =
+            single_chunk_key.and_then(|key| self.world_tree.chunk_payload(key));
 
         let splice_start = Instant::now();
         let mut changed_bounds = self
@@ -193,7 +189,9 @@ impl Scene {
             match payload {
                 ChunkPayload::Empty => false,
                 ChunkPayload::Uniform(idx) => idx_is_solid(*idx),
-                ChunkPayload::Dense16 { materials } => materials.iter().any(|idx| idx_is_solid(*idx)),
+                ChunkPayload::Dense16 { materials } => {
+                    materials.iter().any(|idx| idx_is_solid(*idx))
+                }
                 ChunkPayload::PalettePacked { .. } => payload
                     .dense_materials()
                     .map(|indices| indices.into_iter().any(|idx| idx_is_solid(idx)))

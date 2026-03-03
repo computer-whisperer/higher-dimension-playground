@@ -137,8 +137,7 @@ impl Scene {
                 if hit.block.is_air() {
                     continue;
                 }
-                let origin: [i32; 4] =
-                    std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
+                let origin: [i32; 4] = std::array::from_fn(|i| hit.bounds.min[i].to_num::<i32>());
                 let size = 1i32 << hit.block.scale_exp.max(0);
                 let half = size as f32 * 0.5;
                 let dx = origin[0] as f32 + half - ray_origin[0];
@@ -203,8 +202,7 @@ fn compute_placement_target(
             // Snap hit_point to placement grid
             let bits = hit_point[axis].to_bits();
             let step_bits = place_step.to_bits();
-            origin[axis] =
-                ChunkCoord::from_bits(bits.div_euclid(step_bits) * step_bits);
+            origin[axis] = ChunkCoord::from_bits(bits.div_euclid(step_bits) * step_bits);
         }
     }
     ScaleAwareBlockTarget {

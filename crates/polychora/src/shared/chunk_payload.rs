@@ -457,7 +457,10 @@ fn unpack_indices_u16(packed: &[u64], bit_width: u8, count: usize) -> Vec<u16> {
     out
 }
 
-fn bounds_extents_at_scale(bounds: Aabb4, scale_exp: i8) -> Result<[usize; 4], ChunkArrayCodecError> {
+fn bounds_extents_at_scale(
+    bounds: Aabb4,
+    scale_exp: i8,
+) -> Result<[usize; 4], ChunkArrayCodecError> {
     bounds
         .chunk_extents_at_scale(scale_exp)
         .ok_or(ChunkArrayCodecError::InvalidBounds)
@@ -823,14 +826,12 @@ impl ResolvedChunkPayload {
             ChunkPayload::Dense16 { materials } => ChunkPayload::Dense16 {
                 materials: materials.iter().map(|&idx| remap(idx)).collect(),
             },
-            ChunkPayload::PalettePacked { .. } => {
-                match self.payload.dense_materials() {
-                    Ok(dense) => ChunkPayload::Dense16 {
-                        materials: dense.iter().map(|&idx| remap(idx)).collect(),
-                    },
-                    Err(_) => ChunkPayload::Empty,
-                }
-            }
+            ChunkPayload::PalettePacked { .. } => match self.payload.dense_materials() {
+                Ok(dense) => ChunkPayload::Dense16 {
+                    materials: dense.iter().map(|&idx| remap(idx)).collect(),
+                },
+                Err(_) => ChunkPayload::Empty,
+            },
         }
     }
 
@@ -863,15 +864,11 @@ impl ResolvedChunkPayload {
         let palette_idx = match &self.payload {
             ChunkPayload::Empty => 0u16,
             ChunkPayload::Uniform(idx) => *idx,
-            ChunkPayload::Dense16 { materials } => {
-                materials.get(voxel_idx).copied().unwrap_or(0)
-            }
-            ChunkPayload::PalettePacked { .. } => {
-                match self.payload.dense_materials() {
-                    Ok(dense) => dense.get(voxel_idx).copied().unwrap_or(0),
-                    Err(_) => 0,
-                }
-            }
+            ChunkPayload::Dense16 { materials } => materials.get(voxel_idx).copied().unwrap_or(0),
+            ChunkPayload::PalettePacked { .. } => match self.payload.dense_materials() {
+                Ok(dense) => dense.get(voxel_idx).copied().unwrap_or(0),
+                Err(_) => 0,
+            },
         };
         self.block_palette
             .get(palette_idx as usize)

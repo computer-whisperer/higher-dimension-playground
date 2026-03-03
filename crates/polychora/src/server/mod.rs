@@ -21,21 +21,16 @@ use self::runtime_net::{
     handle_message, remove_client, spawn_client_thread, start_broadcast_thread,
 };
 use self::spawn_logic::{
-    default_spawn_pose_for_client, entity_type_entry_for_token, env_flag_enabled,
-    parse_spawn_vec4, phase_spider_next_phase_deadline,
-    sanitize_player_name, spawn_usage_string,
+    default_spawn_pose_for_client, entity_type_entry_for_token, env_flag_enabled, parse_spawn_vec4,
+    phase_spider_next_phase_deadline, sanitize_player_name, spawn_usage_string,
 };
 use self::types::{
     ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityLifecycle, EntityRecord,
-    EntityRecordSummary, LiveReplicationFrame, MobNavCell, MobNavPathResult,
-    MobNavigationState, MobState, PersistedMobEntry, PlayerState, QueuedExplosionEvent,
-    QueuedPlayerMovementModifier,
+    EntityRecordSummary, LiveReplicationFrame, MobNavCell, MobNavPathResult, MobNavigationState,
+    MobState, PersistedMobEntry, PlayerState, QueuedExplosionEvent, QueuedPlayerMovementModifier,
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
-use crate::shared::entity_types::{
-    EntityCategory, MobLocomotionMode,
-    ENTITY_PLAYER_AVATAR,
-};
+use crate::shared::entity_types::{EntityCategory, MobLocomotionMode, ENTITY_PLAYER_AVATAR};
 use crate::shared::protocol::{
     ClientMessage, Entity, EntityPose, EntitySnapshot, EntityTransform, ServerMessage, WorldBounds,
     WorldSummary,
@@ -419,4 +414,3 @@ pub fn run_tcp_server(config: &mut RuntimeConfig) -> io::Result<()> {
 
     Ok(())
 }
-

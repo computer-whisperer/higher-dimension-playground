@@ -51,15 +51,15 @@ fn register_legacy_remaps(registry: &mut ContentRegistry) {
 
     // Block remaps: (0, 1) → (ns, BLOCK_RED), (0, 2) → (ns, BLOCK_ORANGE), ...
     const LEGACY_BLOCK_REMAP: [(u32, u32); 68] = [
-        (1,  0x9d5288f1), // Red
-        (2,  0x5b0dbb41), // Orange
-        (3,  0xe453dd32), // Yellow-Green
-        (4,  0xb0ee89ae), // Green
-        (5,  0xae574f7a), // Cyan
-        (6,  0xf2acf72f), // Blue
-        (7,  0xec98d2c1), // Purple
-        (8,  0x6c941cf0), // Magenta
-        (9,  0xa3cd59bf), // Rainbow
+        (1, 0x9d5288f1),  // Red
+        (2, 0x5b0dbb41),  // Orange
+        (3, 0xe453dd32),  // Yellow-Green
+        (4, 0xb0ee89ae),  // Green
+        (5, 0xae574f7a),  // Cyan
+        (6, 0xf2acf72f),  // Blue
+        (7, 0xec98d2c1),  // Purple
+        (8, 0x6c941cf0),  // Magenta
+        (9, 0xa3cd59bf),  // Rainbow
         (10, 0x4139d32c), // Brown
         (11, 0xc45ed1f0), // Grid Floor
         (12, 0x21ce5dd2), // White
@@ -127,9 +127,9 @@ fn register_legacy_remaps(registry: &mut ContentRegistry) {
 
     // Entity remaps: (0, 1) → (ns, ENTITY_CUBE), etc.
     const LEGACY_ENTITY_REMAP: [(u32, u32); 6] = [
-        (1,  0x776b1b69), // cube
-        (2,  0x71790134), // rotor
-        (3,  0x433824fe), // drifter
+        (1, 0x776b1b69),  // cube
+        (2, 0x71790134),  // rotor
+        (3, 0x433824fe),  // drifter
         (10, 0xa974d75b), // seeker
         (11, 0x3dc5fd3d), // creeper
         (12, 0x4af27f80), // phase_spider

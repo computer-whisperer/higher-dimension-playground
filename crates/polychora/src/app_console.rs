@@ -178,10 +178,14 @@ impl App {
             if let Some(rb) = report.root_bounds {
                 self.append_dev_console_log_line(format!(
                     "  root=[{},{},{},{}]->[{},{},{},{}]",
-                    rb.min[0].to_num::<i32>(), rb.min[1].to_num::<i32>(),
-                    rb.min[2].to_num::<i32>(), rb.min[3].to_num::<i32>(),
-                    rb.max[0].to_num::<i32>(), rb.max[1].to_num::<i32>(),
-                    rb.max[2].to_num::<i32>(), rb.max[3].to_num::<i32>(),
+                    rb.min[0].to_num::<i32>(),
+                    rb.min[1].to_num::<i32>(),
+                    rb.min[2].to_num::<i32>(),
+                    rb.min[3].to_num::<i32>(),
+                    rb.max[0].to_num::<i32>(),
+                    rb.max[1].to_num::<i32>(),
+                    rb.max[2].to_num::<i32>(),
+                    rb.max[3].to_num::<i32>(),
                 ));
             } else {
                 self.append_dev_console_log_line("  tree is empty");
@@ -202,29 +206,36 @@ impl App {
                     .iter()
                     .map(|(s, c)| format!("s{}={}", s, c))
                     .collect();
-                self.append_dev_console_log_line(format!(
-                    "  scales: {}", scales.join(" "),
-                ));
+                self.append_dev_console_log_line(format!("  scales: {}", scales.join(" "),));
             }
 
             let bounds_overlap_count = report.bounds_overlaps.len();
             if bounds_overlap_count > 0 {
                 self.append_dev_console_log_line(format!(
-                    "  FAIL: {} sibling bounds overlap(s) detected!", bounds_overlap_count,
+                    "  FAIL: {} sibling bounds overlap(s) detected!",
+                    bounds_overlap_count,
                 ));
                 // Detailed report to stderr
                 eprintln!("[/check] BOUNDS OVERLAPS ({} total):", bounds_overlap_count);
                 for (i, (a, b)) in report.bounds_overlaps.iter().enumerate() {
                     eprintln!(
                         "  [{i}] [{},{},{},{}]->[{},{},{},{}] vs [{},{},{},{}]->[{},{},{},{}]",
-                        a.min[0].to_num::<i32>(), a.min[1].to_num::<i32>(),
-                        a.min[2].to_num::<i32>(), a.min[3].to_num::<i32>(),
-                        a.max[0].to_num::<i32>(), a.max[1].to_num::<i32>(),
-                        a.max[2].to_num::<i32>(), a.max[3].to_num::<i32>(),
-                        b.min[0].to_num::<i32>(), b.min[1].to_num::<i32>(),
-                        b.min[2].to_num::<i32>(), b.min[3].to_num::<i32>(),
-                        b.max[0].to_num::<i32>(), b.max[1].to_num::<i32>(),
-                        b.max[2].to_num::<i32>(), b.max[3].to_num::<i32>(),
+                        a.min[0].to_num::<i32>(),
+                        a.min[1].to_num::<i32>(),
+                        a.min[2].to_num::<i32>(),
+                        a.min[3].to_num::<i32>(),
+                        a.max[0].to_num::<i32>(),
+                        a.max[1].to_num::<i32>(),
+                        a.max[2].to_num::<i32>(),
+                        a.max[3].to_num::<i32>(),
+                        b.min[0].to_num::<i32>(),
+                        b.min[1].to_num::<i32>(),
+                        b.min[2].to_num::<i32>(),
+                        b.min[3].to_num::<i32>(),
+                        b.max[0].to_num::<i32>(),
+                        b.max[1].to_num::<i32>(),
+                        b.max[2].to_num::<i32>(),
+                        b.max[3].to_num::<i32>(),
                     );
                     if i >= 19 {
                         eprintln!("  ... ({} more)", bounds_overlap_count - 20);
@@ -254,20 +265,28 @@ impl App {
             if let Some(ref ct) = rr.cache_tree_report {
                 self.append_dev_console_log_line(format!(
                     "  render-cache: depth={} branches={} chunks={} uniforms={} cells={}",
-                    ct.max_depth, ct.branch_count, ct.chunk_array_count,
-                    ct.uniform_count, ct.total_chunk_cells,
+                    ct.max_depth,
+                    ct.branch_count,
+                    ct.chunk_array_count,
+                    ct.uniform_count,
+                    ct.total_chunk_cells,
                 ));
                 if !ct.scale_histogram.is_empty() {
-                    let scales: Vec<String> = ct.scale_histogram.iter()
-                        .map(|(s, c)| format!("s{}={}", s, c)).collect();
+                    let scales: Vec<String> = ct
+                        .scale_histogram
+                        .iter()
+                        .map(|(s, c)| format!("s{}={}", s, c))
+                        .collect();
                     self.append_dev_console_log_line(format!(
-                        "  render-cache scales: {}", scales.join(" "),
+                        "  render-cache scales: {}",
+                        scales.join(" "),
                     ));
                 }
                 let cache_overlaps = ct.bounds_overlaps.len();
                 if cache_overlaps > 0 {
                     self.append_dev_console_log_line(format!(
-                        "  FAIL: render-cache has {} bounds overlap(s)", cache_overlaps,
+                        "  FAIL: render-cache has {} bounds overlap(s)",
+                        cache_overlaps,
                     ));
                 }
                 if let Some(ref e) = ct.data_overlap_error {
@@ -283,10 +302,13 @@ impl App {
             self.append_dev_console_log_line(format!(
                 "  cpu-bvh: root={:?} nodes={}/{} leaves={}/{} depth={} (uniform={} ca={})",
                 rr.cpu_bvh_root,
-                rr.cpu_bvh_reachable_nodes, rr.cpu_bvh_node_count,
-                rr.cpu_bvh_reachable_leaves, rr.cpu_bvh_leaf_count,
+                rr.cpu_bvh_reachable_nodes,
+                rr.cpu_bvh_node_count,
+                rr.cpu_bvh_reachable_leaves,
+                rr.cpu_bvh_leaf_count,
                 rr.cpu_bvh_max_depth,
-                rr.cpu_bvh_uniform_leaves, rr.cpu_bvh_chunk_array_leaves,
+                rr.cpu_bvh_uniform_leaves,
+                rr.cpu_bvh_chunk_array_leaves,
             ));
             for err in &rr.cpu_bvh_errors {
                 self.append_dev_console_log_line(format!("  FAIL cpu-bvh: {err}"));
@@ -318,7 +340,10 @@ impl App {
                         rr.cross_validate_fresh_chunk_count,
                         rr.cross_validate_cached_chunk_count,
                     ));
-                    eprintln!("[/check] CACHE-VS-WORLD MISMATCHES ({} total):", mismatch_count);
+                    eprintln!(
+                        "[/check] CACHE-VS-WORLD MISMATCHES ({} total):",
+                        mismatch_count
+                    );
                     for (i, err) in rr.cross_validate_errors.iter().enumerate() {
                         eprintln!("  [{i}] {err}");
                         if i >= 19 {

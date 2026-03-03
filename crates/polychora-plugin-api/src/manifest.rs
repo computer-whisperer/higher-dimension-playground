@@ -132,8 +132,7 @@ mod tests {
         };
 
         let bytes = postcard::to_allocvec(&manifest).expect("serialize");
-        let deserialized: PluginManifest =
-            postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized: PluginManifest = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(manifest, deserialized);
     }
 }

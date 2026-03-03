@@ -329,7 +329,13 @@ impl WasmRuntimeInstance {
 
         let call_result = self.call.call(
             &mut self.store,
-            (opcode, self.io_in_ptr, input_len_i32, self.io_out_ptr, self.io_out_cap),
+            (
+                opcode,
+                self.io_in_ptr,
+                input_len_i32,
+                self.io_out_ptr,
+                self.io_out_cap,
+            ),
         );
 
         let output = match call_result {

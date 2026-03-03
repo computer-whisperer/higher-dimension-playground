@@ -76,7 +76,9 @@ fn default_hotbar_slots() -> [Option<polychora::shared::protocol::ItemStack>; 9]
     ]
 }
 
-fn block_data_from_slot(slot: &Option<polychora::shared::protocol::ItemStack>) -> polychora::shared::voxel::BlockData {
+fn block_data_from_slot(
+    slot: &Option<polychora::shared::protocol::ItemStack>,
+) -> polychora::shared::voxel::BlockData {
     slot.as_ref()
         .and_then(|stack| stack.to_block_data())
         .unwrap_or_else(|| {
@@ -348,25 +350,100 @@ const PERF_POSE_FAR_OBLIQUE: PerfSuiteScenario = PerfSuiteScenario {
 
 const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 15] = [
     // platform-surface: standing on platform, 3D-like view
-    PerfSuiteScenario { label: "platform-surface/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_PLATFORM_SURFACE },
-    PerfSuiteScenario { label: "platform-surface/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_PLATFORM_SURFACE },
-    PerfSuiteScenario { label: "platform-surface/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_PLATFORM_SURFACE },
+    PerfSuiteScenario {
+        label: "platform-surface/low",
+        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
+        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
+        ..PERF_POSE_PLATFORM_SURFACE
+    },
+    PerfSuiteScenario {
+        label: "platform-surface/default",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_PLATFORM_SURFACE
+    },
+    PerfSuiteScenario {
+        label: "platform-surface/high",
+        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
+        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
+        ..PERF_POSE_PLATFORM_SURFACE
+    },
     // platform-4d: same spot, strong 4D rotation
-    PerfSuiteScenario { label: "platform-4d/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_PLATFORM_4D },
-    PerfSuiteScenario { label: "platform-4d/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_PLATFORM_4D },
-    PerfSuiteScenario { label: "platform-4d/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_PLATFORM_4D },
+    PerfSuiteScenario {
+        label: "platform-4d/low",
+        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
+        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
+        ..PERF_POSE_PLATFORM_4D
+    },
+    PerfSuiteScenario {
+        label: "platform-4d/default",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_PLATFORM_4D
+    },
+    PerfSuiteScenario {
+        label: "platform-4d/high",
+        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
+        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
+        ..PERF_POSE_PLATFORM_4D
+    },
     // open-sky: high altitude looking down
-    PerfSuiteScenario { label: "open-sky/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_OPEN_SKY },
-    PerfSuiteScenario { label: "open-sky/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_OPEN_SKY },
-    PerfSuiteScenario { label: "open-sky/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_OPEN_SKY },
+    PerfSuiteScenario {
+        label: "open-sky/low",
+        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
+        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
+        ..PERF_POSE_OPEN_SKY
+    },
+    PerfSuiteScenario {
+        label: "open-sky/default",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_OPEN_SKY
+    },
+    PerfSuiteScenario {
+        label: "open-sky/high",
+        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
+        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
+        ..PERF_POSE_OPEN_SKY
+    },
     // corridor: oblique far view between platforms
-    PerfSuiteScenario { label: "corridor/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_CORRIDOR },
-    PerfSuiteScenario { label: "corridor/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_CORRIDOR },
-    PerfSuiteScenario { label: "corridor/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_CORRIDOR },
+    PerfSuiteScenario {
+        label: "corridor/low",
+        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
+        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
+        ..PERF_POSE_CORRIDOR
+    },
+    PerfSuiteScenario {
+        label: "corridor/default",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_CORRIDOR
+    },
+    PerfSuiteScenario {
+        label: "corridor/high",
+        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
+        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
+        ..PERF_POSE_CORRIDOR
+    },
     // far-oblique: distant ridge terrain with 4D
-    PerfSuiteScenario { label: "far-oblique/low",     vte_max_trace_steps: Some(PERF_TIER_LOW.0),     vte_max_trace_distance: Some(PERF_TIER_LOW.1),     ..PERF_POSE_FAR_OBLIQUE },
-    PerfSuiteScenario { label: "far-oblique/default", vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0), vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1), ..PERF_POSE_FAR_OBLIQUE },
-    PerfSuiteScenario { label: "far-oblique/high",    vte_max_trace_steps: Some(PERF_TIER_HIGH.0),    vte_max_trace_distance: Some(PERF_TIER_HIGH.1),    ..PERF_POSE_FAR_OBLIQUE },
+    PerfSuiteScenario {
+        label: "far-oblique/low",
+        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
+        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
+        ..PERF_POSE_FAR_OBLIQUE
+    },
+    PerfSuiteScenario {
+        label: "far-oblique/default",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_FAR_OBLIQUE
+    },
+    PerfSuiteScenario {
+        label: "far-oblique/high",
+        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
+        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
+        ..PERF_POSE_FAR_OBLIQUE
+    },
 ];
 
 const VTE_SWEEP_PROFILES: [VteRuntimeProfile; 2] = [
@@ -924,7 +1001,10 @@ fn main() {
         let (reg, mgr) = polychora::plugin_loader::create_full_registry_with_wasm();
         (Arc::new(reg), Some(mgr))
     } else {
-        (Arc::new(polychora::plugin_loader::create_full_registry()), None)
+        (
+            Arc::new(polychora::plugin_loader::create_full_registry()),
+            None,
+        )
     };
 
     let multiplayer = if let Some(server) = args.server.as_ref() {
@@ -1109,7 +1189,9 @@ fn main() {
         egui_ctx: egui::Context::default(),
         egui_winit_state: None,
         content_registry: content_registry.clone(),
-        material_resolver: polychora::content_registry::MaterialResolver::from_registry(&content_registry),
+        material_resolver: polychora::content_registry::MaterialResolver::from_registry(
+            &content_registry,
+        ),
         wasm_model_manager: polychora::plugin_loader::create_wasm_manager_for_client(),
         material_icon_sheet: None,
         material_icons_texture_id: None,
@@ -1490,11 +1572,7 @@ struct App {
     multiplayer_chunk_sample_diag_rng_state: u64,
     multiplayer_chunk_sample_diag_next_request_id: u64,
     multiplayer_chunk_sample_diag_recent_patches:
-        VecDeque<(
-            u64,
-            Aabb4i,
-            polychora::shared::region_tree::RegionTreeCore,
-        )>,
+        VecDeque<(u64, Aabb4i, polychora::shared::region_tree::RegionTreeCore)>,
     multiplayer_chunk_sample_diag_patch_seq: u64,
     pending_player_movement_modifiers: VecDeque<PendingPlayerMovementModifier>,
     player_modifier_external_velocity: [f32; 4],

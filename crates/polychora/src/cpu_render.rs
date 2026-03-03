@@ -607,7 +607,14 @@ fn rasterize_pixel(
         return ([0.0; 3], 0.0);
     }
 
-    render_zw_lines_simple(&zw_lines, theta_min, theta_max, sun_view_dir, content_registry, material_resolver)
+    render_zw_lines_simple(
+        &zw_lines,
+        theta_min,
+        theta_max,
+        sun_view_dir,
+        content_registry,
+        material_resolver,
+    )
 }
 
 // ─── ZW line rendering ──────────────────────────────────────────────
@@ -679,8 +686,12 @@ fn render_zw_lines_simple(
                 lines[j].tex[0][2] * (1.0 - val) + lines[j].tex[1][2] * val,
                 lines[j].tex[0][3] * (1.0 - val) + lines[j].tex[1][3] * val,
             ];
-            let (albedo, luminance) =
-                sample_material(lines[j].material_id, [tex[0], tex[1], tex[2], tex[3]], content_registry, material_resolver);
+            let (albedo, luminance) = sample_material(
+                lines[j].material_id,
+                [tex[0], tex[1], tex[2], tex[3]],
+                content_registry,
+                material_resolver,
+            );
             let normal = lines[j].normal;
 
             // Two-sided Lambert diffuse
@@ -731,7 +742,12 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-fn sample_material(id: u32, tex_pos: [f32; 4], content_registry: &polychora::content_registry::ContentRegistry, material_resolver: &polychora::content_registry::MaterialResolver) -> ([f32; 3], f32) {
+fn sample_material(
+    id: u32,
+    tex_pos: [f32; 4],
+    content_registry: &polychora::content_registry::ContentRegistry,
+    material_resolver: &polychora::content_registry::MaterialResolver,
+) -> ([f32; 3], f32) {
     const TAU: f32 = 6.283_185_5;
     let basic_lum = 0.001;
     let p = [
@@ -856,7 +872,14 @@ fn sample_material(id: u32, tex_pos: [f32; 4], content_registry: &polychora::con
                 .block_for_gpu_token(id.min(u16::MAX as u32) as u16)
                 .map(|(ns, bt)| content_registry.block_color(ns, bt))
                 .unwrap_or([128, 128, 128]);
-            ([color[0] as f32 / 255.0, color[1] as f32 / 255.0, color[2] as f32 / 255.0], 0.0)
+            (
+                [
+                    color[0] as f32 / 255.0,
+                    color[1] as f32 / 255.0,
+                    color[2] as f32 / 255.0,
+                ],
+                0.0,
+            )
         }
     }
 }

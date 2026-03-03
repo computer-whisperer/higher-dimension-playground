@@ -66,9 +66,7 @@ impl Aabb4 {
         let chunk_world_size = cs.saturating_mul(step);
         Self {
             min: key.map(|k| k.saturating_mul(cs)),
-            max: key.map(|k| {
-                k.saturating_mul(cs).saturating_add(chunk_world_size)
-            }),
+            max: key.map(|k| k.saturating_mul(cs).saturating_add(chunk_world_size)),
         }
     }
 

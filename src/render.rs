@@ -13,16 +13,15 @@ mod types;
 mod vte;
 
 use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers, VoxelBufferCapacities};
-use self::texture_pool::TexturePool;
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
-    push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine,
-    HUD_VERTEX_CAPACITY,
+    push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine, HUD_VERTEX_CAPACITY,
 };
 use self::pipelines::{ComputePipelineContext, PresentPipelineContext};
 use self::profiler::{GpuProfiler, PROFILER_MAX_TIMESTAMPS};
+use self::texture_pool::TexturePool;
 pub use self::types::*;
 pub use self::vte::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelChunkBvhNodeRangeWrite,
@@ -3296,11 +3295,10 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             );
         }
 
-        self.frames_in_flight[frame_idx].vte_compare_enabled =
-            do_voxel_vte
-                && (vte_compare_diagnostics_enabled
-                    || vte_entity_bvh_compare_enabled()
-                    || self.vte_stage_a_breakdown_enabled);
+        self.frames_in_flight[frame_idx].vte_compare_enabled = do_voxel_vte
+            && (vte_compare_diagnostics_enabled
+                || vte_entity_bvh_compare_enabled()
+                || self.vte_stage_a_breakdown_enabled);
         self.frames_in_flight[frame_idx].vte_world_bvh_ray_diag_enabled =
             do_voxel_vte && self.vte_world_bvh_ray_diag_enabled;
 
@@ -3457,8 +3455,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         if non_voxel_leaf_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
                             let n = non_voxel_leaf_count as u32;
                             let topology_tet_count_matches =
-                                self.vte_non_voxel_bvh_topology_tet_count
-                                    == non_voxel_leaf_count;
+                                self.vte_non_voxel_bvh_topology_tet_count == non_voxel_leaf_count;
                             let periodic_rebuild_due = self.vte_non_voxel_bvh_refit_frames
                                 >= VTE_ENTITY_BVH_REFIT_REBUILD_INTERVAL;
                             let can_refit_only =
@@ -3473,7 +3470,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                             self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                         )
                                         .unwrap();
-                                    unsafe { builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1]) }
+                                    unsafe {
+                                        builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1])
+                                    }
                                     .unwrap();
                                 }
                                 builder
@@ -3514,7 +3513,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                         self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
                                     )
                                     .unwrap();
-                                unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }.unwrap();
+                                unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }
+                                    .unwrap();
 
                                 let num_stages = n_pow2.trailing_zeros();
                                 let local_stages = 6u32.min(num_stages);
@@ -3594,7 +3594,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                             self.compute_pipeline.bvh_link_parents_pipeline.clone(),
                                         )
                                         .unwrap();
-                                    unsafe { builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1]) }
+                                    unsafe {
+                                        builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1])
+                                    }
                                     .unwrap();
                                 }
                                 builder
@@ -3615,16 +3617,14 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     }
                                     .unwrap();
                                 }
-                                self.vte_non_voxel_bvh_topology_tet_count =
-                                    non_voxel_leaf_count;
+                                self.vte_non_voxel_bvh_topology_tet_count = non_voxel_leaf_count;
                                 self.vte_non_voxel_bvh_refit_frames = 0;
-                                vte_non_voxel_bvh_update_mode = if periodic_rebuild_due
-                                    && topology_tet_count_matches
-                                {
-                                    "rebuild_interval"
-                                } else {
-                                    "rebuild"
-                                };
+                                vte_non_voxel_bvh_update_mode =
+                                    if periodic_rebuild_due && topology_tet_count_matches {
+                                        "rebuild_interval"
+                                    } else {
+                                        "rebuild"
+                                    };
                             }
                         } else {
                             self.vte_non_voxel_bvh_topology_tet_count = 0;
@@ -3656,7 +3656,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         .voxel_trace_stage_a_integral_fused_pipeline
                         .clone()
                 } else {
-                    self.compute_pipeline.voxel_trace_stage_a_layered_pipeline.clone()
+                    self.compute_pipeline
+                        .voxel_trace_stage_a_layered_pipeline
+                        .clone()
                 };
                 builder
                     .bind_pipeline_compute(voxel_trace_stage_a_pipeline)
@@ -4168,7 +4170,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
+                            builder.dispatch([
+                                (total_tetrahedron_count as u32).div_ceil(64u32),
+                                1,
+                                1,
+                            ])
                         }
                         .unwrap();
 
@@ -4179,7 +4185,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
+                            builder.dispatch([
+                                (total_tetrahedron_count as u32).div_ceil(64u32),
+                                1,
+                                1,
+                            ])
                         }
                         .unwrap();
 
@@ -4202,7 +4212,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             )
                             .unwrap();
                         unsafe {
-                            builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
+                            builder.dispatch([
+                                (total_tetrahedron_count as u32).div_ceil(64u32),
+                                1,
+                                1,
+                            ])
                         }
                         .unwrap();
                     }
@@ -4392,8 +4406,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             let periodic_due = self
                 .vte_stage_a_breakdown_last_log_frame
                 .map(|last| {
-                    self.frames_rendered
-                        .saturating_sub(last)
+                    self.frames_rendered.saturating_sub(last)
                         >= self.vte_stage_a_breakdown_interval.max(1)
                 })
                 .unwrap_or(true);

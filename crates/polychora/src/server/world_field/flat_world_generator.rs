@@ -1,9 +1,7 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
 use crate::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
-use crate::shared::region_tree::{
-    ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore,
-};
+use crate::shared::region_tree::{ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore};
 use crate::shared::spatial::{Aabb4i, ChunkCoord};
 use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE, CHUNK_VOLUME};
 use std::collections::HashSet;
@@ -250,10 +248,9 @@ mod tests {
         // X: keys -2..2 = 5 chunks, Z: keys -1..3 = 5, W: keys -2..2 = 5
         let expected_count = 5usize * 5 * 5;
         assert_eq!(non_empty.len(), expected_count);
-        assert!(non_empty
-            .iter()
-            .all(|(key, payload)| key[1] == ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y)
-                && payload.uniform_block() == Some(&floor)));
+        assert!(non_empty.iter().all(|(key, payload)| key[1]
+            == ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y)
+            && payload.uniform_block() == Some(&floor)));
     }
 
     #[test]

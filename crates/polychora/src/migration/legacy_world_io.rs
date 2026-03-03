@@ -61,7 +61,9 @@ fn write_base_kind<W: Write>(base_kind: &BaseWorldKind, writer: &mut W) -> io::R
         BaseWorldKind::Empty => writer.write_all(&[BASE_KIND_EMPTY])?,
         BaseWorldKind::FlatFloor { material } | BaseWorldKind::MassivePlatforms { material } => {
             writer.write_all(&[BASE_KIND_FLAT_FLOOR])?;
-            writer.write_all(&[crate::content_registry::material_token_from_block_data(material)])?;
+            writer.write_all(&[crate::content_registry::material_token_from_block_data(
+                material,
+            )])?;
         }
     }
     Ok(())

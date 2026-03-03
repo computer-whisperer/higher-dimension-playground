@@ -120,11 +120,7 @@ impl TexturePool {
             layout,
             [
                 WriteDescriptorSet::sampler(0, sampler.clone()),
-                WriteDescriptorSet::image_view_array(
-                    1,
-                    0,
-                    image_views.iter().cloned(),
-                ),
+                WriteDescriptorSet::image_view_array(1, 0, image_views.iter().cloned()),
             ],
             [],
         )

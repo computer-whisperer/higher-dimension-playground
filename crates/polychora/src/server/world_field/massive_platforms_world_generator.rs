@@ -1,19 +1,17 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
-use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 #[cfg(test)]
 use crate::shared::chunk_payload::ResolvedChunkPayload;
+use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 #[cfg(test)]
 use crate::shared::region_tree::ChunkKey;
-use crate::shared::region_tree::{
-    RegionChunkTree, RegionNodeKind, RegionTreeCore,
-};
+use crate::shared::region_tree::{RegionChunkTree, RegionNodeKind, RegionTreeCore};
 use crate::shared::spatial::Aabb4i;
 #[cfg(test)]
 use crate::shared::spatial::ChunkCoord;
-use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_VOLUME};
 #[cfg(test)]
 use crate::shared::voxel::CHUNK_SIZE;
+use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_VOLUME};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -24,7 +22,7 @@ const POISSON_CELL_XZW: i32 = 48;
 const POISSON_CELL_Y: i32 = 12;
 // Anisotropic scaling: Y distances are multiplied by this before comparison.
 const POISSON_Y_SCALE: i64 = 4; // = POISSON_CELL_XZW / POISSON_CELL_Y
-// Minimum squared distance in scaled space between accepted candidates.
+                                // Minimum squared distance in scaled space between accepted candidates.
 const POISSON_MIN_DIST_SQ: i64 = 2304; // 48 * 48
 
 const PLATFORM_THICKNESS_CHUNKS: i32 = 2;
@@ -96,13 +94,7 @@ impl MassivePlatformsWorldGenerator {
         }
     }
 
-    fn sample_platform_bounds(
-        &self,
-        cy: i32,
-        cx: i32,
-        cz: i32,
-        cw: i32,
-    ) -> Option<Aabb4i> {
+    fn sample_platform_bounds(&self, cy: i32, cx: i32, cz: i32, cw: i32) -> Option<Aabb4i> {
         let material = self.platform_voxel.as_ref()?;
         if material.is_air() {
             return None;
@@ -128,43 +120,20 @@ impl MassivePlatformsWorldGenerator {
         let extent_span =
             (PLATFORM_HALF_EXTENT_MAX_CHUNKS - PLATFORM_HALF_EXTENT_MIN_CHUNKS + 1).max(1) as u64;
         let half_x = PLATFORM_HALF_EXTENT_MIN_CHUNKS
-            + (hash_platform_cell(
-                self.world_seed,
-                cy,
-                cx,
-                cz,
-                cw,
-                PLATFORM_HASH_SALT_EXTENT_X,
-            ) % extent_span) as i32;
+            + (hash_platform_cell(self.world_seed, cy, cx, cz, cw, PLATFORM_HASH_SALT_EXTENT_X)
+                % extent_span) as i32;
         let half_z = PLATFORM_HALF_EXTENT_MIN_CHUNKS
-            + (hash_platform_cell(
-                self.world_seed,
-                cy,
-                cx,
-                cz,
-                cw,
-                PLATFORM_HASH_SALT_EXTENT_Z,
-            ) % extent_span) as i32;
+            + (hash_platform_cell(self.world_seed, cy, cx, cz, cw, PLATFORM_HASH_SALT_EXTENT_Z)
+                % extent_span) as i32;
         let half_w = PLATFORM_HALF_EXTENT_MIN_CHUNKS
-            + (hash_platform_cell(
-                self.world_seed,
-                cy,
-                cx,
-                cz,
-                cw,
-                PLATFORM_HASH_SALT_EXTENT_W,
-            ) % extent_span) as i32;
+            + (hash_platform_cell(self.world_seed, cy, cx, cz, cw, PLATFORM_HASH_SALT_EXTENT_W)
+                % extent_span) as i32;
 
         let min_y = pos[1] - PLATFORM_THICKNESS_CHUNKS + 1;
         let max_y = pos[1];
 
         let platform_bounds = Aabb4i::from_lattice_bounds(
-            [
-                pos[0] - half_x,
-                min_y,
-                pos[2] - half_z,
-                pos[3] - half_w,
-            ],
+            [pos[0] - half_x, min_y, pos[2] - half_z, pos[3] - half_w],
             [
                 pos[0] + half_x - 1,
                 max_y,
@@ -224,8 +193,7 @@ impl MassivePlatformsWorldGenerator {
             for cz in min_cz..=max_cz {
                 for cy in min_cy..=max_cy {
                     for cx in min_cx..=max_cx {
-                        let Some(platform_bounds) =
-                            self.sample_platform_bounds(cy, cx, cz, cw)
+                        let Some(platform_bounds) = self.sample_platform_bounds(cy, cx, cz, cw)
                         else {
                             continue;
                         };
@@ -371,10 +339,8 @@ impl MassivePlatformsWorldGenerator {
         procgen_frame_offset: [i32; 3],
         tree: &mut RegionChunkTree,
     ) {
-        let placement_data = procgen::generate_maze_placements_for_bounds(
-            procgen_seed,
-            local_query_bounds,
-        );
+        let placement_data =
+            procgen::generate_maze_placements_for_bounds(procgen_seed, local_query_bounds);
 
         let platform_material = self.platform_voxel.as_ref().map(|v| {
             let mut pal = procgen::block_palette().to_vec();
@@ -546,8 +512,7 @@ fn is_candidate_accepted(seed: u64, cx: i32, cy: i32, cz: i32, cw: i32) -> bool 
                         }
                         let neighbor_pri = cell_priority(seed, nx, ny, nz, nw);
                         if neighbor_pri > my_pri
-                            || (neighbor_pri == my_pri
-                                && (ny, nx, nz, nw) < (cy, cx, cz, cw))
+                            || (neighbor_pri == my_pri && (ny, nx, nz, nw) < (cy, cx, cz, cw))
                         {
                             return false;
                         }
@@ -596,16 +561,28 @@ fn query_bounds_local_to_platform(
     let y_offset = p_key_max[1] + 1; // surface key + 1
     let local = Aabb4i::from_lattice_bounds(
         [
-            q_key_min[0].max(p_key_min[0]).saturating_add(procgen_frame_offset_xzw[0]),
+            q_key_min[0]
+                .max(p_key_min[0])
+                .saturating_add(procgen_frame_offset_xzw[0]),
             q_key_min[1] - y_offset,
-            q_key_min[2].max(p_key_min[2]).saturating_add(procgen_frame_offset_xzw[1]),
-            q_key_min[3].max(p_key_min[3]).saturating_add(procgen_frame_offset_xzw[2]),
+            q_key_min[2]
+                .max(p_key_min[2])
+                .saturating_add(procgen_frame_offset_xzw[1]),
+            q_key_min[3]
+                .max(p_key_min[3])
+                .saturating_add(procgen_frame_offset_xzw[2]),
         ],
         [
-            q_key_max[0].min(p_key_max[0]).saturating_add(procgen_frame_offset_xzw[0]),
+            q_key_max[0]
+                .min(p_key_max[0])
+                .saturating_add(procgen_frame_offset_xzw[0]),
             q_key_max[1] - y_offset,
-            q_key_max[2].min(p_key_max[2]).saturating_add(procgen_frame_offset_xzw[1]),
-            q_key_max[3].min(p_key_max[3]).saturating_add(procgen_frame_offset_xzw[2]),
+            q_key_max[2]
+                .min(p_key_max[2])
+                .saturating_add(procgen_frame_offset_xzw[1]),
+            q_key_max[3]
+                .min(p_key_max[3])
+                .saturating_add(procgen_frame_offset_xzw[2]),
         ],
         0,
     );
@@ -715,9 +692,7 @@ fn build_chunk_array_from_placement(
         // Check if this chunk only contains voxels matching the platform material.
         // If so, skip it — the platform Uniform node already covers it.
         if let Some(plat_mat) = platform_material {
-            let dominated = chunk.iter().all(|&v| {
-                v == 0 || v == plat_mat
-            });
+            let dominated = chunk.iter().all(|&v| v == 0 || v == plat_mat);
             if dominated {
                 continue;
             }
@@ -756,8 +731,7 @@ fn build_chunk_array_from_placement(
 
     // Use an empty/air chunk as the default palette entry (index 0).
     let mut palette: Vec<ChunkPayload> = vec![ChunkPayload::Empty];
-    let mut palette_map: HashMap<ChunkPayload, u16> =
-        HashMap::new();
+    let mut palette_map: HashMap<ChunkPayload, u16> = HashMap::new();
     palette_map.insert(ChunkPayload::Empty, 0);
 
     let mut indices = vec![0u16; cell_count];
@@ -795,10 +769,15 @@ fn build_chunk_array_from_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::region_tree::{collect_non_empty_chunks_from_core_in_bounds, ChunkKey, chunk_key_i32};
+    use crate::shared::region_tree::{
+        chunk_key_i32, collect_non_empty_chunks_from_core_in_bounds, ChunkKey,
+    };
     use std::collections::HashMap;
 
-    fn payload_at_chunk(core: &RegionTreeCore, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
+    fn payload_at_chunk(
+        core: &RegionTreeCore,
+        chunk_key: ChunkKey,
+    ) -> Option<ResolvedChunkPayload> {
         let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
         collect_non_empty_chunks_from_core_in_bounds(core, bounds)
             .into_iter()
@@ -832,9 +811,7 @@ mod tests {
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let chunks = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
         // Find a chunk that's NOT in the origin anchor (to test non-trivial platforms).
-        let origin_bounds = generator
-            .sample_platform_bounds(0, 0, 0, 0)
-            .unwrap();
+        let origin_bounds = generator.sample_platform_bounds(0, 0, 0, 0).unwrap();
         for (key, _) in &chunks {
             if key[0] < origin_bounds.min[0]
                 || key[0] > origin_bounds.max[0]
@@ -905,8 +882,12 @@ mod tests {
         let bounds = Aabb4i::from_lattice_bounds([-1, -1, -1, -1], [1, 1, 1, 1], 0);
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let non_empty = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
-        assert!(non_empty.iter().any(|(key, _)| *key == chunk_key_i32(0, 0, 0, 0)));
-        assert!(!non_empty.iter().any(|(key, _)| *key == chunk_key_i32(0, 1, 0, 0)));
+        assert!(non_empty
+            .iter()
+            .any(|(key, _)| *key == chunk_key_i32(0, 0, 0, 0)));
+        assert!(!non_empty
+            .iter()
+            .any(|(key, _)| *key == chunk_key_i32(0, 1, 0, 0)));
     }
 
     #[test]
@@ -1039,11 +1020,8 @@ mod tests {
             else {
                 return;
             };
-            let global_chunk = chunk_key_from_local_to_platform(
-                local_chunk,
-                &platform,
-                frame_offset,
-            );
+            let global_chunk =
+                chunk_key_from_local_to_platform(local_chunk, &platform, frame_offset);
             // Verify the global chunk is above the origin platform surface.
             if global_chunk[1].to_num::<i32>() < POISSON_CELL_Y {
                 return;

@@ -106,7 +106,10 @@ impl App {
         }
 
         // Auto-spawn entities on first scenario's warmup phase (once).
-        if scenario_index == 0 && phase == PerfSuitePhase::Warmup && !self.perf_suite_entities_spawned {
+        if scenario_index == 0
+            && phase == PerfSuitePhase::Warmup
+            && !self.perf_suite_entities_spawned
+        {
             self.perf_suite_auto_spawn_entities();
         }
 

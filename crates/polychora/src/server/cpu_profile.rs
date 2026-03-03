@@ -108,7 +108,9 @@ impl ServerCpuProfile {
         self.tick_wasm_us_max = self.tick_wasm_us_max.max(subtimings.wasm_us);
         self.tick_nav_us_sum = self.tick_nav_us_sum.saturating_add(subtimings.nav_us);
         self.tick_nav_us_max = self.tick_nav_us_max.max(subtimings.nav_us);
-        self.tick_collision_us_sum = self.tick_collision_us_sum.saturating_add(subtimings.collision_us);
+        self.tick_collision_us_sum = self
+            .tick_collision_us_sum
+            .saturating_add(subtimings.collision_us);
         self.tick_collision_us_max = self.tick_collision_us_max.max(subtimings.collision_us);
     }
 

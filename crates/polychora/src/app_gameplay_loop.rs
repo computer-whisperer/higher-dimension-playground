@@ -194,7 +194,10 @@ impl App {
                         "Hotbar slot {} selected: {} ({})",
                         self.hotbar_selected_index + 1,
                         self.selected_block.block_type,
-                        self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
+                        self.content_registry.block_name(
+                            self.selected_block.namespace,
+                            self.selected_block.block_type
+                        ),
                     );
                 }
             }
@@ -380,7 +383,10 @@ impl App {
                         "Hotbar slot {} selected: {} ({})",
                         digit,
                         self.selected_block.block_type,
-                        self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
+                        self.content_registry.block_name(
+                            self.selected_block.namespace,
+                            self.selected_block.block_type
+                        ),
                     );
                 }
             }
@@ -536,8 +542,14 @@ impl App {
                             eprintln!(
                                 "Picked voxel {} ({}) from ({}, {}, {}, {})",
                                 self.selected_block.block_type,
-                                self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
-                                origin[0], origin[1], origin[2], origin[3],
+                                self.content_registry.block_name(
+                                    self.selected_block.namespace,
+                                    self.selected_block.block_type
+                                ),
+                                origin[0],
+                                origin[1],
+                                origin[2],
+                                origin[3],
                             );
                         }
                     }
@@ -552,10 +564,17 @@ impl App {
                     if remove_requested {
                         if let Some(hit) = &edit_targets.hit {
                             let [x, y, z, w] = hit.origin_i32();
-                            let air = polychora::shared::voxel::BlockData::AIR
-                                .at_scale(hit.scale_exp);
-                            eprintln!("Removed block at ({x}, {y}, {z}, {w}) scale={}", hit.scale_exp);
-                            self.play_spatial_sound_voxel(SoundEffect::Break, hit.origin_i32(), 1.0);
+                            let air =
+                                polychora::shared::voxel::BlockData::AIR.at_scale(hit.scale_exp);
+                            eprintln!(
+                                "Removed block at ({x}, {y}, {z}, {w}) scale={}",
+                                hit.scale_exp
+                            );
+                            self.play_spatial_sound_voxel(
+                                SoundEffect::Break,
+                                hit.origin_i32(),
+                                1.0,
+                            );
                             self.send_multiplayer_voxel_update(now, hit.origin, air);
                         }
                     } else if place_requested {
@@ -564,10 +583,17 @@ impl App {
                             eprintln!(
                                 "Placed voxel {} ({}) at ({x}, {y}, {z}, {w}) scale={}",
                                 self.selected_block.block_type,
-                                self.content_registry.block_name(self.selected_block.namespace, self.selected_block.block_type),
+                                self.content_registry.block_name(
+                                    self.selected_block.namespace,
+                                    self.selected_block.block_type
+                                ),
                                 place.scale_exp,
                             );
-                            self.play_spatial_sound_voxel(SoundEffect::Place, place.origin_i32(), 1.0);
+                            self.play_spatial_sound_voxel(
+                                SoundEffect::Place,
+                                place.origin_i32(),
+                                1.0,
+                            );
                             self.send_multiplayer_voxel_update(
                                 now,
                                 place.origin,
@@ -679,7 +705,8 @@ impl App {
             .find(|hit| {
                 matches!(
                     hit.kind,
-                    DebugRayBvhNodeKind::LeafUniform { .. } | DebugRayBvhNodeKind::LeafChunkArray { .. }
+                    DebugRayBvhNodeKind::LeafUniform { .. }
+                        | DebugRayBvhNodeKind::LeafChunkArray { .. }
                 )
             })
             .map(describe_sample_ray_hit_for_hud);
@@ -713,10 +740,13 @@ impl App {
                     wmin[3] + half,
                 ];
                 let block_dist = distance4(self.camera.position, block_center);
-                Some((WailaTarget::Block {
-                    coords: hit.origin_i32(),
-                    block,
-                }, block_dist))
+                Some((
+                    WailaTarget::Block {
+                        coords: hit.origin_i32(),
+                        block,
+                    },
+                    block_dist,
+                ))
             });
 
             match (&entity_hit, &block_target) {

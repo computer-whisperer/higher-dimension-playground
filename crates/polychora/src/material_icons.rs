@@ -1,8 +1,8 @@
-use polychora::content_registry::{ContentRegistry, MaterialResolver};
 use common::{MatN, ModelInstance};
 use higher_dimension_playground::render::{
     FrameParams, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
 };
+use polychora::content_registry::{ContentRegistry, MaterialResolver};
 use std::collections::HashMap;
 use std::sync::Arc;
 use vulkano::device::{Device, Queue};
@@ -186,7 +186,10 @@ pub fn generate_material_icon_sheet_gpu(
         let v_min = dst_y as f32 / sheet_h as f32;
         let u_max = (dst_x + ICON_SIZE) as f32 / sheet_w as f32;
         let v_max = (dst_y + ICON_SIZE) as f32 / sheet_h as f32;
-        uv_rects.insert((entry.namespace, entry.block_type), [u_min, v_min, u_max, v_max]);
+        uv_rects.insert(
+            (entry.namespace, entry.block_type),
+            [u_min, v_min, u_max, v_max],
+        );
     }
 
     Some(MaterialIconSheet {

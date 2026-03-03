@@ -266,7 +266,10 @@ fn print_world_stats(label: &str, stats: &WorldStats) {
             println!("  base: flat-floor (material {})", material.block_type)
         }
         BaseWorldKind::MassivePlatforms { material } => {
-            println!("  base: massive-platforms (material {})", material.block_type)
+            println!(
+                "  base: massive-platforms (material {})",
+                material.block_type
+            )
         }
     }
     println!(
@@ -626,18 +629,18 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let mut entity_tag_count = 0usize;
     let content_registry = polychora::plugin_loader::create_full_registry();
     for entity in &entities {
-        let category = content_registry.entity_category(entity.entity.namespace, entity.entity.entity_type);
+        let category =
+            content_registry.entity_category(entity.entity.namespace, entity.entity.entity_type);
         match category {
             EntityCategory::Player => entity_class_counts[0] += 1,
             EntityCategory::Accent => entity_class_counts[1] += 1,
             EntityCategory::Mob => entity_class_counts[2] += 1,
         }
-        let type_name = content_registry.entity_lookup(entity.entity.namespace, entity.entity.entity_type)
+        let type_name = content_registry
+            .entity_lookup(entity.entity.namespace, entity.entity.entity_type)
             .map(|e| e.canonical_name.as_str())
             .unwrap_or("unknown");
-        *entity_kind_counts
-            .entry(type_name.to_string())
-            .or_insert(0) += 1;
+        *entity_kind_counts.entry(type_name.to_string()).or_insert(0) += 1;
         entity_payload_bytes += entity.entity.data.len();
         entity_tag_count += entity.tags.len();
     }
@@ -774,7 +777,9 @@ fn main() {
         } => {
             let world_result: io::Result<RegionChunkWorld> = match base.as_str() {
                 "flat" => Ok(RegionChunkWorld::new_with_base(BaseWorldKind::FlatFloor {
-                    material: polychora::content_registry::block_data_from_material_token(base_material),
+                    material: polychora::content_registry::block_data_from_material_token(
+                        base_material,
+                    ),
                 })),
                 "empty" => Ok(RegionChunkWorld::new()),
                 other => Err(io::Error::new(

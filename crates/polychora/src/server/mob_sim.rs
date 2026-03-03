@@ -30,11 +30,18 @@ fn wasm_entity_steer(
 ) -> Option<MobSteeringCommand> {
     let input_bytes = postcard::to_allocvec(input).ok()?;
     let result = manager
-        .call_slot(WasmPluginSlot::EntitySimulation, OP_ENTITY_TICK as i32, &input_bytes)
+        .call_slot(
+            WasmPluginSlot::EntitySimulation,
+            OP_ENTITY_TICK as i32,
+            &input_bytes,
+        )
         .ok()??;
     let output: EntityTickOutput = postcard::from_bytes(&result.invocation.output).ok()?;
     match output {
-        EntityTickOutput::Steer { desired_direction, speed_factor } => {
+        EntityTickOutput::Steer {
+            desired_direction,
+            speed_factor,
+        } => {
             let desired_direction = sanitize_direction(desired_direction)?;
             let speed_factor = if speed_factor.is_finite() {
                 speed_factor.clamp(0.0, 10.0)
@@ -77,7 +84,9 @@ struct MobSteeringCommand {
     speed_factor: f32,
 }
 
-fn resolved_payload_is_all_air(payload: &crate::shared::chunk_payload::ResolvedChunkPayload) -> bool {
+fn resolved_payload_is_all_air(
+    payload: &crate::shared::chunk_payload::ResolvedChunkPayload,
+) -> bool {
     use crate::shared::chunk_payload::ChunkPayload;
     match &payload.payload {
         ChunkPayload::Empty => true,
@@ -342,13 +351,7 @@ fn mob_nav_has_line_of_sight(
         }
         if locomotion == MobLocomotionMode::Walking {
             let probe_cell = mob_nav_base_cell_from_position(probe, locomotion);
-            if !mob_nav_cell_is_walkable(
-                state,
-                cache,
-                probe_cell,
-                collision_radius,
-                locomotion,
-            ) {
+            if !mob_nav_cell_is_walkable(state, cache, probe_cell, collision_radius, locomotion) {
                 return false;
             }
         }
@@ -432,13 +435,7 @@ fn mob_nav_find_walkable_goal_cell(
     collision_radius: f32,
     locomotion: MobLocomotionMode,
 ) -> Option<MobNavCell> {
-    if mob_nav_cell_is_walkable(
-        state,
-        cache,
-        desired_goal,
-        collision_radius,
-        locomotion,
-    ) {
+    if mob_nav_cell_is_walkable(state, cache, desired_goal, collision_radius, locomotion) {
         return Some(desired_goal);
     }
 
@@ -684,10 +681,19 @@ fn update_mob_navigation_state(
     let repath_due =
         now_ms.saturating_sub(navigation.last_repath_ms) >= MOB_NAV_PATH_REPLAN_INTERVAL_MS;
 
-    let has_los = if !goal_changed && now_ms.saturating_sub(navigation.last_los_check_ms) < MOB_NAV_LOS_CACHE_MS {
+    let has_los = if !goal_changed
+        && now_ms.saturating_sub(navigation.last_los_check_ms) < MOB_NAV_LOS_CACHE_MS
+    {
         navigation.last_los_result
     } else {
-        let result = mob_nav_has_line_of_sight(state, cache, position, direct_target, collision_radius, locomotion);
+        let result = mob_nav_has_line_of_sight(
+            state,
+            cache,
+            position,
+            direct_target,
+            collision_radius,
+            locomotion,
+        );
         navigation.last_los_result = result;
         navigation.last_los_check_ms = now_ms;
         result
@@ -727,9 +733,14 @@ fn update_mob_navigation_state(
         navigation.goal_cell = Some(goal_cell);
         navigation.last_repath_ms = now_ms;
 
-        if let Some(path_result) =
-            mob_nav_find_path(state, cache, start_cell, goal_cell, collision_radius, locomotion)
-        {
+        if let Some(path_result) = mob_nav_find_path(
+            state,
+            cache,
+            start_cell,
+            goal_cell,
+            collision_radius,
+            locomotion,
+        ) {
             let path_len = path_result.path_cells.len();
             let reached_goal = path_result.reached_goal;
             let expanded_steps = path_result.expanded_steps;
@@ -865,7 +876,13 @@ fn resolve_walking_collision_with_steps(
     scale: f32,
 ) -> [f32; 4] {
     let resolved = resolve_mob_collision(state, cache, old_position, attempted_position, scale);
-    let mut best = stick_mob_to_ground(state, cache, resolved, scale, MOB_WALK_GROUND_STICK_MAX_DROP);
+    let mut best = stick_mob_to_ground(
+        state,
+        cache,
+        resolved,
+        scale,
+        MOB_WALK_GROUND_STICK_MAX_DROP,
+    );
     let desired_progress_sq = mob_horizontal_distance_sq(old_position, attempted_position);
     if desired_progress_sq <= 1e-6 {
         return best;
@@ -886,7 +903,8 @@ fn resolve_walking_collision_with_steps(
             attempted_position[2],
             attempted_position[3],
         ];
-        let raised_resolved = resolve_mob_collision(state, cache, raised_old, raised_attempted, scale);
+        let raised_resolved =
+            resolve_mob_collision(state, cache, raised_old, raised_attempted, scale);
         let grounded = stick_mob_to_ground(
             state,
             cache,
@@ -917,9 +935,13 @@ fn apply_mob_locomotion_post_collision(
     locomotion: MobLocomotionMode,
 ) -> [f32; 4] {
     match locomotion {
-        MobLocomotionMode::Walking => {
-            resolve_walking_collision_with_steps(state, cache, old_position, attempted_position, scale)
-        }
+        MobLocomotionMode::Walking => resolve_walking_collision_with_steps(
+            state,
+            cache,
+            old_position,
+            attempted_position,
+            scale,
+        ),
         MobLocomotionMode::Flying => {
             resolve_mob_collision(state, cache, old_position, attempted_position, scale)
         }
@@ -1003,7 +1025,8 @@ fn simulate_mobs(
         .collect();
 
     let mut stale = Vec::new();
-    let mut detonations: Vec<(u64, [f32; 4], polychora_plugin_api::entity::EntitySimConfig)> = Vec::new();
+    let mut detonations: Vec<(u64, [f32; 4], polychora_plugin_api::entity::EntitySimConfig)> =
+        Vec::new();
     let mut navigation_updates = Vec::with_capacity(state.mobs.len());
     let mut phase_deadline_updates = Vec::with_capacity(state.mobs.len());
     let mut updates = Vec::with_capacity(state.mobs.len());
@@ -1016,7 +1039,10 @@ fn simulate_mobs(
             stale.push(mob.entity_id);
             continue;
         };
-        let Some(sim_config) = state.content_registry.sim_config(mob.entity_ns, mob.entity_type) else {
+        let Some(sim_config) = state
+            .content_registry
+            .sim_config(mob.entity_ns, mob.entity_type)
+        else {
             stale.push(mob.entity_id);
             continue;
         };
@@ -1130,7 +1156,9 @@ fn simulate_mobs(
         let mut final_forward = next_forward;
 
         // Blink ability (phase spider) via WASM
-        let has_blink = sim_config.ability_params.as_ref()
+        let has_blink = sim_config
+            .ability_params
+            .as_ref()
             .map(|a| a.blink_min_interval_ms > 0)
             .unwrap_or(false);
         if has_blink && now_ms >= mob.next_phase_ms {
@@ -1300,16 +1328,27 @@ pub(super) fn tick_entity_simulation_window(
     now_ms: u64,
     next_sim_ms: &mut u64,
     sim_step_ms: u64,
-) -> (Vec<QueuedExplosionEvent>, Vec<QueuedPlayerMovementModifier>, SimTimings) {
+) -> (
+    Vec<QueuedExplosionEvent>,
+    Vec<QueuedPlayerMovementModifier>,
+    SimTimings,
+) {
     let mut queued_explosions = Vec::new();
     let mut queued_player_modifiers = Vec::new();
     let mut timings = SimTimings::default();
     let mut collision_cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
     while *next_sim_ms <= now_ms && timings.sim_steps < ENTITY_SIM_STEP_MAX_PER_BROADCAST {
         collision_cache.clear();
-        state.entity_store.simulate(*next_sim_ms, &state.content_registry, wasm_manager);
-        let (mut step_explosions, mut step_player_modifiers) =
-            simulate_mobs(state, &mut collision_cache, wasm_manager, *next_sim_ms, &mut timings);
+        state
+            .entity_store
+            .simulate(*next_sim_ms, &state.content_registry, wasm_manager);
+        let (mut step_explosions, mut step_player_modifiers) = simulate_mobs(
+            state,
+            &mut collision_cache,
+            wasm_manager,
+            *next_sim_ms,
+            &mut timings,
+        );
         queued_explosions.append(&mut step_explosions);
         queued_player_modifiers.append(&mut step_player_modifiers);
         *next_sim_ms = (*next_sim_ms).saturating_add(sim_step_ms);
@@ -1324,8 +1363,8 @@ pub(super) fn tick_entity_simulation_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::content_registry::ContentRegistry;
+    use std::sync::Arc;
 
     fn test_registry() -> Arc<ContentRegistry> {
         Arc::new(crate::plugin_loader::create_full_registry())
@@ -1403,8 +1442,15 @@ mod tests {
         let start = [0, 3, 0, 0];
         let goal = [2, 4, 0, 0];
         let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
-        let path = mob_nav_find_path(&state, &mut cache, start, goal, 0.2, MobLocomotionMode::Walking)
-            .expect("walking path should step up onto one-cell rise");
+        let path = mob_nav_find_path(
+            &state,
+            &mut cache,
+            start,
+            goal,
+            0.2,
+            MobLocomotionMode::Walking,
+        )
+        .expect("walking path should step up onto one-cell rise");
         assert!(path.reached_goal);
         assert_eq!(path.path_cells.last().copied(), Some(goal));
 
@@ -1435,7 +1481,8 @@ mod tests {
         let scale = 0.78;
         let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
         let baseline = resolve_mob_collision(&state, &mut cache, old_pos, attempted_pos, scale);
-        let stepped = resolve_walking_collision_with_steps(&state, &mut cache, old_pos, attempted_pos, scale);
+        let stepped =
+            resolve_walking_collision_with_steps(&state, &mut cache, old_pos, attempted_pos, scale);
         assert!(
             stepped[0] > baseline[0] + 0.15,
             "expected step solver to improve horizontal progress: baseline_x={} stepped_x={}",
@@ -1449,7 +1496,13 @@ mod tests {
         let state = test_server_state_with_world();
         let start = [0.0, 10.0, 0.0, 0.0];
         let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
-        let stuck = stick_mob_to_ground(&state, &mut cache, start, 0.3, MOB_WALK_GROUND_STICK_MAX_DROP);
+        let stuck = stick_mob_to_ground(
+            &state,
+            &mut cache,
+            start,
+            0.3,
+            MOB_WALK_GROUND_STICK_MAX_DROP,
+        );
         let dropped = start[1] - stuck[1];
         assert!(dropped <= MOB_WALK_GROUND_STICK_MAX_DROP + 1e-4);
         assert!(dropped + 1e-4 >= MOB_WALK_GROUND_STICK_MAX_DROP - MOB_WALK_GROUND_STICK_STEP);

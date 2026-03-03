@@ -18,74 +18,74 @@ use std::collections::HashMap;
 pub const LEGACY_MATERIAL_TOKEN_COUNT: u8 = 68;
 
 const TOKEN_TO_BLOCK_TYPE: [u32; LEGACY_MATERIAL_TOKEN_COUNT as usize] = [
-    content_ids::BLOCK_RED,                // token 1
-    content_ids::BLOCK_ORANGE,             // token 2
-    content_ids::BLOCK_YELLOW_GREEN,       // token 3
-    content_ids::BLOCK_GREEN,              // token 4
-    content_ids::BLOCK_CYAN,               // token 5
-    content_ids::BLOCK_BLUE,               // token 6
-    content_ids::BLOCK_PURPLE,             // token 7
-    content_ids::BLOCK_MAGENTA,            // token 8
-    content_ids::BLOCK_RAINBOW,            // token 9
-    content_ids::BLOCK_BROWN,              // token 10
-    content_ids::BLOCK_GRID_FLOOR,         // token 11
-    content_ids::BLOCK_WHITE,              // token 12
-    content_ids::BLOCK_LIGHT,              // token 13
-    content_ids::BLOCK_MIRROR,             // token 14
-    content_ids::BLOCK_LAVA_VEINED_BASALT, // token 15
-    content_ids::BLOCK_CRYSTAL_LATTICE,    // token 16
-    content_ids::BLOCK_MARBLE,             // token 17
-    content_ids::BLOCK_OXIDIZED_METAL,     // token 18
-    content_ids::BLOCK_BIO_SPORE_MOSS,     // token 19
-    content_ids::BLOCK_VOID_MIRROR,        // token 20
-    content_ids::BLOCK_AVATAR_MARKER,      // token 21
+    content_ids::BLOCK_RED,                  // token 1
+    content_ids::BLOCK_ORANGE,               // token 2
+    content_ids::BLOCK_YELLOW_GREEN,         // token 3
+    content_ids::BLOCK_GREEN,                // token 4
+    content_ids::BLOCK_CYAN,                 // token 5
+    content_ids::BLOCK_BLUE,                 // token 6
+    content_ids::BLOCK_PURPLE,               // token 7
+    content_ids::BLOCK_MAGENTA,              // token 8
+    content_ids::BLOCK_RAINBOW,              // token 9
+    content_ids::BLOCK_BROWN,                // token 10
+    content_ids::BLOCK_GRID_FLOOR,           // token 11
+    content_ids::BLOCK_WHITE,                // token 12
+    content_ids::BLOCK_LIGHT,                // token 13
+    content_ids::BLOCK_MIRROR,               // token 14
+    content_ids::BLOCK_LAVA_VEINED_BASALT,   // token 15
+    content_ids::BLOCK_CRYSTAL_LATTICE,      // token 16
+    content_ids::BLOCK_MARBLE,               // token 17
+    content_ids::BLOCK_OXIDIZED_METAL,       // token 18
+    content_ids::BLOCK_BIO_SPORE_MOSS,       // token 19
+    content_ids::BLOCK_VOID_MIRROR,          // token 20
+    content_ids::BLOCK_AVATAR_MARKER,        // token 21
     content_ids::BLOCK_HOLOGRAPHIC_LAMINATE, // token 22
-    content_ids::BLOCK_TIDAL_GLASS,        // token 23
-    content_ids::BLOCK_CIRCUIT_WEAVE,      // token 24
-    content_ids::BLOCK_AURORA_STONE,       // token 25
-    content_ids::BLOCK_HAZARD_CHEVRONS,    // token 26
-    content_ids::BLOCK_STONE,              // token 27
-    content_ids::BLOCK_COBBLESTONE,        // token 28
-    content_ids::BLOCK_DIRT,               // token 29
-    content_ids::BLOCK_COARSE_DIRT,        // token 30
-    content_ids::BLOCK_OAK_PLANKS,         // token 31
-    content_ids::BLOCK_SPRUCE_PLANKS,      // token 32
-    content_ids::BLOCK_LOG_BARK,           // token 33
-    content_ids::BLOCK_LOG_END_RINGS,      // token 34
-    content_ids::BLOCK_SAND,               // token 35
-    content_ids::BLOCK_GRAVEL,             // token 36
-    content_ids::BLOCK_CLAY,               // token 37
-    content_ids::BLOCK_GRASS_BLOCK,        // token 38
-    content_ids::BLOCK_SNOW,               // token 39
-    content_ids::BLOCK_ICE,                // token 40
-    content_ids::BLOCK_COAL_ORE,           // token 41
-    content_ids::BLOCK_IRON_ORE,           // token 42
-    content_ids::BLOCK_GOLD_ORE,           // token 43
-    content_ids::BLOCK_DIAMOND_ORE,        // token 44
-    content_ids::BLOCK_REDSTONE_ORE,       // token 45
-    content_ids::BLOCK_BIRCH_PLANKS,       // token 46
-    content_ids::BLOCK_BRICKS,             // token 47
-    content_ids::BLOCK_SANDSTONE,          // token 48
-    content_ids::BLOCK_GLASS,              // token 49
-    content_ids::BLOCK_GLOWSTONE,          // token 50
-    content_ids::BLOCK_OBSIDIAN,           // token 51
-    content_ids::BLOCK_PRISMARINE,         // token 52
-    content_ids::BLOCK_TERRACOTTA,         // token 53
-    content_ids::BLOCK_WOOL_WHITE,         // token 54
-    content_ids::BLOCK_BASALT_TILES,       // token 55
-    content_ids::BLOCK_COPPER_WEAVE,       // token 56
-    content_ids::BLOCK_NEBULA_STRATA,      // token 57
-    content_ids::BLOCK_STARFORGED_CORE,    // token 58
-    content_ids::BLOCK_CRYO_CIRCUIT,       // token 59
-    content_ids::BLOCK_SMOKED_GLASS,       // token 60
-    content_ids::BLOCK_IVORY_MARBLE,       // token 61
-    content_ids::BLOCK_RUNIC_ALLOY,        // token 62
-    content_ids::BLOCK_HYPERPHASE_GEL,     // token 63
-    content_ids::BLOCK_SINGULARITY_CORE,   // token 64
-    content_ids::BLOCK_CHRONO_BLOOM,       // token 65
-    content_ids::BLOCK_TESSERACT_WEAVE,    // token 66
-    content_ids::BLOCK_EVENTIDE_ALLOY,     // token 67
-    content_ids::BLOCK_BEACON_MATRIX,      // token 68
+    content_ids::BLOCK_TIDAL_GLASS,          // token 23
+    content_ids::BLOCK_CIRCUIT_WEAVE,        // token 24
+    content_ids::BLOCK_AURORA_STONE,         // token 25
+    content_ids::BLOCK_HAZARD_CHEVRONS,      // token 26
+    content_ids::BLOCK_STONE,                // token 27
+    content_ids::BLOCK_COBBLESTONE,          // token 28
+    content_ids::BLOCK_DIRT,                 // token 29
+    content_ids::BLOCK_COARSE_DIRT,          // token 30
+    content_ids::BLOCK_OAK_PLANKS,           // token 31
+    content_ids::BLOCK_SPRUCE_PLANKS,        // token 32
+    content_ids::BLOCK_LOG_BARK,             // token 33
+    content_ids::BLOCK_LOG_END_RINGS,        // token 34
+    content_ids::BLOCK_SAND,                 // token 35
+    content_ids::BLOCK_GRAVEL,               // token 36
+    content_ids::BLOCK_CLAY,                 // token 37
+    content_ids::BLOCK_GRASS_BLOCK,          // token 38
+    content_ids::BLOCK_SNOW,                 // token 39
+    content_ids::BLOCK_ICE,                  // token 40
+    content_ids::BLOCK_COAL_ORE,             // token 41
+    content_ids::BLOCK_IRON_ORE,             // token 42
+    content_ids::BLOCK_GOLD_ORE,             // token 43
+    content_ids::BLOCK_DIAMOND_ORE,          // token 44
+    content_ids::BLOCK_REDSTONE_ORE,         // token 45
+    content_ids::BLOCK_BIRCH_PLANKS,         // token 46
+    content_ids::BLOCK_BRICKS,               // token 47
+    content_ids::BLOCK_SANDSTONE,            // token 48
+    content_ids::BLOCK_GLASS,                // token 49
+    content_ids::BLOCK_GLOWSTONE,            // token 50
+    content_ids::BLOCK_OBSIDIAN,             // token 51
+    content_ids::BLOCK_PRISMARINE,           // token 52
+    content_ids::BLOCK_TERRACOTTA,           // token 53
+    content_ids::BLOCK_WOOL_WHITE,           // token 54
+    content_ids::BLOCK_BASALT_TILES,         // token 55
+    content_ids::BLOCK_COPPER_WEAVE,         // token 56
+    content_ids::BLOCK_NEBULA_STRATA,        // token 57
+    content_ids::BLOCK_STARFORGED_CORE,      // token 58
+    content_ids::BLOCK_CRYO_CIRCUIT,         // token 59
+    content_ids::BLOCK_SMOKED_GLASS,         // token 60
+    content_ids::BLOCK_IVORY_MARBLE,         // token 61
+    content_ids::BLOCK_RUNIC_ALLOY,          // token 62
+    content_ids::BLOCK_HYPERPHASE_GEL,       // token 63
+    content_ids::BLOCK_SINGULARITY_CORE,     // token 64
+    content_ids::BLOCK_CHRONO_BLOOM,         // token 65
+    content_ids::BLOCK_TESSERACT_WEAVE,      // token 66
+    content_ids::BLOCK_EVENTIDE_ALLOY,       // token 67
+    content_ids::BLOCK_BEACON_MATRIX,        // token 68
 ];
 
 /// Convert a material token (0 = air, 1–68 = blocks) to its `BlockData`.
@@ -311,7 +311,10 @@ impl ContentRegistry {
                 name: "Air".into(),
                 category: BlockCategory::Special,
                 color: [0, 0, 0],
-                texture: TextureRef { namespace: 0, texture_id: 0 },
+                texture: TextureRef {
+                    namespace: 0,
+                    texture_id: 0,
+                },
                 material_token: 0,
             },
         );
@@ -341,7 +344,10 @@ impl ContentRegistry {
             name: name.into(),
             category,
             color,
-            texture: TextureRef { namespace: 0, texture_id: 0 },
+            texture: TextureRef {
+                namespace: 0,
+                texture_id: 0,
+            },
             material_token: token,
         };
         self.blocks.insert((namespace, block_type), entry);
@@ -385,7 +391,8 @@ impl ContentRegistry {
         };
         self.blocks.insert((namespace, block_type), entry);
         self.block_order.push((namespace, block_type));
-        self.token_to_block.insert(forced_token, (namespace, block_type));
+        self.token_to_block
+            .insert(forced_token, (namespace, block_type));
         // Keep next_procedural_token ahead of any forced token
         if forced_token >= self.next_procedural_token {
             self.next_procedural_token = forced_token + 1;
@@ -424,12 +431,15 @@ impl ContentRegistry {
                 );
             }
         }
-        self.texture_tokens.insert((namespace, texture_id), material_token);
+        self.texture_tokens
+            .insert((namespace, texture_id), material_token);
     }
 
     /// Resolve a `TextureRef` to its GPU material token.
     pub fn resolve_texture_token(&self, tex: &TextureRef) -> Option<u16> {
-        self.texture_tokens.get(&(tex.namespace, tex.texture_id)).copied()
+        self.texture_tokens
+            .get(&(tex.namespace, tex.texture_id))
+            .copied()
     }
 
     // -----------------------------------------------------------------------
@@ -506,7 +516,9 @@ impl ContentRegistry {
     /// Iterate all blocks in registration order (excludes air).
     /// Replacement for `MATERIALS.iter()`.
     pub fn all_blocks_ordered(&self) -> impl Iterator<Item = &BlockEntry> {
-        self.block_order.iter().filter_map(|key| self.blocks.get(key))
+        self.block_order
+            .iter()
+            .filter_map(|key| self.blocks.get(key))
     }
 
     /// Number of registered blocks (excludes air).
@@ -648,7 +660,8 @@ mod tests {
 
         // Verify specific block lookups via MaterialResolver reverse mapping
         let check_name = |token: u16, expected_name: &str| {
-            let (ns, bt) = resolver.block_for_gpu_token(token)
+            let (ns, bt) = resolver
+                .block_for_gpu_token(token)
                 .unwrap_or_else(|| panic!("token {} not in resolver", token));
             assert_eq!(registry.block_name(ns, bt), expected_name);
             assert_eq!(resolver.resolve_block(ns, bt), token);
@@ -662,7 +675,8 @@ mod tests {
 
         // Verify round-trip for all 68 blocks
         for token in 1u16..=68 {
-            let (ns, bt) = resolver.block_for_gpu_token(token)
+            let (ns, bt) = resolver
+                .block_for_gpu_token(token)
                 .unwrap_or_else(|| panic!("token {} not in resolver", token));
             assert_eq!(resolver.resolve_block(ns, bt), token);
         }
@@ -682,7 +696,10 @@ mod tests {
         assert!(seeker.sim_config.is_some(), "seeker should have sim_config");
         let seeker_config = seeker.sim_config.as_ref().unwrap();
         assert_eq!(seeker_config.move_speed, 3.0);
-        assert_eq!(seeker_config.locomotion, polychora_plugin_api::entity::MobLocomotionMode::Walking);
+        assert_eq!(
+            seeker_config.locomotion,
+            polychora_plugin_api::entity::MobLocomotionMode::Walking
+        );
 
         // Spawnable names should include all non-player entities
         let spawnable = registry.spawnable_entity_names();
@@ -725,15 +742,24 @@ mod tests {
         use polychora_plugin_api::texture::{builtin_textures, TextureRef};
 
         // TEX_STONE should resolve to material token 27
-        let tex = TextureRef { namespace: 0, texture_id: builtin_textures::TEX_STONE };
+        let tex = TextureRef {
+            namespace: 0,
+            texture_id: builtin_textures::TEX_STONE,
+        };
         assert_eq!(registry.resolve_texture_token(&tex), Some(27));
 
         // TEX_RED should resolve to material token 1
-        let tex = TextureRef { namespace: 0, texture_id: builtin_textures::TEX_RED };
+        let tex = TextureRef {
+            namespace: 0,
+            texture_id: builtin_textures::TEX_RED,
+        };
         assert_eq!(registry.resolve_texture_token(&tex), Some(1));
 
         // Unknown texture returns None
-        let tex = TextureRef { namespace: 99, texture_id: 0xdeadbeef };
+        let tex = TextureRef {
+            namespace: 99,
+            texture_id: 0xdeadbeef,
+        };
         assert_eq!(registry.resolve_texture_token(&tex), None);
     }
 
@@ -741,9 +767,17 @@ mod tests {
     fn entity_model_textures_declared() {
         let registry = full_registry();
         // Every non-player entity should have at least one model texture.
-        let expected_entities = ["cube", "rotor", "drifter", "seeker", "creeper", "phase_spider"];
+        let expected_entities = [
+            "cube",
+            "rotor",
+            "drifter",
+            "seeker",
+            "creeper",
+            "phase_spider",
+        ];
         for name in expected_entities {
-            let entry = registry.entity_lookup_by_name(name)
+            let entry = registry
+                .entity_lookup_by_name(name)
                 .unwrap_or_else(|| panic!("entity '{}' not found", name));
             assert!(
                 !entry.model_textures.is_empty(),
@@ -773,7 +807,8 @@ mod tests {
             ("mobphasespider", "phase_spider"),
         ];
         for &(alias, canonical) in expected {
-            let entry = registry.entity_lookup_by_name(alias)
+            let entry = registry
+                .entity_lookup_by_name(alias)
                 .unwrap_or_else(|| panic!("alias '{}' not found", alias));
             assert_eq!(
                 entry.canonical_name, canonical,

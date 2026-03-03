@@ -8,12 +8,30 @@ pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZ
 // 4! = 24 permutations of [X, Y, Z, W] axes.
 // Each row is a permutation: output[i] = input[PERMUTATIONS[perm][i]]
 const PERMUTATIONS: [[u8; 4]; 24] = [
-    [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1],
-    [0, 3, 1, 2], [0, 3, 2, 1], [1, 0, 2, 3], [1, 0, 3, 2],
-    [1, 2, 0, 3], [1, 2, 3, 0], [1, 3, 0, 2], [1, 3, 2, 0],
-    [2, 0, 1, 3], [2, 0, 3, 1], [2, 1, 0, 3], [2, 1, 3, 0],
-    [2, 3, 0, 1], [2, 3, 1, 0], [3, 0, 1, 2], [3, 0, 2, 1],
-    [3, 1, 0, 2], [3, 1, 2, 0], [3, 2, 0, 1], [3, 2, 1, 0],
+    [0, 1, 2, 3],
+    [0, 1, 3, 2],
+    [0, 2, 1, 3],
+    [0, 2, 3, 1],
+    [0, 3, 1, 2],
+    [0, 3, 2, 1],
+    [1, 0, 2, 3],
+    [1, 0, 3, 2],
+    [1, 2, 0, 3],
+    [1, 2, 3, 0],
+    [1, 3, 0, 2],
+    [1, 3, 2, 0],
+    [2, 0, 1, 3],
+    [2, 0, 3, 1],
+    [2, 1, 0, 3],
+    [2, 1, 3, 0],
+    [2, 3, 0, 1],
+    [2, 3, 1, 0],
+    [3, 0, 1, 2],
+    [3, 0, 2, 1],
+    [3, 1, 0, 2],
+    [3, 1, 2, 0],
+    [3, 2, 0, 1],
+    [3, 2, 1, 0],
 ];
 
 /// A tesseract (4D hypercube) orientation: one of 384 discrete rotations/reflections.
@@ -80,10 +98,7 @@ impl TesseractOrientation {
         }
 
         // Find the permutation index for c_perm
-        let perm_idx = PERMUTATIONS
-            .iter()
-            .position(|p| *p == c_perm)
-            .unwrap_or(0) as u8;
+        let perm_idx = PERMUTATIONS.iter().position(|p| *p == c_perm).unwrap_or(0) as u8;
         Self::from_parts(perm_idx, c_signs)
     }
 

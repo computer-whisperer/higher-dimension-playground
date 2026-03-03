@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::shared::spatial::ChunkCoord;
-use crate::shared::voxel::{
-    world_to_chunk_at_scale, BaseWorldKind, CHUNK_SIZE, CHUNK_VOLUME,
-};
+use crate::shared::voxel::{world_to_chunk_at_scale, BaseWorldKind, CHUNK_SIZE, CHUNK_VOLUME};
 
 /// Legacy chunk position used only during migration from old save formats.
 /// Replaces the removed `ChunkPos` struct.
@@ -115,7 +113,9 @@ impl RegionChunkWorld {
         let flat_floor_chunk = match &base_kind {
             BaseWorldKind::FlatFloor { material }
             | BaseWorldKind::MassivePlatforms { material } => {
-                Self::build_flat_floor_chunk(LegacyVoxel(crate::content_registry::material_token_from_block_data(material)))
+                Self::build_flat_floor_chunk(LegacyVoxel(
+                    crate::content_registry::material_token_from_block_data(material),
+                ))
             }
             BaseWorldKind::Empty => Chunk::new(),
         };

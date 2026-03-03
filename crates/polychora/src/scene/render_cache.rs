@@ -128,7 +128,9 @@ impl Scene {
         if let Some(bounds) = self.render_region_cache_bounds {
             eprintln!(
                 "  cache bounds: {:?} -> {:?}  size: {:?}",
-                bounds.min, bounds.max, bounds_size(&bounds),
+                bounds.min,
+                bounds.max,
+                bounds_size(&bounds),
             );
         }
         if let Some(cache) = self.render_region_cache.as_ref() {
@@ -154,11 +156,7 @@ impl Scene {
         eprintln!("=== END REGION CACHE TREE ===\n");
     }
 
-    fn dump_region_node(
-        node: &RegionTreeCore,
-        depth: usize,
-        stats: &mut RegionDumpStats,
-    ) {
+    fn dump_region_node(node: &RegionTreeCore, depth: usize, stats: &mut RegionDumpStats) {
         fn bounds_size(b: &Aabb4i) -> [i32; 4] {
             [
                 (b.max[0] - b.min[0]).to_num::<i32>(),
@@ -188,7 +186,12 @@ impl Scene {
                 stats.uniform += 1;
                 eprintln!(
                     "{}Uniform(ns={},bt={})  bounds={:?}->{:?} size={:?}",
-                    indent, block.namespace, block.block_type, node.bounds.min, node.bounds.max, size,
+                    indent,
+                    block.namespace,
+                    block.block_type,
+                    node.bounds.min,
+                    node.bounds.max,
+                    size,
                 );
             }
             RegionNodeKind::ProceduralRef(gen) => {
@@ -312,13 +315,7 @@ impl Scene {
             };
             eprintln!(
                 "{}Leaf[{}->{}] {}  bounds={:?}->{:?} size={:?}",
-                indent,
-                node_idx,
-                leaf_idx,
-                leaf_label,
-                node.world_min,
-                node.world_max,
-                size,
+                indent, node_idx, leaf_idx, leaf_label, node.world_min, node.world_max, size,
             );
         } else {
             stats.internal_count += 1;
@@ -685,22 +682,18 @@ impl Scene {
         }
 
         // --- Cross-validate: render cache vs world tree ---
-        if let (Some(bounds), Some(cache)) =
-            (cache_bounds, self.render_region_cache.as_ref())
-        {
+        if let (Some(bounds), Some(cache)) = (cache_bounds, self.render_region_cache.as_ref()) {
             let fresh = self.build_render_region_tree_in_bounds(bounds);
             let fresh_core = fresh.slice_non_empty_core_in_bounds(bounds);
             let cached_core = cache.slice_non_empty_core_in_bounds(bounds);
 
             // Compare by collecting all non-empty chunks from both
-            let mut fresh_chunks = collect_non_empty_chunks_from_core_in_bounds(
-                &fresh_core, bounds,
-            );
+            let mut fresh_chunks =
+                collect_non_empty_chunks_from_core_in_bounds(&fresh_core, bounds);
             fresh_chunks.sort_unstable_by_key(|(key, _)| *key);
 
-            let mut cached_chunks = collect_non_empty_chunks_from_core_in_bounds(
-                &cached_core, bounds,
-            );
+            let mut cached_chunks =
+                collect_non_empty_chunks_from_core_in_bounds(&cached_core, bounds);
             cached_chunks.sort_unstable_by_key(|(key, _)| *key);
 
             report.cross_validate_fresh_chunk_count = fresh_chunks.len();
@@ -912,8 +905,12 @@ fn walk_cpu_bvh_node(
                 if !bounds_within(l.bounds, node.bounds) {
                     ctx.errors.push(format!(
                         "left child {} bounds {:?}->{:?} not within parent {} bounds {:?}->{:?}",
-                        left, l.bounds.min, l.bounds.max,
-                        node_idx, node.bounds.min, node.bounds.max,
+                        left,
+                        l.bounds.min,
+                        l.bounds.max,
+                        node_idx,
+                        node.bounds.min,
+                        node.bounds.max,
                     ));
                 }
             }
@@ -922,8 +919,12 @@ fn walk_cpu_bvh_node(
                 if !bounds_within(r.bounds, node.bounds) {
                     ctx.errors.push(format!(
                         "right child {} bounds {:?}->{:?} not within parent {} bounds {:?}->{:?}",
-                        right, r.bounds.min, r.bounds.max,
-                        node_idx, node.bounds.min, node.bounds.max,
+                        right,
+                        r.bounds.min,
+                        r.bounds.max,
+                        node_idx,
+                        node.bounds.min,
+                        node.bounds.max,
                     ));
                 }
             }
@@ -1039,8 +1040,10 @@ fn walk_gpu_bvh_node(fd: &VoxelFrameData, node_idx: u32, depth: usize, ctx: &mut
             }
         }
         if !bounds_ok {
-            let expected_min: [i32; 4] = std::array::from_fn(|i| (node_min[i] / cell_size).floor() as i32);
-            let expected_max: [i32; 4] = std::array::from_fn(|i| (node_max[i] / cell_size).floor() as i32 - 1);
+            let expected_min: [i32; 4] =
+                std::array::from_fn(|i| (node_min[i] / cell_size).floor() as i32);
+            let expected_max: [i32; 4] =
+                std::array::from_fn(|i| (node_max[i] / cell_size).floor() as i32 - 1);
             ctx.errors.push(format!(
                 "gpu node {} bounds {:?}->{:?} diverges from leaf {} coords {:?}->{:?} (scale_exp={}, cell_size={}, expected {:?}->{:?})",
                 node_idx, node_min, node_max, leaf_idx, leaf_min, leaf_max, scale_exp, cell_size, expected_min, expected_max,
@@ -1066,8 +1069,13 @@ fn walk_gpu_bvh_node(fd: &VoxelFrameData, node_idx: u32, depth: usize, ctx: &mut
                     {
                         ctx.errors.push(format!(
                             "gpu {} child {} bounds {:?}->{:?} outside parent {} bounds {:?}->{:?}",
-                            child_name, child_idx, c.world_min, c.world_max,
-                            node_idx, node.world_min, node.world_max,
+                            child_name,
+                            child_idx,
+                            c.world_min,
+                            c.world_max,
+                            node_idx,
+                            node.world_min,
+                            node.world_max,
                         ));
                         break;
                     }

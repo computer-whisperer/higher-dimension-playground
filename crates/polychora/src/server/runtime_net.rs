@@ -789,16 +789,22 @@ pub(super) fn start_broadcast_thread(
                     MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS,
                     MOB_NAV_CACHE_EVICT_BUDGET_PER_TICK,
                 );
-                let (explosion_events, player_movement_modifiers, sim_timings) = tick_entity_simulation_window(
-                    &mut guard,
-                    &mut wasm_manager,
-                    now,
-                    &mut next_entity_sim_ms,
-                    entity_sim_step_ms,
-                );
+                let (explosion_events, player_movement_modifiers, sim_timings) =
+                    tick_entity_simulation_window(
+                        &mut guard,
+                        &mut wasm_manager,
+                        now,
+                        &mut next_entity_sim_ms,
+                        entity_sim_step_ms,
+                    );
                 let entity_batches =
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
-                (entity_batches, explosion_events, player_movement_modifiers, sim_timings)
+                (
+                    entity_batches,
+                    explosion_events,
+                    player_movement_modifiers,
+                    sim_timings,
+                )
             };
             let spawned_count: usize = entity_batches.iter().map(|batch| batch.spawned.len()).sum();
             let transform_count: usize = entity_batches
@@ -1105,7 +1111,10 @@ fn spawn_entity_from_request(
     };
 
     let snapshot = match (entry.category, entry.sim_config.as_ref().map(|c| c.mode)) {
-        (EntityCategory::Mob, Some(polychora_plugin_api::entity::SimulationMode::PhysicsDriven)) => {
+        (
+            EntityCategory::Mob,
+            Some(polychora_plugin_api::entity::SimulationMode::PhysicsDriven),
+        ) => {
             let config = entry.sim_config.as_ref().unwrap();
             spawn_mob_entity(
                 state,
@@ -1120,9 +1129,7 @@ fn spawn_entity_from_request(
                 start,
             )
         }
-        (EntityCategory::Accent, _) => {
-            spawn_entity(state, entity_data, None, true, None, start)
-        }
+        (EntityCategory::Accent, _) => spawn_entity(state, entity_data, None, true, None, start),
         (category, sim_mode) => {
             return Err(format!(
                 "spawn spec for '{}' is invalid (category={:?}, sim_mode={:?})",
@@ -1298,7 +1305,11 @@ pub(super) fn handle_message(
         ClientMessage::WorldInterestUpdate { bounds } => {
             handle_world_interest_update(state, client_id, bounds);
         }
-        ClientMessage::WorldChunkSampleRequest { request_id, chunk, scale_exp: _ } => {
+        ClientMessage::WorldChunkSampleRequest {
+            request_id,
+            chunk,
+            scale_exp: _,
+        } => {
             handle_world_chunk_sample_request(state, client_id, request_id, chunk);
         }
         ClientMessage::Ping { nonce } => {
@@ -1493,9 +1504,7 @@ fn spawn_mob_entity(
     let mut guard = state.lock().expect("server state lock poisoned");
     let allocated_id = allocate_or_reserve_server_object_id(&mut guard, persisted_entity_id);
     let now_ms = monotonic_ms(start);
-    guard
-        .entity_store
-        .spawn(allocated_id, entity, now_ms);
+    guard.entity_store.spawn(allocated_id, entity, now_ms);
     let phase_offset = persisted_mob
         .as_ref()
         .map(|mob| mob.phase_offset)
@@ -1516,10 +1525,23 @@ fn spawn_mob_entity(
         .unwrap_or(config.tangent_weight)
         .clamp(0.0, 2.0);
     let initial_phase_tick_seed = (allocated_id as u32).wrapping_mul(7477);
-    let blink_min_ms = config.ability_params.as_ref().map(|a| a.blink_min_interval_ms).unwrap_or(0);
-    let blink_max_ms = config.ability_params.as_ref().map(|a| a.blink_max_interval_ms).unwrap_or(0);
-    let next_phase_ms =
-        phase_spider_next_phase_deadline(now_ms, phase_offset, initial_phase_tick_seed, blink_min_ms, blink_max_ms);
+    let blink_min_ms = config
+        .ability_params
+        .as_ref()
+        .map(|a| a.blink_min_interval_ms)
+        .unwrap_or(0);
+    let blink_max_ms = config
+        .ability_params
+        .as_ref()
+        .map(|a| a.blink_max_interval_ms)
+        .unwrap_or(0);
+    let next_phase_ms = phase_spider_next_phase_deadline(
+        now_ms,
+        phase_offset,
+        initial_phase_tick_seed,
+        blink_min_ms,
+        blink_max_ms,
+    );
     guard.mobs.insert(
         allocated_id,
         MobState {

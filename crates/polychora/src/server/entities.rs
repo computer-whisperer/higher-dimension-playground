@@ -118,11 +118,19 @@ fn wasm_entity_set_pose(
     let manager = wasm_manager.as_mut()?;
     let input_bytes = postcard::to_allocvec(input).ok()?;
     let result = manager
-        .call_slot(WasmPluginSlot::EntitySimulation, OP_ENTITY_TICK as i32, &input_bytes)
+        .call_slot(
+            WasmPluginSlot::EntitySimulation,
+            OP_ENTITY_TICK as i32,
+            &input_bytes,
+        )
         .ok()??;
     let output: EntityTickOutput = postcard::from_bytes(&result.invocation.output).ok()?;
     match output {
-        EntityTickOutput::SetPose { position, orientation, scale } => {
+        EntityTickOutput::SetPose {
+            position,
+            orientation,
+            scale,
+        } => {
             // Validate finite values
             if position.iter().all(|v| v.is_finite())
                 && orientation.iter().all(|v| v.is_finite())
@@ -196,12 +204,7 @@ impl EntityStore {
         true
     }
 
-    pub fn spawn(
-        &mut self,
-        entity_id: EntityId,
-        entity: Entity,
-        last_update_ms: u64,
-    ) -> EntityId {
+    pub fn spawn(&mut self, entity_id: EntityId, entity: Entity, last_update_ms: u64) -> EntityId {
         let home_position = entity.pose.position;
         let base_scale = entity.pose.scale;
         let state = EntityState {

@@ -169,10 +169,8 @@ impl RenderContext {
             device.clone(),
             shader_spirv!("mainVoxelTraceStageAIntegralFused"),
         );
-        let voxel_trace_stage_a_layered = load_shader(
-            device.clone(),
-            shader_spirv!("mainVoxelTraceStageALayered"),
-        );
+        let voxel_trace_stage_a_layered =
+            load_shader(device.clone(), shader_spirv!("mainVoxelTraceStageALayered"));
         let voxel_display_stage_b =
             load_shader(device.clone(), shader_spirv!("mainVoxelDisplayStageB"));
         let raster_tet = load_shader(device.clone(), shader_spirv!("mainTetrahedronCS"));

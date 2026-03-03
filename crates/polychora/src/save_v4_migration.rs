@@ -2,12 +2,12 @@ use crate::migration::legacy_voxel::Chunk as LegacyChunk;
 use crate::migration::legacy_voxel::RegionChunkWorld;
 use crate::migration::legacy_world_io::load_world;
 use crate::migration::save_v3;
+use crate::migration::save_v3::{EntityClass, EntityKind};
 use crate::save_v4::{
     self, PersistedEntityRecord, PlayerEntityHint, PlayerRecord, SaveChunkPayloadRequest,
     SaveResult, DEFAULT_REGION_CHUNK_EDGE,
 };
 use crate::shared::chunk_payload::{ChunkPayload as FieldChunkPayload, ResolvedChunkPayload};
-use crate::migration::save_v3::{EntityClass, EntityKind};
 use crate::shared::entity_types;
 use crate::shared::protocol::{Entity, EntityPose};
 use crate::shared::region_tree::ChunkKey;
@@ -54,23 +54,74 @@ fn entity_kind_to_type_key(kind: EntityKind) -> (u32, u32) {
 fn build_legacy_block_palette() -> Vec<BlockData> {
     use polychora_plugin_api::content_ids::*;
     let ordered: &[u32] = &[
-        BLOCK_RED, BLOCK_ORANGE, BLOCK_YELLOW_GREEN, BLOCK_GREEN,
-        BLOCK_CYAN, BLOCK_BLUE, BLOCK_PURPLE, BLOCK_MAGENTA,
-        BLOCK_RAINBOW, BLOCK_BROWN, BLOCK_GRID_FLOOR, BLOCK_WHITE,
-        BLOCK_LIGHT, BLOCK_MIRROR, BLOCK_LAVA_VEINED_BASALT, BLOCK_CRYSTAL_LATTICE,
-        BLOCK_MARBLE, BLOCK_OXIDIZED_METAL, BLOCK_BIO_SPORE_MOSS, BLOCK_VOID_MIRROR,
-        BLOCK_AVATAR_MARKER, BLOCK_HOLOGRAPHIC_LAMINATE, BLOCK_TIDAL_GLASS, BLOCK_CIRCUIT_WEAVE,
-        BLOCK_AURORA_STONE, BLOCK_HAZARD_CHEVRONS, BLOCK_STONE, BLOCK_COBBLESTONE,
-        BLOCK_DIRT, BLOCK_COARSE_DIRT, BLOCK_OAK_PLANKS, BLOCK_SPRUCE_PLANKS,
-        BLOCK_LOG_BARK, BLOCK_LOG_END_RINGS, BLOCK_SAND, BLOCK_GRAVEL,
-        BLOCK_CLAY, BLOCK_GRASS_BLOCK, BLOCK_SNOW, BLOCK_ICE,
-        BLOCK_COAL_ORE, BLOCK_IRON_ORE, BLOCK_GOLD_ORE, BLOCK_DIAMOND_ORE,
-        BLOCK_REDSTONE_ORE, BLOCK_BIRCH_PLANKS, BLOCK_BRICKS, BLOCK_SANDSTONE,
-        BLOCK_GLASS, BLOCK_GLOWSTONE, BLOCK_OBSIDIAN, BLOCK_PRISMARINE,
-        BLOCK_TERRACOTTA, BLOCK_WOOL_WHITE, BLOCK_BASALT_TILES, BLOCK_COPPER_WEAVE,
-        BLOCK_NEBULA_STRATA, BLOCK_STARFORGED_CORE, BLOCK_CRYO_CIRCUIT, BLOCK_SMOKED_GLASS,
-        BLOCK_IVORY_MARBLE, BLOCK_RUNIC_ALLOY, BLOCK_HYPERPHASE_GEL, BLOCK_SINGULARITY_CORE,
-        BLOCK_CHRONO_BLOOM, BLOCK_TESSERACT_WEAVE, BLOCK_EVENTIDE_ALLOY, BLOCK_BEACON_MATRIX,
+        BLOCK_RED,
+        BLOCK_ORANGE,
+        BLOCK_YELLOW_GREEN,
+        BLOCK_GREEN,
+        BLOCK_CYAN,
+        BLOCK_BLUE,
+        BLOCK_PURPLE,
+        BLOCK_MAGENTA,
+        BLOCK_RAINBOW,
+        BLOCK_BROWN,
+        BLOCK_GRID_FLOOR,
+        BLOCK_WHITE,
+        BLOCK_LIGHT,
+        BLOCK_MIRROR,
+        BLOCK_LAVA_VEINED_BASALT,
+        BLOCK_CRYSTAL_LATTICE,
+        BLOCK_MARBLE,
+        BLOCK_OXIDIZED_METAL,
+        BLOCK_BIO_SPORE_MOSS,
+        BLOCK_VOID_MIRROR,
+        BLOCK_AVATAR_MARKER,
+        BLOCK_HOLOGRAPHIC_LAMINATE,
+        BLOCK_TIDAL_GLASS,
+        BLOCK_CIRCUIT_WEAVE,
+        BLOCK_AURORA_STONE,
+        BLOCK_HAZARD_CHEVRONS,
+        BLOCK_STONE,
+        BLOCK_COBBLESTONE,
+        BLOCK_DIRT,
+        BLOCK_COARSE_DIRT,
+        BLOCK_OAK_PLANKS,
+        BLOCK_SPRUCE_PLANKS,
+        BLOCK_LOG_BARK,
+        BLOCK_LOG_END_RINGS,
+        BLOCK_SAND,
+        BLOCK_GRAVEL,
+        BLOCK_CLAY,
+        BLOCK_GRASS_BLOCK,
+        BLOCK_SNOW,
+        BLOCK_ICE,
+        BLOCK_COAL_ORE,
+        BLOCK_IRON_ORE,
+        BLOCK_GOLD_ORE,
+        BLOCK_DIAMOND_ORE,
+        BLOCK_REDSTONE_ORE,
+        BLOCK_BIRCH_PLANKS,
+        BLOCK_BRICKS,
+        BLOCK_SANDSTONE,
+        BLOCK_GLASS,
+        BLOCK_GLOWSTONE,
+        BLOCK_OBSIDIAN,
+        BLOCK_PRISMARINE,
+        BLOCK_TERRACOTTA,
+        BLOCK_WOOL_WHITE,
+        BLOCK_BASALT_TILES,
+        BLOCK_COPPER_WEAVE,
+        BLOCK_NEBULA_STRATA,
+        BLOCK_STARFORGED_CORE,
+        BLOCK_CRYO_CIRCUIT,
+        BLOCK_SMOKED_GLASS,
+        BLOCK_IVORY_MARBLE,
+        BLOCK_RUNIC_ALLOY,
+        BLOCK_HYPERPHASE_GEL,
+        BLOCK_SINGULARITY_CORE,
+        BLOCK_CHRONO_BLOOM,
+        BLOCK_TESSERACT_WEAVE,
+        BLOCK_EVENTIDE_ALLOY,
+        BLOCK_BEACON_MATRIX,
     ];
     let mut palette = vec![BlockData::AIR]; // index 0 = air
     for &block_type in ordered {
@@ -81,7 +132,10 @@ fn build_legacy_block_palette() -> Vec<BlockData> {
 
 /// Resolve a legacy ChunkPayload (where u16 values are raw material tokens) into a
 /// ResolvedChunkPayload with a proper block palette.
-fn resolve_legacy_payload(payload: FieldChunkPayload, palette: &[BlockData]) -> ResolvedChunkPayload {
+fn resolve_legacy_payload(
+    payload: FieldChunkPayload,
+    palette: &[BlockData],
+) -> ResolvedChunkPayload {
     ResolvedChunkPayload {
         payload,
         block_palette: palette.to_vec(),
@@ -311,7 +365,10 @@ fn verify_v3_migration_equivalence(
             ),
         ));
     }
-    for ((exp_key, _, exp_payload), loaded) in expected_chunk_payloads.iter().zip(loaded_chunk_payloads.iter()) {
+    for ((exp_key, _, exp_payload), loaded) in expected_chunk_payloads
+        .iter()
+        .zip(loaded_chunk_payloads.iter())
+    {
         if *exp_key != loaded.0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

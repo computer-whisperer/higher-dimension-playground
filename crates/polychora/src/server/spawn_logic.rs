@@ -39,7 +39,9 @@ pub(super) fn entity_type_entry_for_token<'a>(
     token: &str,
     registry: &'a ContentRegistry,
 ) -> Option<&'a EntityEntry> {
-    registry.entity_lookup_by_name(token).filter(|entry| entry.is_spawnable())
+    registry
+        .entity_lookup_by_name(token)
+        .filter(|entry| entry.is_spawnable())
 }
 
 pub(super) fn default_spawn_pose_for_client(
@@ -69,12 +71,8 @@ pub(super) fn phase_spider_next_phase_deadline(
     min_interval_ms: u64,
     max_interval_ms: u64,
 ) -> u64 {
-    let span = max_interval_ms
-        .saturating_sub(min_interval_ms)
-        .max(1);
+    let span = max_interval_ms.saturating_sub(min_interval_ms).max(1);
     let wobble =
         ((phase_offset * 31.0 + phase_ticks as f32 * 1.73).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-    now_ms.saturating_add(
-        min_interval_ms + ((span as f32 * wobble).round() as u64),
-    )
+    now_ms.saturating_add(min_interval_ms + ((span as f32 * wobble).round() as u64))
 }

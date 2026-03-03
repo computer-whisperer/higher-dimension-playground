@@ -38,7 +38,10 @@ fn build_wasm_plugin() {
         .arg(&content_manifest)
         .arg("--target-dir")
         .arg(&wasm_target_dir)
-        .env("CARGO_ENCODED_RUSTFLAGS", "-Clink-args=--max-memory=4194304")
+        .env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            "-Clink-args=--max-memory=4194304",
+        )
         .status()
         .expect("failed to invoke cargo for polychora-content WASM build");
 
@@ -69,10 +72,7 @@ fn build_wasm_plugin() {
         .join("polychora-content")
         .join("src");
     println!("cargo:rerun-if-changed={}", content_src.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        content_manifest.display()
-    );
+    println!("cargo:rerun-if-changed={}", content_manifest.display());
     // Also rerun if plugin-api changes (shared types)
     let plugin_api_src = workspace_root
         .join("crates")
