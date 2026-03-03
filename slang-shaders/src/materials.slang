@@ -1176,6 +1176,16 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
         break;
     }
 
+    // Procedural albedo values are authored in sRGB/perceptual space.
+    // Convert to linear before lighting so that the full pipeline
+    // (linear lighting → ACES tone map → gamma 2.2) produces correct results.
+    // The texture-pool path is excluded: Vulkan's SRGB format already
+    // linearizes on sample.
+    if (!isTexturePool)
+    {
+        mat.albedo.rgb = pow(max(mat.albedo.rgb, float3(0.0)), float3(2.2));
+    }
+
     if (isPreviewMaterial)
     {
         // Held-block preview should over-contribute enough to read clearly in
