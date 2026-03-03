@@ -91,7 +91,7 @@ pub(super) struct PersistedSettings {
     pub focal_length_zw: f32,
     pub zw_angle_color_shift_enabled: bool,
     pub zw_angle_color_shift_strength: f32,
-    pub place_material: u8, // legacy name kept for JSON compat
+    pub place_material: u8,    // legacy name kept for JSON compat
     pub hotbar_slots: [u8; 9], // legacy format kept for JSON compat
     pub hotbar_selected_index: usize,
     pub render_width: u32,
@@ -302,8 +302,7 @@ pub(super) fn save_settings(path: &Path, settings: &PersistedSettings) -> io::Re
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(settings)
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    let bytes = serde_json::to_vec_pretty(settings).map_err(io::Error::other)?;
     std::fs::write(path, bytes)
 }
 
@@ -373,12 +372,14 @@ impl App {
         self.focal_length_zw = settings.focal_length_zw;
         for (i, &mat) in settings.hotbar_slots.iter().enumerate() {
             let block = polychora::content_registry::block_data_from_material_token(mat);
-            self.hotbar_slots[i] =
-                Some(polychora::shared::protocol::ItemStack::block(block.namespace, block.block_type, 1));
+            self.hotbar_slots[i] = Some(polychora::shared::protocol::ItemStack::block(
+                block.namespace,
+                block.block_type,
+                1,
+            ));
         }
         self.hotbar_selected_index = settings.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX);
-        self.selected_block =
-            block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
+        self.selected_block = block_data_from_slot(&self.hotbar_slots[self.hotbar_selected_index]);
         self.main_menu_server_address = settings.main_menu_server_address;
         if self.args.player_name.is_none() {
             self.main_menu_player_name = settings.main_menu_player_name;
@@ -402,7 +403,9 @@ impl App {
             focal_length_zw: self.focal_length_zw,
             zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
             zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
-            place_material: polychora::content_registry::material_token_from_block_data(&self.selected_block),
+            place_material: polychora::content_registry::material_token_from_block_data(
+                &self.selected_block,
+            ),
             hotbar_slots: {
                 let mut slots = [3u8; 9];
                 for (i, slot) in self.hotbar_slots.iter().enumerate() {

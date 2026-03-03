@@ -261,31 +261,6 @@ pub(super) fn append_axis_aligned_outline_edge_instance(
     ));
 }
 
-pub(super) fn append_voxel_outline_edge_instance(
-    overlay_edge_instances: &mut Vec<common::ModelInstance>,
-    voxel: [i32; 4],
-    edge_tag: u32,
-) {
-    let min_world = [
-        voxel[0] as f32,
-        voxel[1] as f32,
-        voxel[2] as f32,
-        voxel[3] as f32,
-    ];
-    let max_world = [
-        (voxel[0] as f32) + 1.0,
-        (voxel[1] as f32) + 1.0,
-        (voxel[2] as f32) + 1.0,
-        (voxel[3] as f32) + 1.0,
-    ];
-    append_axis_aligned_outline_edge_instance(
-        overlay_edge_instances,
-        min_world,
-        max_world,
-        edge_tag,
-    );
-}
-
 pub(super) fn append_chunk_bounds_outline_edge_instance(
     overlay_edge_instances: &mut Vec<common::ModelInstance>,
     min_chunk: polychora::shared::region_tree::ChunkKey,
@@ -301,8 +276,14 @@ pub(super) fn append_chunk_bounds_outline_edge_instance(
     }
 
     let chunk_size = voxel::CHUNK_SIZE as i32;
-    let min_world_i32: [i32; 4] = std::array::from_fn(|i| min_chunk[i].to_num::<i32>().saturating_mul(chunk_size));
-    let max_world_i32: [i32; 4] = std::array::from_fn(|i| max_chunk[i].to_num::<i32>().saturating_add(1).saturating_mul(chunk_size));
+    let min_world_i32: [i32; 4] =
+        std::array::from_fn(|i| min_chunk[i].to_num::<i32>().saturating_mul(chunk_size));
+    let max_world_i32: [i32; 4] = std::array::from_fn(|i| {
+        max_chunk[i]
+            .to_num::<i32>()
+            .saturating_add(1)
+            .saturating_mul(chunk_size)
+    });
 
     let min_world = [
         min_world_i32[0] as f32,
@@ -597,12 +578,7 @@ pub(super) fn build_ghost_placement_instance(
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ];
-    build_centered_model_instance(
-        center,
-        &basis,
-        [size; 4],
-        [preview_material; 8],
-    )
+    build_centered_model_instance(center, &basis, [size; 4], [preview_material; 8])
 }
 
 pub(super) fn build_remote_player_avatar_instances(

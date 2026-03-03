@@ -23,7 +23,11 @@ pub enum PluginLoadError {
     Wasm(WasmRuntimeError),
     ManifestDeserialize(String),
     ReservedNamespace(u32),
-    TextureResolutionFailed { block_name: String, namespace: u32, texture_id: u32 },
+    TextureResolutionFailed {
+        block_name: String,
+        namespace: u32,
+        texture_id: u32,
+    },
     BlockRegistrationFailed(String),
 }
 
@@ -32,8 +36,14 @@ impl fmt::Display for PluginLoadError {
         match self {
             Self::Wasm(e) => write!(f, "wasm error: {e}"),
             Self::ManifestDeserialize(e) => write!(f, "manifest deserialization failed: {e}"),
-            Self::ReservedNamespace(ns) => write!(f, "namespace {ns:#010x} is reserved for the engine"),
-            Self::TextureResolutionFailed { block_name, namespace, texture_id } => {
+            Self::ReservedNamespace(ns) => {
+                write!(f, "namespace {ns:#010x} is reserved for the engine")
+            }
+            Self::TextureResolutionFailed {
+                block_name,
+                namespace,
+                texture_id,
+            } => {
                 write!(f, "block '{block_name}': texture ({namespace:#010x}, {texture_id:#010x}) not found in texture registry")
             }
             Self::BlockRegistrationFailed(msg) => write!(f, "block registration failed: {msg}"),
@@ -56,11 +66,8 @@ pub fn load_plugin(
     limits: WasmExecutionLimits,
 ) -> Result<LoadedPlugin, PluginLoadError> {
     let compiled = Arc::new(runtime.compile_module(wasm_bytes)?);
-    let mut instance = runtime.instantiate_module(
-        compiled,
-        WasmExecutionRole::ServerAuthoritative,
-        limits,
-    )?;
+    let mut instance =
+        runtime.instantiate_module(compiled, WasmExecutionRole::ServerAuthoritative, limits)?;
 
     // Call OP_GET_MANIFEST with empty input
     let result = instance.call_bytes(OP_GET_MANIFEST as i32, &[])?;
@@ -113,7 +120,7 @@ pub fn populate_registry_from_plugin(
             block.category,
             block.color_hint,
             material_token,
-            block.texture.clone(),
+            block.texture,
         );
     }
 
@@ -193,11 +200,8 @@ pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) 
     populate_registry_from_plugin(&mut registry, &plugin)
         .expect("failed to populate registry from plugin");
 
-    let mut manager = WasmPluginManager::new(
-        WasmExecutionRole::ServerAuthoritative,
-        runtime,
-        cache,
-    );
+    let mut manager =
+        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime, cache);
     manager
         .activate_slot_from_bytes(
             WasmPluginSlot::EntitySimulation,
@@ -217,11 +221,7 @@ pub fn create_wasm_manager_for_client() -> Option<WasmPluginManager> {
     let runtime = Arc::new(WasmRuntime::new().ok()?);
     let cache = Arc::new(WasmModuleCache::new(runtime.clone(), None).ok()?);
     let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
-    let mut manager = WasmPluginManager::new(
-        WasmExecutionRole::ClientSpeculative,
-        runtime,
-        cache,
-    );
+    let mut manager = WasmPluginManager::new(WasmExecutionRole::ClientSpeculative, runtime, cache);
     manager
         .activate_slot_from_bytes(
             WasmPluginSlot::ModelLogic,
@@ -240,11 +240,8 @@ pub fn create_wasm_manager_for_server() -> Option<WasmPluginManager> {
     let runtime = Arc::new(WasmRuntime::new().ok()?);
     let cache = Arc::new(WasmModuleCache::new(runtime.clone(), None).ok()?);
     let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
-    let mut manager = WasmPluginManager::new(
-        WasmExecutionRole::ServerAuthoritative,
-        runtime,
-        cache,
-    );
+    let mut manager =
+        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime, cache);
     manager
         .activate_slot_from_bytes(
             WasmPluginSlot::EntitySimulation,

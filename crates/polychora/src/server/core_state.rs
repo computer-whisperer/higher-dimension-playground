@@ -4,6 +4,7 @@ use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::entity_types::EntityCategory;
 use crate::shared::region_tree::{ChunkKey, RegionChunkTree, RegionTreeCore};
 use crate::shared::spatial::ChunkCoord;
+#[cfg(test)]
 use crate::shared::voxel::BlockData;
 
 pub(super) struct ServerState {
@@ -90,8 +91,7 @@ impl ServerState {
         &self,
         chunk_key: ChunkKey,
     ) -> Option<(ResolvedChunkPayload, i8)> {
-        self.mob_nav_chunk_cache
-            .chunk_payload(chunk_key)
+        self.mob_nav_chunk_cache.chunk_payload(chunk_key)
     }
 
     pub(super) fn evict_far_mob_nav_cache_chunks(
@@ -104,7 +104,11 @@ impl ServerState {
             .lazy_drop_outside_bounds(keep_bounds, max_subtree_drops)
     }
 
-    fn absorb_world_subtree_into_mob_nav_cache(&mut self, bounds: Aabb4i, subtree: &RegionTreeCore) {
+    fn absorb_world_subtree_into_mob_nav_cache(
+        &mut self,
+        bounds: Aabb4i,
+        subtree: &RegionTreeCore,
+    ) {
         if !bounds.is_valid() {
             return;
         }
@@ -170,6 +174,7 @@ impl ServerState {
             .effective_chunk(chunk_key, preserve_explicit_empty_chunk)
     }
 
+    #[cfg(test)]
     pub(super) fn apply_world_voxel_edit(
         &mut self,
         position: [ChunkCoord; 4],
@@ -184,7 +189,8 @@ impl ServerState {
         block: BlockData,
         scale_exp: i8,
     ) -> Option<ChunkKey> {
-        self.world.apply_voxel_edit_at_scale(position, block, scale_exp)
+        self.world
+            .apply_voxel_edit_at_scale(position, block, scale_exp)
     }
 
     pub(super) fn world_take_dirty_bounds(&mut self) -> Vec<Aabb4i> {
@@ -207,10 +213,7 @@ impl ServerState {
         self.client_world_interest_bounds.insert(client_id, bounds)
     }
 
-    pub(super) fn clear_client_world_interest_bounds(
-        &mut self,
-        client_id: u64,
-    ) -> Option<Aabb4i> {
+    pub(super) fn clear_client_world_interest_bounds(&mut self, client_id: u64) -> Option<Aabb4i> {
         self.client_world_interest_bounds.remove(&client_id)
     }
 }
@@ -327,9 +330,7 @@ pub(super) fn summarize_entity_records(state: &ServerState) -> EntityRecordSumma
                     EntityCategory::Accent => {
                         summary.live_accents = summary.live_accents.saturating_add(1)
                     }
-                    EntityCategory::Mob => {
-                        summary.live_mobs = summary.live_mobs.saturating_add(1)
-                    }
+                    EntityCategory::Mob => summary.live_mobs = summary.live_mobs.saturating_add(1),
                 }
             }
             EntityLifecycle::Despawned => {
@@ -417,9 +418,12 @@ pub(super) fn record_server_cpu_sample(
     } else {
         0.0
     };
+    let wasm_ms_max = report.tick_wasm_us_max as f64 / 1000.0;
+    let nav_ms_max = report.tick_nav_us_max as f64 / 1000.0;
+    let collision_ms_max = report.tick_collision_us_max as f64 / 1000.0;
 
     eprintln!(
-        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_sim_steps_avg={:.1} tick_sim_steps_max={} tick_wasm_ms={:.3} tick_nav_ms={:.3} tick_collision_ms={:.3} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_persistent={} rec_owned={} rec_tombstones={}",
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_sim_steps_avg={:.1} tick_sim_steps_max={} tick_wasm_ms_avg={:.3} tick_wasm_ms_max={:.3} tick_nav_ms_avg={:.3} tick_nav_ms_max={:.3} tick_collision_ms_avg={:.3} tick_collision_ms_max={:.3} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_persistent={} rec_owned={} rec_tombstones={}",
         msg_avg_ms,
         report.message_cpu_ms_max,
         report.message_samples,
@@ -429,8 +433,11 @@ pub(super) fn record_server_cpu_sample(
         sim_steps_avg,
         report.tick_sim_steps_max,
         wasm_ms_avg,
+        wasm_ms_max,
         nav_ms_avg,
+        nav_ms_max,
         collision_ms_avg,
+        collision_ms_max,
         tick_players_avg,
         report.tick_player_snapshots_max,
         tick_entities_avg,

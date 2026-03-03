@@ -120,20 +120,29 @@ impl App {
                 );
                 {
                     let blocks: Vec<_> = self.content_registry.all_blocks_ordered().collect();
-                    let current_key = (self.selected_block.namespace, self.selected_block.block_type);
-                    let mut block_idx = blocks.iter()
+                    let current_key = (
+                        self.selected_block.namespace,
+                        self.selected_block.block_type,
+                    );
+                    let mut block_idx = blocks
+                        .iter()
                         .position(|b| (b.namespace, b.block_type) == current_key)
                         .unwrap_or(0) as u32;
                     let max_idx = blocks.len().saturating_sub(1) as u32;
-                    let response = ui.add(
-                        egui::Slider::new(&mut block_idx, 0..=max_idx)
-                            .text("Place Block"),
-                    );
+                    let response =
+                        ui.add(egui::Slider::new(&mut block_idx, 0..=max_idx).text("Place Block"));
                     if response.changed() {
                         if let Some(entry) = blocks.get(block_idx as usize) {
-                            self.selected_block = polychora::shared::voxel::BlockData::simple(entry.namespace, entry.block_type);
+                            self.selected_block = polychora::shared::voxel::BlockData::simple(
+                                entry.namespace,
+                                entry.block_type,
+                            );
                             self.hotbar_slots[self.hotbar_selected_index] =
-                                Some(polychora::shared::protocol::ItemStack::block(entry.namespace, entry.block_type, 1));
+                                Some(polychora::shared::protocol::ItemStack::block(
+                                    entry.namespace,
+                                    entry.block_type,
+                                    1,
+                                ));
                         }
                     }
                 }
@@ -345,7 +354,9 @@ impl App {
                     ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
                     for i in 0..9 {
                         let block = block_data_from_slot(&self.hotbar_slots[i]);
-                        let [r, g, b] = self.content_registry.block_color(block.namespace, block.block_type);
+                        let [r, g, b] = self
+                            .content_registry
+                            .block_color(block.namespace, block.block_type);
                         let is_selected = i == self.hotbar_selected_index;
 
                         let (rect, _response) = ui.allocate_exact_size(
@@ -362,7 +373,9 @@ impl App {
                         if let (Some(sheet), Some(tex_id)) =
                             (&self.material_icon_sheet, self.material_icons_texture_id)
                         {
-                            if let Some([u0, v0, u1, v1]) = sheet.uv_rect(block.namespace, block.block_type) {
+                            if let Some([u0, v0, u1, v1]) =
+                                sheet.uv_rect(block.namespace, block.block_type)
+                            {
                                 ui.painter().image(
                                     tex_id,
                                     icon_rect,
@@ -412,7 +425,9 @@ impl App {
                         );
 
                         // Block name (bottom center, small text)
-                        let name = self.content_registry.block_name(block.namespace, block.block_type);
+                        let name = self
+                            .content_registry
+                            .block_name(block.namespace, block.block_type);
                         let label_pos = rect.center_bottom() + egui::vec2(0.0, -3.0);
                         ui.painter().text(
                             label_pos,
@@ -428,7 +443,6 @@ impl App {
 
     pub(super) fn draw_egui_scale_selector(&mut self, ctx: &egui::Context) {
         let screen_rect = ctx.content_rect();
-        let slot_size = 80.0;
         let center_x = screen_rect.width() / 2.0;
         let hotbar_bottom = screen_rect.height() - 65.0;
 
@@ -473,17 +487,20 @@ impl App {
                 );
 
                 // Left arrow button
-                let left_rect = egui::Rect::from_min_size(
-                    rect.left_top(),
-                    egui::vec2(28.0, widget_height),
-                );
-                let left_resp = ui.interact(left_rect, egui::Id::new("scale_left"), egui::Sense::click());
+                let left_rect =
+                    egui::Rect::from_min_size(rect.left_top(), egui::vec2(28.0, widget_height));
+                let left_resp =
+                    ui.interact(left_rect, egui::Id::new("scale_left"), egui::Sense::click());
                 ui.painter().text(
                     left_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     "◀",
                     arrow_font.clone(),
-                    if left_resp.hovered() { arrow_hover } else { arrow_color },
+                    if left_resp.hovered() {
+                        arrow_hover
+                    } else {
+                        arrow_color
+                    },
                 );
                 if left_resp.clicked() {
                     self.selected_block.scale_exp = (scale - 1).max(-3);
@@ -494,13 +511,21 @@ impl App {
                     egui::pos2(rect.right() - 28.0, rect.top()),
                     egui::vec2(28.0, widget_height),
                 );
-                let right_resp = ui.interact(right_rect, egui::Id::new("scale_right"), egui::Sense::click());
+                let right_resp = ui.interact(
+                    right_rect,
+                    egui::Id::new("scale_right"),
+                    egui::Sense::click(),
+                );
                 ui.painter().text(
                     right_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     "▶",
                     arrow_font,
-                    if right_resp.hovered() { arrow_hover } else { arrow_color },
+                    if right_resp.hovered() {
+                        arrow_hover
+                    } else {
+                        arrow_color
+                    },
                 );
                 if right_resp.clicked() {
                     self.selected_block.scale_exp = (scale + 1).min(3);
@@ -1043,40 +1068,45 @@ impl App {
                     .fill(egui::Color32::from_rgba_unmultiplied(15, 15, 22, 190))
                     .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(egui::Margin::symmetric(12, 8))
-                    .show(ui, |ui| {
-                        match target {
-                            WailaTarget::Block { coords, block } => {
-                                self.draw_waila_block(ui, *coords, block);
-                            }
-                            WailaTarget::Entity {
-                                entity_id,
-                                entity_type_ns,
-                                entity_type,
-                                position,
-                                orientation,
-                                scale,
+                    .show(ui, |ui| match target {
+                        WailaTarget::Block { coords, block } => {
+                            self.draw_waila_block(ui, *coords, block);
+                        }
+                        WailaTarget::Entity {
+                            entity_id,
+                            entity_type_ns,
+                            entity_type,
+                            position,
+                            orientation,
+                            scale,
+                            data,
+                            distance,
+                        } => {
+                            self.draw_waila_entity(
+                                ui,
+                                *entity_id,
+                                *entity_type_ns,
+                                *entity_type,
+                                *position,
+                                *orientation,
+                                *scale,
                                 data,
-                                distance,
-                            } => {
-                                self.draw_waila_entity(
-                                    ui,
-                                    *entity_id,
-                                    *entity_type_ns,
-                                    *entity_type,
-                                    *position,
-                                    *orientation,
-                                    *scale,
-                                    data,
-                                    *distance,
-                                );
-                            }
+                                *distance,
+                            );
                         }
                     });
             });
     }
 
-    fn draw_waila_block(&self, ui: &mut egui::Ui, coords: [i32; 4], block: &polychora::shared::voxel::BlockData) {
-        let entry = self.content_registry.block_entry(block.namespace, block.block_type);
+    fn draw_waila_block(
+        &self,
+        ui: &mut egui::Ui,
+        coords: [i32; 4],
+        block: &polychora::shared::voxel::BlockData,
+    ) {
+        let entry = self
+            .content_registry
+            .block_entry(block.namespace, block.block_type);
         let name = entry.map(|e| e.name.as_str()).unwrap_or("Unknown");
         let category = entry.map(|e| e.category.label()).unwrap_or("Unknown");
         let [r, g, b] = entry.map(|e| e.color).unwrap_or([128, 128, 128]);
@@ -1094,10 +1124,7 @@ impl App {
                     ui.painter().image(
                         tex_id,
                         icon_rect,
-                        egui::Rect::from_min_max(
-                            egui::pos2(u0, v0),
-                            egui::pos2(u1, v1),
-                        ),
+                        egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
                         egui::Color32::WHITE,
                     );
                 } else {
@@ -1116,9 +1143,12 @@ impl App {
                     .color(egui::Color32::from_rgb(240, 240, 240)),
             );
             ui.label(
-                egui::RichText::new(format!("{} ({:#x}:{:#x})", category, block.namespace, block.block_type))
-                    .size(12.0)
-                    .color(egui::Color32::from_rgb(160, 160, 170)),
+                egui::RichText::new(format!(
+                    "{} ({:#x}:{:#x})",
+                    category, block.namespace, block.block_type
+                ))
+                .size(12.0)
+                .color(egui::Color32::from_rgb(160, 160, 170)),
             );
         });
 
@@ -1166,7 +1196,9 @@ impl App {
         data: &[u8],
         distance: f32,
     ) {
-        let entry = self.content_registry.entity_lookup(entity_type_ns, entity_type);
+        let entry = self
+            .content_registry
+            .entity_lookup(entity_type_ns, entity_type);
         let canonical_name = entry
             .map(|e| e.canonical_name.as_str())
             .unwrap_or("unknown");
@@ -1176,18 +1208,19 @@ impl App {
         // Resolve entity's primary color and icon from its model_textures palette
         let first_block_key = entry
             .and_then(|e| e.model_textures.first())
-            .and_then(|tex| self.material_resolver.block_for_gpu_token(
-                self.material_resolver.resolve_texture(tex.namespace, tex.texture_id).unwrap_or(7)
-            ));
+            .and_then(|tex| {
+                self.material_resolver.block_for_gpu_token(
+                    self.material_resolver
+                        .resolve_texture(tex.namespace, tex.texture_id)
+                        .unwrap_or(7),
+                )
+            });
         let [r, g, b] = first_block_key
             .map(|(ns, bt)| self.content_registry.block_color(ns, bt))
             .unwrap_or([128, 128, 128]);
 
         // Check if this is a player
-        let player_name = self
-            .remote_players
-            .get(&entity_id)
-            .map(|p| p.name.clone());
+        let player_name = self.remote_players.get(&entity_id).map(|p| p.name.clone());
 
         // Header row: icon + name + category + distance
         ui.horizontal(|ui| {
@@ -1197,9 +1230,9 @@ impl App {
 
             // Entity icon: use the block matching the entity's first model texture
             let icon_uv = first_block_key.and_then(|(ns, bt)| {
-                self.material_icon_sheet.as_ref().and_then(|sheet| {
-                    sheet.uv_rect(ns, bt)
-                })
+                self.material_icon_sheet
+                    .as_ref()
+                    .and_then(|sheet| sheet.uv_rect(ns, bt))
             });
             if let (Some([u0, v0, u1, v1]), Some(tex_id)) =
                 (icon_uv, self.material_icons_texture_id)
@@ -1207,10 +1240,7 @@ impl App {
                 ui.painter().image(
                     tex_id,
                     icon_rect,
-                    egui::Rect::from_min_max(
-                        egui::pos2(u0, v0),
-                        egui::pos2(u1, v1),
-                    ),
+                    egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
                     egui::Color32::WHITE,
                 );
             } else {
@@ -1278,10 +1308,13 @@ impl App {
         if let Some(entry) = entry {
             if let Some(ref config) = entry.sim_config {
                 ui.label(
-                    egui::RichText::new(format!("{:?}: {:?} spd={:.1}", config.mode, config.locomotion, config.move_speed))
-                        .monospace()
-                        .size(info_size)
-                        .color(info_color),
+                    egui::RichText::new(format!(
+                        "{:?}: {:?} spd={:.1}",
+                        config.mode, config.locomotion, config.move_speed
+                    ))
+                    .monospace()
+                    .size(info_size)
+                    .color(info_color),
                 );
             }
         }
