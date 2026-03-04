@@ -1307,12 +1307,8 @@ impl Scene {
             ],
             0,
         );
-        let scene_bounds = self
-            .voxel_cached_visibility_bounds
-            .filter(|active_bounds| Self::bounds_contains_bounds(*active_bounds, view_bounds))
-            .unwrap_or(desired_scene_bounds);
-
-        // Poll background rebuild
+        // Poll background rebuild before computing scene_bounds, since applying
+        // the result updates voxel_cached_visibility_bounds.
         if let Some(bg) = self.voxel_background_rebuild.take() {
             match bg.receiver.try_recv() {
                 Ok(Ok(result)) => {
@@ -1341,6 +1337,13 @@ impl Scene {
                 }
             }
         }
+
+        // Compute scene_bounds AFTER polling the background rebuild, so that
+        // voxel_cached_visibility_bounds reflects any just-applied result.
+        let scene_bounds = self
+            .voxel_cached_visibility_bounds
+            .filter(|active_bounds| Self::bounds_contains_bounds(*active_bounds, view_bounds))
+            .unwrap_or(desired_scene_bounds);
 
         let frame_root_valid = self.voxel_frame_root_is_valid();
         let cached_render_bvh_empty = self
