@@ -813,6 +813,7 @@ fn voxel_frame_snapshot_path_clears_mutation_batch() {
         64.0,
         &test_resolver(),
     );
+    scene.flush_voxel_background_rebuild();
     assert!(scene.voxel_frame_data.mutation_batch.is_none());
     assert!(scene.voxel_frame_data.mutation_base_generation.is_none());
 }
@@ -827,6 +828,7 @@ fn voxel_frame_delta_path_emits_mutation_batch() {
         64.0,
         &test_resolver(),
     );
+    scene.flush_voxel_background_rebuild();
     assert!(scene.voxel_frame_data.mutation_batch.is_none());
     let base_generation = scene.voxel_frame_data.metadata_generation;
 
@@ -866,6 +868,7 @@ fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
         64.0,
         &test_resolver(),
     );
+    scene.flush_voxel_background_rebuild();
 
     let frame_root = scene.voxel_frame_data.region_bvh_root_index;
     assert_ne!(frame_root, VTE_REGION_BVH_INVALID_NODE);
@@ -892,6 +895,7 @@ fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
         64.0,
         &test_resolver(),
     );
+    scene.flush_voxel_background_rebuild();
 
     assert!(scene.voxel_pending_render_bvh_mutation_deltas.is_empty());
     assert!(scene.voxel_frame_data.mutation_batch.is_none());
@@ -910,6 +914,7 @@ fn voxel_frame_delta_updates_match_world_after_flat_floor_edit() {
     let cam = [0.0, 2.0, 0.0, 0.0];
 
     let _ = scene.build_voxel_frame_data(cam, [0.0, 0.0, 1.0, 0.0], 96.0, &test_resolver());
+    scene.flush_voxel_background_rebuild();
 
     let edit_voxel = [0, -1, 0, 0];
     let before_world =
@@ -974,6 +979,7 @@ fn voxel_frame_dense_cache_respects_block_palette_at_scale_neg3() {
 
     let _ =
         scene.build_voxel_frame_data([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], 64.0, &resolver);
+    scene.flush_voxel_background_rebuild();
 
     let cobblestone_expected =
         resolver.resolve_block(cobblestone.namespace, cobblestone.block_type);

@@ -1329,6 +1329,34 @@ impl Scene {
             .filter(|active_bounds| Self::bounds_contains_bounds(*active_bounds, view_bounds))
             .unwrap_or(desired_scene_bounds);
 
+        // Poll background rebuild
+        if let Some(bg) = self.voxel_background_rebuild.take() {
+            match bg.receiver.try_recv() {
+                Ok(Ok(buffers)) => {
+                    eprintln!(
+                        "[voxel-bg-rebuild] background build completed, applying for bounds {:?}->{:?}",
+                        bg.bounds.min, bg.bounds.max
+                    );
+                    self.apply_voxel_frame_buffers(bg.bounds, Some(buffers));
+                    self.voxel_pending_render_bvh_rebuild = false;
+                    // Fall through to normal processing for any dirty regions accumulated during build
+                }
+                Ok(Err(error)) => {
+                    eprintln!("[voxel-bg-rebuild] background build failed: {error}");
+                    self.voxel_pending_render_bvh_rebuild = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    eprintln!("[voxel-bg-rebuild] background thread panicked");
+                    self.voxel_pending_render_bvh_rebuild = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still building — return stale frame data, skip all processing
+                    self.voxel_background_rebuild = Some(bg);
+                    return &self.voxel_frame_data;
+                }
+            }
+        }
+
         let frame_root_valid = self.voxel_frame_root_is_valid();
         let cached_render_bvh_empty = self
             .render_bvh_cache
@@ -1401,38 +1429,22 @@ impl Scene {
                         self.voxel_frame_data.region_bvh_root_index,
                         cpu_root,
                     );
-                    match Self::build_voxel_frame_buffers_from_render_bvh(render_bvh, resolver) {
-                        Ok(buffers) => {
-                            self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
-                            if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
-                                eprintln!(
-                                    "[edit-sync-voxel-rebuild] scene_bounds={:?}->{:?} result=ok frame_root={}",
-                                    scene_bounds.min,
-                                    scene_bounds.max,
-                                    self.voxel_frame_data.region_bvh_root_index
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            // Preserve last-good GPU voxel buffers and keep retrying full snapshot builds.
-                            self.voxel_pending_render_bvh_rebuild = true;
-                            let reason = format!("snapshot_encode_failed:{error}");
-                            self.log_voxel_rebuild_failure_once(
-                                scene_bounds,
-                                &reason,
-                                render_bvh.nodes.len(),
-                                render_bvh.leaves.len(),
-                            );
-                            if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
-                                eprintln!(
-                                    "[edit-sync-voxel-rebuild] scene_bounds={:?}->{:?} result=encode_error error={}",
-                                    scene_bounds.min,
-                                    scene_bounds.max,
-                                    error
-                                );
-                            }
-                        }
-                    }
+                    // Spawn background thread for the expensive encoding
+                    let bvh_clone = render_bvh.clone();
+                    let resolver_clone = resolver.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(
+                            Scene::build_voxel_frame_buffers_from_render_bvh(
+                                &bvh_clone,
+                                &resolver_clone,
+                            ),
+                        );
+                    });
+                    self.voxel_background_rebuild = Some(BackgroundVoxelRebuild {
+                        receiver: rx,
+                        bounds: scene_bounds,
+                    });
                 }
             } else if !deltas.is_empty() {
                 let applied_deltas = deltas.len();
@@ -1541,6 +1553,26 @@ impl Scene {
         &self.voxel_frame_data
     }
 
+    /// Block until any in-flight background voxel rebuild completes and apply the result.
+    pub(crate) fn flush_voxel_background_rebuild(&mut self) {
+        if let Some(bg) = self.voxel_background_rebuild.take() {
+            match bg.receiver.recv() {
+                Ok(Ok(buffers)) => {
+                    self.apply_voxel_frame_buffers(bg.bounds, Some(buffers));
+                    self.voxel_pending_render_bvh_rebuild = false;
+                }
+                Ok(Err(error)) => {
+                    eprintln!("[voxel-bg-rebuild] background build failed: {error}");
+                    self.voxel_pending_render_bvh_rebuild = true;
+                }
+                Err(_) => {
+                    eprintln!("[voxel-bg-rebuild] background thread panicked");
+                    self.voxel_pending_render_bvh_rebuild = true;
+                }
+            }
+        }
+    }
+
     /// Prime voxel frame metadata around the current spawn/camera position.
     pub fn preload_spawn_chunks(
         &mut self,
@@ -1555,6 +1587,7 @@ impl Scene {
             max_trace_distance,
             resolver,
         );
+        self.flush_voxel_background_rebuild();
         eprintln!(
             "Preloaded render-tree voxel metadata in {:.2} ms",
             start.elapsed().as_secs_f64() * 1000.0

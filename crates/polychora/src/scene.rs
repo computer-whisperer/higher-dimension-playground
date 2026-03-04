@@ -97,6 +97,11 @@ struct DensePayloadCacheKey {
     block_palette: Vec<BlockData>,
 }
 
+struct BackgroundVoxelRebuild {
+    receiver: std::sync::mpsc::Receiver<Result<VoxelFrameDataBuffers, String>>,
+    bounds: Aabb4i,
+}
+
 impl DensePayloadCacheKey {
     fn new(payload: &ChunkPayload, block_palette: &[BlockData]) -> Self {
         Self {
@@ -147,6 +152,7 @@ pub struct Scene {
     voxel_leaf_entry_spans: Vec<Option<std::ops::Range<usize>>>,
     voxel_leaf_entry_free_spans: Vec<std::ops::Range<usize>>,
     voxel_last_rebuild_failure_signature: Option<(Aabb4i, usize, usize)>,
+    voxel_background_rebuild: Option<BackgroundVoxelRebuild>,
     voxel_frame_data: VoxelFrameData,
 }
 
@@ -716,6 +722,7 @@ impl Scene {
             voxel_leaf_entry_spans: Vec::new(),
             voxel_leaf_entry_free_spans: Vec::new(),
             voxel_last_rebuild_failure_signature: None,
+            voxel_background_rebuild: None,
             voxel_frame_data: VoxelFrameData {
                 metadata_generation: 0,
                 mutation_base_generation: None,
