@@ -6,12 +6,8 @@ use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
 #[cfg(test)]
 use crate::shared::region_tree::ChunkKey;
 use crate::shared::region_tree::{RegionChunkTree, RegionNodeKind, RegionTreeCore};
-use crate::shared::spatial::Aabb4i;
-#[cfg(test)]
-use crate::shared::spatial::ChunkCoord;
-#[cfg(test)]
-use crate::shared::voxel::CHUNK_SIZE;
-use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_VOLUME};
+use crate::shared::spatial::{Aabb4i, ChunkCoord};
+use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE, CHUNK_VOLUME};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -245,7 +241,25 @@ impl MassivePlatformsWorldGenerator {
         }
         let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
         let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
-        self.for_each_platform_instance_in_bounds(bounds, min_cy, max_cy, |platform| {
+        // Expand the search on XZW so we also find platforms whose structures
+        // might overhang into the query region.
+        let overhang_world =
+            ChunkCoord::from_num(procgen::max_structure_overhang_chunks() * CHUNK_SIZE as i32);
+        let search_bounds = Aabb4i::new(
+            [
+                bounds.min[0] - overhang_world,
+                bounds.min[1],
+                bounds.min[2] - overhang_world,
+                bounds.min[3] - overhang_world,
+            ],
+            [
+                bounds.max[0] + overhang_world,
+                bounds.max[1],
+                bounds.max[2] + overhang_world,
+                bounds.max[3] + overhang_world,
+            ],
+        );
+        self.for_each_platform_instance_in_bounds(search_bounds, min_cy, max_cy, |platform| {
             self.insert_procgen_chunks_for_platform(bounds, platform, tree);
         });
     }
@@ -257,11 +271,15 @@ impl MassivePlatformsWorldGenerator {
         tree: &mut RegionChunkTree,
     ) {
         let procgen_frame_offset = procgen_frame_offset_xzw_chunks(self.world_seed, platform);
-        let local_query_bounds =
-            query_bounds_local_to_platform(query_bounds, platform, procgen_frame_offset);
-        let Some(local_query_bounds) = local_query_bounds else {
+        let overhang = procgen::max_structure_overhang_chunks();
+
+        // Both structures and mazes use extended bounds so they can overhang the platform edge.
+        let structure_local_bounds =
+            query_bounds_local_to_platform(query_bounds, platform, procgen_frame_offset, overhang);
+        let Some(structure_local_bounds) = structure_local_bounds else {
             return;
         };
+
         let procgen_seed = hash_platform_cell(
             self.world_seed,
             platform.level,
@@ -271,19 +289,19 @@ impl MassivePlatformsWorldGenerator {
             PLATFORM_HASH_SALT_PROCGEN_SEED,
         );
 
-        // Generate per-placement structure chunk data (each placement isolated).
-        let placement_data = procgen::generate_structure_placements_for_bounds(
-            procgen_seed,
-            local_query_bounds,
-            self.procgen_keepout_cells(),
-        );
-
         let platform_material = self.platform_voxel.as_ref().map(|v| {
             let mut pal = procgen::block_palette().to_vec();
             procgen::intern_block_into_palette(&mut pal, v)
         });
 
         let y_offset = platform_y_offset(&platform);
+
+        // Generate per-placement structure chunk data (each placement isolated).
+        let placement_data = procgen::generate_structure_placements_for_bounds(
+            procgen_seed,
+            structure_local_bounds,
+            self.procgen_keepout_cells(),
+        );
 
         for placement in placement_data {
             if placement.chunks.is_empty() {
@@ -321,10 +339,10 @@ impl MassivePlatformsWorldGenerator {
             let _ = tree.splice_non_empty_core_in_bounds(effective_bounds, &core);
         }
 
-        // Mazes still use the per-chunk path.
+        // Mazes also use extended bounds so they can overhang the platform edge.
         self.insert_maze_chunks_for_platform(
             procgen_seed,
-            local_query_bounds,
+            structure_local_bounds,
             &platform,
             procgen_frame_offset,
             tree,
@@ -554,6 +572,7 @@ fn query_bounds_local_to_platform(
     query_bounds: Aabb4i,
     platform: PlatformInstance,
     procgen_frame_offset_xzw: [i32; 3],
+    xzw_margin_chunks: i32,
 ) -> Option<Aabb4i> {
     // Convert world-space bounds to key-space for procgen.
     let (q_key_min, q_key_max) = query_bounds.to_chunk_lattice_bounds(0);
@@ -562,26 +581,26 @@ fn query_bounds_local_to_platform(
     let local = Aabb4i::from_lattice_bounds(
         [
             q_key_min[0]
-                .max(p_key_min[0])
+                .max(p_key_min[0] - xzw_margin_chunks)
                 .saturating_add(procgen_frame_offset_xzw[0]),
             q_key_min[1] - y_offset,
             q_key_min[2]
-                .max(p_key_min[2])
+                .max(p_key_min[2] - xzw_margin_chunks)
                 .saturating_add(procgen_frame_offset_xzw[1]),
             q_key_min[3]
-                .max(p_key_min[3])
+                .max(p_key_min[3] - xzw_margin_chunks)
                 .saturating_add(procgen_frame_offset_xzw[2]),
         ],
         [
             q_key_max[0]
-                .min(p_key_max[0])
+                .min(p_key_max[0] + xzw_margin_chunks)
                 .saturating_add(procgen_frame_offset_xzw[0]),
             q_key_max[1] - y_offset,
             q_key_max[2]
-                .min(p_key_max[2])
+                .min(p_key_max[2] + xzw_margin_chunks)
                 .saturating_add(procgen_frame_offset_xzw[1]),
             q_key_max[3]
-                .min(p_key_max[3])
+                .min(p_key_max[3] + xzw_margin_chunks)
                 .saturating_add(procgen_frame_offset_xzw[2]),
         ],
         0,
@@ -931,6 +950,7 @@ mod tests {
             probe,
             platform,
             procgen_frame_offset_xzw_chunks(generator.world_seed, platform),
+            0,
         )
         .expect("origin platform probe should be valid");
         let procgen_seed = hash_platform_cell(
@@ -1001,7 +1021,7 @@ mod tests {
                 ],
             );
             let Some(local_probe) =
-                query_bounds_local_to_platform(world_probe, platform, frame_offset)
+                query_bounds_local_to_platform(world_probe, platform, frame_offset, 0)
             else {
                 return;
             };
@@ -1122,19 +1142,39 @@ mod tests {
             let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
             let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
             let mut anchored = false;
+            let overhang_world = ChunkCoord::from_num(
+                procgen::max_structure_overhang_chunks() * CHUNK_SIZE as i32,
+            );
+            let expanded_key_bounds = Aabb4i::new(
+                [
+                    key_bounds.min[0] - overhang_world,
+                    key_bounds.min[1],
+                    key_bounds.min[2] - overhang_world,
+                    key_bounds.min[3] - overhang_world,
+                ],
+                [
+                    key_bounds.max[0] + overhang_world,
+                    key_bounds.max[1],
+                    key_bounds.max[2] + overhang_world,
+                    key_bounds.max[3] + overhang_world,
+                ],
+            );
             generator.for_each_platform_instance_in_bounds(
-                key_bounds,
+                expanded_key_bounds,
                 min_cy,
                 max_cy,
                 |platform| {
                     let y_offset = platform_y_offset(&platform);
                     let chunk_wb = Aabb4i::chunk_world_bounds(key, 0);
-                    let in_horizontal = chunk_wb.min[0] < platform.bounds.max[0]
-                        && chunk_wb.max[0] > platform.bounds.min[0]
-                        && chunk_wb.min[2] < platform.bounds.max[2]
-                        && chunk_wb.max[2] > platform.bounds.min[2]
-                        && chunk_wb.min[3] < platform.bounds.max[3]
-                        && chunk_wb.max[3] > platform.bounds.min[3];
+                    // Structures can overhang the platform edge, so expand the
+                    // horizontal check by the overhang margin.
+                    let in_horizontal = chunk_wb.min[0]
+                        < platform.bounds.max[0] + overhang_world
+                        && chunk_wb.max[0] > platform.bounds.min[0] - overhang_world
+                        && chunk_wb.min[2] < platform.bounds.max[2] + overhang_world
+                        && chunk_wb.max[2] > platform.bounds.min[2] - overhang_world
+                        && chunk_wb.min[3] < platform.bounds.max[3] + overhang_world
+                        && chunk_wb.max[3] > platform.bounds.min[3] - overhang_world;
                     let in_vertical =
                         key_y >= y_offset + local_min_y && key_y <= y_offset + local_max_y;
                     if in_horizontal && in_vertical {

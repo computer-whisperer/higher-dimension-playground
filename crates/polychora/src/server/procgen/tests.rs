@@ -61,7 +61,6 @@ fn procedural_maze_bounds_vary_in_all_dimensions() {
     let mut span_y_values = HashSet::new();
     let mut span_z_values = HashSet::new();
     let mut span_w_values = HashSet::new();
-    let mut y_min_values = HashSet::new();
 
     'scan: for cell_x in -16..=16 {
         for cell_z in -16..=16 {
@@ -75,13 +74,11 @@ fn procedural_maze_bounds_vary_in_all_dimensions() {
                 span_y_values.insert(shape.span[1]);
                 span_z_values.insert(shape.span[2]);
                 span_w_values.insert(shape.span[3]);
-                y_min_values.insert(shape.world_y_min);
 
                 if span_x_values.len() > 1
                     && span_y_values.len() > 1
                     && span_z_values.len() > 1
                     && span_w_values.len() > 1
-                    && y_min_values.len() > 1
                 {
                     break 'scan;
                 }
@@ -104,10 +101,6 @@ fn procedural_maze_bounds_vary_in_all_dimensions() {
     assert!(
         span_w_values.len() > 1,
         "expected procedural mazes to vary w span"
-    );
-    assert!(
-        y_min_values.len() > 1,
-        "expected procedural mazes to vary y min bounds"
     );
 }
 

@@ -68,7 +68,7 @@ const MAZE_GRID_Y_CELLS_MAX: i32 = 7;
 const MAZE_STRIDE: i32 = 4;
 const MAZE_LEVEL_HEIGHT: i32 = 4;
 const MAZE_WORLD_Y_BASE: i32 = 0;
-const MAZE_WORLD_Y_JITTER: i32 = 8;
+const MAZE_WORLD_Y_JITTER: i32 = 0;
 const MAZE_MAX_HALF_SPAN_XZW: i32 = (MAZE_GRID_XZW_CELLS_MAX * MAZE_STRIDE + 1) / 2;
 const MAZE_LAYOUT_CACHE_CAPACITY: usize = 96;
 type DenseChunk = [u16; CHUNK_VOLUME];
@@ -731,6 +731,18 @@ fn structure_set() -> &'static StructureSet {
     })
 }
 
+/// Maximum distance (in chunks) that a structure or maze can extend beyond
+/// its platform edge on any XZW axis.
+pub fn max_structure_overhang_chunks() -> i32 {
+    let set = structure_set();
+    // Structure overhang: max blueprint extent + jitter from cell center.
+    let structure_voxels = set.max_abs_offset_xzw + STRUCTURE_CELL_JITTER;
+    // Maze overhang: half-span + jitter from cell center.
+    let maze_voxels = MAZE_MAX_HALF_SPAN_XZW + MAZE_CELL_JITTER;
+    let max_voxels = structure_voxels.max(maze_voxels);
+    (max_voxels + CHUNK_SIZE as i32 - 1) / CHUNK_SIZE as i32
+}
+
 pub fn structure_chunk_y_bounds() -> (i32, i32) {
     let set = structure_set();
     let chunk_size = CHUNK_SIZE as i32;
@@ -1046,7 +1058,10 @@ fn collect_structure_placements_for_chunk_bounds(
     placements
 }
 
-fn collect_maze_placements_for_chunk_bounds(world_seed: u64, bounds: Aabb4i) -> Vec<MazePlacement> {
+fn collect_maze_placements_for_chunk_bounds(
+    world_seed: u64,
+    bounds: Aabb4i,
+) -> Vec<MazePlacement> {
     if !bounds.is_valid() {
         return Vec::new();
     }
