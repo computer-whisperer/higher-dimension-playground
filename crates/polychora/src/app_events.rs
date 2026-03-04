@@ -52,6 +52,10 @@ impl ApplicationHandler for App {
             [self.args.width, self.args.height, self.args.layers],
             pixel_storage_layers,
         ));
+        // Give the scene the GPU memory allocator so background voxel rebuilds
+        // can pre-create GPU buffers off the main thread.
+        self.scene
+            .set_memory_allocator(self.rcx.as_ref().unwrap().memory_allocator());
 
         // Generate material icon sprite sheet and upload to GPU
         if self.material_icon_sheet.is_none() {

@@ -12,7 +12,8 @@ mod texture_pool;
 mod types;
 mod vte;
 
-use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers, VoxelBufferCapacities};
+use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers};
+pub use self::buffers::{VoxelBufferCapacities, VoxelGpuBuffers};
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
     build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
@@ -1970,6 +1971,87 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         grown
     }
 
+    /// Install pre-populated voxel GPU buffers from a background rebuild.
+    /// Waits for all in-flight frames, replaces voxel buffers and descriptor sets,
+    /// then sets metadata generation so render_internal skips redundant uploads.
+    pub fn install_new_voxel_gpu_buffers(
+        &mut self,
+        gpu_buffers: VoxelGpuBuffers,
+        metadata_generation: u64,
+    ) {
+        self.wait_for_all_frames();
+        let live_layout = self
+            .compute_pipeline
+            .pipeline_layout
+            .set_layouts()
+            .get(2)
+            .cloned()
+            .expect("live descriptor set layout");
+        for frame in &mut self.frames_in_flight {
+            let new_voxel = VoxelGpuBuffers::new(
+                self.memory_allocator.clone(),
+                gpu_buffers.caps,
+            );
+            // Copy data from the pre-populated buffers into per-frame buffers.
+            // Each frame needs its own buffer set for safe concurrent GPU access.
+            {
+                let src = gpu_buffers.chunk_headers_buffer.read().unwrap();
+                let mut dst = new_voxel.chunk_headers_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            {
+                let src = gpu_buffers.occupancy_words_buffer.read().unwrap();
+                let mut dst = new_voxel.occupancy_words_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            {
+                let src = gpu_buffers.material_words_buffer.read().unwrap();
+                let mut dst = new_voxel.material_words_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            {
+                let src = gpu_buffers.orientation_words_buffer.read().unwrap();
+                let mut dst = new_voxel.orientation_words_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            {
+                let src = gpu_buffers.macro_words_buffer.read().unwrap();
+                let mut dst = new_voxel.macro_words_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            {
+                let src = gpu_buffers.leaf_headers_buffer.read().unwrap();
+                let mut dst = new_voxel.leaf_headers_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            {
+                let src = gpu_buffers.region_bvh_nodes_buffer.read().unwrap();
+                let mut dst = new_voxel.region_bvh_nodes_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            {
+                let src = gpu_buffers.leaf_chunk_entries_buffer.read().unwrap();
+                let mut dst = new_voxel.leaf_chunk_entries_buffer.write().unwrap();
+                dst[..src.len()].copy_from_slice(&src);
+            }
+            frame.live_buffers.install_voxel_buffers(
+                new_voxel,
+                self.descriptor_set_allocator.clone(),
+                live_layout.clone(),
+            );
+            frame.last_voxel_metadata_generation = Some(metadata_generation);
+        }
+        eprintln!(
+            "[vte-buffers-swap] installed pre-built GPU buffers (gen={}, caps={:?})",
+            metadata_generation, gpu_buffers.caps
+        );
+    }
+
+    /// Get a clone of the GPU memory allocator for use in background voxel rebuilds.
+    pub fn memory_allocator(&self) -> Arc<dyn MemoryAllocator> {
+        self.memory_allocator.clone()
+    }
+
     pub fn render(
         &mut self,
         device: Arc<Device>,
@@ -2637,7 +2719,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel_chunk_headers_buffer
+                            .voxel.chunk_headers_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2653,7 +2735,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel_occupancy_words_buffer
+                            .voxel.occupancy_words_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2669,7 +2751,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel_material_words_buffer
+                            .voxel.material_words_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2685,7 +2767,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel_orientation_words_buffer
+                            .voxel.orientation_words_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2698,7 +2780,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                             continue;
                         };
                         let mut writer =
-                            frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
+                            frame.live_buffers.voxel.macro_words_buffer.write().unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
                     }
 
@@ -2712,7 +2794,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel_region_bvh_nodes_buffer
+                            .voxel.region_bvh_nodes_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2726,7 +2808,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel_leaf_headers_buffer
+                            .voxel.leaf_headers_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2742,7 +2824,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel_leaf_chunk_entries_buffer
+                            .voxel.leaf_chunk_entries_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2759,7 +2841,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = chunk_headers_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel_chunk_headers_buffer
+                            .voxel.chunk_headers_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&chunk_headers[range]);
@@ -2775,7 +2857,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = occupancy_words_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel_occupancy_words_buffer
+                            .voxel.occupancy_words_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&occupancy_words[range]);
@@ -2791,7 +2873,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = material_words_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel_material_words_buffer
+                            .voxel.material_words_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&material_words[range]);
@@ -2807,7 +2889,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = orientation_words_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel_orientation_words_buffer
+                            .voxel.orientation_words_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&orientation_words[range]);
@@ -2821,7 +2903,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = leaf_headers_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel_leaf_headers_buffer
+                            .voxel.leaf_headers_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&leaf_headers[range]);
@@ -2837,7 +2919,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = region_bvh_nodes_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel_region_bvh_nodes_buffer
+                            .voxel.region_bvh_nodes_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&region_bvh_nodes[range]);
@@ -2853,7 +2935,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = leaf_chunk_entries_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel_leaf_chunk_entries_buffer
+                            .voxel.leaf_chunk_entries_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&leaf_chunk_entries[range]);
@@ -2866,7 +2948,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     .or_else(|| (vte_macro_word_count > 0).then_some(0..vte_macro_word_count));
                     if let Some(range) = macro_words_dirty {
                         let mut writer =
-                            frame.live_buffers.voxel_macro_words_buffer.write().unwrap();
+                            frame.live_buffers.voxel.macro_words_buffer.write().unwrap();
                         writer[range.clone()].copy_from_slice(&macro_words[range]);
                     }
                 }

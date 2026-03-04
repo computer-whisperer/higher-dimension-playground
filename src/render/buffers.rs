@@ -451,27 +451,31 @@ impl SizedBuffers {
     }
 }
 
+pub struct VoxelGpuBuffers {
+    pub(super) chunk_headers_buffer: Subbuffer<[GpuVoxelChunkHeader]>,
+    pub(super) occupancy_words_buffer: Subbuffer<[u32]>,
+    pub(super) material_words_buffer: Subbuffer<[u32]>,
+    pub(super) orientation_words_buffer: Subbuffer<[u32]>,
+    pub(super) leaf_headers_buffer: Subbuffer<[vte::GpuVoxelLeafHeader]>,
+    pub(super) region_bvh_nodes_buffer: Subbuffer<[vte::GpuVoxelChunkBvhNode]>,
+    pub(super) leaf_chunk_entries_buffer: Subbuffer<[u32]>,
+    pub(super) macro_words_buffer: Subbuffer<[u32]>,
+    pub(super) caps: VoxelBufferCapacities,
+}
+
 pub(super) struct LiveBuffers {
     pub(super) model_instance_buffer: Subbuffer<[common::ModelInstance]>,
     pub(super) working_data_buffer: Subbuffer<common::WorkingData>,
     pub(super) voxel_frame_meta_buffer: Subbuffer<vte::GpuVoxelFrameMeta>,
-    pub(super) voxel_chunk_headers_buffer: Subbuffer<[GpuVoxelChunkHeader]>,
-    pub(super) voxel_occupancy_words_buffer: Subbuffer<[u32]>,
-    pub(super) voxel_material_words_buffer: Subbuffer<[u32]>,
-    pub(super) voxel_orientation_words_buffer: Subbuffer<[u32]>,
-    pub(super) voxel_leaf_headers_buffer: Subbuffer<[vte::GpuVoxelLeafHeader]>,
-    pub(super) voxel_region_bvh_nodes_buffer: Subbuffer<[vte::GpuVoxelChunkBvhNode]>,
-    pub(super) voxel_leaf_chunk_entries_buffer: Subbuffer<[u32]>,
-    pub(super) voxel_macro_words_buffer: Subbuffer<[u32]>,
+    pub(super) voxel: VoxelGpuBuffers,
     pub(super) vte_compare_stats_buffer: Subbuffer<[u32]>,
     pub(super) vte_first_mismatch_buffer: Subbuffer<[u32]>,
     pub(super) vte_world_bvh_ray_diag_buffer: Subbuffer<[u32]>,
-    pub(super) voxel_caps: VoxelBufferCapacities,
     pub(super) descriptor_set: Arc<DescriptorSet>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) struct VoxelBufferCapacities {
+pub struct VoxelBufferCapacities {
     pub(super) dense_chunks: usize,
     pub(super) leaf_headers: usize,
     pub(super) region_bvh_nodes: usize,
@@ -520,6 +524,215 @@ impl VoxelBufferCapacities {
     }
 }
 
+impl VoxelGpuBuffers {
+    pub fn new(
+        memory_allocator: Arc<dyn MemoryAllocator>,
+        caps: VoxelBufferCapacities,
+    ) -> Self {
+        let caps = caps.with_minimums();
+
+        let chunk_headers_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![GpuVoxelChunkHeader::zeroed(); caps.dense_chunks],
+        )
+        .unwrap();
+
+        let occupancy_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; caps.occupancy_words()],
+        )
+        .unwrap();
+
+        let material_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; caps.material_words()],
+        )
+        .unwrap();
+
+        let orientation_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; caps.orientation_words()],
+        )
+        .unwrap();
+
+        let leaf_headers_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![vte::GpuVoxelLeafHeader::zeroed(); caps.leaf_headers],
+        )
+        .unwrap();
+
+        let region_bvh_nodes_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![vte::GpuVoxelChunkBvhNode::empty(); caps.region_bvh_nodes],
+        )
+        .unwrap();
+
+        let leaf_chunk_entries_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; caps.leaf_chunk_entries],
+        )
+        .unwrap();
+
+        let macro_words_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vec![0u32; caps.macro_words()],
+        )
+        .unwrap();
+
+        Self {
+            chunk_headers_buffer,
+            occupancy_words_buffer,
+            material_words_buffer,
+            orientation_words_buffer,
+            leaf_headers_buffer,
+            region_bvh_nodes_buffer,
+            leaf_chunk_entries_buffer,
+            macro_words_buffer,
+            caps,
+        }
+    }
+
+    /// Create GPU buffers pre-populated with the given CPU data.
+    /// Used by the background rebuild thread to build GPU buffers off the main thread.
+    pub fn from_data(
+        memory_allocator: Arc<dyn MemoryAllocator>,
+        chunk_headers: &[GpuVoxelChunkHeader],
+        occupancy_words: &[u32],
+        material_words: &[u32],
+        orientation_words: &[u32],
+        macro_words: &[u32],
+        leaf_headers: &[vte::GpuVoxelLeafHeader],
+        region_bvh_nodes: &[vte::GpuVoxelChunkBvhNode],
+        leaf_chunk_entries: &[u32],
+    ) -> Self {
+        let alloc_info = AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        };
+        let buf_info = BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        };
+
+        let caps = VoxelBufferCapacities {
+            dense_chunks: chunk_headers.len().max(1),
+            leaf_headers: leaf_headers.len().max(1),
+            region_bvh_nodes: region_bvh_nodes.len().max(1),
+            leaf_chunk_entries: leaf_chunk_entries.len().max(1),
+        };
+
+        // Buffer::from_iter requires at least 1 element. Use from_iter with
+        // copied iterators so we don't need to clone entire Vecs.
+        macro_rules! make_buf {
+            ($alloc:expr, $info:expr, $ainfo:expr, $data:expr, $zero:expr) => {
+                if $data.is_empty() {
+                    Buffer::from_iter($alloc.clone(), $info.clone(), $ainfo.clone(), vec![$zero]).unwrap()
+                } else {
+                    Buffer::from_iter($alloc.clone(), $info.clone(), $ainfo.clone(), $data.iter().copied()).unwrap()
+                }
+            };
+        }
+
+        let chunk_headers_buffer = make_buf!(memory_allocator, buf_info, alloc_info, chunk_headers, GpuVoxelChunkHeader::zeroed());
+        let occupancy_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, occupancy_words, 0u32);
+        let material_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, material_words, 0u32);
+        let orientation_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, orientation_words, 0u32);
+        let macro_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, macro_words, 0u32);
+        let leaf_headers_buffer = make_buf!(memory_allocator, buf_info, alloc_info, leaf_headers, vte::GpuVoxelLeafHeader::zeroed());
+        let region_bvh_nodes_buffer = make_buf!(memory_allocator, buf_info, alloc_info, region_bvh_nodes, vte::GpuVoxelChunkBvhNode::empty());
+        let leaf_chunk_entries_buffer = make_buf!(memory_allocator, buf_info, alloc_info, leaf_chunk_entries, 0u32);
+
+        Self {
+            chunk_headers_buffer,
+            occupancy_words_buffer,
+            material_words_buffer,
+            orientation_words_buffer,
+            leaf_headers_buffer,
+            region_bvh_nodes_buffer,
+            leaf_chunk_entries_buffer,
+            macro_words_buffer,
+            caps,
+        }
+    }
+
+    pub fn capacities(&self) -> VoxelBufferCapacities {
+        self.caps
+    }
+}
+
 impl LiveBuffers {
     pub(super) fn new(
         memory_allocator: Arc<dyn MemoryAllocator>,
@@ -540,7 +753,7 @@ impl LiveBuffers {
         descriptor_set_layout: Arc<DescriptorSetLayout>,
         voxel_caps: VoxelBufferCapacities,
     ) -> Self {
-        let voxel_caps = voxel_caps.with_minimums();
+        let voxel = VoxelGpuBuffers::new(memory_allocator.clone(), voxel_caps);
 
         let model_instance_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -584,126 +797,6 @@ impl LiveBuffers {
                 ..Default::default()
             },
             vte::GpuVoxelFrameMeta::zeroed(),
-        )
-        .unwrap();
-
-        let voxel_chunk_headers_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![GpuVoxelChunkHeader::zeroed(); voxel_caps.dense_chunks],
-        )
-        .unwrap();
-
-        let voxel_occupancy_words_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![0u32; voxel_caps.occupancy_words()],
-        )
-        .unwrap();
-
-        let voxel_material_words_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![0u32; voxel_caps.material_words()],
-        )
-        .unwrap();
-
-        let voxel_orientation_words_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![0u32; voxel_caps.orientation_words()],
-        )
-        .unwrap();
-
-        let voxel_leaf_headers_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![vte::GpuVoxelLeafHeader::zeroed(); voxel_caps.leaf_headers],
-        )
-        .unwrap();
-
-        let voxel_region_bvh_nodes_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![vte::GpuVoxelChunkBvhNode::empty(); voxel_caps.region_bvh_nodes],
-        )
-        .unwrap();
-
-        let voxel_leaf_chunk_entries_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![0u32; voxel_caps.leaf_chunk_entries],
-        )
-        .unwrap();
-
-        let voxel_macro_words_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vec![0u32; voxel_caps.macro_words()],
         )
         .unwrap();
 
@@ -759,17 +852,17 @@ impl LiveBuffers {
                 WriteDescriptorSet::buffer(0, model_instance_buffer.clone()),
                 WriteDescriptorSet::buffer(1, working_data_buffer.clone()),
                 WriteDescriptorSet::buffer(2, voxel_frame_meta_buffer.clone()),
-                WriteDescriptorSet::buffer(3, voxel_chunk_headers_buffer.clone()),
-                WriteDescriptorSet::buffer(4, voxel_occupancy_words_buffer.clone()),
-                WriteDescriptorSet::buffer(5, voxel_material_words_buffer.clone()),
-                WriteDescriptorSet::buffer(6, voxel_leaf_headers_buffer.clone()),
-                WriteDescriptorSet::buffer(7, voxel_region_bvh_nodes_buffer.clone()),
-                WriteDescriptorSet::buffer(8, voxel_leaf_chunk_entries_buffer.clone()),
+                WriteDescriptorSet::buffer(3, voxel.chunk_headers_buffer.clone()),
+                WriteDescriptorSet::buffer(4, voxel.occupancy_words_buffer.clone()),
+                WriteDescriptorSet::buffer(5, voxel.material_words_buffer.clone()),
+                WriteDescriptorSet::buffer(6, voxel.leaf_headers_buffer.clone()),
+                WriteDescriptorSet::buffer(7, voxel.region_bvh_nodes_buffer.clone()),
+                WriteDescriptorSet::buffer(8, voxel.leaf_chunk_entries_buffer.clone()),
                 WriteDescriptorSet::buffer(9, vte_compare_stats_buffer.clone()),
                 WriteDescriptorSet::buffer(10, vte_first_mismatch_buffer.clone()),
-                WriteDescriptorSet::buffer(11, voxel_macro_words_buffer.clone()),
+                WriteDescriptorSet::buffer(11, voxel.macro_words_buffer.clone()),
                 WriteDescriptorSet::buffer(12, vte_world_bvh_ray_diag_buffer.clone()),
-                WriteDescriptorSet::buffer(13, voxel_orientation_words_buffer.clone()),
+                WriteDescriptorSet::buffer(13, voxel.orientation_words_buffer.clone()),
             ],
             [],
         )
@@ -778,24 +871,47 @@ impl LiveBuffers {
             model_instance_buffer,
             working_data_buffer,
             voxel_frame_meta_buffer,
-            voxel_chunk_headers_buffer,
-            voxel_occupancy_words_buffer,
-            voxel_material_words_buffer,
-            voxel_orientation_words_buffer,
-            voxel_leaf_headers_buffer,
-            voxel_region_bvh_nodes_buffer,
-            voxel_leaf_chunk_entries_buffer,
-            voxel_macro_words_buffer,
+            voxel,
             vte_compare_stats_buffer,
             vte_first_mismatch_buffer,
             vte_world_bvh_ray_diag_buffer,
-            voxel_caps,
             descriptor_set,
         }
     }
 
     pub(super) fn voxel_capacities(&self) -> VoxelBufferCapacities {
-        self.voxel_caps
+        self.voxel.caps
+    }
+
+    pub(super) fn install_voxel_buffers(
+        &mut self,
+        voxel: VoxelGpuBuffers,
+        descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
+        descriptor_set_layout: Arc<DescriptorSetLayout>,
+    ) {
+        self.voxel = voxel;
+        self.descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator,
+            descriptor_set_layout,
+            [
+                WriteDescriptorSet::buffer(0, self.model_instance_buffer.clone()),
+                WriteDescriptorSet::buffer(1, self.working_data_buffer.clone()),
+                WriteDescriptorSet::buffer(2, self.voxel_frame_meta_buffer.clone()),
+                WriteDescriptorSet::buffer(3, self.voxel.chunk_headers_buffer.clone()),
+                WriteDescriptorSet::buffer(4, self.voxel.occupancy_words_buffer.clone()),
+                WriteDescriptorSet::buffer(5, self.voxel.material_words_buffer.clone()),
+                WriteDescriptorSet::buffer(6, self.voxel.leaf_headers_buffer.clone()),
+                WriteDescriptorSet::buffer(7, self.voxel.region_bvh_nodes_buffer.clone()),
+                WriteDescriptorSet::buffer(8, self.voxel.leaf_chunk_entries_buffer.clone()),
+                WriteDescriptorSet::buffer(9, self.vte_compare_stats_buffer.clone()),
+                WriteDescriptorSet::buffer(10, self.vte_first_mismatch_buffer.clone()),
+                WriteDescriptorSet::buffer(11, self.voxel.macro_words_buffer.clone()),
+                WriteDescriptorSet::buffer(12, self.vte_world_bvh_ray_diag_buffer.clone()),
+                WriteDescriptorSet::buffer(13, self.voxel.orientation_words_buffer.clone()),
+            ],
+            [],
+        )
+        .unwrap();
     }
 
     pub(super) fn create_descriptor_set_layout(device: Arc<Device>) -> Arc<DescriptorSetLayout> {

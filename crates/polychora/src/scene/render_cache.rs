@@ -32,10 +32,10 @@ impl Scene {
     pub(crate) fn prime_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
         let core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
         let render_core = render_tree::from_region_core(&core);
-        self.render_bvh_cache = Some(render_tree::build_bvh_in_bounds(&render_core, bounds));
-        self.render_bvh_cache_bounds = Some(bounds);
-        self.voxel_pending_render_bvh_rebuild = false;
-        self.voxel_pending_render_bvh_mutation_deltas.clear();
+        self.active_config.render_bvh_cache = Some(render_tree::build_bvh_in_bounds(&render_core, bounds));
+        self.active_config.render_bvh_cache_bounds = Some(bounds);
+        self.active_config.pending_render_bvh_rebuild = false;
+        self.active_config.pending_render_bvh_mutation_deltas.clear();
         self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
     }
 
@@ -107,7 +107,7 @@ impl Scene {
         }
 
         eprintln!("\n=== WORLD TREE (render view) ===");
-        if let Some(bounds) = self.render_bvh_cache_bounds {
+        if let Some(bounds) = self.active_config.render_bvh_cache_bounds {
             eprintln!(
                 "  render bounds: {:?} -> {:?}  size: {:?}",
                 bounds.min,
@@ -208,7 +208,7 @@ impl Scene {
     /// `GpuVoxelChunkBvhNode` array) and `leaf_headers`, showing the tree
     /// the shader traverses.
     fn dump_gpu_bvh(&self) {
-        let fd = &self.voxel_frame_data;
+        let fd = &self.active_config.frame_data;
         let nodes = &fd.region_bvh_nodes;
         let leaves = &fd.leaf_headers;
         let root_idx = fd.region_bvh_root_index;
@@ -348,35 +348,36 @@ impl Scene {
     /// This discards all incremental mutation state and reconstructs a fresh
     /// optimal tree, useful for profiling BVH quality degradation.
     pub fn force_render_bvh_rebuild(&mut self) {
-        if self.render_bvh_cache_bounds.is_some() {
-            self.voxel_pending_render_bvh_rebuild = true;
-            self.voxel_pending_render_bvh_mutation_deltas.clear();
+        if self.active_config.render_bvh_cache_bounds.is_some() {
+            self.active_config.pending_render_bvh_rebuild = true;
+            self.active_config.pending_render_bvh_mutation_deltas.clear();
         }
     }
 
     pub(crate) fn ensure_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
         if !bounds.is_valid() {
-            self.render_bvh_cache_bounds = None;
-            self.render_bvh_cache = None;
-            self.voxel_pending_render_bvh_rebuild = true;
-            self.voxel_pending_render_bvh_mutation_deltas.clear();
+            self.active_config.render_bvh_cache_bounds = None;
+            self.active_config.render_bvh_cache = None;
+            self.active_config.pending_render_bvh_rebuild = true;
+            self.active_config.pending_render_bvh_mutation_deltas.clear();
             return;
         }
 
-        let has_cache = self.render_bvh_cache_bounds == Some(bounds)
-            && self.render_bvh_cache.is_some();
+        let has_cache = self.active_config.render_bvh_cache_bounds == Some(bounds)
+            && self.active_config.render_bvh_cache.is_some();
         if !has_cache {
             // No existing cache for these bounds — clear stale state and let the
             // background thread in build_voxel_frame_data handle the full rebuild.
-            self.render_bvh_cache_bounds = None;
-            self.render_bvh_cache = None;
-            self.voxel_pending_render_bvh_rebuild = true;
-            self.voxel_pending_render_bvh_mutation_deltas.clear();
+            self.active_config.render_bvh_cache_bounds = None;
+            self.active_config.render_bvh_cache = None;
+            self.active_config.pending_render_bvh_rebuild = true;
+            self.active_config.pending_render_bvh_mutation_deltas.clear();
             self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
             return;
         }
-        if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE
+        if self.active_config.frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE
             && self
+                .active_config
                 .render_bvh_cache
                 .as_ref()
                 .and_then(|bvh| bvh.root)
@@ -384,7 +385,7 @@ impl Scene {
         {
             // Recover from an invalid/empty frame upload by replaying a full
             // snapshot from the already cached render BVH.
-            self.voxel_pending_render_bvh_rebuild = true;
+            self.active_config.pending_render_bvh_rebuild = true;
         }
 
         let dirty_regions = self.take_voxel_scene_dirty_regions_in_bounds(
@@ -417,7 +418,7 @@ impl Scene {
                 continue;
             };
 
-            if let Some(render_bvh) = self.render_bvh_cache.as_mut() {
+            if let Some(render_bvh) = self.active_config.render_bvh_cache.as_mut() {
                 let world_core = self.world_tree.slice_non_empty_core_in_bounds(dirty_bounds);
                 let desired_render_core = render_tree::from_region_core(&world_core);
                 match render_tree::apply_core_patch_in_bounds_with_delta_in_bvh(
@@ -453,8 +454,8 @@ impl Scene {
                 bounds.max,
                 deltas.len()
             );
-            self.voxel_pending_render_bvh_rebuild = true;
-            self.voxel_pending_render_bvh_mutation_deltas.clear();
+            self.active_config.pending_render_bvh_rebuild = true;
+            self.active_config.pending_render_bvh_mutation_deltas.clear();
             return;
         }
         if !deltas.is_empty() {
@@ -468,7 +469,7 @@ impl Scene {
                     self.voxel_pending_scene_dirty_regions.len()
                 );
             }
-            self.voxel_pending_render_bvh_mutation_deltas.extend(deltas);
+            self.active_config.pending_render_bvh_mutation_deltas.extend(deltas);
         }
     }
 
@@ -538,9 +539,9 @@ impl Scene {
     pub(crate) fn take_pending_render_bvh_update_flags(
         &mut self,
     ) -> (bool, Vec<RenderBvhChunkMutationDelta>) {
-        let needs_rebuild = self.voxel_pending_render_bvh_rebuild;
-        self.voxel_pending_render_bvh_rebuild = false;
-        let deltas = std::mem::take(&mut self.voxel_pending_render_bvh_mutation_deltas);
+        let needs_rebuild = self.active_config.pending_render_bvh_rebuild;
+        self.active_config.pending_render_bvh_rebuild = false;
+        let deltas = std::mem::take(&mut self.active_config.pending_render_bvh_mutation_deltas);
         (needs_rebuild, deltas)
     }
 
@@ -553,7 +554,7 @@ impl Scene {
             return Vec::new();
         }
         self.ensure_render_bvh_cache_for_bounds(bounds);
-        self.render_bvh_cache
+        self.active_config.render_bvh_cache
             .as_ref()
             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
             .unwrap_or_default()
@@ -565,10 +566,10 @@ impl Scene {
     pub fn check_render_tree_integrity(&self) -> RenderTreeReport {
         let mut report = RenderTreeReport::default();
 
-        report.cache_bounds = self.render_bvh_cache_bounds;
+        report.cache_bounds = self.active_config.render_bvh_cache_bounds;
 
         // --- CPU BVH ---
-        if let Some(bvh) = self.render_bvh_cache.as_ref() {
+        if let Some(bvh) = self.active_config.render_bvh_cache.as_ref() {
             report.cpu_bvh_bounds = Some(bvh.bounds);
             report.cpu_bvh_root = bvh.root;
             report.cpu_bvh_node_count = bvh.nodes.len();
@@ -588,7 +589,7 @@ impl Scene {
         }
 
         // --- GPU BVH buffers ---
-        let fd = &self.voxel_frame_data;
+        let fd = &self.active_config.frame_data;
         report.gpu_bvh_root = fd.region_bvh_root_index;
         report.gpu_bvh_node_count = fd.region_bvh_nodes.len();
         report.gpu_bvh_leaf_count = fd.leaf_headers.len();
@@ -628,7 +629,7 @@ impl Scene {
         // Diagnostics must not mutate the active render cache: forcing a
         // per-frame cache resize here can trigger pathological full snapshot
         // rebuild loops in the main voxel path.
-        self.render_bvh_cache
+        self.active_config.render_bvh_cache
             .as_ref()
             .map(|bvh| {
                 render_tree::collect_ray_intersected_nodes_from_bvh(

@@ -1231,13 +1231,27 @@ impl App {
                 }
             }
             let voxel_build_start = Instant::now();
-            let voxel_frame = self.scene.build_voxel_frame_data(
+            let voxel_result = self.scene.build_voxel_frame_data(
                 self.camera.position,
                 look_dir,
                 self.vte_max_trace_distance,
                 &self.material_resolver,
             );
             let voxel_build_elapsed_ms = voxel_build_start.elapsed().as_secs_f64() * 1000.0;
+
+            // Install pre-built GPU buffers from background rebuild (avoids
+            // multi-second synchronous upload stall).
+            if let Some(gpu_buffers) = voxel_result.new_gpu_buffers {
+                // Use the generation at which the GPU buffers were built, not
+                // the frame_data's current generation — deltas applied after the
+                // swap advance the generation, and the renderer must detect the
+                // delta as dirty to upload it.
+                let gen = voxel_result.gpu_buffers_generation
+                    .unwrap_or(voxel_result.frame_data.metadata_generation);
+                self.rcx.as_mut().unwrap().install_new_voxel_gpu_buffers(
+                    gpu_buffers, gen,
+                );
+            }
 
             // If we are playing without a live server connection, do not keep the loading gate up.
             if !self.world_ready
@@ -1269,7 +1283,7 @@ impl App {
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
-                voxel_frame.as_input(),
+                voxel_result.frame_data.as_input(),
                 &vte_non_voxel_instances,
                 preview_overlay_instances,
             );

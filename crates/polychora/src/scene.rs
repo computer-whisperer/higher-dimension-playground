@@ -2,8 +2,11 @@ use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::{CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
-    VoxelFrameInput, VoxelMutationBatch, VTE_REGION_BVH_INVALID_NODE,
+    VoxelFrameInput, VoxelGpuBuffers, VoxelMutationBatch,
+    VTE_REGION_BVH_INVALID_NODE,
 };
+use std::sync::Arc;
+use vulkano::memory::allocator::MemoryAllocator;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::protocol::WorldBounds;
 use polychora::shared::region_tree::{
@@ -92,7 +95,7 @@ struct VoxelFrameDataBuffers {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct DensePayloadCacheKey {
+pub(crate) struct DensePayloadCacheKey {
     payload: ChunkPayload,
     block_palette: Vec<BlockData>,
 }
@@ -100,6 +103,7 @@ struct DensePayloadCacheKey {
 struct BackgroundRebuildResult {
     render_bvh: render_tree::RenderBvh,
     frame_buffers: VoxelFrameDataBuffers,
+    gpu_buffers: Option<VoxelGpuBuffers>,
 }
 
 struct BackgroundVoxelRebuild {
@@ -136,6 +140,31 @@ impl VoxelFrameData {
     }
 }
 
+pub(crate) struct VoxelConfig {
+    pub(crate) frame_data: VoxelFrameData,
+    pub(crate) render_bvh_cache: Option<render_tree::RenderBvh>,
+    pub(crate) render_bvh_cache_bounds: Option<Aabb4i>,
+    pub(crate) pending_render_bvh_rebuild: bool,
+    pub(crate) pending_render_bvh_mutation_deltas: Vec<RenderBvhChunkMutationDelta>,
+    pub(crate) dense_payload_encoded_cache: HashMap<DensePayloadCacheKey, u32>,
+    pub(crate) leaf_entry_spans: Vec<Option<std::ops::Range<usize>>>,
+    pub(crate) leaf_entry_free_spans: Vec<std::ops::Range<usize>>,
+}
+
+pub struct VoxelFrameBuildResult<'a> {
+    pub frame_data: &'a VoxelFrameData,
+    /// When `Some`, a background rebuild just completed and produced pre-populated
+    /// GPU buffers. The caller should install these into the renderer to skip the
+    /// synchronous upload path.
+    pub new_gpu_buffers: Option<VoxelGpuBuffers>,
+    /// The metadata generation that the GPU buffers were built at. This may differ
+    /// from `frame_data.metadata_generation` if incremental deltas were applied on
+    /// top of the background rebuild in the same frame. The renderer must use this
+    /// value (not the frame_data generation) when installing GPU buffers so that the
+    /// subsequent dirty-range upload path correctly applies the delta changes.
+    pub gpu_buffers_generation: Option<u64>,
+}
+
 pub struct Scene {
     pub world_bounds: WorldBounds,
     world_tree: RegionChunkTree,
@@ -147,15 +176,9 @@ pub struct Scene {
     voxel_visibility_generation: u64,
     voxel_cached_visibility_bounds: Option<Aabb4i>,
     voxel_pending_scene_dirty_regions: Vec<Aabb4i>,
-    render_bvh_cache_bounds: Option<Aabb4i>,
-    render_bvh_cache: Option<render_tree::RenderBvh>,
-    voxel_pending_render_bvh_rebuild: bool,
-    voxel_pending_render_bvh_mutation_deltas: Vec<RenderBvhChunkMutationDelta>,
-    voxel_dense_payload_encoded_cache: HashMap<DensePayloadCacheKey, u32>,
-    voxel_leaf_entry_spans: Vec<Option<std::ops::Range<usize>>>,
-    voxel_leaf_entry_free_spans: Vec<std::ops::Range<usize>>,
+    pub(crate) active_config: VoxelConfig,
     voxel_background_rebuild: Option<BackgroundVoxelRebuild>,
-    voxel_frame_data: VoxelFrameData,
+    memory_allocator: Option<Arc<dyn MemoryAllocator>>,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -501,7 +524,8 @@ impl Scene {
         &self,
         chunk_key: ChunkKey,
     ) -> Vec<ResolvedChunkPayload> {
-        self.render_bvh_cache
+        self.active_config
+            .render_bvh_cache
             .as_ref()
             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
             .unwrap_or_default()
@@ -512,7 +536,7 @@ impl Scene {
     }
 
     pub fn debug_pending_render_bvh_delta_count(&self) -> usize {
-        self.voxel_pending_render_bvh_mutation_deltas.len()
+        self.active_config.pending_render_bvh_mutation_deltas.len()
     }
 
     pub fn debug_world_tree_root_bounds(&self) -> Option<Aabb4i> {
@@ -582,27 +606,27 @@ impl Scene {
 
     pub fn debug_voxel_frame_buffer_lengths(&self) -> (usize, usize, usize, usize) {
         (
-            self.voxel_frame_data.chunk_headers.len(),
-            self.voxel_frame_data.leaf_headers.len(),
-            self.voxel_frame_data.region_bvh_nodes.len(),
-            self.voxel_frame_data.leaf_chunk_entries.len(),
+            self.active_config.frame_data.chunk_headers.len(),
+            self.active_config.frame_data.leaf_headers.len(),
+            self.active_config.frame_data.region_bvh_nodes.len(),
+            self.active_config.frame_data.leaf_chunk_entries.len(),
         )
     }
 
     fn decode_voxel_frame_dense_chunk_materials(&self, chunk_index: usize) -> Option<Vec<u16>> {
-        let header = self.voxel_frame_data.chunk_headers.get(chunk_index)?;
+        let header = self.active_config.frame_data.chunk_headers.get(chunk_index)?;
         let mut out = vec![0u16; CHUNK_VOLUME];
         let is_full = (header.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0;
         for (voxel_idx, material_slot) in out.iter_mut().enumerate().take(CHUNK_VOLUME) {
             if !is_full {
                 let occ_word_idx = header.occupancy_word_offset as usize + (voxel_idx / 32);
-                let occ_word = *self.voxel_frame_data.occupancy_words.get(occ_word_idx)?;
+                let occ_word = *self.active_config.frame_data.occupancy_words.get(occ_word_idx)?;
                 if (occ_word & (1u32 << (voxel_idx % 32))) == 0 {
                     continue;
                 }
             }
             let mat_word_idx = header.material_word_offset as usize + (voxel_idx / 2);
-            let mat_word = *self.voxel_frame_data.material_words.get(mat_word_idx)?;
+            let mat_word = *self.active_config.frame_data.material_words.get(mat_word_idx)?;
             let material = ((mat_word >> ((voxel_idx % 2) * 16)) & 0xFFFF) as u16;
             *material_slot = material;
         }
@@ -611,7 +635,7 @@ impl Scene {
 
     pub fn debug_voxel_frame_chunk_payloads(&self, chunk_key: [i32; 4]) -> Vec<ChunkPayload> {
         let mut out = Vec::<ChunkPayload>::new();
-        for leaf in &self.voxel_frame_data.leaf_headers {
+        for leaf in &self.active_config.frame_data.leaf_headers {
             if chunk_key[0] < leaf.min_chunk_coord[0]
                 || chunk_key[0] > leaf.max_chunk_coord[0]
                 || chunk_key[1] < leaf.min_chunk_coord[1]
@@ -651,7 +675,7 @@ impl Scene {
             let local_w = (chunk_key[3] - leaf.min_chunk_coord[3]) as usize;
             let linear = local_x + dim_x * (local_y + dim_y * (local_z + dim_z * local_w));
             let entry_index = leaf.chunk_entry_offset as usize + linear;
-            let Some(&entry) = self.voxel_frame_data.leaf_chunk_entries.get(entry_index) else {
+            let Some(&entry) = self.active_config.frame_data.leaf_chunk_entries.get(entry_index) else {
                 continue;
             };
 
@@ -714,31 +738,41 @@ impl Scene {
             voxel_visibility_generation: 0,
             voxel_cached_visibility_bounds: None,
             voxel_pending_scene_dirty_regions: Vec::new(),
-            render_bvh_cache_bounds: None,
-            render_bvh_cache: None,
-            voxel_pending_render_bvh_rebuild: true,
-            voxel_pending_render_bvh_mutation_deltas: Vec::new(),
-            voxel_dense_payload_encoded_cache: HashMap::new(),
-            voxel_leaf_entry_spans: Vec::new(),
-            voxel_leaf_entry_free_spans: Vec::new(),
-            voxel_background_rebuild: None,
-            voxel_frame_data: VoxelFrameData {
-                metadata_generation: 0,
-                mutation_base_generation: None,
-                region_bvh_root_index:
-                    higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
-                dirty_ranges: VoxelFrameDirtyRanges::default(),
-                mutation_batch: None,
-                chunk_headers: Vec::new(),
-                occupancy_words: Vec::new(),
-                material_words: Vec::new(),
-                orientation_words: Vec::new(),
-                macro_words: Vec::new(),
-                region_bvh_nodes: Vec::new(),
-                leaf_headers: Vec::new(),
-                leaf_chunk_entries: Vec::new(),
+            active_config: VoxelConfig {
+                render_bvh_cache_bounds: None,
+                render_bvh_cache: None,
+                pending_render_bvh_rebuild: true,
+                pending_render_bvh_mutation_deltas: Vec::new(),
+                dense_payload_encoded_cache: HashMap::new(),
+                leaf_entry_spans: Vec::new(),
+                leaf_entry_free_spans: Vec::new(),
+                frame_data: VoxelFrameData {
+                    metadata_generation: 0,
+                    mutation_base_generation: None,
+                    region_bvh_root_index:
+                        higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
+                    dirty_ranges: VoxelFrameDirtyRanges::default(),
+                    mutation_batch: None,
+                    chunk_headers: Vec::new(),
+                    occupancy_words: Vec::new(),
+                    material_words: Vec::new(),
+                    orientation_words: Vec::new(),
+                    macro_words: Vec::new(),
+                    region_bvh_nodes: Vec::new(),
+                    leaf_headers: Vec::new(),
+                    leaf_chunk_entries: Vec::new(),
+                },
             },
+            voxel_background_rebuild: None,
+            memory_allocator: None,
         }
+    }
+
+    /// Set the GPU memory allocator for background voxel rebuild.
+    /// Must be called before the first `build_voxel_frame_data` that triggers a
+    /// background rebuild, otherwise the rebuild will skip GPU buffer pre-creation.
+    pub fn set_memory_allocator(&mut self, allocator: Arc<dyn MemoryAllocator>) {
+        self.memory_allocator = Some(allocator);
     }
 }
 

@@ -82,10 +82,10 @@ impl Scene {
         self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
 
         self.mark_voxel_scene_region_dirty(changed_bounds);
-        if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE
+        if self.active_config.frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE
             && desired_non_empty > 0
         {
-            self.voxel_pending_render_bvh_rebuild = true;
+            self.active_config.pending_render_bvh_rebuild = true;
         }
 
         RegionPatchStats {
@@ -162,8 +162,8 @@ impl Scene {
         self.world_tree_revision = self.world_tree_revision.wrapping_add(1);
 
         self.mark_voxel_scene_region_dirty(changed_bounds);
-        if self.voxel_frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE {
-            self.voxel_pending_render_bvh_rebuild = true;
+        if self.active_config.frame_data.region_bvh_root_index == VTE_REGION_BVH_INVALID_NODE {
+            self.active_config.pending_render_bvh_rebuild = true;
         }
         RegionPatchStats {
             changed_chunks: 1,

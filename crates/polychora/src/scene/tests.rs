@@ -29,7 +29,7 @@ fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) ->
     );
     let chunk_key: [i32; 4] = chunk_key_fixed.map(|c: ChunkCoord| c.to_num::<i32>());
 
-    for leaf in &scene.voxel_frame_data.leaf_headers {
+    for leaf in &scene.active_config.frame_data.leaf_headers {
         if chunk_key[0] < leaf.min_chunk_coord[0]
             || chunk_key[0] > leaf.max_chunk_coord[0]
             || chunk_key[1] < leaf.min_chunk_coord[1]
@@ -59,7 +59,7 @@ fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) ->
         let local_w = (chunk_key[3] - leaf.min_chunk_coord[3]) as usize;
         let linear = local_x + dim_x * (local_y + dim_y * (local_z + dim_z * local_w));
         let entry_index = leaf.chunk_entry_offset as usize + linear;
-        let &entry = scene.voxel_frame_data.leaf_chunk_entries.get(entry_index)?;
+        let &entry = scene.active_config.frame_data.leaf_chunk_entries.get(entry_index)?;
 
         if entry == higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY {
             return None;
@@ -70,16 +70,16 @@ fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) ->
         }
 
         let chunk_index = entry.saturating_sub(1) as usize;
-        let header = scene.voxel_frame_data.chunk_headers.get(chunk_index)?;
+        let header = scene.active_config.frame_data.chunk_headers.get(chunk_index)?;
         if (header.flags & GpuVoxelChunkHeader::FLAG_FULL) == 0 {
             let occ_word_index = header.occupancy_word_offset as usize + (voxel_idx / 32);
-            let &occ_word = scene.voxel_frame_data.occupancy_words.get(occ_word_index)?;
+            let &occ_word = scene.active_config.frame_data.occupancy_words.get(occ_word_index)?;
             if (occ_word & (1u32 << (voxel_idx % 32))) == 0 {
                 return None;
             }
         }
         let mat_word_index = header.material_word_offset as usize + (voxel_idx / 2);
-        let &mat_word = scene.voxel_frame_data.material_words.get(mat_word_index)?;
+        let &mat_word = scene.active_config.frame_data.material_words.get(mat_word_index)?;
         let material = ((mat_word >> ((voxel_idx % 2) * 16)) & 0xFFFF) as u8;
         return (material != 0).then_some(material);
     }
@@ -715,7 +715,7 @@ fn voxel_scene_dirty_tracking_rebuild_clears_only_overlapping_chunks() {
 
     // Prime cache.
     scene.prime_render_bvh_cache_for_bounds(bounds);
-    assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+    assert_eq!(scene.active_config.render_bvh_cache_bounds, Some(bounds));
     assert!(scene.voxel_pending_scene_dirty_regions.is_empty());
 
     // Add one dirty chunk inside bounds and one far outside.
@@ -750,7 +750,7 @@ fn voxel_scene_dirty_tracking_offscreen_edits_do_not_invalidate_local_cache() {
 
     // Prime cache once.
     scene.prime_render_bvh_cache_for_bounds(bounds);
-    assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+    assert_eq!(scene.active_config.render_bvh_cache_bounds, Some(bounds));
 
     // Edit a far chunk; local bounds should remain cache-valid.
     let far_world_x = (CHUNK_SIZE as i32) * 60;
@@ -768,7 +768,7 @@ fn voxel_scene_dirty_tracking_offscreen_edits_do_not_invalidate_local_cache() {
         .voxel_pending_scene_dirty_regions
         .iter()
         .any(|region| region.contains_chunk_world_min(far_key)));
-    assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+    assert_eq!(scene.active_config.render_bvh_cache_bounds, Some(bounds));
 }
 
 #[test]
@@ -778,7 +778,7 @@ fn voxel_scene_dirty_budget_limits_chunks_per_rebuild() {
 
     // Prime cache.
     scene.prime_render_bvh_cache_for_bounds(bounds);
-    assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
+    assert_eq!(scene.active_config.render_bvh_cache_bounds, Some(bounds));
 
     // Mark more dirty chunks than per-frame budget.
     let dirty_count = VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET + 5;
@@ -814,8 +814,8 @@ fn voxel_frame_snapshot_path_clears_mutation_batch() {
         &test_resolver(),
     );
     scene.flush_voxel_background_rebuild();
-    assert!(scene.voxel_frame_data.mutation_batch.is_none());
-    assert!(scene.voxel_frame_data.mutation_base_generation.is_none());
+    assert!(scene.active_config.frame_data.mutation_batch.is_none());
+    assert!(scene.active_config.frame_data.mutation_base_generation.is_none());
 }
 
 #[test]
@@ -829,8 +829,8 @@ fn voxel_frame_delta_path_emits_mutation_batch() {
         &test_resolver(),
     );
     scene.flush_voxel_background_rebuild();
-    assert!(scene.voxel_frame_data.mutation_batch.is_none());
-    let base_generation = scene.voxel_frame_data.metadata_generation;
+    assert!(scene.active_config.frame_data.mutation_batch.is_none());
+    let base_generation = scene.active_config.frame_data.metadata_generation;
 
     scene.world_set_block(CHUNK_SIZE as i32, 0, 0, 0, BlockData::simple(0, 4));
     let _ = scene.build_voxel_frame_data(
@@ -840,11 +840,11 @@ fn voxel_frame_delta_path_emits_mutation_batch() {
         &test_resolver(),
     );
 
-    let batch = scene.voxel_frame_data.mutation_batch.as_ref();
+    let batch = scene.active_config.frame_data.mutation_batch.as_ref();
     assert!(batch.is_some());
     let batch = batch.unwrap();
     assert_eq!(
-        scene.voxel_frame_data.mutation_base_generation,
+        scene.active_config.frame_data.mutation_base_generation,
         Some(base_generation)
     );
     assert!(
@@ -870,14 +870,14 @@ fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
     );
     scene.flush_voxel_background_rebuild();
 
-    let frame_root = scene.voxel_frame_data.region_bvh_root_index;
+    let frame_root = scene.active_config.frame_data.region_bvh_root_index;
     assert_ne!(frame_root, VTE_REGION_BVH_INVALID_NODE);
-    assert!(scene.render_bvh_cache.is_some());
+    assert!(scene.active_config.render_bvh_cache.is_some());
 
-    scene.voxel_pending_render_bvh_rebuild = false;
-    scene.voxel_pending_render_bvh_mutation_deltas.clear();
+    scene.active_config.pending_render_bvh_rebuild = false;
+    scene.active_config.pending_render_bvh_mutation_deltas.clear();
     scene
-        .voxel_pending_render_bvh_mutation_deltas
+        .active_config.pending_render_bvh_mutation_deltas
         .push(RenderBvhChunkMutationDelta {
             key: chunk_key_i32(0, 0, 0, 0),
             expected_root: Some(frame_root.wrapping_add(1)),
@@ -897,15 +897,16 @@ fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
     );
     scene.flush_voxel_background_rebuild();
 
-    assert!(scene.voxel_pending_render_bvh_mutation_deltas.is_empty());
-    assert!(scene.voxel_frame_data.mutation_batch.is_none());
-    assert!(scene.voxel_frame_data.mutation_base_generation.is_none());
+    assert!(scene.active_config.pending_render_bvh_mutation_deltas.is_empty());
+    assert!(scene.active_config.frame_data.mutation_batch.is_none());
+    assert!(scene.active_config.frame_data.mutation_base_generation.is_none());
     let cpu_root = scene
+        .active_config
         .render_bvh_cache
         .as_ref()
         .and_then(|bvh| bvh.root)
         .unwrap_or(VTE_REGION_BVH_INVALID_NODE);
-    assert_eq!(scene.voxel_frame_data.region_bvh_root_index, cpu_root);
+    assert_eq!(scene.active_config.frame_data.region_bvh_root_index, cpu_root);
 }
 
 #[test]

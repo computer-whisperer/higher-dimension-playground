@@ -291,6 +291,9 @@ impl App {
     pub(super) fn enter_play_state(&mut self, window: &Window) {
         // Start from an empty client scene; multiplayer snapshot/chunks are authoritative.
         self.scene = Scene::new(ScenePreset::Empty);
+        if let Some(rcx) = self.rcx.as_ref() {
+            self.scene.set_memory_allocator(rcx.memory_allocator());
+        }
         self.camera = Camera4D::new();
         self.app_state = AppState::Playing;
         self.menu_open = false;
@@ -378,6 +381,9 @@ impl App {
         }
         // Reset scene to show demo background (DemoCubes has visible geometry near origin)
         self.scene = Scene::new(ScenePreset::DemoCubes);
+        if let Some(rcx) = self.rcx.as_ref() {
+            self.scene.set_memory_allocator(rcx.memory_allocator());
+        }
         self.app_state = AppState::MainMenu;
         self.main_menu_page = MainMenuPage::Root;
         self.main_menu_connect_error = None;
@@ -450,17 +456,24 @@ impl App {
         };
 
         if backend == RenderBackend::VoxelTraversal {
-            let voxel_frame = self.scene.build_voxel_frame_data(
+            let voxel_result = self.scene.build_voxel_frame_data(
                 self.menu_camera.position,
                 self.menu_camera.look_direction(),
                 self.vte_max_trace_distance,
                 &self.material_resolver,
             );
+            if let Some(gpu_buffers) = voxel_result.new_gpu_buffers {
+                let gen = voxel_result.gpu_buffers_generation
+                    .unwrap_or(voxel_result.frame_data.metadata_generation);
+                self.rcx.as_mut().unwrap().install_new_voxel_gpu_buffers(
+                    gpu_buffers, gen,
+                );
+            }
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),
                 self.queue.clone(),
                 frame_params,
-                voxel_frame.as_input(),
+                voxel_result.frame_data.as_input(),
                 &[],
                 &[],
             );
