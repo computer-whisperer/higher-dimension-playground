@@ -50,7 +50,7 @@ impl Inventory {
             (CONTENT_NS, BLOCK_GREEN),
         ];
         for (i, (ns, bt)) in defaults.into_iter().enumerate() {
-            inv.slots[i] = Some(ItemStack::block(ns, bt, 1));
+            inv.slots[i] = Some(ItemStack::block(ns, bt, 1, 0));
         }
         inv
     }
@@ -157,6 +157,24 @@ impl Inventory {
         }
     }
 
+    /// Update the scale_exp of the block item in a slot. No-op if the slot is
+    /// empty or not a block item.
+    pub fn update_slot_scale(&mut self, index: usize, scale_exp: i8) {
+        if index >= INVENTORY_SIZE {
+            return;
+        }
+        if let Some(stack) = &mut self.slots[index] {
+            use crate::shared::item_types::{BlockItemMeta, ITEM_BLOCK};
+            if (stack.item.namespace, stack.item.item_type) != ITEM_BLOCK {
+                return;
+            }
+            if let Some(mut meta) = BlockItemMeta::decode(&stack.item.data) {
+                meta.scale_exp = scale_exp;
+                stack.item.data = meta.encode();
+            }
+        }
+    }
+
     pub fn swap_slots(&mut self, a: usize, b: usize) {
         if a < INVENTORY_SIZE && b < INVENTORY_SIZE {
             self.slots.swap(a, b);
@@ -198,7 +216,7 @@ impl Inventory {
         for (i, &token) in tokens.iter().enumerate() {
             let block = crate::content_registry::block_data_from_material_token(token);
             if !block.is_air() {
-                inv.slots[i] = Some(ItemStack::block(block.namespace, block.block_type, 1));
+                inv.slots[i] = Some(ItemStack::block(block.namespace, block.block_type, 1, 0));
             }
         }
         inv
@@ -226,10 +244,10 @@ mod tests {
     #[test]
     fn try_add_stacking() {
         let mut inv = Inventory::default();
-        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 60)));
+        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 60, 0)));
 
         // Should merge into slot 0
-        let remainder = inv.try_add(ItemStack::block(CONTENT_NS, BLOCK_STONE, 3));
+        let remainder = inv.try_add(ItemStack::block(CONTENT_NS, BLOCK_STONE, 3, 0));
         assert!(remainder.is_none());
         assert_eq!(inv.slot(0).unwrap().count, 63);
     }
@@ -237,10 +255,10 @@ mod tests {
     #[test]
     fn try_add_overflow() {
         let mut inv = Inventory::default();
-        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 60)));
+        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 60, 0)));
 
         // 10 merges 4 into slot 0, 6 into empty slot 1
-        let remainder = inv.try_add(ItemStack::block(CONTENT_NS, BLOCK_STONE, 10));
+        let remainder = inv.try_add(ItemStack::block(CONTENT_NS, BLOCK_STONE, 10, 0));
         assert!(remainder.is_none());
         assert_eq!(inv.slot(0).unwrap().count, 64);
         assert_eq!(inv.slot(1).unwrap().count, 6);
@@ -250,9 +268,9 @@ mod tests {
     fn try_add_full_inventory() {
         let mut inv = Inventory::default();
         for i in 0..INVENTORY_SIZE {
-            inv.set_slot(i, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, MAX_STACK_SIZE)));
+            inv.set_slot(i, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, MAX_STACK_SIZE, 0)));
         }
-        let remainder = inv.try_add(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 1));
+        let remainder = inv.try_add(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 1, 0));
         assert!(remainder.is_some());
         assert_eq!(remainder.unwrap().count, 1);
     }
@@ -260,7 +278,7 @@ mod tests {
     #[test]
     fn decrement_slot_works() {
         let mut inv = Inventory::default();
-        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 3)));
+        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 3, 0)));
         assert!(inv.decrement_slot(0));
         assert_eq!(inv.slot(0).unwrap().count, 2);
         assert!(inv.decrement_slot(0));
@@ -272,7 +290,7 @@ mod tests {
     #[test]
     fn payload_round_trip() {
         let mut inv = Inventory::default_creative();
-        inv.set_slot(9, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 42)));
+        inv.set_slot(9, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 42, 0)));
 
         let payload = inv.to_payload();
         let restored = Inventory::from_payload(&payload).expect("should deserialize");
@@ -309,8 +327,8 @@ mod tests {
     #[test]
     fn swap_slots_works() {
         let mut inv = Inventory::default();
-        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 1)));
-        inv.set_slot(1, Some(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 5)));
+        inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 1, 0)));
+        inv.set_slot(1, Some(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 5, 0)));
         inv.swap_slots(0, 1);
         assert_eq!(inv.slot(0).unwrap().block_type_key(), Some((CONTENT_NS, BLOCK_DIRT)));
         assert_eq!(inv.slot(1).unwrap().block_type_key(), Some((CONTENT_NS, BLOCK_STONE)));

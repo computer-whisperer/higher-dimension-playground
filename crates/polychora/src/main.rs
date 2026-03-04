@@ -1175,6 +1175,7 @@ fn main() {
             polychora_plugin_api::content_ids::CONTENT_NS,
             polychora_plugin_api::content_ids::BLOCK_YELLOW_GREEN,
         ),
+        placement_orientation: polychora::shared::voxel::TesseractOrientation::IDENTITY,
         world_file,
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
@@ -1536,6 +1537,7 @@ struct App {
     zw_angle_color_shift_enabled: bool,
     zw_angle_color_shift_strength: f32,
     selected_block: polychora::shared::voxel::BlockData, // cached from hotbar_slots; derived, not persisted
+    placement_orientation: polychora::shared::voxel::TesseractOrientation, // transient session state
     world_file: PathBuf,
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,

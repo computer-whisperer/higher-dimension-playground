@@ -47,6 +47,21 @@ pub struct TesseractOrientation(pub u16);
 impl TesseractOrientation {
     pub const IDENTITY: Self = Self(0);
 
+    // 90° rotation generators — one per coordinate plane.
+    // Each maps axis A→-B, B→A while leaving the other two unchanged.
+    /// 90° in XZ plane: X→-Z, Z→X (yaw)
+    pub const ROT_XZ: Self = Self(228); // perm 14 [2,1,0,3], signs 4
+    /// 90° in YZ plane: Y→-Z, Z→Y (pitch)
+    pub const ROT_YZ: Self = Self(36); // perm 2 [0,2,1,3], signs 4
+    /// 90° in XW plane: X→-W, W→X
+    pub const ROT_XW: Self = Self(344); // perm 21 [3,1,2,0], signs 8
+    /// 90° in XY plane: X→-Y, Y→X
+    pub const ROT_XY: Self = Self(98); // perm 6 [1,0,2,3], signs 2
+    /// 90° in YW plane: Y→-W, W→Y
+    pub const ROT_YW: Self = Self(88); // perm 5 [0,3,2,1], signs 8
+    /// 90° in ZW plane: Z→-W, W→Z
+    pub const ROT_ZW: Self = Self(24); // perm 1 [0,1,3,2], signs 8
+
     pub fn identity() -> Self {
         Self::IDENTITY
     }
@@ -282,6 +297,71 @@ mod tests {
         let (cp, idx) = world_to_chunk_at_scale(cc(-1), cc(0), cc(0), cc(0), -1);
         assert_eq!(cp[0], fixed_from_lattice(-1, -1));
         assert_eq!(idx, 6);
+    }
+
+    #[test]
+    fn rotation_generators_apply_correctly() {
+        use super::TesseractOrientation as TO;
+
+        // ROT_XZ: (x,y,z,w) -> (z, y, -x, w)
+        assert_eq!(TO::ROT_XZ.apply([1, 0, 0, 0]), [0, 0, -1, 0]);
+        assert_eq!(TO::ROT_XZ.apply([0, 0, 1, 0]), [1, 0, 0, 0]);
+        assert_eq!(TO::ROT_XZ.apply([0, 1, 0, 0]), [0, 1, 0, 0]); // Y unchanged
+        assert_eq!(TO::ROT_XZ.apply([0, 0, 0, 1]), [0, 0, 0, 1]); // W unchanged
+
+        // ROT_YZ: (x,y,z,w) -> (x, z, -y, w)
+        assert_eq!(TO::ROT_YZ.apply([0, 1, 0, 0]), [0, 0, -1, 0]);
+        assert_eq!(TO::ROT_YZ.apply([0, 0, 1, 0]), [0, 1, 0, 0]);
+
+        // ROT_XW: (x,y,z,w) -> (w, y, z, -x)
+        assert_eq!(TO::ROT_XW.apply([1, 0, 0, 0]), [0, 0, 0, -1]);
+        assert_eq!(TO::ROT_XW.apply([0, 0, 0, 1]), [1, 0, 0, 0]);
+
+        // ROT_XY: (x,y,z,w) -> (y, -x, z, w)
+        assert_eq!(TO::ROT_XY.apply([1, 0, 0, 0]), [0, -1, 0, 0]);
+        assert_eq!(TO::ROT_XY.apply([0, 1, 0, 0]), [1, 0, 0, 0]);
+
+        // ROT_YW: (x,y,z,w) -> (x, w, z, -y)
+        assert_eq!(TO::ROT_YW.apply([0, 1, 0, 0]), [0, 0, 0, -1]);
+        assert_eq!(TO::ROT_YW.apply([0, 0, 0, 1]), [0, 1, 0, 0]);
+
+        // ROT_ZW: (x,y,z,w) -> (x, y, w, -z)
+        assert_eq!(TO::ROT_ZW.apply([0, 0, 1, 0]), [0, 0, 0, -1]);
+        assert_eq!(TO::ROT_ZW.apply([0, 0, 0, 1]), [0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn rotation_generators_are_order_4() {
+        use super::TesseractOrientation as TO;
+        for rot in [TO::ROT_XZ, TO::ROT_YZ, TO::ROT_XW, TO::ROT_XY, TO::ROT_YW, TO::ROT_ZW] {
+            let mut cur = rot;
+            cur = rot.compose(cur);
+            cur = rot.compose(cur);
+            cur = rot.compose(cur);
+            assert_eq!(cur, TO::IDENTITY, "4 applications of {:?} should be identity", rot);
+        }
+    }
+
+    #[test]
+    fn rotation_compose_example() {
+        use super::TesseractOrientation as TO;
+        // ROT_XZ then ROT_YZ: first XZ rotates, then YZ rotates
+        let composed = TO::ROT_YZ.compose(TO::ROT_XZ);
+        // Apply to X-axis: XZ maps X->(0,0,-1,0), then YZ maps (0,0,-1,0)->(0,-1,0,0)
+        // Wait: compose(a,b) means "a applied after b" so compose(YZ, XZ) = first XZ then YZ
+        // XZ: [1,0,0,0] -> [0,0,-1,0]
+        // YZ: [0,0,-1,0] -> [0,-1,0,0]
+        assert_eq!(composed.apply([1, 0, 0, 0]), [0, -1, 0, 0]);
+    }
+
+    #[test]
+    fn rotation_inverse() {
+        use super::TesseractOrientation as TO;
+        for rot in [TO::ROT_XZ, TO::ROT_YZ, TO::ROT_XW, TO::ROT_XY, TO::ROT_YW, TO::ROT_ZW] {
+            let inv = rot.inverse();
+            assert_eq!(rot.compose(inv), TO::IDENTITY);
+            assert_eq!(inv.compose(rot), TO::IDENTITY);
+        }
     }
 
     #[test]

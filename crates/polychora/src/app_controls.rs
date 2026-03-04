@@ -19,74 +19,6 @@ impl App {
         self.input.clear_mouse_delta();
     }
 
-    pub(super) fn cycle_hotbar_material_prev(&mut self) {
-        let current_key = (
-            self.selected_block.namespace,
-            self.selected_block.block_type,
-        );
-        let blocks: Vec<_> = self.content_registry.all_blocks_ordered().collect();
-        let pos = blocks
-            .iter()
-            .position(|b| (b.namespace, b.block_type) == current_key);
-        let next_idx = pos
-            .map(|p| if p == 0 { blocks.len() - 1 } else { p - 1 })
-            .unwrap_or(0);
-        if let Some(entry) = blocks.get(next_idx) {
-            self.selected_block =
-                polychora::shared::voxel::BlockData::simple(entry.namespace, entry.block_type);
-            self.inventory.set_slot(
-                self.hotbar_selected_index,
-                Some(polychora::shared::protocol::ItemStack::block(
-                    entry.namespace,
-                    entry.block_type,
-                    1,
-                )),
-            );
-            self.inventory_dirty = true;
-            eprintln!(
-                "Hotbar slot {} block: ({:#x}, {:#x}) ({})",
-                self.hotbar_selected_index + 1,
-                entry.namespace,
-                entry.block_type,
-                self.content_registry
-                    .block_name(entry.namespace, entry.block_type),
-            );
-        }
-    }
-
-    pub(super) fn cycle_hotbar_material_next(&mut self) {
-        let current_key = (
-            self.selected_block.namespace,
-            self.selected_block.block_type,
-        );
-        let blocks: Vec<_> = self.content_registry.all_blocks_ordered().collect();
-        let pos = blocks
-            .iter()
-            .position(|b| (b.namespace, b.block_type) == current_key);
-        let next_idx = pos.map(|p| (p + 1) % blocks.len()).unwrap_or(0);
-        if let Some(entry) = blocks.get(next_idx) {
-            self.selected_block =
-                polychora::shared::voxel::BlockData::simple(entry.namespace, entry.block_type);
-            self.inventory.set_slot(
-                self.hotbar_selected_index,
-                Some(polychora::shared::protocol::ItemStack::block(
-                    entry.namespace,
-                    entry.block_type,
-                    1,
-                )),
-            );
-            self.inventory_dirty = true;
-            eprintln!(
-                "Hotbar slot {} block: ({:#x}, {:#x}) ({})",
-                self.hotbar_selected_index + 1,
-                entry.namespace,
-                entry.block_type,
-                self.content_registry
-                    .block_name(entry.namespace, entry.block_type),
-            );
-        }
-    }
-
     pub(super) fn toggle_inventory(&mut self) {
         self.inventory_open = !self.inventory_open;
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
@@ -213,6 +145,9 @@ impl App {
         self.input.take_remove_block();
         self.input.take_place_block();
         self.input.take_pick_material();
+        self.input.take_rotate_xz();
+        self.input.take_rotate_yz();
+        self.input.take_rotate_xw();
         self.input.take_inventory_toggle();
         self.input.take_teleport_dialog();
         self.input.take_mouse_delta();

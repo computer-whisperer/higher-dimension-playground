@@ -565,6 +565,7 @@ pub(super) fn build_ghost_placement_instance(
     target: &scene::ScaleAwareBlockTarget,
     block: &polychora::shared::voxel::BlockData,
     material_resolver: &polychora::content_registry::MaterialResolver,
+    orientation: polychora::shared::voxel::TesseractOrientation,
 ) -> common::ModelInstance {
     let material_token = material_resolver.resolve_block(block.namespace, block.block_type);
     let preview_material = material_token as u32 | PREVIEW_MATERIAL_FLAG;
@@ -576,11 +577,12 @@ pub(super) fn build_ghost_placement_instance(
         wmin[2] + size * 0.5,
         wmin[3] + size * 0.5,
     ];
-    let basis = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
+    // Apply orientation to basis vectors so the wireframe preview reflects rotation.
+    let basis: [[f32; 4]; 4] = [
+        orientation.apply([1, 0, 0, 0]).map(|v| v as f32),
+        orientation.apply([0, 1, 0, 0]).map(|v| v as f32),
+        orientation.apply([0, 0, 1, 0]).map(|v| v as f32),
+        orientation.apply([0, 0, 0, 1]).map(|v| v as f32),
     ];
     build_centered_model_instance(center, &basis, [size; 4], [preview_material; 8])
 }

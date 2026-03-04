@@ -34,6 +34,8 @@ pub struct BlockItemMeta {
     pub block_type: u32,
     #[serde(default)]
     pub extra_data: Vec<u8>,
+    #[serde(default)]
+    pub scale_exp: i8,
 }
 
 impl BlockItemMeta {
@@ -57,11 +59,12 @@ impl BlockItemMeta {
 
 impl ItemStack {
     /// Create a block_stack item for the given block type.
-    pub fn block(namespace: u32, block_type: u32, count: u32) -> Self {
+    pub fn block(namespace: u32, block_type: u32, count: u32, scale_exp: i8) -> Self {
         let meta = BlockItemMeta {
             namespace,
             block_type,
             extra_data: Vec::new(),
+            scale_exp,
         };
         Self {
             item: Item {
@@ -84,7 +87,7 @@ impl ItemStack {
             block_type: meta.block_type,
             orientation: TesseractOrientation::IDENTITY,
             extra_data: meta.extra_data,
-            scale_exp: 0,
+            scale_exp: meta.scale_exp,
         })
     }
 

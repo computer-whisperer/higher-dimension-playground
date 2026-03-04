@@ -147,6 +147,9 @@ pub struct InputState {
     inventory_toggle_requested: bool,
     inventory_tab_cycle_requested: bool,
     teleport_dialog_requested: bool,
+    rotate_xz_requested: bool,
+    rotate_yz_requested: bool,
+    rotate_xw_requested: bool,
     menu_left_requested: bool,
     menu_right_requested: bool,
     menu_up_requested: bool,
@@ -195,6 +198,9 @@ impl InputState {
             inventory_toggle_requested: false,
             inventory_tab_cycle_requested: false,
             teleport_dialog_requested: false,
+            rotate_xz_requested: false,
+            rotate_yz_requested: false,
+            rotate_xw_requested: false,
             menu_left_requested: false,
             menu_right_requested: false,
             menu_up_requested: false,
@@ -313,6 +319,21 @@ impl InputState {
                 }
                 KeyCode::KeyF => {
                     self.pull_to_3d_held = pressed;
+                }
+                KeyCode::KeyZ => {
+                    if pressed && !event.repeat {
+                        self.rotate_xz_requested = true;
+                    }
+                }
+                KeyCode::KeyX => {
+                    if pressed && !event.repeat {
+                        self.rotate_yz_requested = true;
+                    }
+                }
+                KeyCode::KeyC => {
+                    if pressed && !event.repeat {
+                        self.rotate_xw_requested = true;
+                    }
                 }
                 KeyCode::KeyG => {
                     if pressed && !event.repeat {
@@ -590,6 +611,24 @@ impl InputState {
     pub fn take_look_at(&mut self) -> bool {
         let v = self.look_at_requested;
         self.look_at_requested = false;
+        v
+    }
+
+    pub fn take_rotate_xz(&mut self) -> bool {
+        let v = self.rotate_xz_requested;
+        self.rotate_xz_requested = false;
+        v
+    }
+
+    pub fn take_rotate_yz(&mut self) -> bool {
+        let v = self.rotate_yz_requested;
+        self.rotate_yz_requested = false;
+        v
+    }
+
+    pub fn take_rotate_xw(&mut self) -> bool {
+        let v = self.rotate_xw_requested;
+        self.rotate_xw_requested = false;
         v
     }
 

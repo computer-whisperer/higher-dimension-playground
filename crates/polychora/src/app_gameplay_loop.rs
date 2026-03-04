@@ -433,12 +433,18 @@ impl App {
                 eprintln!("Sprint: on");
             }
 
-            // Block place material selection via bracket keys.
+            // Bracket keys adjust placement scale.
             if self.input.take_place_material_prev() {
-                self.cycle_hotbar_material_prev();
+                let new_scale = (self.selected_block.scale_exp - 1).max(-3);
+                self.selected_block.scale_exp = new_scale;
+                self.inventory.update_slot_scale(self.hotbar_selected_index, new_scale);
+                self.inventory_dirty = true;
             }
             if self.input.take_place_material_next() {
-                self.cycle_hotbar_material_next();
+                let new_scale = (self.selected_block.scale_exp + 1).min(3);
+                self.selected_block.scale_exp = new_scale;
+                self.inventory.update_slot_scale(self.hotbar_selected_index, new_scale);
+                self.inventory_dirty = true;
             }
             // Number keys 1-9 select hotbar slot.
             if let Some(digit) = self.input.take_place_material_digit() {
@@ -602,6 +608,20 @@ impl App {
             }
             self.was_grounded_last_frame = self.camera.is_grounded;
 
+            // Placement orientation rotation.
+            {
+                use polychora::shared::voxel::TesseractOrientation;
+                if self.input.take_rotate_xz() {
+                    self.placement_orientation = TesseractOrientation::ROT_XZ.compose(self.placement_orientation);
+                }
+                if self.input.take_rotate_yz() {
+                    self.placement_orientation = TesseractOrientation::ROT_YZ.compose(self.placement_orientation);
+                }
+                if self.input.take_rotate_xw() {
+                    self.placement_orientation = TesseractOrientation::ROT_XW.compose(self.placement_orientation);
+                }
+            }
+
             // Block edit actions.
             let look_dir_for_edit = self.current_look_direction();
             if self.mouse_grabbed {
@@ -618,12 +638,14 @@ impl App {
                     if let Some(picked) = pick_targets.hit_block {
                         if !picked.is_air() {
                             let origin = pick_targets.hit.unwrap().origin_i32();
+                            self.placement_orientation = picked.orientation;
                             self.inventory.set_slot(
                                 self.hotbar_selected_index,
                                 Some(polychora::shared::protocol::ItemStack::block(
                                     picked.namespace,
                                     picked.block_type,
                                     1,
+                                    picked.scale_exp,
                                 )),
                             );
                             self.inventory_dirty = true;
@@ -674,6 +696,7 @@ impl App {
                                             broken.namespace,
                                             broken.block_type,
                                             1,
+                                            broken.scale_exp,
                                         );
                                         self.inventory.try_add(stack);
                                         self.inventory_dirty = true;
@@ -698,10 +721,12 @@ impl App {
                                 place.origin_i32(),
                                 1.0,
                             );
+                            let mut placed_block = self.selected_block.clone();
+                            placed_block.orientation = self.placement_orientation;
                             self.send_multiplayer_voxel_update(
                                 now,
                                 place.origin,
-                                self.selected_block.clone(),
+                                placed_block,
                             );
                             // Survival: decrement placed block from inventory
                             if self.game_mode == polychora::shared::inventory::GameMode::Survival {
@@ -724,6 +749,9 @@ impl App {
             self.input.take_remove_block();
             self.input.take_place_block();
             self.input.take_pick_material();
+            self.input.take_rotate_xz();
+            self.input.take_rotate_yz();
+            self.input.take_rotate_xw();
             self.footstep_distance_accum = 0.0;
             self.was_grounded_last_frame = self.camera.is_grounded;
         }
@@ -1196,6 +1224,7 @@ impl App {
                                 place,
                                 &self.selected_block,
                                 &self.material_resolver,
+                                self.placement_orientation,
                             ));
                         }
                     }

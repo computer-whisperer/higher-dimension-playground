@@ -144,6 +144,7 @@ impl App {
                             entry.namespace,
                             entry.block_type,
                             1,
+                            0,
                         )),
                     );
                     self.inventory_dirty = true;
@@ -403,7 +404,7 @@ impl App {
         let gap = 6.5;
         let total_width = 9.0 * slot_size + 8.0 * gap;
         let start_x = (screen_rect.width() - total_width) / 2.0;
-        let start_y = screen_rect.height() - slot_size - 65.0;
+        let start_y = screen_rect.height() - slot_size - 10.0;
 
         egui::Area::new(egui::Id::new("hotbar"))
             .fixed_pos(egui::pos2(start_x, start_y))
@@ -474,25 +475,6 @@ impl App {
                             );
                         }
 
-                        // Stack count badge (survival mode, bottom-right)
-                        if self.game_mode
-                            == polychora::shared::inventory::GameMode::Survival
-                        {
-                            if let Some(stack) = self.inventory.slot(i) {
-                                if stack.count > 1 {
-                                    let badge_pos =
-                                        rect.right_bottom() + egui::vec2(-4.0, -14.0);
-                                    ui.painter().text(
-                                        badge_pos,
-                                        egui::Align2::RIGHT_BOTTOM,
-                                        format!("{}", stack.count),
-                                        egui::FontId::proportional(14.0),
-                                        egui::Color32::WHITE,
-                                    );
-                                }
-                            }
-                        }
-
                         // Slot number label (top-left corner)
                         let label_pos = rect.left_top() + egui::vec2(4.0, 1.3);
                         ui.painter().text(
@@ -502,6 +484,33 @@ impl App {
                             egui::FontId::proportional(13.0),
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
                         );
+
+                        // Scale badge (bottom-left)
+                        if block.scale_exp != 0 {
+                            let badge_pos = rect.left_bottom() + egui::vec2(4.0, -3.0);
+                            ui.painter().text(
+                                badge_pos,
+                                egui::Align2::LEFT_BOTTOM,
+                                format!("s{}", block.scale_exp),
+                                egui::FontId::proportional(12.0),
+                                egui::Color32::from_rgb(140, 200, 255),
+                            );
+                        }
+
+                        // Stack count badge (bottom-right)
+                        if let Some(stack) = self.inventory.slot(i) {
+                            if stack.count > 1 {
+                                let badge_pos =
+                                    rect.right_bottom() + egui::vec2(-4.0, -3.0);
+                                ui.painter().text(
+                                    badge_pos,
+                                    egui::Align2::RIGHT_BOTTOM,
+                                    format!("{}", stack.count),
+                                    egui::FontId::proportional(12.0),
+                                    egui::Color32::WHITE,
+                                );
+                            }
+                        }
 
                         // Block name (bottom center, small text)
                         let name = self
@@ -520,24 +529,25 @@ impl App {
             });
     }
 
-    pub(super) fn draw_egui_scale_selector(&mut self, ctx: &egui::Context) {
+    pub(super) fn draw_egui_orientation_indicator(&mut self, ctx: &egui::Context) {
+        use polychora::shared::voxel::TesseractOrientation;
+
         let screen_rect = ctx.content_rect();
-        let center_x = screen_rect.width() / 2.0;
-        let hotbar_bottom = screen_rect.height() - 65.0;
+        let slot_size = 80.0;
+        let gap = 6.5;
+        let total_hotbar_width = 9.0 * slot_size + 8.0 * gap;
+        let hotbar_start_x = (screen_rect.width() - total_hotbar_width) / 2.0;
+        let hotbar_start_y = screen_rect.height() - slot_size - 10.0;
 
-        let scale = self.selected_block.scale_exp;
-        let label = match scale {
-            0 => "Scale: 0 (1×)".to_string(),
-            s if s > 0 => format!("Scale: {s} ({}×)", 1 << s),
-            s => format!("Scale: {s} (1/{}×)", 1 << -s),
-        };
+        // Position to the left of the hotbar, vertically centered
+        let widget_width = 148.0;
+        let widget_height = 52.0;
+        let widget_x = hotbar_start_x - widget_width - 8.0;
+        let widget_y = hotbar_start_y + (slot_size - widget_height) / 2.0;
 
-        let widget_width = 160.0;
-        let widget_height = 28.0;
-        let widget_x = center_x - widget_width / 2.0;
-        let widget_y = hotbar_bottom + 4.0;
+        let is_rotated = self.placement_orientation != TesseractOrientation::IDENTITY;
 
-        egui::Area::new(egui::Id::new("scale_selector"))
+        egui::Area::new(egui::Id::new("orientation_indicator"))
             .fixed_pos(egui::pos2(widget_x, widget_y))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -546,69 +556,126 @@ impl App {
                     egui::Sense::hover(),
                 );
 
-                // Background
-                let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140);
+                // Background — tinted when orientation is non-identity
+                let bg = if is_rotated {
+                    egui::Color32::from_rgba_unmultiplied(40, 30, 80, 160)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140)
+                };
                 ui.painter().rect_filled(rect, 4.0, bg);
 
-                let text_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200);
-                let arrow_color = egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180);
-                let arrow_hover = egui::Color32::from_rgb(255, 255, 100);
-                let font = egui::FontId::proportional(14.0);
-                let arrow_font = egui::FontId::proportional(18.0);
+                let btn_size = egui::vec2(28.0, 20.0);
+                let btn_font = egui::FontId::proportional(11.0);
+                let text_color = egui::Color32::from_rgba_unmultiplied(200, 200, 200, 200);
+                let hover_color = egui::Color32::from_rgb(255, 255, 100);
 
-                // Center label
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    &label,
-                    font,
-                    text_color,
-                );
+                // Row layout constants
+                let row0_y = rect.top() + 2.0;
+                let row1_y = rect.top() + 26.0;
+                let col_start = rect.left() + 3.0;
+                let col_gap = 30.0;
 
-                // Left arrow button
-                let left_rect =
-                    egui::Rect::from_min_size(rect.left_top(), egui::vec2(28.0, widget_height));
-                let left_resp =
-                    ui.interact(left_rect, egui::Id::new("scale_left"), egui::Sense::click());
-                ui.painter().text(
-                    left_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "◀",
-                    arrow_font.clone(),
-                    if left_resp.hovered() {
-                        arrow_hover
-                    } else {
-                        arrow_color
-                    },
-                );
-                if left_resp.clicked() {
-                    self.selected_block.scale_exp = (scale - 1).max(-3);
+                // Top row: XZ, YZ, XW (primary — matching Z/X/C keys)
+                let top_buttons: [(&str, &str, TesseractOrientation); 3] = [
+                    ("XZ", "Z key: rotate in XZ plane (yaw)", TesseractOrientation::ROT_XZ),
+                    ("YZ", "X key: rotate in YZ plane (pitch)", TesseractOrientation::ROT_YZ),
+                    ("XW", "C key: rotate in XW plane (4D)", TesseractOrientation::ROT_XW),
+                ];
+                for (i, (label, tooltip, rot)) in top_buttons.iter().enumerate() {
+                    let btn_rect = egui::Rect::from_min_size(
+                        egui::pos2(col_start + i as f32 * col_gap, row0_y),
+                        btn_size,
+                    );
+                    let resp = ui.interact(
+                        btn_rect,
+                        egui::Id::new(format!("rot_{}", label)),
+                        egui::Sense::click(),
+                    );
+                    let color = if resp.hovered() { hover_color } else { text_color };
+                    ui.painter().text(
+                        btn_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        btn_font.clone(),
+                        color,
+                    );
+                    if resp.clicked() {
+                        self.placement_orientation = rot.compose(self.placement_orientation);
+                    }
+                    resp.on_hover_text(*tooltip);
                 }
 
-                // Right arrow button
-                let right_rect = egui::Rect::from_min_size(
-                    egui::pos2(rect.right() - 28.0, rect.top()),
-                    egui::vec2(28.0, widget_height),
+                // Bottom row: XY, YW, ZW (secondary — UI only)
+                let bottom_buttons: [(&str, &str, TesseractOrientation); 3] = [
+                    ("XY", "Rotate in XY plane", TesseractOrientation::ROT_XY),
+                    ("YW", "Rotate in YW plane", TesseractOrientation::ROT_YW),
+                    ("ZW", "Rotate in ZW plane", TesseractOrientation::ROT_ZW),
+                ];
+                for (i, (label, tooltip, rot)) in bottom_buttons.iter().enumerate() {
+                    let btn_rect = egui::Rect::from_min_size(
+                        egui::pos2(col_start + i as f32 * col_gap, row1_y),
+                        btn_size,
+                    );
+                    let resp = ui.interact(
+                        btn_rect,
+                        egui::Id::new(format!("rot_{}", label)),
+                        egui::Sense::click(),
+                    );
+                    let color = if resp.hovered() { hover_color } else { text_color };
+                    ui.painter().text(
+                        btn_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        btn_font.clone(),
+                        color,
+                    );
+                    if resp.clicked() {
+                        self.placement_orientation = rot.compose(self.placement_orientation);
+                    }
+                    resp.on_hover_text(*tooltip);
+                }
+
+                // Reset button
+                let reset_rect = egui::Rect::from_min_size(
+                    egui::pos2(col_start + 3.0 * col_gap, row0_y),
+                    egui::vec2(28.0, 20.0),
                 );
-                let right_resp = ui.interact(
-                    right_rect,
-                    egui::Id::new("scale_right"),
+                let reset_resp = ui.interact(
+                    reset_rect,
+                    egui::Id::new("rot_reset"),
                     egui::Sense::click(),
                 );
+                let reset_color = if reset_resp.hovered() { hover_color } else { text_color };
                 ui.painter().text(
-                    right_rect.center(),
+                    reset_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "▶",
-                    arrow_font,
-                    if right_resp.hovered() {
-                        arrow_hover
-                    } else {
-                        arrow_color
-                    },
+                    "\u{21ba}",
+                    egui::FontId::proportional(16.0),
+                    reset_color,
                 );
-                if right_resp.clicked() {
-                    self.selected_block.scale_exp = (scale + 1).min(3);
+                if reset_resp.clicked() {
+                    self.placement_orientation = TesseractOrientation::IDENTITY;
                 }
+                reset_resp.on_hover_text("Reset orientation to identity");
+
+                // Orientation value display
+                let label_text = if is_rotated {
+                    format!("Ori: {}", self.placement_orientation.0)
+                } else {
+                    "Ori: 0".to_string()
+                };
+                let label_color = if is_rotated {
+                    egui::Color32::from_rgb(180, 160, 255)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(160, 160, 160, 180)
+                };
+                ui.painter().text(
+                    egui::pos2(col_start + 3.0 * col_gap + 14.0, row1_y + 10.0),
+                    egui::Align2::CENTER_CENTER,
+                    &label_text,
+                    egui::FontId::proportional(10.0),
+                    label_color,
+                );
             });
     }
 
@@ -967,6 +1034,18 @@ impl App {
                     ui.painter().rect_filled(icon_rect, 2.0, mat_color);
                 }
 
+                // Scale badge (bottom-left)
+                if block_data.scale_exp != 0 {
+                    let badge_pos = rect.left_bottom() + egui::vec2(4.0, -3.0);
+                    ui.painter().text(
+                        badge_pos,
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("s{}", block_data.scale_exp),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_rgb(140, 200, 255),
+                    );
+                }
+
                 // Count badge (bottom-right)
                 if stack.count > 1 {
                     let badge_pos = rect.right_bottom() + egui::vec2(-4.0, -3.0);
@@ -974,7 +1053,7 @@ impl App {
                         badge_pos,
                         egui::Align2::RIGHT_BOTTOM,
                         format!("{}", stack.count),
-                        egui::FontId::proportional(13.0),
+                        egui::FontId::proportional(11.0),
                         egui::Color32::WHITE,
                     );
                 }
@@ -1084,11 +1163,15 @@ impl App {
                         ui.end_row();
 
                         ui.label(egui::RichText::new("Middle Click").strong());
-                        ui.label("Pick material");
+                        ui.label("Pick material (copies orientation & scale)");
                         ui.end_row();
 
                         ui.label(egui::RichText::new("[ / ]").strong());
-                        ui.label("Previous / Next material");
+                        ui.label("Scale down / up");
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Z / X / C").strong());
+                        ui.label("Rotate block: XZ (yaw) / YZ (pitch) / XW (4D)");
                         ui.end_row();
 
                         ui.label(egui::RichText::new("Scroll Wheel").strong());
@@ -1168,7 +1251,7 @@ impl App {
                     self.draw_egui_dev_console(ctx, &mut console_command, &mut close_console);
                 }
                 self.draw_egui_hotbar(ctx);
-                self.draw_egui_scale_selector(ctx);
+                self.draw_egui_orientation_indicator(ctx);
                 self.draw_egui_waila(ctx);
             }
         });
@@ -1203,7 +1286,7 @@ impl App {
             let block = polychora::shared::voxel::BlockData::simple(ns, bt);
             self.inventory.set_slot(
                 self.hotbar_selected_index,
-                Some(polychora::shared::protocol::ItemStack::block(ns, bt, 1)),
+                Some(polychora::shared::protocol::ItemStack::block(ns, bt, 1, 0)),
             );
             self.inventory_dirty = true;
             self.selected_block = block;
