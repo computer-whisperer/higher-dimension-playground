@@ -784,21 +784,22 @@ impl Scene {
         if new_span.start >= new_span.end {
             return;
         }
-        free_spans.push(new_span);
-        free_spans.sort_unstable_by_key(|span| span.start);
-        let mut merged = Vec::<std::ops::Range<usize>>::with_capacity(free_spans.len());
-        for span in free_spans.drain(..) {
-            if let Some(last) = merged.last_mut() {
-                if span.start <= last.end {
-                    last.end = last.end.max(span.end);
-                } else {
-                    merged.push(span);
-                }
-            } else {
-                merged.push(span);
-            }
+        // Insert in sorted position (by start), then merge with neighbors.
+        let pos = free_spans
+            .binary_search_by_key(&new_span.start, |s| s.start)
+            .unwrap_or_else(|p| p);
+        free_spans.insert(pos, new_span);
+
+        // Merge with the following span if they overlap/touch.
+        while pos + 1 < free_spans.len() && free_spans[pos + 1].start <= free_spans[pos].end {
+            free_spans[pos].end = free_spans[pos].end.max(free_spans[pos + 1].end);
+            free_spans.remove(pos + 1);
         }
-        *free_spans = merged;
+        // Merge with the preceding span if they overlap/touch.
+        if pos > 0 && free_spans[pos - 1].end >= free_spans[pos].start {
+            free_spans[pos - 1].end = free_spans[pos - 1].end.max(free_spans[pos].end);
+            free_spans.remove(pos);
+        }
     }
 
     fn build_free_spans_from_leaf_spans(
@@ -881,7 +882,11 @@ impl Scene {
         let old_material_words_len = self.voxel_frame_data.material_words.len();
         let old_orientation_words_len = self.voxel_frame_data.orientation_words.len();
         let old_macro_words_len = self.voxel_frame_data.macro_words.len();
-        let mut dirty = VoxelFrameDirtyRanges::default();
+        // Start from the previous cumulative dirty_ranges so that frame-in-flight
+        // slots that missed earlier deltas can still apply the mutation batch
+        // (which is built from these ranges and contains all changes since the
+        // last full rebuild).
+        let mut dirty = std::mem::take(&mut self.voxel_frame_data.dirty_ranges);
         let mut current_root = if self.voxel_frame_data.region_bvh_root_index
             == higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE
         {

@@ -142,6 +142,7 @@ pub fn build_bvh_in_bounds(core: &RenderTreeCore, bounds: Aabb4i) -> RenderBvh {
     if leaf_inputs.is_empty() {
         return empty_render_bvh(bounds);
     }
+    #[cfg(debug_assertions)]
     if let Err(error) = validate_render_leaves_world_space_non_overlapping(&leaf_inputs) {
         eprintln!(
             "[render-tree-scale-overlap] BUG: build_bvh_in_bounds produced overlap: {}",
@@ -316,6 +317,7 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
 
     let mut replacement_leaves = Vec::<RenderLeaf>::new();
     collect_render_leaves_in_bounds(patch_core, clipped_patch_bounds, &mut replacement_leaves);
+    #[cfg(debug_assertions)]
     if let Err(error) = validate_render_leaves_world_space_non_overlapping(&replacement_leaves) {
         eprintln!(
             "[render-tree-scale-overlap] BUG: apply_core_patch produced overlap: {}",
@@ -1021,10 +1023,11 @@ fn release_retired_nodes_and_leaves(
         if node_idx >= bvh.nodes.len() {
             continue;
         }
-        if bvh.free_node_ids.contains(&node_id) {
-            continue;
+        if let Err(pos) = bvh.free_node_ids.binary_search(&node_id) {
+            bvh.free_node_ids.insert(pos, node_id);
+        } else {
+            continue; // already free
         }
-        bvh.free_node_ids.push(node_id);
         bvh.nodes[node_idx] = RenderBvhNode {
             bounds: Aabb4i::from_i32([0, 0, 0, 0], [-1, -1, -1, -1]),
             kind: RenderBvhNodeKind::Leaf {
@@ -1041,10 +1044,11 @@ fn release_retired_nodes_and_leaves(
         if leaf_idx >= bvh.leaves.len() {
             continue;
         }
-        if bvh.free_leaf_ids.contains(&leaf_id) {
-            continue;
+        if let Err(pos) = bvh.free_leaf_ids.binary_search(&leaf_id) {
+            bvh.free_leaf_ids.insert(pos, leaf_id);
+        } else {
+            continue; // already free
         }
-        bvh.free_leaf_ids.push(leaf_id);
         bvh.leaves[leaf_idx] = RenderLeaf {
             bounds: Aabb4i::from_i32([0, 0, 0, 0], [-1, -1, -1, -1]),
             kind: RenderLeafKind::Uniform(BlockData::AIR),

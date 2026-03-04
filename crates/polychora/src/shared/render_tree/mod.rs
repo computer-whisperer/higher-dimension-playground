@@ -58,6 +58,7 @@ pub fn from_region_core(core: &RegionTreeCore) -> RenderTreeCore {
         kind: map_kind(&core.kind),
     };
     normalize_render_core(&mut mapped);
+    #[cfg(debug_assertions)]
     if let Err(error) = validate_render_core_world_space_non_overlapping(&mapped) {
         eprintln!(
             "[render-tree-scale-overlap] BUG: from_region_core produced overlap: {}",
