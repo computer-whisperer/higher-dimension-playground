@@ -567,7 +567,8 @@ pub(super) fn apply_creeper_explosion(
         ],
     ];
 
-    let mut changed_chunks = HashSet::new();
+    // Collect all voxel positions in the blast sphere.
+    let mut positions = Vec::new();
     for blast_center in blast_centers {
         for dx in -radius..=radius {
             for dy in -radius..=radius {
@@ -577,22 +578,20 @@ pub(super) fn apply_creeper_explosion(
                         if dist_sq > radius_sq {
                             continue;
                         }
-                        let pos = [
+                        positions.push([
                             ChunkCoord::from_num(blast_center[0] + dx),
                             ChunkCoord::from_num(blast_center[1] + dy),
                             ChunkCoord::from_num(blast_center[2] + dz),
                             ChunkCoord::from_num(blast_center[3] + dw),
-                        ];
-                        if let Some(chunk_pos) =
-                            apply_authoritative_voxel_edit(state, pos, BlockData::AIR, 0)
-                        {
-                            changed_chunks.insert(chunk_pos);
-                        }
+                        ]);
                     }
                 }
             }
         }
     }
+
+    // Bulk-edit: groups by chunk internally, processes each chunk once.
+    let changed_chunks = state.apply_bulk_air_edits_scale0(&positions);
 
     (
         changed_chunks.len(),

@@ -508,27 +508,54 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         blocks
     }
 
-    /// Read the effective (override + virgin) world state for a chunk region.
+    /// Read the effective (override + virgin) blocks for a chunk, returning both.
     ///
-    /// Returns `CHUNK_VOLUME` dense blocks at the given chunk position and scale.
-    /// Layers override data on top of virgin data by walking the override tree's
-    /// BVH directly (avoiding lossy slice/composition through scale-0).
-    fn read_effective_blocks_at_scale(&self, chunk_key: ChunkKey, scale_exp: i8) -> Vec<BlockData> {
-        // Start with virgin blocks as baseline.
-        let mut blocks = self.query_virgin_blocks_at_scale(chunk_key, scale_exp);
-
-        // Quick check: does the override tree have any data overlapping this region?
+    /// The override tree stores fully composed state, so when it has data for a
+    /// chunk, that data IS the effective state — no per-cell overlay needed.
+    ///
+    /// Returns `(effective_blocks, virgin_blocks)`.
+    fn read_effective_and_virgin_blocks(
+        &self,
+        chunk_key: ChunkKey,
+        scale_exp: i8,
+    ) -> (Vec<BlockData>, Vec<BlockData>) {
         let chunk_bounds = Aabb4i::chunk_world_bounds(chunk_key, scale_exp);
+
         let has_overlap = self
             .override_chunks
             .root()
             .map(|root| root.bounds.intersects(&chunk_bounds))
             .unwrap_or(false);
+
+        let virgin = self.query_virgin_blocks_at_scale(chunk_key, scale_exp);
+
         if !has_overlap {
-            return blocks;
+            // No overrides — effective == virgin.
+            return (virgin.clone(), virgin);
         }
 
-        // Walk the override tree's BVH for each cell to layer overrides.
+        // Scale-0 fast path: extract the fully-composed chunk directly from
+        // the override tree (one tree slice instead of 4096 point lookups).
+        // Only safe when the sliced core is a simple structure at scale 0 —
+        // finer-scale data needs per-cell sampling to avoid mixing up spatial extents.
+        if scale_exp == 0 {
+            let override_core = self.override_chunks.slice_core_in_bounds(chunk_bounds);
+            let safe_for_fast_path = match &override_core.kind {
+                RegionNodeKind::Empty | RegionNodeKind::Uniform(_) => true,
+                RegionNodeKind::ChunkArray(ca) => ca.scale_exp == 0,
+                _ => false,
+            };
+            if safe_for_fast_path {
+                if let Some(payload) = chunk_payload_from_core(&override_core, chunk_key) {
+                    return (payload.dense_blocks(), virgin);
+                }
+                return (virgin.clone(), virgin);
+            }
+            // Fall through to per-cell lookup for finer-scale override data.
+        }
+
+        // Non-zero scale: per-cell override lookup (rare path).
+        let mut effective = virgin.clone();
         let step = step_for_scale(scale_exp);
         let cs = ChunkCoord::from_num(CHUNK_SIZE as i32);
         let origin = chunk_key.map(|k| k.saturating_mul(cs));
@@ -548,14 +575,14 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                                 + lz * CHUNK_SIZE * CHUNK_SIZE
                                 + ly * CHUNK_SIZE
                                 + lx;
-                            blocks[idx] = block;
+                            effective[idx] = block;
                         }
                     }
                 }
             }
         }
 
-        blocks
+        (effective, virgin)
     }
 
     /// Determine the optimal chunk scale for placing a block at the given position.
@@ -661,8 +688,9 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             eprintln!("failed to hydrate spatial region before edit: {}", e);
         }
 
-        // 3. Read effective (override + virgin) world state for this chunk region.
-        let mut blocks = self.read_effective_blocks_at_scale(chunk_key, chunk_scale);
+        // 3. Read effective and virgin blocks in one pass (no redundant queries).
+        let (mut blocks, virgin_blocks) =
+            self.read_effective_and_virgin_blocks(chunk_key, chunk_scale);
 
         // 4. Compute multi-cell footprint for coarser-than-chunk placements.
         let multi_cell = if scale_exp > chunk_scale {
@@ -705,7 +733,6 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         }
 
         // 7. Compare to virgin: prune if identical.
-        let virgin_blocks = self.query_virgin_blocks_at_scale(chunk_key, chunk_scale);
         let should_remove = blocks_match_ignoring_scale(&blocks, &virgin_blocks);
         let payload = if should_remove {
             None
@@ -736,6 +763,82 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             self.dirty_save_chunks.insert(key, se);
         }
         Some(chunk_key)
+    }
+
+    /// Efficiently set multiple voxels to AIR at scale 0.
+    ///
+    /// Groups edits by chunk and processes each chunk once: one read, one
+    /// encode, one tree insert, one dirty mark.  Falls back to per-voxel
+    /// edits for the rare case where a chunk contains sub-chunk-scale data.
+    pub fn apply_bulk_air_edits_scale0(
+        &mut self,
+        positions: &[[ChunkCoord; 4]],
+    ) -> Vec<ChunkKey> {
+        // Group voxel positions by their scale-0 chunk key.
+        let mut by_chunk: HashMap<ChunkKey, Vec<[ChunkCoord; 4]>> = HashMap::new();
+        for &pos in positions {
+            let (chunk_key, _) =
+                world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+            by_chunk.entry(chunk_key).or_default().push(pos);
+        }
+
+        let mut changed = Vec::new();
+        for (chunk_key, chunk_positions) in &by_chunk {
+            let chunk_bounds = Aabb4i::chunk_world_bounds(*chunk_key, 0);
+            if let Err(e) = self.ensure_persisted_bounds_loaded(chunk_bounds) {
+                eprintln!("failed to hydrate spatial region before bulk edit: {e}");
+            }
+
+            // Verify no finer-scale override data exists in this chunk region.
+            // Writing at scale 0 would overwrite finer chunks, losing detail.
+            let entries = self
+                .override_chunks
+                .collect_chunk_entries_in_bounds(chunk_bounds);
+            if entries.iter().any(|(_, se)| *se != 0) {
+                // Rare: sub-chunk-scale data. Fall back to per-voxel edits.
+                for &pos in chunk_positions {
+                    if let Some(ck) = self.apply_voxel_edit_at_scale(pos, BlockData::AIR, 0) {
+                        if !changed.contains(&ck) {
+                            changed.push(ck);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let (mut blocks, virgin_blocks) =
+                self.read_effective_and_virgin_blocks(*chunk_key, 0);
+
+            for &pos in chunk_positions {
+                let (_, voxel_idx) =
+                    world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+                blocks[voxel_idx] = BlockData::AIR;
+            }
+
+            let should_remove = blocks_match_ignoring_scale(&blocks, &virgin_blocks);
+            let payload = if should_remove {
+                None
+            } else {
+                ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
+            };
+
+            let affected_bounds =
+                self.override_chunks
+                    .set_chunk_at_scale(*chunk_key, payload, 0);
+            let Some(affected_bounds) = affected_bounds else {
+                continue;
+            };
+
+            self.mark_dirty_chunk(*chunk_key, 0);
+            for (key, se) in self
+                .override_chunks
+                .collect_chunk_entries_in_bounds(affected_bounds)
+            {
+                self.dirty_save_chunks.insert(key, se);
+            }
+            changed.push(*chunk_key);
+        }
+        changed
     }
 
     pub fn persist_dirty_overrides_with_players(

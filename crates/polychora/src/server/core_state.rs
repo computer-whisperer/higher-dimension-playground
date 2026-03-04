@@ -201,6 +201,13 @@ impl ServerState {
             .apply_voxel_edit_at_scale(position, block, scale_exp)
     }
 
+    pub(super) fn apply_bulk_air_edits_scale0(
+        &mut self,
+        positions: &[[ChunkCoord; 4]],
+    ) -> Vec<ChunkKey> {
+        self.world.apply_bulk_air_edits_scale0(positions)
+    }
+
     pub(super) fn world_take_dirty_bounds(&mut self) -> Vec<Aabb4i> {
         self.world.take_dirty_bounds()
     }
