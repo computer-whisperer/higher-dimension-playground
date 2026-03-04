@@ -714,7 +714,7 @@ fn voxel_scene_dirty_tracking_rebuild_clears_only_overlapping_chunks() {
     let bounds = Aabb4i::from_i32([-16, -16, -16, -16], [24, 24, 24, 24]);
 
     // Prime cache.
-    scene.ensure_render_bvh_cache_for_bounds(bounds);
+    scene.prime_render_bvh_cache_for_bounds(bounds);
     assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
     assert!(scene.voxel_pending_scene_dirty_regions.is_empty());
 
@@ -749,7 +749,7 @@ fn voxel_scene_dirty_tracking_offscreen_edits_do_not_invalidate_local_cache() {
     let bounds = Aabb4i::from_i32([-16, -16, -16, -16], [24, 24, 24, 24]);
 
     // Prime cache once.
-    scene.ensure_render_bvh_cache_for_bounds(bounds);
+    scene.prime_render_bvh_cache_for_bounds(bounds);
     assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
 
     // Edit a far chunk; local bounds should remain cache-valid.
@@ -777,7 +777,7 @@ fn voxel_scene_dirty_budget_limits_chunks_per_rebuild() {
     let bounds = Aabb4i::from_i32([-16, -16, -16, -16], [1608, 24, 24, 24]);
 
     // Prime cache.
-    scene.ensure_render_bvh_cache_for_bounds(bounds);
+    scene.prime_render_bvh_cache_for_bounds(bounds);
     assert_eq!(scene.render_bvh_cache_bounds, Some(bounds));
 
     // Mark more dirty chunks than per-frame budget.

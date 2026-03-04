@@ -10,7 +10,7 @@ use polychora::shared::region_tree::{
     chunk_key_i32, slice_non_empty_region_core_in_bounds, validate_tree_integrity, ChunkKey,
     RegionChunkTree, RegionNodeKind, RegionTreeCore, TreeIntegrityReport,
 };
-use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta, RenderTreeCore};
+use polychora::shared::render_tree::{self, RenderBvhChunkMutationDelta};
 use polychora::shared::spatial::{step_for_scale, Aabb4i, ChunkCoord};
 use polychora::shared::voxel::{world_to_chunk_at_scale, BlockData};
 use std::collections::HashMap;
@@ -97,8 +97,13 @@ struct DensePayloadCacheKey {
     block_palette: Vec<BlockData>,
 }
 
+struct BackgroundRebuildResult {
+    render_bvh: render_tree::RenderBvh,
+    frame_buffers: VoxelFrameDataBuffers,
+}
+
 struct BackgroundVoxelRebuild {
-    receiver: std::sync::mpsc::Receiver<Result<VoxelFrameDataBuffers, String>>,
+    receiver: std::sync::mpsc::Receiver<Result<BackgroundRebuildResult, String>>,
     bounds: Aabb4i,
 }
 
@@ -142,8 +147,6 @@ pub struct Scene {
     voxel_visibility_generation: u64,
     voxel_cached_visibility_bounds: Option<Aabb4i>,
     voxel_pending_scene_dirty_regions: Vec<Aabb4i>,
-    render_region_cache_bounds: Option<Aabb4i>,
-    render_region_cache: Option<RegionChunkTree>,
     render_bvh_cache_bounds: Option<Aabb4i>,
     render_bvh_cache: Option<render_tree::RenderBvh>,
     voxel_pending_render_bvh_rebuild: bool,
@@ -151,7 +154,6 @@ pub struct Scene {
     voxel_dense_payload_encoded_cache: HashMap<DensePayloadCacheKey, u32>,
     voxel_leaf_entry_spans: Vec<Option<std::ops::Range<usize>>>,
     voxel_leaf_entry_free_spans: Vec<std::ops::Range<usize>>,
-    voxel_last_rebuild_failure_signature: Option<(Aabb4i, usize, usize)>,
     voxel_background_rebuild: Option<BackgroundVoxelRebuild>,
     voxel_frame_data: VoxelFrameData,
 }
@@ -712,8 +714,6 @@ impl Scene {
             voxel_visibility_generation: 0,
             voxel_cached_visibility_bounds: None,
             voxel_pending_scene_dirty_regions: Vec::new(),
-            render_region_cache_bounds: None,
-            render_region_cache: None,
             render_bvh_cache_bounds: None,
             render_bvh_cache: None,
             voxel_pending_render_bvh_rebuild: true,
@@ -721,7 +721,6 @@ impl Scene {
             voxel_dense_payload_encoded_cache: HashMap::new(),
             voxel_leaf_entry_spans: Vec::new(),
             voxel_leaf_entry_free_spans: Vec::new(),
-            voxel_last_rebuild_failure_signature: None,
             voxel_background_rebuild: None,
             voxel_frame_data: VoxelFrameData {
                 metadata_generation: 0,

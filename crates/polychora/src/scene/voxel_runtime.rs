@@ -197,28 +197,6 @@ impl Scene {
             && (root as usize) < self.voxel_frame_data.region_bvh_nodes.len()
     }
 
-    fn log_voxel_rebuild_failure_once(
-        &mut self,
-        bounds: Aabb4i,
-        reason: &str,
-        node_count: usize,
-        leaf_count: usize,
-    ) {
-        let signature = (bounds, node_count, leaf_count);
-        if self.voxel_last_rebuild_failure_signature == Some(signature) {
-            return;
-        }
-        self.voxel_last_rebuild_failure_signature = Some(signature);
-        eprintln!(
-            "[vte-voxel-rebuild-failure] reason={} bounds={:?}->{:?} nodes={} leaves={} (preserving last-good GPU voxel frame)",
-            reason,
-            bounds.min,
-            bounds.max,
-            node_count,
-            leaf_count,
-        );
-    }
-
     fn log_voxel_snapshot_rebuild(
         &self,
         bounds: Aabb4i,
@@ -1091,7 +1069,7 @@ impl Scene {
         self.voxel_frame_data.region_bvh_root_index = current_root
             .unwrap_or(higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE);
         self.voxel_cached_visibility_bounds = Some(bounds);
-        self.voxel_last_rebuild_failure_signature = None;
+
         Ok(())
     }
 
@@ -1268,10 +1246,10 @@ impl Scene {
             self.voxel_frame_data.dirty_ranges =
                 Self::full_dirty_ranges_from_frame(&self.voxel_frame_data);
             self.sync_leaf_entry_allocator_from_frame();
-            self.voxel_last_rebuild_failure_signature = None;
+    
         } else {
             self.clear_voxel_frame_buffers();
-            self.voxel_last_rebuild_failure_signature = None;
+    
         }
         self.voxel_cached_visibility_bounds = Some(bounds);
     }
@@ -1332,12 +1310,14 @@ impl Scene {
         // Poll background rebuild
         if let Some(bg) = self.voxel_background_rebuild.take() {
             match bg.receiver.try_recv() {
-                Ok(Ok(buffers)) => {
+                Ok(Ok(result)) => {
                     eprintln!(
                         "[voxel-bg-rebuild] background build completed, applying for bounds {:?}->{:?}",
                         bg.bounds.min, bg.bounds.max
                     );
-                    self.apply_voxel_frame_buffers(bg.bounds, Some(buffers));
+                    self.render_bvh_cache = Some(result.render_bvh);
+                    self.render_bvh_cache_bounds = Some(bg.bounds);
+                    self.apply_voxel_frame_buffers(bg.bounds, Some(result.frame_buffers));
                     self.voxel_pending_render_bvh_rebuild = false;
                     // Fall through to normal processing for any dirty regions accumulated during build
                 }
@@ -1417,35 +1397,47 @@ impl Scene {
             }
 
             if needs_rebuild {
-                if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
-                    let cpu_root = render_bvh.root.unwrap_or(
-                        higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
-                    );
-                    self.log_voxel_snapshot_rebuild(
-                        scene_bounds,
-                        "pending_rebuild_flag",
-                        0,
-                        self.voxel_pending_render_bvh_mutation_deltas.len(),
-                        self.voxel_frame_data.region_bvh_root_index,
-                        cpu_root,
-                    );
-                    // Spawn background thread for the expensive encoding
-                    let bvh_clone = render_bvh.clone();
-                    let resolver_clone = resolver.clone();
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
-                        let _ = tx.send(
+                self.log_voxel_snapshot_rebuild(
+                    scene_bounds,
+                    "pending_rebuild_flag",
+                    0,
+                    self.voxel_pending_render_bvh_mutation_deltas.len(),
+                    self.voxel_frame_data.region_bvh_root_index,
+                    self.render_bvh_cache
+                        .as_ref()
+                        .and_then(|bvh| bvh.root)
+                        .unwrap_or(
+                            higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
+                        ),
+                );
+                // Clone the world tree slice and spawn the full chain on a background thread:
+                // world_tree slice → RenderTreeCore → RenderBvh → GPU encode
+                let world_core =
+                    self.world_tree.slice_non_empty_core_in_bounds(scene_bounds);
+                let resolver_clone = resolver.clone();
+                let bg_bounds = scene_bounds;
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = (|| -> Result<BackgroundRebuildResult, String> {
+                        let render_core = render_tree::from_region_core(&world_core);
+                        let render_bvh =
+                            render_tree::build_bvh_in_bounds(&render_core, bg_bounds);
+                        let frame_buffers =
                             Scene::build_voxel_frame_buffers_from_render_bvh(
-                                &bvh_clone,
+                                &render_bvh,
                                 &resolver_clone,
-                            ),
-                        );
-                    });
-                    self.voxel_background_rebuild = Some(BackgroundVoxelRebuild {
-                        receiver: rx,
-                        bounds: scene_bounds,
-                    });
-                }
+                            )?;
+                        Ok(BackgroundRebuildResult {
+                            render_bvh,
+                            frame_buffers,
+                        })
+                    })();
+                    let _ = tx.send(result);
+                });
+                self.voxel_background_rebuild = Some(BackgroundVoxelRebuild {
+                    receiver: rx,
+                    bounds: scene_bounds,
+                });
             } else if !deltas.is_empty() {
                 let applied_deltas = deltas.len();
                 let mut apply_ok = false;
@@ -1476,36 +1468,12 @@ impl Scene {
                         );
                     }
                     self.voxel_pending_render_bvh_mutation_deltas.clear();
-                    if let Some(render_bvh) = self.render_bvh_cache.as_ref() {
-                        let cpu_root = render_bvh.root.unwrap_or(
-                            higher_dimension_playground::render::VTE_REGION_BVH_INVALID_NODE,
-                        );
-                        self.log_voxel_snapshot_rebuild(
-                            scene_bounds,
-                            apply_error.as_deref().unwrap_or("delta_apply_failed"),
-                            applied_deltas,
-                            self.voxel_pending_render_bvh_mutation_deltas.len(),
-                            self.voxel_frame_data.region_bvh_root_index,
-                            cpu_root,
-                        );
-                        match Self::build_voxel_frame_buffers_from_render_bvh(render_bvh, resolver)
-                        {
-                            Ok(buffers) => {
-                                self.apply_voxel_frame_buffers(scene_bounds, Some(buffers));
-                            }
-                            Err(error) => {
-                                self.voxel_pending_render_bvh_rebuild = true;
-                                let reason =
-                                    format!("delta_recovery_snapshot_encode_failed:{error}");
-                                self.log_voxel_rebuild_failure_once(
-                                    scene_bounds,
-                                    &reason,
-                                    render_bvh.nodes.len(),
-                                    render_bvh.leaves.len(),
-                                );
-                            }
-                        }
-                    }
+                    // Schedule a background rebuild instead of synchronous recovery
+                    self.voxel_pending_render_bvh_rebuild = true;
+                    eprintln!(
+                        "[vte-delta-fallback] scheduling background rebuild reason={:?} applied_deltas={}",
+                        apply_error, applied_deltas
+                    );
                 } else if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
                     eprintln!(
                         "[edit-sync-voxel-delta] scene_bounds={:?}->{:?} result=ok applied_deltas={} frame_root={}",
@@ -1517,10 +1485,6 @@ impl Scene {
                     for delta in deltas.iter().take(8) {
                         let key = delta.key;
                         let world_payload = self.world_tree.chunk_payload(key).map(|(p, _)| p);
-                        let cache_payload = self
-                            .render_region_cache
-                            .as_ref()
-                            .and_then(|cache| cache.chunk_payload(key).map(|(p, _)| p));
                         let bvh_payloads = self
                             .render_bvh_cache
                             .as_ref()
@@ -1532,7 +1496,7 @@ impl Scene {
                             .map(ResolvedChunkPayload::from_payload_with_static_palette)
                             .collect();
                         eprintln!(
-                            "[edit-sync-render] key={:?} root={:?}->{:?} writes(nodes={},leaves={},freed_nodes={},freed_leaves={}) world={} cache={} bvh={} frame={}",
+                            "[edit-sync-render] key={:?} root={:?}->{:?} writes(nodes={},leaves={},freed_nodes={},freed_leaves={}) world={} bvh={} frame={}",
                             key,
                             delta.expected_root,
                             delta.new_root,
@@ -1541,7 +1505,6 @@ impl Scene {
                             delta.freed_node_ids.len(),
                             delta.freed_leaf_ids.len(),
                             Self::summarize_chunk_payload_compact(world_payload.as_ref()),
-                            Self::summarize_chunk_payload_compact(cache_payload.as_ref()),
                             Self::summarize_chunk_payload_list_compact(&bvh_payloads),
                             Self::summarize_chunk_payload_list_compact(&frame_payloads),
                         );
@@ -1557,8 +1520,10 @@ impl Scene {
     pub(crate) fn flush_voxel_background_rebuild(&mut self) {
         if let Some(bg) = self.voxel_background_rebuild.take() {
             match bg.receiver.recv() {
-                Ok(Ok(buffers)) => {
-                    self.apply_voxel_frame_buffers(bg.bounds, Some(buffers));
+                Ok(Ok(result)) => {
+                    self.render_bvh_cache = Some(result.render_bvh);
+                    self.render_bvh_cache_bounds = Some(bg.bounds);
+                    self.apply_voxel_frame_buffers(bg.bounds, Some(result.frame_buffers));
                     self.voxel_pending_render_bvh_rebuild = false;
                 }
                 Ok(Err(error)) => {

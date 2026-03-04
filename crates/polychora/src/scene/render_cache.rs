@@ -2,7 +2,6 @@ use super::*;
 use higher_dimension_playground::render::{
     VTE_LEAF_KIND_UNIFORM, VTE_LEAF_KIND_VOXEL_CHUNK_ARRAY, VTE_REGION_BVH_NODE_FLAG_LEAF,
 };
-use polychora::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds;
 
 #[derive(Default)]
 struct RegionDumpStats {
@@ -27,34 +26,17 @@ struct GpuBvhDumpStats {
 }
 
 impl Scene {
-    fn build_render_region_tree_in_bounds(&self, bounds: Aabb4i) -> RegionChunkTree {
-        let mut composed = RegionChunkTree::new();
-        if !bounds.is_valid() {
-            return composed;
-        }
-        let world_core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
-        let _ = composed.splice_non_empty_core_in_bounds(bounds, &world_core);
-        composed
-    }
-
-    fn build_render_tree_core_in_bounds(&self, bounds: Aabb4i) -> RenderTreeCore {
-        if !bounds.is_valid() {
-            return RenderTreeCore::empty(bounds);
-        }
-        let composed = self.build_render_region_tree_in_bounds(bounds);
-        let composed_core = composed.slice_non_empty_core_in_bounds(bounds);
-        render_tree::from_region_core(&composed_core)
-    }
-
-    fn rebuild_render_bvh_from_region_cache(&mut self, bounds: Aabb4i) {
-        let render_core = if let Some(cache) = self.render_region_cache.as_ref() {
-            let core = cache.slice_non_empty_core_in_bounds(bounds);
-            render_tree::from_region_core(&core)
-        } else {
-            self.build_render_tree_core_in_bounds(bounds)
-        };
+    /// Synchronously build and install the render BVH cache for the given bounds.
+    /// Test-only: production code uses the background rebuild path instead.
+    #[cfg(test)]
+    pub(crate) fn prime_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
+        let core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
+        let render_core = render_tree::from_region_core(&core);
         self.render_bvh_cache = Some(render_tree::build_bvh_in_bounds(&render_core, bounds));
         self.render_bvh_cache_bounds = Some(bounds);
+        self.voxel_pending_render_bvh_rebuild = false;
+        self.voxel_pending_render_bvh_mutation_deltas.clear();
+        self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
     }
 
     fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
@@ -110,11 +92,11 @@ impl Scene {
     /// Dump the region cache tree (client-side) and the on-GPU BVH buffer
     /// structure to stderr for structural analysis.
     pub fn dump_render_trees(&self) {
-        self.dump_region_cache_tree();
+        self.dump_world_tree_render_view();
         self.dump_gpu_bvh();
     }
 
-    fn dump_region_cache_tree(&self) {
+    fn dump_world_tree_render_view(&self) {
         fn bounds_size(b: &Aabb4i) -> [i32; 4] {
             [
                 (b.max[0] - b.min[0]).to_num::<i32>(),
@@ -124,36 +106,32 @@ impl Scene {
             ]
         }
 
-        eprintln!("\n=== REGION CACHE TREE ===");
-        if let Some(bounds) = self.render_region_cache_bounds {
+        eprintln!("\n=== WORLD TREE (render view) ===");
+        if let Some(bounds) = self.render_bvh_cache_bounds {
             eprintln!(
-                "  cache bounds: {:?} -> {:?}  size: {:?}",
+                "  render bounds: {:?} -> {:?}  size: {:?}",
                 bounds.min,
                 bounds.max,
                 bounds_size(&bounds),
             );
         }
-        if let Some(cache) = self.render_region_cache.as_ref() {
-            if let Some(root) = cache.root() {
-                let mut stats = RegionDumpStats::default();
-                Self::dump_region_node(root, 0, &mut stats);
-                eprintln!(
-                    "--- region summary: {} nodes (empty={} uniform={} procedural={} chunk_array={} branch={}), max_depth={}",
-                    stats.total_nodes,
-                    stats.empty,
-                    stats.uniform,
-                    stats.procedural,
-                    stats.chunk_array,
-                    stats.branch,
-                    stats.max_depth,
-                );
-            } else {
-                eprintln!("  (empty root)");
-            }
+        if let Some(root) = self.world_tree.root() {
+            let mut stats = RegionDumpStats::default();
+            Self::dump_region_node(root, 0, &mut stats);
+            eprintln!(
+                "--- region summary: {} nodes (empty={} uniform={} procedural={} chunk_array={} branch={}), max_depth={}",
+                stats.total_nodes,
+                stats.empty,
+                stats.uniform,
+                stats.procedural,
+                stats.chunk_array,
+                stats.branch,
+                stats.max_depth,
+            );
         } else {
-            eprintln!("  (no region cache)");
+            eprintln!("  (empty root)");
         }
-        eprintln!("=== END REGION CACHE TREE ===\n");
+        eprintln!("=== END WORLD TREE ===\n");
     }
 
     fn dump_region_node(node: &RegionTreeCore, depth: usize, stats: &mut RegionDumpStats) {
@@ -370,8 +348,7 @@ impl Scene {
     /// This discards all incremental mutation state and reconstructs a fresh
     /// optimal tree, useful for profiling BVH quality degradation.
     pub fn force_render_bvh_rebuild(&mut self) {
-        if let Some(bounds) = self.render_bvh_cache_bounds {
-            self.rebuild_render_bvh_from_region_cache(bounds);
+        if self.render_bvh_cache_bounds.is_some() {
             self.voxel_pending_render_bvh_rebuild = true;
             self.voxel_pending_render_bvh_mutation_deltas.clear();
         }
@@ -379,8 +356,6 @@ impl Scene {
 
     pub(crate) fn ensure_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
         if !bounds.is_valid() {
-            self.render_region_cache_bounds = None;
-            self.render_region_cache = None;
             self.render_bvh_cache_bounds = None;
             self.render_bvh_cache = None;
             self.voxel_pending_render_bvh_rebuild = true;
@@ -389,12 +364,12 @@ impl Scene {
         }
 
         let has_cache = self.render_bvh_cache_bounds == Some(bounds)
-            && self.render_region_cache_bounds == Some(bounds)
-            && self.render_region_cache.is_some();
+            && self.render_bvh_cache.is_some();
         if !has_cache {
-            self.render_region_cache_bounds = Some(bounds);
-            self.render_region_cache = Some(self.build_render_region_tree_in_bounds(bounds));
-            self.rebuild_render_bvh_from_region_cache(bounds);
+            // No existing cache for these bounds — clear stale state and let the
+            // background thread in build_voxel_frame_data handle the full rebuild.
+            self.render_bvh_cache_bounds = None;
+            self.render_bvh_cache = None;
             self.voxel_pending_render_bvh_rebuild = true;
             self.voxel_pending_render_bvh_mutation_deltas.clear();
             self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
@@ -433,7 +408,6 @@ impl Scene {
             return;
         }
 
-        let mut changed = false;
         let mut deltas = Vec::<RenderBvhChunkMutationDelta>::new();
         let mut fallback_full_rebuild = false;
         let mut fallback_reason: Option<String> = None;
@@ -442,38 +416,10 @@ impl Scene {
             let Some(dirty_bounds) = Self::intersect_bounds(dirty_region, bounds) else {
                 continue;
             };
-            let desired_fragment_tree = self.build_render_region_tree_in_bounds(dirty_bounds);
-            let desired_fragment_core =
-                desired_fragment_tree.slice_non_empty_core_in_bounds(dirty_bounds);
-            if let Some(cache) = self.render_region_cache.as_mut() {
-                let previous_fragment_core = cache.slice_non_empty_core_in_bounds(dirty_bounds);
-                let splice_changed =
-                    cache.splice_non_empty_core_in_bounds(dirty_bounds, &desired_fragment_core);
-                if splice_changed.is_none() {
-                    let current_fragment_core = cache.slice_non_empty_core_in_bounds(dirty_bounds);
-                    if current_fragment_core.kind != desired_fragment_core.kind {
-                        fallback_full_rebuild = true;
-                        fallback_reason = Some(format!(
-                            "render_region_splice_noop_mismatch bounds={:?}->{:?} prev_kind={:?} desired_kind={:?} current_kind={:?}",
-                            dirty_bounds.min,
-                            dirty_bounds.max,
-                            previous_fragment_core.kind,
-                            desired_fragment_core.kind,
-                            current_fragment_core.kind
-                        ));
-                        break;
-                    }
-                    continue;
-                }
-            } else {
-                fallback_full_rebuild = true;
-                fallback_reason = Some("missing_render_region_cache".to_string());
-                break;
-            }
 
-            changed = true;
             if let Some(render_bvh) = self.render_bvh_cache.as_mut() {
-                let desired_render_core = render_tree::from_region_core(&desired_fragment_core);
+                let world_core = self.world_tree.slice_non_empty_core_in_bounds(dirty_bounds);
+                let desired_render_core = render_tree::from_region_core(&world_core);
                 match render_tree::apply_core_patch_in_bounds_with_delta_in_bvh(
                     render_bvh,
                     dirty_bounds,
@@ -507,26 +453,11 @@ impl Scene {
                 bounds.max,
                 deltas.len()
             );
-            self.render_region_cache_bounds = Some(bounds);
-            self.render_region_cache = Some(self.build_render_region_tree_in_bounds(bounds));
-            self.rebuild_render_bvh_from_region_cache(bounds);
             self.voxel_pending_render_bvh_rebuild = true;
             self.voxel_pending_render_bvh_mutation_deltas.clear();
             return;
         }
-        if changed {
-            if deltas.is_empty() {
-                // If the render-region cache changed but the BVH delta path produced
-                // no writes, the GPU frame can get stuck on stale data.
-                eprintln!(
-                    "[vte-bvh-delta-fallback] reason=changed_cache_without_deltas rebuild_bounds={:?}->{:?}",
-                    bounds.min, bounds.max
-                );
-                self.rebuild_render_bvh_from_region_cache(bounds);
-                self.voxel_pending_render_bvh_rebuild = true;
-                self.voxel_pending_render_bvh_mutation_deltas.clear();
-                return;
-            }
+        if !deltas.is_empty() {
             if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some() {
                 eprintln!(
                     "[edit-sync-dirty-apply] bounds={:?}->{:?} dirty_regions={} deltas={} pending_after={}",
@@ -634,12 +565,7 @@ impl Scene {
     pub fn check_render_tree_integrity(&self) -> RenderTreeReport {
         let mut report = RenderTreeReport::default();
 
-        // --- Render region cache ---
-        let cache_bounds = self.render_region_cache_bounds;
-        report.cache_bounds = cache_bounds;
-        if let Some(cache) = self.render_region_cache.as_ref() {
-            report.cache_tree_report = Some(validate_tree_integrity(cache));
-        }
+        report.cache_bounds = self.render_bvh_cache_bounds;
 
         // --- CPU BVH ---
         if let Some(bvh) = self.render_bvh_cache.as_ref() {
@@ -681,75 +607,7 @@ impl Scene {
             report.gpu_bvh_errors = ctx.errors;
         }
 
-        // --- Cross-validate: render cache vs world tree ---
-        if let (Some(bounds), Some(cache)) = (cache_bounds, self.render_region_cache.as_ref()) {
-            let fresh = self.build_render_region_tree_in_bounds(bounds);
-            let fresh_core = fresh.slice_non_empty_core_in_bounds(bounds);
-            let cached_core = cache.slice_non_empty_core_in_bounds(bounds);
-
-            // Compare by collecting all non-empty chunks from both
-            let mut fresh_chunks =
-                collect_non_empty_chunks_from_core_in_bounds(&fresh_core, bounds);
-            fresh_chunks.sort_unstable_by_key(|(key, _)| *key);
-
-            let mut cached_chunks =
-                collect_non_empty_chunks_from_core_in_bounds(&cached_core, bounds);
-            cached_chunks.sort_unstable_by_key(|(key, _)| *key);
-
-            report.cross_validate_fresh_chunk_count = fresh_chunks.len();
-            report.cross_validate_cached_chunk_count = cached_chunks.len();
-
-            // Find mismatches
-            let mut fi = 0;
-            let mut ci = 0;
-            while fi < fresh_chunks.len() && ci < cached_chunks.len() {
-                let (fk, fp) = &fresh_chunks[fi];
-                let (ck, cp) = &cached_chunks[ci];
-                match fk.cmp(ck) {
-                    std::cmp::Ordering::Less => {
-                        report.cross_validate_errors.push(format!(
-                            "chunk {:?} in world_tree but missing from render cache",
-                            fk,
-                        ));
-                        fi += 1;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        report.cross_validate_errors.push(format!(
-                            "chunk {:?} in render cache but missing from world_tree",
-                            ck,
-                        ));
-                        ci += 1;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        // Compare resolved block data, not internal palette
-                        // structure — the cache may flatten branches into a
-                        // single ChunkArray with a shared (larger) palette.
-                        if fp.dense_blocks() != cp.dense_blocks() {
-                            report.cross_validate_errors.push(format!(
-                                "chunk {:?} payload mismatch: fresh={:?} cached={:?}",
-                                fk, fp, cp,
-                            ));
-                        }
-                        fi += 1;
-                        ci += 1;
-                    }
-                }
-            }
-            while fi < fresh_chunks.len() {
-                report.cross_validate_errors.push(format!(
-                    "chunk {:?} in world_tree but missing from render cache",
-                    fresh_chunks[fi].0,
-                ));
-                fi += 1;
-            }
-            while ci < cached_chunks.len() {
-                report.cross_validate_errors.push(format!(
-                    "chunk {:?} in render cache but missing from world_tree",
-                    cached_chunks[ci].0,
-                ));
-                ci += 1;
-            }
-        }
+        // (render_region_cache removed — cross-validation no longer applicable)
 
         // Dump full trees to stderr for offline analysis
         self.dump_render_trees();
@@ -789,9 +647,7 @@ impl Scene {
 
 #[derive(Default)]
 pub struct RenderTreeReport {
-    // Render region cache
     pub cache_bounds: Option<Aabb4i>,
-    pub cache_tree_report: Option<TreeIntegrityReport>,
 
     // CPU BVH
     pub cpu_bvh_bounds: Option<Aabb4i>,
@@ -816,11 +672,6 @@ pub struct RenderTreeReport {
     pub gpu_bvh_chunk_array_leaves: usize,
     pub gpu_bvh_sibling_overlaps: usize,
     pub gpu_bvh_errors: Vec<String>,
-
-    // Cross-validation: render cache vs world tree
-    pub cross_validate_fresh_chunk_count: usize,
-    pub cross_validate_cached_chunk_count: usize,
-    pub cross_validate_errors: Vec<String>,
 }
 
 // --- CPU BVH walk helpers ---
