@@ -1946,11 +1946,15 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             .cloned()
             .expect("live descriptor set layout");
         for frame in &mut self.frames_in_flight {
-            frame.live_buffers = LiveBuffers::new_with_voxel_caps(
-                self.memory_allocator.clone(),
+            // Only replace the voxel buffers, keeping non-voxel buffers
+            // (working_data, model_instance, voxel_frame_meta) intact.
+            // Creating entirely new LiveBuffers would zero those buffers,
+            // discarding data already written earlier in this frame.
+            let new_voxel = VoxelGpuBuffers::new(self.memory_allocator.clone(), grown);
+            frame.live_buffers.install_voxel_buffers(
+                new_voxel,
                 self.descriptor_set_allocator.clone(),
                 live_layout.clone(),
-                grown,
             );
             frame.last_voxel_metadata_generation = None;
             frame.vte_compare_enabled = false;
@@ -2707,10 +2711,12 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 let region_bvh_nodes = &input.region_bvh_nodes[..vte_region_bvh_node_count];
                 let leaf_chunk_entries = &input.leaf_chunk_entries[..vte_leaf_chunk_entry_count];
                 let macro_words = &input.macro_words[..vte_macro_word_count];
-                // The mutation batch covers all changes since the last full rebuild
-                // (built from cumulative dirty_ranges), so it's valid for any
-                // frame slot regardless of its last generation.
-                if let Some(batch) = input.mutation_batch {
+                // When the frame has no previous generation (e.g. after voxel buffer
+                // capacity growth), we must do a full upload. The mutation_batch only
+                // covers incremental changes — it assumes buffers already contain
+                // the baseline data.
+                let force_full_upload = frame.last_voxel_metadata_generation.is_none();
+                if let Some(batch) = input.mutation_batch.filter(|_| !force_full_upload) {
                     for write in &batch.chunk_header_writes {
                         let Some((dst, src)) =
                             clamp_write_span(write.start, write.values.len(), vte_chunk_count)
@@ -2830,8 +2836,14 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         writer[dst].copy_from_slice(&write.values[src]);
                     }
                 } else {
-                    // No mutation batch — use dirty_ranges for partial upload.
-                    let dirty = input.dirty_ranges;
+                    // No mutation batch (or forced full upload for empty buffers).
+                    // When force_full_upload is true, set dirty to None so all
+                    // .or_else() fallbacks trigger full-range uploads.
+                    let dirty = if force_full_upload {
+                        None
+                    } else {
+                        input.dirty_ranges
+                    };
 
                     let chunk_headers_dirty = clamp_dirty_range(
                         dirty.and_then(|ranges| ranges.chunk_headers.clone()),
