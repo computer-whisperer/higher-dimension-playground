@@ -70,24 +70,33 @@ fn pack_dense_materials_words(
     orientation_words.fill(0);
     macro_words.fill(0);
 
+    // Pre-resolve the block palette so the inner loop uses array lookups
+    // instead of HashMap lookups (palette is typically ~10-20 entries vs
+    // 4096 voxels).
+    let resolved_palette: Vec<(u16, u16)> = block_palette
+        .iter()
+        .map(|block| {
+            let mat = resolver.resolve_block(block.namespace, block.block_type);
+            let orient = pack_orientation_scale_u16(block.orientation.0, block.scale_exp);
+            (mat, orient)
+        })
+        .collect();
+
     let mut solid_count = 0u32;
     let mut solid_local_min = [i32::MAX; 4];
     let mut solid_local_max = [i32::MIN; 4];
 
     for (voxel_idx, &palette_idx) in dense_palette_indices.iter().enumerate() {
-        let block = block_palette
+        let (mat_u16, orient_scale_u16) = resolved_palette
             .get(palette_idx as usize)
-            .cloned()
-            .unwrap_or(BlockData::AIR);
-        let mat_u16 = resolver.resolve_block(block.namespace, block.block_type);
+            .copied()
+            .unwrap_or((0, 0));
 
         let mat_word_idx = voxel_idx / 2;
         let mat_shift = ((voxel_idx & 1) * 16) as u32;
         material_words[mat_word_idx] &= !(0xFFFFu32 << mat_shift);
         material_words[mat_word_idx] |= u32::from(mat_u16) << mat_shift;
 
-        // Pack orientation + scale into u16: bits 0-8 orientation, bits 9-15 scale_exp
-        let orient_scale_u16 = pack_orientation_scale_u16(block.orientation.0, block.scale_exp);
         orientation_words[mat_word_idx] &= !(0xFFFFu32 << mat_shift);
         orientation_words[mat_word_idx] |= u32::from(orient_scale_u16) << mat_shift;
 
