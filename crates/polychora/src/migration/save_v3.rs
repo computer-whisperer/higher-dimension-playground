@@ -974,9 +974,7 @@ fn ensure_data_file(root: &Path, data_file_id: u32) -> io::Result<()> {
     file.write_all(&DATA_FILE_VERSION.to_le_bytes())?;
     file.write_all(&data_file_id.to_le_bytes())?;
     file.flush()?;
-    let file = file
-        .into_inner()
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    let file = file.into_inner().map_err(io::Error::other)?;
     file.sync_all()?;
     Ok(())
 }
@@ -1105,9 +1103,7 @@ fn save_manifest_atomic(root: &Path, manifest: &Manifest) -> io::Result<()> {
         serde_json::to_writer_pretty(&mut writer, manifest)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         writer.flush()?;
-        let file = writer
-            .into_inner()
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        let file = writer.into_inner().map_err(io::Error::other)?;
         file.sync_all()?;
     }
     std::fs::rename(&tmp_path, &final_path)?;
@@ -1138,9 +1134,7 @@ fn write_payload_file<T: Serialize>(
     writer.write_all(&checksum.to_le_bytes())?;
     writer.write_all(&encoded)?;
     writer.flush()?;
-    let file = writer
-        .into_inner()
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    let file = writer.into_inner().map_err(io::Error::other)?;
     file.sync_all()?;
     Ok(())
 }

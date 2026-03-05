@@ -528,9 +528,10 @@ impl Scene {
     /// cache, CPU BVH, and GPU BVH buffers, and cross-validates against the
     /// world tree.
     pub fn check_render_tree_integrity(&self) -> RenderTreeReport {
-        let mut report = RenderTreeReport::default();
-
-        report.cache_bounds = self.active_config.render_bvh_cache_bounds;
+        let mut report = RenderTreeReport {
+            cache_bounds: self.active_config.render_bvh_cache_bounds,
+            ..Default::default()
+        };
 
         // --- CPU BVH ---
         if let Some(bvh) = self.active_config.render_bvh_cache.as_ref() {
@@ -613,6 +614,7 @@ impl Scene {
 
 #[derive(Default)]
 pub struct RenderTreeReport {
+    #[allow(dead_code)]
     pub cache_bounds: Option<Aabb4i>,
 
     // CPU BVH

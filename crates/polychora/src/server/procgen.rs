@@ -1640,7 +1640,7 @@ struct MazeLayoutCacheEntry {
     last_used: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct MazeLayoutCache {
     entries: HashMap<MazeLayoutCacheKey, MazeLayoutCacheEntry>,
     next_use_id: u64,
@@ -1691,15 +1691,6 @@ impl MazeLayoutCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.next_use_id = 0;
-    }
-}
-
-impl Default for MazeLayoutCache {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-            next_use_id: 0,
-        }
     }
 }
 

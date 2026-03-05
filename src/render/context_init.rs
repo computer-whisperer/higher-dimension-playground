@@ -200,55 +200,46 @@ impl RenderContext {
         let bvh_propagate_aabbs =
             load_shader(device.clone(), shader_spirv!("mainBVHPropagateAABBs"));
 
-        let render_pass = match swapchain.clone() {
-            Some(swapchain) => {
-                // The next step is to create a *render pass*, which is an object that describes where the
-                // output of the graphics pipeline will go. It describes the layout of the images where the
-                // colors, depth and/or stencil information will be written.
-                Some(
-                    vulkano::single_pass_renderpass!(
-                        device.clone(),
-                        attachments: {
-                            // `color` is a custom name we give to the first and only attachment.
-                            color: {
-                                // `format: <ty>` indicates the type of the format of the image. This has to be
-                                // one of the types of the `vulkano::format` module (or alternatively one of
-                                // your structs that implements the `FormatDesc` trait). Here we use the same
-                                // format as the swapchain.
-                                format: swapchain.image_format(),
-                                // `samples: 1` means that we ask the GPU to use one sample to determine the
-                                // value of each pixel in the color attachment. We could use a larger value
-                                // (multisampling) for antialiasing. An example of this can be found in
-                                // msaa-renderpass.rs.
-                                samples: 1,
-                                // `load_op: Clear` means that we ask the GPU to clear the content of this
-                                // attachment at the start of the drawing.
-                                load_op: Clear,
-                                // `store_op: Store` means that we ask the GPU to store the output of the draw
-                                // in the actual image. We could also ask it to discard the result.
-                                store_op: Store,
-                            },
-                        },
-                        pass: {
-                            // We use the attachment named `color` as the one and only color attachment.
-                            color: [color],
-                            // No depth-stencil attachment is indicated with empty brackets.
-                            depth_stencil: {},
-                        },
-                    )
-                    .unwrap(),
-                )
-            }
-            None => None,
-        };
+        let render_pass = swapchain.clone().map(|swapchain| {
+            // The next step is to create a *render pass*, which is an object that describes where the
+            // output of the graphics pipeline will go. It describes the layout of the images where the
+            // colors, depth and/or stencil information will be written.
+            vulkano::single_pass_renderpass!(
+                device.clone(),
+                attachments: {
+                    // `color` is a custom name we give to the first and only attachment.
+                    color: {
+                        // `format: <ty>` indicates the type of the format of the image. This has to be
+                        // one of the types of the `vulkano::format` module (or alternatively one of
+                        // your structs that implements the `FormatDesc` trait). Here we use the same
+                        // format as the swapchain.
+                        format: swapchain.image_format(),
+                        // `samples: 1` means that we ask the GPU to use one sample to determine the
+                        // value of each pixel in the color attachment. We could use a larger value
+                        // (multisampling) for antialiasing. An example of this can be found in
+                        // msaa-renderpass.rs.
+                        samples: 1,
+                        // `load_op: Clear` means that we ask the GPU to clear the content of this
+                        // attachment at the start of the drawing.
+                        load_op: Clear,
+                        // `store_op: Store` means that we ask the GPU to store the output of the draw
+                        // in the actual image. We could also ask it to discard the result.
+                        store_op: Store,
+                    },
+                },
+                pass: {
+                    // We use the attachment named `color` as the one and only color attachment.
+                    color: [color],
+                    // No depth-stencil attachment is indicated with empty brackets.
+                    depth_stencil: {},
+                },
+            )
+            .unwrap()
+        });
 
-        let framebuffers = match render_pass.clone() {
-            Some(render_pass) => match images {
-                Some(images) => Some(window_size_dependent_setup(&images, &render_pass)),
-                None => None,
-            },
-            None => None,
-        };
+        let framebuffers = render_pass.clone().and_then(|render_pass| {
+            images.map(|images| window_size_dependent_setup(&images, &render_pass))
+        });
 
         let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
@@ -321,10 +312,10 @@ impl RenderContext {
             edge_cs: raster_edge,
             tetrahedron_pixel_cs: raster_pixel,
             bin_tets_cs,
-            raytrace_preprocess: raytrace_preprocess,
+            raytrace_preprocess,
             entity_instance_aabb_preprocess,
-            raytrace_pixel: raytrace_pixel,
-            raytrace_clear: raytrace_clear,
+            raytrace_pixel,
+            raytrace_clear,
             voxel_trace_stage_a_integral_fused,
             voxel_trace_stage_a_layered,
             voxel_display_stage_b,
@@ -339,15 +330,14 @@ impl RenderContext {
             bvh_propagate_aabbs,
         };
 
-        let present_pipeline = match render_pass.clone() {
-            Some(render_pass) => Some(PresentPipelineContext::new(
+        let present_pipeline = render_pass.clone().map(|render_pass| {
+            PresentPipelineContext::new(
                 device.clone(),
                 render_pass.clone(),
                 &shaders,
                 pipeline_layout.clone(),
-            )),
-            None => None,
-        };
+            )
+        });
         let compute_pipeline =
             ComputePipelineContext::new(device.clone(), &shaders, pipeline_layout.clone());
 
@@ -609,8 +599,7 @@ impl RenderContext {
             VTE_WORLD_BVH_RAY_DIAG_SAMPLES_ENV,
             VTE_WORLD_BVH_RAY_DIAG_DEFAULT_SAMPLES,
         )
-        .max(1)
-        .min(vte::VTE_WORLD_BVH_RAY_DIAG_CAPACITY);
+        .clamp(1, vte::VTE_WORLD_BVH_RAY_DIAG_CAPACITY);
         let vte_world_bvh_ray_diag_interval = env_usize(
             VTE_WORLD_BVH_RAY_DIAG_INTERVAL_ENV,
             VTE_WORLD_BVH_RAY_DIAG_DEFAULT_INTERVAL,

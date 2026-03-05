@@ -361,10 +361,10 @@ pub(super) fn orthonormal_basis_from_forward(forward: [f32; 4]) -> [[f32; 4]; 4]
             break;
         }
         let mut v = candidate;
-        for basis_idx in 0..count {
-            let projection = dot4(v, ortho[basis_idx]);
+        for basis in &ortho[..count] {
+            let projection = dot4(v, *basis);
             for axis in 0..4 {
-                v[axis] -= projection * ortho[basis_idx][axis];
+                v[axis] -= projection * basis[axis];
             }
         }
 
@@ -374,8 +374,8 @@ pub(super) fn orthonormal_basis_from_forward(forward: [f32; 4]) -> [[f32; 4]; 4]
         }
 
         let inv_len = len_sq.sqrt().recip();
-        for axis in 0..4 {
-            v[axis] *= inv_len;
+        for elem in &mut v {
+            *elem *= inv_len;
         }
         ortho[count] = v;
         count += 1;
@@ -761,7 +761,7 @@ pub(super) fn find_targeted_entity(
         if perp_sq > radius * radius {
             continue;
         }
-        if best.as_ref().map_or(true, |b| t < b.distance) {
+        if best.as_ref().is_none_or(|b| t < b.distance) {
             best = Some(EntityHitResult {
                 entity_id: eid,
                 distance: t,
@@ -785,7 +785,7 @@ pub(super) fn find_targeted_entity(
         if perp_sq > radius * radius {
             continue;
         }
-        if best.as_ref().map_or(true, |b| t < b.distance) {
+        if best.as_ref().is_none_or(|b| t < b.distance) {
             best = Some(EntityHitResult {
                 entity_id: eid,
                 distance: t,
@@ -893,6 +893,6 @@ fn format_cbor_value(value: &ciborium::Value, out: &mut String, depth: usize, ma
             out.push(' ');
             format_cbor_value(inner, out, depth + 1, max_depth);
         }
-        _ => out.push_str("?"),
+        _ => out.push('?'),
     }
 }

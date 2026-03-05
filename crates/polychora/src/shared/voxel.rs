@@ -129,8 +129,8 @@ impl TesseractOrientation {
             inv_perm[perm[i] as usize] = i as u8;
         }
         // Inverse sign: the sign that undoes the original flip
-        for i in 0..4 {
-            let original_axis = inv_perm[i] as usize;
+        for (i, &inv_p) in inv_perm.iter().enumerate() {
+            let original_axis = inv_p as usize;
             if signs & (1 << original_axis) != 0 {
                 inv_signs |= 1 << i;
             }

@@ -393,9 +393,7 @@ fn gen_whoosh(rng: &mut Rng, sample_rate: u32, duration_s: f32, amp: f32) -> Vec
         let cutoff = 800.0 + (4200.0 - 800.0) * (i as f32 / n.max(1) as f32);
         let end = (i + chunk).min(n);
         let filtered = onepole_lowpass(&noise[i..end], cutoff, sr);
-        for j in 0..(end - i) {
-            y[i + j] = filtered[j];
-        }
+        y[i..end].copy_from_slice(&filtered[..(end - i)]);
     }
 
     let envelope = env_adsr(n, sr, 0.01, 0.05, 0.2, 0.08);
@@ -454,22 +452,22 @@ fn soften_medium(
 
     if transient_soft > 0.0 {
         let mut w = ((transient_soft * 0.002 * sr).round() as usize).max(3);
-        if w % 2 == 0 {
+        if w.is_multiple_of(2) {
             w += 1;
         }
         let half = w / 2;
         let mut smoothed = vec![0.0f32; high.len()];
-        for i in 0..high.len() {
+        for (i, s) in smoothed.iter_mut().enumerate().take(high.len()) {
             let lo = i.saturating_sub(half);
             let hi = (i + half + 1).min(high.len());
             let mut acc = 0.0;
             for sample in &high[lo..hi] {
                 acc += *sample;
             }
-            smoothed[i] = acc / (hi - lo).max(1) as f32;
+            *s = acc / (hi - lo).max(1) as f32;
         }
-        for i in 0..high.len() {
-            high[i] = 0.65 * smoothed[i] + 0.35 * high[i];
+        for (h, s) in high.iter_mut().zip(smoothed.iter()) {
+            *h = 0.65 * *s + 0.35 * *h;
         }
     }
 

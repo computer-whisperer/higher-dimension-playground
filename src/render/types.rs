@@ -1,8 +1,9 @@
 use super::*;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum RenderBackend {
     /// Legacy behavior: derive backend from existing booleans.
+    #[default]
     Auto,
     /// Existing tetrahedron tile raster path.
     TetraRaster,
@@ -12,19 +13,14 @@ pub enum RenderBackend {
     VoxelTraversal,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum VteDisplayMode {
+    #[default]
     Integral,
     Slice,
     ThickSlice,
     DebugCompare,
     DebugIntegral,
-}
-
-impl Default for VteDisplayMode {
-    fn default() -> Self {
-        Self::Integral
-    }
 }
 
 impl VteDisplayMode {
@@ -49,12 +45,6 @@ impl VteDisplayMode {
     }
 }
 
-impl Default for RenderBackend {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
 impl RenderBackend {
     pub(super) fn label(self) -> &'static str {
         match self {
@@ -71,7 +61,7 @@ pub const OVERLAY_EDGE_TAG_TARGET: u32 = 1;
 pub const OVERLAY_EDGE_TAG_PLACE: u32 = 2;
 pub const OVERLAY_EDGE_TAG_DIAG_BASE: u32 = 16;
 pub const OVERLAY_EDGE_DIAG_TAG_COUNT: u32 = 8;
-pub const OVERLAY_EDGE_TAG_REGION_BRANCH: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 0;
+pub const OVERLAY_EDGE_TAG_REGION_BRANCH: u32 = OVERLAY_EDGE_TAG_DIAG_BASE;
 pub const OVERLAY_EDGE_TAG_REGION_EMPTY: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 1;
 pub const OVERLAY_EDGE_TAG_REGION_UNIFORM: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 2;
 pub const OVERLAY_EDGE_TAG_REGION_CHUNK_ARRAY: u32 = OVERLAY_EDGE_TAG_DIAG_BASE + 3;

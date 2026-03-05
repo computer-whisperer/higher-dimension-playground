@@ -11,8 +11,8 @@ pub(super) fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
     let texture_position_simplexes =
         generate_simplexes_for_k_face_3::<3>([0b000, 0b001, 0b010, 0b100]);
 
-    for cell_id in 0..tetrahedron_cells.len() {
-        let position_simplexes = generate_simplexes_for_k_face_3::<4>(tetrahedron_cells[cell_id]);
+    for (cell_id, &cell) in tetrahedron_cells.iter().enumerate() {
+        let position_simplexes = generate_simplexes_for_k_face_3::<4>(cell);
 
         for simplex_id in 0..position_simplexes.len() {
             let texture_simplex = texture_position_simplexes[simplex_id];
@@ -39,15 +39,11 @@ pub(super) fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
             ])
             .into();
             let test_vector = Vec4::new(1.0, 1.0, 1.0, 1.0);
-            let is_normal_flipped = test_vector.dot(normal.into()) < 0.0;
-            let should_be_flipped = tetrahedron_cells[cell_id].contains(&0);
+            let is_normal_flipped = test_vector.dot(normal) < 0.0;
+            let should_be_flipped = cell.contains(&0);
             if should_be_flipped != is_normal_flipped {
-                let temp = vertex_positions[1];
-                vertex_positions[1] = vertex_positions[2];
-                vertex_positions[2] = temp;
-                let temp = texture_positions[1];
-                texture_positions[1] = texture_positions[2];
-                texture_positions[2] = temp;
+                vertex_positions.swap(1, 2);
+                texture_positions.swap(1, 2);
             }
 
             output_tetrahedrons.push(common::ModelTetrahedron {

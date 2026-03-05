@@ -256,7 +256,7 @@ pub fn lattice_from_fixed(fixed_pos: ChunkCoord, scale_exp: i8) -> i32 {
 /// `step = 2^scale_exp`
 pub fn step_for_scale(scale_exp: i8) -> ChunkCoord {
     let shift = 16i32 + scale_exp as i32;
-    if shift < 0 || shift > 62 {
+    if !(0..=62).contains(&shift) {
         ChunkCoord::ZERO
     } else {
         ChunkCoord::from_bits(1i64 << shift)

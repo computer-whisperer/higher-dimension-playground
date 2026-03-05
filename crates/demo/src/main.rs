@@ -415,7 +415,7 @@ impl DemoScene {
             do_raytrace,
             do_edges,
             prepare_render_screenshot: do_frame_export
-                && ((self.sub_frame_num + 1) % sub_frames_per_export == 0),
+                && (self.sub_frame_num + 1).is_multiple_of(sub_frames_per_export),
             ..Default::default()
         };
 
@@ -463,7 +463,7 @@ impl DemoScene {
 
         self.sub_frame_num += 1;
 
-        if do_frame_export && (self.sub_frame_num % sub_frames_per_export == 0) {
+        if do_frame_export && self.sub_frame_num.is_multiple_of(sub_frames_per_export) {
             rcx.save_rendered_frame(&format!(
                 "frames/render_{}_{}.exr",
                 self.frame_num, self.sub_frame_num

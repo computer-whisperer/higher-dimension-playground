@@ -185,14 +185,12 @@ impl WasmRuntime {
             .ok_or(WasmRuntimeError::MissingMemoryExport)?;
 
         let memory_ty = memory.ty(&store);
-        let min_pages: u64 = memory_ty.minimum().into();
-        let max_pages =
-            memory_ty
-                .maximum()
-                .map(Into::into)
-                .ok_or(WasmRuntimeError::MemoryUnbounded {
-                    allowed_max_pages: limits.max_memory_pages,
-                })?;
+        let min_pages: u64 = memory_ty.minimum();
+        let max_pages = memory_ty
+            .maximum()
+            .ok_or(WasmRuntimeError::MemoryUnbounded {
+                allowed_max_pages: limits.max_memory_pages,
+            })?;
         let allowed_max_pages = u64::from(limits.max_memory_pages);
         if min_pages > allowed_max_pages {
             return Err(WasmRuntimeError::MemoryLimitExceeded {

@@ -147,7 +147,7 @@ impl GpuProfiler {
             }
         }
 
-        if self.total_frames > 0 && self.total_frames % PROFILER_REPORT_INTERVAL == 0 {
+        if self.total_frames > 0 && self.total_frames.is_multiple_of(PROFILER_REPORT_INTERVAL) {
             self.print_report();
         }
     }

@@ -702,9 +702,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         let affected_bounds =
             self.override_chunks
                 .set_chunk_at_scale(chunk_key, payload, chunk_scale);
-        let Some(affected_bounds) = affected_bounds else {
-            return None;
-        };
+        let affected_bounds = affected_bounds?;
 
         // 8. Dirty tracking.
         // Mark the directly-edited chunk for BVH delta updates.
@@ -905,7 +903,7 @@ fn all_blocks_in_core_representable(core: &RegionTreeCore, chunk_scale: i8) -> b
                 return true;
             }
             let diff = block.scale_exp - chunk_scale;
-            diff >= 0 && diff <= 3
+            (0..=3).contains(&diff)
         }
         RegionNodeKind::ChunkArray(ca) => {
             // The ChunkArray's own scale tells us the finest block scale

@@ -290,6 +290,12 @@ pub struct ContentRegistry {
     namespace_names: HashMap<u32, String>,
 }
 
+impl Default for ContentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContentRegistry {
     pub fn new() -> Self {
         let mut registry = Self {

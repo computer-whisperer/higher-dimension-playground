@@ -448,7 +448,7 @@ impl App {
             }
             // Number keys 1-9 select hotbar slot.
             if let Some(digit) = self.input.take_place_material_digit() {
-                if digit >= 1 && digit <= 9 {
+                if (1..=9).contains(&digit) {
                     self.hotbar_selected_index = (digit - 1) as usize;
                     self.selected_block = block_data_from_slot(
                         self.inventory.hotbar_slot(self.hotbar_selected_index),
@@ -973,19 +973,19 @@ impl App {
                             data: ent.data.clone(),
                             distance: eh.distance,
                         })
-                    } else if let Some(player) = self.remote_players.get(&eh.entity_id) {
-                        Some(WailaTarget::Entity {
-                            entity_id: eh.entity_id,
-                            entity_type_ns: 0,
-                            entity_type: 0,
-                            position: player.render_position,
-                            orientation: player.render_look,
-                            scale: 1.0,
-                            data: Vec::new(),
-                            distance: eh.distance,
-                        })
                     } else {
-                        None
+                        self.remote_players
+                            .get(&eh.entity_id)
+                            .map(|player| WailaTarget::Entity {
+                                entity_id: eh.entity_id,
+                                entity_type_ns: 0,
+                                entity_type: 0,
+                                position: player.render_position,
+                                orientation: player.render_look,
+                                scale: 1.0,
+                                data: Vec::new(),
+                                distance: eh.distance,
+                            })
                     }
                 }
                 (_, Some((target, _))) => Some(target.clone()),

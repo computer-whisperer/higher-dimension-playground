@@ -143,6 +143,7 @@ impl<const N: usize> core::ops::IndexMut<[usize; 2]> for MatN<N> {
 impl<const N: usize> core::ops::Mul<VecN<N>> for MatN<N> {
     type Output = VecN<N>;
 
+    #[allow(clippy::needless_range_loop)]
     fn mul(self, rhs: VecN<N>) -> Self::Output {
         let mut outputs = [0f32; N];
 
@@ -174,6 +175,7 @@ impl<const N: usize> core::ops::Mul<MatN<N>> for MatN<N> {
 }
 
 impl From<&Mat4> for MatN<4> {
+    #[allow(clippy::needless_range_loop)]
     fn from(value: &Mat4) -> Self {
         let mut values = [[0f32; 4]; 4];
 
@@ -188,6 +190,7 @@ impl From<&Mat4> for MatN<4> {
 }
 
 impl From<&Mat3> for MatN<3> {
+    #[allow(clippy::needless_range_loop)]
     fn from(value: &Mat3) -> Self {
         let mut values = [[0f32; 3]; 3];
 
@@ -202,6 +205,7 @@ impl From<&Mat3> for MatN<3> {
 }
 
 impl From<&Mat2> for MatN<2> {
+    #[allow(clippy::needless_range_loop)]
     fn from(value: &Mat2) -> Self {
         let mut values = [[0f32; 2]; 2];
 

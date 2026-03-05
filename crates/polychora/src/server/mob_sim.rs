@@ -173,14 +173,14 @@ fn mob_collides_at_with_bounds(
     radius: f32,
     world_bounds: &WorldBounds,
 ) -> bool {
-    for axis in 0..4 {
+    for (axis, &pos) in position.iter().enumerate() {
         if let Some(lo) = world_bounds.min[axis] {
-            if position[axis] - radius < lo {
+            if pos - radius < lo {
                 return true;
             }
         }
         if let Some(hi) = world_bounds.max[axis] {
-            if position[axis] + radius > hi {
+            if pos + radius > hi {
                 return true;
             }
         }
@@ -337,7 +337,7 @@ fn mob_nav_has_line_of_sight(
         return true;
     }
     let dist = dist_sq.sqrt();
-    let steps = (dist / MOB_NAV_PATH_LOS_STEP).ceil().max(1.0).min(256.0) as usize;
+    let steps = (dist / MOB_NAV_PATH_LOS_STEP).ceil().clamp(1.0, 256.0) as usize;
     for idx in 1..=steps {
         let t = idx as f32 / steps as f32;
         let probe = [

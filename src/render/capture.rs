@@ -64,7 +64,7 @@ impl RenderContext {
                 layers.push(exr::prelude::Layer::new(
                     (buffer_dimensions[0] as usize, buffer_dimensions[1] as usize),
                     exr::prelude::LayerAttributes {
-                        layer_name: Some(exr::prelude::Text::new_or_panic(format!("Full Render"))),
+                        layer_name: Some(exr::prelude::Text::new_or_panic("Full Render")),
                         ..Default::default()
                     },
                     exr::prelude::Encoding::SMALL_FAST_LOSSLESS,

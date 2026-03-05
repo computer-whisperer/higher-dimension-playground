@@ -186,7 +186,7 @@ impl Inventory {
         self.slots.iter().position(|slot| {
             slot.as_ref()
                 .and_then(|s| s.block_type_key())
-                .map_or(false, |(n, b)| n == ns && b == bt)
+                .is_some_and(|(n, b)| n == ns && b == bt)
         })
     }
 

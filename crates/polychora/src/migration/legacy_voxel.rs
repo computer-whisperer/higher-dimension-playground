@@ -42,6 +42,12 @@ pub struct Chunk {
     pub dirty: bool,
 }
 
+impl Default for Chunk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Chunk {
     pub fn new() -> Self {
         Self {
@@ -102,6 +108,12 @@ pub struct RegionChunkWorld {
     world_dirty: bool,
     pending_chunk_updates: Vec<LegacyChunkPos>,
     pending_chunk_update_set: HashSet<LegacyChunkPos>,
+}
+
+impl Default for RegionChunkWorld {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RegionChunkWorld {

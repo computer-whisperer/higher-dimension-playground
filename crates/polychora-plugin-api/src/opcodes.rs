@@ -5,7 +5,6 @@
 ///
 /// On success the return value is the number of bytes written to the output
 /// buffer. On failure the return value is a negative `ABI_ERR_*` constant.
-
 pub const OP_GET_MANIFEST: u32 = 0x0010;
 pub const OP_GET_TEXTURES: u32 = 0x0011;
 pub const OP_ENTITY_TICK: u32 = 0x0100;

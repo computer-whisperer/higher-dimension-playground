@@ -134,12 +134,10 @@ impl RegionChunkTree {
         resolved: Option<ResolvedChunkPayload>,
         scale_exp: i8,
     ) -> Option<Aabb4i> {
-        let payload = resolved.map(|r| canonicalize_resolved_payload(r));
+        let payload = resolved.map(canonicalize_resolved_payload);
         let chunk_bounds = Aabb4i::chunk_world_bounds(key, scale_exp);
         if self.root.is_none() {
-            let Some(payload) = payload else {
-                return None;
-            };
+            let payload = payload?;
             self.root = Some(Box::new(RegionTreeCore {
                 bounds: chunk_bounds,
                 kind: kind_from_resolved_value_at_scale(chunk_bounds, Some(payload), scale_exp),
@@ -314,9 +312,7 @@ impl RegionChunkTree {
         if max_subtree_drops == 0 {
             return None;
         }
-        let Some(root) = self.root.as_mut() else {
-            return None;
-        };
+        let root = self.root.as_mut()?;
 
         let mut budget = max_subtree_drops;
         let changed_bounds = lazy_drop_outside_node(root, keep_bounds, &mut budget);
@@ -937,8 +933,8 @@ pub fn resample_chunk_array_to_bounds(
                         // Same scale — the source chunk maps 1:1 to the target chunk.
                         // Just resolve all blocks directly.
                         let mut chunk_blocks = Vec::with_capacity(CHUNK_VOLUME);
-                        for voxel_idx in 0..CHUNK_VOLUME {
-                            let block_palette_idx = src_materials[voxel_idx] as usize;
+                        for &mat_idx in src_materials.iter().take(CHUNK_VOLUME) {
+                            let block_palette_idx = mat_idx as usize;
                             let block = source
                                 .block_palette
                                 .get(block_palette_idx)
@@ -1571,7 +1567,7 @@ fn chunk_array_has_empty_gap_default(chunk_array: &ChunkArrayData) -> bool {
         chunk_array
             .chunk_palette
             .get(default_idx as usize)
-            .map_or(false, |p| *p == ChunkPayload::Empty)
+            .is_some_and(|p| *p == ChunkPayload::Empty)
     } else {
         false
     }
@@ -4409,9 +4405,9 @@ fn bvh_raycast(
                 // Advance DDA: step the axis with the smallest t_max.
                 let mut min_axis = 0;
                 let mut min_t = t_max_arr[0];
-                for axis in 1..4 {
-                    if t_max_arr[axis] < min_t {
-                        min_t = t_max_arr[axis];
+                for (axis, &t_val) in t_max_arr.iter().enumerate().skip(1) {
+                    if t_val < min_t {
+                        min_t = t_val;
                         min_axis = axis;
                     }
                 }
@@ -4590,8 +4586,8 @@ fn split_bounds_longest_axis(bounds: Aabb4i, alignment: ChunkCoord) -> Option<(A
 
     // Half-open span: no +1 needed.
     let mut spans = [0i64; 4];
-    for i in 0..4 {
-        spans[i] = to_lattice(bounds.max[i]) - to_lattice(bounds.min[i]);
+    for (i, span) in spans.iter_mut().enumerate() {
+        *span = to_lattice(bounds.max[i]) - to_lattice(bounds.min[i]);
     }
     let mut axis = 0usize;
     for idx in 1..4 {

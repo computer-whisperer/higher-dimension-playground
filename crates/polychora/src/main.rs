@@ -938,7 +938,7 @@ fn main() {
     let initial_vte_max_trace_steps = args.vte_max_trace_steps.max(1);
     let initial_vte_max_trace_distance = args.vte_max_trace_distance.max(1.0);
 
-    let world_file = if args.perf_suite && args.world_file == PathBuf::from(WORLD_FILE_DEFAULT) {
+    let world_file = if args.perf_suite && args.world_file == Path::new(WORLD_FILE_DEFAULT) {
         // Perf suite uses a dedicated ephemeral world directory so it never collides
         // with user save data and always starts with a freshly-generated world.
         let perf_world =

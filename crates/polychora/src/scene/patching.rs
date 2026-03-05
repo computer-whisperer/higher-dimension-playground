@@ -194,7 +194,7 @@ impl Scene {
                 }
                 ChunkPayload::PalettePacked { .. } => payload
                     .dense_materials()
-                    .map(|indices| indices.into_iter().any(|idx| idx_is_solid(idx)))
+                    .map(|indices| indices.into_iter().any(idx_is_solid))
                     .unwrap_or(true),
             }
         }

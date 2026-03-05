@@ -480,8 +480,7 @@ fn summarize_bvh_topology(
     let mut self_child_edges = 0usize;
     let mut internal_ready = 0usize;
 
-    for idx in 0..internal_nodes {
-        let node = &bvh_nodes[idx];
+    for (idx, node) in bvh_nodes.iter().enumerate().take(internal_nodes) {
         if node.atomic_visit_count >= 2 {
             internal_ready += 1;
         }
@@ -547,8 +546,8 @@ fn summarize_bvh_topology(
     let mut leaf_seen = vec![0u8; num_tetrahedrons];
     let mut leaf_invalid_tetra_indices = 0usize;
     let mut leaf_duplicate_tetra_indices = 0usize;
-    for idx in internal_nodes..total_nodes {
-        let tet_idx = bvh_nodes[idx].tetrahedron_index as usize;
+    for node in &bvh_nodes[internal_nodes..total_nodes] {
+        let tet_idx = node.tetrahedron_index as usize;
         if tet_idx >= num_tetrahedrons {
             leaf_invalid_tetra_indices += 1;
             continue;
@@ -1078,7 +1077,7 @@ fn vte_cpu_trace_ray_linear(
 
     let clipped_by_max_distance = root_exit > max_distance + CHUNK_EPS;
     let mut touched_visible_chunk = false;
-    let max_chunk_steps = meta.max_trace_steps.max(1).min(4096);
+    let max_chunk_steps = meta.max_trace_steps.clamp(1, 4096);
     let mut remaining_voxels = meta.max_trace_steps.saturating_mul(8).clamp(1, 32768);
     let mut chunk_steps = 0u32;
     let mut current_t = traversal_min_t;
@@ -2188,17 +2187,14 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             nalgebra::Matrix5::from_column_slice(slice).transpose();
         let view_matrix_nalgebra_inv = view_matrix_nalgebra.try_inverse().unwrap();
 
-        match self.window.clone() {
-            Some(window) => {
-                let window_size = window.inner_size();
-                // Do not draw the frame when the screen size is zero. On Windows, this can occur
-                // when minimizing the application.
-                if window_size.width == 0 || window_size.height == 0 {
-                    return;
-                }
+        if let Some(window) = self.window.clone() {
+            let window_size = window.inner_size();
+            // Do not draw the frame when the screen size is zero. On Windows, this can occur
+            // when minimizing the application.
+            if window_size.width == 0 || window_size.height == 0 {
+                return;
             }
-            None => {}
-        };
+        }
 
         // CPU frame time tracking
         let render_start = Instant::now();
@@ -4302,7 +4298,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 || non_voxel_outlier_count > 0
                 || used_non_voxel_went_zero
                 || tets_non_voxel_went_zero
-                || (model_instances_input.len() > 0 && non_voxel_used_instance_count == 0)
+                || (!model_instances_input.is_empty() && non_voxel_used_instance_count == 0)
                 || (non_voxel_used_instance_count > 0 && non_voxel_bvh_leaf_count == 0));
         let vte_entity_diag_periodic_due = self
             .vte_entity_diag_last_log_frame
@@ -4316,7 +4312,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             && non_voxel_bvh_leaf_count > 0
             && (self.vte_entity_diag_verbose
                 || vte_entity_diag_anomaly
-                || self.frames_rendered % self.vte_entity_diag_interval.max(1) == 0);
+                || self
+                    .frames_rendered
+                    .is_multiple_of(self.vte_entity_diag_interval.max(1)));
         self.frames_in_flight[frame_idx].vte_entity_diag_copy_scheduled =
             vte_entity_diag_copy_requested;
         self.frames_in_flight[frame_idx].vte_entity_diag_non_voxel_tet_count = if do_voxel_vte {
@@ -4792,7 +4790,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     if prev_non_voxel_tets > 0 {
                         if self.vte_entity_diag_bvh_topology {
                             if let Ok(bvh_data) = self.sized_buffers.cpu_bvh_nodes_buffer.read() {
-                                if let Some(root) = bvh_data.get(0) {
+                                if let Some(root) = bvh_data.first() {
                                     let finite = root.min_bounds.x.is_finite()
                                         && root.min_bounds.y.is_finite()
                                         && root.min_bounds.z.is_finite()
@@ -4868,7 +4866,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             }
                         } else if let Ok(root_data) = self.sized_buffers.cpu_bvh_root_buffer.read()
                         {
-                            if let Some(root) = root_data.get(0) {
+                            if let Some(root) = root_data.first() {
                                 let finite = root.min_bounds.x.is_finite()
                                     && root.min_bounds.y.is_finite()
                                     && root.min_bounds.z.is_finite()
@@ -5274,14 +5272,12 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 if bvh_nodes[i].atomic_visit_count >= 2 {
                     valid_internal += 1;
                 }
-                if bvh_nodes[i].left_child >= total_nodes as u32
-                    || bvh_nodes[i].right_child >= total_nodes as u32
+                if (bvh_nodes[i].left_child >= total_nodes as u32
+                    || bvh_nodes[i].right_child >= total_nodes as u32)
+                    && bvh_nodes[i].left_child != 0xFFFFFFFF
+                    && bvh_nodes[i].right_child != 0xFFFFFFFF
                 {
-                    if bvh_nodes[i].left_child != 0xFFFFFFFF
-                        && bvh_nodes[i].right_child != 0xFFFFFFFF
-                    {
-                        invalid_children += 1;
-                    }
+                    invalid_children += 1;
                 }
                 let aabb_size = (bvh_nodes[i].max_bounds - bvh_nodes[i].min_bounds).length();
                 if aabb_size < 0.001 && bvh_nodes[i].atomic_visit_count >= 2 {

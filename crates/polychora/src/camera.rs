@@ -693,8 +693,8 @@ impl Camera4D {
             return;
         }
         let movement_scale = speed * dt * input_mag * wish_len_sq.sqrt().recip();
-        for axis in 0..4 {
-            self.position[axis] += wish[axis] * movement_scale;
+        for (pos, &w) in self.position.iter_mut().zip(wish.iter()) {
+            *pos += w * movement_scale;
         }
     }
 
@@ -759,15 +759,13 @@ impl Camera4D {
     pub fn view_matrix(&self) -> Array2<f32> {
         let [px, py, pz, pw] = self.position;
         let m = self.rotation_matrix();
-        let m = m.dot(&translate_matrix_4d(-px, -py, -pz, -pw));
-        m
+        m.dot(&translate_matrix_4d(-px, -py, -pz, -pw))
     }
 
     pub fn view_matrix_upright(&self) -> Array2<f32> {
         let [px, py, pz, pw] = self.position;
         let m = self.rotation_matrix_upright();
-        let m = m.dot(&translate_matrix_4d(-px, -py, -pz, -pw));
-        m
+        m.dot(&translate_matrix_4d(-px, -py, -pz, -pw))
     }
 
     pub fn view_basis(&self) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
@@ -1184,8 +1182,8 @@ impl Camera4D {
             return;
         }
         let movement_scale = speed * dt * input_mag * wish_len_sq.sqrt().recip();
-        for axis in 0..4 {
-            self.position[axis] += wish[axis] * movement_scale;
+        for (pos, &w) in self.position.iter_mut().zip(wish.iter()) {
+            *pos += w * movement_scale;
         }
     }
 
@@ -1260,8 +1258,8 @@ impl Camera4D {
             return;
         }
         let movement_scale = speed * dt * input_mag * wish_len_sq.sqrt().recip();
-        for axis in 0..4 {
-            self.position[axis] += wish[axis] * movement_scale;
+        for (pos, &w) in self.position.iter_mut().zip(wish.iter()) {
+            *pos += w * movement_scale;
         }
     }
 

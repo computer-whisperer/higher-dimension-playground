@@ -3,6 +3,7 @@ use crate::vec_n::VecN;
 
 // Specialized 4D normal calculation (cross product generalization)
 // Takes 3 vectors in 4D space and returns the normal vector
+#[allow(clippy::needless_range_loop)]
 pub fn get_normal_4d(components: &[VecN<4>; 3]) -> VecN<4> {
     let mut output = VecN::<4>::ZERO;
     for i in 0..4 {

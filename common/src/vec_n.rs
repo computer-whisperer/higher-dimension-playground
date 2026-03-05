@@ -15,9 +15,7 @@ impl<const N: usize> VecN<N> {
 
     pub fn new(v: [f32; N]) -> Self {
         let mut values = [0f32; N];
-        for i in 0..N {
-            values[i] = v[i];
-        }
+        values[..N].copy_from_slice(&v[..N]);
         Self { values }
     }
 
