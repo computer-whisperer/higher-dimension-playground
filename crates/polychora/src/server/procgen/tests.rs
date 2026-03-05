@@ -518,3 +518,69 @@ fn keepout_cells_block_generation_for_affected_chunk() {
         chunk_pos
     );
 }
+
+/// Manual-run seed scanner for finding seeds with structures/mazes near perf suite camera poses.
+///
+/// Run: `cargo test -p polychora scan_seeds_for_perf_scenarios -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn scan_seeds_for_perf_scenarios() {
+    let candidate_positions: &[[f32; 4]] = &[
+        [0.0, 8.0, -24.0, -4.0],   // platform-surface
+        [0.0, 64.0, 0.0, -4.0],    // open-sky
+        [96.0, 20.0, 96.0, -4.0],  // corridor
+        [-64.0, 14.0, 32.0, -4.0], // far-oblique
+        [0.0, 8.0, 0.0, 0.0],      // origin area
+    ];
+    let scan_radius = 80; // voxels around each position
+
+    for seed in 0..10_000u64 {
+        for &pos in candidate_positions {
+            let center = [
+                pos[0] as i32,
+                pos[1] as i32,
+                pos[2] as i32,
+                pos[3] as i32,
+            ];
+            let bounds = Aabb4i::from_lattice_bounds(
+                [
+                    (center[0] - scan_radius).div_euclid(CHUNK_SIZE as i32),
+                    (center[1] - scan_radius).div_euclid(CHUNK_SIZE as i32),
+                    (center[2] - scan_radius).div_euclid(CHUNK_SIZE as i32),
+                    (center[3] - scan_radius).div_euclid(CHUNK_SIZE as i32),
+                ],
+                [
+                    (center[0] + scan_radius).div_euclid(CHUNK_SIZE as i32),
+                    (center[1] + scan_radius).div_euclid(CHUNK_SIZE as i32),
+                    (center[2] + scan_radius).div_euclid(CHUNK_SIZE as i32),
+                    (center[3] + scan_radius).div_euclid(CHUNK_SIZE as i32),
+                ],
+                0,
+            );
+
+            let structures =
+                collect_structure_placements_for_chunk_bounds(seed, bounds, None);
+            let mazes = collect_maze_placements_for_chunk_bounds(seed, bounds);
+
+            if !structures.is_empty() || !mazes.is_empty() {
+                println!(
+                    "seed={} pos=[{:.0},{:.0},{:.0},{:.0}] structures={} mazes={}",
+                    seed, pos[0], pos[1], pos[2], pos[3],
+                    structures.len(), mazes.len(),
+                );
+                for s in &structures {
+                    println!(
+                        "  structure: blueprint_idx={} origin={:?} orientation={}",
+                        s.blueprint_idx, s.origin, s.orientation
+                    );
+                }
+                for m in &mazes {
+                    println!(
+                        "  maze: origin={:?} grid_cells={:?}",
+                        m.origin, m.shape.grid_cells
+                    );
+                }
+            }
+        }
+    }
+}

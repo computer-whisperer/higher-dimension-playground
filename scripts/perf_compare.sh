@@ -60,7 +60,7 @@ fi
 # Accept both v1 and v2 schemas.
 for report in "$base_report" "$head_report"; do
   schema=$(jq -r '.schema // empty' "$report")
-  if [[ "$schema" != "polychora.perf_suite.v1" && "$schema" != "polychora.perf_suite.v2" ]]; then
+  if [[ "$schema" != "polychora.perf_suite.v1" && "$schema" != "polychora.perf_suite.v2" && "$schema" != "polychora.perf_suite.v3" ]]; then
     echo "error: unsupported schema in $report: '$schema'" >&2
     exit 1
   fi
@@ -86,9 +86,9 @@ if [[ -n "$base_world" ]]; then echo "base-world: $base_world"; fi
 if [[ -n "$head_world" ]]; then echo "head-world: $head_world"; fi
 echo ""
 
-# Determine if both are v2 (for render_config and phases display).
+# Determine if both are v2+ (for render_config and phases display).
 both_v2=false
-if [[ "$base_schema" == "polychora.perf_suite.v2" && "$head_schema" == "polychora.perf_suite.v2" ]]; then
+if [[ "$base_schema" != "polychora.perf_suite.v1" && "$head_schema" != "polychora.perf_suite.v1" ]]; then
   both_v2=true
 fi
 

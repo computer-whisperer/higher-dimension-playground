@@ -1189,6 +1189,48 @@ fn handle_console_spawn_command(
     Ok(())
 }
 
+fn handle_console_explode_command(
+    state: &SharedState,
+    client_id: u64,
+    args: &[&str],
+) -> Result<(), String> {
+    let usage = || {
+        "usage: /explode <x> <y> <z> <w> [radius]\n  radius defaults to 4, clamped 1-16".to_string()
+    };
+    if args.len() < 4 || args.len() > 5 {
+        return Err(usage());
+    }
+    let Some(position) = parse_spawn_vec4(&args[0..4]) else {
+        return Err(usage());
+    };
+    let radius: i32 = if args.len() == 5 {
+        args[4].parse::<i32>().map_err(|_| usage())?.clamp(1, 16)
+    } else {
+        4
+    };
+
+    let (dirty, explosion) = {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        let (_changed, explosion) = apply_creeper_explosion(&mut guard, 0, position, radius);
+        let dirty = guard.world_take_dirty_bounds();
+        (dirty, explosion)
+    };
+    broadcast_world_dirty_bounds_updates(state, &dirty);
+    broadcast(
+        state,
+        ServerMessage::Explosion {
+            position: explosion.position,
+            radius: explosion.radius,
+            source_entity_id: explosion.source_entity_id,
+        },
+    );
+    eprintln!(
+        "[console] client {} explode at [{:.1}, {:.1}, {:.1}, {:.1}] radius={}",
+        client_id, position[0], position[1], position[2], position[3], radius
+    );
+    Ok(())
+}
+
 fn run_server_console_command(
     state: &SharedState,
     client_id: u64,
@@ -1211,8 +1253,11 @@ fn run_server_console_command(
     if command_name.eq_ignore_ascii_case("spawn") {
         return handle_console_spawn_command(state, client_id, &args, start);
     }
+    if command_name.eq_ignore_ascii_case("explode") {
+        return handle_console_explode_command(state, client_id, &args);
+    }
     Err(format!(
-        "unknown server command '{}'; supported: /spawn",
+        "unknown server command '{}'; supported: /spawn, /explode",
         command_name
     ))
 }

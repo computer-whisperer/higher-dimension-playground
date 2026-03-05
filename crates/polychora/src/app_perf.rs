@@ -105,12 +105,12 @@ impl App {
             rcx.reset_gpu_profile_window();
         }
 
-        // Auto-spawn entities on first scenario's warmup phase (once).
-        if scenario_index == 0
-            && phase == PerfSuitePhase::Warmup
-            && !self.perf_suite_entities_spawned
-        {
-            self.perf_suite_auto_spawn_entities();
+        // Execute per-scenario setup (entity spawns, explosions) on warmup entry.
+        if phase == PerfSuitePhase::Warmup {
+            let scenario = self.perf_suite_scenario(scenario_index);
+            if let Some(setup) = scenario.setup {
+                self.perf_suite_execute_scenario_setup(setup, scenario.position);
+            }
         }
 
         if announce {
@@ -137,37 +137,46 @@ impl App {
         }
     }
 
-    fn perf_suite_auto_spawn_entities(&mut self) {
-        let count = self.args.perf_suite_spawn_entities;
-        if count == 0 {
-            return;
-        }
-        self.perf_suite_entities_spawned = true;
-
-        let [cx, cy, cz, cw] = self.camera.position;
-        // Place entities in a grid near camera position.
-        let grid_size = (count as f32).sqrt().ceil() as u32;
-        let spacing = 4.0_f32;
+    fn perf_suite_execute_scenario_setup(
+        &mut self,
+        setup: &PerfScenarioSetup,
+        camera_pos: [f32; 4],
+    ) {
+        let [cx, cy, cz, cw] = camera_pos;
         let mut spawned = 0u32;
-        for ix in 0..grid_size {
-            for iz in 0..grid_size {
-                if spawned >= count {
-                    break;
-                }
-                let x = cx + (ix as f32 - grid_size as f32 / 2.0) * spacing;
-                let z = cz + (iz as f32 - grid_size as f32 / 2.0) * spacing;
-                let cmd = format!("spawn cube {:.1} {:.1} {:.1} {:.1}", x, cy + 2.0, z, cw);
-                if !self.send_multiplayer_console_command(&cmd) {
-                    eprintln!(
-                        "[perf-suite] entity spawn failed (no active server); spawned {}/{}",
-                        spawned, count
-                    );
-                    return;
-                }
+        for &(type_token, [ox, oy, oz, ow]) in setup.entity_spawns {
+            let cmd = format!(
+                "spawn {} {:.1} {:.1} {:.1} {:.1}",
+                type_token,
+                cx + ox,
+                cy + oy,
+                cz + oz,
+                cw + ow
+            );
+            if self.send_multiplayer_console_command(&cmd) {
                 spawned += 1;
             }
         }
-        eprintln!("[perf-suite] spawned {} entities for BVH testing", spawned);
+        let mut exploded = 0u32;
+        for &([ox, oy, oz, ow], radius) in setup.explosions {
+            let cmd = format!(
+                "explode {:.1} {:.1} {:.1} {:.1} {}",
+                cx + ox,
+                cy + oy,
+                cz + oz,
+                cw + ow,
+                radius
+            );
+            if self.send_multiplayer_console_command(&cmd) {
+                exploded += 1;
+            }
+        }
+        if spawned > 0 || exploded > 0 {
+            eprintln!(
+                "[perf-suite] scenario setup: spawned {} entities, {} explosions",
+                spawned, exploded
+            );
+        }
     }
 
     pub(super) fn perf_suite_report_path(&self) -> PathBuf {
@@ -211,6 +220,14 @@ impl App {
                     })
                 })
                 .collect();
+            let setup_json = if let Some(setup) = scenario.setup {
+                serde_json::json!({
+                    "entity_spawn_count": setup.entity_spawns.len(),
+                    "explosion_count": setup.explosions.len(),
+                })
+            } else {
+                serde_json::json!(null)
+            };
             scenarios.push(serde_json::json!({
                 "index": result.scenario_index,
                 "label": result.scenario_label,
@@ -226,6 +243,7 @@ impl App {
                     "vte_max_trace_steps": result.vte_max_trace_steps,
                     "vte_max_trace_distance": result.vte_max_trace_distance,
                 },
+                "setup": setup_json,
                 "client_cpu": {
                     "avg_ms": result.client_cpu_avg_ms,
                     "max_ms": result.client_cpu_max_ms,
@@ -238,7 +256,7 @@ impl App {
 
         let singleplayer_world_type = format!("{:?}", self.args.singleplayer_world_type);
         let report = serde_json::json!({
-            "schema": "polychora.perf_suite.v2",
+            "schema": "polychora.perf_suite.v3",
             "generated_unix_seconds": SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())

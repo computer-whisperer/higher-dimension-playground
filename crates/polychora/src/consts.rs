@@ -126,6 +126,12 @@ pub(crate) struct VteRuntimeProfile {
 }
 
 #[derive(Copy, Clone)]
+pub(crate) struct PerfScenarioSetup {
+    pub(crate) entity_spawns: &'static [(&'static str, [f32; 4])],
+    pub(crate) explosions: &'static [([f32; 4], i32)],
+}
+
+#[derive(Copy, Clone)]
 pub(crate) struct PerfSuiteScenario {
     pub(crate) label: &'static str,
     pub(crate) position: [f32; 4],
@@ -136,6 +142,7 @@ pub(crate) struct PerfSuiteScenario {
     pub(crate) yw_deviation: f32,
     pub(crate) vte_max_trace_steps: Option<u32>,
     pub(crate) vte_max_trace_distance: Option<f32>,
+    pub(crate) setup: Option<&'static PerfScenarioSetup>,
 }
 
 pub(crate) const PERF_SUITE_WARMUP_FRAMES_DEFAULT: u32 = 180;
@@ -143,16 +150,62 @@ pub(crate) const PERF_SUITE_SAMPLE_FRAMES_DEFAULT: u32 = 600;
 pub(crate) const PERF_SUITE_REPORT_DIR_DEFAULT: &str = "profiles";
 pub(crate) const VTE_SWEEP_SAMPLE_FRAMES: usize = 120;
 
-/// (max_trace_steps, max_trace_distance) for perf suite render distance tiers.
-pub(crate) const PERF_TIER_LOW: (u32, f32) = (160, 80.0);
+/// (max_trace_steps, max_trace_distance) for perf suite default render distance tier.
 pub(crate) const PERF_TIER_DEFAULT: (u32, f32) = (320, 160.0);
-pub(crate) const PERF_TIER_HIGH: (u32, f32) = (640, 320.0);
 
 pub(crate) const PERF_SUITE_SETTLE_STABLE_FRAMES: u32 = 60;
 pub(crate) const PERF_SUITE_SETTLE_MAX_FRAMES: u32 = 600;
 
-// Base poses for perf suite scenarios (MassivePlatforms seed 1337).
-// Each pose is stamped across 3 render distance tiers.
+// ---------------------------------------------------------------------------
+// Per-scenario setup configurations
+// ---------------------------------------------------------------------------
+
+/// 8 cubes in a ring around camera (offsets at ±4/±8 in XZW, Y+2).
+static SETUP_ENTITIES_NEAR: PerfScenarioSetup = PerfScenarioSetup {
+    entity_spawns: &[
+        ("cube", [4.0, 2.0, 0.0, 0.0]),
+        ("cube", [-4.0, 2.0, 0.0, 0.0]),
+        ("cube", [0.0, 2.0, 4.0, 0.0]),
+        ("cube", [0.0, 2.0, -4.0, 0.0]),
+        ("cube", [8.0, 2.0, 0.0, 4.0]),
+        ("cube", [-8.0, 2.0, 0.0, -4.0]),
+        ("cube", [0.0, 2.0, 0.0, 8.0]),
+        ("cube", [0.0, 2.0, 0.0, -8.0]),
+    ],
+    explosions: &[],
+};
+
+/// One small explosion offset from camera.
+static SETUP_EXPLOSION_SMALL: PerfScenarioSetup = PerfScenarioSetup {
+    entity_spawns: &[],
+    explosions: &[([8.0, -2.0, 8.0, 0.0], 4)],
+};
+
+/// One large explosion directly below camera.
+static SETUP_EXPLOSION_LARGE: PerfScenarioSetup = PerfScenarioSetup {
+    entity_spawns: &[],
+    explosions: &[([0.0, -1.0, 0.0, 0.0], 6)],
+};
+
+/// Combined: 8 entities + 1 explosion.
+static SETUP_ENTITIES_AND_EXPLOSION: PerfScenarioSetup = PerfScenarioSetup {
+    entity_spawns: &[
+        ("cube", [4.0, 2.0, 0.0, 0.0]),
+        ("cube", [-4.0, 2.0, 0.0, 0.0]),
+        ("cube", [0.0, 2.0, 4.0, 0.0]),
+        ("cube", [0.0, 2.0, -4.0, 0.0]),
+        ("cube", [8.0, 2.0, 0.0, 4.0]),
+        ("cube", [-8.0, 2.0, 0.0, -4.0]),
+        ("cube", [0.0, 2.0, 0.0, 8.0]),
+        ("cube", [0.0, 2.0, 0.0, -8.0]),
+    ],
+    explosions: &[([0.0, -1.0, 0.0, 0.0], 5)],
+};
+
+// ---------------------------------------------------------------------------
+// Base poses for perf suite scenarios (MassivePlatforms seed 1337)
+// ---------------------------------------------------------------------------
+
 const PERF_POSE_PLATFORM_SURFACE: PerfSuiteScenario = PerfSuiteScenario {
     label: "",
     position: [0.0, 8.0, -24.0, -4.0],
@@ -163,6 +216,7 @@ const PERF_POSE_PLATFORM_SURFACE: PerfSuiteScenario = PerfSuiteScenario {
     yw_deviation: 0.0,
     vte_max_trace_steps: None,
     vte_max_trace_distance: None,
+    setup: None,
 };
 
 const PERF_POSE_PLATFORM_4D: PerfSuiteScenario = PerfSuiteScenario {
@@ -175,6 +229,7 @@ const PERF_POSE_PLATFORM_4D: PerfSuiteScenario = PerfSuiteScenario {
     yw_deviation: 0.0,
     vte_max_trace_steps: None,
     vte_max_trace_distance: None,
+    setup: None,
 };
 
 const PERF_POSE_OPEN_SKY: PerfSuiteScenario = PerfSuiteScenario {
@@ -187,6 +242,7 @@ const PERF_POSE_OPEN_SKY: PerfSuiteScenario = PerfSuiteScenario {
     yw_deviation: 0.0,
     vte_max_trace_steps: None,
     vte_max_trace_distance: None,
+    setup: None,
 };
 
 const PERF_POSE_CORRIDOR: PerfSuiteScenario = PerfSuiteScenario {
@@ -199,6 +255,7 @@ const PERF_POSE_CORRIDOR: PerfSuiteScenario = PerfSuiteScenario {
     yw_deviation: 0.0,
     vte_max_trace_steps: None,
     vte_max_trace_distance: None,
+    setup: None,
 };
 
 const PERF_POSE_FAR_OBLIQUE: PerfSuiteScenario = PerfSuiteScenario {
@@ -211,103 +268,145 @@ const PERF_POSE_FAR_OBLIQUE: PerfSuiteScenario = PerfSuiteScenario {
     yw_deviation: 0.0,
     vte_max_trace_steps: None,
     vte_max_trace_distance: None,
+    setup: None,
 };
 
-pub(crate) const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 15] = [
-    // platform-surface: standing on platform, 3D-like view
+pub(crate) const PERF_SUITE_SCENARIOS: &[PerfSuiteScenario] = &[
+    // -----------------------------------------------------------------------
+    // Baselines (5): existing poses, no setup, default render tier
+    // -----------------------------------------------------------------------
     PerfSuiteScenario {
-        label: "platform-surface/low",
-        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
-        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
-        ..PERF_POSE_PLATFORM_SURFACE
-    },
-    PerfSuiteScenario {
-        label: "platform-surface/default",
+        label: "platform-surface",
         vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
         vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
         ..PERF_POSE_PLATFORM_SURFACE
     },
     PerfSuiteScenario {
-        label: "platform-surface/high",
-        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
-        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
+        label: "platform-4d",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_PLATFORM_4D
+    },
+    PerfSuiteScenario {
+        label: "open-sky",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_OPEN_SKY
+    },
+    PerfSuiteScenario {
+        label: "corridor",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_CORRIDOR
+    },
+    PerfSuiteScenario {
+        label: "far-oblique",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        ..PERF_POSE_FAR_OBLIQUE
+    },
+    // -----------------------------------------------------------------------
+    // Entities (3): nearby entities for BVH overhead testing
+    // -----------------------------------------------------------------------
+    PerfSuiteScenario {
+        label: "platform-surface+entities",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        setup: Some(&SETUP_ENTITIES_NEAR),
         ..PERF_POSE_PLATFORM_SURFACE
     },
-    // platform-4d: same spot, strong 4D rotation
     PerfSuiteScenario {
-        label: "platform-4d/low",
-        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
-        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
-        ..PERF_POSE_PLATFORM_4D
-    },
-    PerfSuiteScenario {
-        label: "platform-4d/default",
+        label: "corridor+entities",
         vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
         vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
-        ..PERF_POSE_PLATFORM_4D
-    },
-    PerfSuiteScenario {
-        label: "platform-4d/high",
-        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
-        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
-        ..PERF_POSE_PLATFORM_4D
-    },
-    // open-sky: high altitude looking down
-    PerfSuiteScenario {
-        label: "open-sky/low",
-        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
-        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
-        ..PERF_POSE_OPEN_SKY
-    },
-    PerfSuiteScenario {
-        label: "open-sky/default",
-        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
-        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
-        ..PERF_POSE_OPEN_SKY
-    },
-    PerfSuiteScenario {
-        label: "open-sky/high",
-        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
-        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
-        ..PERF_POSE_OPEN_SKY
-    },
-    // corridor: oblique far view between platforms
-    PerfSuiteScenario {
-        label: "corridor/low",
-        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
-        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
+        setup: Some(&SETUP_ENTITIES_NEAR),
         ..PERF_POSE_CORRIDOR
     },
     PerfSuiteScenario {
-        label: "corridor/default",
+        label: "far-oblique+entities",
         vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
         vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
-        ..PERF_POSE_CORRIDOR
-    },
-    PerfSuiteScenario {
-        label: "corridor/high",
-        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
-        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
-        ..PERF_POSE_CORRIDOR
-    },
-    // far-oblique: distant ridge terrain with 4D
-    PerfSuiteScenario {
-        label: "far-oblique/low",
-        vte_max_trace_steps: Some(PERF_TIER_LOW.0),
-        vte_max_trace_distance: Some(PERF_TIER_LOW.1),
+        setup: Some(&SETUP_ENTITIES_NEAR),
         ..PERF_POSE_FAR_OBLIQUE
     },
+    // -----------------------------------------------------------------------
+    // Explosions (2): terrain craters
+    // -----------------------------------------------------------------------
     PerfSuiteScenario {
-        label: "far-oblique/default",
+        label: "platform-surface+explosion",
         vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
         vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
-        ..PERF_POSE_FAR_OBLIQUE
+        setup: Some(&SETUP_EXPLOSION_SMALL),
+        ..PERF_POSE_PLATFORM_SURFACE
     },
     PerfSuiteScenario {
-        label: "far-oblique/high",
-        vte_max_trace_steps: Some(PERF_TIER_HIGH.0),
-        vte_max_trace_distance: Some(PERF_TIER_HIGH.1),
+        label: "corridor+explosion",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        setup: Some(&SETUP_EXPLOSION_LARGE),
+        ..PERF_POSE_CORRIDOR
+    },
+    // -----------------------------------------------------------------------
+    // Combined (2): entities + explosion
+    // -----------------------------------------------------------------------
+    PerfSuiteScenario {
+        label: "platform-4d+combined",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        setup: Some(&SETUP_ENTITIES_AND_EXPLOSION),
+        ..PERF_POSE_PLATFORM_4D
+    },
+    PerfSuiteScenario {
+        label: "far-oblique+combined",
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        setup: Some(&SETUP_ENTITIES_AND_EXPLOSION),
         ..PERF_POSE_FAR_OBLIQUE
+    },
+    // -----------------------------------------------------------------------
+    // Structures (3): seeds with structures/mazes in view
+    // NOTE: These scenarios require their specific seed to produce the expected
+    // structures. The perf suite runner script iterates seeds; these will only
+    // show structure content when run with the matching seed.
+    // -----------------------------------------------------------------------
+    // seed=23: 2 structures nearby (braided_transit + cross_shrine)
+    PerfSuiteScenario {
+        label: "structure-2x-s23",
+        position: [0.0, 8.0, -24.0, -4.0],
+        yaw: 1.25,
+        pitch: -0.15,
+        xw_angle: 0.0,
+        zw_angle: 0.0,
+        yw_deviation: 0.0,
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        setup: None,
+    },
+    // seed=40: structure + maze combo (hypercube_frame + 11x3x11x15 maze)
+    PerfSuiteScenario {
+        label: "struct+maze-s40",
+        position: [96.0, 20.0, 96.0, -4.0],
+        yaw: -2.35,
+        pitch: -0.22,
+        xw_angle: -0.45,
+        zw_angle: 0.42,
+        yw_deviation: 0.0,
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        setup: None,
+    },
+    // seed=46: large maze (11x7x15x15 grid cells)
+    PerfSuiteScenario {
+        label: "large-maze-s46",
+        position: [0.0, 8.0, 0.0, 0.0],
+        yaw: 0.0,
+        pitch: -0.10,
+        xw_angle: 0.0,
+        zw_angle: 0.0,
+        yw_deviation: 0.0,
+        vte_max_trace_steps: Some(PERF_TIER_DEFAULT.0),
+        vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
+        setup: None,
     },
 ];
 
