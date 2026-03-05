@@ -1121,9 +1121,8 @@ mod tests {
             let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
             let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
             let mut anchored = false;
-            let overhang_world = ChunkCoord::from_num(
-                procgen::max_structure_overhang_chunks() * CHUNK_SIZE as i32,
-            );
+            let overhang_world =
+                ChunkCoord::from_num(procgen::max_structure_overhang_chunks() * CHUNK_SIZE as i32);
             let expanded_key_bounds = Aabb4i::new(
                 [
                     key_bounds.min[0] - overhang_world,
@@ -1147,8 +1146,7 @@ mod tests {
                     let chunk_wb = Aabb4i::chunk_world_bounds(key, 0);
                     // Structures can overhang the platform edge, so expand the
                     // horizontal check by the overhang margin.
-                    let in_horizontal = chunk_wb.min[0]
-                        < platform.bounds.max[0] + overhang_world
+                    let in_horizontal = chunk_wb.min[0] < platform.bounds.max[0] + overhang_world
                         && chunk_wb.max[0] > platform.bounds.min[0] - overhang_world
                         && chunk_wb.min[2] < platform.bounds.max[2] + overhang_world
                         && chunk_wb.max[2] > platform.bounds.min[2] - overhang_world

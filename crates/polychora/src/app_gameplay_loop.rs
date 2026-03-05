@@ -213,8 +213,9 @@ impl App {
                             self.hotbar_selected_index = (self.hotbar_selected_index + 1) % 9;
                         }
                     }
-                    self.selected_block =
-                        block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
                     eprintln!(
                         "Hotbar slot {} selected: {} ({})",
                         self.hotbar_selected_index + 1,
@@ -434,21 +435,24 @@ impl App {
             if self.input.take_place_material_prev() {
                 let new_scale = (self.selected_block.scale_exp - 1).max(-3);
                 self.selected_block.scale_exp = new_scale;
-                self.inventory.update_slot_scale(self.hotbar_selected_index, new_scale);
+                self.inventory
+                    .update_slot_scale(self.hotbar_selected_index, new_scale);
                 self.inventory_dirty = true;
             }
             if self.input.take_place_material_next() {
                 let new_scale = (self.selected_block.scale_exp + 1).min(3);
                 self.selected_block.scale_exp = new_scale;
-                self.inventory.update_slot_scale(self.hotbar_selected_index, new_scale);
+                self.inventory
+                    .update_slot_scale(self.hotbar_selected_index, new_scale);
                 self.inventory_dirty = true;
             }
             // Number keys 1-9 select hotbar slot.
             if let Some(digit) = self.input.take_place_material_digit() {
                 if digit >= 1 && digit <= 9 {
                     self.hotbar_selected_index = (digit - 1) as usize;
-                    self.selected_block =
-                        block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
                     eprintln!(
                         "Hotbar slot {} selected: {} ({})",
                         digit,
@@ -609,13 +613,16 @@ impl App {
             {
                 use polychora::shared::voxel::TesseractOrientation;
                 if self.input.take_rotate_xz() {
-                    self.placement_orientation = TesseractOrientation::ROT_XZ.compose(self.placement_orientation);
+                    self.placement_orientation =
+                        TesseractOrientation::ROT_XZ.compose(self.placement_orientation);
                 }
                 if self.input.take_rotate_yz() {
-                    self.placement_orientation = TesseractOrientation::ROT_YZ.compose(self.placement_orientation);
+                    self.placement_orientation =
+                        TesseractOrientation::ROT_YZ.compose(self.placement_orientation);
                 }
                 if self.input.take_rotate_xw() {
-                    self.placement_orientation = TesseractOrientation::ROT_XW.compose(self.placement_orientation);
+                    self.placement_orientation =
+                        TesseractOrientation::ROT_XW.compose(self.placement_orientation);
                 }
             }
 
@@ -712,11 +719,21 @@ impl App {
                             // few units in front of the player if no block target).
                             let spawn_pos = if let Some(place) = &edit_targets.place {
                                 let o = place.origin_i32();
-                                [o[0] as f32 + 0.5, o[1] as f32 + 0.5, o[2] as f32 + 0.5, o[3] as f32 + 0.5]
+                                [
+                                    o[0] as f32 + 0.5,
+                                    o[1] as f32 + 0.5,
+                                    o[2] as f32 + 0.5,
+                                    o[3] as f32 + 0.5,
+                                ]
                             } else {
                                 let look = self.current_look_direction();
                                 let p = self.camera.position;
-                                [p[0] + look[0] * 3.0, p[1] + look[1] * 3.0, p[2] + look[2] * 3.0, p[3] + look[3] * 3.0]
+                                [
+                                    p[0] + look[0] * 3.0,
+                                    p[1] + look[1] * 3.0,
+                                    p[2] + look[2] * 3.0,
+                                    p[3] + look[3] * 3.0,
+                                ]
                             };
                             let scale = self
                                 .content_registry
@@ -747,11 +764,7 @@ impl App {
                             );
                             let mut placed_block = self.selected_block.clone();
                             placed_block.orientation = self.placement_orientation;
-                            self.send_multiplayer_voxel_update(
-                                now,
-                                place.origin,
-                                placed_block,
-                            );
+                            self.send_multiplayer_voxel_update(now, place.origin, placed_block);
                             // Survival: decrement placed block from inventory
                             if self.game_mode == polychora::shared::inventory::GameMode::Survival {
                                 self.inventory.decrement_slot(self.hotbar_selected_index);
@@ -1269,11 +1282,13 @@ impl App {
                 // the frame_data's current generation — deltas applied after the
                 // swap advance the generation, and the renderer must detect the
                 // delta as dirty to upload it.
-                let gen = voxel_result.gpu_buffers_generation
+                let gen = voxel_result
+                    .gpu_buffers_generation
                     .unwrap_or(voxel_result.frame_data.metadata_generation);
-                self.rcx.as_mut().unwrap().install_new_voxel_gpu_buffers(
-                    gpu_buffers, gen,
-                );
+                self.rcx
+                    .as_mut()
+                    .unwrap()
+                    .install_new_voxel_gpu_buffers(gpu_buffers, gen);
             }
 
             // If we are playing without a live server connection, do not keep the loading gate up.

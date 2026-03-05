@@ -1724,9 +1724,7 @@ impl App {
                 );
             }
             multiplayer::ServerMessage::InventorySync { payload } => {
-                if let Some(inv) =
-                    polychora::shared::inventory::Inventory::from_payload(&payload)
-                {
+                if let Some(inv) = polychora::shared::inventory::Inventory::from_payload(&payload) {
                     self.inventory = inv;
                     self.selected_block = block_data_from_slot(
                         self.inventory.hotbar_slot(self.hotbar_selected_index),
@@ -1734,12 +1732,8 @@ impl App {
                     eprintln!("Restored inventory from server");
                 }
             }
-            multiplayer::ServerMessage::InventorySlotUpdate {
-                slot_index,
-                stack,
-            } => {
-                self.inventory
-                    .set_slot(slot_index as usize, stack);
+            multiplayer::ServerMessage::InventorySlotUpdate { slot_index, stack } => {
+                self.inventory.set_slot(slot_index as usize, stack);
                 if (slot_index as usize) == self.hotbar_selected_index {
                     self.selected_block = block_data_from_slot(
                         self.inventory.hotbar_slot(self.hotbar_selected_index),

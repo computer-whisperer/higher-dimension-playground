@@ -32,10 +32,13 @@ impl Scene {
     pub(crate) fn prime_render_bvh_cache_for_bounds(&mut self, bounds: Aabb4i) {
         let core = self.world_tree.slice_non_empty_core_in_bounds(bounds);
         let render_core = render_tree::from_region_core(&core);
-        self.active_config.render_bvh_cache = Some(render_tree::build_bvh_in_bounds(&render_core, bounds));
+        self.active_config.render_bvh_cache =
+            Some(render_tree::build_bvh_in_bounds(&render_core, bounds));
         self.active_config.render_bvh_cache_bounds = Some(bounds);
         self.active_config.pending_render_bvh_rebuild = false;
-        self.active_config.pending_render_bvh_mutation_deltas.clear();
+        self.active_config
+            .pending_render_bvh_mutation_deltas
+            .clear();
         self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
     }
 
@@ -300,7 +303,9 @@ impl Scene {
     pub fn force_render_bvh_rebuild(&mut self) {
         if self.active_config.render_bvh_cache_bounds.is_some() {
             self.active_config.pending_render_bvh_rebuild = true;
-            self.active_config.pending_render_bvh_mutation_deltas.clear();
+            self.active_config
+                .pending_render_bvh_mutation_deltas
+                .clear();
         }
     }
 
@@ -309,7 +314,9 @@ impl Scene {
             self.active_config.render_bvh_cache_bounds = None;
             self.active_config.render_bvh_cache = None;
             self.active_config.pending_render_bvh_rebuild = true;
-            self.active_config.pending_render_bvh_mutation_deltas.clear();
+            self.active_config
+                .pending_render_bvh_mutation_deltas
+                .clear();
             return;
         }
 
@@ -321,7 +328,9 @@ impl Scene {
             self.active_config.render_bvh_cache_bounds = None;
             self.active_config.render_bvh_cache = None;
             self.active_config.pending_render_bvh_rebuild = true;
-            self.active_config.pending_render_bvh_mutation_deltas.clear();
+            self.active_config
+                .pending_render_bvh_mutation_deltas
+                .clear();
             self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
             return;
         }
@@ -405,7 +414,9 @@ impl Scene {
                 deltas.len()
             );
             self.active_config.pending_render_bvh_rebuild = true;
-            self.active_config.pending_render_bvh_mutation_deltas.clear();
+            self.active_config
+                .pending_render_bvh_mutation_deltas
+                .clear();
             return;
         }
         if !deltas.is_empty() {
@@ -419,7 +430,9 @@ impl Scene {
                     self.voxel_pending_scene_dirty_regions.len()
                 );
             }
-            self.active_config.pending_render_bvh_mutation_deltas.extend(deltas);
+            self.active_config
+                .pending_render_bvh_mutation_deltas
+                .extend(deltas);
         }
     }
 
@@ -504,7 +517,8 @@ impl Scene {
             return Vec::new();
         }
         self.ensure_render_bvh_cache_for_bounds(bounds);
-        self.active_config.render_bvh_cache
+        self.active_config
+            .render_bvh_cache
             .as_ref()
             .map(|bvh| render_tree::sample_chunk_payloads_from_bvh(bvh, chunk_key))
             .unwrap_or_default()
@@ -579,7 +593,8 @@ impl Scene {
         // Diagnostics must not mutate the active render cache: forcing a
         // per-frame cache resize here can trigger pathological full snapshot
         // rebuild loops in the main voxel path.
-        self.active_config.render_bvh_cache
+        self.active_config
+            .render_bvh_cache
             .as_ref()
             .map(|bvh| {
                 render_tree::collect_ray_intersected_nodes_from_bvh(

@@ -11,10 +11,10 @@ impl App {
                 }
             }
             ControlScheme::LookTransport
-                | ControlScheme::TransportUniform
-                | ControlScheme::TransportDecoupled
-                | ControlScheme::TransportScaled
-                | ControlScheme::RotorFree => RotationPair::Standard,
+            | ControlScheme::TransportUniform
+            | ControlScheme::TransportDecoupled
+            | ControlScheme::TransportScaled
+            | ControlScheme::RotorFree => RotationPair::Standard,
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 if self.input.mouse_back_held() && self.input.mouse_forward_held() {
                     RotationPair::DoubleRotation
@@ -33,12 +33,10 @@ impl App {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.look_direction_upright(),
             ControlScheme::LookTransport
-                | ControlScheme::TransportUniform
-                | ControlScheme::TransportDecoupled
-                | ControlScheme::TransportScaled
-                | ControlScheme::RotorFree => {
-                self.camera.look_direction_look_frame()
-            }
+            | ControlScheme::TransportUniform
+            | ControlScheme::TransportDecoupled
+            | ControlScheme::TransportScaled
+            | ControlScheme::RotorFree => self.camera.look_direction_look_frame(),
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 self.camera.look_direction()
             }
@@ -49,12 +47,10 @@ impl App {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.view_matrix_upright(),
             ControlScheme::LookTransport
-                | ControlScheme::TransportUniform
-                | ControlScheme::TransportDecoupled
-                | ControlScheme::TransportScaled
-                | ControlScheme::RotorFree => {
-                self.camera.view_matrix_look_frame()
-            }
+            | ControlScheme::TransportUniform
+            | ControlScheme::TransportDecoupled
+            | ControlScheme::TransportScaled
+            | ControlScheme::RotorFree => self.camera.view_matrix_look_frame(),
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 self.camera.view_matrix()
             }
@@ -65,12 +61,10 @@ impl App {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.view_basis_upright(),
             ControlScheme::LookTransport
-                | ControlScheme::TransportUniform
-                | ControlScheme::TransportDecoupled
-                | ControlScheme::TransportScaled
-                | ControlScheme::RotorFree => {
-                self.camera.view_basis_look_frame()
-            }
+            | ControlScheme::TransportUniform
+            | ControlScheme::TransportDecoupled
+            | ControlScheme::TransportScaled
+            | ControlScheme::RotorFree => self.camera.view_basis_look_frame(),
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 self.camera.view_basis()
             }
@@ -111,12 +105,10 @@ impl App {
         match self.control_scheme {
             ControlScheme::IntuitiveUpright => self.camera.is_y_inverted_upright(),
             ControlScheme::LookTransport
-                | ControlScheme::TransportUniform
-                | ControlScheme::TransportDecoupled
-                | ControlScheme::TransportScaled
-                | ControlScheme::RotorFree => {
-                self.camera.is_y_inverted_look_frame()
-            }
+            | ControlScheme::TransportUniform
+            | ControlScheme::TransportDecoupled
+            | ControlScheme::TransportScaled
+            | ControlScheme::RotorFree => self.camera.is_y_inverted_look_frame(),
             ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
                 self.camera.is_y_inverted()
             }

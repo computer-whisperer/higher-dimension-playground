@@ -266,7 +266,11 @@ pub fn create_full_registry() -> (ContentRegistry, Vec<PendingTextureUpload>) {
 ///
 /// Used by the server (both integrated and dedicated) so that entity simulation
 /// (steering, abilities, parametric animation) can be evaluated via WASM at runtime.
-pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager, Vec<PendingTextureUpload>) {
+pub fn create_full_registry_with_wasm() -> (
+    ContentRegistry,
+    WasmPluginManager,
+    Vec<PendingTextureUpload>,
+) {
     let mut registry = ContentRegistry::new();
     builtin_content::register_builtin_content(&mut registry);
 

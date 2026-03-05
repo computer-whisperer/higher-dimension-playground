@@ -333,12 +333,24 @@ mod tests {
     #[test]
     fn rotation_generators_are_order_4() {
         use super::TesseractOrientation as TO;
-        for rot in [TO::ROT_XZ, TO::ROT_YZ, TO::ROT_XW, TO::ROT_XY, TO::ROT_YW, TO::ROT_ZW] {
+        for rot in [
+            TO::ROT_XZ,
+            TO::ROT_YZ,
+            TO::ROT_XW,
+            TO::ROT_XY,
+            TO::ROT_YW,
+            TO::ROT_ZW,
+        ] {
             let mut cur = rot;
             cur = rot.compose(cur);
             cur = rot.compose(cur);
             cur = rot.compose(cur);
-            assert_eq!(cur, TO::IDENTITY, "4 applications of {:?} should be identity", rot);
+            assert_eq!(
+                cur,
+                TO::IDENTITY,
+                "4 applications of {:?} should be identity",
+                rot
+            );
         }
     }
 
@@ -357,7 +369,14 @@ mod tests {
     #[test]
     fn rotation_inverse() {
         use super::TesseractOrientation as TO;
-        for rot in [TO::ROT_XZ, TO::ROT_YZ, TO::ROT_XW, TO::ROT_XY, TO::ROT_YW, TO::ROT_ZW] {
+        for rot in [
+            TO::ROT_XZ,
+            TO::ROT_YZ,
+            TO::ROT_XW,
+            TO::ROT_XY,
+            TO::ROT_YW,
+            TO::ROT_ZW,
+        ] {
             let inv = rot.inverse();
             assert_eq!(rot.compose(inv), TO::IDENTITY);
             assert_eq!(inv.compose(rot), TO::IDENTITY);

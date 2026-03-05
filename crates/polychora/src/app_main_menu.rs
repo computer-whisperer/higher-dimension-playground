@@ -462,11 +462,13 @@ impl App {
                 &self.material_resolver,
             );
             if let Some(gpu_buffers) = voxel_result.new_gpu_buffers {
-                let gen = voxel_result.gpu_buffers_generation
+                let gen = voxel_result
+                    .gpu_buffers_generation
                     .unwrap_or(voxel_result.frame_data.metadata_generation);
-                self.rcx.as_mut().unwrap().install_new_voxel_gpu_buffers(
-                    gpu_buffers, gen,
-                );
+                self.rcx
+                    .as_mut()
+                    .unwrap()
+                    .install_new_voxel_gpu_buffers(gpu_buffers, gen);
             }
             self.rcx.as_mut().unwrap().render_voxel_frame(
                 self.device.clone(),

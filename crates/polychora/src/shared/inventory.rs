@@ -268,7 +268,10 @@ mod tests {
     fn try_add_full_inventory() {
         let mut inv = Inventory::default();
         for i in 0..INVENTORY_SIZE {
-            inv.set_slot(i, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, MAX_STACK_SIZE, 0)));
+            inv.set_slot(
+                i,
+                Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, MAX_STACK_SIZE, 0)),
+            );
         }
         let remainder = inv.try_add(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 1, 0));
         assert!(remainder.is_some());
@@ -330,7 +333,13 @@ mod tests {
         inv.set_slot(0, Some(ItemStack::block(CONTENT_NS, BLOCK_STONE, 1, 0)));
         inv.set_slot(1, Some(ItemStack::block(CONTENT_NS, BLOCK_DIRT, 5, 0)));
         inv.swap_slots(0, 1);
-        assert_eq!(inv.slot(0).unwrap().block_type_key(), Some((CONTENT_NS, BLOCK_DIRT)));
-        assert_eq!(inv.slot(1).unwrap().block_type_key(), Some((CONTENT_NS, BLOCK_STONE)));
+        assert_eq!(
+            inv.slot(0).unwrap().block_type_key(),
+            Some((CONTENT_NS, BLOCK_DIRT))
+        );
+        assert_eq!(
+            inv.slot(1).unwrap().block_type_key(),
+            Some((CONTENT_NS, BLOCK_STONE))
+        );
     }
 }

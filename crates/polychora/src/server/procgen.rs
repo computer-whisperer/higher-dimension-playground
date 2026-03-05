@@ -1058,10 +1058,7 @@ fn collect_structure_placements_for_chunk_bounds(
     placements
 }
 
-fn collect_maze_placements_for_chunk_bounds(
-    world_seed: u64,
-    bounds: Aabb4i,
-) -> Vec<MazePlacement> {
+fn collect_maze_placements_for_chunk_bounds(world_seed: u64, bounds: Aabb4i) -> Vec<MazePlacement> {
     if !bounds.is_valid() {
         return Vec::new();
     }

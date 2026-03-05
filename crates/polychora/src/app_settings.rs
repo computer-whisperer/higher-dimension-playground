@@ -415,15 +415,15 @@ impl App {
             &settings.hotbar_slots,
         );
         self.hotbar_selected_index = settings.hotbar_selected_index.min(MAX_HOTBAR_SLOT_INDEX);
-        self.selected_block = block_data_from_slot(
-            self.inventory.hotbar_slot(self.hotbar_selected_index),
-        );
+        self.selected_block =
+            block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
         self.main_menu_server_address = settings.main_menu_server_address;
         if self.args.player_name.is_none() {
             self.main_menu_player_name = settings.main_menu_player_name;
         }
         self.placement_preview_mode = settings.placement_preview_mode.into();
-        self.placement_preview_hide_camera_intersect = settings.placement_preview_hide_camera_intersect;
+        self.placement_preview_hide_camera_intersect =
+            settings.placement_preview_hide_camera_intersect;
         self.placement_preview_hide_same_scale = settings.placement_preview_hide_same_scale;
         self.pending_render_width = self.args.width;
         self.pending_render_height = self.args.height;

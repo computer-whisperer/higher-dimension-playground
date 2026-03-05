@@ -2016,10 +2016,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             .cloned()
             .expect("live descriptor set layout");
         for frame in &mut self.frames_in_flight {
-            let new_voxel = VoxelGpuBuffers::new(
-                self.memory_allocator.clone(),
-                gpu_buffers.caps,
-            );
+            let new_voxel = VoxelGpuBuffers::new(self.memory_allocator.clone(), gpu_buffers.caps);
             // Copy data from the pre-populated buffers into per-frame buffers.
             // Each frame needs its own buffer set for safe concurrent GPU access.
             {
@@ -2691,7 +2688,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel.chunk_headers_buffer
+                            .voxel
+                            .chunk_headers_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2707,7 +2705,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel.occupancy_words_buffer
+                            .voxel
+                            .occupancy_words_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2723,7 +2722,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel.material_words_buffer
+                            .voxel
+                            .material_words_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2739,7 +2739,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel.orientation_words_buffer
+                            .voxel
+                            .orientation_words_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2766,7 +2767,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel.region_bvh_nodes_buffer
+                            .voxel
+                            .region_bvh_nodes_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2780,7 +2782,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel.leaf_headers_buffer
+                            .voxel
+                            .leaf_headers_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2796,7 +2799,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                         };
                         let mut writer = frame
                             .live_buffers
-                            .voxel.leaf_chunk_entries_buffer
+                            .voxel
+                            .leaf_chunk_entries_buffer
                             .write()
                             .unwrap();
                         writer[dst].copy_from_slice(&write.values[src]);
@@ -2819,7 +2823,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = chunk_headers_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel.chunk_headers_buffer
+                            .voxel
+                            .chunk_headers_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&chunk_headers[range]);
@@ -2835,7 +2840,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = occupancy_words_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel.occupancy_words_buffer
+                            .voxel
+                            .occupancy_words_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&occupancy_words[range]);
@@ -2851,7 +2857,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = material_words_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel.material_words_buffer
+                            .voxel
+                            .material_words_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&material_words[range]);
@@ -2867,7 +2874,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = orientation_words_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel.orientation_words_buffer
+                            .voxel
+                            .orientation_words_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&orientation_words[range]);
@@ -2881,7 +2889,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = leaf_headers_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel.leaf_headers_buffer
+                            .voxel
+                            .leaf_headers_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&leaf_headers[range]);
@@ -2897,7 +2906,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = region_bvh_nodes_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel.region_bvh_nodes_buffer
+                            .voxel
+                            .region_bvh_nodes_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&region_bvh_nodes[range]);
@@ -2913,7 +2923,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     if let Some(range) = leaf_chunk_entries_dirty {
                         let mut writer = frame
                             .live_buffers
-                            .voxel.leaf_chunk_entries_buffer
+                            .voxel
+                            .leaf_chunk_entries_buffer
                             .write()
                             .unwrap();
                         writer[range.clone()].copy_from_slice(&leaf_chunk_entries[range]);
@@ -3434,8 +3445,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     vte_non_voxel_rebuild_executed = true;
                     // Preprocess one proxy tetrahedron per non-voxel instance using the
                     // transformed [0,1]^4 instance AABB as the leaf primitive.
-                    let vte_preprocess_push_data: [u32; 4] =
-                        [0, non_voxel_leaf_count as u32, 0, 0];
+                    let vte_preprocess_push_data: [u32; 4] = [0, non_voxel_leaf_count as u32, 0, 0];
                     builder
                         .push_constants(
                             self.compute_pipeline.pipeline_layout.clone(),
@@ -3472,8 +3482,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             self.vte_non_voxel_bvh_topology_tet_count == non_voxel_leaf_count;
                         let periodic_rebuild_due = self.vte_non_voxel_bvh_refit_frames
                             >= VTE_ENTITY_BVH_REFIT_REBUILD_INTERVAL;
-                        let can_refit_only =
-                            topology_tet_count_matches && !periodic_rebuild_due;
+                        let can_refit_only = topology_tet_count_matches && !periodic_rebuild_due;
                         if can_refit_only {
                             // Refit-only update for rapid movers: keep tree topology and
                             // update leaf/internal bounds from current tetrahedra.
@@ -3496,8 +3505,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 .unwrap();
                             unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
                             {
-                                let q =
-                                    self.profiler.next_query_index("vte_non_voxel_bvh_refit");
+                                let q = self.profiler.next_query_index("vte_non_voxel_bvh_refit");
                                 unsafe {
                                     builder.write_timestamp(
                                         self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -3527,8 +3535,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                     self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
                                 )
                                 .unwrap();
-                            unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }
-                                .unwrap();
+                            unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }.unwrap();
 
                             let num_stages = n_pow2.trailing_zeros();
                             let local_stages = 6u32.min(num_stages);
@@ -4037,14 +4044,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 hasher.finish()
             };
             let bvh_needs_rebuild = scene_hash != self.bvh_scene_hash;
-            let raytrace_should_clear =
-                render_options.do_frame_clear || bvh_needs_rebuild;
+            let raytrace_should_clear = render_options.do_frame_clear || bvh_needs_rebuild;
 
             if raytrace_should_clear {
                 builder
-                    .bind_pipeline_compute(
-                        self.compute_pipeline.raytrace_clear_pipeline.clone(),
-                    )
+                    .bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone())
                     .unwrap();
                 unsafe {
                     builder.dispatch([
@@ -4124,11 +4128,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     // Phase 1: Sort each 64-element block in shared memory (stages 0-5)
                     let push_data: [u32; 4] = [0, 0, n_pow2, 0];
                     builder
-                        .push_constants(
-                            self.compute_pipeline.pipeline_layout.clone(),
-                            0,
-                            push_data,
-                        )
+                        .push_constants(self.compute_pipeline.pipeline_layout.clone(), 0, push_data)
                         .unwrap();
                     builder
                         .bind_pipeline_compute(
@@ -4184,11 +4184,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         )
                         .unwrap();
                     unsafe {
-                        builder.dispatch([
-                            (total_tetrahedron_count as u32).div_ceil(64u32),
-                            1,
-                            1,
-                        ])
+                        builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                     }
                     .unwrap();
 
@@ -4199,11 +4195,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         )
                         .unwrap();
                     unsafe {
-                        builder.dispatch([
-                            (total_tetrahedron_count as u32).div_ceil(64u32),
-                            1,
-                            1,
-                        ])
+                        builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                     }
                     .unwrap();
 
@@ -4226,11 +4218,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         )
                         .unwrap();
                     unsafe {
-                        builder.dispatch([
-                            (total_tetrahedron_count as u32).div_ceil(64u32),
-                            1,
-                            1,
-                        ])
+                        builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                     }
                     .unwrap();
                 }

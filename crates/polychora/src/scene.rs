@@ -2,11 +2,8 @@ use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::{CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,
-    VoxelFrameInput, VoxelGpuBuffers, VoxelMutationBatch,
-    VTE_REGION_BVH_INVALID_NODE,
+    VoxelFrameInput, VoxelGpuBuffers, VoxelMutationBatch, VTE_REGION_BVH_INVALID_NODE,
 };
-use std::sync::Arc;
-use vulkano::memory::allocator::MemoryAllocator;
 use polychora::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::protocol::WorldBounds;
 use polychora::shared::region_tree::{
@@ -19,7 +16,9 @@ use polychora::shared::voxel::{world_to_chunk_at_scale, BlockData};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
+use vulkano::memory::allocator::MemoryAllocator;
 
 mod collision;
 mod editing;
@@ -614,19 +613,31 @@ impl Scene {
     }
 
     fn decode_voxel_frame_dense_chunk_materials(&self, chunk_index: usize) -> Option<Vec<u16>> {
-        let header = self.active_config.frame_data.chunk_headers.get(chunk_index)?;
+        let header = self
+            .active_config
+            .frame_data
+            .chunk_headers
+            .get(chunk_index)?;
         let mut out = vec![0u16; CHUNK_VOLUME];
         let is_full = (header.flags & GpuVoxelChunkHeader::FLAG_FULL) != 0;
         for (voxel_idx, material_slot) in out.iter_mut().enumerate().take(CHUNK_VOLUME) {
             if !is_full {
                 let occ_word_idx = header.occupancy_word_offset as usize + (voxel_idx / 32);
-                let occ_word = *self.active_config.frame_data.occupancy_words.get(occ_word_idx)?;
+                let occ_word = *self
+                    .active_config
+                    .frame_data
+                    .occupancy_words
+                    .get(occ_word_idx)?;
                 if (occ_word & (1u32 << (voxel_idx % 32))) == 0 {
                     continue;
                 }
             }
             let mat_word_idx = header.material_word_offset as usize + (voxel_idx / 2);
-            let mat_word = *self.active_config.frame_data.material_words.get(mat_word_idx)?;
+            let mat_word = *self
+                .active_config
+                .frame_data
+                .material_words
+                .get(mat_word_idx)?;
             let material = ((mat_word >> ((voxel_idx % 2) * 16)) & 0xFFFF) as u16;
             *material_slot = material;
         }
@@ -675,7 +686,12 @@ impl Scene {
             let local_w = (chunk_key[3] - leaf.min_chunk_coord[3]) as usize;
             let linear = local_x + dim_x * (local_y + dim_y * (local_z + dim_z * local_w));
             let entry_index = leaf.chunk_entry_offset as usize + linear;
-            let Some(&entry) = self.active_config.frame_data.leaf_chunk_entries.get(entry_index) else {
+            let Some(&entry) = self
+                .active_config
+                .frame_data
+                .leaf_chunk_entries
+                .get(entry_index)
+            else {
                 continue;
             };
 

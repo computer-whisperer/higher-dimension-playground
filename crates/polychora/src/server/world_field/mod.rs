@@ -728,15 +728,11 @@ impl PassthroughWorldOverlay<ServerWorldField> {
     /// Groups edits by chunk and processes each chunk once: one read, one
     /// encode, one tree insert, one dirty mark.  Falls back to per-voxel
     /// edits for the rare case where a chunk contains sub-chunk-scale data.
-    pub fn apply_bulk_air_edits_scale0(
-        &mut self,
-        positions: &[[ChunkCoord; 4]],
-    ) -> Vec<ChunkKey> {
+    pub fn apply_bulk_air_edits_scale0(&mut self, positions: &[[ChunkCoord; 4]]) -> Vec<ChunkKey> {
         // Group voxel positions by their scale-0 chunk key.
         let mut by_chunk: HashMap<ChunkKey, Vec<[ChunkCoord; 4]>> = HashMap::new();
         for &pos in positions {
-            let (chunk_key, _) =
-                world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+            let (chunk_key, _) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
             by_chunk.entry(chunk_key).or_default().push(pos);
         }
 
@@ -764,12 +760,10 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 continue;
             }
 
-            let (mut blocks, virgin_blocks) =
-                self.read_effective_and_virgin_blocks(*chunk_key, 0);
+            let (mut blocks, virgin_blocks) = self.read_effective_and_virgin_blocks(*chunk_key, 0);
 
             for &pos in chunk_positions {
-                let (_, voxel_idx) =
-                    world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+                let (_, voxel_idx) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
                 blocks[voxel_idx] = BlockData::AIR;
             }
 
@@ -780,9 +774,9 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
             };
 
-            let affected_bounds =
-                self.override_chunks
-                    .set_chunk_at_scale(*chunk_key, payload, 0);
+            let affected_bounds = self
+                .override_chunks
+                .set_chunk_at_scale(*chunk_key, payload, 0);
             let Some(affected_bounds) = affected_bounds else {
                 continue;
             };

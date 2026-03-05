@@ -204,8 +204,7 @@ fn compute_placement_target(
                 // origin + place_step <= hit.origin  =>  origin <= hit.origin - place_step
                 // Floor to placement grid.
                 let raw_bits = (hit.origin[axis] - place_step).to_bits();
-                origin[axis] =
-                    ChunkCoord::from_bits(raw_bits.div_euclid(step_bits) * step_bits);
+                origin[axis] = ChunkCoord::from_bits(raw_bits.div_euclid(step_bits) * step_bits);
             } else {
                 // Place on the max side: block must start at or after hit.origin + hit_size.
                 // Ceil to placement grid.

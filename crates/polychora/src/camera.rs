@@ -572,17 +572,9 @@ impl Camera4D {
 
         let forward_y_before = self.look_forward[1];
         if hidden_mode {
-            Self::rotate_axis_pair_xzw(
-                &mut self.look_forward,
-                &mut self.look_side,
-                scaled_yaw,
-            );
+            Self::rotate_axis_pair_xzw(&mut self.look_forward, &mut self.look_side, scaled_yaw);
         } else {
-            Self::rotate_axis_pair_xzw(
-                &mut self.look_forward,
-                &mut self.look_right,
-                scaled_yaw,
-            );
+            Self::rotate_axis_pair_xzw(&mut self.look_forward, &mut self.look_right, scaled_yaw);
         }
         self.renormalize_forward_preserve_y(forward_y_before);
 

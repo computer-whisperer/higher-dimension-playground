@@ -5,7 +5,11 @@ fn spawn_egg_color(base_color: [u8; 3]) -> egui::Color32 {
     let [r, g, b] = base_color;
     // If the base color is very dark, brighten it so the egg is visible.
     if (r as u16 + g as u16 + b as u16) < 80 {
-        egui::Color32::from_rgb(r.saturating_add(60), g.saturating_add(60), b.saturating_add(60))
+        egui::Color32::from_rgb(
+            r.saturating_add(60),
+            g.saturating_add(60),
+            b.saturating_add(60),
+        )
     } else {
         egui::Color32::from_rgb(r, g, b)
     }
@@ -26,7 +30,11 @@ fn paint_spawn_egg_icon(painter: &egui::Painter, rect: egui::Rect, base_color: [
     let rounding = rect.width().min(rect.height()) * 0.4;
     painter.rect_filled(rect, rounding, egg_color);
     let dot_center = rect.center() - egui::vec2(0.0, rect.height() * 0.15);
-    painter.circle_filled(dot_center, rect.width() * 0.12, brighten_color(egg_color, 80));
+    painter.circle_filled(
+        dot_center,
+        rect.width() * 0.12,
+        brighten_color(egg_color, 80),
+    );
 }
 
 impl App {
@@ -94,11 +102,7 @@ impl App {
                     ControlScheme::LegacySideButtonLayers,
                     ControlScheme::LegacyScrollCycle,
                 ] {
-                    ui.selectable_value(
-                        &mut selected_control_scheme,
-                        scheme,
-                        scheme.label(),
-                    );
+                    ui.selectable_value(&mut selected_control_scheme, scheme, scheme.label());
                 }
             });
         if selected_control_scheme != self.control_scheme {
@@ -280,8 +284,7 @@ impl App {
             || self.pending_render_height != self.args.height
             || self.pending_render_layers != self.args.layers;
         ui.horizontal(|ui| {
-            let apply_btn =
-                ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
+            let apply_btn = ui.add_enabled(dims_changed, egui::Button::new("Apply Resolution"));
             if apply_btn.clicked() {
                 self.args.width = self.pending_render_width;
                 self.args.height = self.pending_render_height;
@@ -460,9 +463,7 @@ impl App {
                                     entry.base_color,
                                 );
                             }
-                            entry
-                                .map(|e| e.canonical_name.as_str())
-                                .unwrap_or("???")
+                            entry.map(|e| e.canonical_name.as_str()).unwrap_or("???")
                         } else {
                             // Block icon (tesseract image or color fallback)
                             let block = block_data_from_slot(self.inventory.hotbar_slot(i));
@@ -542,8 +543,7 @@ impl App {
                         // Stack count badge (bottom-right)
                         if let Some(stack) = slot {
                             if stack.count > 1 {
-                                let badge_pos =
-                                    rect.right_bottom() + egui::vec2(-4.0, -3.0);
+                                let badge_pos = rect.right_bottom() + egui::vec2(-4.0, -3.0);
                                 ui.painter().text(
                                     badge_pos,
                                     egui::Align2::RIGHT_BOTTOM,
@@ -616,9 +616,21 @@ impl App {
 
                 // Top row: XZ, YZ, XW (primary — matching Z/X/C keys)
                 let top_buttons: [(&str, &str, TesseractOrientation); 3] = [
-                    ("XZ", "Z key: rotate in XZ plane (yaw)", TesseractOrientation::ROT_XZ),
-                    ("YZ", "X key: rotate in YZ plane (pitch)", TesseractOrientation::ROT_YZ),
-                    ("XW", "C key: rotate in XW plane (4D)", TesseractOrientation::ROT_XW),
+                    (
+                        "XZ",
+                        "Z key: rotate in XZ plane (yaw)",
+                        TesseractOrientation::ROT_XZ,
+                    ),
+                    (
+                        "YZ",
+                        "X key: rotate in YZ plane (pitch)",
+                        TesseractOrientation::ROT_YZ,
+                    ),
+                    (
+                        "XW",
+                        "C key: rotate in XW plane (4D)",
+                        TesseractOrientation::ROT_XW,
+                    ),
                 ];
                 for (i, (label, tooltip, rot)) in top_buttons.iter().enumerate() {
                     let btn_rect = egui::Rect::from_min_size(
@@ -630,7 +642,11 @@ impl App {
                         egui::Id::new(format!("rot_{}", label)),
                         egui::Sense::click(),
                     );
-                    let color = if resp.hovered() { hover_color } else { text_color };
+                    let color = if resp.hovered() {
+                        hover_color
+                    } else {
+                        text_color
+                    };
                     ui.painter().text(
                         btn_rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -660,7 +676,11 @@ impl App {
                         egui::Id::new(format!("rot_{}", label)),
                         egui::Sense::click(),
                     );
-                    let color = if resp.hovered() { hover_color } else { text_color };
+                    let color = if resp.hovered() {
+                        hover_color
+                    } else {
+                        text_color
+                    };
                     ui.painter().text(
                         btn_rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -679,12 +699,13 @@ impl App {
                     egui::pos2(col_start + 3.0 * col_gap, row0_y),
                     egui::vec2(28.0, 20.0),
                 );
-                let reset_resp = ui.interact(
-                    reset_rect,
-                    egui::Id::new("rot_reset"),
-                    egui::Sense::click(),
-                );
-                let reset_color = if reset_resp.hovered() { hover_color } else { text_color };
+                let reset_resp =
+                    ui.interact(reset_rect, egui::Id::new("rot_reset"), egui::Sense::click());
+                let reset_color = if reset_resp.hovered() {
+                    hover_color
+                } else {
+                    text_color
+                };
                 ui.painter().text(
                     reset_rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -817,19 +838,13 @@ impl App {
                 // Tab bar: Creative | Survival
                 ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(
-                            self.inventory_tab == InventoryTab::Creative,
-                            "Creative",
-                        )
+                        .selectable_label(self.inventory_tab == InventoryTab::Creative, "Creative")
                         .clicked()
                     {
                         self.inventory_tab = InventoryTab::Creative;
                     }
                     if ui
-                        .selectable_label(
-                            self.inventory_tab == InventoryTab::Survival,
-                            "Survival",
-                        )
+                        .selectable_label(self.inventory_tab == InventoryTab::Survival, "Survival")
                         .clicked()
                     {
                         self.inventory_tab = InventoryTab::Survival;
@@ -912,8 +927,7 @@ impl App {
                         if let (Some(sheet), Some(tex_id)) =
                             (&self.material_icon_sheet, self.material_icons_texture_id)
                         {
-                            if let Some([u0, v0, u1, v1]) =
-                                sheet.uv_rect(block_key.0, block_key.1)
+                            if let Some([u0, v0, u1, v1]) = sheet.uv_rect(block_key.0, block_key.1)
                             {
                                 ui.painter().image(
                                     tex_id,
@@ -953,20 +967,18 @@ impl App {
                             ui.painter().rect_stroke(
                                 rect,
                                 3.0,
-                                egui::Stroke::new(
-                                    2.0,
-                                    egui::Color32::from_rgb(255, 255, 100),
-                                ),
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 100)),
                                 egui::epaint::StrokeKind::Outside,
                             );
                         }
 
                         if response.clicked() {
-                            *inventory_pick = Some(
-                                polychora::shared::protocol::ItemStack::block(
-                                    block_key.0, block_key.1, 1, 0,
-                                ),
-                            );
+                            *inventory_pick = Some(polychora::shared::protocol::ItemStack::block(
+                                block_key.0,
+                                block_key.1,
+                                1,
+                                0,
+                            ));
                         }
                     }
                 });
@@ -977,8 +989,7 @@ impl App {
                 ui.label("Spawn Eggs");
                 ui.add_space(4.0);
 
-                let mut entities: Vec<_> =
-                    self.content_registry.spawnable_entities().collect();
+                let mut entities: Vec<_> = self.content_registry.spawnable_entities().collect();
                 entities.sort_by(|a, b| a.canonical_name.cmp(&b.canonical_name));
 
                 ui.horizontal_wrapped(|ui| {
@@ -1026,20 +1037,17 @@ impl App {
                             ui.painter().rect_stroke(
                                 rect,
                                 3.0,
-                                egui::Stroke::new(
-                                    2.0,
-                                    egui::Color32::from_rgb(255, 255, 100),
-                                ),
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 100)),
                                 egui::epaint::StrokeKind::Outside,
                             );
                         }
 
                         if response.clicked() {
-                            *inventory_pick = Some(
-                                polychora::shared::protocol::ItemStack::spawn_egg(
-                                    entity.namespace, entity.entity_type,
-                                ),
-                            );
+                            *inventory_pick =
+                                Some(polychora::shared::protocol::ItemStack::spawn_egg(
+                                    entity.namespace,
+                                    entity.entity_type,
+                                ));
                         }
                     }
                 });
@@ -1084,12 +1092,12 @@ impl App {
         // Handle click: swap clicked slot with selected hotbar slot
         if let Some(slot_idx) = clicked_slot {
             if slot_idx != self.hotbar_selected_index {
-                self.inventory.swap_slots(slot_idx, self.hotbar_selected_index);
+                self.inventory
+                    .swap_slots(slot_idx, self.hotbar_selected_index);
                 self.inventory_dirty = true;
             }
-            self.selected_block = block_data_from_slot(
-                self.inventory.hotbar_slot(self.hotbar_selected_index),
-            );
+            self.selected_block =
+                block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
         }
 
         ui.separator();
@@ -1104,10 +1112,8 @@ impl App {
         is_selected: bool,
     ) -> bool {
         let slot = self.inventory.slot(slot_idx);
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(cell_size, cell_size),
-            egui::Sense::click(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(cell_size, cell_size), egui::Sense::click());
         let clicked = response.clicked();
 
         // Background
@@ -1140,10 +1146,7 @@ impl App {
                         ui.painter().image(
                             tex_id,
                             icon_rect,
-                            egui::Rect::from_min_max(
-                                egui::pos2(u0, v0),
-                                egui::pos2(u1, v1),
-                            ),
+                            egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
                             egui::Color32::WHITE,
                         );
                     } else {
@@ -1404,10 +1407,8 @@ impl App {
             self.grab_mouse(&window);
         }
         if let Some(stack) = inventory_pick {
-            self.inventory.set_slot(
-                self.hotbar_selected_index,
-                Some(stack),
-            );
+            self.inventory
+                .set_slot(self.hotbar_selected_index, Some(stack));
             self.inventory_dirty = true;
             self.selected_block =
                 block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));

@@ -916,8 +916,7 @@ fn build_bvh_recursive_for_leaf_ids(
         // Build suffix array of right-side aggregate bounds (from right to left).
         right_bounds_suffix[n - 1] = leaf_bounds[indices[n - 1]];
         for i in (0..n - 1).rev() {
-            right_bounds_suffix[i] =
-                right_bounds_suffix[i + 1].union(&leaf_bounds[indices[i]]);
+            right_bounds_suffix[i] = right_bounds_suffix[i + 1].union(&leaf_bounds[indices[i]]);
         }
 
         // Sweep left to right, evaluating SAH cost at each split position.

@@ -995,8 +995,7 @@ fn main() {
     // run an integrated server so mob steering can be evaluated via WASM.
     let (content_registry, wasm_manager, pending_texture_uploads) =
         if start_with_integrated_singleplayer {
-            let (reg, mgr, pending) =
-                polychora::plugin_loader::create_full_registry_with_wasm();
+            let (reg, mgr, pending) = polychora::plugin_loader::create_full_registry_with_wasm();
             (Arc::new(reg), Some(mgr), pending)
         } else {
             let (reg, pending) = polychora::plugin_loader::create_full_registry();

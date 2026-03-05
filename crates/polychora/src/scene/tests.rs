@@ -60,7 +60,11 @@ fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) ->
         let local_w = (chunk_key[3] - leaf.min_chunk_coord[3]) as usize;
         let linear = local_x + dim_x * (local_y + dim_y * (local_z + dim_z * local_w));
         let entry_index = leaf.chunk_entry_offset as usize + linear;
-        let &entry = scene.active_config.frame_data.leaf_chunk_entries.get(entry_index)?;
+        let &entry = scene
+            .active_config
+            .frame_data
+            .leaf_chunk_entries
+            .get(entry_index)?;
 
         if entry == higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY {
             return None;
@@ -71,16 +75,28 @@ fn sample_voxel_from_frame(scene: &Scene, wx: i32, wy: i32, wz: i32, ww: i32) ->
         }
 
         let chunk_index = entry.saturating_sub(1) as usize;
-        let header = scene.active_config.frame_data.chunk_headers.get(chunk_index)?;
+        let header = scene
+            .active_config
+            .frame_data
+            .chunk_headers
+            .get(chunk_index)?;
         if (header.flags & GpuVoxelChunkHeader::FLAG_FULL) == 0 {
             let occ_word_index = header.occupancy_word_offset as usize + (voxel_idx / 32);
-            let &occ_word = scene.active_config.frame_data.occupancy_words.get(occ_word_index)?;
+            let &occ_word = scene
+                .active_config
+                .frame_data
+                .occupancy_words
+                .get(occ_word_index)?;
             if (occ_word & (1u32 << (voxel_idx % 32))) == 0 {
                 return None;
             }
         }
         let mat_word_index = header.material_word_offset as usize + (voxel_idx / 2);
-        let &mat_word = scene.active_config.frame_data.material_words.get(mat_word_index)?;
+        let &mat_word = scene
+            .active_config
+            .frame_data
+            .material_words
+            .get(mat_word_index)?;
         let material = ((mat_word >> ((voxel_idx % 2) * 16)) & 0xFFFF) as u8;
         return (material != 0).then_some(material);
     }
@@ -816,7 +832,11 @@ fn voxel_frame_snapshot_path_clears_mutation_batch() {
     );
     scene.flush_voxel_background_rebuild();
     assert!(scene.active_config.frame_data.mutation_batch.is_none());
-    assert!(scene.active_config.frame_data.mutation_base_generation.is_none());
+    assert!(scene
+        .active_config
+        .frame_data
+        .mutation_base_generation
+        .is_none());
 }
 
 #[test]
@@ -876,9 +896,13 @@ fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
     assert!(scene.active_config.render_bvh_cache.is_some());
 
     scene.active_config.pending_render_bvh_rebuild = false;
-    scene.active_config.pending_render_bvh_mutation_deltas.clear();
     scene
-        .active_config.pending_render_bvh_mutation_deltas
+        .active_config
+        .pending_render_bvh_mutation_deltas
+        .clear();
+    scene
+        .active_config
+        .pending_render_bvh_mutation_deltas
         .push(RenderBvhChunkMutationDelta {
             key: chunk_key_i32(0, 0, 0, 0),
             expected_root: Some(frame_root.wrapping_add(1)),
@@ -898,16 +922,26 @@ fn voxel_frame_delta_root_mismatch_forces_snapshot_rebuild() {
     );
     scene.flush_voxel_background_rebuild();
 
-    assert!(scene.active_config.pending_render_bvh_mutation_deltas.is_empty());
+    assert!(scene
+        .active_config
+        .pending_render_bvh_mutation_deltas
+        .is_empty());
     assert!(scene.active_config.frame_data.mutation_batch.is_none());
-    assert!(scene.active_config.frame_data.mutation_base_generation.is_none());
+    assert!(scene
+        .active_config
+        .frame_data
+        .mutation_base_generation
+        .is_none());
     let cpu_root = scene
         .active_config
         .render_bvh_cache
         .as_ref()
         .and_then(|bvh| bvh.root)
         .unwrap_or(VTE_REGION_BVH_INVALID_NODE);
-    assert_eq!(scene.active_config.frame_data.region_bvh_root_index, cpu_root);
+    assert_eq!(
+        scene.active_config.frame_data.region_bvh_root_index,
+        cpu_root
+    );
 }
 
 #[test]

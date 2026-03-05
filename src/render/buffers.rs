@@ -525,10 +525,7 @@ impl VoxelBufferCapacities {
 }
 
 impl VoxelGpuBuffers {
-    pub fn new(
-        memory_allocator: Arc<dyn MemoryAllocator>,
-        caps: VoxelBufferCapacities,
-    ) -> Self {
+    pub fn new(memory_allocator: Arc<dyn MemoryAllocator>, caps: VoxelBufferCapacities) -> Self {
         let caps = caps.with_minimums();
 
         let chunk_headers_buffer = Buffer::from_iter(
@@ -699,21 +696,66 @@ impl VoxelGpuBuffers {
         macro_rules! make_buf {
             ($alloc:expr, $info:expr, $ainfo:expr, $data:expr, $zero:expr) => {
                 if $data.is_empty() {
-                    Buffer::from_iter($alloc.clone(), $info.clone(), $ainfo.clone(), vec![$zero]).unwrap()
+                    Buffer::from_iter($alloc.clone(), $info.clone(), $ainfo.clone(), vec![$zero])
+                        .unwrap()
                 } else {
-                    Buffer::from_iter($alloc.clone(), $info.clone(), $ainfo.clone(), $data.iter().copied()).unwrap()
+                    Buffer::from_iter(
+                        $alloc.clone(),
+                        $info.clone(),
+                        $ainfo.clone(),
+                        $data.iter().copied(),
+                    )
+                    .unwrap()
                 }
             };
         }
 
-        let chunk_headers_buffer = make_buf!(memory_allocator, buf_info, alloc_info, chunk_headers, GpuVoxelChunkHeader::zeroed());
-        let occupancy_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, occupancy_words, 0u32);
-        let material_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, material_words, 0u32);
-        let orientation_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, orientation_words, 0u32);
-        let macro_words_buffer = make_buf!(memory_allocator, buf_info, alloc_info, macro_words, 0u32);
-        let leaf_headers_buffer = make_buf!(memory_allocator, buf_info, alloc_info, leaf_headers, vte::GpuVoxelLeafHeader::zeroed());
-        let region_bvh_nodes_buffer = make_buf!(memory_allocator, buf_info, alloc_info, region_bvh_nodes, vte::GpuVoxelChunkBvhNode::empty());
-        let leaf_chunk_entries_buffer = make_buf!(memory_allocator, buf_info, alloc_info, leaf_chunk_entries, 0u32);
+        let chunk_headers_buffer = make_buf!(
+            memory_allocator,
+            buf_info,
+            alloc_info,
+            chunk_headers,
+            GpuVoxelChunkHeader::zeroed()
+        );
+        let occupancy_words_buffer = make_buf!(
+            memory_allocator,
+            buf_info,
+            alloc_info,
+            occupancy_words,
+            0u32
+        );
+        let material_words_buffer =
+            make_buf!(memory_allocator, buf_info, alloc_info, material_words, 0u32);
+        let orientation_words_buffer = make_buf!(
+            memory_allocator,
+            buf_info,
+            alloc_info,
+            orientation_words,
+            0u32
+        );
+        let macro_words_buffer =
+            make_buf!(memory_allocator, buf_info, alloc_info, macro_words, 0u32);
+        let leaf_headers_buffer = make_buf!(
+            memory_allocator,
+            buf_info,
+            alloc_info,
+            leaf_headers,
+            vte::GpuVoxelLeafHeader::zeroed()
+        );
+        let region_bvh_nodes_buffer = make_buf!(
+            memory_allocator,
+            buf_info,
+            alloc_info,
+            region_bvh_nodes,
+            vte::GpuVoxelChunkBvhNode::empty()
+        );
+        let leaf_chunk_entries_buffer = make_buf!(
+            memory_allocator,
+            buf_info,
+            alloc_info,
+            leaf_chunk_entries,
+            0u32
+        );
 
         Self {
             chunk_headers_buffer,

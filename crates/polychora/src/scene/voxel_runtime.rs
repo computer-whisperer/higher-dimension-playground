@@ -881,7 +881,9 @@ impl Scene {
         if !bounds.is_valid() {
             return Ok(());
         }
-        if self.active_config.leaf_entry_spans.len() != self.active_config.frame_data.leaf_headers.len() {
+        if self.active_config.leaf_entry_spans.len()
+            != self.active_config.frame_data.leaf_headers.len()
+        {
             self.sync_leaf_entry_allocator_from_frame();
         }
         let leaf_spans = &mut self.active_config.leaf_entry_spans;
@@ -932,7 +934,8 @@ impl Scene {
                     }
                 }
                 if leaf_index < self.active_config.frame_data.leaf_headers.len() {
-                    self.active_config.frame_data.leaf_headers[leaf_index] = Self::invalid_leaf_header();
+                    self.active_config.frame_data.leaf_headers[leaf_index] =
+                        Self::invalid_leaf_header();
                     Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                 }
             }
@@ -940,7 +943,8 @@ impl Scene {
             for (leaf_index, leaf) in &delta.leaf_writes {
                 let leaf_index = *leaf_index as usize;
                 if self.active_config.frame_data.leaf_headers.len() <= leaf_index {
-                    self.active_config.frame_data
+                    self.active_config
+                        .frame_data
                         .leaf_headers
                         .resize(leaf_index + 1, Self::invalid_leaf_header());
                 }
@@ -956,17 +960,19 @@ impl Scene {
                         let scale_exp = block.scale_exp;
                         let (lat_min, lat_max) = leaf.bounds.to_chunk_lattice_bounds(scale_exp);
                         let mat = resolver.resolve_block(block.namespace, block.block_type);
-                        self.active_config.frame_data.leaf_headers[leaf_index] = GpuVoxelLeafHeader {
-                            min_chunk_coord: lat_min,
-                            max_chunk_coord: lat_max,
-                            leaf_kind: higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
-                            uniform_material: u32::from(mat),
-                            chunk_entry_offset: 0,
-                            uniform_orientation: pack_scale_exp_into_orientation(
-                                u32::from(block.orientation.0),
-                                scale_exp,
-                            ),
-                        };
+                        self.active_config.frame_data.leaf_headers[leaf_index] =
+                            GpuVoxelLeafHeader {
+                                min_chunk_coord: lat_min,
+                                max_chunk_coord: lat_max,
+                                leaf_kind:
+                                    higher_dimension_playground::render::VTE_LEAF_KIND_UNIFORM,
+                                uniform_material: u32::from(mat),
+                                chunk_entry_offset: 0,
+                                uniform_orientation: pack_scale_exp_into_orientation(
+                                    u32::from(block.orientation.0),
+                                    scale_exp,
+                                ),
+                            };
                         Self::mark_dirty_index(&mut dirty.leaf_headers, leaf_index);
                     }
                     RenderLeafKind::VoxelChunkArray(chunk_array) => {
@@ -1027,7 +1033,8 @@ impl Scene {
             for (node_index, src_node) in &delta.node_writes {
                 let node_index_usize = *node_index as usize;
                 if self.active_config.frame_data.region_bvh_nodes.len() <= node_index_usize {
-                    self.active_config.frame_data
+                    self.active_config
+                        .frame_data
                         .region_bvh_nodes
                         .resize(node_index_usize + 1, GpuVoxelChunkBvhNode::empty());
                 }
@@ -1261,10 +1268,8 @@ impl Scene {
             self.active_config.frame_data.dirty_ranges =
                 Self::full_dirty_ranges_from_frame(&self.active_config.frame_data);
             self.sync_leaf_entry_allocator_from_frame();
-    
         } else {
             self.clear_voxel_frame_buffers();
-    
         }
         self.voxel_cached_visibility_bounds = Some(bounds);
     }
@@ -1307,7 +1312,8 @@ impl Scene {
     ) -> VoxelFrameBuildResult<'_> {
         const SCENE_RESIDENCY_RADIUS_MULTIPLIER: i32 = 2;
         const SCENE_RESIDENCY_EXTRA_CHUNKS: i32 = 2;
-        let mut swap_gpu_buffers: Option<higher_dimension_playground::render::VoxelGpuBuffers> = None;
+        let mut swap_gpu_buffers: Option<higher_dimension_playground::render::VoxelGpuBuffers> =
+            None;
         let mut swap_gpu_generation: Option<u64> = None;
 
         let active_distance = max_trace_distance.max(VOXEL_NEAR_ACTIVE_DISTANCE);
@@ -1367,7 +1373,8 @@ impl Scene {
                         // advance, but the GPU buffers still contain this generation's
                         // data. The caller must use this value so the renderer correctly
                         // detects the delta as dirty and uploads it.
-                        swap_gpu_generation = Some(self.active_config.frame_data.metadata_generation);
+                        swap_gpu_generation =
+                            Some(self.active_config.frame_data.metadata_generation);
                     } else {
                         // Fallback: no allocator available (e.g. preload before renderer init).
                         // Use the old dirty-range path — renderer will upload from CPU data.
@@ -1411,7 +1418,10 @@ impl Scene {
             .map(|bvh| bvh.root.is_none())
             .unwrap_or(false);
         let has_pending_render_updates = self.active_config.pending_render_bvh_rebuild
-            || !self.active_config.pending_render_bvh_mutation_deltas.is_empty();
+            || !self
+                .active_config
+                .pending_render_bvh_mutation_deltas
+                .is_empty();
         let visibility_cache_valid = self.voxel_cached_visibility_bounds == Some(scene_bounds)
             && !self.voxel_scene_bounds_has_pending_dirty_regions(scene_bounds)
             && !has_pending_render_updates
@@ -1470,7 +1480,8 @@ impl Scene {
                     0,
                     self.active_config.pending_render_bvh_mutation_deltas.len(),
                     self.active_config.frame_data.region_bvh_root_index,
-                    self.active_config.render_bvh_cache
+                    self.active_config
+                        .render_bvh_cache
                         .as_ref()
                         .and_then(|bvh| bvh.root)
                         .unwrap_or(
@@ -1479,8 +1490,7 @@ impl Scene {
                 );
                 // Clone the world tree slice and spawn the full chain on a background thread:
                 // world_tree slice → RenderTreeCore → RenderBvh → GPU encode → GPU buffers
-                let world_core =
-                    self.world_tree.slice_non_empty_core_in_bounds(scene_bounds);
+                let world_core = self.world_tree.slice_non_empty_core_in_bounds(scene_bounds);
                 let resolver_clone = resolver.clone();
                 let bg_bounds = scene_bounds;
                 let bg_allocator = self.memory_allocator.clone();
@@ -1488,13 +1498,11 @@ impl Scene {
                 std::thread::spawn(move || {
                     let result = (|| -> Result<BackgroundRebuildResult, String> {
                         let render_core = render_tree::from_region_core(&world_core);
-                        let render_bvh =
-                            render_tree::build_bvh_in_bounds(&render_core, bg_bounds);
-                        let frame_buffers =
-                            Scene::build_voxel_frame_buffers_from_render_bvh(
-                                &render_bvh,
-                                &resolver_clone,
-                            )?;
+                        let render_bvh = render_tree::build_bvh_in_bounds(&render_core, bg_bounds);
+                        let frame_buffers = Scene::build_voxel_frame_buffers_from_render_bvh(
+                            &render_bvh,
+                            &resolver_clone,
+                        )?;
                         // Create pre-populated GPU buffers on the background thread
                         // to avoid blocking the main thread with synchronous uploads.
                         let gpu_buffers = bg_allocator.map(|allocator| {
@@ -1552,7 +1560,9 @@ impl Scene {
                             apply_error
                         );
                     }
-                    self.active_config.pending_render_bvh_mutation_deltas.clear();
+                    self.active_config
+                        .pending_render_bvh_mutation_deltas
+                        .clear();
                     // Schedule a background rebuild instead of synchronous recovery
                     self.active_config.pending_render_bvh_rebuild = true;
                     eprintln!(
