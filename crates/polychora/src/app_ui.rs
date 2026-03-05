@@ -1215,12 +1215,37 @@ impl App {
                     );
                 }
             } else {
-                // Generic item — draw color-hint swatch from item registry
-                let [r, g, b] = self
-                    .content_registry
-                    .item_color(stack.item.namespace, stack.item.item_type);
-                let color = egui::Color32::from_rgb(r, g, b);
-                ui.painter().rect_filled(icon_rect, 2.0, color);
+                // Generic item — try thumbnail texture, fall back to color swatch
+                let mut rendered = false;
+                if let Some(tex) =
+                    self.content_registry
+                        .resolve_item_thumbnail_texture(&stack.item)
+                {
+                    if let (Some(sheet), Some(tex_id)) =
+                        (&self.material_icon_sheet, self.material_icons_texture_id)
+                    {
+                        if let Some([u0, v0, u1, v1]) =
+                            sheet.texture_uv_rect(tex.namespace, tex.texture_id)
+                        {
+                            ui.painter().image(
+                                tex_id,
+                                icon_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(u0, v0),
+                                    egui::pos2(u1, v1),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                            rendered = true;
+                        }
+                    }
+                }
+                if !rendered {
+                    let [r, g, b] = self
+                        .content_registry
+                        .item_color(stack.item.namespace, stack.item.item_type);
+                    ui.painter().rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                }
             }
 
             // Count badge (bottom-right)

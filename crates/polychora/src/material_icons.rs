@@ -93,12 +93,23 @@ pub struct MaterialIconSheet {
     pub height: u32,
     /// Map from (namespace, block_type) to its UV rectangle [u_min, v_min, u_max, v_max]
     uv_rects: HashMap<(u32, u32), [f32; 4]>,
+    /// Map from (texture_namespace, texture_id) to the UV rectangle of the
+    /// block that uses that texture.  Populated during sheet generation so
+    /// that `resolve_item_thumbnail_texture` results can be looked up
+    /// without knowing the block type.
+    texture_uv_rects: HashMap<(u32, u32), [f32; 4]>,
 }
 
 impl MaterialIconSheet {
     /// Get the UV rectangle for a block by (namespace, block_type), or None if not found.
     pub fn uv_rect(&self, namespace: u32, block_type: u32) -> Option<[f32; 4]> {
         self.uv_rects.get(&(namespace, block_type)).copied()
+    }
+
+    /// Get the UV rectangle for a texture reference, or None if no block
+    /// uses that texture.
+    pub fn texture_uv_rect(&self, namespace: u32, texture_id: u32) -> Option<[f32; 4]> {
+        self.texture_uv_rects.get(&(namespace, texture_id)).copied()
     }
 }
 
@@ -118,6 +129,7 @@ pub fn generate_material_icon_sheet_gpu(
 
     let mut pixels = vec![0u8; (sheet_w * sheet_h * 4) as usize];
     let mut uv_rects = HashMap::new();
+    let mut texture_uv_rects = HashMap::new();
     let icon_pixel_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
 
     let mut offscreen = RenderContext::new(
@@ -186,10 +198,13 @@ pub fn generate_material_icon_sheet_gpu(
         let v_min = dst_y as f32 / sheet_h as f32;
         let u_max = (dst_x + ICON_SIZE) as f32 / sheet_w as f32;
         let v_max = (dst_y + ICON_SIZE) as f32 / sheet_h as f32;
-        uv_rects.insert(
-            (entry.namespace, entry.block_type),
-            [u_min, v_min, u_max, v_max],
-        );
+        let uv = [u_min, v_min, u_max, v_max];
+        uv_rects.insert((entry.namespace, entry.block_type), uv);
+        // Also index by the block's texture reference so that
+        // resolve_item_thumbnail_texture() results can map directly to an icon.
+        texture_uv_rects
+            .entry((entry.texture.namespace, entry.texture.texture_id))
+            .or_insert(uv);
     }
 
     Some(MaterialIconSheet {
@@ -197,5 +212,6 @@ pub fn generate_material_icon_sheet_gpu(
         width: sheet_w,
         height: sheet_h,
         uv_rects,
+        texture_uv_rects,
     })
 }
