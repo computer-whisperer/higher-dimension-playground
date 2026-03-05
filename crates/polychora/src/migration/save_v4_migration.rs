@@ -1,8 +1,8 @@
-use crate::migration::legacy_voxel::Chunk as LegacyChunk;
-use crate::migration::legacy_voxel::RegionChunkWorld;
-use crate::migration::legacy_world_io::load_world;
-use crate::migration::save_v3;
-use crate::migration::save_v3::{EntityClass, EntityKind};
+use super::legacy_voxel::Chunk as LegacyChunk;
+use super::legacy_voxel::RegionChunkWorld;
+use super::legacy_world_io::load_world;
+use super::save_v3;
+use super::save_v3::{EntityClass, EntityKind};
 use crate::save_v4::{
     self, PersistedEntityRecord, PlayerEntityHint, PlayerRecord, SaveChunkPayloadRequest,
     SaveResult, DEFAULT_REGION_CHUNK_EDGE,

@@ -1,5 +1,5 @@
-use crate::migration::legacy_voxel::RegionChunkWorld;
-use crate::migration::legacy_world_io::{load_world, save_world};
+use super::legacy_voxel::RegionChunkWorld;
+use super::legacy_world_io::{load_world, save_world};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;

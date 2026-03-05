@@ -46,7 +46,7 @@ fn run_legacy_trim_migration(
     min_chunk: [i32; 4],
     max_chunk: [i32; 4],
 ) -> Result<(usize, usize), String> {
-    let result = polychora::legacy_migration::trim_legacy_world_keep_bounds(
+    let result = polychora::migration::legacy_migration::trim_legacy_world_keep_bounds(
         input, output, min_chunk, max_chunk,
     )
     .map_err(|error| format!("legacy trim migration failed: {error}"))?;
@@ -84,7 +84,7 @@ fn run_v3_to_v4_migration(
             )
         })?;
     }
-    polychora::save_v4_migration::migrate_v3_save_to_v4(
+    polychora::migration::save_v4_migration::migrate_v3_save_to_v4(
         input,
         output,
         overwrite,
@@ -238,7 +238,7 @@ impl App {
                 return;
             }
         };
-        if let Err(error) = polychora::legacy_migration::validate_chunk_bounds(min_chunk, max_chunk)
+        if let Err(error) = polychora::migration::legacy_migration::validate_chunk_bounds(min_chunk, max_chunk)
         {
             self.main_menu_migration_status = Some(format!("Error: {error}"));
             return;

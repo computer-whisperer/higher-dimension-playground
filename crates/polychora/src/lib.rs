@@ -1,9 +1,7 @@
 pub mod builtin_content;
 pub mod content_registry;
-pub mod legacy_migration;
 pub mod migration;
 pub mod plugin_loader;
 pub mod save_v4;
-pub mod save_v4_migration;
 pub mod server;
 pub mod shared;

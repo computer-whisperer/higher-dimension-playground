@@ -722,7 +722,7 @@ fn migrate_legacy_world_to_v4_roundtrip() {
         writer.flush().expect("flush legacy");
     }
 
-    let save_result = crate::save_v4_migration::migrate_legacy_world_to_v4(
+    let save_result = crate::migration::save_v4_migration::migrate_legacy_world_to_v4(
         &legacy_world,
         None,
         &output_root,
@@ -797,7 +797,7 @@ fn migrate_v3_save_to_v4_roundtrip() {
     )
     .expect("create v3 input");
 
-    let save_result = crate::save_v4_migration::migrate_v3_save_to_v4(
+    let save_result = crate::migration::save_v4_migration::migrate_v3_save_to_v4(
         &v3_root,
         &output_root,
         false,

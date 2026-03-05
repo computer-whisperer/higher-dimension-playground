@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
-use polychora::legacy_migration;
+use polychora::migration::legacy_migration;
 use polychora::migration::legacy_voxel::{LegacyVoxel, RegionChunkWorld};
 use polychora::migration::legacy_world_io::{load_world, save_world};
 use polychora::migration::save_v3;
+use polychora::migration::save_v4_migration;
 use polychora::save_v4;
-use polychora::save_v4_migration;
 use polychora::shared::entity_types::EntityCategory;
 use polychora::shared::voxel::BaseWorldKind;
 use std::collections::BTreeMap;
