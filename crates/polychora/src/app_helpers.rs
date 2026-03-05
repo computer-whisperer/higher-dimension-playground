@@ -456,16 +456,37 @@ pub(super) fn stable_name_hash(name: &str) -> u32 {
     hash
 }
 
-pub(super) fn build_place_preview_instance(
+/// Build the held-item preview instance positioned in the lower-right of the
+/// viewport.  Resolves item textures through `resolve_item_world_textures` so
+/// blocks, spawn eggs, and plugin items all display their actual materials.
+pub(super) fn build_held_item_preview_instance(
     camera: &Camera4D,
-    block: &polychora::shared::voxel::BlockData,
+    item: &polychora::shared::protocol::ItemStack,
     time_s: f32,
     control_scheme: ControlScheme,
     aspect: f32,
+    content_registry: &polychora::content_registry::ContentRegistry,
     material_resolver: &polychora::content_registry::MaterialResolver,
 ) -> common::ModelInstance {
-    let material_token = material_resolver.resolve_block(block.namespace, block.block_type);
-    let preview_material = material_token as u32 | PREVIEW_MATERIAL_FLAG;
+    // Resolve textures through the item visual pipeline
+    let textures = content_registry.resolve_item_world_textures(&item.item);
+    let mut cell_mats = [7u32; 8]; // fallback: Purple
+    for (i, t) in textures.iter().enumerate().take(8) {
+        let token = material_resolver
+            .resolve_texture(t.namespace, t.texture_id)
+            .unwrap_or(7) as u32;
+        cell_mats[i] = token | PREVIEW_MATERIAL_FLAG;
+    }
+    // If no textures resolved, fill all cells with first material
+    if !textures.is_empty() {
+        let first = cell_mats[0];
+        for m in cell_mats.iter_mut() {
+            if *m == 7 {
+                *m = first;
+            }
+        }
+    }
+
     let (right, up, view_z, view_w) = match control_scheme {
         ControlScheme::IntuitiveUpright => camera.view_basis_upright(),
         ControlScheme::LookTransport
@@ -524,7 +545,7 @@ pub(super) fn build_place_preview_instance(
         anchor,
         &basis,
         [0.35, 0.35, 0.38, 0.38],
-        [preview_material; 8],
+        cell_mats,
     )
 }
 

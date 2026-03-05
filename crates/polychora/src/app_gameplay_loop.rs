@@ -1177,6 +1177,7 @@ impl App {
         look_dir: [f32; 4],
         preview_time_s: f32,
         preview_instance: Option<common::ModelInstance>,
+        holding_block: bool,
         targets: Option<&scene::BlockEditTargets>,
         disable_remote_non_voxel: bool,
         vte_disable_entities: bool,
@@ -1205,7 +1206,7 @@ impl App {
             }
             // Ghost placement preview (only when holding a block)
             if !vte_disable_entities
-                && preview_instance.is_some()
+                && holding_block
                 && self.placement_preview_mode == PlacementPreviewMode::Ghost
             {
                 if let Some(targets) = targets {
@@ -1480,24 +1481,25 @@ impl App {
                 size.width.max(1) as f32 / size.height.max(1) as f32
             })
             .unwrap_or_else(|| self.args.width.max(1) as f32 / self.args.height.max(1) as f32);
-        let holding_block = self
+        let held_item = self
             .inventory
             .hotbar_slot(self.hotbar_selected_index)
+            .clone();
+        let holding_block = held_item
             .as_ref()
             .and_then(|s| s.to_block_data())
             .is_some();
-        let preview_instance = if holding_block {
-            Some(build_place_preview_instance(
+        let preview_instance = held_item.as_ref().map(|stack| {
+            build_held_item_preview_instance(
                 &self.camera,
-                &self.selected_block,
+                stack,
                 preview_time_s,
                 self.control_scheme,
                 aspect,
+                &self.content_registry,
                 &self.material_resolver,
-            ))
-        } else {
-            None
-        };
+            )
+        });
 
         let view_matrix = self.current_view_matrix();
         let backend = self.args.backend.to_render_backend();
@@ -1625,6 +1627,7 @@ impl App {
             look_dir,
             preview_time_s,
             preview_instance,
+            holding_block,
             scene_data.targets.as_ref(),
             disable_remote_non_voxel,
             vte_disable_entities,
