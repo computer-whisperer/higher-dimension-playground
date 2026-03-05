@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::BlockCategory;
 use crate::entity::{EntityCategory, EntitySimConfig};
-use crate::texture::TextureRef;
+use crate::texture::{TextureFormat, TextureRef};
 
 /// Declares a plugin's content to the host at load time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -63,6 +63,8 @@ pub struct TextureDeclaration {
     pub name: String,
     pub width: u32,
     pub height: u32,
+    pub depth: u32,
+    pub format: TextureFormat,
 }
 
 #[cfg(test)]
@@ -128,6 +130,8 @@ mod tests {
                 name: String::from("TestTexture"),
                 width: 64,
                 height: 64,
+                depth: 16,
+                format: crate::texture::TextureFormat::Rgba8Srgb,
             }],
         };
 

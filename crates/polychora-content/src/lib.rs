@@ -23,8 +23,9 @@ use polychora_plugin_api::manifest::PluginManifest;
 use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput};
 use polychora_plugin_api::opcodes::{
     ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_ENTITY_ABILITY,
-    OP_ENTITY_MODEL, OP_ENTITY_TICK, OP_GET_MANIFEST,
+    OP_ENTITY_MODEL, OP_ENTITY_TICK, OP_GET_MANIFEST, OP_GET_TEXTURES,
 };
+use polychora_plugin_api::texture::GetTexturesResponse;
 
 /// Namespace ID for the first-party polychora-content plugin.
 pub const NAMESPACE: u32 = 0x706f6c79; // "poly" in ASCII
@@ -78,6 +79,7 @@ pub extern "C" fn polychora_call(
 ) -> i32 {
     match opcode as u32 {
         OP_GET_MANIFEST => handle_get_manifest(out_ptr, out_cap),
+        OP_GET_TEXTURES => handle_get_textures(out_ptr, out_cap),
         OP_ENTITY_TICK => handle_entity_tick(in_ptr, in_len, out_ptr, out_cap),
         OP_ENTITY_ABILITY => handle_entity_ability(in_ptr, in_len, out_ptr, out_cap),
         OP_ENTITY_MODEL => handle_entity_model(in_ptr, in_len, out_ptr, out_cap),
@@ -88,6 +90,17 @@ pub extern "C" fn polychora_call(
 fn handle_get_manifest(out_ptr: i32, out_cap: i32) -> i32 {
     let manifest = build_manifest();
     let bytes = match postcard::to_allocvec(&manifest) {
+        Ok(bytes) => bytes,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    write_output(&bytes, out_ptr, out_cap)
+}
+
+fn handle_get_textures(out_ptr: i32, out_cap: i32) -> i32 {
+    let response = GetTexturesResponse {
+        textures: Vec::new(),
+    };
+    let bytes = match postcard::to_allocvec(&response) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,
     };

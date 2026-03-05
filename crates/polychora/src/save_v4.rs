@@ -1540,7 +1540,8 @@ fn build_world_leaf_descriptors_from_payloads(
 
 #[cfg(test)]
 fn test_content_registry() -> crate::content_registry::ContentRegistry {
-    crate::plugin_loader::create_full_registry()
+    let (registry, _pending) = crate::plugin_loader::create_full_registry();
+    registry
 }
 
 #[cfg(test)]

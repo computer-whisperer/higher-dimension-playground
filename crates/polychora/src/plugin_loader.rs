@@ -1,19 +1,34 @@
 use crate::builtin_content;
-use crate::content_registry::{ContentRegistry, EntityEntry};
+use crate::content_registry::{ContentRegistry, EntityEntry, MATERIAL_TOKEN_TEXTURE_POOL_FLAG};
 use crate::shared::wasm::{
     WasmExecutionLimits, WasmExecutionRole, WasmModuleCache, WasmPluginManager, WasmPluginSlot,
     WasmRuntime, WasmRuntimeError, WasmRuntimeInstance,
 };
 use polychora_plugin_api::manifest::PluginManifest;
-use polychora_plugin_api::opcodes::OP_GET_MANIFEST;
+use polychora_plugin_api::opcodes::{OP_GET_MANIFEST, OP_GET_TEXTURES};
+use polychora_plugin_api::texture::{GetTexturesResponse, TextureFormat};
 use std::fmt;
 use std::sync::Arc;
+use vulkano::format::Format;
+
+/// A texture that has been deserialized from a plugin's `OP_GET_TEXTURES`
+/// response and is waiting to be uploaded to the GPU texture pool.
+pub struct PendingTextureUpload {
+    pub namespace: u32,
+    pub texture_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub format: Format,
+    pub data: Vec<u8>,
+}
 
 /// A WASM plugin that has been loaded and had its manifest parsed.
 pub struct LoadedPlugin {
     pub namespace_id: u32,
     pub name: String,
     pub manifest: PluginManifest,
+    pub pending_texture_uploads: Vec<PendingTextureUpload>,
     #[allow(dead_code)]
     instance: WasmRuntimeInstance,
 }
@@ -29,6 +44,7 @@ pub enum PluginLoadError {
         texture_id: u32,
     },
     BlockRegistrationFailed(String),
+    TextureDataDeserialize(String),
 }
 
 impl fmt::Display for PluginLoadError {
@@ -47,6 +63,9 @@ impl fmt::Display for PluginLoadError {
                 write!(f, "block '{block_name}': texture ({namespace:#010x}, {texture_id:#010x}) not found in texture registry")
             }
             Self::BlockRegistrationFailed(msg) => write!(f, "block registration failed: {msg}"),
+            Self::TextureDataDeserialize(e) => {
+                write!(f, "texture data deserialization failed: {e}")
+            }
         }
     }
 }
@@ -75,10 +94,52 @@ pub fn load_plugin(
     let manifest: PluginManifest = postcard::from_bytes(&result.output)
         .map_err(|e| PluginLoadError::ManifestDeserialize(e.to_string()))?;
 
+    // Call OP_GET_TEXTURES to retrieve pixel data for declared textures
+    let tex_result = instance.call_bytes(OP_GET_TEXTURES as i32, &[])?;
+    let tex_response: GetTexturesResponse = postcard::from_bytes(&tex_result.output)
+        .map_err(|e| PluginLoadError::TextureDataDeserialize(e.to_string()))?;
+
+    let mut pending_texture_uploads = Vec::with_capacity(tex_response.textures.len());
+    for payload in tex_response.textures {
+        if payload.width == 0 || payload.height == 0 || payload.depth == 0 {
+            return Err(PluginLoadError::TextureDataDeserialize(format!(
+                "texture {:#010x}: zero-dimension texture ({}x{}x{})",
+                payload.texture_id, payload.width, payload.height, payload.depth,
+            )));
+        }
+        let bpp = payload.format.bytes_per_pixel() as u64;
+        let expected_size =
+            payload.width as u64 * payload.height as u64 * payload.depth as u64 * bpp;
+        if payload.data.len() as u64 != expected_size {
+            return Err(PluginLoadError::TextureDataDeserialize(format!(
+                "texture {:#010x}: expected {} bytes ({}x{}x{}x{}bpp), got {}",
+                payload.texture_id,
+                expected_size,
+                payload.width,
+                payload.height,
+                payload.depth,
+                bpp,
+                payload.data.len(),
+            )));
+        }
+        pending_texture_uploads.push(PendingTextureUpload {
+            namespace: manifest.namespace_id,
+            texture_id: payload.texture_id,
+            width: payload.width,
+            height: payload.height,
+            depth: payload.depth,
+            format: match payload.format {
+                TextureFormat::Rgba8Srgb => Format::R8G8B8A8_SRGB,
+            },
+            data: payload.data,
+        });
+    }
+
     Ok(LoadedPlugin {
         namespace_id: manifest.namespace_id,
         name: manifest.name.clone(),
         manifest,
+        pending_texture_uploads,
         instance,
     })
 }
@@ -157,13 +218,26 @@ pub fn populate_registry_from_plugin(
     Ok(())
 }
 
+/// Pre-register texture pool slot tokens on the registry while it is still
+/// exclusively owned (before wrapping in `Arc`).  The pool starts empty so
+/// slots are assigned sequentially: upload 0 → slot 0, upload 1 → slot 1, etc.
+fn register_pending_texture_tokens(
+    registry: &mut ContentRegistry,
+    uploads: &[PendingTextureUpload],
+) {
+    for (i, upload) in uploads.iter().enumerate() {
+        let token = (i as u16) | MATERIAL_TOKEN_TEXTURE_POOL_FLAG;
+        registry.register_texture_token(upload.namespace, upload.texture_id, token);
+    }
+}
+
 /// Build a fully-populated content registry: engine internals (Air, Player,
 /// texture mappings, legacy remaps) + embedded first-party content plugin
 /// (68 blocks, 6 entities).
 ///
 /// This is the standard way to initialize the content registry for the game
 /// client (which does not need a persisted WASM runtime).
-pub fn create_full_registry() -> ContentRegistry {
+pub fn create_full_registry() -> (ContentRegistry, Vec<PendingTextureUpload>) {
     let mut registry = ContentRegistry::new();
     builtin_content::register_builtin_content(&mut registry);
 
@@ -174,10 +248,16 @@ pub fn create_full_registry() -> ContentRegistry {
         WasmExecutionLimits::default(),
     )
     .expect("failed to load polychora-content plugin");
+
+    // Pre-register texture pool slot tokens before populating blocks/entities,
+    // so plugin blocks can reference their own uploaded textures.
+    // Slots are assigned sequentially starting from 0 (the pool starts empty).
+    register_pending_texture_tokens(&mut registry, &plugin.pending_texture_uploads);
+
     populate_registry_from_plugin(&mut registry, &plugin)
         .expect("failed to populate registry from plugin");
 
-    registry
+    (registry, plugin.pending_texture_uploads)
 }
 
 /// Build a content registry *and* a persistent `WasmPluginManager` with the
@@ -185,7 +265,7 @@ pub fn create_full_registry() -> ContentRegistry {
 ///
 /// Used by the server (both integrated and dedicated) so that entity simulation
 /// (steering, abilities, parametric animation) can be evaluated via WASM at runtime.
-pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) {
+pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager, Vec<PendingTextureUpload>) {
     let mut registry = ContentRegistry::new();
     builtin_content::register_builtin_content(&mut registry);
 
@@ -197,8 +277,13 @@ pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) 
     let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
     let plugin = load_plugin(&runtime, wasm_bytes, WasmExecutionLimits::default())
         .expect("failed to load polychora-content plugin");
+
+    register_pending_texture_tokens(&mut registry, &plugin.pending_texture_uploads);
+
     populate_registry_from_plugin(&mut registry, &plugin)
         .expect("failed to populate registry from plugin");
+
+    let pending = plugin.pending_texture_uploads;
 
     let mut manager =
         WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime, cache);
@@ -210,7 +295,7 @@ pub fn create_full_registry_with_wasm() -> (ContentRegistry, WasmPluginManager) 
         )
         .expect("failed to activate EntitySimulation WASM slot");
 
-    (registry, manager)
+    (registry, manager, pending)
 }
 
 /// Create a standalone `WasmPluginManager` with the ModelLogic slot activated.

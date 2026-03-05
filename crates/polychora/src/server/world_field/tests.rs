@@ -11,7 +11,8 @@ fn cc4(v: [i32; 4]) -> [ChunkCoord; 4] {
 }
 
 fn test_registry() -> Arc<ContentRegistry> {
-    Arc::new(crate::plugin_loader::create_full_registry())
+    let (registry, _pending) = crate::plugin_loader::create_full_registry();
+    Arc::new(registry)
 }
 
 fn dense_materials_from_core_chunk(core: &RegionTreeCore, chunk_key: ChunkKey) -> Vec<u16> {

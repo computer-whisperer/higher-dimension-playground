@@ -91,6 +91,9 @@ impl ApplicationHandler for App {
             self.material_icons_texture_id = Some(egui::TextureId::User(1));
         }
 
+        // Upload any pending plugin textures to the GPU texture pool.
+        self.process_pending_texture_uploads();
+
         self.last_frame = Instant::now();
         if self.perf_suite_active() {
             self.begin_perf_suite_phase(true);
@@ -284,6 +287,49 @@ impl ApplicationHandler for App {
         if let Some(rcx) = self.rcx.as_ref() {
             if let Some(window) = rcx.window.as_ref() {
                 window.request_redraw();
+            }
+        }
+    }
+}
+
+impl App {
+    /// Drain pending plugin texture uploads and push each to the GPU texture pool.
+    ///
+    /// Texture tokens are already registered in the content registry (before it
+    /// was wrapped in Arc), with pre-assigned sequential slot indices.  This
+    /// method performs the actual GPU upload and verifies the slot assignment
+    /// matches what was pre-registered.
+    fn process_pending_texture_uploads(&mut self) {
+        let uploads: Vec<_> = self.pending_texture_uploads.drain(..).collect();
+        if uploads.is_empty() {
+            return;
+        }
+
+        let rcx = match self.rcx.as_mut() {
+            Some(rcx) => rcx,
+            None => return,
+        };
+
+        for (i, upload) in uploads.iter().enumerate() {
+            match rcx.upload_texture_3d(
+                &upload.data,
+                upload.width,
+                upload.height,
+                upload.depth,
+                upload.format,
+            ) {
+                Some(index) => {
+                    assert_eq!(
+                        index, i as u16,
+                        "texture pool slot {index} diverged from pre-registered slot {i}"
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "Warning: texture pool full, could not upload texture {:#010x}",
+                        upload.texture_id,
+                    );
+                }
             }
         }
     }

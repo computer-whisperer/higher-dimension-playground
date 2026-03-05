@@ -1016,15 +1016,15 @@ fn main() {
 
     // Build content registry; also construct a WASM plugin manager when we'll
     // run an integrated server so mob steering can be evaluated via WASM.
-    let (content_registry, wasm_manager) = if start_with_integrated_singleplayer {
-        let (reg, mgr) = polychora::plugin_loader::create_full_registry_with_wasm();
-        (Arc::new(reg), Some(mgr))
-    } else {
-        (
-            Arc::new(polychora::plugin_loader::create_full_registry()),
-            None,
-        )
-    };
+    let (content_registry, wasm_manager, pending_texture_uploads) =
+        if start_with_integrated_singleplayer {
+            let (reg, mgr, pending) =
+                polychora::plugin_loader::create_full_registry_with_wasm();
+            (Arc::new(reg), Some(mgr), pending)
+        } else {
+            let (reg, pending) = polychora::plugin_loader::create_full_registry();
+            (Arc::new(reg), None, pending)
+        };
 
     let multiplayer = if let Some(server) = args.server.as_ref() {
         let server_addr = normalize_server_addr(server);
@@ -1216,6 +1216,7 @@ fn main() {
         material_resolver: polychora::content_registry::MaterialResolver::from_registry(
             &content_registry,
         ),
+        pending_texture_uploads,
         wasm_model_manager: polychora::plugin_loader::create_wasm_manager_for_client(),
         material_icon_sheet: None,
         material_icons_texture_id: None,
@@ -1571,6 +1572,7 @@ struct App {
     egui_winit_state: Option<egui_winit::State>,
     content_registry: Arc<polychora::content_registry::ContentRegistry>,
     material_resolver: polychora::content_registry::MaterialResolver,
+    pending_texture_uploads: Vec<polychora::plugin_loader::PendingTextureUpload>,
     wasm_model_manager: Option<polychora::shared::wasm::WasmPluginManager>,
     material_icon_sheet: Option<material_icons::MaterialIconSheet>,
     material_icons_texture_id: Option<egui::TextureId>,

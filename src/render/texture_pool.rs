@@ -1,6 +1,3 @@
-// Texture pool scaffolding — methods will be wired in the next project phase.
-#![allow(dead_code)]
-
 use super::*;
 
 /// Maximum number of 3D textures that can be in the pool simultaneously.
@@ -161,6 +158,8 @@ impl TexturePool {
     }
 
     /// Remove a texture from the pool, replacing it with the dummy texture.
+    /// Future API for texture eviction when plugins are unloaded or slots reclaimed.
+    #[allow(dead_code)]
     pub(super) fn remove_texture(&mut self, index: u16) {
         let idx = index as usize;
         if idx < self.slots.len() {

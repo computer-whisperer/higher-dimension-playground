@@ -12,7 +12,8 @@ fn cc4(v: [i32; 4]) -> [ChunkCoord; 4] {
 }
 
 fn test_registry() -> ContentRegistry {
-    polychora::plugin_loader::create_full_registry()
+    let (registry, _pending) = polychora::plugin_loader::create_full_registry();
+    registry
 }
 
 fn test_resolver() -> MaterialResolver {

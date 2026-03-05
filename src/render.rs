@@ -2056,6 +2056,20 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         self.memory_allocator.clone()
     }
 
+    /// Upload a 3D texture to the GPU texture pool.
+    /// Returns the pool slot index (0..255), or None if the pool is full.
+    pub fn upload_texture_3d(
+        &mut self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        depth: u32,
+        format: Format,
+    ) -> Option<u16> {
+        self.texture_pool
+            .upload_texture_3d(data, width, height, depth, format)
+    }
+
     pub fn render(
         &mut self,
         device: Arc<Device>,

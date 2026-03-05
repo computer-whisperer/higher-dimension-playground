@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 /// A reference to a texture identified by its owning namespace and a
@@ -6,6 +7,37 @@ use serde::{Deserialize, Serialize};
 pub struct TextureRef {
     pub namespace: u32,
     pub texture_id: u32,
+}
+
+/// Pixel format for uploaded textures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TextureFormat {
+    Rgba8Srgb,
+}
+
+impl TextureFormat {
+    pub fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::Rgba8Srgb => 4,
+        }
+    }
+}
+
+/// Pixel data for a single 3D texture returned by `OP_GET_TEXTURES`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TexturePayload {
+    pub texture_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub format: TextureFormat,
+    pub data: Vec<u8>,
+}
+
+/// Wire format for the `OP_GET_TEXTURES` response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GetTexturesResponse {
+    pub textures: Vec<TexturePayload>,
 }
 
 /// Stable random texture IDs for namespace 0 procedural shader textures.

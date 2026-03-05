@@ -134,7 +134,7 @@ pub(super) fn run_cpu_render(_scene_preset: ScenePreset, args: &Args) {
 
     eprintln!("CPU render: {}x{}", params.width, params.height);
     let start = Instant::now();
-    let content_registry = polychora::plugin_loader::create_full_registry();
+    let (content_registry, _pending) = polychora::plugin_loader::create_full_registry();
     let material_resolver =
         polychora::content_registry::MaterialResolver::from_registry(&content_registry);
     let img = cpu_render::cpu_render(

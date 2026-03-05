@@ -1367,7 +1367,8 @@ mod tests {
     use std::sync::Arc;
 
     fn test_registry() -> Arc<ContentRegistry> {
-        Arc::new(crate::plugin_loader::create_full_registry())
+        let (registry, _pending) = crate::plugin_loader::create_full_registry();
+        Arc::new(registry)
     }
 
     fn test_server_state_with_world() -> ServerState {

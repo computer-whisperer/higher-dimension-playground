@@ -627,7 +627,7 @@ fn run_inspect_v4(input: PathBuf) -> io::Result<()> {
     let mut entity_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut entity_payload_bytes = 0usize;
     let mut entity_tag_count = 0usize;
-    let content_registry = polychora::plugin_loader::create_full_registry();
+    let (content_registry, _pending) = polychora::plugin_loader::create_full_registry();
     for entity in &entities {
         let category =
             content_registry.entity_category(entity.entity.namespace, entity.entity.entity_type);
