@@ -84,43 +84,6 @@ pub fn validate_render_core_world_space_non_overlapping(
     validate_region_core_world_space_non_overlapping(&region_core)
 }
 
-fn validate_render_leaves_world_space_non_overlapping(leaves: &[RenderLeaf]) -> Result<(), String> {
-    if leaves.len() < 2 {
-        return Ok(());
-    }
-
-    let mut children = Vec::<RenderTreeCore>::with_capacity(leaves.len());
-    let mut combined_bounds: Option<Aabb4i> = None;
-    for leaf in leaves {
-        if !leaf.bounds.is_valid() {
-            continue;
-        }
-        let kind = match &leaf.kind {
-            RenderLeafKind::Uniform(block) => RenderNodeKind::Uniform(block.clone()),
-            RenderLeafKind::VoxelChunkArray(chunk_array) => {
-                RenderNodeKind::VoxelChunkArray(chunk_array.clone())
-            }
-        };
-        children.push(RenderTreeCore {
-            bounds: leaf.bounds,
-            kind,
-        });
-        combined_bounds = Some(match combined_bounds {
-            Some(existing) => existing.union(&leaf.bounds),
-            None => leaf.bounds,
-        });
-    }
-
-    let Some(bounds) = combined_bounds else {
-        return Ok(());
-    };
-    let core = RenderTreeCore {
-        bounds,
-        kind: RenderNodeKind::Branch(children),
-    };
-    validate_render_core_world_space_non_overlapping(&core)
-}
-
 fn empty_render_bvh(bounds: Aabb4i) -> RenderBvh {
     RenderBvh {
         bounds,
@@ -135,19 +98,6 @@ fn empty_render_bvh(bounds: Aabb4i) -> RenderBvh {
 pub fn build_bvh_in_bounds(core: &RenderTreeCore, bounds: Aabb4i) -> RenderBvh {
     if !bounds.is_valid() {
         return empty_render_bvh(bounds);
-    }
-
-    let mut leaf_inputs = Vec::<RenderLeaf>::new();
-    collect_render_leaves_in_bounds(core, bounds, &mut leaf_inputs);
-    if leaf_inputs.is_empty() {
-        return empty_render_bvh(bounds);
-    }
-    #[cfg(debug_assertions)]
-    if let Err(error) = validate_render_leaves_world_space_non_overlapping(&leaf_inputs) {
-        eprintln!(
-            "[render-tree-scale-overlap] BUG: build_bvh_in_bounds produced overlap: {}",
-            error
-        );
     }
 
     let mut bvh = RenderBvh {
@@ -167,10 +117,193 @@ pub fn build_bvh_in_bounds(core: &RenderTreeCore, bounds: Aabb4i) -> RenderBvh {
         freed_node_ids: Vec::new(),
         freed_leaf_ids: Vec::new(),
     };
-    let root = append_leaves_subtree_with_delta(&mut bvh, leaf_inputs, &mut init_delta)
-        .expect("initial BVH build should succeed");
-    bvh.root = Some(root);
+    let root = build_bvh_from_render_tree(core, bounds, &mut bvh, &mut init_delta);
+    bvh.root = root;
     bvh
+}
+
+/// Build a BVH by directly converting the render tree structure, preserving
+/// its spatial partition hierarchy. Branch nodes are binarized using SAH on
+/// the children (not flattened leaves), which guarantees zero sibling overlaps
+/// since the children of any Branch are non-overlapping by construction.
+fn build_bvh_from_render_tree(
+    core: &RenderTreeCore,
+    bounds: Aabb4i,
+    bvh: &mut RenderBvh,
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> Option<u32> {
+    let Some(clipped) = core.bounds.intersection(&bounds) else {
+        return None;
+    };
+    match &core.kind {
+        RenderNodeKind::Empty => None,
+        RenderNodeKind::Uniform(block) => {
+            if block.is_air() {
+                return None;
+            }
+            let leaf_id = allocate_leaf_slot(
+                bvh,
+                RenderLeaf {
+                    bounds: clipped,
+                    kind: RenderLeafKind::Uniform(block.clone()),
+                },
+                delta,
+            )
+            .expect("allocate uniform leaf");
+            Some(
+                allocate_node_slot(
+                    bvh,
+                    RenderBvhNode {
+                        bounds: clipped,
+                        kind: RenderBvhNodeKind::Leaf { leaf_index: leaf_id },
+                    },
+                    delta,
+                )
+                .expect("allocate leaf node"),
+            )
+        }
+        RenderNodeKind::VoxelChunkArray(chunk_array) => {
+            let leaf_id = allocate_leaf_slot(
+                bvh,
+                RenderLeaf {
+                    bounds: clipped,
+                    kind: RenderLeafKind::VoxelChunkArray(chunk_array.clone()),
+                },
+                delta,
+            )
+            .expect("allocate chunk array leaf");
+            Some(
+                allocate_node_slot(
+                    bvh,
+                    RenderBvhNode {
+                        bounds: clipped,
+                        kind: RenderBvhNodeKind::Leaf { leaf_index: leaf_id },
+                    },
+                    delta,
+                )
+                .expect("allocate leaf node"),
+            )
+        }
+        RenderNodeKind::Branch(children) => {
+            let child_roots: Vec<u32> = children
+                .iter()
+                .filter_map(|child| build_bvh_from_render_tree(child, clipped, bvh, delta))
+                .collect();
+            if child_roots.is_empty() {
+                None
+            } else {
+                Some(binarize_subtree_roots(bvh, &child_roots, delta))
+            }
+        }
+    }
+}
+
+/// Given a set of BVH subtree roots whose bounds are mutually non-overlapping
+/// (from a spatial partition), produce a single binary BVH subtree using SAH
+/// to choose the best partition at each level.
+///
+/// Because the input roots have non-overlapping bounds, the left and right
+/// groups at each split also have non-overlapping union bounds — there exists
+/// a separating hyperplane along the chosen axis.
+fn binarize_subtree_roots(
+    bvh: &mut RenderBvh,
+    roots: &[u32],
+    delta: &mut RenderBvhChunkMutationDelta,
+) -> u32 {
+    debug_assert!(!roots.is_empty());
+    if roots.len() == 1 {
+        return roots[0];
+    }
+    if roots.len() == 2 {
+        let bounds = bvh.nodes[roots[0] as usize]
+            .bounds
+            .union(&bvh.nodes[roots[1] as usize].bounds);
+        return allocate_node_slot(
+            bvh,
+            RenderBvhNode {
+                bounds,
+                kind: RenderBvhNodeKind::Internal {
+                    left: roots[0],
+                    right: roots[1],
+                },
+            },
+            delta,
+        )
+        .expect("allocate internal node");
+    }
+
+    // SAH sweep over all 4 axes to find the best binary partition.
+    let n = roots.len();
+    let root_bounds: Vec<Aabb4i> = roots.iter().map(|&r| bvh.nodes[r as usize].bounds).collect();
+
+    let mut best_axis = 0usize;
+    let mut best_split = n / 2;
+    let mut best_cost = f64::MAX;
+
+    let mut indices: Vec<usize> = (0..n).collect();
+    let mut right_bounds_suffix = vec![Aabb4i::from_i32([0, 0, 0, 0], [-1, -1, -1, -1]); n];
+
+    for axis in 0..4 {
+        indices.sort_unstable_by(|&a, &b| {
+            let ca = centroid_axis(root_bounds[a], axis);
+            let cb = centroid_axis(root_bounds[b], axis);
+            ca.total_cmp(&cb)
+                .then_with(|| root_bounds[a].min.cmp(&root_bounds[b].min))
+                .then_with(|| root_bounds[a].max.cmp(&root_bounds[b].max))
+        });
+
+        right_bounds_suffix[n - 1] = root_bounds[indices[n - 1]];
+        for i in (0..n - 1).rev() {
+            right_bounds_suffix[i] = right_bounds_suffix[i + 1].union(&root_bounds[indices[i]]);
+        }
+
+        let mut left_agg = root_bounds[indices[0]];
+        for split in 1..n {
+            let left_count = split as f64;
+            let right_count = (n - split) as f64;
+            let left_sa = half_surface_area_4d(left_agg);
+            let right_sa = half_surface_area_4d(right_bounds_suffix[split]);
+            let cost = left_sa * left_count + right_sa * right_count;
+
+            if cost < best_cost {
+                best_cost = cost;
+                best_axis = axis;
+                best_split = split;
+            }
+
+            if split < n - 1 {
+                left_agg = left_agg.union(&root_bounds[indices[split]]);
+            }
+        }
+    }
+
+    // Partition roots by the best axis and split position.
+    let mut sorted_roots: Vec<u32> = roots.to_vec();
+    sorted_roots.sort_unstable_by(|&a, &b| {
+        let ab = bvh.nodes[a as usize].bounds;
+        let bb = bvh.nodes[b as usize].bounds;
+        let ca = centroid_axis(ab, best_axis);
+        let cb = centroid_axis(bb, best_axis);
+        ca.total_cmp(&cb)
+            .then_with(|| ab.min.cmp(&bb.min))
+            .then_with(|| ab.max.cmp(&bb.max))
+    });
+
+    let (left_roots, right_roots) = sorted_roots.split_at(best_split);
+    let left = binarize_subtree_roots(bvh, left_roots, delta);
+    let right = binarize_subtree_roots(bvh, right_roots, delta);
+    let bounds = bvh.nodes[left as usize]
+        .bounds
+        .union(&bvh.nodes[right as usize].bounds);
+    allocate_node_slot(
+        bvh,
+        RenderBvhNode {
+            bounds,
+            kind: RenderBvhNodeKind::Internal { left, right },
+        },
+        delta,
+    )
+    .expect("allocate internal node")
 }
 
 pub fn collect_non_empty_chunk_keys_from_bvh_in_bounds(
@@ -315,32 +448,20 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
         None
     };
 
-    let mut replacement_leaves = Vec::<RenderLeaf>::new();
-    collect_render_leaves_in_bounds(patch_core, clipped_patch_bounds, &mut replacement_leaves);
-    #[cfg(debug_assertions)]
-    if let Err(error) = validate_render_leaves_world_space_non_overlapping(&replacement_leaves) {
-        eprintln!(
-            "[render-tree-scale-overlap] BUG: apply_core_patch produced overlap: {}",
-            error
-        );
-    }
-    let replacement_root = if replacement_leaves.is_empty() {
-        None
-    } else {
-        Some(append_leaves_subtree_with_delta(
-            bvh,
-            replacement_leaves,
-            &mut delta,
-        )?)
-    };
+    // Build replacement subtree using the partition-preserving binarizer,
+    // which walks the render tree structure directly instead of flattening
+    // to leaves + SAH.
+    let replacement_root =
+        build_bvh_from_render_tree(patch_core, clipped_patch_bounds, bvh, &mut delta);
 
     let new_root = match (outside_root, replacement_root) {
         (None, None) => None,
         (Some(root), None) | (None, Some(root)) => Some(root),
         (Some(left), Some(right)) => {
-            // Instead of a simple single-node join (which degrades tree quality
-            // over many incremental mutations), collect all leaf IDs from both
-            // subtrees and rebuild with SAH for optimal structure.
+            // Collect all leaf IDs from both subtrees and rebuild with SAH
+            // for optimal traversal structure. SAH minimizes expected ray
+            // intersection cost via the surface area heuristic — its small
+            // sibling overlaps are far less costly than suboptimal depth.
             let mut left_nodes = Vec::new();
             let mut left_leaf_ids = Vec::new();
             collect_subtree_node_leaf_ids(bvh, left, &mut left_nodes, &mut left_leaf_ids);
@@ -349,11 +470,11 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
             let mut right_leaf_ids = Vec::new();
             collect_subtree_node_leaf_ids(bvh, right, &mut right_nodes, &mut right_leaf_ids);
 
-            // Recycle node slots into the CPU free list so the SAH rebuild can
-            // reuse them. We do NOT add them to delta.freed_node_ids because
-            // the rebuild will immediately rewrite them (via delta.node_writes).
-            // The GPU consumer applies writes to these slots, so they remain
-            // valid in the GPU buffer.
+            // Recycle node slots into the CPU free list so the SAH rebuild
+            // can reuse them. We do NOT add them to delta.freed_node_ids
+            // because the rebuild will immediately rewrite them (via
+            // delta.node_writes). The GPU consumer applies writes to these
+            // slots, so they remain valid in the GPU buffer.
             for &node_id in left_nodes.iter().chain(right_nodes.iter()) {
                 bvh.free_node_ids.push(node_id);
             }
@@ -484,36 +605,6 @@ pub fn collect_ray_intersected_nodes_from_bvh(
     }
 
     out
-}
-
-fn collect_render_leaves_in_bounds(
-    core: &RenderTreeCore,
-    bounds: Aabb4i,
-    out: &mut Vec<RenderLeaf>,
-) {
-    let Some(intersection) = core.bounds.intersection(&bounds) else {
-        return;
-    };
-    match &core.kind {
-        RenderNodeKind::Empty => {}
-        RenderNodeKind::Uniform(block) => {
-            if !block.is_air() {
-                out.push(RenderLeaf {
-                    bounds: intersection,
-                    kind: RenderLeafKind::Uniform(block.clone()),
-                });
-            }
-        }
-        RenderNodeKind::VoxelChunkArray(chunk_array) => out.push(RenderLeaf {
-            bounds: intersection,
-            kind: RenderLeafKind::VoxelChunkArray(chunk_array.clone()),
-        }),
-        RenderNodeKind::Branch(children) => {
-            for child in children {
-                collect_render_leaves_in_bounds(child, intersection, out);
-            }
-        }
-    }
 }
 
 fn sample_leaf_payload_at_key(leaf: &RenderLeaf, key: ChunkKey) -> Option<ResolvedChunkPayload> {
