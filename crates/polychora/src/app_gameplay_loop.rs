@@ -75,6 +75,22 @@ fn overlay_edge_tag_for_sample_ray_hit(hit: &DebugRayBvhNodeHit) -> u32 {
     }
 }
 
+/// Data produced by the scene-targeting phase of the gameplay loop, consumed
+/// when building `RenderOptions` and dispatching the frame.
+struct SceneTargetingData {
+    targets: Option<scene::BlockEditTargets>,
+    hud_player_tags: Vec<HudPlayerTag>,
+    hud_target_hit_voxel: Option<[i32; 4]>,
+    hud_target_hit_face: Option<[i32; 4]>,
+    hud_stream_first_node_desc: Option<String>,
+    hud_stream_final_solid_leaf_desc: Option<String>,
+    custom_overlay_edge_instances: Vec<common::ModelInstance>,
+    vte_highlight_hit_min: Option<[f32; 4]>,
+    vte_highlight_hit_max: [f32; 4],
+    vte_highlight_face_axis: u32,
+    vte_highlight_face_sign: i32,
+}
+
 impl App {
     /// Check whether the placement preview (ghost or wireframe) should be
     /// suppressed this frame based on user-configured conditions.
@@ -102,406 +118,386 @@ impl App {
         false
     }
 
-    pub(super) fn update_and_render(&mut self) {
-        let frame_start = Instant::now();
-        self.begin_runtime_profile_frame();
-        let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32();
-        self.last_frame = now;
-
-        if self.app_state == AppState::MainMenu {
-            let main_menu_update_start = Instant::now();
-            self.update_and_render_main_menu(dt);
-            self.set_runtime_profile_update_ms(
-                main_menu_update_start.elapsed().as_secs_f64() * 1000.0,
-            );
-            if self.perf_suite_active() {
-                self.advance_perf_suite_after_frame(frame_start);
-            } else {
-                self.record_runtime_profile_sample(frame_start);
-            }
-            self.persist_settings_if_needed(false);
-            return;
+    /// Process the auto-command queue (press/wait/screenshot commands injected
+    /// via CLI `--commands`).  Returns `true` when a screenshot command was
+    /// consumed this frame.
+    fn process_command_queue(&mut self) -> bool {
+        if self.perf_suite_active() {
+            return false;
         }
-
-        let gameplay_update_start = Instant::now();
-        self.poll_multiplayer_events();
-        self.smooth_remote_players(dt, now);
-        self.smooth_remote_entities(dt);
-        if let Some(scenario_index) = self
-            .perf_suite_state
-            .as_ref()
-            .map(|state| state.scenario_index)
-        {
-            self.set_perf_suite_camera_pose(scenario_index);
+        if self.command_wait_frames > 0 {
+            self.command_wait_frames -= 1;
+            return false;
         }
-
-        // Process command queue
-        let mut command_screenshot_requested = false;
-        if !self.perf_suite_active() {
-            if self.command_wait_frames > 0 {
-                self.command_wait_frames -= 1;
-            } else if let Some(cmd) = self.command_queue.pop_front() {
-                match cmd {
-                    AutoCommand::Press(keycode) => {
-                        self.inject_key_press(keycode);
-                    }
-                    AutoCommand::Wait(n) => {
-                        self.command_wait_frames = n;
-                    }
-                    AutoCommand::Screenshot => {
-                        command_screenshot_requested = true;
-                    }
+        if let Some(cmd) = self.command_queue.pop_front() {
+            match cmd {
+                AutoCommand::Press(keycode) => {
+                    self.inject_key_press(keycode);
                 }
-            } else if !self.command_queue.is_empty() || self.command_wait_frames > 0 {
-                // Still processing commands
-            } else if self.args.commands.is_some() && self.args.gpu_screenshot {
-                // Commands finished and we're in screenshot mode, exit
-                self.should_exit_after_render = true;
+                AutoCommand::Wait(n) => {
+                    self.command_wait_frames = n;
+                }
+                AutoCommand::Screenshot => {
+                    return true;
+                }
             }
+        } else if !self.command_queue.is_empty() || self.command_wait_frames > 0 {
+            // Still processing commands
+        } else if self.args.commands.is_some() && self.args.gpu_screenshot {
+            // Commands finished and we're in screenshot mode, exit
+            self.should_exit_after_render = true;
         }
+        false
+    }
 
+    /// Handle keyboard/mouse input when menus are closed: mouse look, scroll
+    /// wheel, look-at, orientation resets, hotbar selection, flight/sprint
+    /// toggles, inventory, and teleport dialog.  When a menu is open, drains
+    /// all gameplay inputs instead.
+    fn apply_input_and_camera(&mut self, dt: f32) {
         if self.menu_open
             || self.inventory_open
             || self.teleport_dialog_open
             || self.dev_console_open
         {
             self.drain_gameplay_inputs_while_menu_open();
-        } else {
-            self.input.take_menu_left();
-            self.input.take_menu_right();
-            self.input.take_menu_up();
-            self.input.take_menu_down();
-            self.input.take_menu_activate();
+            return;
+        }
 
-            // (Tab scheme cycling removed - Tab now opens inventory)
+        self.input.take_menu_left();
+        self.input.take_menu_right();
+        self.input.take_menu_up();
+        self.input.take_menu_down();
+        self.input.take_menu_activate();
 
-            if self.input.take_vte_sweep() {
-                self.toggle_vte_runtime_sweep();
-            }
-            if self.input.take_vte_integral_sky_emissive_toggle() {
-                self.toggle_vte_integral_sky_emissive();
-            }
-            if self.input.take_vte_integral_log_merge_toggle() {
-                self.toggle_vte_integral_log_merge();
-            }
+        // VTE sweep / integral toggles
+        if self.input.take_vte_sweep() {
+            self.toggle_vte_runtime_sweep();
+        }
+        if self.input.take_vte_integral_sky_emissive_toggle() {
+            self.toggle_vte_integral_sky_emissive();
+        }
+        if self.input.take_vte_integral_log_merge_toggle() {
+            self.toggle_vte_integral_log_merge();
+        }
 
-            // Scroll wheel
-            let scroll_steps = self.input.take_scroll_steps();
-            if scroll_steps != 0 {
-                if self.control_scheme.uses_scroll_pair_cycle() {
-                    for _ in 0..scroll_steps.abs() {
-                        if scroll_steps > 0 {
-                            self.scroll_cycle_pair = self.scroll_cycle_pair.next();
-                        } else {
-                            // Reverse cycle for the legacy scroll mode.
-                            self.scroll_cycle_pair = match self.scroll_cycle_pair {
-                                RotationPair::Standard => RotationPair::FourD,
-                                RotationPair::FourD => RotationPair::Standard,
-                                RotationPair::DoubleRotation => RotationPair::Standard,
-                            };
-                        }
-                    }
-                } else {
-                    // Scroll wheel cycles hotbar selection.
-                    // Scroll up (positive) moves left (lower index), matching
-                    // the visual hotbar layout convention.
-                    for _ in 0..scroll_steps.abs() {
-                        if scroll_steps > 0 {
-                            self.hotbar_selected_index = (self.hotbar_selected_index + 8) % 9;
-                        } else {
-                            self.hotbar_selected_index = (self.hotbar_selected_index + 1) % 9;
-                        }
-                    }
-                    self.selected_block = block_data_from_slot(
-                        self.inventory.hotbar_slot(self.hotbar_selected_index),
-                    );
-                    eprintln!(
-                        "Hotbar slot {} selected: {} ({})",
-                        self.hotbar_selected_index + 1,
-                        self.selected_block.block_type,
-                        self.content_registry.block_name(
-                            self.selected_block.namespace,
-                            self.selected_block.block_type
-                        ),
-                    );
-                }
-            }
-
-            // Mouse look
-            if self.mouse_grabbed {
-                let pair = self.active_rotation_pair();
-                let (dx, dy) = self.input.take_mouse_delta();
-                // Cancel look-at pull on any mouse movement
-                if dx.abs() > 0.5 || dy.abs() > 0.5 {
-                    self.look_at_target = None;
-                }
-                match self.control_scheme {
-                    ControlScheme::LookTransport => {
-                        if self.input.mouse_forward_held() {
-                            self.camera.apply_mouse_look_transport_with_modifiers(
-                                dx,
-                                dy,
-                                MOUSE_SENSITIVITY,
-                                self.input.mouse_back_held(),
-                                true,
-                            );
-                        } else {
-                            self.camera.apply_mouse_look_transport(
-                                dx,
-                                dy,
-                                MOUSE_SENSITIVITY,
-                                self.input.mouse_back_held(),
-                            );
-                        }
-                    }
-                    ControlScheme::TransportUniform => {
-                        self.camera.apply_mouse_look_transport_uniform(
-                            dx,
-                            dy,
-                            MOUSE_SENSITIVITY,
-                            self.input.mouse_back_held(),
-                            self.input.mouse_forward_held(),
-                        );
-                    }
-                    ControlScheme::TransportDecoupled => {
-                        self.camera.apply_mouse_look_transport_decoupled(
-                            dx,
-                            dy,
-                            MOUSE_SENSITIVITY,
-                            self.input.mouse_back_held(),
-                            self.input.mouse_forward_held(),
-                        );
-                    }
-                    ControlScheme::TransportScaled => {
-                        self.camera.apply_mouse_look_transport_scaled(
-                            dx,
-                            dy,
-                            MOUSE_SENSITIVITY,
-                            self.input.mouse_back_held(),
-                            self.input.mouse_forward_held(),
-                        );
-                    }
-                    ControlScheme::RotorFree => {
-                        self.camera.apply_mouse_look_rotor(
-                            dx,
-                            dy,
-                            MOUSE_SENSITIVITY,
-                            self.input.mouse_back_held(),
-                            self.input.mouse_forward_held(),
-                        );
-                    }
-                    ControlScheme::IntuitiveUpright
-                    | ControlScheme::LegacySideButtonLayers
-                    | ControlScheme::LegacyScrollCycle => {
-                        self.camera.apply_mouse_look_on(
-                            dx,
-                            dy,
-                            MOUSE_SENSITIVITY,
-                            pair.h_target(),
-                            pair.v_target(),
-                        );
+        // Scroll wheel
+        let scroll_steps = self.input.take_scroll_steps();
+        if scroll_steps != 0 {
+            if self.control_scheme.uses_scroll_pair_cycle() {
+                for _ in 0..scroll_steps.abs() {
+                    if scroll_steps > 0 {
+                        self.scroll_cycle_pair = self.scroll_cycle_pair.next();
+                    } else {
+                        self.scroll_cycle_pair = match self.scroll_cycle_pair {
+                            RotationPair::Standard => RotationPair::FourD,
+                            RotationPair::FourD => RotationPair::Standard,
+                            RotationPair::DoubleRotation => RotationPair::Standard,
+                        };
                     }
                 }
             } else {
-                self.input.take_mouse_delta();
+                // Scroll wheel cycles hotbar selection.
+                for _ in 0..scroll_steps.abs() {
+                    if scroll_steps > 0 {
+                        self.hotbar_selected_index = (self.hotbar_selected_index + 8) % 9;
+                    } else {
+                        self.hotbar_selected_index = (self.hotbar_selected_index + 1) % 9;
+                    }
+                }
+                self.selected_block =
+                    block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
+                eprintln!(
+                    "Hotbar slot {} selected: {} ({})",
+                    self.hotbar_selected_index + 1,
+                    self.selected_block.block_type,
+                    self.content_registry.block_name(
+                        self.selected_block.namespace,
+                        self.selected_block.block_type
+                    ),
+                );
             }
+        }
 
-            if self.input.reset_orientation_held() || self.input.pull_to_3d_held() {
-                let pull_home = self.input.reset_orientation_held();
-                self.look_at_target = None; // Cancel look-at when holding R or F
+        // Mouse look
+        if self.mouse_grabbed {
+            let pair = self.active_rotation_pair();
+            let (dx, dy) = self.input.take_mouse_delta();
+            if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                self.look_at_target = None;
+            }
+            match self.control_scheme {
+                ControlScheme::LookTransport => {
+                    if self.input.mouse_forward_held() {
+                        self.camera.apply_mouse_look_transport_with_modifiers(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            self.input.mouse_back_held(),
+                            true,
+                        );
+                    } else {
+                        self.camera.apply_mouse_look_transport(
+                            dx,
+                            dy,
+                            MOUSE_SENSITIVITY,
+                            self.input.mouse_back_held(),
+                        );
+                    }
+                }
+                ControlScheme::TransportUniform => {
+                    self.camera.apply_mouse_look_transport_uniform(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        self.input.mouse_back_held(),
+                        self.input.mouse_forward_held(),
+                    );
+                }
+                ControlScheme::TransportDecoupled => {
+                    self.camera.apply_mouse_look_transport_decoupled(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        self.input.mouse_back_held(),
+                        self.input.mouse_forward_held(),
+                    );
+                }
+                ControlScheme::TransportScaled => {
+                    self.camera.apply_mouse_look_transport_scaled(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        self.input.mouse_back_held(),
+                        self.input.mouse_forward_held(),
+                    );
+                }
+                ControlScheme::RotorFree => {
+                    self.camera.apply_mouse_look_rotor(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        self.input.mouse_back_held(),
+                        self.input.mouse_forward_held(),
+                    );
+                }
+                ControlScheme::IntuitiveUpright
+                | ControlScheme::LegacySideButtonLayers
+                | ControlScheme::LegacyScrollCycle => {
+                    self.camera.apply_mouse_look_on(
+                        dx,
+                        dy,
+                        MOUSE_SENSITIVITY,
+                        pair.h_target(),
+                        pair.v_target(),
+                    );
+                }
+            }
+        } else {
+            self.input.take_mouse_delta();
+        }
+
+        // Orientation reset / pull-to-3D
+        if self.input.reset_orientation_held() || self.input.pull_to_3d_held() {
+            let pull_home = self.input.reset_orientation_held();
+            self.look_at_target = None;
+            match self.control_scheme {
+                ControlScheme::LookTransport
+                | ControlScheme::TransportUniform
+                | ControlScheme::TransportDecoupled
+                | ControlScheme::TransportScaled
+                | ControlScheme::RotorFree => {
+                    if pull_home {
+                        self.camera.pull_toward_home_look_frame(dt);
+                    } else {
+                        self.camera.pull_toward_nearest_3d_look_frame(dt);
+                    }
+                }
+                ControlScheme::IntuitiveUpright
+                | ControlScheme::LegacySideButtonLayers
+                | ControlScheme::LegacyScrollCycle => {
+                    if pull_home {
+                        self.camera.pull_toward_home_angles(dt);
+                    } else {
+                        self.camera.pull_toward_nearest_3d_angles(dt);
+                    }
+                }
+            }
+        }
+
+        // Look-at: on G press, fan-cast across the ZW viewing wedge to
+        // find the nearest solid block and smoothly rotate toward it.
+        if self.input.take_look_at() && self.mouse_grabbed {
+            let edit_reach = self
+                .args
+                .edit_reach
+                .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
+            let (_right, _up, view_z, view_w) = self.current_view_basis();
+            let hit = self.scene.fan_cast_nearest_block(
+                self.camera.position,
+                view_z,
+                view_w,
+                self.focal_length_zw,
+                edit_reach,
+                32,
+            );
+            if let Some([x, y, z, w]) = hit {
+                let target_pos = [
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    z as f32 + 0.5,
+                    w as f32 + 0.5,
+                ];
+                let dir = [
+                    target_pos[0] - self.camera.position[0],
+                    target_pos[1] - self.camera.position[1],
+                    target_pos[2] - self.camera.position[2],
+                    target_pos[3] - self.camera.position[3],
+                ];
                 match self.control_scheme {
                     ControlScheme::LookTransport
                     | ControlScheme::TransportUniform
                     | ControlScheme::TransportDecoupled
                     | ControlScheme::TransportScaled
                     | ControlScheme::RotorFree => {
-                        if pull_home {
-                            self.camera.pull_toward_home_look_frame(dt);
-                        } else {
-                            self.camera.pull_toward_nearest_3d_look_frame(dt);
-                        }
+                        self.look_at_target = Some(LookAtTarget::Direction(dir));
                     }
-                    ControlScheme::IntuitiveUpright
-                    | ControlScheme::LegacySideButtonLayers
-                    | ControlScheme::LegacyScrollCycle => {
-                        if pull_home {
-                            self.camera.pull_toward_home_angles(dt);
-                        } else {
-                            self.camera.pull_toward_nearest_3d_angles(dt);
-                        }
+                    _ => {
+                        let (ty, tp, txw, tzw) = Camera4D::angles_for_direction_upright(dir);
+                        self.look_at_target = Some(LookAtTarget::Angles {
+                            yaw: ty,
+                            pitch: tp,
+                            xw_angle: txw,
+                            zw_angle: tzw,
+                        });
                     }
                 }
-            }
-
-            // Look-at: on G press, fan-cast across the ZW viewing wedge to
-            // find the nearest solid block and smoothly rotate toward it.
-            if self.input.take_look_at() && self.mouse_grabbed {
-                let edit_reach = self
-                    .args
-                    .edit_reach
-                    .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
-                let (_right, _up, view_z, view_w) = self.current_view_basis();
-                let hit = self.scene.fan_cast_nearest_block(
-                    self.camera.position,
-                    view_z,
-                    view_w,
-                    self.focal_length_zw,
-                    edit_reach,
-                    32,
-                );
-                if let Some([x, y, z, w]) = hit {
-                    let target_pos = [
-                        x as f32 + 0.5,
-                        y as f32 + 0.5,
-                        z as f32 + 0.5,
-                        w as f32 + 0.5,
-                    ];
-                    let dir = [
-                        target_pos[0] - self.camera.position[0],
-                        target_pos[1] - self.camera.position[1],
-                        target_pos[2] - self.camera.position[2],
-                        target_pos[3] - self.camera.position[3],
-                    ];
-                    match self.control_scheme {
-                        ControlScheme::LookTransport
-                        | ControlScheme::TransportUniform
-                        | ControlScheme::TransportDecoupled
-                        | ControlScheme::TransportScaled
-                        | ControlScheme::RotorFree => {
-                            self.look_at_target = Some(LookAtTarget::Direction(dir));
-                        }
-                        _ => {
-                            let (ty, tp, txw, tzw) = Camera4D::angles_for_direction_upright(dir);
-                            self.look_at_target = Some(LookAtTarget::Angles {
-                                yaw: ty,
-                                pitch: tp,
-                                xw_angle: txw,
-                                zw_angle: tzw,
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Apply smooth pull toward look-at target
-            if let Some(target) = self.look_at_target {
-                let converged = match target {
-                    LookAtTarget::Angles {
-                        yaw,
-                        pitch,
-                        xw_angle,
-                        zw_angle,
-                    } => self
-                        .camera
-                        .pull_toward_target_angles(yaw, pitch, xw_angle, zw_angle, dt),
-                    LookAtTarget::Direction(dir) => {
-                        self.camera.pull_toward_target_direction_look_frame(dir, dt)
-                    }
-                };
-                if converged {
-                    self.look_at_target = None;
-                }
-            }
-
-            let pair = self.active_rotation_pair();
-            match self.control_scheme {
-                ControlScheme::IntuitiveUpright => {
-                    self.camera.enforce_upright_constraints();
-                }
-                ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
-                    // Auto-level when not in double rotation
-                    if pair != RotationPair::DoubleRotation {
-                        self.camera.auto_level(dt);
-                    }
-                }
-                ControlScheme::LookTransport
-                | ControlScheme::TransportUniform
-                | ControlScheme::TransportDecoupled
-                | ControlScheme::TransportScaled
-                | ControlScheme::RotorFree => {}
-            }
-
-            // Toggle flight mode on double-tap space
-            if self.input.take_fly_toggle() {
-                self.camera.toggle_flying();
-            }
-            if self.input.take_sprint_toggle() && !self.sprint_enabled {
-                self.sprint_enabled = true;
-                eprintln!("Sprint: on");
-            }
-
-            // Bracket keys adjust placement scale.
-            if self.input.take_place_material_prev() {
-                let new_scale = (self.selected_block.scale_exp - 1).max(-3);
-                self.selected_block.scale_exp = new_scale;
-                self.inventory
-                    .update_slot_scale(self.hotbar_selected_index, new_scale);
-                self.inventory_dirty = true;
-            }
-            if self.input.take_place_material_next() {
-                let new_scale = (self.selected_block.scale_exp + 1).min(3);
-                self.selected_block.scale_exp = new_scale;
-                self.inventory
-                    .update_slot_scale(self.hotbar_selected_index, new_scale);
-                self.inventory_dirty = true;
-            }
-            // Number keys 1-9 select hotbar slot.
-            if let Some(digit) = self.input.take_place_material_digit() {
-                if (1..=9).contains(&digit) {
-                    self.hotbar_selected_index = (digit - 1) as usize;
-                    self.selected_block = block_data_from_slot(
-                        self.inventory.hotbar_slot(self.hotbar_selected_index),
-                    );
-                    eprintln!(
-                        "Hotbar slot {} selected: {} ({})",
-                        digit,
-                        self.selected_block.block_type,
-                        self.content_registry.block_name(
-                            self.selected_block.namespace,
-                            self.selected_block.block_type
-                        ),
-                    );
-                }
-            }
-            // I key toggles inventory.
-            if self.input.take_inventory_toggle() {
-                self.toggle_inventory();
-            }
-            // Tab opens inventory, or cycles tab if already open.
-            if self.input.take_inventory_tab_cycle() {
-                if self.inventory_open {
-                    self.inventory_tab = match self.inventory_tab {
-                        polychora::shared::inventory::InventoryTab::Creative => {
-                            polychora::shared::inventory::InventoryTab::Survival
-                        }
-                        polychora::shared::inventory::InventoryTab::Survival => {
-                            polychora::shared::inventory::InventoryTab::Creative
-                        }
-                    };
-                } else {
-                    self.toggle_inventory();
-                }
-            }
-            // T key toggles teleport dialog.
-            if self.input.take_teleport_dialog() {
-                self.toggle_teleport_dialog();
             }
         }
 
-        // Determine active rotation pair
+        // Apply smooth pull toward look-at target
+        if let Some(target) = self.look_at_target {
+            let converged = match target {
+                LookAtTarget::Angles {
+                    yaw,
+                    pitch,
+                    xw_angle,
+                    zw_angle,
+                } => self
+                    .camera
+                    .pull_toward_target_angles(yaw, pitch, xw_angle, zw_angle, dt),
+                LookAtTarget::Direction(dir) => {
+                    self.camera.pull_toward_target_direction_look_frame(dir, dt)
+                }
+            };
+            if converged {
+                self.look_at_target = None;
+            }
+        }
+
+        // Auto-level / upright constraints
         let pair = self.active_rotation_pair();
+        match self.control_scheme {
+            ControlScheme::IntuitiveUpright => {
+                self.camera.enforce_upright_constraints();
+            }
+            ControlScheme::LegacySideButtonLayers | ControlScheme::LegacyScrollCycle => {
+                if pair != RotationPair::DoubleRotation {
+                    self.camera.auto_level(dt);
+                }
+            }
+            ControlScheme::LookTransport
+            | ControlScheme::TransportUniform
+            | ControlScheme::TransportDecoupled
+            | ControlScheme::TransportScaled
+            | ControlScheme::RotorFree => {}
+        }
 
-        let edit_reach = self
-            .args
-            .edit_reach
-            .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
+        // Toggle flight mode on double-tap space
+        if self.input.take_fly_toggle() {
+            self.camera.toggle_flying();
+        }
+        if self.input.take_sprint_toggle() && !self.sprint_enabled {
+            self.sprint_enabled = true;
+            eprintln!("Sprint: on");
+        }
 
-        if !self.menu_open
-            && !self.inventory_open
-            && !self.teleport_dialog_open
-            && !self.dev_console_open
+        // Bracket keys adjust placement scale.
+        if self.input.take_place_material_prev() {
+            let new_scale = (self.selected_block.scale_exp - 1).max(-3);
+            self.selected_block.scale_exp = new_scale;
+            self.inventory
+                .update_slot_scale(self.hotbar_selected_index, new_scale);
+            self.inventory_dirty = true;
+        }
+        if self.input.take_place_material_next() {
+            let new_scale = (self.selected_block.scale_exp + 1).min(3);
+            self.selected_block.scale_exp = new_scale;
+            self.inventory
+                .update_slot_scale(self.hotbar_selected_index, new_scale);
+            self.inventory_dirty = true;
+        }
+        // Number keys 1-9 select hotbar slot.
+        if let Some(digit) = self.input.take_place_material_digit() {
+            if (1..=9).contains(&digit) {
+                self.hotbar_selected_index = (digit - 1) as usize;
+                self.selected_block =
+                    block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
+                eprintln!(
+                    "Hotbar slot {} selected: {} ({})",
+                    digit,
+                    self.selected_block.block_type,
+                    self.content_registry.block_name(
+                        self.selected_block.namespace,
+                        self.selected_block.block_type
+                    ),
+                );
+            }
+        }
+        // I key toggles inventory.
+        if self.input.take_inventory_toggle() {
+            self.toggle_inventory();
+        }
+        // Tab opens inventory, or cycles tab if already open.
+        if self.input.take_inventory_tab_cycle() {
+            if self.inventory_open {
+                self.inventory_tab = match self.inventory_tab {
+                    polychora::shared::inventory::InventoryTab::Creative => {
+                        polychora::shared::inventory::InventoryTab::Survival
+                    }
+                    polychora::shared::inventory::InventoryTab::Survival => {
+                        polychora::shared::inventory::InventoryTab::Creative
+                    }
+                };
+            } else {
+                self.toggle_inventory();
+            }
+        }
+        // T key toggles teleport dialog.
+        if self.input.take_teleport_dialog() {
+            self.toggle_teleport_dialog();
+        }
+    }
+
+    /// Apply movement, gravity, collision, footstep audio, placement
+    /// orientation, and block/entity edit actions.  When menus are open,
+    /// drains all gameplay-related inputs instead.
+    fn apply_physics_and_editing(&mut self, dt: f32, edit_reach: f32, now: Instant) {
+        if self.menu_open
+            || self.inventory_open
+            || self.teleport_dialog_open
+            || self.dev_console_open
         {
+            self.input.take_jump();
+            self.input.take_remove_block();
+            self.input.take_place_block();
+            self.input.take_pick_material();
+            self.input.take_rotate_xz();
+            self.input.take_rotate_yz();
+            self.input.take_rotate_xw();
+            self.footstep_distance_accum = 0.0;
+            self.was_grounded_last_frame = self.camera.is_grounded;
+        } else {
             // Jump when in gravity mode, consume jump either way.
             if self.camera.is_flying {
                 self.input.take_jump();
@@ -715,8 +711,6 @@ impl App {
                             .slot(self.hotbar_selected_index)
                             .and_then(|s| s.spawn_egg_entity_key());
                         if let Some((ens, etype)) = egg_key {
-                            // Spawn entity at the placement target position (or a
-                            // few units in front of the player if no block target).
                             let spawn_pos = if let Some(place) = &edit_targets.place {
                                 let o = place.origin_i32();
                                 [
@@ -765,7 +759,6 @@ impl App {
                             let mut placed_block = self.selected_block.clone();
                             placed_block.orientation = self.placement_orientation;
                             self.send_multiplayer_voxel_update(now, place.origin, placed_block);
-                            // Survival: decrement placed block from inventory
                             if self.game_mode == polychora::shared::inventory::GameMode::Survival {
                                 self.inventory.decrement_slot(self.hotbar_selected_index);
                                 self.inventory_dirty = true;
@@ -781,17 +774,8 @@ impl App {
                 self.input.take_place_block();
                 self.input.take_pick_material();
             }
-        } else {
-            self.input.take_jump();
-            self.input.take_remove_block();
-            self.input.take_place_block();
-            self.input.take_pick_material();
-            self.input.take_rotate_xz();
-            self.input.take_rotate_yz();
-            self.input.take_rotate_xw();
-            self.footstep_distance_accum = 0.0;
-            self.was_grounded_last_frame = self.camera.is_grounded;
         }
+
         if let Some(scenario_index) = self
             .perf_suite_state
             .as_ref()
@@ -800,101 +784,11 @@ impl App {
             self.set_perf_suite_camera_pose(scenario_index);
         }
         self.apply_pending_player_movement_modifiers();
+    }
 
-        let look_dir = self.current_look_direction();
-        self.send_multiplayer_player_update(now, look_dir);
-        if self.inventory_dirty {
-            self.inventory_dirty = false;
-            self.send_inventory_sync();
-        }
-        self.send_multiplayer_chunk_sample_diag_request();
-        let preview_elapsed = now - self.start_time;
-        let preview_time_s = preview_elapsed.as_secs_f32();
-        let preview_time_ticks_ms = preview_elapsed.as_millis() as u32;
-        let aspect = self
-            .rcx
-            .as_ref()
-            .and_then(|rcx| rcx.window.as_ref())
-            .map(|window| {
-                let size = window.inner_size();
-                size.width.max(1) as f32 / size.height.max(1) as f32
-            })
-            .unwrap_or_else(|| self.args.width.max(1) as f32 / self.args.height.max(1) as f32);
-        let preview_instance = build_place_preview_instance(
-            &self.camera,
-            &self.selected_block,
-            preview_time_s,
-            self.control_scheme,
-            aspect,
-            &self.material_resolver,
-        );
-
-        // Build view matrix and scene
-        let view_matrix = self.current_view_matrix();
-        let backend = self.args.backend.to_render_backend();
-        let disable_remote_non_voxel = env_flag_enabled("R4D_DISABLE_REMOTE_NON_VOXEL");
-        let vte_disable_entities = env_flag_enabled("R4D_VTE_DISABLE_ENTITIES");
-        let highlight_mode = self.args.edit_highlight_mode;
-        let mut hud_player_tags =
-            self.remote_player_tags(&view_matrix, look_dir, self.focal_length_xy, aspect);
-        self.append_multiplayer_stream_tree_diag_hud_tags(
-            &mut hud_player_tags,
-            &view_matrix,
-            self.focal_length_xy,
-            aspect,
-        );
-        let targets = if !self.menu_open
-            && self.mouse_grabbed
-            && (highlight_mode.uses_faces()
-                || highlight_mode.uses_edges()
-                || self.placement_preview_mode.needs_targets())
-        {
-            Some(self.scene.block_edit_targets(
-                self.camera.position,
-                look_dir,
-                edit_reach,
-                self.selected_block.scale_exp,
-            ))
-        } else {
-            None
-        };
-        let mut hud_target_hit_voxel = None;
-        let mut hud_target_hit_face = None;
-        if let Some(targets) = &targets {
-            hud_target_hit_voxel = targets.hit.map(|h| h.origin_i32());
-            if targets.face_sign != 0 && targets.hit.is_some() {
-                let mut face = [0i32; 4];
-                face[targets.face_axis as usize] = targets.face_sign as i32;
-                hud_target_hit_face = Some(face);
-            }
-        }
-        let sample_ray_node_hits = if !self.menu_open && self.mouse_grabbed {
-            self.scene.debug_render_bvh_ray_node_hits(
-                self.camera.position,
-                look_dir,
-                edit_reach,
-                self.multiplayer_stream_tree_diag_sample_ray_max_nodes
-                    .max(1),
-            )
-        } else {
-            Vec::new()
-        };
-        let hud_stream_first_node_desc = sample_ray_node_hits
-            .first()
-            .map(describe_sample_ray_hit_for_hud);
-        let hud_stream_final_solid_leaf_desc = sample_ray_node_hits
-            .iter()
-            .rev()
-            .find(|hit| {
-                matches!(
-                    hit.kind,
-                    DebugRayBvhNodeKind::LeafUniform { .. }
-                        | DebugRayBvhNodeKind::LeafChunkArray { .. }
-                )
-            })
-            .map(describe_sample_ray_hit_for_hud);
-
-        // WAILA: combined block + entity targeting
+    /// Update WAILA (What Am I Looking At) target based on block and entity
+    /// ray-cast results.  Writes `self.waila_target`.
+    fn update_waila_target(&mut self, look_dir: [f32; 4], edit_reach: f32) {
         self.waila_target = if !self.menu_open && self.mouse_grabbed && !self.args.no_hud {
             let entity_hit = find_targeted_entity(
                 self.camera.position,
@@ -934,7 +828,6 @@ impl App {
 
             match (&entity_hit, &block_target) {
                 (Some(eh), Some((_, bd))) if eh.distance < *bd => {
-                    // Entity is closer — build entity target
                     if let Some(ent) = self.remote_entities.get(&eh.entity_id) {
                         Some(WailaTarget::Entity {
                             entity_id: eh.entity_id,
@@ -994,7 +887,16 @@ impl App {
         } else {
             None
         };
+    }
 
+    /// Build overlay edge instances for block targeting, wireframe placement
+    /// preview, BVH debug visualisation, and stream-tree diagnostics.
+    fn build_overlay_edges(
+        &mut self,
+        targets: Option<&scene::BlockEditTargets>,
+        highlight_mode: EditHighlightModeArg,
+        sample_ray_node_hits: &[DebugRayBvhNodeHit],
+    ) -> Vec<common::ModelInstance> {
         let overlay_edge_capacity = 2usize
             .saturating_add(if self.multiplayer_stream_tree_diag_enabled {
                 self.multiplayer_stream_tree_diag_max_nodes.max(1)
@@ -1015,12 +917,12 @@ impl App {
             } else {
                 0
             });
-        let mut custom_overlay_edge_instances = Vec::with_capacity(overlay_edge_capacity);
+        let mut out = Vec::with_capacity(overlay_edge_capacity);
         if highlight_mode.uses_edges() {
-            if let Some(targets) = &targets {
+            if let Some(targets) = targets {
                 if let Some(hit) = &targets.hit {
                     append_axis_aligned_outline_edge_instance(
-                        &mut custom_overlay_edge_instances,
+                        &mut out,
                         hit.world_min(),
                         hit.world_max(),
                         OVERLAY_EDGE_TAG_TARGET,
@@ -1028,7 +930,7 @@ impl App {
                 }
                 if let Some(place) = &targets.place {
                     append_axis_aligned_outline_edge_instance(
-                        &mut custom_overlay_edge_instances,
+                        &mut out,
                         place.world_min(),
                         place.world_max(),
                         OVERLAY_EDGE_TAG_PLACE,
@@ -1039,11 +941,11 @@ impl App {
         // Wireframe placement preview: add outline edges for the placement
         // target independently of the edit-highlight edge mode.
         if self.placement_preview_mode == PlacementPreviewMode::Wireframe {
-            if let Some(targets) = &targets {
+            if let Some(targets) = targets {
                 if let Some(place) = &targets.place {
                     if !self.should_suppress_placement_preview(place, targets) {
                         append_axis_aligned_outline_edge_instance(
-                            &mut custom_overlay_edge_instances,
+                            &mut out,
                             place.world_min(),
                             place.world_max(),
                             OVERLAY_EDGE_TAG_PLACE,
@@ -1053,41 +955,150 @@ impl App {
             }
         }
         if self.multiplayer_stream_tree_diag_sample_ray_bounds_enabled {
-            for hit in &sample_ray_node_hits {
+            for hit in sample_ray_node_hits {
                 append_chunk_bounds_outline_edge_instance(
-                    &mut custom_overlay_edge_instances,
+                    &mut out,
                     hit.bounds.min,
                     hit.bounds.max,
                     overlay_edge_tag_for_sample_ray_hit(hit),
                 );
             }
         }
-        self.append_multiplayer_stream_tree_diag_overlay_instances(
-            &mut custom_overlay_edge_instances,
-        );
-        self.append_multiplayer_stream_tree_compare_overlay_instances(
-            &mut custom_overlay_edge_instances,
-        );
+        self.append_multiplayer_stream_tree_diag_overlay_instances(&mut out);
+        self.append_multiplayer_stream_tree_compare_overlay_instances(&mut out);
         if self.args.no_hud {
-            custom_overlay_edge_instances.clear();
+            out.clear();
         }
+        out
+    }
 
-        let mut vte_highlight_hit_min = None;
-        let mut vte_highlight_hit_max = [0.0f32; 4];
-        let mut vte_highlight_face_axis = 0u32;
-        let mut vte_highlight_face_sign = 0i32;
+    /// Compute the VTE face-highlight bounds from the current block targets.
+    fn compute_vte_highlight(
+        backend: RenderBackend,
+        highlight_mode: EditHighlightModeArg,
+        targets: Option<&scene::BlockEditTargets>,
+    ) -> (Option<[f32; 4]>, [f32; 4], u32, i32) {
+        let mut hit_min = None;
+        let mut hit_max = [0.0f32; 4];
+        let mut face_axis = 0u32;
+        let mut face_sign = 0i32;
         if backend == RenderBackend::VoxelTraversal && highlight_mode.uses_faces() {
-            if let Some(targets) = &targets {
+            if let Some(targets) = targets {
                 if let Some(hit) = &targets.hit {
-                    vte_highlight_hit_min = Some(hit.world_min());
-                    vte_highlight_hit_max = hit.world_max();
-                    vte_highlight_face_axis = targets.face_axis as u32;
-                    vte_highlight_face_sign = targets.face_sign as i32;
+                    hit_min = Some(hit.world_min());
+                    hit_max = hit.world_max();
+                    face_axis = targets.face_axis as u32;
+                    face_sign = targets.face_sign as i32;
                 }
             }
         }
+        (hit_min, hit_max, face_axis, face_sign)
+    }
 
-        let auto_screenshot = if self.gpu_screenshot_countdown > 1 {
+    /// Prepare all scene-targeting data needed for the render frame: block
+    /// edit targets, HUD tag/hit data, sample-ray BVH diagnostics, WAILA,
+    /// overlay edges, and VTE face-highlight bounds.
+    fn prepare_scene_targeting_data(
+        &mut self,
+        look_dir: [f32; 4],
+        edit_reach: f32,
+        view_matrix: &ndarray::Array2<f32>,
+        aspect: f32,
+        backend: RenderBackend,
+        highlight_mode: EditHighlightModeArg,
+    ) -> SceneTargetingData {
+        let mut hud_player_tags =
+            self.remote_player_tags(view_matrix, look_dir, self.focal_length_xy, aspect);
+        self.append_multiplayer_stream_tree_diag_hud_tags(
+            &mut hud_player_tags,
+            view_matrix,
+            self.focal_length_xy,
+            aspect,
+        );
+        let targets = if !self.menu_open
+            && self.mouse_grabbed
+            && (highlight_mode.uses_faces()
+                || highlight_mode.uses_edges()
+                || self.placement_preview_mode.needs_targets())
+        {
+            Some(self.scene.block_edit_targets(
+                self.camera.position,
+                look_dir,
+                edit_reach,
+                self.selected_block.scale_exp,
+            ))
+        } else {
+            None
+        };
+        let mut hud_target_hit_voxel = None;
+        let mut hud_target_hit_face = None;
+        if let Some(targets) = &targets {
+            hud_target_hit_voxel = targets.hit.map(|h| h.origin_i32());
+            if targets.face_sign != 0 && targets.hit.is_some() {
+                let mut face = [0i32; 4];
+                face[targets.face_axis as usize] = targets.face_sign as i32;
+                hud_target_hit_face = Some(face);
+            }
+        }
+        let sample_ray_node_hits = if !self.menu_open && self.mouse_grabbed {
+            self.scene.debug_render_bvh_ray_node_hits(
+                self.camera.position,
+                look_dir,
+                edit_reach,
+                self.multiplayer_stream_tree_diag_sample_ray_max_nodes
+                    .max(1),
+            )
+        } else {
+            Vec::new()
+        };
+        let hud_stream_first_node_desc = sample_ray_node_hits
+            .first()
+            .map(describe_sample_ray_hit_for_hud);
+        let hud_stream_final_solid_leaf_desc = sample_ray_node_hits
+            .iter()
+            .rev()
+            .find(|hit| {
+                matches!(
+                    hit.kind,
+                    DebugRayBvhNodeKind::LeafUniform { .. }
+                        | DebugRayBvhNodeKind::LeafChunkArray { .. }
+                )
+            })
+            .map(describe_sample_ray_hit_for_hud);
+
+        self.update_waila_target(look_dir, edit_reach);
+
+        let custom_overlay_edge_instances =
+            self.build_overlay_edges(targets.as_ref(), highlight_mode, &sample_ray_node_hits);
+        let (
+            vte_highlight_hit_min,
+            vte_highlight_hit_max,
+            vte_highlight_face_axis,
+            vte_highlight_face_sign,
+        ) = Self::compute_vte_highlight(backend, highlight_mode, targets.as_ref());
+
+        SceneTargetingData {
+            targets,
+            hud_player_tags,
+            hud_target_hit_voxel,
+            hud_target_hit_face,
+            hud_stream_first_node_desc,
+            hud_stream_final_solid_leaf_desc,
+            custom_overlay_edge_instances,
+            vte_highlight_hit_min,
+            vte_highlight_hit_max,
+            vte_highlight_face_axis,
+            vte_highlight_face_sign,
+        }
+    }
+
+    /// Resolve screenshot request state: decrement countdown, check manual
+    /// trigger, determine whether to take a screenshot this frame and whether
+    /// it is an auto-screenshot (exit after render).
+    ///
+    /// Returns `(take_screenshot, auto_screenshot)`.
+    fn resolve_screenshot_request(&mut self, command_screenshot_requested: bool) -> (bool, bool) {
+        let countdown_triggered = if self.gpu_screenshot_countdown > 1 {
             self.gpu_screenshot_countdown -= 1;
             false
         } else if self.gpu_screenshot_countdown == 1 {
@@ -1098,11 +1109,12 @@ impl App {
         };
         let manual_screenshot = self.input.take_screenshot();
         let mut take_screenshot = manual_screenshot || command_screenshot_requested;
-        if auto_screenshot && self.args.gpu_screenshot_source == GpuScreenshotSourceArg::Framebuffer
+        if countdown_triggered
+            && self.args.gpu_screenshot_source == GpuScreenshotSourceArg::Framebuffer
         {
             take_screenshot = true;
         }
-        let auto_screenshot = auto_screenshot || command_screenshot_requested;
+        let auto_screenshot = countdown_triggered || command_screenshot_requested;
         if take_screenshot {
             if let Some(parent) = self.args.screenshot_output.parent() {
                 if !parent.as_os_str().is_empty() {
@@ -1113,7 +1125,12 @@ impl App {
                 self.should_exit_after_render = true;
             }
         }
-        let vte_sweep_status = if let Some(state) = self.vte_sweep_state {
+        (take_screenshot, auto_screenshot)
+    }
+
+    /// Format the VTE sweep status string for the HUD.
+    fn vte_sweep_status_string(&self) -> String {
+        if let Some(state) = self.vte_sweep_state {
             let profiles = self.vte_sweep_profiles();
             let profile = profiles[state.profile_index];
             format!(
@@ -1126,109 +1143,22 @@ impl App {
             )
         } else {
             "off".to_string()
-        };
-        let egui_paint = if self.args.no_hud && !self.dev_console_open {
-            None
-        } else {
-            self.run_egui_frame()
-        };
-        let mut do_navigation_hud =
-            !self.menu_open && !self.dev_console_open && self.info_panel_mode != InfoPanelMode::Off;
-        if self.args.no_hud {
-            do_navigation_hud = false;
         }
-        let hud_readout_mode = if !self.menu_open
-            && !self.dev_console_open
-            && matches!(
-                self.info_panel_mode,
-                InfoPanelMode::VectorTable | InfoPanelMode::VectorTable2
-            ) {
-            HudReadoutMode::CompactVectors
-        } else {
-            HudReadoutMode::Full
-        };
-        let hud_rotation_label = self.current_info_hud_text(
-            pair,
-            look_dir,
-            edit_reach,
-            highlight_mode,
-            &vte_sweep_status,
-            hud_target_hit_voxel,
-            hud_target_hit_face,
-            hud_stream_first_node_desc.as_deref(),
-            hud_stream_final_solid_leaf_desc.as_deref(),
-        );
-        let hud_rotation_label = if self.args.no_hud {
-            None
-        } else {
-            hud_rotation_label
-        };
+    }
 
-        let render_options = RenderOptions {
-            do_raster: true,
-            render_backend: backend,
-            vte_max_trace_steps: self.vte_max_trace_steps,
-            vte_max_trace_distance: self.vte_max_trace_distance,
-            vte_display_mode: self.args.vte_display_mode.to_render_mode(),
-            vte_slice_layer: self.args.vte_slice_layer,
-            vte_thick_half_width: self.args.vte_thick_half_width,
-            vte_reference_compare: self.vte_reference_compare_enabled,
-            vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
-            vte_compare_slice_only: self.vte_compare_slice_only_enabled,
-            vte_integral_sky_emissive_tweak: self.vte_integral_sky_emissive_enabled,
-            vte_integral_sky_scale: self.vte_integral_sky_scale,
-            vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,
-            vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
-            vte_integral_log_merge_k: self.vte_integral_log_merge_k,
-            zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
-            zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
-            vte_highlight_hit_min: if self.args.no_hud {
-                None
-            } else {
-                vte_highlight_hit_min
-            },
-            vte_highlight_hit_max: if self.args.no_hud {
-                [0.0; 4]
-            } else {
-                vte_highlight_hit_max
-            },
-            vte_highlight_face_axis: if self.args.no_hud {
-                0
-            } else {
-                vte_highlight_face_axis
-            },
-            vte_highlight_face_sign: if self.args.no_hud {
-                0
-            } else {
-                vte_highlight_face_sign
-            },
-            do_navigation_hud,
-            custom_overlay_lines: Vec::new(),
-            custom_overlay_edge_instances,
-            take_framebuffer_screenshot: take_screenshot,
-            prepare_render_screenshot: auto_screenshot,
-            hud_readout_mode,
-            hud_rotation_label,
-            hud_target_hit_voxel,
-            hud_target_hit_face,
-            hud_player_tags: if self.args.no_hud {
-                Vec::new()
-            } else {
-                hud_player_tags
-            },
-            egui_paint,
-            ..Default::default()
-        };
-
-        let frame_params = FrameParams {
-            view_matrix,
-            time_ticks_ms: preview_time_ticks_ms,
-            focal_length_xy: self.focal_length_xy,
-            focal_length_zw: self.focal_length_zw,
-            render_options,
-        };
-        self.set_runtime_profile_update_ms(gameplay_update_start.elapsed().as_secs_f64() * 1000.0);
-
+    /// Submit the frame to the VTE or tetra rasterisation backend.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_render_frame(
+        &mut self,
+        frame_params: FrameParams,
+        backend: RenderBackend,
+        look_dir: [f32; 4],
+        preview_time_s: f32,
+        preview_instance: common::ModelInstance,
+        targets: Option<&scene::BlockEditTargets>,
+        disable_remote_non_voxel: bool,
+        vte_disable_entities: bool,
+    ) {
         if backend == RenderBackend::VoxelTraversal {
             let mut vte_non_voxel_instances = if vte_disable_entities || disable_remote_non_voxel {
                 Vec::new()
@@ -1245,15 +1175,11 @@ impl App {
             if self.vte_overlay_raster_enabled {
                 preview_overlay_instances = std::slice::from_ref(&preview_instance);
             } else if !vte_disable_entities {
-                // Default: render held-block preview through Stage A entity path.
-                // Skipped when R4D_VTE_DISABLE_ENTITIES is set so the entire non-voxel
-                // BVH query (including preview) is fused off for isolation profiling.
                 vte_non_voxel_instances.push(preview_instance);
             }
-            // Ghost placement preview: render a semi-transparent block at the
-            // placement target position via the entity pipeline.
+            // Ghost placement preview
             if !vte_disable_entities && self.placement_preview_mode == PlacementPreviewMode::Ghost {
-                if let Some(targets) = &targets {
+                if let Some(targets) = targets {
                     if let Some(place) = &targets.place {
                         if !self.should_suppress_placement_preview(place, targets) {
                             vte_non_voxel_instances.push(build_ghost_placement_instance(
@@ -1275,13 +1201,8 @@ impl App {
             );
             let voxel_build_elapsed_ms = voxel_build_start.elapsed().as_secs_f64() * 1000.0;
 
-            // Install pre-built GPU buffers from background rebuild (avoids
-            // multi-second synchronous upload stall).
+            // Install pre-built GPU buffers from background rebuild.
             if let Some(gpu_buffers) = voxel_result.new_gpu_buffers {
-                // Use the generation at which the GPU buffers were built, not
-                // the frame_data's current generation — deltas applied after the
-                // swap advance the generation, and the renderer must detect the
-                // delta as dirty to upload it.
                 let gen = voxel_result
                     .gpu_buffers_generation
                     .unwrap_or(voxel_result.frame_data.metadata_generation);
@@ -1291,7 +1212,7 @@ impl App {
                     .install_new_voxel_gpu_buffers(gpu_buffers, gen);
             }
 
-            // If we are playing without a live server connection, do not keep the loading gate up.
+            // World-ready gate
             if !self.world_ready
                 && self.app_state == AppState::Playing
                 && self.multiplayer.is_none()
@@ -1299,8 +1220,6 @@ impl App {
                 self.world_ready = true;
                 eprintln!("World ready: no multiplayer connection");
             }
-            // Failsafe: do not let the loading gate stick forever if the first
-            // world subtree patch is delayed or dropped.
             if !self.world_ready
                 && self.app_state == AppState::Playing
                 && self.multiplayer.is_some()
@@ -1360,114 +1279,319 @@ impl App {
                 render_submit_start.elapsed().as_secs_f64() * 1000.0,
             );
         }
+    }
 
-        let post_render_start = Instant::now();
-        if auto_screenshot {
-            if let Some(parent) = self.args.screenshot_output.parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+    /// Save an auto-screenshot (render-buffer or framebuffer capture) and
+    /// write the JSON sidecar metadata.
+    fn save_auto_screenshot(&mut self) {
+        if let Some(parent) = self.args.screenshot_output.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
             }
-            match self.args.gpu_screenshot_source {
-                GpuScreenshotSourceArg::RenderBuffer => {
-                    self.rcx.as_mut().unwrap().save_rendered_frame_png(
-                        self.args
-                            .screenshot_output
-                            .to_str()
-                            .unwrap_or("frames/gpu_render.png"),
-                    );
-                }
-                GpuScreenshotSourceArg::Framebuffer => {
-                    if let Some(src_path) = latest_framebuffer_screenshot_path() {
-                        let webp_path = self.args.screenshot_output.with_extension("webp");
-                        if let Err(err) = std::fs::copy(&src_path, &webp_path) {
+        }
+        match self.args.gpu_screenshot_source {
+            GpuScreenshotSourceArg::RenderBuffer => {
+                self.rcx.as_mut().unwrap().save_rendered_frame_png(
+                    self.args
+                        .screenshot_output
+                        .to_str()
+                        .unwrap_or("frames/gpu_render.png"),
+                );
+            }
+            GpuScreenshotSourceArg::Framebuffer => {
+                if let Some(src_path) = latest_framebuffer_screenshot_path() {
+                    let webp_path = self.args.screenshot_output.with_extension("webp");
+                    if let Err(err) = std::fs::copy(&src_path, &webp_path) {
+                        eprintln!(
+                            "Failed to copy framebuffer screenshot {} -> {}: {}",
+                            src_path.display(),
+                            webp_path.display(),
+                            err
+                        );
+                    }
+                    match image::open(&src_path) {
+                        Ok(img) => {
+                            if let Err(err) = img.save(&self.args.screenshot_output) {
+                                eprintln!(
+                                    "Failed to save {}: {err}",
+                                    self.args.screenshot_output.display()
+                                );
+                            } else {
+                                println!("Saved PNG to {}", self.args.screenshot_output.display());
+                            }
+                        }
+                        Err(err) => {
                             eprintln!(
-                                "Failed to copy framebuffer screenshot {} -> {}: {}",
+                                "Failed to decode framebuffer screenshot {}: {}",
                                 src_path.display(),
-                                webp_path.display(),
                                 err
                             );
                         }
-                        match image::open(&src_path) {
-                            Ok(img) => {
-                                if let Err(err) = img.save(&self.args.screenshot_output) {
-                                    eprintln!(
-                                        "Failed to save {}: {err}",
-                                        self.args.screenshot_output.display()
-                                    );
-                                } else {
-                                    println!(
-                                        "Saved PNG to {}",
-                                        self.args.screenshot_output.display()
-                                    );
-                                }
-                            }
-                            Err(err) => {
-                                eprintln!(
-                                    "Failed to decode framebuffer screenshot {}: {}",
-                                    src_path.display(),
-                                    err
-                                );
-                            }
-                        }
-                    } else {
-                        eprintln!(
-                            "No framebuffer screenshot found under frames/ after auto-capture."
-                        );
                     }
+                } else {
+                    eprintln!("No framebuffer screenshot found under frames/ after auto-capture.");
                 }
             }
-            // Write JSON sidecar metadata
-            {
-                let json_path = self.args.screenshot_output.with_extension("json");
-                let window_size = self
-                    .rcx
-                    .as_ref()
-                    .and_then(|rcx| rcx.window.as_ref())
-                    .map(|w| {
-                        let size = w.inner_size();
-                        [size.width, size.height]
-                    })
-                    .unwrap_or([0, 0]);
-
-                let metadata = serde_json::json!({
-                    "render_width": self.args.width,
-                    "render_height": self.args.height,
-                    "render_layers": self.args.layers,
-                    "window_width": window_size[0],
-                    "window_height": window_size[1],
-                    "camera_position": [
-                        self.camera.position[0],
-                        self.camera.position[1],
-                        self.camera.position[2],
-                        self.camera.position[3],
-                    ],
-                    "camera_angles_rad": [
-                        self.camera.yaw,
-                        self.camera.pitch,
-                        self.camera.xw_angle,
-                        self.camera.zw_angle,
-                    ],
-                    "backend": format!("{:?}", self.args.backend),
-                    "vte_display_mode": format!("{:?}", self.args.vte_display_mode),
-                    "gpu_screenshot_source": format!("{:?}", self.args.gpu_screenshot_source),
-                    "world_file": if self.args.load_world {
-                        Some(self.args.world_file.to_string_lossy().into_owned())
-                    } else {
-                        None
-                    },
-                    "scene": format!("{:?}", self.args.scene),
-                    "no_hud": self.args.no_hud,
-                });
-
-                match std::fs::write(&json_path, serde_json::to_string_pretty(&metadata).unwrap()) {
-                    Ok(()) => println!("Saved metadata to {}", json_path.display()),
-                    Err(err) => {
-                        eprintln!("Failed to save metadata {}: {}", json_path.display(), err)
-                    }
-                }
+        }
+        // Write JSON sidecar metadata
+        let json_path = self.args.screenshot_output.with_extension("json");
+        let window_size = self
+            .rcx
+            .as_ref()
+            .and_then(|rcx| rcx.window.as_ref())
+            .map(|w| {
+                let size = w.inner_size();
+                [size.width, size.height]
+            })
+            .unwrap_or([0, 0]);
+        let metadata = serde_json::json!({
+            "render_width": self.args.width,
+            "render_height": self.args.height,
+            "render_layers": self.args.layers,
+            "window_width": window_size[0],
+            "window_height": window_size[1],
+            "camera_position": [
+                self.camera.position[0],
+                self.camera.position[1],
+                self.camera.position[2],
+                self.camera.position[3],
+            ],
+            "camera_angles_rad": [
+                self.camera.yaw,
+                self.camera.pitch,
+                self.camera.xw_angle,
+                self.camera.zw_angle,
+            ],
+            "backend": format!("{:?}", self.args.backend),
+            "vte_display_mode": format!("{:?}", self.args.vte_display_mode),
+            "gpu_screenshot_source": format!("{:?}", self.args.gpu_screenshot_source),
+            "world_file": if self.args.load_world {
+                Some(self.args.world_file.to_string_lossy().into_owned())
+            } else {
+                None
+            },
+            "scene": format!("{:?}", self.args.scene),
+            "no_hud": self.args.no_hud,
+        });
+        match std::fs::write(&json_path, serde_json::to_string_pretty(&metadata).unwrap()) {
+            Ok(()) => println!("Saved metadata to {}", json_path.display()),
+            Err(err) => {
+                eprintln!("Failed to save metadata {}: {}", json_path.display(), err)
             }
-            self.should_exit_after_render = true;
+        }
+        self.should_exit_after_render = true;
+    }
+
+    pub(super) fn update_and_render(&mut self) {
+        let frame_start = Instant::now();
+        self.begin_runtime_profile_frame();
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32();
+        self.last_frame = now;
+
+        if self.app_state == AppState::MainMenu {
+            let main_menu_update_start = Instant::now();
+            self.update_and_render_main_menu(dt);
+            self.set_runtime_profile_update_ms(
+                main_menu_update_start.elapsed().as_secs_f64() * 1000.0,
+            );
+            if self.perf_suite_active() {
+                self.advance_perf_suite_after_frame(frame_start);
+            } else {
+                self.record_runtime_profile_sample(frame_start);
+            }
+            self.persist_settings_if_needed(false);
+            return;
+        }
+
+        let gameplay_update_start = Instant::now();
+        self.poll_multiplayer_events();
+        self.smooth_remote_players(dt, now);
+        self.smooth_remote_entities(dt);
+        if let Some(scenario_index) = self
+            .perf_suite_state
+            .as_ref()
+            .map(|state| state.scenario_index)
+        {
+            self.set_perf_suite_camera_pose(scenario_index);
+        }
+
+        let command_screenshot_requested = self.process_command_queue();
+
+        self.apply_input_and_camera(dt);
+
+        // Determine active rotation pair
+        let pair = self.active_rotation_pair();
+
+        let edit_reach = self
+            .args
+            .edit_reach
+            .clamp(BLOCK_EDIT_REACH_MIN, BLOCK_EDIT_REACH_MAX);
+
+        self.apply_physics_and_editing(dt, edit_reach, now);
+
+        let look_dir = self.current_look_direction();
+        self.send_multiplayer_player_update(now, look_dir);
+        if self.inventory_dirty {
+            self.inventory_dirty = false;
+            self.send_inventory_sync();
+        }
+        self.send_multiplayer_chunk_sample_diag_request();
+        let preview_elapsed = now - self.start_time;
+        let preview_time_s = preview_elapsed.as_secs_f32();
+        let preview_time_ticks_ms = preview_elapsed.as_millis() as u32;
+        let aspect = self
+            .rcx
+            .as_ref()
+            .and_then(|rcx| rcx.window.as_ref())
+            .map(|window| {
+                let size = window.inner_size();
+                size.width.max(1) as f32 / size.height.max(1) as f32
+            })
+            .unwrap_or_else(|| self.args.width.max(1) as f32 / self.args.height.max(1) as f32);
+        let preview_instance = build_place_preview_instance(
+            &self.camera,
+            &self.selected_block,
+            preview_time_s,
+            self.control_scheme,
+            aspect,
+            &self.material_resolver,
+        );
+
+        let view_matrix = self.current_view_matrix();
+        let backend = self.args.backend.to_render_backend();
+        let disable_remote_non_voxel = env_flag_enabled("R4D_DISABLE_REMOTE_NON_VOXEL");
+        let vte_disable_entities = env_flag_enabled("R4D_VTE_DISABLE_ENTITIES");
+        let highlight_mode = self.args.edit_highlight_mode;
+
+        let scene_data = self.prepare_scene_targeting_data(
+            look_dir,
+            edit_reach,
+            &view_matrix,
+            aspect,
+            backend,
+            highlight_mode,
+        );
+
+        let (take_screenshot, auto_screenshot) =
+            self.resolve_screenshot_request(command_screenshot_requested);
+        let vte_sweep_status = self.vte_sweep_status_string();
+        let egui_paint = if self.args.no_hud && !self.dev_console_open {
+            None
+        } else {
+            self.run_egui_frame()
+        };
+        let mut do_navigation_hud =
+            !self.menu_open && !self.dev_console_open && self.info_panel_mode != InfoPanelMode::Off;
+        if self.args.no_hud {
+            do_navigation_hud = false;
+        }
+        let hud_readout_mode = if !self.menu_open
+            && !self.dev_console_open
+            && matches!(
+                self.info_panel_mode,
+                InfoPanelMode::VectorTable | InfoPanelMode::VectorTable2
+            ) {
+            HudReadoutMode::CompactVectors
+        } else {
+            HudReadoutMode::Full
+        };
+        let hud_rotation_label = self.current_info_hud_text(
+            pair,
+            look_dir,
+            edit_reach,
+            highlight_mode,
+            &vte_sweep_status,
+            scene_data.hud_target_hit_voxel,
+            scene_data.hud_target_hit_face,
+            scene_data.hud_stream_first_node_desc.as_deref(),
+            scene_data.hud_stream_final_solid_leaf_desc.as_deref(),
+        );
+        let hud_rotation_label = if self.args.no_hud {
+            None
+        } else {
+            hud_rotation_label
+        };
+
+        let render_options = RenderOptions {
+            do_raster: true,
+            render_backend: backend,
+            vte_max_trace_steps: self.vte_max_trace_steps,
+            vte_max_trace_distance: self.vte_max_trace_distance,
+            vte_display_mode: self.args.vte_display_mode.to_render_mode(),
+            vte_slice_layer: self.args.vte_slice_layer,
+            vte_thick_half_width: self.args.vte_thick_half_width,
+            vte_reference_compare: self.vte_reference_compare_enabled,
+            vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
+            vte_compare_slice_only: self.vte_compare_slice_only_enabled,
+            vte_integral_sky_emissive_tweak: self.vte_integral_sky_emissive_enabled,
+            vte_integral_sky_scale: self.vte_integral_sky_scale,
+            vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,
+            vte_integral_log_merge_tweak: self.vte_integral_log_merge_enabled,
+            vte_integral_log_merge_k: self.vte_integral_log_merge_k,
+            zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
+            zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
+            vte_highlight_hit_min: if self.args.no_hud {
+                None
+            } else {
+                scene_data.vte_highlight_hit_min
+            },
+            vte_highlight_hit_max: if self.args.no_hud {
+                [0.0; 4]
+            } else {
+                scene_data.vte_highlight_hit_max
+            },
+            vte_highlight_face_axis: if self.args.no_hud {
+                0
+            } else {
+                scene_data.vte_highlight_face_axis
+            },
+            vte_highlight_face_sign: if self.args.no_hud {
+                0
+            } else {
+                scene_data.vte_highlight_face_sign
+            },
+            do_navigation_hud,
+            custom_overlay_lines: Vec::new(),
+            custom_overlay_edge_instances: scene_data.custom_overlay_edge_instances,
+            take_framebuffer_screenshot: take_screenshot,
+            prepare_render_screenshot: auto_screenshot,
+            hud_readout_mode,
+            hud_rotation_label,
+            hud_target_hit_voxel: scene_data.hud_target_hit_voxel,
+            hud_target_hit_face: scene_data.hud_target_hit_face,
+            hud_player_tags: if self.args.no_hud {
+                Vec::new()
+            } else {
+                scene_data.hud_player_tags
+            },
+            egui_paint,
+            ..Default::default()
+        };
+
+        let frame_params = FrameParams {
+            view_matrix,
+            time_ticks_ms: preview_time_ticks_ms,
+            focal_length_xy: self.focal_length_xy,
+            focal_length_zw: self.focal_length_zw,
+            render_options,
+        };
+        self.set_runtime_profile_update_ms(gameplay_update_start.elapsed().as_secs_f64() * 1000.0);
+
+        self.dispatch_render_frame(
+            frame_params,
+            backend,
+            look_dir,
+            preview_time_s,
+            preview_instance,
+            scene_data.targets.as_ref(),
+            disable_remote_non_voxel,
+            vte_disable_entities,
+        );
+
+        let post_render_start = Instant::now();
+        if auto_screenshot {
+            self.save_auto_screenshot();
         }
 
         self.advance_vte_runtime_sweep_after_frame();

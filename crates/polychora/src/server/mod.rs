@@ -26,8 +26,8 @@ use self::spawn_logic::{
 };
 use self::types::{
     ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityLifecycle, EntityRecord,
-    EntityRecordSummary, LiveReplicationFrame, MobNavCell, MobNavPathResult, MobNavigationState,
-    MobState, PersistedMobEntry, PlayerState, QueuedExplosionEvent, QueuedPlayerMovementModifier,
+    EntityRecordSummary, LiveReplicationFrame, MobNavPathResult, MobNavigationState, MobState,
+    PersistedMobEntry, PlayerState, QueuedExplosionEvent, QueuedPlayerMovementModifier,
 };
 use self::world_field::{QueryDetail, QueryVolume, ServerWorldOverlay, WorldField};
 use crate::shared::entity_types::{EntityCategory, MobLocomotionMode, ENTITY_PLAYER_AVATAR};

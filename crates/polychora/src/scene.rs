@@ -20,8 +20,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use vulkano::memory::allocator::MemoryAllocator;
 
+mod chunk_encoder;
 mod collision;
+mod delta_patcher;
 mod editing;
+mod frame_builder;
 mod patching;
 pub(crate) mod render_cache;
 mod voxel_runtime;
