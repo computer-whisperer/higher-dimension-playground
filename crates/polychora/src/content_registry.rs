@@ -2,6 +2,7 @@ use crate::shared::voxel::BlockData;
 use polychora_plugin_api::block::BlockCategory;
 use polychora_plugin_api::content_ids;
 use polychora_plugin_api::entity::{EntityCategory, EntitySimConfig};
+use polychora_plugin_api::manifest::{ItemThumbnail, ItemWorldModel};
 use polychora_plugin_api::texture::TextureRef;
 use std::collections::HashMap;
 
@@ -258,6 +259,10 @@ pub struct ItemEntry {
     pub name: String,
     pub max_stack_size: u32,
     pub color_hint: [u8; 3],
+    /// In-world model texture palette for dropped item entities.
+    pub world_model: ItemWorldModel,
+    /// Inventory thumbnail texture.
+    pub thumbnail: ItemThumbnail,
 }
 
 impl ItemEntry {
@@ -504,6 +509,80 @@ impl ContentRegistry {
     /// Iterate all registered items.
     pub fn all_items(&self) -> impl Iterator<Item = &ItemEntry> {
         self.items.values()
+    }
+
+    /// Resolve the texture palette for rendering an item in the world.
+    ///
+    /// For engine-internal items (ns=0):
+    /// - ITEM_BLOCK: decodes BlockItemMeta → returns the block's texture
+    /// - ITEM_SPAWN_EGG: decodes SpawnEggMeta → returns the entity's model_textures
+    ///
+    /// For plugin items: returns the declared `world_model.textures`.
+    /// Fallback: empty vec (renderer will use default appearance).
+    pub fn resolve_item_world_textures(
+        &self,
+        item: &crate::shared::protocol::Item,
+    ) -> Vec<TextureRef> {
+        use crate::shared::item_types::{BlockItemMeta, SpawnEggMeta, ITEM_BLOCK, ITEM_SPAWN_EGG};
+
+        let key = (item.namespace, item.item_type);
+
+        if key == ITEM_BLOCK {
+            if let Some(meta) = BlockItemMeta::decode(&item.data) {
+                if let Some(block) = self.resolve_block_entry(meta.namespace, meta.block_type) {
+                    return vec![block.texture];
+                }
+            }
+            return Vec::new();
+        }
+
+        if key == ITEM_SPAWN_EGG {
+            if let Some(meta) = SpawnEggMeta::decode(&item.data) {
+                if let Some(entity) =
+                    self.resolve_entity_entry(meta.entity_namespace, meta.entity_type)
+                {
+                    return entity.model_textures.clone();
+                }
+            }
+            return Vec::new();
+        }
+
+        // Plugin item: use declared world model textures
+        self.items
+            .get(&key)
+            .map(|e| e.world_model.textures.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resolve the thumbnail texture for rendering an item in the inventory UI.
+    ///
+    /// For engine-internal items (ns=0):
+    /// - ITEM_BLOCK: decodes BlockItemMeta → returns the block's texture
+    /// - ITEM_SPAWN_EGG: returns None (uses special spawn egg icon)
+    ///
+    /// For plugin items: returns the declared `thumbnail.texture`.
+    pub fn resolve_item_thumbnail_texture(
+        &self,
+        item: &crate::shared::protocol::Item,
+    ) -> Option<TextureRef> {
+        use crate::shared::item_types::{BlockItemMeta, ITEM_BLOCK, ITEM_SPAWN_EGG};
+
+        let key = (item.namespace, item.item_type);
+
+        if key == ITEM_BLOCK {
+            let meta = BlockItemMeta::decode(&item.data)?;
+            let block = self.resolve_block_entry(meta.namespace, meta.block_type)?;
+            return Some(block.texture);
+        }
+
+        if key == ITEM_SPAWN_EGG {
+            return None; // Spawn eggs use special icon rendering
+        }
+
+        // Plugin item: use declared thumbnail texture
+        self.items
+            .get(&key)
+            .and_then(|e| e.thumbnail.texture)
     }
 
     // -----------------------------------------------------------------------
@@ -938,5 +1017,62 @@ mod tests {
         assert_eq!(registry.item_color(999, 999), [128, 128, 128]);
         assert_eq!(registry.item_max_stack_size(999, 999), 64);
         assert!(registry.item_entry(999, 999).is_none());
+    }
+
+    #[test]
+    fn resolve_item_world_textures_for_block_item() {
+        use crate::shared::protocol::ItemStack;
+
+        let registry = full_registry();
+
+        // A stone block item should resolve to Stone's texture
+        let stone_stack = ItemStack::block(content_ids::CONTENT_NS, content_ids::BLOCK_STONE, 1, 0);
+        let textures = registry.resolve_item_world_textures(&stone_stack.item);
+        assert_eq!(textures.len(), 1, "block item should resolve to 1 texture");
+        // Stone's texture should be TEX_STONE
+        assert_eq!(
+            textures[0].texture_id,
+            polychora_plugin_api::texture::builtin_textures::TEX_STONE,
+        );
+
+        // A spawn egg item should resolve to the entity's model textures
+        let seeker = registry.entity_lookup_by_name("seeker").unwrap();
+        let egg_stack = ItemStack::spawn_egg(seeker.namespace, seeker.entity_type);
+        let textures = registry.resolve_item_world_textures(&egg_stack.item);
+        assert!(
+            !textures.is_empty(),
+            "spawn egg should resolve to entity model textures",
+        );
+        assert_eq!(
+            textures.len(),
+            seeker.model_textures.len(),
+            "spawn egg textures should match entity model textures",
+        );
+    }
+
+    #[test]
+    fn resolve_item_thumbnail_texture_for_block_item() {
+        use crate::shared::protocol::ItemStack;
+
+        let registry = full_registry();
+
+        // A stone block should resolve its thumbnail to Stone's texture
+        let stone_stack = ItemStack::block(content_ids::CONTENT_NS, content_ids::BLOCK_STONE, 1, 0);
+        let thumb = registry.resolve_item_thumbnail_texture(&stone_stack.item);
+        assert!(thumb.is_some(), "block item should have a thumbnail texture");
+        assert_eq!(
+            thumb.unwrap().texture_id,
+            polychora_plugin_api::texture::builtin_textures::TEX_STONE,
+        );
+
+        // Spawn egg thumbnail should be None (uses special icon)
+        let seeker = registry.entity_lookup_by_name("seeker").unwrap();
+        let egg_stack = ItemStack::spawn_egg(seeker.namespace, seeker.entity_type);
+        assert!(
+            registry
+                .resolve_item_thumbnail_texture(&egg_stack.item)
+                .is_none(),
+            "spawn egg should not have a thumbnail texture",
+        );
     }
 }

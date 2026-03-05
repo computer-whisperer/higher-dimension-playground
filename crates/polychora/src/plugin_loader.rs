@@ -226,6 +226,8 @@ pub fn populate_registry_from_plugin(
             name: item.name.clone(),
             max_stack_size: item.max_stack_size,
             color_hint: item.color_hint,
+            world_model: item.world_model.clone(),
+            thumbnail: item.thumbnail.clone(),
         });
     }
 

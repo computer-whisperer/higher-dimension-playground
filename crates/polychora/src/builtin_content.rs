@@ -1,4 +1,5 @@
 use crate::content_registry::{ContentRegistry, EntityEntry, ItemEntry};
+use polychora_plugin_api::manifest::{ItemThumbnail, ItemWorldModel};
 use crate::shared::entity_types::{EntitySimConfig, SimulationMode, ENTITY_ITEM_STACK_TYPE};
 use polychora_plugin_api::entity::{EntityCategory, MobLocomotionMode};
 use polychora_plugin_api::texture::builtin_textures;
@@ -77,12 +78,17 @@ fn register_item_stack_entity(registry: &mut ContentRegistry) {
 fn register_builtin_items(registry: &mut ContentRegistry) {
     use crate::shared::item_types::{ITEM_BLOCK, ITEM_SPAWN_EGG};
 
+    // ITEM_BLOCK and ITEM_SPAWN_EGG have empty world_model/thumbnail because
+    // their visuals are resolved dynamically from item.data (the block type or
+    // entity type encoded inside the item).  See ContentRegistry::resolve_item_*().
     registry.register_item(ItemEntry {
         namespace: ITEM_BLOCK.0,
         item_type: ITEM_BLOCK.1,
         name: "Block".into(),
         max_stack_size: 64,
         color_hint: [160, 160, 160],
+        world_model: ItemWorldModel::default(),
+        thumbnail: ItemThumbnail::default(),
     });
 
     registry.register_item(ItemEntry {
@@ -91,6 +97,8 @@ fn register_builtin_items(registry: &mut ContentRegistry) {
         name: "Spawn Egg".into(),
         max_stack_size: 1,
         color_hint: [255, 200, 100],
+        world_model: ItemWorldModel::default(),
+        thumbnail: ItemThumbnail::default(),
     });
 }
 

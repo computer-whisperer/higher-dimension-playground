@@ -1866,12 +1866,24 @@ impl App {
             }
 
             // Resolve entity texture palette to GPU material tokens.
+            // For item stack entities, decode the contained ItemStack and resolve
+            // its textures through the item visual pipeline instead.
             let gpu_mats: [u32; 10] = {
-                let textures = self
-                    .content_registry
-                    .entity_lookup(entity.entity_type_ns, entity.entity_type)
-                    .map(|e| &e.model_textures[..])
-                    .unwrap_or(&[]);
+                let textures: Vec<polychora_plugin_api::texture::TextureRef> =
+                    if type_key == ENTITY_ITEM_STACK {
+                        // Decode ItemStack from entity data and resolve item textures
+                        polychora::shared::protocol::ItemStack::decode_from_cbor(&entity.data)
+                            .map(|stack| {
+                                self.content_registry
+                                    .resolve_item_world_textures(&stack.item)
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        self.content_registry
+                            .entity_lookup(entity.entity_type_ns, entity.entity_type)
+                            .map(|e| e.model_textures.clone())
+                            .unwrap_or_default()
+                    };
                 let mut mats = [7u32; 10]; // fallback to Purple for all slots
                 for (i, t) in textures.iter().enumerate().take(10) {
                     mats[i] = self

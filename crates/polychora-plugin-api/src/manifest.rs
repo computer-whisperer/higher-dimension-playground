@@ -49,6 +49,26 @@ pub struct EntityDeclaration {
     pub sim_config: Option<EntitySimConfig>,
 }
 
+/// How an item renders as a dropped entity in the world.
+///
+/// Contains a texture palette (like entity `model_textures`) used for the
+/// in-world floating item model.  If `textures` is empty, the renderer falls
+/// back to a single cube colored by `color_hint`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ItemWorldModel {
+    pub textures: Vec<TextureRef>,
+}
+
+/// How an item renders as a thumbnail in the inventory UI.
+///
+/// If `texture` is set, the UI can render a GPU-rendered cube icon using that
+/// texture (like block icons in the material icon sheet).  If `None`, the UI
+/// falls back to a flat color swatch from `color_hint`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ItemThumbnail {
+    pub texture: Option<TextureRef>,
+}
+
 /// An item type declared by a plugin.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ItemDeclaration {
@@ -58,6 +78,12 @@ pub struct ItemDeclaration {
     pub max_stack_size: u32,
     #[serde(default)]
     pub color_hint: [u8; 3],
+    /// In-world model configuration for dropped item entities.
+    #[serde(default)]
+    pub world_model: ItemWorldModel,
+    /// Inventory thumbnail configuration.
+    #[serde(default)]
+    pub thumbnail: ItemThumbnail,
 }
 
 fn default_max_stack_size() -> u32 {
@@ -134,6 +160,18 @@ mod tests {
                 name: String::from("TestItem"),
                 max_stack_size: 16,
                 color_hint: [255, 128, 0],
+                world_model: ItemWorldModel {
+                    textures: vec![TextureRef {
+                        namespace: 0,
+                        texture_id: 0xb3b1799d,
+                    }],
+                },
+                thumbnail: ItemThumbnail {
+                    texture: Some(TextureRef {
+                        namespace: 0,
+                        texture_id: 0xb3b1799d,
+                    }),
+                },
             }],
             textures: vec![TextureDeclaration {
                 texture_id: 0xaabbccdd,
