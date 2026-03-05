@@ -205,23 +205,10 @@ fn assert_tree_matches_expected_uniform_map(
 }
 
 fn assert_tree_non_overlapping(node: &RegionTreeCore) {
-    fn contains_bounds(outer: Aabb4i, inner: Aabb4i) -> bool {
-        outer.is_valid()
-            && inner.is_valid()
-            && outer.min[0] <= inner.min[0]
-            && outer.min[1] <= inner.min[1]
-            && outer.min[2] <= inner.min[2]
-            && outer.min[3] <= inner.min[3]
-            && outer.max[0] >= inner.max[0]
-            && outer.max[1] >= inner.max[1]
-            && outer.max[2] >= inner.max[2]
-            && outer.max[3] >= inner.max[3]
-    }
-
     if let RegionNodeKind::Branch(children) = &node.kind {
         for child in children {
             assert!(
-                contains_bounds(node.bounds, child.bounds),
+                node.bounds.contains_bounds(&child.bounds),
                 "child {:?}->{:?} escapes parent {:?}->{:?}",
                 child.bounds.min,
                 child.bounds.max,

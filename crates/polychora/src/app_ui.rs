@@ -303,16 +303,6 @@ impl App {
     }
 
     fn draw_settings_advanced(&mut self, ui: &mut egui::Ui) {
-        let mut y_cache_enabled = self.vte_y_slice_lookup_cache_enabled;
-        if ui
-            .checkbox(&mut y_cache_enabled, "Y-Slice Lookup Cache")
-            .changed()
-        {
-            self.toggle_vte_y_slice_lookup_cache();
-        }
-
-        ui.separator();
-
         let mut sky_emissive_tweak = self.vte_integral_sky_emissive_enabled;
         if ui
             .checkbox(&mut sky_emissive_tweak, "Integral Sky+Emissive Tweak")

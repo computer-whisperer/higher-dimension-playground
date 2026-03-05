@@ -25,7 +25,6 @@ pub(super) struct CliOverrides {
     pub player_name: bool,
     pub audio_volume: bool,
     pub audio_spatial_falloff_power: bool,
-    pub vte_y_slice_lookup_cache: bool,
     pub vte_integral_sky_emissive_tweak: bool,
     pub vte_integral_sky_scale: bool,
     pub vte_integral_hit_emissive_boost: bool,
@@ -52,7 +51,6 @@ impl CliOverrides {
                 "--audio-spatial-falloff-power",
                 None,
             ),
-            vte_y_slice_lookup_cache: arg_present(&raw_args, "--vte-y-slice-lookup-cache", None),
             vte_integral_sky_emissive_tweak: arg_present(
                 &raw_args,
                 "--vte-integral-sky-emissive-tweak",
@@ -101,7 +99,6 @@ pub(super) struct PersistedSettings {
     pub render_layers: u32,
     pub audio_volume: f32,
     pub audio_spatial_falloff_power: f32,
-    pub vte_y_slice_lookup_cache_enabled: bool,
     pub vte_integral_sky_emissive_enabled: bool,
     pub vte_integral_sky_scale: f32,
     pub vte_integral_hit_emissive_boost: f32,
@@ -134,7 +131,6 @@ impl Default for PersistedSettings {
             render_layers: DEFAULT_RENDER_LAYERS,
             audio_volume: DEFAULT_AUDIO_VOLUME,
             audio_spatial_falloff_power: DEFAULT_AUDIO_SPATIAL_FALLOFF_POWER,
-            vte_y_slice_lookup_cache_enabled: true,
             vte_integral_sky_emissive_enabled: true,
             vte_integral_sky_scale: 0.25,
             vte_integral_hit_emissive_boost: 0.025,
@@ -376,9 +372,6 @@ pub(super) fn apply_settings_to_args(
     if !cli_overrides.player_name && args.player_name.is_none() {
         args.player_name = Some(settings.main_menu_player_name.clone());
     }
-    if !cli_overrides.vte_y_slice_lookup_cache {
-        args.vte_y_slice_lookup_cache = settings.vte_y_slice_lookup_cache_enabled;
-    }
     if !cli_overrides.vte_integral_sky_emissive_tweak {
         args.vte_integral_sky_emissive_tweak = settings.vte_integral_sky_emissive_enabled;
     }
@@ -461,7 +454,6 @@ impl App {
             render_layers: self.args.layers,
             audio_volume: self.audio.master_volume,
             audio_spatial_falloff_power: self.audio.spatial_falloff_power,
-            vte_y_slice_lookup_cache_enabled: self.vte_y_slice_lookup_cache_enabled,
             vte_integral_sky_emissive_enabled: self.vte_integral_sky_emissive_enabled,
             vte_integral_sky_scale: self.vte_integral_sky_scale,
             vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,

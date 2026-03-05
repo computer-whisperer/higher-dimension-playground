@@ -38,6 +38,7 @@ use common::ModelTetrahedron;
 use exr::prelude::WritableImage;
 use glam::{Vec2, Vec4};
 use image::{ImageBuffer, Rgba};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
@@ -394,6 +395,29 @@ fn model_instance_is_finite(instance: &common::ModelInstance) -> bool {
         }
     }
     true
+}
+
+/// Filter out `ModelInstance`s with non-finite transforms.  Returns the
+/// original slice (borrowed) when every element is finite, avoiding
+/// allocation on the common path.  `dropped` is incremented for each
+/// discarded instance.
+fn filter_finite_instances<'a>(
+    instances: &'a [common::ModelInstance],
+    dropped: &mut usize,
+) -> Cow<'a, [common::ModelInstance]> {
+    if instances.iter().all(model_instance_is_finite) {
+        Cow::Borrowed(instances)
+    } else {
+        let mut filtered = Vec::with_capacity(instances.len());
+        for instance in instances.iter().copied() {
+            if model_instance_is_finite(&instance) {
+                filtered.push(instance);
+            } else {
+                *dropped += 1;
+            }
+        }
+        Cow::Owned(filtered)
+    }
 }
 
 fn model_instance_transform_extrema(instances: &[common::ModelInstance]) -> (f32, f32, usize) {
@@ -2070,31 +2094,6 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             .upload_texture_3d(data, width, height, depth, format)
     }
 
-    pub fn render(
-        &mut self,
-        device: Arc<Device>,
-        queue: Arc<Queue>,
-        view_matrix: ndarray::Array2<f32>,
-        focal_length_xy: f32,
-        focal_length_zw: f32,
-        model_instances: &[common::ModelInstance],
-        render_options: RenderOptions,
-    ) {
-        // Backward-compatible shim while call sites migrate to explicit tetra/voxel contracts.
-        self.render_tetra_frame(
-            device,
-            queue,
-            FrameParams {
-                view_matrix,
-                time_ticks_ms: (self.frames_rendered as u64).wrapping_mul(16) as u32,
-                focal_length_xy,
-                focal_length_zw,
-                render_options,
-            },
-            TetraFrameInput { model_instances },
-        );
-    }
-
     pub fn render_tetra_frame(
         &mut self,
         device: Arc<Device>,
@@ -2160,62 +2159,19 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
 
         // Guard against non-finite transforms/material data poisoning shared
         // non-voxel preprocess/BVH buffers for the entire frame.
-        let mut filtered_model_instances: Vec<common::ModelInstance> = Vec::new();
         let mut dropped_model_instance_count = 0usize;
-        let model_instances: &[common::ModelInstance] =
-            if model_instances_input.iter().all(model_instance_is_finite) {
-                model_instances_input
-            } else {
-                filtered_model_instances.reserve(model_instances_input.len());
-                for instance in model_instances_input.iter().copied() {
-                    if model_instance_is_finite(&instance) {
-                        filtered_model_instances.push(instance);
-                    } else {
-                        dropped_model_instance_count += 1;
-                    }
-                }
-                filtered_model_instances.as_slice()
-            };
-
-        let mut filtered_overlay_instances: Vec<common::ModelInstance> = Vec::new();
         let mut dropped_overlay_instance_count = 0usize;
-        let raster_overlay_instances: &[common::ModelInstance] = if raster_overlay_instances_input
-            .iter()
-            .all(model_instance_is_finite)
-        {
-            raster_overlay_instances_input
-        } else {
-            filtered_overlay_instances.reserve(raster_overlay_instances_input.len());
-            for instance in raster_overlay_instances_input.iter().copied() {
-                if model_instance_is_finite(&instance) {
-                    filtered_overlay_instances.push(instance);
-                } else {
-                    dropped_overlay_instance_count += 1;
-                }
-            }
-            filtered_overlay_instances.as_slice()
-        };
-
-        let mut filtered_custom_overlay_edge_instances: Vec<common::ModelInstance> = Vec::new();
         let mut dropped_custom_overlay_edge_instance_count = 0usize;
-        let custom_overlay_edge_instances: &[common::ModelInstance] = if render_options
-            .custom_overlay_edge_instances
-            .iter()
-            .all(model_instance_is_finite)
-        {
-            &render_options.custom_overlay_edge_instances
-        } else {
-            filtered_custom_overlay_edge_instances
-                .reserve(render_options.custom_overlay_edge_instances.len());
-            for instance in render_options.custom_overlay_edge_instances.iter().copied() {
-                if model_instance_is_finite(&instance) {
-                    filtered_custom_overlay_edge_instances.push(instance);
-                } else {
-                    dropped_custom_overlay_edge_instance_count += 1;
-                }
-            }
-            filtered_custom_overlay_edge_instances.as_slice()
-        };
+        let model_instances =
+            filter_finite_instances(model_instances_input, &mut dropped_model_instance_count);
+        let raster_overlay_instances = filter_finite_instances(
+            raster_overlay_instances_input,
+            &mut dropped_overlay_instance_count,
+        );
+        let custom_overlay_edge_instances = filter_finite_instances(
+            &render_options.custom_overlay_edge_instances,
+            &mut dropped_custom_overlay_edge_instance_count,
+        );
 
         if dropped_model_instance_count > 0
             || dropped_overlay_instance_count > 0
@@ -2290,8 +2246,6 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                 .clear();
         }
 
-        let force_clear = false;
-
         if let Some(swapchain) = self.swapchain.clone() {
             if let Some(window) = self.window.clone() {
                 if let Some(render_pass) = self.render_pass.clone() {
@@ -2301,8 +2255,6 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                     // the dynamic state viewport.
                     if self.recreate_swapchain {
                         // Use the new dimensions of the window.
-
-                        //force_clear = true;
 
                         let (new_swapchain, new_images) = swapchain
                             .recreate(SwapchainCreateInfo {
@@ -3372,7 +3324,6 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             vte_leaf_count,
             vte_visible_lod_counts,
             0,
-            0,
             vte_buffer_caps.dense_chunks,
             vte_buffer_caps.leaf_headers,
             vte_buffer_caps.region_bvh_nodes,
@@ -3404,215 +3355,221 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             RenderBackend::Auto
         };
 
-        let cpu_mode = false;
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                self.compute_pipeline.pipeline_layout.clone(),
+                0,
+                vec![
+                    self.one_time_buffers.descriptor_set.clone(),
+                    self.frames_in_flight[frame_idx]
+                        .sized_descriptor_set
+                        .clone(),
+                    self.frames_in_flight[frame_idx]
+                        .live_buffers
+                        .descriptor_set
+                        .clone(),
+                    self.texture_pool.descriptor_set().clone(),
+                ],
+            )
+            .unwrap();
 
-        if cpu_mode {
-            self.wait_for_all_frames();
+        // Set default push constants (required by pipeline layout even for shaders that don't use them)
+        let dummy_push_data: [u32; 4] = [0, 0, 0, 0];
+        builder
+            .push_constants(
+                self.compute_pipeline.pipeline_layout.clone(),
+                0,
+                dummy_push_data,
+            )
+            .unwrap();
+
+        // GPU profiling: reset query pool and write start timestamp
+        self.profiler.begin_frame();
+        unsafe {
+            builder.reset_query_pool(
+                self.frames_in_flight[frame_idx].query_pool.clone(),
+                0..PROFILER_MAX_TIMESTAMPS,
+            )
         }
-
-        if cpu_mode {
-            if do_raster || do_tetrahedron_edges {
-                // Tetrahedron pre-raster
-                unimplemented!();
-            }
-
-            if do_raster {
-                unimplemented!();
-            }
-
-            if do_edges {
-                unimplemented!();
-            }
-
-            if do_raytrace {
-                // CPU shader fallback not available with Slang shaders
-                // (Slang compiles to SPIR-V only, not CPU-executable code)
-                unimplemented!("CPU raytracing not available - use GPU mode");
-            }
-            if do_voxel_vte {
-                unimplemented!("CPU voxel traversal backend not implemented");
-            }
-        } else {
-            builder
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Compute,
-                    self.compute_pipeline.pipeline_layout.clone(),
-                    0,
-                    vec![
-                        self.one_time_buffers.descriptor_set.clone(),
-                        self.frames_in_flight[frame_idx]
-                            .sized_descriptor_set
-                            .clone(),
-                        self.frames_in_flight[frame_idx]
-                            .live_buffers
-                            .descriptor_set
-                            .clone(),
-                        self.texture_pool.descriptor_set().clone(),
-                    ],
-                )
-                .unwrap();
-
-            // Set default push constants (required by pipeline layout even for shaders that don't use them)
-            let dummy_push_data: [u32; 4] = [0, 0, 0, 0];
-            builder
-                .push_constants(
-                    self.compute_pipeline.pipeline_layout.clone(),
-                    0,
-                    dummy_push_data,
-                )
-                .unwrap();
-
-            // GPU profiling: reset query pool and write start timestamp
-            self.profiler.begin_frame();
+        .unwrap();
+        {
+            let q = self.profiler.next_query_index("start");
             unsafe {
-                builder.reset_query_pool(
+                builder.write_timestamp(
                     self.frames_in_flight[frame_idx].query_pool.clone(),
-                    0..PROFILER_MAX_TIMESTAMPS,
+                    q,
+                    PipelineStage::AllCommands,
                 )
             }
             .unwrap();
-            {
-                let q = self.profiler.next_query_index("start");
-                unsafe {
-                    builder.write_timestamp(
-                        self.frames_in_flight[frame_idx].query_pool.clone(),
-                        q,
-                        PipelineStage::AllCommands,
-                    )
-                }
-                .unwrap();
-            }
+        }
 
-            if do_voxel_vte {
-                let non_voxel_leaf_count = non_voxel_bvh_leaf_count;
-                if non_voxel_leaf_count == 0 {
-                    vte_non_voxel_rebuild_needed = false;
-                    vte_non_voxel_rebuild_reason = "empty";
-                    vte_non_voxel_bvh_update_mode = "empty";
-                    self.vte_non_voxel_scene_hash = 0;
-                    self.vte_non_voxel_bvh_topology_tet_count = 0;
-                    self.vte_non_voxel_bvh_refit_frames = 0;
-                } else {
-                    // In overlay-raster mode, the shared tetra output buffer is reused by the
-                    // overlay tet preprocess pass later in the frame. Force non-voxel
-                    // reprovision every frame in that mode so Stage A never consumes stale
-                    // non-voxel tetra/BVH data on the next frame.
-                    vte_non_voxel_rebuild_needed =
-                        do_raster || non_voxel_scene_hash != self.vte_non_voxel_scene_hash;
-                    vte_non_voxel_rebuild_reason = match (
-                        do_raster,
-                        non_voxel_scene_hash != self.vte_non_voxel_scene_hash,
-                    ) {
-                        (true, true) => "overlay_raster+scene_hash",
-                        (true, false) => "overlay_raster",
-                        (false, true) => "scene_hash",
-                        (false, false) => "unchanged",
-                    };
-                    if vte_non_voxel_rebuild_needed {
-                        vte_non_voxel_rebuild_executed = true;
-                        // Preprocess one proxy tetrahedron per non-voxel instance using the
-                        // transformed [0,1]^4 instance AABB as the leaf primitive.
-                        let vte_preprocess_push_data: [u32; 4] =
-                            [0, non_voxel_leaf_count as u32, 0, 0];
-                        builder
-                            .push_constants(
-                                self.compute_pipeline.pipeline_layout.clone(),
-                                0,
-                                vte_preprocess_push_data,
-                            )
-                            .unwrap();
-                        builder
-                            .bind_pipeline_compute(
-                                self.compute_pipeline
-                                    .entity_instance_aabb_pre_pipeline
-                                    .clone(),
-                            )
-                            .unwrap();
+        if do_voxel_vte {
+            let non_voxel_leaf_count = non_voxel_bvh_leaf_count;
+            if non_voxel_leaf_count == 0 {
+                vte_non_voxel_rebuild_needed = false;
+                vte_non_voxel_rebuild_reason = "empty";
+                vte_non_voxel_bvh_update_mode = "empty";
+                self.vte_non_voxel_scene_hash = 0;
+                self.vte_non_voxel_bvh_topology_tet_count = 0;
+                self.vte_non_voxel_bvh_refit_frames = 0;
+            } else {
+                // In overlay-raster mode, the shared tetra output buffer is reused by the
+                // overlay tet preprocess pass later in the frame. Force non-voxel
+                // reprovision every frame in that mode so Stage A never consumes stale
+                // non-voxel tetra/BVH data on the next frame.
+                vte_non_voxel_rebuild_needed =
+                    do_raster || non_voxel_scene_hash != self.vte_non_voxel_scene_hash;
+                vte_non_voxel_rebuild_reason = match (
+                    do_raster,
+                    non_voxel_scene_hash != self.vte_non_voxel_scene_hash,
+                ) {
+                    (true, true) => "overlay_raster+scene_hash",
+                    (true, false) => "overlay_raster",
+                    (false, true) => "scene_hash",
+                    (false, false) => "unchanged",
+                };
+                if vte_non_voxel_rebuild_needed {
+                    vte_non_voxel_rebuild_executed = true;
+                    // Preprocess one proxy tetrahedron per non-voxel instance using the
+                    // transformed [0,1]^4 instance AABB as the leaf primitive.
+                    let vte_preprocess_push_data: [u32; 4] =
+                        [0, non_voxel_leaf_count as u32, 0, 0];
+                    builder
+                        .push_constants(
+                            self.compute_pipeline.pipeline_layout.clone(),
+                            0,
+                            vte_preprocess_push_data,
+                        )
+                        .unwrap();
+                    builder
+                        .bind_pipeline_compute(
+                            self.compute_pipeline
+                                .entity_instance_aabb_pre_pipeline
+                                .clone(),
+                        )
+                        .unwrap();
+                    unsafe {
+                        builder.dispatch([(non_voxel_leaf_count as u32).div_ceil(64u32), 1, 1])
+                    }
+                    .unwrap();
+                    {
+                        let q = self.profiler.next_query_index("vte_non_voxel_preprocess");
                         unsafe {
-                            builder.dispatch([(non_voxel_leaf_count as u32).div_ceil(64u32), 1, 1])
+                            builder.write_timestamp(
+                                self.frames_in_flight[frame_idx].query_pool.clone(),
+                                q,
+                                PipelineStage::AllCommands,
+                            )
                         }
                         .unwrap();
-                        {
-                            let q = self.profiler.next_query_index("vte_non_voxel_preprocess");
-                            unsafe {
-                                builder.write_timestamp(
-                                    self.frames_in_flight[frame_idx].query_pool.clone(),
-                                    q,
-                                    PipelineStage::AllCommands,
-                                )
-                            }
-                            .unwrap();
-                        }
+                    }
 
-                        if non_voxel_leaf_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
-                            let n = non_voxel_leaf_count as u32;
-                            let topology_tet_count_matches =
-                                self.vte_non_voxel_bvh_topology_tet_count == non_voxel_leaf_count;
-                            let periodic_rebuild_due = self.vte_non_voxel_bvh_refit_frames
-                                >= VTE_ENTITY_BVH_REFIT_REBUILD_INTERVAL;
-                            let can_refit_only =
-                                topology_tet_count_matches && !periodic_rebuild_due;
-                            if can_refit_only {
-                                // Refit-only update for rapid movers: keep tree topology and
-                                // update leaf/internal bounds from current tetrahedra.
-                                let num_internal_nodes = n.saturating_sub(1);
-                                if num_internal_nodes > 0 {
+                    if non_voxel_leaf_count > vte::VTE_ENTITY_LINEAR_THRESHOLD_TETS {
+                        let n = non_voxel_leaf_count as u32;
+                        let topology_tet_count_matches =
+                            self.vte_non_voxel_bvh_topology_tet_count == non_voxel_leaf_count;
+                        let periodic_rebuild_due = self.vte_non_voxel_bvh_refit_frames
+                            >= VTE_ENTITY_BVH_REFIT_REBUILD_INTERVAL;
+                        let can_refit_only =
+                            topology_tet_count_matches && !periodic_rebuild_due;
+                        if can_refit_only {
+                            // Refit-only update for rapid movers: keep tree topology and
+                            // update leaf/internal bounds from current tetrahedra.
+                            let num_internal_nodes = n.saturating_sub(1);
+                            if num_internal_nodes > 0 {
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_link_parents_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                unsafe {
+                                    builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1])
+                                }
+                                .unwrap();
+                            }
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
+                            {
+                                let q =
+                                    self.profiler.next_query_index("vte_non_voxel_bvh_refit");
+                                unsafe {
+                                    builder.write_timestamp(
+                                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                                        q,
+                                        PipelineStage::AllCommands,
+                                    )
+                                }
+                                .unwrap();
+                            }
+                            self.vte_non_voxel_bvh_refit_frames =
+                                self.vte_non_voxel_bvh_refit_frames.saturating_add(1);
+                            vte_non_voxel_bvh_update_mode = "refit";
+                        } else {
+                            // Full build path (first build, changed tetra count, or periodic
+                            // topology refresh after repeated refits).
+                            let n_pow2 = n.next_power_of_two();
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_scene_bounds_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([1, 1, 1]) }.unwrap();
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }
+                                .unwrap();
+
+                            let num_stages = n_pow2.trailing_zeros();
+                            let local_stages = 6u32.min(num_stages);
+                            let workgroups = n_pow2.div_ceil(64);
+
+                            let push_data: [u32; 4] = [0, 0, n_pow2, 0];
+                            builder
+                                .push_constants(
+                                    self.compute_pipeline.pipeline_layout.clone(),
+                                    0,
+                                    push_data,
+                                )
+                                .unwrap();
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline
+                                        .bvh_bitonic_sort_local_pipeline
+                                        .clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+
+                            for stage in local_stages..num_stages {
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_bitonic_sort_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                for step in (local_stages..=stage).rev() {
+                                    let push_data: [u32; 4] = [stage, step, n_pow2, 0];
                                     builder
-                                        .bind_pipeline_compute(
-                                            self.compute_pipeline.bvh_link_parents_pipeline.clone(),
+                                        .push_constants(
+                                            self.compute_pipeline.pipeline_layout.clone(),
+                                            0,
+                                            push_data,
                                         )
                                         .unwrap();
-                                    unsafe {
-                                        builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1])
-                                    }
-                                    .unwrap();
+                                    unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
                                 }
-                                builder
-                                    .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
-                                    )
-                                    .unwrap();
-                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
-                                {
-                                    let q =
-                                        self.profiler.next_query_index("vte_non_voxel_bvh_refit");
-                                    unsafe {
-                                        builder.write_timestamp(
-                                            self.frames_in_flight[frame_idx].query_pool.clone(),
-                                            q,
-                                            PipelineStage::AllCommands,
-                                        )
-                                    }
-                                    .unwrap();
-                                }
-                                self.vte_non_voxel_bvh_refit_frames =
-                                    self.vte_non_voxel_bvh_refit_frames.saturating_add(1);
-                                vte_non_voxel_bvh_update_mode = "refit";
-                            } else {
-                                // Full build path (first build, changed tetra count, or periodic
-                                // topology refresh after repeated refits).
-                                let n_pow2 = n.next_power_of_two();
 
-                                builder
-                                    .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_scene_bounds_pipeline.clone(),
-                                    )
-                                    .unwrap();
-                                unsafe { builder.dispatch([1, 1, 1]) }.unwrap();
-
-                                builder
-                                    .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
-                                    )
-                                    .unwrap();
-                                unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }
-                                    .unwrap();
-
-                                let num_stages = n_pow2.trailing_zeros();
-                                let local_stages = 6u32.min(num_stages);
-                                let workgroups = n_pow2.div_ceil(64);
-
-                                let push_data: [u32; 4] = [0, 0, n_pow2, 0];
+                                let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
                                 builder
                                     .push_constants(
                                         self.compute_pipeline.pipeline_layout.clone(),
@@ -3623,117 +3580,130 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                                 builder
                                     .bind_pipeline_compute(
                                         self.compute_pipeline
-                                            .bvh_bitonic_sort_local_pipeline
+                                            .bvh_bitonic_sort_local_merge_pipeline
                                             .clone(),
                                     )
                                     .unwrap();
                                 unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-
-                                for stage in local_stages..num_stages {
-                                    builder
-                                        .bind_pipeline_compute(
-                                            self.compute_pipeline.bvh_bitonic_sort_pipeline.clone(),
-                                        )
-                                        .unwrap();
-                                    for step in (local_stages..=stage).rev() {
-                                        let push_data: [u32; 4] = [stage, step, n_pow2, 0];
-                                        builder
-                                            .push_constants(
-                                                self.compute_pipeline.pipeline_layout.clone(),
-                                                0,
-                                                push_data,
-                                            )
-                                            .unwrap();
-                                        unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-                                    }
-
-                                    let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
-                                    builder
-                                        .push_constants(
-                                            self.compute_pipeline.pipeline_layout.clone(),
-                                            0,
-                                            push_data,
-                                        )
-                                        .unwrap();
-                                    builder
-                                        .bind_pipeline_compute(
-                                            self.compute_pipeline
-                                                .bvh_bitonic_sort_local_merge_pipeline
-                                                .clone(),
-                                        )
-                                        .unwrap();
-                                    unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-                                }
-
-                                builder
-                                    .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
-                                    )
-                                    .unwrap();
-                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
-
-                                builder
-                                    .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_build_tree_pipeline.clone(),
-                                    )
-                                    .unwrap();
-                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
-
-                                let num_internal_nodes = n.saturating_sub(1);
-                                if num_internal_nodes > 0 {
-                                    builder
-                                        .bind_pipeline_compute(
-                                            self.compute_pipeline.bvh_link_parents_pipeline.clone(),
-                                        )
-                                        .unwrap();
-                                    unsafe {
-                                        builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1])
-                                    }
-                                    .unwrap();
-                                }
-                                builder
-                                    .bind_pipeline_compute(
-                                        self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
-                                    )
-                                    .unwrap();
-                                unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
-
-                                {
-                                    let q = self.profiler.next_query_index("vte_non_voxel_bvh");
-                                    unsafe {
-                                        builder.write_timestamp(
-                                            self.frames_in_flight[frame_idx].query_pool.clone(),
-                                            q,
-                                            PipelineStage::AllCommands,
-                                        )
-                                    }
-                                    .unwrap();
-                                }
-                                self.vte_non_voxel_bvh_topology_tet_count = non_voxel_leaf_count;
-                                self.vte_non_voxel_bvh_refit_frames = 0;
-                                vte_non_voxel_bvh_update_mode =
-                                    if periodic_rebuild_due && topology_tet_count_matches {
-                                        "rebuild_interval"
-                                    } else {
-                                        "rebuild"
-                                    };
                             }
-                        } else {
-                            self.vte_non_voxel_bvh_topology_tet_count = 0;
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
+
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_build_tree_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
+
+                            let num_internal_nodes = n.saturating_sub(1);
+                            if num_internal_nodes > 0 {
+                                builder
+                                    .bind_pipeline_compute(
+                                        self.compute_pipeline.bvh_link_parents_pipeline.clone(),
+                                    )
+                                    .unwrap();
+                                unsafe {
+                                    builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1])
+                                }
+                                .unwrap();
+                            }
+                            builder
+                                .bind_pipeline_compute(
+                                    self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([n.div_ceil(64u32), 1, 1]) }.unwrap();
+
+                            {
+                                let q = self.profiler.next_query_index("vte_non_voxel_bvh");
+                                unsafe {
+                                    builder.write_timestamp(
+                                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                                        q,
+                                        PipelineStage::AllCommands,
+                                    )
+                                }
+                                .unwrap();
+                            }
+                            self.vte_non_voxel_bvh_topology_tet_count = non_voxel_leaf_count;
                             self.vte_non_voxel_bvh_refit_frames = 0;
-                            vte_non_voxel_bvh_update_mode = "linear";
+                            vte_non_voxel_bvh_update_mode =
+                                if periodic_rebuild_due && topology_tet_count_matches {
+                                    "rebuild_interval"
+                                } else {
+                                    "rebuild"
+                                };
                         }
-
-                        self.vte_non_voxel_scene_hash = non_voxel_scene_hash;
                     } else {
-                        vte_non_voxel_bvh_update_mode = "reuse";
+                        self.vte_non_voxel_bvh_topology_tet_count = 0;
+                        self.vte_non_voxel_bvh_refit_frames = 0;
+                        vte_non_voxel_bvh_update_mode = "linear";
                     }
-                }
 
-                let fuse_integral_in_stage_a =
-                    render_options.vte_display_mode == VteDisplayMode::Integral;
+                    self.vte_non_voxel_scene_hash = non_voxel_scene_hash;
+                } else {
+                    vte_non_voxel_bvh_update_mode = "reuse";
+                }
+            }
+
+            let fuse_integral_in_stage_a =
+                render_options.vte_display_mode == VteDisplayMode::Integral;
+            {
+                let q = self.profiler.next_query_index("vte_stage_a_setup");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+            let voxel_trace_stage_a_pipeline = if fuse_integral_in_stage_a {
+                self.compute_pipeline
+                    .voxel_trace_stage_a_integral_fused_pipeline
+                    .clone()
+            } else {
+                self.compute_pipeline
+                    .voxel_trace_stage_a_layered_pipeline
+                    .clone()
+            };
+            builder
+                .bind_pipeline_compute(voxel_trace_stage_a_pipeline)
+                .unwrap();
+            unsafe {
+                builder.dispatch([
+                    self.sized_buffers.render_dimensions[0].div_ceil(8),
+                    self.sized_buffers.render_dimensions[1].div_ceil(8),
+                    if fuse_integral_in_stage_a {
+                        1
+                    } else {
+                        self.sized_buffers.render_dimensions[2].max(1)
+                    },
+                ])
+            }
+            .unwrap();
+            {
+                let q = self.profiler.next_query_index("vte_stage_a");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+
+            if !fuse_integral_in_stage_a {
                 {
-                    let q = self.profiler.next_query_index("vte_stage_a_setup");
+                    let q = self.profiler.next_query_index("vte_stage_b_setup");
                     unsafe {
                         builder.write_timestamp(
                             self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -3743,32 +3713,148 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     }
                     .unwrap();
                 }
-                let voxel_trace_stage_a_pipeline = if fuse_integral_in_stage_a {
-                    self.compute_pipeline
-                        .voxel_trace_stage_a_integral_fused_pipeline
-                        .clone()
-                } else {
-                    self.compute_pipeline
-                        .voxel_trace_stage_a_layered_pipeline
-                        .clone()
-                };
                 builder
-                    .bind_pipeline_compute(voxel_trace_stage_a_pipeline)
+                    .bind_pipeline_compute(
+                        self.compute_pipeline.voxel_display_stage_b_pipeline.clone(),
+                    )
                     .unwrap();
                 unsafe {
                     builder.dispatch([
                         self.sized_buffers.render_dimensions[0].div_ceil(8),
                         self.sized_buffers.render_dimensions[1].div_ceil(8),
-                        if fuse_integral_in_stage_a {
-                            1
-                        } else {
-                            self.sized_buffers.render_dimensions[2].max(1)
-                        },
+                        1,
                     ])
                 }
                 .unwrap();
+            }
+            {
+                let q = self.profiler.next_query_index("vte_stage_b");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+        } else if (render_options.do_frame_clear) && !do_raytrace {
+            builder
+                .bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone())
+                .unwrap();
+            unsafe {
+                builder.dispatch([
+                    self.sized_buffers.render_dimensions[0].div_ceil(8),
+                    self.sized_buffers.render_dimensions[1].div_ceil(8),
+                    1,
+                ])
+            }
+            .unwrap();
+            let q = self.profiler.next_query_index("clear");
+            unsafe {
+                builder.write_timestamp(
+                    self.frames_in_flight[frame_idx].query_pool.clone(),
+                    q,
+                    PipelineStage::AllCommands,
+                )
+            }
+            .unwrap();
+        }
+
+        if do_raster || do_tetrahedron_edges {
+            let raster_preprocess_tetrahedron_count = if do_voxel_vte {
+                raster_tetrahedron_count
+            } else {
+                total_tetrahedron_count
+            };
+            let raster_preprocess_push_data: [u32; 4] = [
+                raster_instance_base as u32,
+                raster_preprocess_tetrahedron_count as u32,
+                0,
+                0,
+            ];
+
+            // Tetrahedron pre-raster
+            // Reset atomic counter to 0 before clipping dispatch
+            builder
+                .fill_buffer(self.sized_buffers.atomic_counter_buffer.clone(), 0u32)
+                .unwrap();
+            {
+                let q = self.profiler.next_query_index("tet_counter_clear");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+
+            builder
+                .push_constants(
+                    self.compute_pipeline.pipeline_layout.clone(),
+                    0,
+                    raster_preprocess_push_data,
+                )
+                .unwrap();
+            builder
+                .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone())
+                .unwrap();
+            unsafe {
+                builder.dispatch([
+                    (raster_preprocess_tetrahedron_count as u32).div_ceil(64u32),
+                    1,
+                    1,
+                ])
+            }
+            .unwrap();
+            {
+                let q = self.profiler.next_query_index("tet_clip");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+
+            // Copy atomic counter for CPU readback (clipped tet count diagnostic)
+            builder
+                .copy_buffer(CopyBufferInfo::buffers(
+                    self.sized_buffers.atomic_counter_buffer.clone(),
+                    self.frames_in_flight[frame_idx]
+                        .cpu_clipped_tet_count_buffer
+                        .clone(),
+                ))
+                .unwrap();
+            {
+                let q = self.profiler.next_query_index("tet_counter_copy");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+
+            if do_tetrahedron_edges {
+                line_render_count = raster_preprocess_tetrahedron_count * 6;
+            }
+        }
+
+        if do_raster {
+            if !do_voxel_vte {
+                // Zero tile counts
+                builder
+                    .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
+                    .unwrap();
                 {
-                    let q = self.profiler.next_query_index("vte_stage_a");
+                    let q = self.profiler.next_query_index("tet_bin_clear");
                     unsafe {
                         builder.write_timestamp(
                             self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -3779,34 +3865,20 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 }
 
-                if !fuse_integral_in_stage_a {
-                    {
-                        let q = self.profiler.next_query_index("vte_stage_b_setup");
-                        unsafe {
-                            builder.write_timestamp(
-                                self.frames_in_flight[frame_idx].query_pool.clone(),
-                                q,
-                                PipelineStage::AllCommands,
-                            )
-                        }
-                        .unwrap();
-                    }
-                    builder
-                        .bind_pipeline_compute(
-                            self.compute_pipeline.voxel_display_stage_b_pipeline.clone(),
-                        )
-                        .unwrap();
-                    unsafe {
-                        builder.dispatch([
-                            self.sized_buffers.render_dimensions[0].div_ceil(8),
-                            self.sized_buffers.render_dimensions[1].div_ceil(8),
-                            1,
-                        ])
-                    }
+                // Bin tetrahedra into tiles
+                builder
+                    .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
                     .unwrap();
+                unsafe {
+                    builder.dispatch([
+                        (self.sized_buffers.max_tetrahedrons as u32).div_ceil(64),
+                        1,
+                        1,
+                    ])
                 }
+                .unwrap();
                 {
-                    let q = self.profiler.next_query_index("vte_stage_b");
+                    let q = self.profiler.next_query_index("tet_bin");
                     unsafe {
                         builder.write_timestamp(
                             self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -3816,9 +3888,163 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     }
                     .unwrap();
                 }
-            } else if (render_options.do_frame_clear || force_clear) && !do_raytrace {
+            }
+
+            // Tetrahedron pixel raster (tile-based)
+            builder
+                .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone())
+                .unwrap();
+            let (raster_dispatch_push, raster_dispatch_dims) = if do_voxel_vte {
+                let region = self.vte_overlay_raster_region();
+                let overlay_work_w = region[2].div_ceil(VTE_OVERLAY_RASTER_SCALE);
+                let overlay_work_h = region[3].div_ceil(VTE_OVERLAY_RASTER_SCALE);
+                if self.frames_rendered == 0 {
+                    println!(
+                        "VTE overlay raster region: origin=({}, {}) size={}x{} (work {}x{} @{}x upsample)",
+                        region[0], region[1], region[2], region[3], overlay_work_w, overlay_work_h, VTE_OVERLAY_RASTER_SCALE
+                    );
+                }
+                (
+                    region,
+                    [overlay_work_w.div_ceil(8), overlay_work_h.div_ceil(8), 1],
+                )
+            } else {
+                (
+                    [0, 0, 0, 0],
+                    [
+                        self.sized_buffers.render_dimensions[0].div_ceil(8),
+                        self.sized_buffers.render_dimensions[1].div_ceil(8),
+                        1,
+                    ],
+                )
+            };
+            builder
+                .push_constants(
+                    self.compute_pipeline.pipeline_layout.clone(),
+                    0,
+                    raster_dispatch_push,
+                )
+                .unwrap();
+            unsafe { builder.dispatch(raster_dispatch_dims) }.unwrap();
+            {
+                let q = self.profiler.next_query_index("tet_raster");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+        }
+
+        if do_edges || custom_overlay_edge_used_instance_count > 0 {
+            // Edge pre-raster supports dedicated instance ranges (for debug edges and
+            // GPU-only custom overlay boxes) and appends into the shared line buffer.
+            let model_edge_count = self.one_time_buffers.model_edge_count;
+            let max_lines = LINE_VERTEX_CAPACITY / 2;
+            let mut dispatched_any_edges = false;
+
+            builder
+                .bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone())
+                .unwrap();
+
+            if model_edge_count > 0 {
+                if do_edges {
+                    let available_lines = max_lines.saturating_sub(line_render_count);
+                    let max_instances = available_lines / model_edge_count;
+                    let edge_instance_count = used_instance_count.min(max_instances);
+                    if edge_instance_count > 0 {
+                        let edge_line_count = edge_instance_count * model_edge_count;
+                        let edge_push_data: [u32; 4] = [
+                            0,
+                            edge_instance_count.min(u32::MAX as usize) as u32,
+                            line_render_count.min(u32::MAX as usize) as u32,
+                            0,
+                        ];
+                        builder
+                            .push_constants(
+                                self.compute_pipeline.pipeline_layout.clone(),
+                                0,
+                                edge_push_data,
+                            )
+                            .unwrap();
+                        unsafe {
+                            builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
+                        }
+                        .unwrap();
+                        line_render_count += edge_line_count;
+                        dispatched_any_edges = true;
+                    }
+                }
+
+                if custom_overlay_edge_used_instance_count > 0 {
+                    let available_lines = max_lines.saturating_sub(line_render_count);
+                    let max_instances = available_lines / model_edge_count;
+                    let edge_overlay_instance_count =
+                        custom_overlay_edge_used_instance_count.min(max_instances);
+                    if edge_overlay_instance_count > 0 {
+                        let edge_line_count = edge_overlay_instance_count * model_edge_count;
+                        let edge_push_data: [u32; 4] = [
+                            custom_overlay_edge_instance_base.min(u32::MAX as usize) as u32,
+                            edge_overlay_instance_count.min(u32::MAX as usize) as u32,
+                            line_render_count.min(u32::MAX as usize) as u32,
+                            0,
+                        ];
+                        builder
+                            .push_constants(
+                                self.compute_pipeline.pipeline_layout.clone(),
+                                0,
+                                edge_push_data,
+                            )
+                            .unwrap();
+                        unsafe {
+                            builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
+                        }
+                        .unwrap();
+                        line_render_count += edge_line_count;
+                        dispatched_any_edges = true;
+                    }
+                }
+            }
+
+            if dispatched_any_edges {
+                let q = self.profiler.next_query_index("edges");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
+            }
+        }
+
+        if do_raytrace {
+            // Compute a hash of the scene inputs that affect the BVH.
+            // If unchanged, skip tetrahedron preprocessing and BVH construction.
+            let scene_hash = {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                for &val in view_matrix_nalgebra.as_slice() {
+                    val.to_bits().hash(&mut hasher);
+                }
+                focal_length_xy.to_bits().hash(&mut hasher);
+                focal_length_zw.to_bits().hash(&mut hasher);
+                model_instances.len().hash(&mut hasher);
+                bytemuck::cast_slice::<_, u8>(&model_instances).hash(&mut hasher);
+                hasher.finish()
+            };
+            let bvh_needs_rebuild = scene_hash != self.bvh_scene_hash;
+            let raytrace_should_clear =
+                render_options.do_frame_clear || bvh_needs_rebuild;
+
+            if raytrace_should_clear {
                 builder
-                    .bind_pipeline_compute(self.compute_pipeline.raytrace_clear_pipeline.clone())
+                    .bind_pipeline_compute(
+                        self.compute_pipeline.raytrace_clear_pipeline.clone(),
+                    )
                     .unwrap();
                 unsafe {
                     builder.dispatch([
@@ -3839,56 +4065,26 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 .unwrap();
             }
 
-            if do_raster || do_tetrahedron_edges {
-                let raster_preprocess_tetrahedron_count = if do_voxel_vte {
-                    raster_tetrahedron_count
-                } else {
-                    total_tetrahedron_count
-                };
-                let raster_preprocess_push_data: [u32; 4] = [
-                    raster_instance_base as u32,
-                    raster_preprocess_tetrahedron_count as u32,
-                    0,
-                    0,
-                ];
-
-                // Tetrahedron pre-raster
-                // Reset atomic counter to 0 before clipping dispatch
-                builder
-                    .fill_buffer(self.sized_buffers.atomic_counter_buffer.clone(), 0u32)
-                    .unwrap();
-                {
-                    let q = self.profiler.next_query_index("tet_counter_clear");
-                    unsafe {
-                        builder.write_timestamp(
-                            self.frames_in_flight[frame_idx].query_pool.clone(),
-                            q,
-                            PipelineStage::AllCommands,
-                        )
-                    }
-                    .unwrap();
-                }
-
+            if bvh_needs_rebuild {
+                // 1. Tetrahedron preprocessing (transform to view space)
+                let raytrace_preprocess_push_data: [u32; 4] =
+                    [0, total_tetrahedron_count as u32, 0, 0];
                 builder
                     .push_constants(
                         self.compute_pipeline.pipeline_layout.clone(),
                         0,
-                        raster_preprocess_push_data,
+                        raytrace_preprocess_push_data,
                     )
                     .unwrap();
                 builder
-                    .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pipeline.clone())
+                    .bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone())
                     .unwrap();
                 unsafe {
-                    builder.dispatch([
-                        (raster_preprocess_tetrahedron_count as u32).div_ceil(64u32),
-                        1,
-                        1,
-                    ])
+                    builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
                 }
                 .unwrap();
                 {
-                    let q = self.profiler.next_query_index("tet_clip");
+                    let q = self.profiler.next_query_index("rt_preprocess");
                     unsafe {
                         builder.write_timestamp(
                             self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -3899,308 +4095,71 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     .unwrap();
                 }
 
-                // Copy atomic counter for CPU readback (clipped tet count diagnostic)
-                builder
-                    .copy_buffer(CopyBufferInfo::buffers(
-                        self.sized_buffers.atomic_counter_buffer.clone(),
-                        self.frames_in_flight[frame_idx]
-                            .cpu_clipped_tet_count_buffer
-                            .clone(),
-                    ))
-                    .unwrap();
-                {
-                    let q = self.profiler.next_query_index("tet_counter_copy");
-                    unsafe {
-                        builder.write_timestamp(
-                            self.frames_in_flight[frame_idx].query_pool.clone(),
-                            q,
-                            PipelineStage::AllCommands,
-                        )
-                    }
-                    .unwrap();
-                }
-
-                if do_tetrahedron_edges {
-                    line_render_count = raster_preprocess_tetrahedron_count * 6;
-                }
-            }
-
-            if do_raster {
-                if !do_voxel_vte {
-                    // Zero tile counts
-                    builder
-                        .fill_buffer(self.sized_buffers.tile_tet_counts_buffer.clone(), 0u32)
-                        .unwrap();
-                    {
-                        let q = self.profiler.next_query_index("tet_bin_clear");
-                        unsafe {
-                            builder.write_timestamp(
-                                self.frames_in_flight[frame_idx].query_pool.clone(),
-                                q,
-                                PipelineStage::AllCommands,
-                            )
-                        }
-                        .unwrap();
-                    }
-
-                    // Bin tetrahedra into tiles
-                    builder
-                        .bind_pipeline_compute(self.compute_pipeline.bin_tets_pipeline.clone())
-                        .unwrap();
-                    unsafe {
-                        builder.dispatch([
-                            (self.sized_buffers.max_tetrahedrons as u32).div_ceil(64),
-                            1,
-                            1,
-                        ])
-                    }
-                    .unwrap();
-                    {
-                        let q = self.profiler.next_query_index("tet_bin");
-                        unsafe {
-                            builder.write_timestamp(
-                                self.frames_in_flight[frame_idx].query_pool.clone(),
-                                q,
-                                PipelineStage::AllCommands,
-                            )
-                        }
-                        .unwrap();
-                    }
-                }
-
-                // Tetrahedron pixel raster (tile-based)
-                builder
-                    .bind_pipeline_compute(self.compute_pipeline.tetrahedron_pixel_pipeline.clone())
-                    .unwrap();
-                let (raster_dispatch_push, raster_dispatch_dims) = if do_voxel_vte {
-                    let region = self.vte_overlay_raster_region();
-                    let overlay_work_w = region[2].div_ceil(VTE_OVERLAY_RASTER_SCALE);
-                    let overlay_work_h = region[3].div_ceil(VTE_OVERLAY_RASTER_SCALE);
-                    if self.frames_rendered == 0 {
-                        println!(
-                            "VTE overlay raster region: origin=({}, {}) size={}x{} (work {}x{} @{}x upsample)",
-                            region[0], region[1], region[2], region[3], overlay_work_w, overlay_work_h, VTE_OVERLAY_RASTER_SCALE
-                        );
-                    }
-                    (
-                        region,
-                        [overlay_work_w.div_ceil(8), overlay_work_h.div_ceil(8), 1],
-                    )
-                } else {
-                    (
-                        [0, 0, 0, 0],
-                        [
-                            self.sized_buffers.render_dimensions[0].div_ceil(8),
-                            self.sized_buffers.render_dimensions[1].div_ceil(8),
-                            1,
-                        ],
-                    )
-                };
-                builder
-                    .push_constants(
-                        self.compute_pipeline.pipeline_layout.clone(),
-                        0,
-                        raster_dispatch_push,
-                    )
-                    .unwrap();
-                unsafe { builder.dispatch(raster_dispatch_dims) }.unwrap();
-                {
-                    let q = self.profiler.next_query_index("tet_raster");
-                    unsafe {
-                        builder.write_timestamp(
-                            self.frames_in_flight[frame_idx].query_pool.clone(),
-                            q,
-                            PipelineStage::AllCommands,
-                        )
-                    }
-                    .unwrap();
-                }
-            }
-
-            if do_edges || custom_overlay_edge_used_instance_count > 0 {
-                // Edge pre-raster supports dedicated instance ranges (for debug edges and
-                // GPU-only custom overlay boxes) and appends into the shared line buffer.
-                let model_edge_count = self.one_time_buffers.model_edge_count;
-                let max_lines = LINE_VERTEX_CAPACITY / 2;
-                let mut dispatched_any_edges = false;
-
-                builder
-                    .bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone())
-                    .unwrap();
-
-                if model_edge_count > 0 {
-                    if do_edges {
-                        let available_lines = max_lines.saturating_sub(line_render_count);
-                        let max_instances = available_lines / model_edge_count;
-                        let edge_instance_count = used_instance_count.min(max_instances);
-                        if edge_instance_count > 0 {
-                            let edge_line_count = edge_instance_count * model_edge_count;
-                            let edge_push_data: [u32; 4] = [
-                                0,
-                                edge_instance_count.min(u32::MAX as usize) as u32,
-                                line_render_count.min(u32::MAX as usize) as u32,
-                                0,
-                            ];
-                            builder
-                                .push_constants(
-                                    self.compute_pipeline.pipeline_layout.clone(),
-                                    0,
-                                    edge_push_data,
-                                )
-                                .unwrap();
-                            unsafe {
-                                builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
-                            }
-                            .unwrap();
-                            line_render_count += edge_line_count;
-                            dispatched_any_edges = true;
-                        }
-                    }
-
-                    if custom_overlay_edge_used_instance_count > 0 {
-                        let available_lines = max_lines.saturating_sub(line_render_count);
-                        let max_instances = available_lines / model_edge_count;
-                        let edge_overlay_instance_count =
-                            custom_overlay_edge_used_instance_count.min(max_instances);
-                        if edge_overlay_instance_count > 0 {
-                            let edge_line_count = edge_overlay_instance_count * model_edge_count;
-                            let edge_push_data: [u32; 4] = [
-                                custom_overlay_edge_instance_base.min(u32::MAX as usize) as u32,
-                                edge_overlay_instance_count.min(u32::MAX as usize) as u32,
-                                line_render_count.min(u32::MAX as usize) as u32,
-                                0,
-                            ];
-                            builder
-                                .push_constants(
-                                    self.compute_pipeline.pipeline_layout.clone(),
-                                    0,
-                                    edge_push_data,
-                                )
-                                .unwrap();
-                            unsafe {
-                                builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
-                            }
-                            .unwrap();
-                            line_render_count += edge_line_count;
-                            dispatched_any_edges = true;
-                        }
-                    }
-                }
-
-                if dispatched_any_edges {
-                    let q = self.profiler.next_query_index("edges");
-                    unsafe {
-                        builder.write_timestamp(
-                            self.frames_in_flight[frame_idx].query_pool.clone(),
-                            q,
-                            PipelineStage::AllCommands,
-                        )
-                    }
-                    .unwrap();
-                }
-            }
-
-            if do_raytrace {
-                // Compute a hash of the scene inputs that affect the BVH.
-                // If unchanged, skip tetrahedron preprocessing and BVH construction.
-                let scene_hash = {
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    for &val in view_matrix_nalgebra.as_slice() {
-                        val.to_bits().hash(&mut hasher);
-                    }
-                    focal_length_xy.to_bits().hash(&mut hasher);
-                    focal_length_zw.to_bits().hash(&mut hasher);
-                    model_instances.len().hash(&mut hasher);
-                    bytemuck::cast_slice::<_, u8>(model_instances).hash(&mut hasher);
-                    hasher.finish()
-                };
-                let bvh_needs_rebuild = scene_hash != self.bvh_scene_hash;
-                let raytrace_should_clear =
-                    render_options.do_frame_clear || force_clear || bvh_needs_rebuild;
-
-                if raytrace_should_clear {
+                // 2. BVH Construction
+                if total_tetrahedron_count > 0 {
+                    // 2a. Compute scene bounds
                     builder
                         .bind_pipeline_compute(
-                            self.compute_pipeline.raytrace_clear_pipeline.clone(),
+                            self.compute_pipeline.bvh_scene_bounds_pipeline.clone(),
                         )
                         .unwrap();
-                    unsafe {
-                        builder.dispatch([
-                            self.sized_buffers.render_dimensions[0].div_ceil(8),
-                            self.sized_buffers.render_dimensions[1].div_ceil(8),
-                            1,
-                        ])
-                    }
-                    .unwrap();
-                    let q = self.profiler.next_query_index("clear");
-                    unsafe {
-                        builder.write_timestamp(
-                            self.frames_in_flight[frame_idx].query_pool.clone(),
-                            q,
-                            PipelineStage::AllCommands,
-                        )
-                    }
-                    .unwrap();
-                }
+                    unsafe { builder.dispatch([1, 1, 1]) }.unwrap();
 
-                if bvh_needs_rebuild {
-                    // 1. Tetrahedron preprocessing (transform to view space)
-                    let raytrace_preprocess_push_data: [u32; 4] =
-                        [0, total_tetrahedron_count as u32, 0, 0];
+                    // 2b. Compute Morton codes (dispatch n_pow2 threads to fill sentinels for padding)
+                    let n = total_tetrahedron_count as u32;
+                    let n_pow2 = n.next_power_of_two();
+                    builder
+                        .bind_pipeline_compute(
+                            self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
+                        )
+                        .unwrap();
+                    unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }.unwrap();
+
+                    // 2c. Bitonic sort using shared memory optimization
+                    // Sort all n_pow2 elements (including sentinel-padded entries)
+                    let num_stages = n_pow2.trailing_zeros(); // log2(n_pow2)
+                    let local_stages = 6u32.min(num_stages); // stages 0-5 fit in 64-element workgroups
+                    let workgroups = n_pow2.div_ceil(64);
+
+                    // Phase 1: Sort each 64-element block in shared memory (stages 0-5)
+                    let push_data: [u32; 4] = [0, 0, n_pow2, 0];
                     builder
                         .push_constants(
                             self.compute_pipeline.pipeline_layout.clone(),
                             0,
-                            raytrace_preprocess_push_data,
+                            push_data,
                         )
                         .unwrap();
                     builder
-                        .bind_pipeline_compute(self.compute_pipeline.raytrace_pre_pipeline.clone())
+                        .bind_pipeline_compute(
+                            self.compute_pipeline
+                                .bvh_bitonic_sort_local_pipeline
+                                .clone(),
+                        )
                         .unwrap();
-                    unsafe {
-                        builder.dispatch([(total_tetrahedron_count as u32).div_ceil(64u32), 1, 1])
-                    }
-                    .unwrap();
-                    {
-                        let q = self.profiler.next_query_index("rt_preprocess");
-                        unsafe {
-                            builder.write_timestamp(
-                                self.frames_in_flight[frame_idx].query_pool.clone(),
-                                q,
-                                PipelineStage::AllCommands,
+                    unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
+
+                    // Phase 2: Global merge stages (stages 6+)
+                    for stage in local_stages..num_stages {
+                        // Global steps: stepSize >= 64 (step >= 6)
+                        builder
+                            .bind_pipeline_compute(
+                                self.compute_pipeline.bvh_bitonic_sort_pipeline.clone(),
                             )
+                            .unwrap();
+                        for step in (local_stages..=stage).rev() {
+                            let push_data: [u32; 4] = [stage, step, n_pow2, 0];
+                            builder
+                                .push_constants(
+                                    self.compute_pipeline.pipeline_layout.clone(),
+                                    0,
+                                    push_data,
+                                )
+                                .unwrap();
+                            unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
                         }
-                        .unwrap();
-                    }
-
-                    // 2. BVH Construction
-                    if total_tetrahedron_count > 0 {
-                        // 2a. Compute scene bounds
-                        builder
-                            .bind_pipeline_compute(
-                                self.compute_pipeline.bvh_scene_bounds_pipeline.clone(),
-                            )
-                            .unwrap();
-                        unsafe { builder.dispatch([1, 1, 1]) }.unwrap();
-
-                        // 2b. Compute Morton codes (dispatch n_pow2 threads to fill sentinels for padding)
-                        let n = total_tetrahedron_count as u32;
-                        let n_pow2 = n.next_power_of_two();
-                        builder
-                            .bind_pipeline_compute(
-                                self.compute_pipeline.bvh_morton_codes_pipeline.clone(),
-                            )
-                            .unwrap();
-                        unsafe { builder.dispatch([n_pow2.div_ceil(64u32), 1, 1]) }.unwrap();
-
-                        // 2c. Bitonic sort using shared memory optimization
-                        // Sort all n_pow2 elements (including sentinel-padded entries)
-                        let num_stages = n_pow2.trailing_zeros(); // log2(n_pow2)
-                        let local_stages = 6u32.min(num_stages); // stages 0-5 fit in 64-element workgroups
-                        let workgroups = n_pow2.div_ceil(64);
-
-                        // Phase 1: Sort each 64-element block in shared memory (stages 0-5)
-                        let push_data: [u32; 4] = [0, 0, n_pow2, 0];
+                        // Local merge: steps 5-0 in shared memory (1 dispatch)
+                        let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
                         builder
                             .push_constants(
                                 self.compute_pipeline.pipeline_layout.clone(),
@@ -4211,153 +4170,91 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         builder
                             .bind_pipeline_compute(
                                 self.compute_pipeline
-                                    .bvh_bitonic_sort_local_pipeline
+                                    .bvh_bitonic_sort_local_merge_pipeline
                                     .clone(),
                             )
                             .unwrap();
                         unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-
-                        // Phase 2: Global merge stages (stages 6+)
-                        for stage in local_stages..num_stages {
-                            // Global steps: stepSize >= 64 (step >= 6)
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_bitonic_sort_pipeline.clone(),
-                                )
-                                .unwrap();
-                            for step in (local_stages..=stage).rev() {
-                                let push_data: [u32; 4] = [stage, step, n_pow2, 0];
-                                builder
-                                    .push_constants(
-                                        self.compute_pipeline.pipeline_layout.clone(),
-                                        0,
-                                        push_data,
-                                    )
-                                    .unwrap();
-                                unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-                            }
-                            // Local merge: steps 5-0 in shared memory (1 dispatch)
-                            let push_data: [u32; 4] = [stage, 0, n_pow2, 0];
-                            builder
-                                .push_constants(
-                                    self.compute_pipeline.pipeline_layout.clone(),
-                                    0,
-                                    push_data,
-                                )
-                                .unwrap();
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline
-                                        .bvh_bitonic_sort_local_merge_pipeline
-                                        .clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([workgroups, 1, 1]) }.unwrap();
-                        }
-
-                        // 2d. Initialize leaf nodes
-                        builder
-                            .bind_pipeline_compute(
-                                self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
-                            )
-                            .unwrap();
-                        unsafe {
-                            builder.dispatch([
-                                (total_tetrahedron_count as u32).div_ceil(64u32),
-                                1,
-                                1,
-                            ])
-                        }
-                        .unwrap();
-
-                        // 2e. Build internal nodes (Karras algorithm)
-                        builder
-                            .bind_pipeline_compute(
-                                self.compute_pipeline.bvh_build_tree_pipeline.clone(),
-                            )
-                            .unwrap();
-                        unsafe {
-                            builder.dispatch([
-                                (total_tetrahedron_count as u32).div_ceil(64u32),
-                                1,
-                                1,
-                            ])
-                        }
-                        .unwrap();
-
-                        // 2f. Link parent pointers for leaf-to-root propagation.
-                        let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
-                        if num_internal_nodes > 0 {
-                            builder
-                                .bind_pipeline_compute(
-                                    self.compute_pipeline.bvh_link_parents_pipeline.clone(),
-                                )
-                                .unwrap();
-                            unsafe { builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1]) }
-                                .unwrap();
-                        }
-
-                        // 2g. Compute leaf AABBs and propagate all parent bounds in one pass.
-                        builder
-                            .bind_pipeline_compute(
-                                self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
-                            )
-                            .unwrap();
-                        unsafe {
-                            builder.dispatch([
-                                (total_tetrahedron_count as u32).div_ceil(64u32),
-                                1,
-                                1,
-                            ])
-                        }
-                        .unwrap();
                     }
 
-                    self.bvh_scene_hash = scene_hash;
-
-                    // Debug: copy BVH data to CPU on first rebuild
-                    if self.frames_rendered == 0 {
-                        builder
-                            .copy_buffer(CopyBufferInfo::buffers(
-                                self.sized_buffers.bvh_nodes_buffer.clone(),
-                                self.sized_buffers.cpu_bvh_nodes_buffer.clone(),
-                            ))
-                            .unwrap();
-                        builder
-                            .copy_buffer(CopyBufferInfo::buffers(
-                                self.sized_buffers.morton_codes_buffer.clone(),
-                                self.sized_buffers.cpu_morton_codes_buffer.clone(),
-                            ))
-                            .unwrap();
-                    }
-
-                    {
-                        let q = self.profiler.next_query_index("bvh_build");
-                        unsafe {
-                            builder.write_timestamp(
-                                self.frames_in_flight[frame_idx].query_pool.clone(),
-                                q,
-                                PipelineStage::AllCommands,
-                            )
-                        }
+                    // 2d. Initialize leaf nodes
+                    builder
+                        .bind_pipeline_compute(
+                            self.compute_pipeline.bvh_init_leaves_pipeline.clone(),
+                        )
                         .unwrap();
+                    unsafe {
+                        builder.dispatch([
+                            (total_tetrahedron_count as u32).div_ceil(64u32),
+                            1,
+                            1,
+                        ])
                     }
-                }
-
-                // 3. Raytrace pixels (using BVH) - always runs, only seed changes
-                builder
-                    .bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone())
                     .unwrap();
-                unsafe {
-                    builder.dispatch([
-                        self.sized_buffers.render_dimensions[0].div_ceil(8),
-                        self.sized_buffers.render_dimensions[1].div_ceil(8),
-                        1,
-                    ])
+
+                    // 2e. Build internal nodes (Karras algorithm)
+                    builder
+                        .bind_pipeline_compute(
+                            self.compute_pipeline.bvh_build_tree_pipeline.clone(),
+                        )
+                        .unwrap();
+                    unsafe {
+                        builder.dispatch([
+                            (total_tetrahedron_count as u32).div_ceil(64u32),
+                            1,
+                            1,
+                        ])
+                    }
+                    .unwrap();
+
+                    // 2f. Link parent pointers for leaf-to-root propagation.
+                    let num_internal_nodes = total_tetrahedron_count.saturating_sub(1) as u32;
+                    if num_internal_nodes > 0 {
+                        builder
+                            .bind_pipeline_compute(
+                                self.compute_pipeline.bvh_link_parents_pipeline.clone(),
+                            )
+                            .unwrap();
+                        unsafe { builder.dispatch([num_internal_nodes.div_ceil(64), 1, 1]) }
+                            .unwrap();
+                    }
+
+                    // 2g. Compute leaf AABBs and propagate all parent bounds in one pass.
+                    builder
+                        .bind_pipeline_compute(
+                            self.compute_pipeline.bvh_propagate_aabbs_pipeline.clone(),
+                        )
+                        .unwrap();
+                    unsafe {
+                        builder.dispatch([
+                            (total_tetrahedron_count as u32).div_ceil(64u32),
+                            1,
+                            1,
+                        ])
+                    }
+                    .unwrap();
                 }
-                .unwrap();
+
+                self.bvh_scene_hash = scene_hash;
+
+                // Debug: copy BVH data to CPU on first rebuild
+                if self.frames_rendered == 0 {
+                    builder
+                        .copy_buffer(CopyBufferInfo::buffers(
+                            self.sized_buffers.bvh_nodes_buffer.clone(),
+                            self.sized_buffers.cpu_bvh_nodes_buffer.clone(),
+                        ))
+                        .unwrap();
+                    builder
+                        .copy_buffer(CopyBufferInfo::buffers(
+                            self.sized_buffers.morton_codes_buffer.clone(),
+                            self.sized_buffers.cpu_morton_codes_buffer.clone(),
+                        ))
+                        .unwrap();
+                }
+
                 {
-                    let q = self.profiler.next_query_index("raytrace");
+                    let q = self.profiler.next_query_index("bvh_build");
                     unsafe {
                         builder.write_timestamp(
                             self.frames_in_flight[frame_idx].query_pool.clone(),
@@ -4367,6 +4264,30 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     }
                     .unwrap();
                 }
+            }
+
+            // 3. Raytrace pixels (using BVH) - always runs, only seed changes
+            builder
+                .bind_pipeline_compute(self.compute_pipeline.raytrace_pixel_pipeline.clone())
+                .unwrap();
+            unsafe {
+                builder.dispatch([
+                    self.sized_buffers.render_dimensions[0].div_ceil(8),
+                    self.sized_buffers.render_dimensions[1].div_ceil(8),
+                    1,
+                ])
+            }
+            .unwrap();
+            {
+                let q = self.profiler.next_query_index("raytrace");
+                unsafe {
+                    builder.write_timestamp(
+                        self.frames_in_flight[frame_idx].query_pool.clone(),
+                        q,
+                        PipelineStage::AllCommands,
+                    )
+                }
+                .unwrap();
             }
         }
 
@@ -4570,7 +4491,7 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 &view_matrix_nalgebra,
                 &view_matrix_nalgebra_inv,
                 focal_length_xy,
-                model_instances,
+                &model_instances,
                 render_options.hud_readout_mode,
                 render_options.hud_rotation_label.as_deref(),
                 render_options.hud_target_hit_voxel,

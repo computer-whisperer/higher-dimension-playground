@@ -176,7 +176,7 @@ where
         // cache merges naturally de-fragment instead of accumulating clipped
         // fragments.
         let base_core = self.field.query_region_core(query, detail);
-        let compose_bounds = union_bounds(bounds, base_core.bounds);
+        let compose_bounds = bounds.union(&base_core.bounds);
         let mut composed = RegionChunkTree::new();
         let _ = composed.splice_non_empty_core_in_bounds(base_core.bounds, base_core.as_ref());
         let override_core = self.override_chunks.slice_core_in_bounds(compose_bounds);
@@ -191,50 +191,8 @@ where
 
 impl<F> WorldOverlay for PassthroughWorldOverlay<F> where F: WorldField {}
 
-fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
-    if !a.intersects(&b) {
-        return None;
-    }
-    let intersection = Aabb4i::new(
-        [
-            a.min[0].max(b.min[0]),
-            a.min[1].max(b.min[1]),
-            a.min[2].max(b.min[2]),
-            a.min[3].max(b.min[3]),
-        ],
-        [
-            a.max[0].min(b.max[0]),
-            a.max[1].min(b.max[1]),
-            a.max[2].min(b.max[2]),
-            a.max[3].min(b.max[3]),
-        ],
-    );
-    if intersection.is_valid() {
-        Some(intersection)
-    } else {
-        None
-    }
-}
-
-fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
-    Aabb4i::new(
-        [
-            a.min[0].min(b.min[0]),
-            a.min[1].min(b.min[1]),
-            a.min[2].min(b.min[2]),
-            a.min[3].min(b.min[3]),
-        ],
-        [
-            a.max[0].max(b.max[0]),
-            a.max[1].max(b.max[1]),
-            a.max[2].max(b.max[2]),
-            a.max[3].max(b.max[3]),
-        ],
-    )
-}
-
 fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
-    let Some(inner) = intersect_bounds(outer, inner) else {
+    let Some(inner) = outer.intersection(&inner) else {
         return vec![outer];
     };
     if inner == outer {

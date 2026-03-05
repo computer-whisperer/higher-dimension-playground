@@ -22,25 +22,7 @@ pub(super) fn latest_framebuffer_screenshot_path() -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
-pub(super) fn env_flag_enabled(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => {
-            let s = v.trim().to_ascii_lowercase();
-            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
-        }
-        Err(_) => false,
-    }
-}
-
-pub(super) fn env_flag_enabled_or(name: &str, default_enabled: bool) -> bool {
-    match std::env::var(name) {
-        Ok(v) => {
-            let s = v.trim().to_ascii_lowercase();
-            !(s.is_empty() || s == "0" || s == "false" || s == "off" || s == "no")
-        }
-        Err(_) => default_enabled,
-    }
-}
+pub(super) use polychora::shared::{env_flag_enabled, env_flag_enabled_or};
 
 pub(super) fn env_usize_or(name: &str, default_value: usize) -> usize {
     std::env::var(name)
@@ -356,19 +338,7 @@ pub(super) fn distance4(a: [f32; 4], b: [f32; 4]) -> f32 {
     (d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3).sqrt()
 }
 
-pub(super) fn normalize4_with_fallback(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
-    let len_sq = dot4(v, v);
-    if len_sq <= 1e-8 || !len_sq.is_finite() {
-        return fallback;
-    }
-    let inv_len = len_sq.sqrt().recip();
-    [
-        v[0] * inv_len,
-        v[1] * inv_len,
-        v[2] * inv_len,
-        v[3] * inv_len,
-    ]
-}
+pub(super) use polychora::shared::normalize4_with_fallback;
 
 pub(super) fn orthonormal_basis_from_forward(forward: [f32; 4]) -> [[f32; 4]; 4] {
     let forward = normalize4_with_fallback(forward, [0.0, 0.0, 1.0, 0.0]);

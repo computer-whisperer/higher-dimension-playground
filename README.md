@@ -157,7 +157,6 @@ Core runtime options:
 | `--load-world` | Load `--world-file` at startup |
 | `--server <ip[:port]>` | Connect to multiplayer server (`:4000` default if omitted) |
 | `--player-name <name>` | Multiplayer display name for `--server` |
-| `--cpu-render` | CPU reference render to `frames/cpu_render.png`, then exit |
 
 VTE-specific options:
 

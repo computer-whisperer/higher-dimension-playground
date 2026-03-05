@@ -160,7 +160,7 @@ fn validate_render_core_rejects_mixed_scale_world_overlap() {
     )
     .expect("fine chunk array");
 
-    let parent_bounds = union_bounds(coarse_bounds, fine_bounds);
+    let parent_bounds = coarse_bounds.union(&fine_bounds);
     let core = RenderTreeCore {
         bounds: parent_bounds,
         kind: RenderNodeKind::Branch(vec![

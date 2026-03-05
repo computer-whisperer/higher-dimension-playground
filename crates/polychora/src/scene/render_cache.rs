@@ -39,56 +39,6 @@ impl Scene {
         self.clear_voxel_scene_dirty_regions_in_bounds(bounds);
     }
 
-    fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
-        if !a.is_valid() || !b.is_valid() || !a.intersects(&b) {
-            return None;
-        }
-        Some(Aabb4i::new(
-            [
-                a.min[0].max(b.min[0]),
-                a.min[1].max(b.min[1]),
-                a.min[2].max(b.min[2]),
-                a.min[3].max(b.min[3]),
-            ],
-            [
-                a.max[0].min(b.max[0]),
-                a.max[1].min(b.max[1]),
-                a.max[2].min(b.max[2]),
-                a.max[3].min(b.max[3]),
-            ],
-        ))
-    }
-
-    fn merge_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
-        Aabb4i::new(
-            [
-                a.min[0].min(b.min[0]),
-                a.min[1].min(b.min[1]),
-                a.min[2].min(b.min[2]),
-                a.min[3].min(b.min[3]),
-            ],
-            [
-                a.max[0].max(b.max[0]),
-                a.max[1].max(b.max[1]),
-                a.max[2].max(b.max[2]),
-                a.max[3].max(b.max[3]),
-            ],
-        )
-    }
-
-    pub(crate) fn bounds_contains_bounds(outer: Aabb4i, inner: Aabb4i) -> bool {
-        outer.is_valid()
-            && inner.is_valid()
-            && outer.min[0] <= inner.min[0]
-            && outer.min[1] <= inner.min[1]
-            && outer.min[2] <= inner.min[2]
-            && outer.min[3] <= inner.min[3]
-            && outer.max[0] >= inner.max[0]
-            && outer.max[1] >= inner.max[1]
-            && outer.max[2] >= inner.max[2]
-            && outer.max[3] >= inner.max[3]
-    }
-
     /// Dump the region cache tree (client-side) and the on-GPU BVH buffer
     /// structure to stderr for structural analysis.
     pub fn dump_render_trees(&self) {
@@ -414,7 +364,7 @@ impl Scene {
         let mut fallback_reason: Option<String> = None;
         let dirty_region_count = dirty_regions.len();
         for dirty_region in dirty_regions {
-            let Some(dirty_bounds) = Self::intersect_bounds(dirty_region, bounds) else {
+            let Some(dirty_bounds) = dirty_region.intersection(&bounds) else {
                 continue;
             };
 
@@ -479,15 +429,15 @@ impl Scene {
         }
         let mut merged = bounds;
         self.voxel_pending_scene_dirty_regions.retain(|existing| {
-            if Self::bounds_contains_bounds(*existing, merged) {
+            if existing.contains_bounds(&merged) {
                 merged = *existing;
                 return true;
             }
-            if Self::bounds_contains_bounds(merged, *existing) {
+            if merged.contains_bounds(existing) {
                 return false;
             }
             if existing.intersects(&merged) {
-                merged = Self::merge_bounds(*existing, merged);
+                merged = existing.union(&merged);
                 return false;
             }
             true

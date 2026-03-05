@@ -160,56 +160,6 @@ pub fn repeated_voxel_leaf(
 mod bvh;
 pub use bvh::*;
 
-fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
-    if !a.intersects(&b) {
-        return None;
-    }
-    Some(Aabb4i::new(
-        [
-            a.min[0].max(b.min[0]),
-            a.min[1].max(b.min[1]),
-            a.min[2].max(b.min[2]),
-            a.min[3].max(b.min[3]),
-        ],
-        [
-            a.max[0].min(b.max[0]),
-            a.max[1].min(b.max[1]),
-            a.max[2].min(b.max[2]),
-            a.max[3].min(b.max[3]),
-        ],
-    ))
-}
-
-fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
-    Aabb4i::new(
-        [
-            a.min[0].min(b.min[0]),
-            a.min[1].min(b.min[1]),
-            a.min[2].min(b.min[2]),
-            a.min[3].min(b.min[3]),
-        ],
-        [
-            a.max[0].max(b.max[0]),
-            a.max[1].max(b.max[1]),
-            a.max[2].max(b.max[2]),
-            a.max[3].max(b.max[3]),
-        ],
-    )
-}
-
-fn bounds_contains_bounds(outer: Aabb4i, inner: Aabb4i) -> bool {
-    outer.is_valid()
-        && inner.is_valid()
-        && outer.min[0] <= inner.min[0]
-        && outer.min[1] <= inner.min[1]
-        && outer.min[2] <= inner.min[2]
-        && outer.min[3] <= inner.min[3]
-        && outer.max[0] >= inner.max[0]
-        && outer.max[1] >= inner.max[1]
-        && outer.max[2] >= inner.max[2]
-        && outer.max[3] >= inner.max[3]
-}
-
 fn normalize_render_core(core: &mut RenderTreeCore) {
     let RenderNodeKind::Branch(children) = &mut core.kind else {
         return;

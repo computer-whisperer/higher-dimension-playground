@@ -157,33 +157,8 @@ fn send_world_subtree_patch_to_client(
     );
 }
 
-fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
-    if !a.intersects(&b) {
-        return None;
-    }
-    let intersection = Aabb4i::new(
-        [
-            a.min[0].max(b.min[0]),
-            a.min[1].max(b.min[1]),
-            a.min[2].max(b.min[2]),
-            a.min[3].max(b.min[3]),
-        ],
-        [
-            a.max[0].min(b.max[0]),
-            a.max[1].min(b.max[1]),
-            a.max[2].min(b.max[2]),
-            a.max[3].min(b.max[3]),
-        ],
-    );
-    if intersection.is_valid() {
-        Some(intersection)
-    } else {
-        None
-    }
-}
-
 fn subtract_bounds(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
-    let Some(inner) = intersect_bounds(outer, inner) else {
+    let Some(inner) = outer.intersection(&inner) else {
         return vec![outer];
     };
     if inner == outer {
@@ -302,7 +277,7 @@ fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aab
     let mut recipients_by_clip = HashMap::<Aabb4i, Vec<u64>>::new();
     for bounds in unique {
         for (client_id, interest) in &recipients_by_client {
-            let Some(clipped) = intersect_bounds(bounds, *interest) else {
+            let Some(clipped) = bounds.intersection(interest) else {
                 continue;
             };
             recipients_by_clip

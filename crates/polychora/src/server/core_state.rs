@@ -149,7 +149,7 @@ impl ServerState {
                 0,
             );
             keep_bounds = Some(match keep_bounds {
-                Some(acc) => union_bounds(acc, player_keep),
+                Some(acc) => acc.union(&player_keep),
                 None => player_keep,
             });
         }
@@ -262,23 +262,6 @@ impl ServerState {
     pub(super) fn clear_client_world_interest_bounds(&mut self, client_id: u64) -> Option<Aabb4i> {
         self.client_world_interest_bounds.remove(&client_id)
     }
-}
-
-fn union_bounds(a: Aabb4i, b: Aabb4i) -> Aabb4i {
-    Aabb4i::new(
-        [
-            a.min[0].min(b.min[0]),
-            a.min[1].min(b.min[1]),
-            a.min[2].min(b.min[2]),
-            a.min[3].min(b.min[3]),
-        ],
-        [
-            a.max[0].max(b.max[0]),
-            a.max[1].max(b.max[1]),
-            a.max[2].max(b.max[2]),
-            a.max[3].max(b.max[3]),
-        ],
-    )
 }
 
 pub(super) type SharedState = Arc<Mutex<ServerState>>;

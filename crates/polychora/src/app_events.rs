@@ -181,7 +181,6 @@ impl ApplicationHandler for App {
                             self.release_mouse(window);
                         }
                         self.menu_open = true;
-                        self.menu_selection = 0;
                     } else {
                         self.persist_settings_if_needed(true);
                         event_loop.exit();
@@ -248,7 +247,6 @@ impl ApplicationHandler for App {
                     let window = self.rcx.as_ref().unwrap().window.clone().unwrap();
                     self.release_mouse(&window);
                     self.menu_open = true;
-                    self.menu_selection = 0;
                 }
             }
             WindowEvent::RedrawRequested => {

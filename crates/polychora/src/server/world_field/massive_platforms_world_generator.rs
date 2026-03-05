@@ -155,7 +155,7 @@ impl MassivePlatformsWorldGenerator {
         let min_cy = key_min[1].div_euclid(POISSON_CELL_Y);
         let max_cy = (key_max[1] + PLATFORM_THICKNESS_CHUNKS - 1).div_euclid(POISSON_CELL_Y);
         self.for_each_platform_instance_in_bounds(bounds, min_cy, max_cy, |platform| {
-            let Some(_intersection) = intersect_bounds(bounds, platform.bounds) else {
+            let Some(_intersection) = bounds.intersection(&platform.bounds) else {
                 return;
             };
             visitor(platform.bounds);
@@ -630,27 +630,6 @@ fn intersects_xzw(a: Aabb4i, b: Aabb4i) -> bool {
         && b.min[2] < a.max[2]
         && a.min[3] < b.max[3]
         && b.min[3] < a.max[3]
-}
-
-fn intersect_bounds(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
-    if !a.intersects(&b) {
-        return None;
-    }
-    let intersection = Aabb4i::new(
-        [
-            a.min[0].max(b.min[0]),
-            a.min[1].max(b.min[1]),
-            a.min[2].max(b.min[2]),
-            a.min[3].max(b.min[3]),
-        ],
-        [
-            a.max[0].min(b.max[0]),
-            a.max[1].min(b.max[1]),
-            a.max[2].min(b.max[2]),
-            a.max[3].min(b.max[3]),
-        ],
-    );
-    intersection.is_valid().then_some(intersection)
 }
 
 fn payload_from_chunk_compact(chunk: &DenseChunk) -> ChunkPayload {

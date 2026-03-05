@@ -25,7 +25,6 @@ pub(super) struct GpuProfiler {
     pub(super) vte_visible_lod1_sum: u64,
     pub(super) vte_visible_lod2_sum: u64,
     pub(super) vte_y_slices_sum: u64,
-    pub(super) vte_y_slice_lookup_entries_sum: u64,
     pub(super) vte_dense_cap_last: usize,
     pub(super) vte_leaf_cap_last: usize,
     pub(super) vte_node_cap_last: usize,
@@ -55,7 +54,6 @@ impl GpuProfiler {
             vte_visible_lod1_sum: 0,
             vte_visible_lod2_sum: 0,
             vte_y_slices_sum: 0,
-            vte_y_slice_lookup_entries_sum: 0,
             vte_dense_cap_last: 0,
             vte_leaf_cap_last: 0,
             vte_node_cap_last: 0,
@@ -161,7 +159,6 @@ impl GpuProfiler {
         vte_visible_chunks: usize,
         vte_visible_lod_counts: [u32; 3],
         vte_y_slices: usize,
-        vte_y_slice_lookup_entries: usize,
         vte_dense_cap: usize,
         vte_leaf_cap: usize,
         vte_node_cap: usize,
@@ -187,9 +184,6 @@ impl GpuProfiler {
                 .vte_visible_lod2_sum
                 .saturating_add(vte_visible_lod_counts[2] as u64);
             self.vte_y_slices_sum = self.vte_y_slices_sum.saturating_add(vte_y_slices as u64);
-            self.vte_y_slice_lookup_entries_sum = self
-                .vte_y_slice_lookup_entries_sum
-                .saturating_add(vte_y_slice_lookup_entries as u64);
             self.vte_dense_cap_last = vte_dense_cap;
             self.vte_leaf_cap_last = vte_leaf_cap;
             self.vte_node_cap_last = vte_node_cap;
@@ -256,14 +250,13 @@ impl GpuProfiler {
         if self.vte_frame_samples > 0 {
             let s = self.vte_frame_samples as f64;
             println!(
-                "  VTE avg chunks: headers {:.1} visible {:.1} (leaf {:.1} / legacy_l1 {:.1} / legacy_l2 {:.1}) y_slices {:.1} y_lookup {:.1}",
+                "  VTE avg chunks: headers {:.1} visible {:.1} (leaf {:.1} / legacy_l1 {:.1} / legacy_l2 {:.1}) y_slices {:.1}",
                 self.vte_chunk_headers_sum as f64 / s,
                 self.vte_visible_chunks_sum as f64 / s,
                 self.vte_visible_lod0_sum as f64 / s,
                 self.vte_visible_lod1_sum as f64 / s,
                 self.vte_visible_lod2_sum as f64 / s,
                 self.vte_y_slices_sum as f64 / s,
-                self.vte_y_slice_lookup_entries_sum as f64 / s,
             );
             println!(
                 "  VTE caps: dense {} leaf {} nodes {} leaf_entries {}",
@@ -293,7 +286,6 @@ impl GpuProfiler {
         self.vte_visible_lod1_sum = 0;
         self.vte_visible_lod2_sum = 0;
         self.vte_y_slices_sum = 0;
-        self.vte_y_slice_lookup_entries_sum = 0;
         self.vte_dense_cap_last = 0;
         self.vte_leaf_cap_last = 0;
         self.vte_node_cap_last = 0;

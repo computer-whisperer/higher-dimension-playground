@@ -9,15 +9,7 @@ pub(super) fn sanitize_player_name(name: &str, client_id: u64) -> String {
     trimmed.chars().take(32).collect()
 }
 
-pub(super) fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
-}
+pub(super) use crate::shared::env_flag_enabled;
 
 pub(super) fn parse_spawn_vec4(args: &[&str]) -> Option<[f32; 4]> {
     if args.len() != 4 {

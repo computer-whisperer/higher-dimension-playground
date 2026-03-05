@@ -74,28 +74,6 @@ impl App {
         }
     }
 
-    pub(super) fn toggle_vte_y_slice_lookup_cache(&mut self) {
-        if let Some(state) = self.vte_sweep_state {
-            eprintln!(
-                "[VTE sweep #{}] ignoring manual y-slice lookup cache toggle while sweep is active.",
-                state.run_id
-            );
-            return;
-        }
-        self.vte_y_slice_lookup_cache_enabled = !self.vte_y_slice_lookup_cache_enabled;
-        if let Some(rcx) = self.rcx.as_mut() {
-            rcx.reset_gpu_profile_window();
-        }
-        eprintln!(
-            "VTE runtime y-slice lookup cache: {}",
-            if self.vte_y_slice_lookup_cache_enabled {
-                "on"
-            } else {
-                "off"
-            }
-        );
-    }
-
     pub(super) fn toggle_vte_integral_sky_emissive(&mut self) {
         self.vte_integral_sky_emissive_enabled = !self.vte_integral_sky_emissive_enabled;
         eprintln!(
@@ -132,7 +110,6 @@ impl App {
         // Do NOT drain take_look_at() - G key should work during gameplay
         self.input.take_scheme_cycle();
         self.input.take_vte_sweep();
-        self.input.take_vte_y_slice_lookup_cache_toggle();
         self.input.take_vte_integral_sky_emissive_toggle();
         self.input.take_vte_integral_log_merge_toggle();
         self.input.take_scroll_steps();
@@ -179,21 +156,7 @@ impl App {
             KeyCode::F12 => {
                 // Screenshot will be handled by setting the flag
             }
-            KeyCode::ArrowUp => {
-                if self.menu_open && self.menu_selection > 0 {
-                    self.menu_selection -= 1;
-                }
-            }
-            KeyCode::ArrowDown => {
-                if self.menu_open && self.menu_selection < 2 {
-                    self.menu_selection += 1;
-                }
-            }
-            KeyCode::Enter => {
-                if self.menu_open {
-                    // Handle menu activation
-                }
-            }
+            KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Enter => {}
             KeyCode::KeyG => {
                 self.input.request_look_at();
             }

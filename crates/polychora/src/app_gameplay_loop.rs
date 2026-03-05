@@ -179,9 +179,6 @@ impl App {
             if self.input.take_vte_sweep() {
                 self.toggle_vte_runtime_sweep();
             }
-            if self.input.take_vte_y_slice_lookup_cache_toggle() {
-                self.toggle_vte_y_slice_lookup_cache();
-            }
             if self.input.take_vte_integral_sky_emissive_toggle() {
                 self.toggle_vte_integral_sky_emissive();
             }
@@ -1165,7 +1162,6 @@ impl App {
             vte_reference_compare: self.vte_reference_compare_enabled,
             vte_reference_mismatch_only: self.vte_reference_mismatch_only_enabled,
             vte_compare_slice_only: self.vte_compare_slice_only_enabled,
-            vte_y_slice_lookup_cache: self.vte_y_slice_lookup_cache_enabled,
             vte_integral_sky_emissive_tweak: self.vte_integral_sky_emissive_enabled,
             vte_integral_sky_scale: self.vte_integral_sky_scale,
             vte_integral_hit_emissive_boost: self.vte_integral_hit_emissive_boost,

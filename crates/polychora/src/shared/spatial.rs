@@ -157,6 +157,57 @@ impl Aabb4 {
             && self.max[3] > other.min[3]
     }
 
+    /// Returns the intersection of two AABBs, or `None` if they don't overlap.
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        let result = Self::new(
+            [
+                self.min[0].max(other.min[0]),
+                self.min[1].max(other.min[1]),
+                self.min[2].max(other.min[2]),
+                self.min[3].max(other.min[3]),
+            ],
+            [
+                self.max[0].min(other.max[0]),
+                self.max[1].min(other.max[1]),
+                self.max[2].min(other.max[2]),
+                self.max[3].min(other.max[3]),
+            ],
+        );
+        result.is_valid().then_some(result)
+    }
+
+    /// Returns the smallest AABB containing both `self` and `other`.
+    pub fn union(&self, other: &Self) -> Self {
+        Self::new(
+            [
+                self.min[0].min(other.min[0]),
+                self.min[1].min(other.min[1]),
+                self.min[2].min(other.min[2]),
+                self.min[3].min(other.min[3]),
+            ],
+            [
+                self.max[0].max(other.max[0]),
+                self.max[1].max(other.max[1]),
+                self.max[2].max(other.max[2]),
+                self.max[3].max(other.max[3]),
+            ],
+        )
+    }
+
+    /// Returns `true` if `self` fully contains `inner` (half-open semantics).
+    pub fn contains_bounds(&self, inner: &Self) -> bool {
+        self.is_valid()
+            && inner.is_valid()
+            && self.min[0] <= inner.min[0]
+            && self.min[1] <= inner.min[1]
+            && self.min[2] <= inner.min[2]
+            && self.min[3] <= inner.min[3]
+            && self.max[0] >= inner.max[0]
+            && self.max[1] >= inner.max[1]
+            && self.max[2] >= inner.max[2]
+            && self.max[3] >= inner.max[3]
+    }
+
     /// Convert world-space half-open bounds to inclusive chunk lattice bounds.
     ///
     /// Returns `(lmin, lmax)` where both are inclusive — suitable for

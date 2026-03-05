@@ -695,7 +695,7 @@ pub fn slice_region_core_in_bounds(core: &RegionTreeCore, bounds: Aabb4i) -> Reg
         return empty_core_for_bounds(bounds);
     }
 
-    let Some(intersection) = intersect_aabb(core.bounds, bounds) else {
+    let Some(intersection) = core.bounds.intersection(&bounds) else {
         return empty_core_for_bounds(bounds);
     };
     let Some(clipped) = slice_node_to_bounds(core, intersection) else {
@@ -731,7 +731,7 @@ fn empty_core_for_bounds(bounds: Aabb4i) -> RegionTreeCore {
 }
 
 fn slice_node_to_bounds(node: &RegionTreeCore, bounds: Aabb4i) -> Option<RegionTreeCore> {
-    let intersection = intersect_aabb(node.bounds, bounds)?;
+    let intersection = node.bounds.intersection(&bounds)?;
     let kind = match &node.kind {
         RegionNodeKind::Empty => RegionNodeKind::Empty,
         RegionNodeKind::Uniform(block) => RegionNodeKind::Uniform(block.clone()),
@@ -774,7 +774,7 @@ fn slice_chunk_array_to_bounds(
     chunk_array: &ChunkArrayData,
     bounds: Aabb4i,
 ) -> Option<ChunkArrayData> {
-    let intersection = intersect_aabb(chunk_array.bounds, bounds)?;
+    let intersection = chunk_array.bounds.intersection(&bounds)?;
     let source_indices = chunk_array.decode_dense_indices().ok()?;
     slice_chunk_array_to_bounds_with_dense_indices(chunk_array, &source_indices, intersection)
 }
@@ -784,7 +784,7 @@ fn slice_chunk_array_to_bounds_with_dense_indices(
     source_indices: &[u16],
     bounds: Aabb4i,
 ) -> Option<ChunkArrayData> {
-    let intersection = intersect_aabb(chunk_array.bounds, bounds)?;
+    let intersection = chunk_array.bounds.intersection(&bounds)?;
     let se = chunk_array.scale_exp;
     let source_extents = chunk_array.bounds.chunk_extents_at_scale(se)?;
     let target_extents = intersection.chunk_extents_at_scale(se)?;
@@ -841,7 +841,7 @@ pub fn resample_chunk_array_to_bounds(
     generator_version_hash: u64,
 ) -> RegionTreeCore {
     // Intersect to get only the overlapping region.
-    let Some(intersection) = intersect_aabb(target_bounds, source.bounds) else {
+    let Some(intersection) = target_bounds.intersection(&source.bounds) else {
         return RegionTreeCore {
             bounds: target_bounds,
             kind: RegionNodeKind::Empty,
@@ -1159,7 +1159,7 @@ fn splice_node_with_non_empty_core(
     bounds: Aabb4i,
     replacement: &RegionTreeCore,
 ) -> Option<Aabb4i> {
-    let intersection = intersect_aabb(node.bounds, bounds)?;
+    let intersection = node.bounds.intersection(&bounds)?;
     let replacement_slice = slice_non_empty_region_core_in_bounds(replacement, intersection);
 
     if matches!(replacement_slice.kind, RegionNodeKind::Empty)
@@ -1274,7 +1274,7 @@ fn collect_non_overlapping_remnants(
             // avoid carve_region_with_rechunk here because its normalize step
             // can consolidate ChunkArray pieces back to the original bounds,
             // restoring the overlap we're trying to eliminate.
-            let intersection = match intersect_aabb(node.bounds, patch_bounds) {
+            let intersection = match node.bounds.intersection(&patch_bounds) {
                 Some(i) => i,
                 None => return,
             };
@@ -1456,7 +1456,7 @@ fn splice_node_with_core(
     bounds: Aabb4i,
     replacement: &RegionTreeCore,
 ) -> Option<Aabb4i> {
-    let intersection = intersect_aabb(node.bounds, bounds)?;
+    let intersection = node.bounds.intersection(&bounds)?;
     let replacement_slice = slice_region_core_in_bounds(replacement, intersection);
     let existing_slice = slice_region_core_in_bounds(node, intersection);
     if existing_slice.kind == replacement_slice.kind {
@@ -1695,7 +1695,7 @@ fn merge_aabb(a: Aabb4i, b: Aabb4i) -> Aabb4i {
 /// Subtract `inner` from `outer`, producing up to 8 half-open pieces that tile
 /// the remaining space with no gaps and no overlaps.
 fn subtract_aabb(outer: Aabb4i, inner: Aabb4i) -> Vec<Aabb4i> {
-    let Some(inner) = intersect_aabb(outer, inner) else {
+    let Some(inner) = outer.intersection(&inner) else {
         return vec![outer];
     };
     if inner == outer {
@@ -1733,7 +1733,7 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
     query_bounds: Aabb4i,
     out: &mut Vec<(ChunkKey, ResolvedChunkPayload)>,
 ) {
-    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
+    let Some(intersection) = bounds.intersection(&query_bounds) else {
         return;
     };
 
@@ -1760,7 +1760,7 @@ fn collect_non_empty_chunks_from_kind_in_bounds(
             }
         }
         RegionNodeKind::ChunkArray(chunk_array) => {
-            let Some(chunk_array_intersection) = intersect_aabb(chunk_array.bounds, query_bounds)
+            let Some(chunk_array_intersection) = chunk_array.bounds.intersection(&query_bounds)
             else {
                 return;
             };
@@ -1829,7 +1829,7 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
     query_bounds: Aabb4i,
     out: &mut Vec<ChunkKey>,
 ) {
-    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
+    let Some(intersection) = bounds.intersection(&query_bounds) else {
         return;
     };
 
@@ -1851,7 +1851,7 @@ fn collect_non_empty_chunk_keys_from_kind_in_bounds(
             }
         }
         RegionNodeKind::ChunkArray(chunk_array) => {
-            let Some(chunk_array_intersection) = intersect_aabb(chunk_array.bounds, query_bounds)
+            let Some(chunk_array_intersection) = chunk_array.bounds.intersection(&query_bounds)
             else {
                 return;
             };
@@ -1911,7 +1911,7 @@ fn collect_chunk_entries_from_kind_in_bounds(
     query_bounds: Aabb4i,
     out: &mut Vec<(ChunkKey, i8)>,
 ) {
-    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
+    let Some(intersection) = bounds.intersection(&query_bounds) else {
         return;
     };
 
@@ -1939,7 +1939,7 @@ fn collect_chunk_entries_from_kind_in_bounds(
             }
         }
         RegionNodeKind::ChunkArray(chunk_array) => {
-            let Some(chunk_array_intersection) = intersect_aabb(chunk_array.bounds, query_bounds)
+            let Some(chunk_array_intersection) = chunk_array.bounds.intersection(&query_bounds)
             else {
                 return;
             };
@@ -2915,7 +2915,7 @@ fn collect_chunks_from_kind_in_bounds(
     query_bounds: Aabb4i,
     out: &mut Vec<(ChunkKey, ResolvedChunkPayload)>,
 ) {
-    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
+    let Some(intersection) = bounds.intersection(&query_bounds) else {
         return;
     };
 
@@ -2938,7 +2938,7 @@ fn collect_chunks_from_kind_in_bounds(
             }
         }
         RegionNodeKind::ChunkArray(chunk_array) => {
-            let Some(chunk_array_intersection) = intersect_aabb(chunk_array.bounds, query_bounds)
+            let Some(chunk_array_intersection) = chunk_array.bounds.intersection(&query_bounds)
             else {
                 return;
             };
@@ -2996,7 +2996,7 @@ fn collect_chunk_keys_from_kind_in_bounds(
     query_bounds: Aabb4i,
     out: &mut Vec<ChunkKey>,
 ) {
-    let Some(intersection) = intersect_aabb(bounds, query_bounds) else {
+    let Some(intersection) = bounds.intersection(&query_bounds) else {
         return;
     };
 
@@ -3044,7 +3044,7 @@ fn chunk_array_has_non_empty_intersection(
     chunk_array: &ChunkArrayData,
     query_bounds: Aabb4i,
 ) -> bool {
-    let Some(intersection) = intersect_aabb(chunk_array.bounds, query_bounds) else {
+    let Some(intersection) = chunk_array.bounds.intersection(&query_bounds) else {
         return false;
     };
     let Ok(indices) = chunk_array.decode_dense_indices() else {
@@ -4691,23 +4691,6 @@ fn expand_root_once(
         kind: RegionNodeKind::Branch(children),
         generator_version_hash: 0,
     })
-}
-
-fn intersect_aabb(a: Aabb4i, b: Aabb4i) -> Option<Aabb4i> {
-    let min = [
-        a.min[0].max(b.min[0]),
-        a.min[1].max(b.min[1]),
-        a.min[2].max(b.min[2]),
-        a.min[3].max(b.min[3]),
-    ];
-    let max = [
-        a.max[0].min(b.max[0]),
-        a.max[1].min(b.max[1]),
-        a.max[2].min(b.max[2]),
-        a.max[3].min(b.max[3]),
-    ];
-    (min[0] < max[0] && min[1] < max[1] && min[2] < max[2] && min[3] < max[3])
-        .then_some(Aabb4i::new(min, max))
 }
 
 #[cfg(test)]

@@ -14,7 +14,6 @@ mod app_ui;
 mod audio;
 mod audio_synth;
 mod camera;
-mod cpu_render;
 mod input;
 mod material_icons;
 mod multiplayer;
@@ -44,7 +43,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use app_bootstrap::{parse_commands, run_cpu_render};
+use app_bootstrap::parse_commands;
 use app_helpers::*;
 use audio::{
     AudioEngine, SoundEffect, AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT, AUDIO_SPATIAL_FALLOFF_POWER_MAX,
@@ -156,7 +155,6 @@ const MENU_ORBIT_TARGET_Y_OFFSET: f32 = 0.6;
 #[derive(Copy, Clone)]
 struct VteRuntimeProfile {
     label: &'static str,
-    y_slice_lookup_cache: bool,
 }
 
 /// (max_trace_steps, max_trace_distance) for perf suite render distance tiers.
@@ -431,14 +429,8 @@ const PERF_SUITE_SCENARIOS: [PerfSuiteScenario; 15] = [
 ];
 
 const VTE_SWEEP_PROFILES: [VteRuntimeProfile; 2] = [
-    VteRuntimeProfile {
-        label: "A bvh",
-        y_slice_lookup_cache: true,
-    },
-    VteRuntimeProfile {
-        label: "B bvh",
-        y_slice_lookup_cache: false,
-    },
+    VteRuntimeProfile { label: "A bvh" },
+    VteRuntimeProfile { label: "B bvh" },
 ];
 
 const VTE_SWEEP_MODE_LABEL: &str = "bvh";
@@ -534,10 +526,6 @@ struct Args {
     #[arg(long, value_enum, default_value_t = SceneArg::Flat)]
     scene: SceneArg,
 
-    /// CPU-only render: produce frames/cpu_render.png and exit (no GPU window)
-    #[arg(long)]
-    cpu_render: bool,
-
     /// GPU screenshot: render one frame at debug camera position and exit
     #[arg(long)]
     gpu_screenshot: bool,
@@ -600,10 +588,6 @@ struct Args {
     /// VTE thick-slice half-width in layer indices.
     #[arg(long, default_value_t = 2)]
     vte_thick_half_width: u32,
-
-    /// Enable y-slice direct chunk-lookup table in Stage A.
-    #[arg(long, action = ArgAction::Set, default_value_t = true)]
-    vte_y_slice_lookup_cache: bool,
 
     /// Enable fused-integral tweak: dim sky contribution and add small hit emissive floor.
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
@@ -888,11 +872,6 @@ fn main() {
     }
     let initial_singleplayer_world_generator = args.singleplayer_world_type.to_runtime();
 
-    if args.cpu_render {
-        run_cpu_render(args.scene.to_scene_preset(), &args);
-        return;
-    }
-
     let event_loop = EventLoop::new().unwrap();
     let (instance, device, queue) = vulkan_setup(Some(&event_loop));
 
@@ -951,7 +930,6 @@ fn main() {
     let vte_reference_compare_enabled = env_flag_enabled("R4D_VTE_REFERENCE_COMPARE")
         || vte_reference_mismatch_only_enabled
         || vte_compare_slice_only_enabled;
-    let initial_vte_y_slice_lookup_cache_enabled = args.vte_y_slice_lookup_cache;
     let initial_vte_integral_sky_emissive_enabled = args.vte_integral_sky_emissive_tweak;
     let initial_vte_integral_log_merge_enabled = args.vte_integral_log_merge_tweak;
     let initial_vte_integral_sky_scale = args.vte_integral_sky_scale.max(0.0);
@@ -987,7 +965,6 @@ fn main() {
     let skip_main_menu = args.load_world
         || args.server.is_some()
         || args.gpu_screenshot
-        || args.cpu_render
         || args.commands.is_some()
         || args.perf_suite
         || !matches!(args.scene, SceneArg::Flat);
@@ -1180,7 +1157,6 @@ fn main() {
         vte_reference_compare_enabled,
         vte_reference_mismatch_only_enabled,
         vte_compare_slice_only_enabled,
-        vte_y_slice_lookup_cache_enabled: initial_vte_y_slice_lookup_cache_enabled,
         vte_integral_sky_emissive_enabled: initial_vte_integral_sky_emissive_enabled,
         vte_integral_sky_scale: initial_vte_integral_sky_scale,
         vte_integral_hit_emissive_boost: initial_vte_integral_hit_emissive_boost,
@@ -1209,7 +1185,6 @@ fn main() {
         dev_console_focus_input: false,
         controls_dialog_open: false,
         menu_open: false,
-        menu_selection: 0,
         egui_ctx: egui::Context::default(),
         egui_winit_state: None,
         content_registry: content_registry.clone(),
@@ -1353,11 +1328,6 @@ fn main() {
     }
     if app.vte_compare_slice_only_enabled {
         eprintln!("VTE compare slice-only mode enabled via R4D_VTE_COMPARE_SLICE_ONLY");
-    }
-    if !app.vte_y_slice_lookup_cache_enabled {
-        eprintln!(
-            "Ignoring deprecated --vte-y-slice-lookup-cache=false; chunk lookup now always uses BVH."
-        );
     }
     if app.vte_integral_sky_emissive_enabled {
         eprintln!(
@@ -1543,7 +1513,6 @@ struct App {
     vte_reference_compare_enabled: bool,
     vte_reference_mismatch_only_enabled: bool,
     vte_compare_slice_only_enabled: bool,
-    vte_y_slice_lookup_cache_enabled: bool,
     vte_integral_sky_emissive_enabled: bool,
     vte_integral_sky_scale: f32,
     vte_integral_hit_emissive_boost: f32,
@@ -1567,7 +1536,6 @@ struct App {
     dev_console_focus_input: bool,
     controls_dialog_open: bool,
     menu_open: bool,
-    menu_selection: usize,
     egui_ctx: egui::Context,
     egui_winit_state: Option<egui_winit::State>,
     content_registry: Arc<polychora::content_registry::ContentRegistry>,
@@ -1669,7 +1637,6 @@ struct VteSweepState {
     run_id: u32,
     profile_index: usize,
     frames_remaining: usize,
-    previous_y_slice_lookup_cache: bool,
 }
 
 #[derive(Clone)]

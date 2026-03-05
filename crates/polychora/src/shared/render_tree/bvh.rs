@@ -106,7 +106,7 @@ fn validate_render_leaves_world_space_non_overlapping(leaves: &[RenderLeaf]) -> 
             kind,
         });
         combined_bounds = Some(match combined_bounds {
-            Some(existing) => union_bounds(existing, leaf.bounds),
+            Some(existing) => existing.union(&leaf.bounds),
             None => leaf.bounds,
         });
     }
@@ -285,7 +285,7 @@ pub fn apply_core_patch_in_bounds_with_delta_in_bvh(
     if !patch_bounds.is_valid() {
         return Ok(None);
     }
-    let Some(clipped_patch_bounds) = intersect_bounds(bvh.bounds, patch_bounds) else {
+    let Some(clipped_patch_bounds) = bvh.bounds.intersection(&patch_bounds) else {
         return Ok(None);
     };
 
@@ -491,7 +491,7 @@ fn collect_render_leaves_in_bounds(
     bounds: Aabb4i,
     out: &mut Vec<RenderLeaf>,
 ) {
-    let Some(intersection) = intersect_bounds(core.bounds, bounds) else {
+    let Some(intersection) = core.bounds.intersection(&bounds) else {
         return;
     };
     match &core.kind {
@@ -566,7 +566,7 @@ fn clone_subtree_excluding_bounds(
     if !node.bounds.intersects(&excluded_bounds) {
         return Ok(Some(node_idx));
     }
-    if bounds_contains_bounds(excluded_bounds, node.bounds) {
+    if excluded_bounds.contains_bounds(&node.bounds) {
         collect_subtree_node_leaf_ids(bvh, node_idx, retired_node_ids, retired_leaf_ids);
         return Ok(None);
     }
@@ -610,10 +610,9 @@ fn clone_subtree_excluding_bounds(
                 (None, None) => Ok(None),
                 (Some(only), None) | (None, Some(only)) => Ok(Some(only)),
                 (Some(new_left), Some(new_right)) => {
-                    let bounds = union_bounds(
-                        bvh.nodes[new_left as usize].bounds,
-                        bvh.nodes[new_right as usize].bounds,
-                    );
+                    let bounds = bvh.nodes[new_left as usize]
+                        .bounds
+                        .union(&bvh.nodes[new_right as usize].bounds);
                     Ok(Some(append_internal_node_with_delta(
                         bvh, new_left, new_right, bounds, delta,
                     )))
@@ -682,7 +681,7 @@ fn split_bounds_excluding_bounds(bounds: Aabb4i, excluded_bounds: Aabb4i) -> Vec
     if !bounds.is_valid() {
         return Vec::new();
     }
-    let Some(clipped_excluded) = intersect_bounds(bounds, excluded_bounds) else {
+    let Some(clipped_excluded) = bounds.intersection(&excluded_bounds) else {
         return vec![bounds];
     };
 
@@ -711,7 +710,7 @@ fn slice_chunk_array_kind_to_bounds(
     source_indices: &[u16],
     bounds: Aabb4i,
 ) -> Result<Option<RenderLeafKind>, String> {
-    let Some(clipped_bounds) = intersect_bounds(bounds, chunk_array.bounds) else {
+    let Some(clipped_bounds) = bounds.intersection(&chunk_array.bounds) else {
         return Ok(None);
     };
     if clipped_bounds != bounds {
@@ -918,7 +917,7 @@ fn build_bvh_recursive_for_leaf_ids(
         right_bounds_suffix[n - 1] = leaf_bounds[indices[n - 1]];
         for i in (0..n - 1).rev() {
             right_bounds_suffix[i] =
-                union_bounds(right_bounds_suffix[i + 1], leaf_bounds[indices[i]]);
+                right_bounds_suffix[i + 1].union(&leaf_bounds[indices[i]]);
         }
 
         // Sweep left to right, evaluating SAH cost at each split position.
@@ -938,7 +937,7 @@ fn build_bvh_recursive_for_leaf_ids(
             }
 
             if split < n - 1 {
-                left_agg = union_bounds(left_agg, leaf_bounds[indices[split]]);
+                left_agg = left_agg.union(&leaf_bounds[indices[split]]);
             }
         }
     }
@@ -978,7 +977,7 @@ fn build_bvh_recursive_for_leaf_ids(
     allocate_node_slot(
         bvh,
         RenderBvhNode {
-            bounds: union_bounds(left_bounds, right_bounds),
+            bounds: left_bounds.union(&right_bounds),
             kind: RenderBvhNodeKind::Internal { left, right },
         },
         delta,
@@ -1115,7 +1114,7 @@ fn collect_non_empty_leaf_chunk_keys_in_bounds(
     bounds: Aabb4i,
     out: &mut Vec<ChunkKey>,
 ) {
-    let Some(clipped_bounds) = intersect_bounds(leaf.bounds, bounds) else {
+    let Some(clipped_bounds) = leaf.bounds.intersection(&bounds) else {
         return;
     };
     match &leaf.kind {
@@ -1136,7 +1135,7 @@ fn collect_non_empty_chunkarray_chunk_keys_in_bounds(
     bounds: Aabb4i,
     out: &mut Vec<ChunkKey>,
 ) {
-    let Some(clipped_bounds) = intersect_bounds(bounds, chunk_array.bounds) else {
+    let Some(clipped_bounds) = bounds.intersection(&chunk_array.bounds) else {
         return;
     };
     let se = chunk_array.scale_exp;

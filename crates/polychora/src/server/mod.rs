@@ -159,19 +159,7 @@ fn chunk_distance2(a: [i32; 4], b: [i32; 4]) -> i64 {
     dx * dx + dy * dy + dz * dz + dw * dw
 }
 
-fn normalize4_or_default(v: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
-    let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
-    if len_sq <= 1e-8 || !len_sq.is_finite() {
-        return fallback;
-    }
-    let inv_len = len_sq.sqrt().recip();
-    [
-        v[0] * inv_len,
-        v[1] * inv_len,
-        v[2] * inv_len,
-        v[3] * inv_len,
-    ]
-}
+use crate::shared::normalize4_with_fallback as normalize4_or_default;
 
 fn distance4_sq(a: [f32; 4], b: [f32; 4]) -> f32 {
     let dx = a[0] - b[0];

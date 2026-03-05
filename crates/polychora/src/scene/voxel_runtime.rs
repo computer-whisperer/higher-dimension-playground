@@ -1400,7 +1400,7 @@ impl Scene {
         // voxel_cached_visibility_bounds reflects any just-applied result.
         let scene_bounds = self
             .voxel_cached_visibility_bounds
-            .filter(|active_bounds| Self::bounds_contains_bounds(*active_bounds, view_bounds))
+            .filter(|active_bounds| active_bounds.contains_bounds(&view_bounds))
             .unwrap_or(desired_scene_bounds);
 
         let frame_root_valid = self.voxel_frame_root_is_valid();

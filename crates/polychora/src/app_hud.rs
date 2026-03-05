@@ -244,7 +244,7 @@ impl App {
                  cache-tree:{}\n\
                  known-interest:{}\n\
                  vte-buf:d{}/{} l{}/{} n{}/{} e{}/{}\n\
-                 vte:F7 ycache:{} F8 sweep:{}\n\
+                 vte:F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 self.control_scheme.label(),
                 self.move_speed,
@@ -274,11 +274,6 @@ impl App {
                 gpu_node_cap,
                 cpu_leaf_entries,
                 gpu_leaf_entry_cap,
-                if self.vte_y_slice_lookup_cache_enabled {
-                    "on"
-                } else {
-                    "off"
-                },
                 vte_sweep_status,
                 if self.vte_integral_sky_emissive_enabled {
                     "on"
@@ -304,7 +299,7 @@ impl App {
                  cache-tree:{}\n\
                  known-interest:{}\n\
                  vte-buf:d{}/{} l{}/{} n{}/{} e{}/{}\n\
-                 vte:F7 ycache:{} F8 sweep:{}\n\
+                 vte:F8 sweep:{}\n\
                  tweak:F10 sky+emi:{} F11 log:{}",
                 pair.label(),
                 self.control_scheme.label(),
@@ -336,11 +331,6 @@ impl App {
                 gpu_node_cap,
                 cpu_leaf_entries,
                 gpu_leaf_entry_cap,
-                if self.vte_y_slice_lookup_cache_enabled {
-                    "on"
-                } else {
-                    "off"
-                },
                 vte_sweep_status,
                 if self.vte_integral_sky_emissive_enabled {
                     "on"
