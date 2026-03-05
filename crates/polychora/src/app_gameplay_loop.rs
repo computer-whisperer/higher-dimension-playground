@@ -953,16 +953,25 @@ impl App {
         }
         // Wireframe placement preview: add outline edges for the placement
         // target independently of the edit-highlight edge mode.
+        // Only show when holding a block item.
         if self.placement_preview_mode == PlacementPreviewMode::Wireframe {
-            if let Some(targets) = targets {
-                if let Some(place) = &targets.place {
-                    if !self.should_suppress_placement_preview(place, targets) {
-                        append_axis_aligned_outline_edge_instance(
-                            &mut out,
-                            place.world_min(),
-                            place.world_max(),
-                            OVERLAY_EDGE_TAG_PLACE,
-                        );
+            let has_block = self
+                .inventory
+                .hotbar_slot(self.hotbar_selected_index)
+                .as_ref()
+                .and_then(|s| s.to_block_data())
+                .is_some();
+            if has_block {
+                if let Some(targets) = targets {
+                    if let Some(place) = &targets.place {
+                        if !self.should_suppress_placement_preview(place, targets) {
+                            append_axis_aligned_outline_edge_instance(
+                                &mut out,
+                                place.world_min(),
+                                place.world_max(),
+                                OVERLAY_EDGE_TAG_PLACE,
+                            );
+                        }
                     }
                 }
             }
@@ -1167,7 +1176,7 @@ impl App {
         backend: RenderBackend,
         look_dir: [f32; 4],
         preview_time_s: f32,
-        preview_instance: common::ModelInstance,
+        preview_instance: Option<common::ModelInstance>,
         targets: Option<&scene::BlockEditTargets>,
         disable_remote_non_voxel: bool,
         vte_disable_entities: bool,
@@ -1184,14 +1193,21 @@ impl App {
                 instances.extend(entity_instances);
                 instances
             };
+            let preview_instance_storage;
             let mut preview_overlay_instances: &[common::ModelInstance] = &[];
-            if self.vte_overlay_raster_enabled {
-                preview_overlay_instances = std::slice::from_ref(&preview_instance);
-            } else if !vte_disable_entities {
-                vte_non_voxel_instances.push(preview_instance);
+            if let Some(pi) = preview_instance {
+                preview_instance_storage = pi;
+                if self.vte_overlay_raster_enabled {
+                    preview_overlay_instances = std::slice::from_ref(&preview_instance_storage);
+                } else if !vte_disable_entities {
+                    vte_non_voxel_instances.push(preview_instance_storage);
+                }
             }
-            // Ghost placement preview
-            if !vte_disable_entities && self.placement_preview_mode == PlacementPreviewMode::Ghost {
+            // Ghost placement preview (only when holding a block)
+            if !vte_disable_entities
+                && preview_instance.is_some()
+                && self.placement_preview_mode == PlacementPreviewMode::Ghost
+            {
                 if let Some(targets) = targets {
                     if let Some(place) = &targets.place {
                         if !self.should_suppress_placement_preview(place, targets) {
@@ -1277,7 +1293,9 @@ impl App {
             render_instances.extend(remote_instances);
             render_instances.extend(entity_instances);
             if !vte_disable_entities {
-                render_instances.push(preview_instance);
+                if let Some(pi) = preview_instance {
+                    render_instances.push(pi);
+                }
             }
             let render_submit_start = Instant::now();
             self.rcx.as_mut().unwrap().render_tetra_frame(
@@ -1462,14 +1480,24 @@ impl App {
                 size.width.max(1) as f32 / size.height.max(1) as f32
             })
             .unwrap_or_else(|| self.args.width.max(1) as f32 / self.args.height.max(1) as f32);
-        let preview_instance = build_place_preview_instance(
-            &self.camera,
-            &self.selected_block,
-            preview_time_s,
-            self.control_scheme,
-            aspect,
-            &self.material_resolver,
-        );
+        let holding_block = self
+            .inventory
+            .hotbar_slot(self.hotbar_selected_index)
+            .as_ref()
+            .and_then(|s| s.to_block_data())
+            .is_some();
+        let preview_instance = if holding_block {
+            Some(build_place_preview_instance(
+                &self.camera,
+                &self.selected_block,
+                preview_time_s,
+                self.control_scheme,
+                aspect,
+                &self.material_resolver,
+            ))
+        } else {
+            None
+        };
 
         let view_matrix = self.current_view_matrix();
         let backend = self.args.backend.to_render_backend();
