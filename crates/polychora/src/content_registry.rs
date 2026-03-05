@@ -229,6 +229,8 @@ pub struct EntityEntry {
     pub canonical_name: String,
     pub aliases: Vec<String>,
     pub default_scale: f32,
+    /// Base material color hint (RGB), used for spawn egg icons.
+    pub base_color: [u8; 3],
     /// Explicit texture palette for entity model parts.
     /// Rendering code resolves each TextureRef to a GPU token at draw time.
     pub model_textures: Vec<TextureRef>,
@@ -568,6 +570,11 @@ impl ContentRegistry {
             .filter(|e| e.is_spawnable())
             .map(|e| e.canonical_name.as_str())
             .collect()
+    }
+
+    /// Iterate all spawnable entities (non-player) for the creative picker.
+    pub fn spawnable_entities(&self) -> impl Iterator<Item = &EntityEntry> {
+        self.entities.values().filter(|e| e.is_spawnable())
     }
 
     /// Get simulation config for an entity type by (namespace, entity_type).

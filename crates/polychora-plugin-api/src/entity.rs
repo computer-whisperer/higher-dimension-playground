@@ -10,6 +10,16 @@ pub enum EntityCategory {
     Mob,
 }
 
+impl EntityCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Player => "Player",
+            Self::Accent => "Accent",
+            Self::Mob => "Mob",
+        }
+    }
+}
+
 /// How the engine simulates an entity each tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SimulationMode {

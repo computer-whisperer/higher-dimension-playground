@@ -1,5 +1,34 @@
 use super::*;
 
+/// Derive a spawn egg color from the entity's base_color, ensuring it's visible.
+fn spawn_egg_color(base_color: [u8; 3]) -> egui::Color32 {
+    let [r, g, b] = base_color;
+    // If the base color is very dark, brighten it so the egg is visible.
+    if (r as u16 + g as u16 + b as u16) < 80 {
+        egui::Color32::from_rgb(r.saturating_add(60), g.saturating_add(60), b.saturating_add(60))
+    } else {
+        egui::Color32::from_rgb(r, g, b)
+    }
+}
+
+/// Lighten a color by adding a fixed amount to each channel.
+fn brighten_color(color: egui::Color32, amount: u8) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        color.r().saturating_add(amount),
+        color.g().saturating_add(amount),
+        color.b().saturating_add(amount),
+    )
+}
+
+/// Paint a spawn egg icon (rounded rect + highlight dot) into the given rect.
+fn paint_spawn_egg_icon(painter: &egui::Painter, rect: egui::Rect, base_color: [u8; 3]) {
+    let egg_color = spawn_egg_color(base_color);
+    let rounding = rect.width().min(rect.height()) * 0.4;
+    painter.rect_filled(rect, rounding, egg_color);
+    let dot_center = rect.center() - egui::vec2(0.0, rect.height() * 0.15);
+    painter.circle_filled(dot_center, rect.width() * 0.12, brighten_color(egg_color, 80));
+}
+
 impl App {
     pub(super) fn draw_egui_pause_menu(
         &mut self,
@@ -414,11 +443,8 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
                     for i in 0..9 {
-                        let block = block_data_from_slot(self.inventory.hotbar_slot(i));
-                        let [r, g, b] = self
-                            .content_registry
-                            .block_color(block.namespace, block.block_type);
                         let is_selected = i == self.hotbar_selected_index;
+                        let slot = self.inventory.slot(i);
 
                         let (rect, _response) = ui.allocate_exact_size(
                             egui::vec2(slot_size, slot_size),
@@ -429,31 +455,69 @@ impl App {
                         let bg_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160);
                         ui.painter().rect_filled(rect, 3.0, bg_color);
 
-                        // Block icon (tesseract image or color fallback)
                         let icon_rect = rect.shrink(5.0);
-                        if let (Some(sheet), Some(tex_id)) =
-                            (&self.material_icon_sheet, self.material_icons_texture_id)
+
+                        // Render icon and resolve item name
+                        let item_name = if let Some((ens, etype)) =
+                            slot.and_then(|s| s.spawn_egg_entity_key())
                         {
-                            if let Some([u0, v0, u1, v1]) =
-                                sheet.uv_rect(block.namespace, block.block_type)
-                            {
-                                ui.painter().image(
-                                    tex_id,
-                                    icon_rect,
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(u0, v0),
-                                        egui::pos2(u1, v1),
-                                    ),
-                                    egui::Color32::WHITE,
+                            // Spawn egg
+                            let entry = self.content_registry.entity_lookup(ens, etype);
+                            if let Some(entry) = entry {
+                                paint_spawn_egg_icon(
+                                    ui.painter(),
+                                    icon_rect.shrink(3.0),
+                                    entry.base_color,
                                 );
+                            }
+                            entry
+                                .map(|e| e.canonical_name.as_str())
+                                .unwrap_or("???")
+                        } else {
+                            // Block icon (tesseract image or color fallback)
+                            let block = block_data_from_slot(self.inventory.hotbar_slot(i));
+                            let [r, g, b] = self
+                                .content_registry
+                                .block_color(block.namespace, block.block_type);
+                            if let (Some(sheet), Some(tex_id)) =
+                                (&self.material_icon_sheet, self.material_icons_texture_id)
+                            {
+                                if let Some([u0, v0, u1, v1]) =
+                                    sheet.uv_rect(block.namespace, block.block_type)
+                                {
+                                    ui.painter().image(
+                                        tex_id,
+                                        icon_rect,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(u0, v0),
+                                            egui::pos2(u1, v1),
+                                        ),
+                                        egui::Color32::WHITE,
+                                    );
+                                } else {
+                                    let mat_color = egui::Color32::from_rgb(r, g, b);
+                                    ui.painter().rect_filled(icon_rect, 2.0, mat_color);
+                                }
                             } else {
                                 let mat_color = egui::Color32::from_rgb(r, g, b);
                                 ui.painter().rect_filled(icon_rect, 2.0, mat_color);
                             }
-                        } else {
-                            let mat_color = egui::Color32::from_rgb(r, g, b);
-                            ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                        }
+
+                            // Scale badge (bottom-left)
+                            if block.scale_exp != 0 {
+                                let badge_pos = rect.left_bottom() + egui::vec2(4.0, -3.0);
+                                ui.painter().text(
+                                    badge_pos,
+                                    egui::Align2::LEFT_BOTTOM,
+                                    format!("s{}", block.scale_exp),
+                                    egui::FontId::proportional(12.0),
+                                    egui::Color32::from_rgb(140, 200, 255),
+                                );
+                            }
+
+                            self.content_registry
+                                .block_name(block.namespace, block.block_type)
+                        };
 
                         // Selection border
                         if is_selected {
@@ -485,20 +549,8 @@ impl App {
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
                         );
 
-                        // Scale badge (bottom-left)
-                        if block.scale_exp != 0 {
-                            let badge_pos = rect.left_bottom() + egui::vec2(4.0, -3.0);
-                            ui.painter().text(
-                                badge_pos,
-                                egui::Align2::LEFT_BOTTOM,
-                                format!("s{}", block.scale_exp),
-                                egui::FontId::proportional(12.0),
-                                egui::Color32::from_rgb(140, 200, 255),
-                            );
-                        }
-
                         // Stack count badge (bottom-right)
-                        if let Some(stack) = self.inventory.slot(i) {
+                        if let Some(stack) = slot {
                             if stack.count > 1 {
                                 let badge_pos =
                                     rect.right_bottom() + egui::vec2(-4.0, -3.0);
@@ -512,15 +564,12 @@ impl App {
                             }
                         }
 
-                        // Block name (bottom center, small text)
-                        let name = self
-                            .content_registry
-                            .block_name(block.namespace, block.block_type);
+                        // Item name (bottom center, small text)
                         let label_pos = rect.center_bottom() + egui::vec2(0.0, -3.0);
                         ui.painter().text(
                             label_pos,
                             egui::Align2::CENTER_BOTTOM,
-                            name,
+                            item_name,
                             egui::FontId::proportional(10.0),
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200),
                         );
@@ -763,7 +812,7 @@ impl App {
         &mut self,
         ctx: &egui::Context,
         close_inventory: &mut bool,
-        inventory_pick: &mut Option<(u32, u32)>,
+        inventory_pick: &mut Option<polychora::shared::protocol::ItemStack>,
     ) {
         use polychora::shared::inventory::InventoryTab;
 
@@ -823,7 +872,7 @@ impl App {
     fn draw_creative_inventory_tab(
         &self,
         ui: &mut egui::Ui,
-        inventory_pick: &mut Option<(u32, u32)>,
+        inventory_pick: &mut Option<polychora::shared::protocol::ItemStack>,
     ) {
         // Category tabs
         ui.horizontal(|ui| {
@@ -923,14 +972,91 @@ impl App {
                         }
 
                         if response.clicked() {
-                            *inventory_pick = Some(block_key);
+                            *inventory_pick = Some(
+                                polychora::shared::protocol::ItemStack::block(
+                                    block_key.0, block_key.1, 1, 0,
+                                ),
+                            );
+                        }
+                    }
+                });
+
+                // Spawn Eggs separator
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label("Spawn Eggs");
+                ui.add_space(4.0);
+
+                let mut entities: Vec<_> =
+                    self.content_registry.spawnable_entities().collect();
+                entities.sort_by(|a, b| a.canonical_name.cmp(&b.canonical_name));
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
+                    for (idx, entity) in entities.iter().enumerate() {
+                        if idx > 0 && idx % items_per_row == 0 {
+                            ui.end_row();
+                        }
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(cell_size, cell_size),
+                            egui::Sense::click(),
+                        );
+
+                        // Background
+                        let bg = if response.hovered() {
+                            egui::Color32::from_rgba_unmultiplied(80, 80, 80, 200)
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200)
+                        };
+                        ui.painter().rect_filled(rect, 3.0, bg);
+
+                        // Egg icon
+                        paint_spawn_egg_icon(ui.painter(), rect.shrink(8.0), entity.base_color);
+
+                        // Entity name label
+                        let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
+                        ui.painter().text(
+                            text_pos,
+                            egui::Align2::CENTER_BOTTOM,
+                            &entity.canonical_name,
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgba_unmultiplied(220, 220, 220, 255),
+                        );
+                        // Category label
+                        let category_pos = egui::pos2(rect.center().x, rect.top() + 4.0);
+                        ui.painter().text(
+                            category_pos,
+                            egui::Align2::CENTER_TOP,
+                            entity.category.label(),
+                            egui::FontId::proportional(8.0),
+                            egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220),
+                        );
+
+                        if response.hovered() {
+                            ui.painter().rect_stroke(
+                                rect,
+                                3.0,
+                                egui::Stroke::new(
+                                    2.0,
+                                    egui::Color32::from_rgb(255, 255, 100),
+                                ),
+                                egui::epaint::StrokeKind::Outside,
+                            );
+                        }
+
+                        if response.clicked() {
+                            *inventory_pick = Some(
+                                polychora::shared::protocol::ItemStack::spawn_egg(
+                                    entity.namespace, entity.entity_type,
+                                ),
+                            );
                         }
                     }
                 });
             });
 
         ui.separator();
-        ui.label("Click a material to place it in the selected hotbar slot. Tab or Esc to close.");
+        ui.label("Click a material or spawn egg to place it in the selected hotbar slot. Tab or Esc to close.");
     }
 
     fn draw_survival_inventory_tab(&mut self, ui: &mut egui::Ui) {
@@ -1003,13 +1129,18 @@ impl App {
         ui.painter().rect_filled(rect, 3.0, bg);
 
         if let Some(stack) = slot {
-            if let Some(block_data) = stack.to_block_data() {
+            let icon_rect = rect.shrink(4.0);
+
+            if let Some((ens, etype)) = stack.spawn_egg_entity_key() {
+                if let Some(entry) = self.content_registry.entity_lookup(ens, etype) {
+                    paint_spawn_egg_icon(ui.painter(), icon_rect.shrink(2.0), entry.base_color);
+                }
+            } else if let Some(block_data) = stack.to_block_data() {
                 let [r, g, b] = self
                     .content_registry
                     .block_color(block_data.namespace, block_data.block_type);
 
                 // Block icon
-                let icon_rect = rect.shrink(4.0);
                 if let (Some(sheet), Some(tex_id)) =
                     (&self.material_icon_sheet, self.material_icons_texture_id)
                 {
@@ -1045,18 +1176,18 @@ impl App {
                         egui::Color32::from_rgb(140, 200, 255),
                     );
                 }
+            }
 
-                // Count badge (bottom-right)
-                if stack.count > 1 {
-                    let badge_pos = rect.right_bottom() + egui::vec2(-4.0, -3.0);
-                    ui.painter().text(
-                        badge_pos,
-                        egui::Align2::RIGHT_BOTTOM,
-                        format!("{}", stack.count),
-                        egui::FontId::proportional(11.0),
-                        egui::Color32::WHITE,
-                    );
-                }
+            // Count badge (bottom-right)
+            if stack.count > 1 {
+                let badge_pos = rect.right_bottom() + egui::vec2(-4.0, -3.0);
+                ui.painter().text(
+                    badge_pos,
+                    egui::Align2::RIGHT_BOTTOM,
+                    format!("{}", stack.count),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::WHITE,
+                );
             }
         }
 
@@ -1222,7 +1353,7 @@ impl App {
         let egui_ctx = self.egui_ctx.clone();
         let mut close_menu = false;
         let mut close_inventory = false;
-        let mut inventory_pick: Option<(u32, u32)> = None;
+        let mut inventory_pick: Option<polychora::shared::protocol::ItemStack> = None;
         let mut teleport_target: Option<[f32; 4]> = None;
         let mut close_teleport = false;
         let mut close_console = false;
@@ -1282,21 +1413,14 @@ impl App {
             self.inventory_open = false;
             self.grab_mouse(&window);
         }
-        if let Some((ns, bt)) = inventory_pick {
-            let block = polychora::shared::voxel::BlockData::simple(ns, bt);
+        if let Some(stack) = inventory_pick {
             self.inventory.set_slot(
                 self.hotbar_selected_index,
-                Some(polychora::shared::protocol::ItemStack::block(ns, bt, 1, 0)),
+                Some(stack),
             );
             self.inventory_dirty = true;
-            self.selected_block = block;
-            eprintln!(
-                "Inventory: set hotbar slot {} to ({:#x}, {:#x}) ({})",
-                self.hotbar_selected_index + 1,
-                ns,
-                bt,
-                self.content_registry.block_name(ns, bt),
-            );
+            self.selected_block =
+                block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
         }
         if close_teleport {
             self.teleport_dialog_open = false;

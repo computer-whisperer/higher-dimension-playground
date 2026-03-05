@@ -1789,6 +1789,25 @@ impl App {
         }
     }
 
+    pub(super) fn send_multiplayer_spawn_entity(
+        &self,
+        entity_type_namespace: u32,
+        entity_type: u32,
+        position: [f32; 4],
+        orientation: [f32; 4],
+        scale: f32,
+    ) {
+        if let Some(client) = self.multiplayer.as_ref() {
+            client.send(MultiplayerClientMessage::SpawnEntity {
+                entity_type_namespace,
+                entity_type,
+                position,
+                orientation,
+                scale,
+            });
+        }
+    }
+
     pub(super) fn send_multiplayer_console_command(&self, command: &str) -> bool {
         let Some(client) = self.multiplayer.as_ref() else {
             return false;

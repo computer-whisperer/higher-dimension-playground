@@ -36,6 +36,7 @@ fn register_player_entity(registry: &mut ContentRegistry) {
         canonical_name: "player".into(),
         aliases: vec!["player".into(), "avatar".into()],
         default_scale: 1.0,
+        base_color: [200, 200, 200],
         model_textures: vec![],
         sim_config: None,
     });

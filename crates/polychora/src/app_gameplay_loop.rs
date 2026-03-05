@@ -705,7 +705,34 @@ impl App {
                             }
                         }
                     } else if place_requested {
-                        if let Some(place) = &edit_targets.place {
+                        // Check if the selected hotbar item is a spawn egg.
+                        let egg_key = self
+                            .inventory
+                            .slot(self.hotbar_selected_index)
+                            .and_then(|s| s.spawn_egg_entity_key());
+                        if let Some((ens, etype)) = egg_key {
+                            // Spawn entity at the placement target position (or a
+                            // few units in front of the player if no block target).
+                            let spawn_pos = if let Some(place) = &edit_targets.place {
+                                let o = place.origin_i32();
+                                [o[0] as f32 + 0.5, o[1] as f32 + 0.5, o[2] as f32 + 0.5, o[3] as f32 + 0.5]
+                            } else {
+                                let look = self.current_look_direction();
+                                let p = self.camera.position;
+                                [p[0] + look[0] * 3.0, p[1] + look[1] * 3.0, p[2] + look[2] * 3.0, p[3] + look[3] * 3.0]
+                            };
+                            let scale = self
+                                .content_registry
+                                .entity_lookup(ens, etype)
+                                .map(|e| e.default_scale)
+                                .unwrap_or(1.0);
+                            let look = self.current_look_direction();
+                            self.send_multiplayer_spawn_entity(ens, etype, spawn_pos, look, scale);
+                            eprintln!(
+                                "Spawn egg used: entity ({:#x}, {:#x}) at ({:.1}, {:.1}, {:.1}, {:.1})",
+                                ens, etype, spawn_pos[0], spawn_pos[1], spawn_pos[2], spawn_pos[3],
+                            );
+                        } else if let Some(place) = &edit_targets.place {
                             let [x, y, z, w] = place.origin_i32();
                             eprintln!(
                                 "Placed voxel {} ({}) at ({x}, {y}, {z}, {w}) scale={}",

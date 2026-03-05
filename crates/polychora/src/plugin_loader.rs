@@ -210,6 +210,7 @@ pub fn populate_registry_from_plugin(
             canonical_name: entity.name.clone(),
             aliases,
             default_scale: entity.default_scale,
+            base_color: entity.base_material_color,
             model_textures: entity.model_textures.clone(),
             sim_config: entity.sim_config.clone(),
         });
