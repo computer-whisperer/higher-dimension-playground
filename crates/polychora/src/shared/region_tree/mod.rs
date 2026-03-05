@@ -39,13 +39,20 @@ pub enum RegionNodeKind {
     Branch(Vec<RegionTreeCore>),
 }
 
+mod chunk_array_ops;
+mod integrity;
 mod tree;
-pub use tree::{
-    chunk_spatial_extent, coarsest_aligned_scale, collect_non_empty_chunks_from_core_in_bounds,
-    optimize_subtree, resample_chunk_array_to_bounds, slice_non_empty_region_core_in_bounds,
-    slice_region_core_in_bounds, validate_region_core_world_space_non_overlapping,
-    validate_tree_integrity, BvhBlockHit, BvhRayHit, RegionChunkTree, TreeIntegrityReport,
+mod tree_edit;
+mod tree_normalize;
+mod tree_query;
+
+pub use chunk_array_ops::{optimize_subtree, resample_chunk_array_to_bounds};
+pub use integrity::{
+    validate_region_core_world_space_non_overlapping, validate_tree_integrity, TreeIntegrityReport,
 };
+pub use tree::{chunk_spatial_extent, coarsest_aligned_scale, RegionChunkTree};
+pub use tree_edit::{slice_non_empty_region_core_in_bounds, slice_region_core_in_bounds};
+pub use tree_query::{collect_non_empty_chunks_from_core_in_bounds, BvhBlockHit, BvhRayHit};
 
 #[cfg(test)]
 mod tests;
