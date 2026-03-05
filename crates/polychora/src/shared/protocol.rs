@@ -157,6 +157,10 @@ pub enum ClientMessage {
     InventorySync {
         payload: Vec<u8>,
     },
+    /// Drop one item from the given inventory slot into the world.
+    DropItem {
+        slot_index: u8,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -757,7 +757,13 @@ pub(super) fn start_broadcast_thread(
             }
             let tick_cpu_start = Instant::now();
             let now = monotonic_ms(start);
-            let (entity_batches, explosion_events, player_movement_modifiers, sim_timings) = {
+            let (
+                entity_batches,
+                explosion_events,
+                player_movement_modifiers,
+                sim_timings,
+                pickup_inventory_syncs,
+            ) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
                 let _ = guard.evict_far_mob_nav_cache_chunks(
                     MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS,
@@ -771,6 +777,7 @@ pub(super) fn start_broadcast_thread(
                         &mut next_entity_sim_ms,
                         entity_sim_step_ms,
                     );
+                let pickup_syncs = pickup_nearby_item_stacks(&mut guard, now);
                 let entity_batches =
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
                 (
@@ -778,8 +785,17 @@ pub(super) fn start_broadcast_thread(
                     explosion_events,
                     player_movement_modifiers,
                     sim_timings,
+                    pickup_syncs,
                 )
             };
+            // Send inventory syncs for players who picked up items
+            for (pickup_client_id, payload) in pickup_inventory_syncs {
+                send_to_client(
+                    &state,
+                    pickup_client_id,
+                    ServerMessage::InventorySync { payload },
+                );
+            }
             let spawned_count: usize = entity_batches.iter().map(|batch| batch.spawned.len()).sum();
             let transform_count: usize = entity_batches
                 .iter()
@@ -1336,6 +1352,9 @@ pub(super) fn handle_message(
                 guard.player_inventory_dirty = true;
             }
         }
+        ClientMessage::DropItem { slot_index } => {
+            handle_drop_item(state, client_id, slot_index, start);
+        }
     }
     record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None, None);
 }
@@ -1494,6 +1513,225 @@ fn spawn_entity(
         .entity_store
         .snapshot(allocated_id)
         .expect("spawned entity should exist in store")
+}
+
+/// Scan for item stack entities near players and perform magnet pull / pickup.
+/// Returns `Vec<(client_id, inventory_payload)>` for clients whose inventory changed.
+fn pickup_nearby_item_stacks(
+    state: &mut ServerState,
+    now_ms: u64,
+) -> Vec<(u64, Vec<u8>)> {
+    use crate::shared::entity_types::ENTITY_ITEM_STACK;
+    use crate::shared::inventory::Inventory;
+    use crate::shared::protocol::ItemStack;
+
+    // Collect player positions
+    let players: Vec<(u64, EntityId, [f32; 4])> = state
+        .players
+        .iter()
+        .filter_map(|(&client_id, player)| {
+            let snapshot = state.entity_store.snapshot(player.entity_id)?;
+            Some((client_id, player.entity_id, snapshot.entity.pose.position))
+        })
+        .collect();
+
+    if players.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect item stack entities
+    let item_stacks: Vec<(EntityId, [f32; 4], u64)> = state
+        .entity_store
+        .iter()
+        .filter(|e| {
+            e.entity.namespace == ENTITY_ITEM_STACK.0
+                && e.entity.entity_type == ENTITY_ITEM_STACK.1
+        })
+        .map(|e| (e.entity_id, e.home_position, e.spawn_time_ms))
+        .collect();
+
+    let mut entities_to_despawn: Vec<EntityId> = Vec::new();
+    let mut entities_to_update_data: Vec<(EntityId, Vec<u8>)> = Vec::new();
+    let mut magnet_pulls: Vec<(EntityId, [f32; 4])> = Vec::new();
+    let mut changed_inventories: HashMap<u64, Inventory> = HashMap::new();
+
+    for (item_entity_id, item_pos, spawn_time) in &item_stacks {
+        // Grace period: don't pick up items that were just dropped
+        if now_ms.saturating_sub(*spawn_time) < ITEM_SPAWN_DELAY_MS {
+            continue;
+        }
+
+        // Find nearest player
+        let mut nearest: Option<(u64, f32, [f32; 4])> = None;
+        for &(client_id, _player_entity_id, player_pos) in &players {
+            let dist_sq = distance4_sq(*item_pos, player_pos);
+            if dist_sq < ITEM_MAGNET_RADIUS_SQ {
+                if nearest.is_none() || dist_sq < nearest.unwrap().1 {
+                    nearest = Some((client_id, dist_sq, player_pos));
+                }
+            }
+        }
+
+        let Some((client_id, dist_sq, player_pos)) = nearest else {
+            continue;
+        };
+
+        if dist_sq < ITEM_PICKUP_RADIUS_SQ {
+            // Pickup: decode item, add to inventory
+            let entity_state = match state.entity_store.iter().find(|e| e.entity_id == *item_entity_id) {
+                Some(e) => e,
+                None => continue,
+            };
+            let Some(item_stack) = ItemStack::decode_from_cbor(&entity_state.entity.data) else {
+                // Invalid data — despawn the broken entity
+                entities_to_despawn.push(*item_entity_id);
+                continue;
+            };
+
+            let inventory = changed_inventories.entry(client_id).or_insert_with(|| {
+                let player = &state.players[&client_id];
+                Inventory::from_payload(&player.inventory_payload).unwrap_or_default()
+            });
+
+            let remainder = inventory.try_add(item_stack);
+            if let Some(leftover) = remainder {
+                // Partially absorbed — update entity data with remainder
+                entities_to_update_data.push((*item_entity_id, leftover.encode_to_cbor()));
+            } else {
+                // Fully absorbed — despawn
+                entities_to_despawn.push(*item_entity_id);
+            }
+        } else {
+            // Magnet pull: lerp home_position toward player
+            let new_pos = [
+                item_pos[0] + (player_pos[0] - item_pos[0]) * ITEM_MAGNET_LERP,
+                item_pos[1] + (player_pos[1] - item_pos[1]) * ITEM_MAGNET_LERP,
+                item_pos[2] + (player_pos[2] - item_pos[2]) * ITEM_MAGNET_LERP,
+                item_pos[3] + (player_pos[3] - item_pos[3]) * ITEM_MAGNET_LERP,
+            ];
+            magnet_pulls.push((*item_entity_id, new_pos));
+        }
+    }
+
+    // Apply magnet pulls
+    for (entity_id, new_pos) in magnet_pulls {
+        if let Some(entity_state) = state.entity_store.get_mut(entity_id) {
+            entity_state.home_position = new_pos;
+        }
+    }
+
+    // Apply entity data updates (partial pickup)
+    for (entity_id, new_data) in entities_to_update_data {
+        if let Some(entity_state) = state.entity_store.get_mut(entity_id) {
+            entity_state.entity.data = new_data;
+        }
+    }
+
+    // Despawn fully picked-up entities
+    for entity_id in entities_to_despawn {
+        state.entity_store.despawn(entity_id);
+        mark_entity_record_despawned(state, entity_id, None);
+    }
+
+    // Serialize changed inventories back and collect sync messages
+    let mut syncs = Vec::new();
+    for (client_id, inventory) in changed_inventories {
+        let payload = inventory.to_payload();
+        if let Some(player) = state.players.get_mut(&client_id) {
+            player.inventory_payload = payload.clone();
+            state.player_inventory_dirty = true;
+        }
+        syncs.push((client_id, payload));
+    }
+
+    syncs
+}
+
+fn handle_drop_item(state: &SharedState, client_id: u64, slot_index: u8, start: Instant) {
+    use crate::shared::entity_types::ENTITY_ITEM_STACK;
+    use crate::shared::inventory::Inventory;
+    use crate::shared::protocol::ItemStack;
+
+    let mut guard = state.lock().expect("server state lock poisoned");
+
+    // Extract what we need from the player, deserialize inventory, and release borrow
+    let (mut inventory, player_entity_id) = {
+        let Some(player) = guard.players.get(&client_id) else {
+            return;
+        };
+        let Some(inv) = Inventory::from_payload(&player.inventory_payload) else {
+            return;
+        };
+        (inv, player.entity_id)
+    };
+
+    // Clone the item to drop (1 count) before decrementing
+    let Some(slot_item) = inventory.slot(slot_index as usize).cloned() else {
+        return;
+    };
+    let dropped_stack = ItemStack {
+        item: slot_item.item.clone(),
+        count: 1,
+    };
+
+    // Decrement the slot and write back
+    inventory.decrement_slot(slot_index as usize);
+    if let Some(player) = guard.players.get_mut(&client_id) {
+        player.inventory_payload = inventory.to_payload();
+    }
+    guard.player_inventory_dirty = true;
+
+    // Get player position and look direction for spawn offset
+    let (spawn_pos, _) = if let Some(snapshot) = guard.entity_store.snapshot(player_entity_id) {
+        let pos = snapshot.entity.pose.position;
+        let look = snapshot.entity.pose.orientation;
+        let offset_pos = [
+            pos[0] + look[0] * 1.5,
+            pos[1] + look[1] * 1.5,
+            pos[2] + look[2] * 1.5,
+            pos[3] + look[3] * 1.5,
+        ];
+        (offset_pos, look)
+    } else {
+        ([0.0; 4], [0.0, 0.0, 1.0, 0.0])
+    };
+
+    // Send updated slot back to client
+    let updated_slot = inventory.slot(slot_index as usize).cloned();
+    let slot_update_msg = ServerMessage::InventorySlotUpdate {
+        slot_index,
+        stack: updated_slot,
+    };
+
+    // Spawn item stack entity
+    let entity_data = Entity {
+        namespace: ENTITY_ITEM_STACK.0,
+        entity_type: ENTITY_ITEM_STACK.1,
+        pose: EntityPose {
+            position: spawn_pos,
+            orientation: [0.0, 0.0, 1.0, 0.0],
+            velocity: [0.0; 4],
+            scale: 0.30,
+        },
+        data: dropped_stack.encode_to_cbor(),
+    };
+
+    let allocated_id = allocate_or_reserve_server_object_id(&mut guard, None);
+    let now_ms = monotonic_ms(start);
+    guard.entity_store.spawn(allocated_id, entity_data, now_ms);
+    upsert_entity_record(
+        &mut guard,
+        allocated_id,
+        EntityCategory::Accent,
+        None,
+        None,
+        false, // Item stacks are transient, not persisted
+        now_ms,
+    );
+
+    // Send slot update (must drop guard first to avoid deadlock with send_to_client)
+    drop(guard);
+    send_to_client(state, client_id, slot_update_msg);
 }
 
 fn spawn_mob_entity(

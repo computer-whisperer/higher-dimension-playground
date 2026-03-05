@@ -1076,6 +1076,7 @@ impl App {
         let cell_size = 60.0;
         let cell_gap = 4.0;
         let mut clicked_slot: Option<usize> = None;
+        let mut right_clicked_slot: Option<usize> = None;
 
         // Draw main inventory rows 3, 2, 1 (slots 27..36, 18..27, 9..18) top-to-bottom
         for row in (1..4).rev() {
@@ -1083,8 +1084,13 @@ impl App {
                 ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
                 for col in 0..INVENTORY_COLS {
                     let slot_idx = row * INVENTORY_COLS + col;
-                    if self.draw_inventory_cell(ui, slot_idx, cell_size, false) {
+                    let (left, right) =
+                        self.draw_inventory_cell(ui, slot_idx, cell_size, false);
+                    if left {
                         clicked_slot = Some(slot_idx);
+                    }
+                    if right {
+                        right_clicked_slot = Some(slot_idx);
                     }
                 }
             });
@@ -1096,13 +1102,22 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
             for col in 0..HOTBAR_SIZE {
-                if self.draw_inventory_cell(ui, col, cell_size, col == self.hotbar_selected_index) {
+                let (left, right) = self.draw_inventory_cell(
+                    ui,
+                    col,
+                    cell_size,
+                    col == self.hotbar_selected_index,
+                );
+                if left {
                     clicked_slot = Some(col);
+                }
+                if right {
+                    right_clicked_slot = Some(col);
                 }
             }
         });
 
-        // Handle click: swap clicked slot with selected hotbar slot
+        // Handle left-click: swap clicked slot with selected hotbar slot
         if let Some(slot_idx) = clicked_slot {
             if slot_idx != self.hotbar_selected_index {
                 self.inventory
@@ -1113,21 +1128,38 @@ impl App {
                 block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
         }
 
+        // Handle right-click: drop one item from clicked slot
+        if let Some(slot_idx) = right_clicked_slot {
+            if self.inventory.slot(slot_idx).is_some() {
+                self.inventory.decrement_slot(slot_idx);
+                self.send_drop_item(slot_idx as u8);
+                self.send_inventory_sync();
+                self.inventory_dirty = true;
+                if slot_idx == self.hotbar_selected_index {
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
+                }
+            }
+        }
+
         ui.separator();
-        ui.label("Click to swap with selected hotbar slot. Tab or Esc to close.");
+        ui.label("Left-click to swap with hotbar. Right-click to drop. Tab or Esc to close.");
     }
 
+    /// Returns (left_clicked, right_clicked).
     fn draw_inventory_cell(
         &self,
         ui: &mut egui::Ui,
         slot_idx: usize,
         cell_size: f32,
         is_selected: bool,
-    ) -> bool {
+    ) -> (bool, bool) {
         let slot = self.inventory.slot(slot_idx);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(cell_size, cell_size), egui::Sense::click());
         let clicked = response.clicked();
+        let right_clicked = response.secondary_clicked();
 
         // Background
         let bg = if is_selected {
@@ -1230,7 +1262,7 @@ impl App {
                 egui::epaint::StrokeKind::Outside,
             );
         }
-        clicked
+        (clicked, right_clicked)
     }
 
     pub(super) fn draw_egui_controls_dialog(&mut self, ctx: &egui::Context) {

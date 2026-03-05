@@ -75,6 +75,11 @@ const MOB_NAV_LOS_CACHE_MS: u64 = 200;
 const MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS: i32 = 16;
 const MOB_NAV_CACHE_EVICT_BUDGET_PER_TICK: usize = 64;
 
+const ITEM_PICKUP_RADIUS_SQ: f32 = 1.0; // 1 block
+const ITEM_MAGNET_RADIUS_SQ: f32 = 9.0; // 3 blocks
+const ITEM_MAGNET_LERP: f32 = 0.15; // 15% per sim step
+const ITEM_SPAWN_DELAY_MS: u64 = 500; // Grace period before pickup
+
 fn entity_snapshot_from_record(
     state: &ServerState,
     record: &EntityRecord,

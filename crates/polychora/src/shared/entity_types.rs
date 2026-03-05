@@ -17,3 +17,7 @@ pub const ENTITY_MOB_SEEKER: (u32, u32) = (content_ids::CONTENT_NS, content_ids:
 pub const ENTITY_MOB_CREEPER4D: (u32, u32) = (content_ids::CONTENT_NS, content_ids::ENTITY_CREEPER);
 pub const ENTITY_MOB_PHASE_SPIDER: (u32, u32) =
     (content_ids::CONTENT_NS, content_ids::ENTITY_PHASE_SPIDER);
+
+/// Engine-internal item stack entity type ID (namespace 0).
+pub const ENTITY_ITEM_STACK_TYPE: u32 = 0x8e3b47a1;
+pub const ENTITY_ITEM_STACK: (u32, u32) = (0, ENTITY_ITEM_STACK_TYPE);

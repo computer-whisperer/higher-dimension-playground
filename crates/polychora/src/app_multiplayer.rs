@@ -1767,6 +1767,12 @@ impl App {
         }
     }
 
+    pub(super) fn send_drop_item(&self, slot_index: u8) {
+        if let Some(client) = self.multiplayer.as_ref() {
+            client.send(MultiplayerClientMessage::DropItem { slot_index });
+        }
+    }
+
     pub(super) fn send_multiplayer_voxel_update(
         &mut self,
         _now: Instant,

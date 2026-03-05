@@ -776,6 +776,19 @@ impl App {
             }
         }
 
+        // Drop item from selected hotbar slot (B key)
+        if self.input.take_drop_item() {
+            let idx = self.hotbar_selected_index;
+            if self.inventory.slot(idx).is_some() {
+                self.inventory.decrement_slot(idx);
+                self.send_drop_item(idx as u8);
+                self.send_inventory_sync();
+                self.inventory_dirty = true;
+                self.selected_block =
+                    block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
+            }
+        }
+
         if let Some(scenario_index) = self
             .perf_suite_state
             .as_ref()

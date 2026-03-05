@@ -1,5 +1,5 @@
 use crate::content_registry::ContentRegistry;
-use crate::shared::entity_types::SimulationMode;
+use crate::shared::entity_types::{SimulationMode, ENTITY_ITEM_STACK};
 use crate::shared::protocol::{Entity, EntitySnapshot};
 use crate::shared::wasm::{WasmPluginManager, WasmPluginSlot};
 use polychora_plugin_api::entity_tick_abi::{EntityTickInput, EntityTickOutput};
@@ -40,6 +40,8 @@ pub struct EntityState {
     // Server-only bookkeeping (not on wire)
     pub home_position: [f32; 4],
     pub base_scale: f32,
+    /// Monotonic timestamp when this entity was spawned (for pickup delay, etc.).
+    pub spawn_time_ms: u64,
 }
 
 impl EntityState {
@@ -62,28 +64,34 @@ impl EntityState {
         let previous_orientation = self.entity.pose.orientation;
         let previous_scale = self.entity.pose.scale;
 
-        // Build EntityTickInput for the WASM plugin
-        let tick_input = EntityTickInput {
-            entity_ns: self.entity.namespace,
-            entity_type: self.entity.entity_type,
-            entity_id: self.entity_id,
-            position: self.entity.pose.position,
-            home_position: self.home_position,
-            scale: self.base_scale,
-            now_ms,
-            ..Default::default()
-        };
+        let entity_key = (self.entity.namespace, self.entity.entity_type);
 
+        // Engine-native parametric tick for namespace-0 entities
         let (next_position, next_orientation, next_scale) =
-            if let Some(pose) = wasm_entity_set_pose(wasm_manager, &tick_input) {
+            if let Some(pose) = engine_native_tick(entity_key, self, now_ms) {
                 pose
             } else {
-                // Fallback: no animation (unknown entity or no WASM)
-                (
-                    self.entity.pose.position,
-                    self.entity.pose.orientation,
-                    self.base_scale.max(0.01),
-                )
+                // WASM plugin tick for content entities
+                let tick_input = EntityTickInput {
+                    entity_ns: self.entity.namespace,
+                    entity_type: self.entity.entity_type,
+                    entity_id: self.entity_id,
+                    position: self.entity.pose.position,
+                    home_position: self.home_position,
+                    scale: self.base_scale,
+                    now_ms,
+                    ..Default::default()
+                };
+                if let Some(pose) = wasm_entity_set_pose(wasm_manager, &tick_input) {
+                    pose
+                } else {
+                    // Fallback: no animation (unknown entity or no WASM)
+                    (
+                        self.entity.pose.position,
+                        self.entity.pose.orientation,
+                        self.base_scale.max(0.01),
+                    )
+                }
             };
 
         self.entity.pose.scale = next_scale;
@@ -108,6 +116,37 @@ impl EntityState {
             last_update_ms: self.last_update_ms,
         }
     }
+}
+
+/// Engine-native parametric tick for namespace-0 entities.
+/// Returns None for entity types that should fall through to WASM.
+fn engine_native_tick(
+    entity_key: (u32, u32),
+    state: &EntityState,
+    now_ms: u64,
+) -> Option<([f32; 4], [f32; 4], f32)> {
+    match entity_key {
+        ENTITY_ITEM_STACK => Some(item_stack_tick(state, now_ms)),
+        _ => None,
+    }
+}
+
+/// Gentle vertical bob and slow rotation for dropped item stacks.
+fn item_stack_tick(state: &EntityState, now_ms: u64) -> ([f32; 4], [f32; 4], f32) {
+    let t = now_ms as f32 * 0.001;
+    let phase = t * 0.80 + state.entity_id as f32 * 0.37;
+    let position = [
+        state.home_position[0],
+        state.home_position[1] + 0.10 * phase.sin(),
+        state.home_position[2],
+        state.home_position[3],
+    ];
+    let rot = t * 0.55 + state.entity_id as f32 * 0.91;
+    let orientation = normalize4_or_default(
+        [rot.cos(), 0.0, rot.sin(), 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    );
+    (position, orientation, state.base_scale)
 }
 
 /// Call OP_ENTITY_TICK via WASM and extract a SetPose result.
@@ -204,6 +243,16 @@ impl EntityStore {
         true
     }
 
+    /// Iterate all entity states (for proximity scanning, etc.).
+    pub fn iter(&self) -> impl Iterator<Item = &EntityState> {
+        self.entities.values()
+    }
+
+    /// Get mutable entity state by ID (for modifying home_position during magnet pull).
+    pub fn get_mut(&mut self, entity_id: EntityId) -> Option<&mut EntityState> {
+        self.entities.get_mut(&entity_id)
+    }
+
     pub fn spawn(&mut self, entity_id: EntityId, entity: Entity, last_update_ms: u64) -> EntityId {
         let home_position = entity.pose.position;
         let base_scale = entity.pose.scale;
@@ -213,6 +262,7 @@ impl EntityStore {
             last_update_ms,
             home_position,
             base_scale,
+            spawn_time_ms: last_update_ms,
         };
         let prior = self.entities.insert(entity_id, state);
         assert!(prior.is_none(), "duplicate entity id: {entity_id}");

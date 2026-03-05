@@ -154,6 +154,7 @@ pub struct InputState {
     menu_up_requested: bool,
     menu_down_requested: bool,
     menu_activate_requested: bool,
+    drop_item_requested: bool,
 }
 
 impl InputState {
@@ -204,6 +205,7 @@ impl InputState {
             menu_up_requested: false,
             menu_down_requested: false,
             menu_activate_requested: false,
+            drop_item_requested: false,
         }
     }
 
@@ -331,6 +333,11 @@ impl InputState {
                 KeyCode::KeyC => {
                     if pressed && !event.repeat {
                         self.rotate_xw_requested = true;
+                    }
+                }
+                KeyCode::KeyB => {
+                    if pressed && !event.repeat {
+                        self.drop_item_requested = true;
                     }
                 }
                 KeyCode::KeyG => {
@@ -664,6 +671,12 @@ impl InputState {
     pub fn take_menu_activate(&mut self) -> bool {
         let v = self.menu_activate_requested;
         self.menu_activate_requested = false;
+        v
+    }
+
+    pub fn take_drop_item(&mut self) -> bool {
+        let v = self.drop_item_requested;
+        self.drop_item_requested = false;
         v
     }
 
