@@ -10,29 +10,6 @@ pub const ITEM_BLOCK: (u32, u32) = (0, 1);
 pub const ITEM_SPAWN_EGG: (u32, u32) = (0, 2);
 
 // ---------------------------------------------------------------------------
-// Item type registry entry
-// ---------------------------------------------------------------------------
-
-pub struct ItemTypeEntry {
-    pub namespace: u32,
-    pub item_type: u32,
-    pub name: &'static str,
-}
-
-pub const ITEM_TYPE_ENTRIES: &[ItemTypeEntry] = &[
-    ItemTypeEntry {
-        namespace: 0,
-        item_type: 1,
-        name: "Block",
-    },
-    ItemTypeEntry {
-        namespace: 0,
-        item_type: 2,
-        name: "Spawn Egg",
-    },
-];
-
-// ---------------------------------------------------------------------------
 // BlockItemMeta — CBOR schema for block_stack item data
 // ---------------------------------------------------------------------------
 
@@ -156,5 +133,20 @@ impl ItemStack {
         }
         let meta = SpawnEggMeta::decode(&self.item.data)?;
         Some((meta.entity_namespace, meta.entity_type))
+    }
+
+    /// Encode an `ItemStack` to CBOR bytes (for entity data serialization).
+    pub fn encode_to_cbor(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf).expect("CBOR encode should not fail");
+        buf
+    }
+
+    /// Decode an `ItemStack` from CBOR bytes.
+    pub fn decode_from_cbor(data: &[u8]) -> Option<Self> {
+        if data.is_empty() {
+            return None;
+        }
+        ciborium::from_reader(data).ok()
     }
 }

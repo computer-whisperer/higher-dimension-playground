@@ -54,6 +54,14 @@ pub struct EntityDeclaration {
 pub struct ItemDeclaration {
     pub type_id: u32,
     pub name: String,
+    #[serde(default = "default_max_stack_size")]
+    pub max_stack_size: u32,
+    #[serde(default)]
+    pub color_hint: [u8; 3],
+}
+
+fn default_max_stack_size() -> u32 {
+    64
 }
 
 /// A texture asset declared by a plugin.
@@ -124,6 +132,8 @@ mod tests {
             items: vec![ItemDeclaration {
                 type_id: 0x12345678,
                 name: String::from("TestItem"),
+                max_stack_size: 16,
+                color_hint: [255, 128, 0],
             }],
             textures: vec![TextureDeclaration {
                 texture_id: 0xaabbccdd,

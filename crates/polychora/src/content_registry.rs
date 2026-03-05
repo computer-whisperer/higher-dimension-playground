@@ -248,6 +248,25 @@ impl EntityEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Item entry
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct ItemEntry {
+    pub namespace: u32,
+    pub item_type: u32,
+    pub name: String,
+    pub max_stack_size: u32,
+    pub color_hint: [u8; 3],
+}
+
+impl ItemEntry {
+    pub fn type_key(&self) -> (u32, u32) {
+        (self.namespace, self.item_type)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Content Registry
 // ---------------------------------------------------------------------------
 
@@ -259,6 +278,7 @@ impl std::fmt::Debug for ContentRegistry {
         f.debug_struct("ContentRegistry")
             .field("blocks", &self.blocks.len())
             .field("entities", &self.entities.len())
+            .field("items", &self.items.len())
             .finish()
     }
 }
@@ -277,6 +297,11 @@ pub struct ContentRegistry {
     entities: HashMap<(u32, u32), EntityEntry>,
     // Name lookup: normalized canonical name / alias → (namespace, entity_type)
     entity_name_index: HashMap<String, (u32, u32)>,
+
+    // Items keyed by (namespace, item_type)
+    items: HashMap<(u32, u32), ItemEntry>,
+    // Name lookup: normalized name → (namespace, item_type)
+    item_name_index: HashMap<String, (u32, u32)>,
 
     // Texture registry: (namespace, texture_id) → material_token
     texture_tokens: HashMap<(u32, u32), u16>,
@@ -305,6 +330,8 @@ impl ContentRegistry {
             next_procedural_token: 1, // 0 = air
             entities: HashMap::new(),
             entity_name_index: HashMap::new(),
+            items: HashMap::new(),
+            item_name_index: HashMap::new(),
             texture_tokens: HashMap::new(),
             legacy_block_remap: HashMap::new(),
             legacy_entity_remap: HashMap::new(),
@@ -420,6 +447,63 @@ impl ContentRegistry {
             self.entity_name_index.insert(normalize_token(alias), key);
         }
         self.entities.insert(key, entry);
+    }
+
+    // -----------------------------------------------------------------------
+    // Item registration
+    // -----------------------------------------------------------------------
+
+    pub fn register_item(&mut self, entry: ItemEntry) {
+        let key = (entry.namespace, entry.item_type);
+        let normalized = normalize_token(&entry.name);
+        self.item_name_index.insert(normalized, key);
+        self.items.insert(key, entry);
+    }
+
+    // -----------------------------------------------------------------------
+    // Item lookups
+    // -----------------------------------------------------------------------
+
+    /// Get an item entry by (namespace, item_type).
+    pub fn item_entry(&self, namespace: u32, item_type: u32) -> Option<&ItemEntry> {
+        self.items.get(&(namespace, item_type))
+    }
+
+    /// Lookup item by name (case-insensitive).
+    pub fn item_lookup_by_name(&self, name: &str) -> Option<&ItemEntry> {
+        let normalized = normalize_token(name);
+        self.item_name_index
+            .get(&normalized)
+            .and_then(|key| self.items.get(key))
+    }
+
+    /// Get item name by (namespace, item_type).
+    pub fn item_name(&self, namespace: u32, item_type: u32) -> &str {
+        self.items
+            .get(&(namespace, item_type))
+            .map(|e| e.name.as_str())
+            .unwrap_or("Unknown Item")
+    }
+
+    /// Get item color hint by (namespace, item_type).
+    pub fn item_color(&self, namespace: u32, item_type: u32) -> [u8; 3] {
+        self.items
+            .get(&(namespace, item_type))
+            .map(|e| e.color_hint)
+            .unwrap_or([128, 128, 128])
+    }
+
+    /// Get item max stack size by (namespace, item_type).
+    pub fn item_max_stack_size(&self, namespace: u32, item_type: u32) -> u32 {
+        self.items
+            .get(&(namespace, item_type))
+            .map(|e| e.max_stack_size)
+            .unwrap_or(64)
+    }
+
+    /// Iterate all registered items.
+    pub fn all_items(&self) -> impl Iterator<Item = &ItemEntry> {
+        self.items.values()
     }
 
     // -----------------------------------------------------------------------
@@ -829,5 +913,30 @@ mod tests {
                 alias, canonical, entry.canonical_name,
             );
         }
+    }
+
+    #[test]
+    fn builtin_items_registered() {
+        let registry = full_registry();
+        // Block item
+        let block_item = registry.item_entry(0, 1).expect("ITEM_BLOCK should be registered");
+        assert_eq!(block_item.name, "Block");
+        assert_eq!(block_item.max_stack_size, 64);
+        // Spawn egg item
+        let egg_item = registry.item_entry(0, 2).expect("ITEM_SPAWN_EGG should be registered");
+        assert_eq!(egg_item.name, "Spawn Egg");
+        assert_eq!(egg_item.max_stack_size, 1);
+        // Name lookups
+        assert!(registry.item_lookup_by_name("block").is_some());
+        assert!(registry.item_lookup_by_name("SpawnEgg").is_some());
+    }
+
+    #[test]
+    fn unknown_item_lookup_returns_defaults() {
+        let registry = full_registry();
+        assert_eq!(registry.item_name(999, 999), "Unknown Item");
+        assert_eq!(registry.item_color(999, 999), [128, 128, 128]);
+        assert_eq!(registry.item_max_stack_size(999, 999), 64);
+        assert!(registry.item_entry(999, 999).is_none());
     }
 }

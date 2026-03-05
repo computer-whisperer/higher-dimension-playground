@@ -1,6 +1,8 @@
-use crate::content_registry::{ContentRegistry, EntityEntry};
-use polychora_plugin_api::entity::EntityCategory;
+use crate::content_registry::{ContentRegistry, EntityEntry, ItemEntry};
+use crate::shared::entity_types::{EntitySimConfig, SimulationMode, ENTITY_ITEM_STACK_TYPE};
+use polychora_plugin_api::entity::{EntityCategory, MobLocomotionMode};
 use polychora_plugin_api::texture::builtin_textures;
+use polychora_plugin_api::texture::TextureRef;
 
 /// The namespace ID used by the polychora-content WASM plugin.
 /// Must match `polychora-content/src/lib.rs::NAMESPACE`.
@@ -17,6 +19,8 @@ pub const CONTENT_PLUGIN_NAMESPACE: u32 = 0x706f6c79; // "poly" in ASCII
 pub fn register_builtin_content(registry: &mut ContentRegistry) {
     register_builtin_texture_mappings(registry);
     register_player_entity(registry);
+    register_item_stack_entity(registry);
+    register_builtin_items(registry);
     register_legacy_remaps(registry);
 }
 
@@ -39,6 +43,54 @@ fn register_player_entity(registry: &mut ContentRegistry) {
         base_color: [200, 200, 200],
         model_textures: vec![],
         sim_config: None,
+    });
+}
+
+/// Item stack entity: in-world representation of a dropped item stack.
+fn register_item_stack_entity(registry: &mut ContentRegistry) {
+    registry.register_entity(EntityEntry {
+        namespace: 0,
+        entity_type: ENTITY_ITEM_STACK_TYPE,
+        category: EntityCategory::Accent,
+        canonical_name: "item_stack".into(),
+        aliases: vec!["dropped_item".into()],
+        default_scale: 0.30,
+        base_color: [220, 220, 220],
+        model_textures: vec![TextureRef {
+            namespace: 0,
+            texture_id: builtin_textures::TEX_WHITE,
+        }],
+        sim_config: Some(EntitySimConfig {
+            mode: SimulationMode::Parametric,
+            locomotion: MobLocomotionMode::default(),
+            move_speed: 0.0,
+            preferred_distance: 0.0,
+            tangent_weight: 0.0,
+            aliases: vec![],
+            nav_target_y_offset: 0.0,
+            ability_params: None,
+        }),
+    });
+}
+
+/// Register engine-internal item types: Block and Spawn Egg.
+fn register_builtin_items(registry: &mut ContentRegistry) {
+    use crate::shared::item_types::{ITEM_BLOCK, ITEM_SPAWN_EGG};
+
+    registry.register_item(ItemEntry {
+        namespace: ITEM_BLOCK.0,
+        item_type: ITEM_BLOCK.1,
+        name: "Block".into(),
+        max_stack_size: 64,
+        color_hint: [160, 160, 160],
+    });
+
+    registry.register_item(ItemEntry {
+        namespace: ITEM_SPAWN_EGG.0,
+        item_type: ITEM_SPAWN_EGG.1,
+        name: "Spawn Egg".into(),
+        max_stack_size: 1,
+        color_hint: [255, 200, 100],
     });
 }
 

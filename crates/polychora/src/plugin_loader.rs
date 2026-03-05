@@ -1,5 +1,7 @@
 use crate::builtin_content;
-use crate::content_registry::{ContentRegistry, EntityEntry, MATERIAL_TOKEN_TEXTURE_POOL_FLAG};
+use crate::content_registry::{
+    ContentRegistry, EntityEntry, ItemEntry, MATERIAL_TOKEN_TEXTURE_POOL_FLAG,
+};
 use crate::shared::wasm::{
     WasmExecutionLimits, WasmExecutionRole, WasmModuleCache, WasmPluginManager, WasmPluginSlot,
     WasmRuntime, WasmRuntimeError, WasmRuntimeInstance,
@@ -213,6 +215,17 @@ pub fn populate_registry_from_plugin(
             base_color: entity.base_material_color,
             model_textures: entity.model_textures.clone(),
             sim_config: entity.sim_config.clone(),
+        });
+    }
+
+    // Register items
+    for item in &plugin.manifest.items {
+        registry.register_item(ItemEntry {
+            namespace: ns,
+            item_type: item.type_id,
+            name: item.name.clone(),
+            max_stack_size: item.max_stack_size,
+            color_hint: item.color_hint,
         });
     }
 

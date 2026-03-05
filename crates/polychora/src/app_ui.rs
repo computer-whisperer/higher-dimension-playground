@@ -464,9 +464,10 @@ impl App {
                                 );
                             }
                             entry.map(|e| e.canonical_name.as_str()).unwrap_or("???")
-                        } else {
+                        } else if let Some(block) =
+                            slot.and_then(|s| s.to_block_data())
+                        {
                             // Block icon (tesseract image or color fallback)
-                            let block = block_data_from_slot(self.inventory.hotbar_slot(i));
                             let [r, g, b] = self
                                 .content_registry
                                 .block_color(block.namespace, block.block_type);
@@ -508,6 +509,18 @@ impl App {
 
                             self.content_registry
                                 .block_name(block.namespace, block.block_type)
+                        } else if let Some(stack) = slot {
+                            // Generic item fallback — use registry color hint
+                            let [r, g, b] = self.content_registry.item_color(
+                                stack.item.namespace,
+                                stack.item.item_type,
+                            );
+                            let color = egui::Color32::from_rgb(r, g, b);
+                            ui.painter().rect_filled(icon_rect, 2.0, color);
+                            self.content_registry
+                                .item_name(stack.item.namespace, stack.item.item_type)
+                        } else {
+                            ""
                         };
 
                         // Selection border
@@ -1169,6 +1182,13 @@ impl App {
                         egui::Color32::from_rgb(140, 200, 255),
                     );
                 }
+            } else {
+                // Generic item — draw color-hint swatch from item registry
+                let [r, g, b] = self
+                    .content_registry
+                    .item_color(stack.item.namespace, stack.item.item_type);
+                let color = egui::Color32::from_rgb(r, g, b);
+                ui.painter().rect_filled(icon_rect, 2.0, color);
             }
 
             // Count badge (bottom-right)
