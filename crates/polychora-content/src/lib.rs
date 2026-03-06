@@ -6,6 +6,7 @@ mod entities;
 mod entity_tick;
 mod math4d;
 mod models;
+mod textures;
 
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
@@ -98,7 +99,7 @@ fn handle_get_manifest(out_ptr: i32, out_cap: i32) -> i32 {
 
 fn handle_get_textures(out_ptr: i32, out_cap: i32) -> i32 {
     let response = GetTexturesResponse {
-        textures: Vec::new(),
+        textures: textures::texture_payloads(),
     };
     let bytes = match postcard::to_allocvec(&response) {
         Ok(bytes) => bytes,
@@ -176,6 +177,6 @@ fn build_manifest() -> PluginManifest {
         blocks: blocks::block_declarations(),
         entities: entities::entity_declarations(),
         items: Vec::new(),
-        textures: Vec::new(),
+        textures: textures::texture_declarations(),
     }
 }
