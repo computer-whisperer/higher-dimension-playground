@@ -1,6 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
-use polychora_plugin_api::content_ids::*;
+use polychora_plugin_api::content_ids::{self, *};
 use polychora_plugin_api::entity::{
     EntityCategory, EntitySimConfig, MobAbilityParams, MobLocomotionMode, SimulationMode,
 };
@@ -30,6 +30,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             model_textures: alloc::vec![
                 tex(TEX_PURPLE),        // slot 0
             ],
+            spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_CUBE,
             sim_config: Some(EntitySimConfig {
                 mode: SimulationMode::Parametric,
                 locomotion: MobLocomotionMode::default(),
@@ -51,6 +52,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_WHITE),         // slot 0
                 tex(TEX_LIGHT),         // slot 1
             ],
+            spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_ROTOR,
             sim_config: Some(EntitySimConfig {
                 mode: SimulationMode::Parametric,
                 locomotion: MobLocomotionMode::default(),
@@ -73,6 +75,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_OXIDIZED_METAL),// slot 1 (unused but keeps alignment)
                 tex(TEX_BIO_SPORE_MOSS),// slot 2
             ],
+            spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_DRIFTER,
             sim_config: Some(EntitySimConfig {
                 mode: SimulationMode::Parametric,
                 locomotion: MobLocomotionMode::default(),
@@ -101,6 +104,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_BROWN),         // slot 7 (unused)
                 tex(TEX_GRID_FLOOR),    // slot 8
             ],
+            spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_SEEKER,
             sim_config: Some(EntitySimConfig {
                 mode: SimulationMode::PhysicsDriven,
                 locomotion: MobLocomotionMode::Walking,
@@ -130,6 +134,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_MIRROR),        // slot 8 (unused)
                 tex(TEX_LAVA_VEINED_BASALT), // slot 9
             ],
+            spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_CREEPER,
             sim_config: Some(EntitySimConfig {
                 mode: SimulationMode::PhysicsDriven,
                 locomotion: MobLocomotionMode::Walking,
@@ -172,6 +177,7 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                 tex(TEX_MARBLE),        // slot 8
                 tex(TEX_OXIDIZED_METAL),// slot 9
             ],
+            spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_PHASE_SPIDER,
             sim_config: Some(EntitySimConfig {
                 mode: SimulationMode::PhysicsDriven,
                 locomotion: MobLocomotionMode::Flying,

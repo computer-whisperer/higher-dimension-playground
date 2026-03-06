@@ -66,6 +66,7 @@ impl ApplicationHandler for App {
                 self.instance.clone(),
                 &self.content_registry,
                 &self.material_resolver,
+                &self.pending_texture_uploads,
             ) {
                 eprintln!(
                     "Generated material icon sprite sheet ({}x{}) in {:.2}s",

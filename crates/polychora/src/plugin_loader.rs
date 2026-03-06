@@ -214,6 +214,7 @@ pub fn populate_registry_from_plugin(
             default_scale: entity.default_scale,
             base_color: entity.base_material_color,
             model_textures: entity.model_textures.clone(),
+            spawn_egg_texture_id: entity.spawn_egg_texture_id,
             sim_config: entity.sim_config.clone(),
         });
     }

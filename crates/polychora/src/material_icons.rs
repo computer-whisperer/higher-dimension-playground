@@ -83,7 +83,81 @@ fn icon_render_options() -> RenderOptions {
     }
 }
 
-/// A sprite sheet containing all material icons packed into a single texture.
+/// Render a spawn egg icon (rounded rect + highlight dot) into an RGBA buffer.
+fn render_spawn_egg_icon_rgba(base_color: [u8; 3]) -> Vec<u8> {
+    let size = ICON_SIZE as usize;
+    let mut pixels = vec![0u8; size * size * 4];
+
+    // Brighten dark colors so the egg is visible
+    let [r, g, b] = base_color;
+    let (r, g, b) = if (r as u16 + g as u16 + b as u16) < 80 {
+        (
+            r.saturating_add(60),
+            g.saturating_add(60),
+            b.saturating_add(60),
+        )
+    } else {
+        (r, g, b)
+    };
+
+    let center_x = size as f32 / 2.0;
+    let center_y = size as f32 / 2.0;
+    let half = size as f32 / 2.0;
+    let rounding = half * 0.4;
+
+    // Dot center and radius (matching the egui version)
+    let dot_cx = center_x;
+    let dot_cy = center_y - half * 0.15;
+    let dot_r = half * 0.12;
+    let dot_color = (
+        r.saturating_add(80),
+        g.saturating_add(80),
+        b.saturating_add(80),
+    );
+
+    for py in 0..size {
+        for px in 0..size {
+            let fx = px as f32 + 0.5;
+            let fy = py as f32 + 0.5;
+
+            // SDF rounded rect: distance from center, reduced by rounding
+            let dx = (fx - center_x).abs() - (half - rounding);
+            let dy = (fy - center_y).abs() - (half - rounding);
+            let dist_rect = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - rounding;
+
+            if dist_rect < 0.5 {
+                let rect_alpha = (0.5 - dist_rect).clamp(0.0, 1.0);
+
+                // Check if inside highlight dot
+                let dist_dot =
+                    ((fx - dot_cx).powi(2) + (fy - dot_cy).powi(2)).sqrt() - dot_r;
+
+                let (pr, pg, pb) = if dist_dot < 0.5 {
+                    let dot_alpha = (0.5 - dist_dot).clamp(0.0, 1.0);
+                    (
+                        (r as f32 * (1.0 - dot_alpha) + dot_color.0 as f32 * dot_alpha) as u8,
+                        (g as f32 * (1.0 - dot_alpha) + dot_color.1 as f32 * dot_alpha) as u8,
+                        (b as f32 * (1.0 - dot_alpha) + dot_color.2 as f32 * dot_alpha) as u8,
+                    )
+                } else {
+                    (r, g, b)
+                };
+
+                let offset = (py * size + px) * 4;
+                pixels[offset] = pr;
+                pixels[offset + 1] = pg;
+                pixels[offset + 2] = pb;
+                pixels[offset + 3] = (rect_alpha * 255.0) as u8;
+            }
+        }
+    }
+
+    pixels
+}
+
+/// A sprite sheet containing all material and spawn egg icons packed into a
+/// single texture.  Keyed exclusively by `(namespace, texture_id)` — callers
+/// convert block/entity identity to a `TextureRef` first, then look up the UV.
 pub struct MaterialIconSheet {
     /// RGBA pixel data for the entire sprite sheet
     pub pixels: Vec<u8>,
@@ -91,45 +165,43 @@ pub struct MaterialIconSheet {
     pub width: u32,
     /// Height of the sprite sheet in pixels
     pub height: u32,
-    /// Map from (namespace, block_type) to its UV rectangle [u_min, v_min, u_max, v_max]
+    /// Map from (texture_namespace, texture_id) to UV rectangle
+    /// [u_min, v_min, u_max, v_max].
     uv_rects: HashMap<(u32, u32), [f32; 4]>,
-    /// Map from (texture_namespace, texture_id) to the UV rectangle of the
-    /// block that uses that texture.  Populated during sheet generation so
-    /// that `resolve_item_thumbnail_texture` results can be looked up
-    /// without knowing the block type.
-    texture_uv_rects: HashMap<(u32, u32), [f32; 4]>,
 }
 
 impl MaterialIconSheet {
-    /// Get the UV rectangle for a block by (namespace, block_type), or None if not found.
-    pub fn uv_rect(&self, namespace: u32, block_type: u32) -> Option<[f32; 4]> {
-        self.uv_rects.get(&(namespace, block_type)).copied()
-    }
-
-    /// Get the UV rectangle for a texture reference, or None if no block
-    /// uses that texture.
-    pub fn texture_uv_rect(&self, namespace: u32, texture_id: u32) -> Option<[f32; 4]> {
-        self.texture_uv_rects.get(&(namespace, texture_id)).copied()
+    /// Get the UV rectangle for a texture by (namespace, texture_id), or None
+    /// if not found.
+    pub fn uv_rect(&self, namespace: u32, texture_id: u32) -> Option<[f32; 4]> {
+        self.uv_rects.get(&(namespace, texture_id)).copied()
     }
 }
 
 /// Generate a sprite sheet containing all material icons packed into a grid
-/// by rendering the tetrahedron pipeline offscreen on GPU.
+/// by rendering the tetrahedron pipeline offscreen on GPU, plus CPU-rendered
+/// spawn egg icons.
+///
+/// `pending_texture_uploads` provides the WASM plugin's 3D textures so migrated
+/// blocks (those using texture pool tokens) render correctly in the offscreen
+/// context.
 pub fn generate_material_icon_sheet_gpu(
     device: Arc<Device>,
     queue: Arc<Queue>,
     instance: Arc<Instance>,
     content_registry: &ContentRegistry,
     material_resolver: &MaterialResolver,
+    pending_texture_uploads: &[polychora::plugin_loader::PendingTextureUpload],
 ) -> Option<MaterialIconSheet> {
-    let num_materials = content_registry.block_count() as u32;
-    let rows = num_materials.div_ceil(SHEET_COLUMNS);
+    let num_blocks = content_registry.block_count() as u32;
+    let num_eggs: u32 = content_registry.spawnable_entities().count() as u32;
+    let total_slots = num_blocks + num_eggs;
+    let rows = total_slots.div_ceil(SHEET_COLUMNS);
     let sheet_w = SHEET_COLUMNS * ICON_SIZE;
     let sheet_h = rows * ICON_SIZE;
 
     let mut pixels = vec![0u8; (sheet_w * sheet_h * 4) as usize];
     let mut uv_rects = HashMap::new();
-    let mut texture_uv_rects = HashMap::new();
     let icon_pixel_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
 
     let mut offscreen = RenderContext::new(
@@ -139,8 +211,22 @@ pub fn generate_material_icon_sheet_gpu(
         None,
         [ICON_SIZE, ICON_SIZE, 1],
     );
+
+    // Upload WASM plugin textures so migrated blocks render with their 3D
+    // textures instead of falling back to magenta.
+    for upload in pending_texture_uploads {
+        offscreen.upload_texture_3d(
+            &upload.data,
+            upload.width,
+            upload.height,
+            upload.depth,
+            upload.format,
+        );
+    }
+
     let view_matrix: ndarray::Array2<f32> = icon_view_matrix().into();
 
+    // Phase 1: GPU-rendered block icons
     for (idx, entry) in content_registry.all_blocks_ordered().enumerate() {
         let col = (idx as u32) % SHEET_COLUMNS;
         let row = (idx as u32) / SHEET_COLUMNS;
@@ -183,28 +269,45 @@ pub fn generate_material_icon_sheet_gpu(
             return None;
         }
 
-        // Copy icon pixels into the sprite sheet
-        let dst_x = col * ICON_SIZE;
-        let dst_y = row * ICON_SIZE;
-        for py in 0..ICON_SIZE {
-            let src_offset = (py * ICON_SIZE * 4) as usize;
-            let dst_offset = ((dst_y + py) * sheet_w + dst_x) as usize * 4;
-            pixels[dst_offset..dst_offset + (ICON_SIZE * 4) as usize]
-                .copy_from_slice(&raw[src_offset..src_offset + (ICON_SIZE * 4) as usize]);
-        }
+        copy_icon_to_sheet(&mut pixels, &raw, col, row, sheet_w);
 
-        // Compute UV coordinates
-        let u_min = dst_x as f32 / sheet_w as f32;
-        let v_min = dst_y as f32 / sheet_h as f32;
-        let u_max = (dst_x + ICON_SIZE) as f32 / sheet_w as f32;
-        let v_max = (dst_y + ICON_SIZE) as f32 / sheet_h as f32;
-        let uv = [u_min, v_min, u_max, v_max];
-        uv_rects.insert((entry.namespace, entry.block_type), uv);
-        // Also index by the block's texture reference so that
-        // resolve_item_thumbnail_texture() results can map directly to an icon.
-        texture_uv_rects
+        let uv = compute_uv(col, row, sheet_w, sheet_h);
+        uv_rects
             .entry((entry.texture.namespace, entry.texture.texture_id))
             .or_insert(uv);
+
+        // Phase 3 inline: namespace-0 aliases for migrated blocks.
+        // Blocks whose texture uses a plugin namespace (e.g. 0x706f6c79)
+        // also need a (0, texture_id) entry so entity model_textures
+        // (which use tex() → namespace 0) can resolve to an icon.
+        if entry.texture.namespace != 0 {
+            uv_rects
+                .entry((0, entry.texture.texture_id))
+                .or_insert(uv);
+        }
+    }
+
+    // Phase 2: CPU-rendered spawn egg icons
+    let mut egg_idx = num_blocks;
+    for entity in content_registry.spawnable_entities() {
+        if entity.spawn_egg_texture_id == 0 {
+            egg_idx += 1;
+            continue;
+        }
+
+        let col = egg_idx % SHEET_COLUMNS;
+        let row = egg_idx / SHEET_COLUMNS;
+
+        let raw = render_spawn_egg_icon_rgba(entity.base_color);
+
+        copy_icon_to_sheet(&mut pixels, &raw, col, row, sheet_w);
+
+        let uv = compute_uv(col, row, sheet_w, sheet_h);
+        uv_rects
+            .entry((0, entity.spawn_egg_texture_id))
+            .or_insert(uv);
+
+        egg_idx += 1;
     }
 
     Some(MaterialIconSheet {
@@ -212,6 +315,26 @@ pub fn generate_material_icon_sheet_gpu(
         width: sheet_w,
         height: sheet_h,
         uv_rects,
-        texture_uv_rects,
     })
+}
+
+fn copy_icon_to_sheet(pixels: &mut [u8], raw: &[u8], col: u32, row: u32, sheet_w: u32) {
+    let dst_x = col * ICON_SIZE;
+    let dst_y = row * ICON_SIZE;
+    for py in 0..ICON_SIZE {
+        let src_offset = (py * ICON_SIZE * 4) as usize;
+        let dst_offset = ((dst_y + py) * sheet_w + dst_x) as usize * 4;
+        pixels[dst_offset..dst_offset + (ICON_SIZE * 4) as usize]
+            .copy_from_slice(&raw[src_offset..src_offset + (ICON_SIZE * 4) as usize]);
+    }
+}
+
+fn compute_uv(col: u32, row: u32, sheet_w: u32, sheet_h: u32) -> [f32; 4] {
+    let dst_x = col * ICON_SIZE;
+    let dst_y = row * ICON_SIZE;
+    let u_min = dst_x as f32 / sheet_w as f32;
+    let v_min = dst_y as f32 / sheet_h as f32;
+    let u_max = (dst_x + ICON_SIZE) as f32 / sheet_w as f32;
+    let v_max = (dst_y + ICON_SIZE) as f32 / sheet_h as f32;
+    [u_min, v_min, u_max, v_max]
 }

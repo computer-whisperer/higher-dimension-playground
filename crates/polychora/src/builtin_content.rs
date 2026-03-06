@@ -43,6 +43,7 @@ fn register_player_entity(registry: &mut ContentRegistry) {
         default_scale: 1.0,
         base_color: [200, 200, 200],
         model_textures: vec![],
+        spawn_egg_texture_id: 0,
         sim_config: None,
     });
 }
@@ -61,6 +62,7 @@ fn register_item_stack_entity(registry: &mut ContentRegistry) {
             namespace: 0,
             texture_id: builtin_textures::TEX_WHITE,
         }],
+        spawn_egg_texture_id: 0,
         sim_config: Some(EntitySimConfig {
             mode: SimulationMode::Parametric,
             locomotion: MobLocomotionMode::default(),

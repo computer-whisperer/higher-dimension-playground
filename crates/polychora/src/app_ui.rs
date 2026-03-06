@@ -1,43 +1,34 @@
 use super::*;
-
-/// Derive a spawn egg color from the entity's base_color, ensuring it's visible.
-fn spawn_egg_color(base_color: [u8; 3]) -> egui::Color32 {
-    let [r, g, b] = base_color;
-    // If the base color is very dark, brighten it so the egg is visible.
-    if (r as u16 + g as u16 + b as u16) < 80 {
-        egui::Color32::from_rgb(
-            r.saturating_add(60),
-            g.saturating_add(60),
-            b.saturating_add(60),
-        )
-    } else {
-        egui::Color32::from_rgb(r, g, b)
-    }
-}
-
-/// Lighten a color by adding a fixed amount to each channel.
-fn brighten_color(color: egui::Color32, amount: u8) -> egui::Color32 {
-    egui::Color32::from_rgb(
-        color.r().saturating_add(amount),
-        color.g().saturating_add(amount),
-        color.b().saturating_add(amount),
-    )
-}
-
-/// Paint a spawn egg icon (rounded rect + highlight dot) into the given rect.
-fn paint_spawn_egg_icon(painter: &egui::Painter, rect: egui::Rect, base_color: [u8; 3]) {
-    let egg_color = spawn_egg_color(base_color);
-    let rounding = rect.width().min(rect.height()) * 0.4;
-    painter.rect_filled(rect, rounding, egg_color);
-    let dot_center = rect.center() - egui::vec2(0.0, rect.height() * 0.15);
-    painter.circle_filled(
-        dot_center,
-        rect.width() * 0.12,
-        brighten_color(egg_color, 80),
-    );
-}
+use polychora_plugin_api::texture::TextureRef;
 
 impl App {
+    /// Paint an icon from the material icon sheet by TextureRef, falling back
+    /// to a flat color swatch when the sheet entry is missing or unavailable.
+    fn paint_icon(
+        &self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        tex_ref: Option<TextureRef>,
+        fallback_color: [u8; 3],
+    ) {
+        let resolved = tex_ref.and_then(|t| {
+            let sheet = self.material_icon_sheet.as_ref()?;
+            let tex_id = self.material_icons_texture_id?;
+            let uv = sheet.uv_rect(t.namespace, t.texture_id)?;
+            Some((tex_id, uv))
+        });
+        if let Some((tex_id, [u0, v0, u1, v1])) = resolved {
+            painter.image(
+                tex_id,
+                rect,
+                egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            let [r, g, b] = fallback_color;
+            painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
+        }
+    }
     pub(super) fn draw_egui_pause_menu(
         &mut self,
         ctx: &egui::Context,
@@ -459,74 +450,42 @@ impl App {
                         let icon_rect = rect.shrink(5.0);
 
                         // Render icon and resolve item name
-                        let item_name = if let Some((ens, etype)) =
-                            slot.and_then(|s| s.spawn_egg_entity_key())
-                        {
-                            // Spawn egg
-                            let entry = self.content_registry.entity_lookup(ens, etype);
-                            if let Some(entry) = entry {
-                                paint_spawn_egg_icon(
-                                    ui.painter(),
-                                    icon_rect.shrink(3.0),
-                                    entry.base_color,
-                                );
-                            }
-                            entry.map(|e| e.canonical_name.as_str()).unwrap_or("???")
-                        } else if let Some(block) =
-                            slot.and_then(|s| s.to_block_data())
-                        {
-                            // Block icon (tesseract image or color fallback)
-                            let [r, g, b] = self
+                        let item_name = if let Some(stack) = slot {
+                            let tex = self
                                 .content_registry
-                                .block_color(block.namespace, block.block_type);
-                            if let (Some(sheet), Some(tex_id)) =
-                                (&self.material_icon_sheet, self.material_icons_texture_id)
-                            {
-                                if let Some([u0, v0, u1, v1]) =
-                                    sheet.uv_rect(block.namespace, block.block_type)
-                                {
-                                    ui.painter().image(
-                                        tex_id,
-                                        icon_rect,
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(u0, v0),
-                                            egui::pos2(u1, v1),
-                                        ),
-                                        egui::Color32::WHITE,
-                                    );
-                                } else {
-                                    let mat_color = egui::Color32::from_rgb(r, g, b);
-                                    ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                                }
-                            } else {
-                                let mat_color = egui::Color32::from_rgb(r, g, b);
-                                ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                            }
-
-                            // Scale badge (bottom-left)
-                            if block.scale_exp != 0 {
-                                let badge_pos = rect.left_bottom() + egui::vec2(4.0, -3.0);
-                                ui.painter().text(
-                                    badge_pos,
-                                    egui::Align2::LEFT_BOTTOM,
-                                    format!("s{}", block.scale_exp),
-                                    egui::FontId::proportional(12.0),
-                                    egui::Color32::from_rgb(140, 200, 255),
-                                );
-                            }
-
-                            self.content_registry
-                                .block_name(block.namespace, block.block_type)
-                        } else if let Some(stack) = slot {
-                            // Generic item fallback — use registry color hint
-                            let [r, g, b] = self.content_registry.item_color(
+                                .resolve_item_thumbnail_texture(&stack.item);
+                            let fallback = self.content_registry.item_color(
                                 stack.item.namespace,
                                 stack.item.item_type,
                             );
-                            let color = egui::Color32::from_rgb(r, g, b);
-                            ui.painter().rect_filled(icon_rect, 2.0, color);
-                            self.content_registry
-                                .item_name(stack.item.namespace, stack.item.item_type)
+                            self.paint_icon(ui.painter(), icon_rect, tex, fallback);
+
+                            // Scale badge (bottom-left) for block items
+                            if let Some(block) = stack.to_block_data() {
+                                if block.scale_exp != 0 {
+                                    let badge_pos =
+                                        rect.left_bottom() + egui::vec2(4.0, -3.0);
+                                    ui.painter().text(
+                                        badge_pos,
+                                        egui::Align2::LEFT_BOTTOM,
+                                        format!("s{}", block.scale_exp),
+                                        egui::FontId::proportional(12.0),
+                                        egui::Color32::from_rgb(140, 200, 255),
+                                    );
+                                }
+                                self.content_registry
+                                    .block_name(block.namespace, block.block_type)
+                            } else if let Some((ens, etype)) =
+                                stack.spawn_egg_entity_key()
+                            {
+                                self.content_registry
+                                    .entity_lookup(ens, etype)
+                                    .map(|e| e.canonical_name.as_str())
+                                    .unwrap_or("???")
+                            } else {
+                                self.content_registry
+                                    .item_name(stack.item.namespace, stack.item.item_type)
+                            }
                         } else {
                             ""
                         };
@@ -926,8 +885,6 @@ impl App {
                         if idx > 0 && idx % items_per_row == 0 {
                             ui.end_row();
                         }
-                        let [r, g, b] = entry.color;
-                        let mat_color = egui::Color32::from_rgb(r, g, b);
                         let block_key = (entry.namespace, entry.block_type);
 
                         let (rect, response) = ui.allocate_exact_size(
@@ -945,26 +902,12 @@ impl App {
 
                         // Material icon (tesseract image or color fallback)
                         let icon_rect = rect.shrink(4.0);
-                        if let (Some(sheet), Some(tex_id)) =
-                            (&self.material_icon_sheet, self.material_icons_texture_id)
-                        {
-                            if let Some([u0, v0, u1, v1]) = sheet.uv_rect(block_key.0, block_key.1)
-                            {
-                                ui.painter().image(
-                                    tex_id,
-                                    icon_rect,
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(u0, v0),
-                                        egui::pos2(u1, v1),
-                                    ),
-                                    egui::Color32::WHITE,
-                                );
-                            } else {
-                                ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                            }
-                        } else {
-                            ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                        }
+                        self.paint_icon(
+                            ui.painter(),
+                            icon_rect,
+                            Some(entry.texture),
+                            entry.color,
+                        );
 
                         // Material name
                         let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
@@ -1033,7 +976,20 @@ impl App {
                         ui.painter().rect_filled(rect, 3.0, bg);
 
                         // Egg icon
-                        paint_spawn_egg_icon(ui.painter(), rect.shrink(8.0), entity.base_color);
+                        let egg_tex = if entity.spawn_egg_texture_id != 0 {
+                            Some(TextureRef {
+                                namespace: 0,
+                                texture_id: entity.spawn_egg_texture_id,
+                            })
+                        } else {
+                            None
+                        };
+                        self.paint_icon(
+                            ui.painter(),
+                            rect.shrink(8.0),
+                            egg_tex,
+                            entity.base_color,
+                        );
 
                         // Entity name label
                         let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
@@ -1180,38 +1136,17 @@ impl App {
         if let Some(stack) = slot {
             let icon_rect = rect.shrink(4.0);
 
-            if let Some((ens, etype)) = stack.spawn_egg_entity_key() {
-                if let Some(entry) = self.content_registry.entity_lookup(ens, etype) {
-                    paint_spawn_egg_icon(ui.painter(), icon_rect.shrink(2.0), entry.base_color);
-                }
-            } else if let Some(block_data) = stack.to_block_data() {
-                let [r, g, b] = self
-                    .content_registry
-                    .block_color(block_data.namespace, block_data.block_type);
+            // Unified icon rendering via TextureRef
+            let tex = self
+                .content_registry
+                .resolve_item_thumbnail_texture(&stack.item);
+            let fallback = self
+                .content_registry
+                .item_color(stack.item.namespace, stack.item.item_type);
+            self.paint_icon(ui.painter(), icon_rect, tex, fallback);
 
-                // Block icon
-                if let (Some(sheet), Some(tex_id)) =
-                    (&self.material_icon_sheet, self.material_icons_texture_id)
-                {
-                    if let Some([u0, v0, u1, v1]) =
-                        sheet.uv_rect(block_data.namespace, block_data.block_type)
-                    {
-                        ui.painter().image(
-                            tex_id,
-                            icon_rect,
-                            egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
-                            egui::Color32::WHITE,
-                        );
-                    } else {
-                        let mat_color = egui::Color32::from_rgb(r, g, b);
-                        ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                    }
-                } else {
-                    let mat_color = egui::Color32::from_rgb(r, g, b);
-                    ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-                }
-
-                // Scale badge (bottom-left)
+            // Scale badge (bottom-left) for block items
+            if let Some(block_data) = stack.to_block_data() {
                 if block_data.scale_exp != 0 {
                     let badge_pos = rect.left_bottom() + egui::vec2(4.0, -3.0);
                     ui.painter().text(
@@ -1221,38 +1156,6 @@ impl App {
                         egui::FontId::proportional(11.0),
                         egui::Color32::from_rgb(140, 200, 255),
                     );
-                }
-            } else {
-                // Generic item — try thumbnail texture, fall back to color swatch
-                let mut rendered = false;
-                if let Some(tex) =
-                    self.content_registry
-                        .resolve_item_thumbnail_texture(&stack.item)
-                {
-                    if let (Some(sheet), Some(tex_id)) =
-                        (&self.material_icon_sheet, self.material_icons_texture_id)
-                    {
-                        if let Some([u0, v0, u1, v1]) =
-                            sheet.texture_uv_rect(tex.namespace, tex.texture_id)
-                        {
-                            ui.painter().image(
-                                tex_id,
-                                icon_rect,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(u0, v0),
-                                    egui::pos2(u1, v1),
-                                ),
-                                egui::Color32::WHITE,
-                            );
-                            rendered = true;
-                        }
-                    }
-                }
-                if !rendered {
-                    let [r, g, b] = self
-                        .content_registry
-                        .item_color(stack.item.namespace, stack.item.item_type);
-                    ui.painter().rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
                 }
             }
 
@@ -1675,24 +1578,10 @@ impl App {
             let (icon_rect, _) =
                 ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
 
-            if let (Some(sheet), Some(tex_id)) =
-                (&self.material_icon_sheet, self.material_icons_texture_id)
-            {
-                if let Some([u0, v0, u1, v1]) = sheet.uv_rect(block.namespace, block.block_type) {
-                    ui.painter().image(
-                        tex_id,
-                        icon_rect,
-                        egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
-                        egui::Color32::WHITE,
-                    );
-                } else {
-                    ui.painter()
-                        .rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
-                }
-            } else {
-                ui.painter()
-                    .rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
-            }
+            let tex = self
+                .content_registry
+                .block_icon_texture(block.namespace, block.block_type);
+            self.paint_icon(ui.painter(), icon_rect, tex, [r, g, b]);
 
             ui.label(
                 egui::RichText::new(name)
@@ -1763,19 +1652,9 @@ impl App {
         let category = entry
             .map(|e| format!("{:?}", e.category))
             .unwrap_or_else(|| "Unknown".to_string());
-        // Resolve entity's primary color and icon from its model_textures palette
-        let first_block_key = entry
-            .and_then(|e| e.model_textures.first())
-            .and_then(|tex| {
-                self.material_resolver.block_for_gpu_token(
-                    self.material_resolver
-                        .resolve_texture(tex.namespace, tex.texture_id)
-                        .unwrap_or(7),
-                )
-            });
-        let [r, g, b] = first_block_key
-            .map(|(ns, bt)| self.content_registry.block_color(ns, bt))
-            .unwrap_or([128, 128, 128]);
+        // Resolve entity's primary texture and color for the icon
+        let first_tex = entry.and_then(|e| e.model_textures.first().copied());
+        let [r, g, b] = entry.map(|e| e.base_color).unwrap_or([128, 128, 128]);
 
         // Check if this is a player
         let player_name = self.remote_players.get(&entity_id).map(|p| p.name.clone());
@@ -1786,25 +1665,7 @@ impl App {
             let (icon_rect, _) =
                 ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
 
-            // Entity icon: use the block matching the entity's first model texture
-            let icon_uv = first_block_key.and_then(|(ns, bt)| {
-                self.material_icon_sheet
-                    .as_ref()
-                    .and_then(|sheet| sheet.uv_rect(ns, bt))
-            });
-            if let (Some([u0, v0, u1, v1]), Some(tex_id)) =
-                (icon_uv, self.material_icons_texture_id)
-            {
-                ui.painter().image(
-                    tex_id,
-                    icon_rect,
-                    egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
-                    egui::Color32::WHITE,
-                );
-            } else {
-                ui.painter()
-                    .rect_filled(icon_rect, 2.0, egui::Color32::from_rgb(r, g, b));
-            }
+            self.paint_icon(ui.painter(), icon_rect, first_tex, [r, g, b]);
 
             let display_name = if let Some(ref pname) = player_name {
                 format!("{} ({})", canonical_name, pname)

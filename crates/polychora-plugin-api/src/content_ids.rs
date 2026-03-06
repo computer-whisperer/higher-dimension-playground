@@ -80,3 +80,12 @@ pub const ENTITY_DRIFTER: u32 = 0x433824fe;
 pub const ENTITY_SEEKER: u32 = 0xa974d75b;
 pub const ENTITY_CREEPER: u32 = 0x3dc5fd3d;
 pub const ENTITY_PHASE_SPIDER: u32 = 0x4af27f80;
+
+// ---- Spawn egg texture IDs (namespace 0) ----
+
+pub const SPAWN_EGG_TEX_CUBE: u32 = 0x3e8a1c47;
+pub const SPAWN_EGG_TEX_ROTOR: u32 = 0xd17f5b92;
+pub const SPAWN_EGG_TEX_DRIFTER: u32 = 0x82c4e60d;
+pub const SPAWN_EGG_TEX_SEEKER: u32 = 0xf5a93718;
+pub const SPAWN_EGG_TEX_CREEPER: u32 = 0x6b2d84a3;
+pub const SPAWN_EGG_TEX_PHASE_SPIDER: u32 = 0xa41e9f56;

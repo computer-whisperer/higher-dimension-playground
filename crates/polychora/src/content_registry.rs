@@ -235,6 +235,8 @@ pub struct EntityEntry {
     /// Explicit texture palette for entity model parts.
     /// Rendering code resolves each TextureRef to a GPU token at draw time.
     pub model_textures: Vec<TextureRef>,
+    /// Texture ID (namespace 0) for the spawn egg icon in the material icon sheet.
+    pub spawn_egg_texture_id: u32,
     pub sim_config: Option<EntitySimConfig>,
 }
 
@@ -558,14 +560,14 @@ impl ContentRegistry {
     ///
     /// For engine-internal items (ns=0):
     /// - ITEM_BLOCK: decodes BlockItemMeta → returns the block's texture
-    /// - ITEM_SPAWN_EGG: returns None (uses special spawn egg icon)
+    /// - ITEM_SPAWN_EGG: decodes SpawnEggMeta → returns the entity's spawn egg texture
     ///
     /// For plugin items: returns the declared `thumbnail.texture`.
     pub fn resolve_item_thumbnail_texture(
         &self,
         item: &crate::shared::protocol::Item,
     ) -> Option<TextureRef> {
-        use crate::shared::item_types::{BlockItemMeta, ITEM_BLOCK, ITEM_SPAWN_EGG};
+        use crate::shared::item_types::{BlockItemMeta, SpawnEggMeta, ITEM_BLOCK, ITEM_SPAWN_EGG};
 
         let key = (item.namespace, item.item_type);
 
@@ -576,7 +578,16 @@ impl ContentRegistry {
         }
 
         if key == ITEM_SPAWN_EGG {
-            return None; // Spawn eggs use special icon rendering
+            let meta = SpawnEggMeta::decode(&item.data)?;
+            let entity =
+                self.resolve_entity_entry(meta.entity_namespace, meta.entity_type)?;
+            if entity.spawn_egg_texture_id != 0 {
+                return Some(TextureRef {
+                    namespace: 0,
+                    texture_id: entity.spawn_egg_texture_id,
+                });
+            }
+            return None;
         }
 
         // Plugin item: use declared thumbnail texture
@@ -678,6 +689,12 @@ impl ContentRegistry {
     pub fn block_category(&self, namespace: u32, block_type: u32) -> Option<BlockCategory> {
         self.resolve_block_entry(namespace, block_type)
             .map(|e| e.category)
+    }
+
+    /// Get the TextureRef for a block's icon (for unified icon sheet lookups).
+    pub fn block_icon_texture(&self, namespace: u32, block_type: u32) -> Option<TextureRef> {
+        self.resolve_block_entry(namespace, block_type)
+            .map(|e| e.texture)
     }
 
     // -----------------------------------------------------------------------
@@ -803,31 +820,19 @@ fn normalize_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin_content;
     use crate::plugin_loader;
-    use crate::shared::wasm::{WasmExecutionLimits, WasmRuntime};
 
     /// Build a fully-populated registry: builtin (Air, Player, textures, remaps)
-    /// + polychora-content WASM plugin (68 blocks, 6 entities).
+    /// + polychora-content WASM plugin (68 blocks, 6 entities, 10 texture uploads).
     fn full_registry() -> ContentRegistry {
-        let mut registry = ContentRegistry::new();
-        builtin_content::register_builtin_content(&mut registry);
-
-        let runtime = WasmRuntime::new().expect("wasm runtime");
-        let plugin = plugin_loader::load_plugin(
-            &runtime,
-            include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH")),
-            WasmExecutionLimits::default(),
-        )
-        .expect("load polychora-content plugin");
-        plugin_loader::populate_registry_from_plugin(&mut registry, &plugin)
-            .expect("populate registry from plugin");
-
+        let (registry, _pending) = plugin_loader::create_full_registry();
         registry
     }
 
     #[test]
     fn plugin_blocks_registered_correctly() {
+        use crate::content_registry::MATERIAL_TOKEN_TEXTURE_POOL_FLAG;
+
         let registry = full_registry();
         let resolver = MaterialResolver::from_registry(&registry);
 
@@ -838,22 +843,48 @@ mod tests {
         let check_name = |token: u16, expected_name: &str| {
             let (ns, bt) = resolver
                 .block_for_gpu_token(token)
-                .unwrap_or_else(|| panic!("token {} not in resolver", token));
+                .unwrap_or_else(|| panic!("token {:#06x} not in resolver", token));
             assert_eq!(registry.block_name(ns, bt), expected_name);
             assert_eq!(resolver.resolve_block(ns, bt), token);
         };
 
-        check_name(1, "Red");
-        check_name(12, "White");
+        // Migrated blocks: texture pool tokens 0x8000..0x8009
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 0, "Red");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 1, "Orange");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 2, "Yellow-Green");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 3, "Green");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 4, "Cyan");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 5, "Blue");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 6, "Purple");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 7, "Magenta");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 8, "Brown");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 9, "White");
+
+        // Non-migrated blocks still use procedural tokens
         check_name(27, "Stone");
         check_name(35, "Sand");
         check_name(68, "Beacon Matrix");
 
-        // Verify round-trip for all 68 blocks
-        for token in 1u16..=68 {
+        // Verify round-trip for all non-migrated procedural tokens.
+        // Procedural tokens for non-migrated blocks: 9, 11, 13, 14, 15..=68
+        let procedural_tokens: Vec<u16> = [9u16, 11, 13, 14]
+            .iter()
+            .copied()
+            .chain(15..=68)
+            .collect();
+        for token in procedural_tokens {
             let (ns, bt) = resolver
                 .block_for_gpu_token(token)
-                .unwrap_or_else(|| panic!("token {} not in resolver", token));
+                .unwrap_or_else(|| panic!("procedural token {} not in resolver", token));
+            assert_eq!(resolver.resolve_block(ns, bt), token);
+        }
+
+        // Verify round-trip for all 10 texture pool tokens
+        for i in 0u16..10 {
+            let token = MATERIAL_TOKEN_TEXTURE_POOL_FLAG | i;
+            let (ns, bt) = resolver
+                .block_for_gpu_token(token)
+                .unwrap_or_else(|| panic!("pool token {:#06x} not in resolver", token));
             assert_eq!(resolver.resolve_block(ns, bt), token);
         }
     }
@@ -914,22 +945,35 @@ mod tests {
 
     #[test]
     fn texture_registry_resolves() {
-        let registry = full_registry();
+        use crate::content_registry::MATERIAL_TOKEN_TEXTURE_POOL_FLAG;
         use polychora_plugin_api::texture::{builtin_textures, TextureRef};
 
-        // TEX_STONE should resolve to material token 27
+        let registry = full_registry();
+        let content_ns = 0x706f6c79u32; // polychora-content NAMESPACE
+
+        // TEX_STONE should resolve to material token 27 via namespace 0
         let tex = TextureRef {
             namespace: 0,
             texture_id: builtin_textures::TEX_STONE,
         };
         assert_eq!(registry.resolve_texture_token(&tex), Some(27));
 
-        // TEX_RED should resolve to material token 1
+        // TEX_RED via namespace 0 should still resolve to procedural token 1
         let tex = TextureRef {
             namespace: 0,
             texture_id: builtin_textures::TEX_RED,
         };
         assert_eq!(registry.resolve_texture_token(&tex), Some(1));
+
+        // TEX_RED via plugin namespace should resolve to texture pool token 0x8000
+        let tex = TextureRef {
+            namespace: content_ns,
+            texture_id: builtin_textures::TEX_RED,
+        };
+        assert_eq!(
+            registry.resolve_texture_token(&tex),
+            Some(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 0),
+        );
 
         // Unknown texture returns None
         let tex = TextureRef {
@@ -1065,14 +1109,20 @@ mod tests {
             polychora_plugin_api::texture::builtin_textures::TEX_STONE,
         );
 
-        // Spawn egg thumbnail should be None (uses special icon)
+        // Spawn egg thumbnail should resolve to the entity's spawn_egg_texture_id
         let seeker = registry.entity_lookup_by_name("seeker").unwrap();
         let egg_stack = ItemStack::spawn_egg(seeker.namespace, seeker.entity_type);
+        let egg_thumb = registry.resolve_item_thumbnail_texture(&egg_stack.item);
         assert!(
-            registry
-                .resolve_item_thumbnail_texture(&egg_stack.item)
-                .is_none(),
-            "spawn egg should not have a thumbnail texture",
+            egg_thumb.is_some(),
+            "spawn egg should have a thumbnail texture",
+        );
+        assert_eq!(
+            egg_thumb.unwrap(),
+            TextureRef {
+                namespace: 0,
+                texture_id: polychora_plugin_api::content_ids::SPAWN_EGG_TEX_SEEKER,
+            },
         );
     }
 }

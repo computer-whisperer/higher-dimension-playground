@@ -44,6 +44,10 @@ pub struct EntityDeclaration {
     /// base_material_token + saturating_add(N).
     #[serde(default)]
     pub model_textures: Vec<TextureRef>,
+    /// Texture ID (namespace 0) for the spawn egg icon in the material icon sheet.
+    /// Zero means no dedicated spawn egg icon (falls back to base_material_color).
+    #[serde(default)]
+    pub spawn_egg_texture_id: u32,
     /// Data-driven simulation configuration. Present for entities with WASM-driven ticks.
     #[serde(default)]
     pub sim_config: Option<EntitySimConfig>,
@@ -134,6 +138,7 @@ mod tests {
                 default_scale: 1.5,
                 base_material_color: [10, 20, 30],
                 model_textures: vec![],
+                spawn_egg_texture_id: 0xdeadcafe,
                 sim_config: Some(EntitySimConfig {
                     mode: SimulationMode::PhysicsDriven,
                     locomotion: MobLocomotionMode::Walking,
