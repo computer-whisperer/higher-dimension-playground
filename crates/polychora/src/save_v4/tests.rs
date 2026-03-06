@@ -353,7 +353,12 @@ fn load_region_filtered_world_and_entities() {
     let legacy_payload = loaded_chunk_payloads[0]
         .1
         .to_material_token_payload(|block| {
-            reg.block_material_token(block.namespace, block.block_type) as u8
+            if let Some(entry) = reg.block_entry(block.namespace, block.block_type) {
+                let canonical = BlockData::simple(entry.namespace, entry.block_type);
+                crate::content_registry::material_token_from_block_data(&canonical)
+            } else {
+                0
+            }
         });
     let chunk =
         legacy_chunk_from_field_chunk_payload(&legacy_payload).expect("decode chunk payload");

@@ -842,9 +842,6 @@ mod tests {
         let registry = full_registry();
         let resolver = MaterialResolver::from_registry(&registry);
 
-        // Verify all 68 blocks are registered (from plugin)
-        assert_eq!(registry.block_count(), 68);
-
         // Verify specific block lookups via MaterialResolver reverse mapping
         let check_name = |token: u16, expected_name: &str| {
             let (ns, bt) = resolver

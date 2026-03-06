@@ -711,7 +711,15 @@ fn chunk_payloads_to_voxel_world(
     let mut world = RegionChunkWorld::new_with_base(base_world_kind);
     for (key, resolved) in chunk_payloads {
         let legacy = resolved.to_material_token_payload(|block| {
-            reg.block_material_token(block.namespace, block.block_type) as u8
+            // Look up the block in the registry (handles legacy namespace-0 remaps)
+            // to get the canonical (CONTENT_NS) entry, then map to a legacy u8 token
+            // via the static TOKEN_TO_BLOCK_TYPE table.
+            if let Some(entry) = reg.block_entry(block.namespace, block.block_type) {
+                let canonical = BlockData::simple(entry.namespace, entry.block_type);
+                crate::content_registry::material_token_from_block_data(&canonical)
+            } else {
+                0
+            }
         });
         let chunk = legacy_chunk_from_field_chunk_payload(&legacy)?;
         let pos = key.map(|c| c.to_num::<i32>());
