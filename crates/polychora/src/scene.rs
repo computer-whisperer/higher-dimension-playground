@@ -1,4 +1,4 @@
-use crate::camera::{PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
+use crate::camera::{PLAYER_HEAD_CLEARANCE, PLAYER_HEIGHT, PLAYER_RADIUS_XZW};
 use crate::voxel::{CHUNK_SIZE, CHUNK_VOLUME};
 use higher_dimension_playground::render::{
     GpuVoxelChunkBvhNode, GpuVoxelChunkHeader, GpuVoxelLeafHeader, VoxelFrameDirtyRanges,

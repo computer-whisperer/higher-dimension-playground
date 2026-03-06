@@ -16,7 +16,8 @@ fn wrap_angle(a: f32) -> f32 {
 
 const GRAVITY: f32 = 20.0;
 const JUMP_SPEED: f32 = 8.0;
-pub const PLAYER_HEIGHT: f32 = 1.7;
+pub const PLAYER_HEIGHT: f32 = 1.62;
+pub const PLAYER_HEAD_CLEARANCE: f32 = 0.18;
 pub const PLAYER_RADIUS_XZW: f32 = 0.30;
 const LOOK_TRANSPORT_UPRIGHT_DAMPING: f32 = 0.06;
 const LOOK_TRANSPORT_YAW_UPRIGHT_LOCK: f32 = 1.0;
