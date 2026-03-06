@@ -418,6 +418,14 @@ impl App {
             )
             .text("Mismatch log interval (frames)"),
         );
+
+        ui.add_space(8.0);
+        ui.label(RichText::new("Tree Dumps").strong());
+        if ui.button("Dump world + render trees to stderr").clicked() {
+            self.scene.dump_world_tree();
+            self.scene.dump_render_trees();
+            eprintln!("--- tree dump complete ---");
+        }
     }
 
     pub(super) fn draw_egui_hotbar(&self, ctx: &egui::Context) {
