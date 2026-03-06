@@ -779,6 +779,8 @@ pub(super) fn collect_maze_placements_for_chunk(
 pub(super) fn collect_maze_placements_for_chunk_bounds(
     world_seed: u64,
     bounds: Aabb4i,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<MazePlacement> {
     if !bounds.is_valid() {
         return Vec::new();
@@ -788,6 +790,12 @@ pub(super) fn collect_maze_placements_for_chunk_bounds(
     if query_world_max[1] < maze_world_min_y || query_world_min[1] > maze_world_max_y {
         return Vec::new();
     }
+
+    let (spawn_num, spawn_den) = if let Some((scale_num, scale_den)) = spawn_rate_scale {
+        (MAZE_SPAWN_NUMERATOR * scale_num, MAZE_SPAWN_DENOMINATOR * scale_den)
+    } else {
+        (MAZE_SPAWN_NUMERATOR, MAZE_SPAWN_DENOMINATOR)
+    };
 
     let search_margin = MAZE_CELL_JITTER + MAZE_MAX_HALF_SPAN_XZW + CHUNK_SIZE as i32;
     let cell_min_x = (query_world_min[0] - search_margin).div_euclid(MAZE_CELL_SIZE) - 1;
@@ -803,7 +811,7 @@ pub(super) fn collect_maze_placements_for_chunk_bounds(
             for cell_w in cell_min_w..=cell_max_w {
                 let cell_hash =
                     hash_structure_cell(world_seed, cell_x, cell_z, cell_w, MAZE_HASH_SALT);
-                if cell_hash % MAZE_SPAWN_DENOMINATOR >= MAZE_SPAWN_NUMERATOR {
+                if cell_hash % spawn_den >= spawn_num {
                     continue;
                 }
                 let shape = maze_shape_from_cell_hash(cell_hash);
@@ -827,6 +835,18 @@ pub(super) fn collect_maze_placements_for_chunk_bounds(
                     && origin_w.abs() <= MAZE_ORIGIN_EXCLUSION_RADIUS
                 {
                     continue;
+                }
+
+                if let Some((min_xzw, max_xzw)) = origin_bounds_xzw {
+                    if origin_x < min_xzw[0]
+                        || origin_x > max_xzw[0]
+                        || origin_z < min_xzw[1]
+                        || origin_z > max_xzw[1]
+                        || origin_w < min_xzw[2]
+                        || origin_w > max_xzw[2]
+                    {
+                        continue;
+                    }
                 }
 
                 let origin = [origin_x, shape.world_y_min, origin_z, origin_w];
@@ -1084,11 +1104,13 @@ pub(super) fn place_maze_into_chunk(
 pub(super) fn generate_maze_placements_for_bounds(
     world_seed: u64,
     bounds: Aabb4i,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<PlacementChunkData> {
     if !bounds.is_valid() {
         return Vec::new();
     }
-    let placements = collect_maze_placements_for_chunk_bounds(world_seed, bounds);
+    let placements = collect_maze_placements_for_chunk_bounds(world_seed, bounds, origin_bounds_xzw, spawn_rate_scale);
     let chunk_size = CHUNK_SIZE as i32;
 
     let mut results = Vec::with_capacity(placements.len());

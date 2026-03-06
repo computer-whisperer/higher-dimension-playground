@@ -370,7 +370,7 @@ fn structure_chunk_positions_for_bounds_matches_bruteforce() {
     }
     brute.sort_unstable();
 
-    let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, None);
+    let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, None, None, None);
     assert_eq!(fast, brute);
 }
 
@@ -427,7 +427,7 @@ fn structure_chunk_positions_for_bounds_respects_keepout_cells() {
     }
     brute.sort_unstable();
 
-    let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, Some(&blocked));
+    let fast = structure_chunk_positions_for_bounds_with_keepout(seed, bounds, Some(&blocked), None, None);
     assert_eq!(fast, brute);
 }
 

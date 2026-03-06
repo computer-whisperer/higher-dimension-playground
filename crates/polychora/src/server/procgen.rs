@@ -470,6 +470,8 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
     world_seed: u64,
     bounds: Aabb4i,
     blocked_cells: Option<&HashSet<StructureCell>>,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<ChunkKey> {
     if !bounds.is_valid() {
         return Vec::new();
@@ -478,7 +480,7 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
     let mut chunk_positions = HashSet::<[i32; 4]>::new();
 
     for placement in
-        collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells)
+        collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells, origin_bounds_xzw, spawn_rate_scale)
     {
         let blueprint = &set.blueprints[placement.blueprint_idx];
         let (placement_min, placement_max) =
@@ -500,7 +502,7 @@ pub fn structure_chunk_positions_for_bounds_with_keepout(
         }
     }
 
-    for placement in collect_maze_placements_for_chunk_bounds(world_seed, bounds) {
+    for placement in collect_maze_placements_for_chunk_bounds(world_seed, bounds, origin_bounds_xzw, spawn_rate_scale) {
         let (maze_min, maze_max) = maze_bounds(placement.origin, placement.shape);
         let Some(covered_chunks) =
             intersect_world_bounds_as_chunk_bounds(maze_min, maze_max, bounds)
@@ -531,15 +533,19 @@ pub fn generate_structure_placements_for_bounds(
     world_seed: u64,
     bounds: Aabb4i,
     blocked_cells: Option<&HashSet<StructureCell>>,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<PlacementChunkData> {
-    structure::generate_structure_placements_for_bounds(world_seed, bounds, blocked_cells)
+    structure::generate_structure_placements_for_bounds(world_seed, bounds, blocked_cells, origin_bounds_xzw, spawn_rate_scale)
 }
 
 pub fn generate_maze_placements_for_bounds(
     world_seed: u64,
     bounds: Aabb4i,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<PlacementChunkData> {
-    maze::generate_maze_placements_for_bounds(world_seed, bounds)
+    maze::generate_maze_placements_for_bounds(world_seed, bounds, origin_bounds_xzw, spawn_rate_scale)
 }
 
 pub fn generate_structure_chunk_with_keepout(
@@ -618,8 +624,10 @@ pub fn collect_structure_placement_reports(
     seed: u64,
     bounds: Aabb4i,
     blocked: Option<&HashSet<StructureCell>>,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<StructurePlacementReport> {
-    collect_structure_placements_for_chunk_bounds(seed, bounds, blocked)
+    collect_structure_placements_for_chunk_bounds(seed, bounds, blocked, origin_bounds_xzw, spawn_rate_scale)
         .into_iter()
         .map(|p| StructurePlacementReport {
             origin: p.origin,
@@ -632,8 +640,10 @@ pub fn collect_structure_placement_reports(
 pub fn collect_maze_placement_reports(
     seed: u64,
     bounds: Aabb4i,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<MazePlacementReport> {
-    collect_maze_placements_for_chunk_bounds(seed, bounds)
+    collect_maze_placements_for_chunk_bounds(seed, bounds, origin_bounds_xzw, spawn_rate_scale)
         .into_iter()
         .map(|p| MazePlacementReport {
             origin: p.origin,

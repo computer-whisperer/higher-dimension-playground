@@ -128,6 +128,8 @@ impl FlatWorldGenerator {
             self.world_seed,
             bounds,
             self.procgen_keepout_cells(),
+            None,
+            None,
         );
         for chunk_key in candidates {
             let Some(resolved) = self.structure_chunk_payload(chunk_key) else {

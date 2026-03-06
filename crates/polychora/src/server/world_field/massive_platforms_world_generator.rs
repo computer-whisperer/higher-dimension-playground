@@ -39,6 +39,9 @@ const PLATFORM_HASH_SALT_PROCGEN_SEED: u64 = 0x2b8a_4e19_9df3_512c;
 const PLATFORM_HASH_SALT_PROCGEN_FRAME: u64 = 0x7a63_1fbc_3d71_2a94;
 const PLATFORM_PROCGEN_FRAME_BASE_OFFSET_CHUNKS: i32 = 4096;
 
+/// Spawn rate boost for structures/mazes on massive platforms: 3/2 = 1.5x the base rate.
+const PLATFORM_SPAWN_RATE_SCALE: (u64, u64) = (3, 2);
+
 #[derive(Clone, Copy, Debug)]
 struct PlatformInstance {
     level: i32,
@@ -296,11 +299,18 @@ impl MassivePlatformsWorldGenerator {
 
         let y_offset = platform_y_offset(&platform);
 
+        // Only spawn structures/mazes whose origin falls on the platform surface.
+        let origin_bounds = Some(platform_origin_bounds_xzw(&platform, procgen_frame_offset));
+
+        let spawn_scale = Some(PLATFORM_SPAWN_RATE_SCALE);
+
         // Generate per-placement structure chunk data (each placement isolated).
         let placement_data = procgen::generate_structure_placements_for_bounds(
             procgen_seed,
             structure_local_bounds,
             self.procgen_keepout_cells(),
+            origin_bounds,
+            spawn_scale,
         );
 
         for placement in placement_data {
@@ -345,6 +355,8 @@ impl MassivePlatformsWorldGenerator {
             structure_local_bounds,
             &platform,
             procgen_frame_offset,
+            origin_bounds,
+            spawn_scale,
             tree,
         );
     }
@@ -355,10 +367,12 @@ impl MassivePlatformsWorldGenerator {
         local_query_bounds: Aabb4i,
         platform: &PlatformInstance,
         procgen_frame_offset: [i32; 3],
+        origin_bounds: Option<([i32; 3], [i32; 3])>,
+        spawn_rate_scale: Option<(u64, u64)>,
         tree: &mut RegionChunkTree,
     ) {
         let placement_data =
-            procgen::generate_maze_placements_for_bounds(procgen_seed, local_query_bounds);
+            procgen::generate_maze_placements_for_bounds(procgen_seed, local_query_bounds, origin_bounds, spawn_rate_scale);
 
         let platform_material = self.platform_voxel.as_ref().map(|v| {
             let mut pal = procgen::block_palette().to_vec();
@@ -485,6 +499,9 @@ impl MassivePlatformsWorldGenerator {
                 PLATFORM_HASH_SALT_PROCGEN_SEED,
             );
 
+            let origin_bounds = Some(platform_origin_bounds_xzw(&platform, procgen_frame_offset));
+            let spawn_scale = Some(PLATFORM_SPAWN_RATE_SCALE);
+
             let y_offset = platform_y_offset(&platform);
             let cs = CHUNK_SIZE as i32;
             let frame_voxels = [
@@ -498,6 +515,8 @@ impl MassivePlatformsWorldGenerator {
                 procgen_seed,
                 local_bounds,
                 self.procgen_keepout_cells(),
+                origin_bounds,
+                spawn_scale,
             ) {
                 results.push(WorldProcgenPlacement {
                     world_origin: [
@@ -515,7 +534,7 @@ impl MassivePlatformsWorldGenerator {
                 });
             }
 
-            for m in procgen::collect_maze_placement_reports(procgen_seed, local_bounds) {
+            for m in procgen::collect_maze_placement_reports(procgen_seed, local_bounds, origin_bounds, spawn_scale) {
                 results.push(WorldProcgenPlacement {
                     world_origin: [
                         m.origin[0] - frame_voxels[0],
@@ -669,6 +688,30 @@ fn platform_y_offset(platform: &PlatformInstance) -> i32 {
     // Platform bounds are world-space. Convert max Y to key-space for procgen offset.
     let (_, key_max) = platform.bounds.to_chunk_lattice_bounds(0);
     key_max[1] + 1
+}
+
+/// Compute the platform's XZW footprint in procgen-frame voxel coordinates.
+///
+/// Returns inclusive `(min_xzw, max_xzw)` bounds. Only placement origins within
+/// these bounds are considered to be "on" the platform.
+fn platform_origin_bounds_xzw(
+    platform: &PlatformInstance,
+    procgen_frame_offset_xzw: [i32; 3],
+) -> ([i32; 3], [i32; 3]) {
+    let cs = CHUNK_SIZE as i32;
+    let (p_key_min, p_key_max) = platform.bounds.to_chunk_lattice_bounds(0);
+    (
+        [
+            (p_key_min[0] + procgen_frame_offset_xzw[0]) * cs,
+            (p_key_min[2] + procgen_frame_offset_xzw[1]) * cs,
+            (p_key_min[3] + procgen_frame_offset_xzw[2]) * cs,
+        ],
+        [
+            (p_key_max[0] + procgen_frame_offset_xzw[0] + 1) * cs - 1,
+            (p_key_max[2] + procgen_frame_offset_xzw[1] + 1) * cs - 1,
+            (p_key_max[3] + procgen_frame_offset_xzw[2] + 1) * cs - 1,
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -1067,6 +1110,8 @@ mod tests {
             procgen_seed,
             local_probe,
             None,
+            None,
+            None,
         );
         assert!(
             !candidates.is_empty(),
@@ -1136,7 +1181,7 @@ mod tests {
                 PLATFORM_HASH_SALT_PROCGEN_SEED,
             );
             let Some(local_chunk) =
-                procgen::structure_chunk_positions_for_bounds_with_keepout(seed, local_probe, None)
+                procgen::structure_chunk_positions_for_bounds_with_keepout(seed, local_probe, None, None, None)
                     .into_iter()
                     .next()
             else {

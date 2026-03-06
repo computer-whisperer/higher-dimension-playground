@@ -443,6 +443,8 @@ pub(super) fn collect_structure_placements_for_chunk_bounds(
     world_seed: u64,
     bounds: Aabb4i,
     blocked_cells: Option<&HashSet<StructureCell>>,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<StructurePlacement> {
     if !bounds.is_valid() {
         return Vec::new();
@@ -452,6 +454,12 @@ pub(super) fn collect_structure_placements_for_chunk_bounds(
     if query_world_max[1] < set.min_world_y || query_world_min[1] > set.max_world_y {
         return Vec::new();
     }
+
+    let (spawn_num, spawn_den) = if let Some((scale_num, scale_den)) = spawn_rate_scale {
+        (STRUCTURE_SPAWN_NUMERATOR * scale_num, STRUCTURE_SPAWN_DENOMINATOR * scale_den)
+    } else {
+        (STRUCTURE_SPAWN_NUMERATOR, STRUCTURE_SPAWN_DENOMINATOR)
+    };
 
     let search_margin = STRUCTURE_CELL_JITTER + set.max_abs_offset_xzw + CHUNK_SIZE as i32;
     let cell_min_x = (query_world_min[0] - search_margin).div_euclid(STRUCTURE_CELL_SIZE) - 1;
@@ -467,7 +475,7 @@ pub(super) fn collect_structure_placements_for_chunk_bounds(
             for cell_w in cell_min_w..=cell_max_w {
                 let cell_hash =
                     hash_structure_cell(world_seed, cell_x, cell_z, cell_w, STRUCTURE_HASH_SALT);
-                if cell_hash % STRUCTURE_SPAWN_DENOMINATOR >= STRUCTURE_SPAWN_NUMERATOR {
+                if cell_hash % spawn_den >= spawn_num {
                     continue;
                 }
 
@@ -483,6 +491,18 @@ pub(super) fn collect_structure_placements_for_chunk_bounds(
                     && origin_w.abs() <= STRUCTURE_ORIGIN_EXCLUSION_RADIUS
                 {
                     continue;
+                }
+
+                if let Some((min_xzw, max_xzw)) = origin_bounds_xzw {
+                    if origin_x < min_xzw[0]
+                        || origin_x > max_xzw[0]
+                        || origin_z < min_xzw[1]
+                        || origin_z > max_xzw[1]
+                        || origin_w < min_xzw[2]
+                        || origin_w > max_xzw[2]
+                    {
+                        continue;
+                    }
                 }
 
                 let pick_roll = splitmix64(cell_hash ^ STRUCTURE_PICK_SALT) % set.total_weight;
@@ -598,13 +618,15 @@ pub(super) fn generate_structure_placements_for_bounds(
     world_seed: u64,
     bounds: Aabb4i,
     blocked_cells: Option<&HashSet<StructureCell>>,
+    origin_bounds_xzw: Option<([i32; 3], [i32; 3])>,
+    spawn_rate_scale: Option<(u64, u64)>,
 ) -> Vec<PlacementChunkData> {
     if !bounds.is_valid() {
         return Vec::new();
     }
     let set = structure_set();
     let placements =
-        collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells);
+        collect_structure_placements_for_chunk_bounds(world_seed, bounds, blocked_cells, origin_bounds_xzw, spawn_rate_scale);
 
     let mut results = Vec::with_capacity(placements.len());
     for placement in placements {
