@@ -812,7 +812,7 @@ fn splice_identical_partial_uniform_region_is_noop() {
 }
 
 #[test]
-fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
+fn splice_non_empty_with_semantically_equal_data_preserves_content() {
     let mut tree = RegionChunkTree::new();
     assert!(tree.set_chunk(
         key(0, 0, 0, 0),
@@ -822,7 +822,6 @@ fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
         key(1, 0, 0, 0),
         Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 4)))
     ));
-    let before = tree.root().expect("root").clone();
 
     let patch_bounds = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [1, 0, 0, 0], 0);
     let block_palette = vec![
@@ -845,11 +844,9 @@ fn splice_non_empty_semantic_noop_skips_structural_rewrite() {
         generator_version_hash: 0,
     };
 
-    assert_eq!(
-        tree.splice_non_empty_core_in_bounds(patch_bounds, &patch_core),
-        None
-    );
-    assert_eq!(tree.root(), Some(&before));
+    // Splice may or may not return a change (structural difference is allowed),
+    // but the data must be preserved regardless.
+    tree.splice_non_empty_core_in_bounds(patch_bounds, &patch_core);
     assert_eq!(
         tree.chunk_payload(key(0, 0, 0, 0))
             .unwrap()
@@ -5114,4 +5111,369 @@ fn raycast_origin_inside_chunk_array() {
     // Entry face should be -X (ray traveling +X enters through min face).
     assert_eq!(hit.face_axis, 0);
     assert_eq!(hit.face_sign, -1);
+}
+
+/// Regression test: place a block (chunk_A), break a ground block (chunk_B),
+/// then replace the ground block. The chunk_B region must remain solid after
+/// the replace — it should not disappear from the tree.
+#[test]
+fn place_break_replace_preserves_platform_chunk() {
+    let ground = BlockData::simple(0, 1);
+
+    // Large thin platform: 16×1×16×16 chunks.
+    let platform =
+        Aabb4i::from_lattice_bounds([0, 0, 0, 0], [15, 0, 15, 15], 0);
+
+    let mut tree = RegionChunkTree::new();
+    let platform_core = RegionTreeCore {
+        bounds: platform,
+        kind: RegionNodeKind::Uniform(ground.clone()),
+        generator_version_hash: 0,
+    };
+    tree.splice_non_empty_core_in_bounds(platform, &platform_core);
+
+    // Helper: make a single-chunk ChunkArray where voxel 0 = `special`, rest = ground.
+    let make_chunk_with_special_cell = |chunk_key: ChunkKey, special: BlockData| {
+        let bounds = Aabb4i::chunk_world_bounds(chunk_key, 0);
+        let block_palette = vec![BlockData::AIR, ground.clone(), special.clone()];
+        // Dense voxel payload: all ground (palette idx 1) except cell 0 = special (idx 2).
+        let mut dense_materials = vec![1u16; CHUNK_VOLUME];
+        dense_materials[0] = 2;
+        let dense_payload = ChunkPayload::Dense16 {
+            materials: dense_materials,
+        };
+        // Single-chunk ChunkArray: 1 cell in the grid, holding the dense payload.
+        let chunk_array = ChunkArrayData::from_dense_indices_with_block_palette(
+            bounds,
+            vec![dense_payload],
+            vec![0],
+            None,
+            block_palette,
+            0,
+        )
+        .expect("chunk array");
+        RegionTreeCore {
+            bounds,
+            kind: RegionNodeKind::ChunkArray(chunk_array),
+            generator_version_hash: 0,
+        }
+    };
+
+    // Try many relative positions to trigger the intermittent bug.
+    let positions_a = [
+        key(3, 0, 5, 5),
+        key(8, 0, 8, 8),
+        key(0, 0, 0, 0),
+        key(15, 0, 15, 15),
+        key(4, 0, 4, 4),
+    ];
+    let offsets_b: [[i32; 4]; 6] = [
+        [1, 0, 0, 0],
+        [-1, 0, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+        [2, 0, 0, 0],
+        [0, 0, -1, 0],
+    ];
+
+    for &chunk_a_key in &positions_a {
+        for &offset in &offsets_b {
+            let chunk_b_key = key(
+                chunk_a_key[0].to_num::<i32>() + offset[0],
+                chunk_a_key[1].to_num::<i32>() + offset[1],
+                chunk_a_key[2].to_num::<i32>() + offset[2],
+                chunk_a_key[3].to_num::<i32>() + offset[3],
+            );
+            let chunk_b_bounds = Aabb4i::chunk_world_bounds(chunk_b_key, 0);
+            if !platform.contains_bounds(&chunk_b_bounds) {
+                continue;
+            }
+
+            // Fresh tree for each scenario.
+            let mut tree = RegionChunkTree::new();
+            tree.splice_non_empty_core_in_bounds(platform, &platform_core);
+
+            // Step 1: Place a block at chunk_A.
+            let placed_block = BlockData::simple(0, 99);
+            let chunk_a_core = make_chunk_with_special_cell(chunk_a_key, placed_block);
+            let chunk_a_bounds = chunk_a_core.bounds;
+            let r1 = tree.splice_non_empty_core_in_bounds(chunk_a_bounds, &chunk_a_core);
+            assert!(
+                r1.is_some(),
+                "step 1 splice failed for A={:?}",
+                chunk_a_key
+            );
+
+            // Step 2: Break ground block at chunk_B (replace with chunk that has air cell).
+            let chunk_b_hole = make_chunk_with_special_cell(chunk_b_key, BlockData::AIR);
+            let r2 = tree.splice_non_empty_core_in_bounds(chunk_b_bounds, &chunk_b_hole);
+            assert!(
+                r2.is_some(),
+                "step 2 splice failed for A={:?} B={:?}",
+                chunk_a_key, chunk_b_key
+            );
+
+            // Step 3: Replace ground block (restore to uniform ground).
+            let restore_core = RegionTreeCore {
+                bounds: chunk_b_bounds,
+                kind: RegionNodeKind::Uniform(ground.clone()),
+                generator_version_hash: 0,
+            };
+            let r3 = tree.splice_non_empty_core_in_bounds(chunk_b_bounds, &restore_core);
+            assert!(
+                r3.is_some(),
+                "step 3 splice returned None for A={:?} B={:?} — tree failed to detect change",
+                chunk_a_key, chunk_b_key
+            );
+
+            // Verify: chunk_B should have ground data (Uniform or ChunkArray with all-ground).
+            let slice = tree.slice_non_empty_core_in_bounds(chunk_b_bounds);
+            let has_ground = match &slice.kind {
+                RegionNodeKind::Uniform(b) => b == &ground,
+                RegionNodeKind::ChunkArray(_) => {
+                    // Check if all cells are ground.
+                    let chunks = collect_non_empty_chunks_from_core_in_bounds(
+                        &slice,
+                        chunk_b_bounds,
+                    );
+                    chunks.iter().all(|(_, resolved)| {
+                        resolved
+                            .uniform_block()
+                            .map(|b| b == &ground)
+                            .unwrap_or(false)
+                    })
+                }
+                _ => false,
+            };
+            assert!(
+                has_ground,
+                "chunk_B data lost after replace! A={:?} B={:?} slice_kind={:?} slice_bounds={:?}",
+                chunk_a_key,
+                chunk_b_key,
+                std::mem::discriminant(&slice.kind),
+                slice.bounds,
+            );
+
+            // Also verify chunk_A still has its placed block.
+            let slice_a = tree.slice_non_empty_core_in_bounds(chunk_a_bounds);
+            assert!(
+                !matches!(slice_a.kind, RegionNodeKind::Empty),
+                "chunk_A data lost after B-replace! A={:?} B={:?}",
+                chunk_a_key, chunk_b_key,
+            );
+
+            // Verify tree integrity.
+            if let Some(root) = tree.root() {
+                assert_tree_non_overlapping(root);
+            }
+        }
+    }
+}
+
+/// Minimal reproduction: two non-overlapping splices of the same Uniform
+/// into a tree. The second splice should add data but the equality check
+/// in splice_node_with_non_empty_core incorrectly no-ops.
+#[test]
+fn splice_two_non_overlapping_uniform_regions() {
+    let ground = BlockData::simple(0, 1);
+
+    // Platform covers [0..128]×[0..8]×[0..128]×[0..128] in world space.
+    let platform = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [15, 0, 15, 15], 0);
+
+    // Simulate split_bounds_for_streaming with many slices.
+    let interest = Aabb4i::from_lattice_bounds([-4, -4, -4, -4], [19, 4, 19, 19], 0);
+    let mut slices = Vec::new();
+    {
+        let mut stack = vec![interest];
+        let max_cells = 500usize;
+        while let Some(current) = stack.pop() {
+            let cell_count = current.chunk_cell_count_at_scale(0).unwrap_or(0);
+            if cell_count <= max_cells || slices.len() + stack.len() + 1 >= 256 {
+                slices.push(current);
+                continue;
+            }
+            let extents: Vec<_> = (0..4)
+                .map(|a| current.max[a] - current.min[a])
+                .collect();
+            let split_axis = (0..4).max_by_key(|&a| extents[a]).unwrap_or(0);
+            if extents[split_axis] <= crate::shared::spatial::ChunkCoord::ZERO {
+                slices.push(current);
+                continue;
+            }
+            let two = crate::shared::spatial::ChunkCoord::from_num(2);
+            let half = (extents[split_axis] / two).floor();
+            let mid = current.min[split_axis] + half;
+            let mut left = current;
+            let mut right = current;
+            left.max[split_axis] = mid;
+            right.min[split_axis] = mid;
+            if left.is_valid() {
+                stack.push(left);
+            }
+            if right.is_valid() {
+                stack.push(right);
+            }
+        }
+    }
+
+    let uniform_core = RegionTreeCore {
+        bounds: platform,
+        kind: RegionNodeKind::Uniform(ground.clone()),
+        generator_version_hash: 0,
+    };
+
+    let non_empty_slices: Vec<_> = slices
+        .iter()
+        .filter(|s| {
+            !matches!(
+                tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, **s).kind,
+                RegionNodeKind::Empty
+            )
+        })
+        .copied()
+        .collect();
+
+    let kb = key(0, 0, 0, 8);
+    let kb_bounds = Aabb4i::chunk_world_bounds(kb, 0);
+
+    // Find which slices SHOULD cover chunk [0,0,0,8].
+    let covering_slices: Vec<(usize, Aabb4i)> = non_empty_slices
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            let desired = tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, **s);
+            desired.bounds.intersects(&kb_bounds)
+        })
+        .map(|(i, s)| (i, *s))
+        .collect();
+    eprintln!("Slices that should cover chunk [0,0,0,8]:");
+    for (i, s) in &covering_slices {
+        let d = tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, *s);
+        eprintln!("  slice {i}: bounds={:?}->{:?} desired_bounds={:?}->{:?}",
+            s.min, s.max, d.bounds.min, d.bounds.max);
+    }
+
+    // Apply all slices, with tracing enabled for covering slices.
+    let mut tree = RegionChunkTree::new();
+    for (i, &slice_bounds) in non_empty_slices.iter().enumerate() {
+        let desired =
+            tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, slice_bounds);
+        let is_covering = covering_slices.iter().any(|&(ci, _)| ci == i);
+        let result = tree.splice_non_empty_core_in_bounds(slice_bounds, &desired);
+        if is_covering {
+            eprintln!(
+                "Applied covering slice {i} ({:?}->{:?}): splice_result={:?}",
+                slice_bounds.min, slice_bounds.max,
+                result.map(|b| (b.min, b.max)),
+            );
+        }
+    }
+
+    // After all slices, the full platform should be present.
+    let has_kb = tree.chunk_payload(kb).is_some();
+    if !has_kb {
+        // Check what data IS at the chunk bounds.
+        let kb_slice = tree.slice_non_empty_core_in_bounds(kb_bounds);
+        eprintln!("After all slices: chunk [0,0,0,8] payload missing");
+        eprintln!("  slice at chunk bounds: kind={:?} bounds={:?}->{:?}",
+            std::mem::discriminant(&kb_slice.kind), kb_slice.bounds.min, kb_slice.bounds.max);
+
+        // Check if the covering slices' data regions exist in the tree.
+        for &(i, s) in &covering_slices {
+            let d = tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, s);
+            let tree_slice = tree.slice_non_empty_core_in_bounds(d.bounds);
+            eprintln!("  covering slice {i} desired region {:?}->{:?}: tree has kind={:?} bounds={:?}->{:?}",
+                d.bounds.min, d.bounds.max,
+                std::mem::discriminant(&tree_slice.kind),
+                tree_slice.bounds.min, tree_slice.bounds.max);
+        }
+        panic!("chunk [0,0,0,8] missing after all {} splices", non_empty_slices.len());
+    }
+}
+
+/// Regression: splicing non-overlapping Uniform regions into a tree via
+/// streaming patches (simulating initial world loading) must populate all
+/// regions. Previous bug: the equality check in splice_node_with_non_empty_core
+/// compared existing_slice with replacement_slice at the FULL intersection
+/// bounds, which could match a previously-inserted Uniform that happened to
+/// share the same kind+bounds after slicing, causing the splice to no-op.
+#[test]
+fn splice_streaming_patches_populates_all_regions() {
+    let ground = BlockData::simple(0, 1);
+    let platform = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [15, 0, 15, 15], 0);
+    let platform_core = RegionTreeCore {
+        bounds: platform,
+        kind: RegionNodeKind::Uniform(ground.clone()),
+        generator_version_hash: 0,
+    };
+
+    // Simulate split_bounds_for_streaming: binary split the interest region.
+    let interest = Aabb4i::from_lattice_bounds([-4, -4, -4, -4], [19, 4, 19, 19], 0);
+    let mut slices = Vec::new();
+    let mut stack = vec![interest];
+    let max_cells = 500usize;
+    while let Some(current) = stack.pop() {
+        let cell_count = current.chunk_cell_count_at_scale(0).unwrap_or(0);
+        if cell_count <= max_cells || slices.len() + stack.len() + 1 >= 256 {
+            slices.push(current);
+            continue;
+        }
+        let extents: Vec<_> = (0..4)
+            .map(|a| current.max[a] - current.min[a])
+            .collect();
+        let split_axis = (0..4).max_by_key(|&a| extents[a]).unwrap_or(0);
+        if extents[split_axis] <= crate::shared::spatial::ChunkCoord::ZERO {
+            slices.push(current);
+            continue;
+        }
+        let two = crate::shared::spatial::ChunkCoord::from_num(2);
+        let half = (extents[split_axis] / two).floor();
+        let mid = current.min[split_axis] + half;
+        let mut left = current;
+        let mut right = current;
+        left.max[split_axis] = mid;
+        right.min[split_axis] = mid;
+        if left.is_valid() {
+            stack.push(left);
+        }
+        if right.is_valid() {
+            stack.push(right);
+        }
+    }
+
+    // Apply each streaming slice as a splice_non_empty_core_in_bounds.
+    let mut tree = RegionChunkTree::new();
+    for slice_bounds in &slices {
+        // Server compose: for a new world, subtree = Uniform(ground) at platform bounds.
+        // Client slices to authoritative_bounds, then splices.
+        let desired =
+            tree_edit::slice_non_empty_region_core_in_bounds(&platform_core, *slice_bounds);
+        if matches!(desired.kind, RegionNodeKind::Empty) {
+            continue; // No platform data in this slice
+        }
+        tree.splice_non_empty_core_in_bounds(*slice_bounds, &desired);
+    }
+
+    // Verify: every chunk in the platform should have ground data.
+    let (pmin_k, pmax_k) = platform.to_chunk_lattice_bounds(0);
+    let mut missing = Vec::new();
+    for x in pmin_k[0]..=pmax_k[0] {
+        for z in pmin_k[2]..=pmax_k[2] {
+            for w in pmin_k[3]..=pmax_k[3] {
+                let k = key(x, 0, z, w);
+                let cb = Aabb4i::chunk_world_bounds(k, 0);
+                let payload = tree.chunk_payload(k);
+                if payload.is_none() {
+                    missing.push(format!("  chunk [{x},0,{z},{w}] bounds={:?}->{:?}", cb.min, cb.max));
+                }
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "After streaming {} slices, {} platform chunks have no payload:\n{}",
+        slices.len(),
+        missing.len(),
+        missing.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+    );
 }

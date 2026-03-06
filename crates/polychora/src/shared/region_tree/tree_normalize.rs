@@ -64,12 +64,22 @@ fn build_adjacent_merge_group_key(
 // Core normalization
 // ---------------------------------------------------------------------------
 
+/// Normalize with Empty gap fill (absence = air). Used by the world tree.
 pub(super) fn normalize_chunk_node(node: &mut RegionTreeCore) {
+    normalize_chunk_node_with_gap_fill(node, ChunkPayload::Empty);
+}
+
+/// Normalize with Virgin gap fill (absence = no override). Used by the override tree.
+pub(super) fn normalize_chunk_node_override(node: &mut RegionTreeCore) {
+    normalize_chunk_node_with_gap_fill(node, ChunkPayload::Virgin);
+}
+
+fn normalize_chunk_node_with_gap_fill(node: &mut RegionTreeCore, gap_fill: ChunkPayload) {
     let RegionNodeKind::Branch(children) = &mut node.kind else {
         return;
     };
     for child in children.iter_mut() {
-        normalize_chunk_node(child);
+        normalize_chunk_node_with_gap_fill(child, gap_fill.clone());
     }
     children.retain(|child| !matches!(child.kind, RegionNodeKind::Empty));
     if children.is_empty() {
@@ -93,8 +103,7 @@ pub(super) fn normalize_chunk_node(node: &mut RegionTreeCore) {
         }
     }
 
-    // Consolidate ChunkArray siblings into a single multi-chunk ChunkArray.
-    consolidate_chunk_array_children(children, node.generator_version_hash);
+    consolidate_chunk_array_children(children, node.generator_version_hash, gap_fill);
 
     if children.len() == 1 {
         let child = children.pop().expect("single child");

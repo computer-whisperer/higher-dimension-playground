@@ -1288,7 +1288,7 @@ fn chunk_payload_has_solid_material_in_context(
             .unwrap_or(false)
     };
     match payload {
-        ChunkPayload::Empty => false,
+        ChunkPayload::Empty | ChunkPayload::Virgin => false,
         ChunkPayload::Uniform(idx) => idx_is_solid(idx),
         ChunkPayload::Dense16 { materials } => materials.iter().any(idx_is_solid),
         ChunkPayload::PalettePacked { palette, .. } => palette.iter().any(idx_is_solid),

@@ -11,6 +11,7 @@ impl Scene {
         };
         match &resolved.payload {
             ChunkPayload::Empty => "Empty".to_string(),
+            ChunkPayload::Virgin => "Virgin".to_string(),
             ChunkPayload::Uniform(idx) => {
                 let block = resolved.block_palette.get(*idx as usize);
                 match block {

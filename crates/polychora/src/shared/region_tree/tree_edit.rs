@@ -4,7 +4,7 @@ use super::chunk_array_ops::{
     slice_chunk_array_to_bounds_with_dense_indices, try_coarsen_chunk_array,
 };
 use super::tree::*;
-use super::tree_normalize::{normalize_chunk_node, prune_empty_subtrees};
+use super::tree_normalize::{normalize_chunk_node, normalize_chunk_node_override, prune_empty_subtrees};
 use super::tree_query::{
     kind_has_non_empty_chunk_intersection, non_empty_kinds_semantically_equal_in_bounds,
 };
@@ -264,7 +264,7 @@ fn set_chunk_recursive_in_branch(
     };
 
     if affected.is_some() {
-        normalize_chunk_node(node);
+        normalize_chunk_node_override(node);
     }
     affected
 }
@@ -390,7 +390,7 @@ fn carve_leaf_for_chunk_edit(
     }
 
     node.kind = RegionNodeKind::Branch(children);
-    normalize_chunk_node(node);
+    normalize_chunk_node_override(node);
     Some(node.bounds)
 }
 

@@ -58,7 +58,7 @@ pub(super) fn slice_chunk_array_to_bounds_with_dense_indices(
         intersection,
         chunk_array.chunk_palette.clone(),
         target_indices,
-        None,
+        chunk_array.default_chunk_idx,
         chunk_array.block_palette.clone(),
         chunk_array.scale_exp,
     )
@@ -508,7 +508,7 @@ pub(super) fn chunk_array_min_block_scale(ca: &ChunkArrayData, floor: i8) -> Opt
     let mut min_s = i8::MAX;
     for cp in &ca.chunk_palette {
         match cp {
-            ChunkPayload::Empty => {
+            ChunkPayload::Empty | ChunkPayload::Virgin => {
                 if let Some(b) = ca.block_palette.first() {
                     min_s = min_s.min(b.scale_exp);
                 }
@@ -875,7 +875,7 @@ where
             }
         }
         RegionNodeKind::ChunkArray(chunk_array) => {
-            if chunk_array_has_empty_gap_default(chunk_array) {
+            if chunk_array_has_transparent_gap_default(chunk_array) {
                 overlay_chunk_array_non_empty_cells(
                     chunk_array,
                     core.generator_version_hash,
@@ -890,13 +890,13 @@ where
 }
 
 /// Returns true if this ChunkArray uses a default_chunk_idx pointing to an
-/// Empty palette entry -- the signature of consolidation-created gap positions.
-fn chunk_array_has_empty_gap_default(chunk_array: &ChunkArrayData) -> bool {
+/// Empty or Virgin palette entry -- the signature of consolidation-created gap positions.
+fn chunk_array_has_transparent_gap_default(chunk_array: &ChunkArrayData) -> bool {
     if let Some(default_idx) = chunk_array.default_chunk_idx {
         chunk_array
             .chunk_palette
             .get(default_idx as usize)
-            .is_some_and(|p| *p == ChunkPayload::Empty)
+            .is_some_and(|p| matches!(p, ChunkPayload::Empty | ChunkPayload::Virgin))
     } else {
         false
     }
@@ -938,7 +938,7 @@ fn overlay_chunk_array_non_empty_cells<F>(
                     }
 
                     let payload = &chunk_array.chunk_palette[palette_idx as usize];
-                    if *payload == ChunkPayload::Empty {
+                    if matches!(payload, ChunkPayload::Empty | ChunkPayload::Virgin) {
                         continue;
                     }
 
@@ -973,6 +973,7 @@ fn overlay_chunk_array_non_empty_cells<F>(
 pub(super) fn consolidate_chunk_array_children(
     children: &mut Vec<RegionTreeCore>,
     generator_version_hash: u64,
+    gap_payload: ChunkPayload,
 ) -> bool {
     let ca_count = children
         .iter()
@@ -1076,10 +1077,9 @@ pub(super) fn consolidate_chunk_array_children(
     }
 
     // Build chunk palette and dense index array for the merged ChunkArray.
-    let empty_payload = ChunkPayload::Empty;
-    let mut palette: Vec<ChunkPayload> = vec![empty_payload.clone()];
+    let mut palette: Vec<ChunkPayload> = vec![gap_payload.clone()];
     let mut palette_map: HashMap<ChunkPayload, u16> = HashMap::new();
-    palette_map.insert(empty_payload, 0u16);
+    palette_map.insert(gap_payload, 0u16);
     let mut dense_indices = vec![0u16; combined_volume];
 
     for (child_idx, ca_child) in ca_children.iter().enumerate() {
@@ -1114,7 +1114,7 @@ pub(super) fn consolidate_chunk_array_children(
 
                         let payload = ca.chunk_palette[palette_idx].clone();
 
-                        if payload == ChunkPayload::Empty {
+                        if matches!(payload, ChunkPayload::Empty | ChunkPayload::Virgin) {
                             continue;
                         }
 
@@ -1287,7 +1287,7 @@ fn payload_has_solid_material_in_context(
     block_palette: &[BlockData],
 ) -> bool {
     match payload {
-        ChunkPayload::Empty => false,
+        ChunkPayload::Empty | ChunkPayload::Virgin => false,
         ChunkPayload::Uniform(idx) => block_palette
             .get(*idx as usize)
             .map(|b| !b.is_air())
@@ -1314,6 +1314,7 @@ pub(super) fn remap_chunk_payload_block_indices(
 ) -> ChunkPayload {
     match payload {
         ChunkPayload::Empty => ChunkPayload::Empty,
+        ChunkPayload::Virgin => ChunkPayload::Virgin,
         ChunkPayload::Uniform(idx) => {
             let new_idx = remap.get(*idx as usize).copied().unwrap_or(*idx);
             ChunkPayload::Uniform(new_idx)

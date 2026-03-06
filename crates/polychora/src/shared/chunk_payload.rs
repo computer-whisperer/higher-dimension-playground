@@ -24,6 +24,10 @@ pub enum ChunkPayload {
     Dense16 {
         materials: Vec<u16>,
     },
+    /// No override — defer to the layer below. Only meaningful in overlay/override
+    /// trees. During compose, Virgin cells are transparent (the base layer shows
+    /// through). Must never appear in the final composed world tree or on the wire.
+    Virgin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +108,7 @@ impl ChunkPayload {
 
     pub fn dense_materials(&self) -> Result<Vec<u16>, ChunkPayloadError> {
         match self {
-            Self::Empty => Ok(vec![0u16; CHUNK_VOLUME]),
+            Self::Empty | Self::Virgin => Ok(vec![0u16; CHUNK_VOLUME]),
             Self::Uniform(material) => Ok(vec![*material; CHUNK_VOLUME]),
             Self::Dense16 { materials } => {
                 if materials.len() != CHUNK_VOLUME {
@@ -324,7 +328,7 @@ impl ChunkArrayData {
     pub fn remap_block_indices(&mut self, remap: &[u16]) {
         for payload in &mut self.chunk_palette {
             match payload {
-                ChunkPayload::Empty => {}
+                ChunkPayload::Empty | ChunkPayload::Virgin => {}
                 ChunkPayload::Uniform(ref mut material) => {
                     if let Some(&new_val) = remap.get(*material as usize) {
                         *material = new_val;
@@ -822,6 +826,7 @@ impl ResolvedChunkPayload {
         };
         match &self.payload {
             ChunkPayload::Empty => ChunkPayload::Empty,
+            ChunkPayload::Virgin => ChunkPayload::Virgin,
             ChunkPayload::Uniform(idx) => ChunkPayload::Uniform(remap(*idx)),
             ChunkPayload::Dense16 { materials } => ChunkPayload::Dense16 {
                 materials: materials.iter().map(|&idx| remap(idx)).collect(),
@@ -838,7 +843,7 @@ impl ResolvedChunkPayload {
     /// True if this chunk contains at least one non-air block.
     pub fn has_solid_block(&self) -> bool {
         match &self.payload {
-            ChunkPayload::Empty => false,
+            ChunkPayload::Empty | ChunkPayload::Virgin => false,
             ChunkPayload::Uniform(idx) => self
                 .block_palette
                 .get(*idx as usize)
@@ -862,7 +867,7 @@ impl ResolvedChunkPayload {
     /// Resolve the block at a given voxel index (0..CHUNK_VOLUME).
     pub fn block_at(&self, voxel_idx: usize) -> BlockData {
         let palette_idx = match &self.payload {
-            ChunkPayload::Empty => 0u16,
+            ChunkPayload::Empty | ChunkPayload::Virgin => 0u16,
             ChunkPayload::Uniform(idx) => *idx,
             ChunkPayload::Dense16 { materials } => materials.get(voxel_idx).copied().unwrap_or(0),
             ChunkPayload::PalettePacked { .. } => match self.payload.dense_materials() {
@@ -896,7 +901,7 @@ impl ResolvedChunkPayload {
     pub fn uniform_block(&self) -> Option<&BlockData> {
         match &self.payload {
             ChunkPayload::Uniform(idx) => self.block_palette.get(*idx as usize),
-            ChunkPayload::Empty => self.block_palette.first(),
+            ChunkPayload::Empty | ChunkPayload::Virgin => self.block_palette.first(),
             _ => None,
         }
     }

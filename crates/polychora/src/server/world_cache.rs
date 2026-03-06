@@ -279,7 +279,7 @@ impl ServerWorldCache {
     /// palette has any ticking types (already checked at ChunkArray level).
     fn chunk_payload_may_contain_ticking(&self, resolved: &ResolvedChunkPayload) -> bool {
         match &resolved.payload {
-            ChunkPayload::Empty => false,
+            ChunkPayload::Empty | ChunkPayload::Virgin => false,
             ChunkPayload::Uniform(idx) => {
                 if let Some(block) = resolved.block_palette.get(*idx as usize) {
                     self.is_ticking_type(block)

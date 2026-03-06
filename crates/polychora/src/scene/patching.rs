@@ -152,6 +152,7 @@ impl Scene {
                 }
             }
         }
+
         let Some(changed_bounds) = changed_bounds else {
             return RegionPatchStats {
                 collect_previous_ms,
@@ -187,7 +188,7 @@ impl Scene {
                     .unwrap_or(false)
             };
             match payload {
-                ChunkPayload::Empty => false,
+                ChunkPayload::Empty | ChunkPayload::Virgin => false,
                 ChunkPayload::Uniform(idx) => idx_is_solid(*idx),
                 ChunkPayload::Dense16 { materials } => {
                     materials.iter().any(|idx| idx_is_solid(*idx))

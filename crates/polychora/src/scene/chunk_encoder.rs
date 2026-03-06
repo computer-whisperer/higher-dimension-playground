@@ -416,7 +416,7 @@ impl Scene {
                             .get(palette_index)
                             .ok_or_else(|| "chunk-array palette out of bounds".to_string())?;
                         let encoded_entry = match payload {
-                            ChunkPayload::Empty => {
+                            ChunkPayload::Empty | ChunkPayload::Virgin => {
                                 higher_dimension_playground::render::VTE_LEAF_CHUNK_ENTRY_EMPTY
                             }
                             ChunkPayload::Uniform(idx) => {

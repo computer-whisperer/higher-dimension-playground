@@ -768,6 +768,7 @@ pub(super) fn canonicalize_resolved_payload(
 fn canonicalize_payload_format(payload: ChunkPayload) -> ChunkPayload {
     let payload = match payload {
         ChunkPayload::Empty => ChunkPayload::Uniform(0),
+        ChunkPayload::Virgin => return ChunkPayload::Virgin,
         other => other,
     };
     let Ok(dense) = payload.dense_materials() else {

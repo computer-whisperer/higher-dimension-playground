@@ -15,7 +15,7 @@ use crate::shared::voxel::{linear_cell_index, BlockData, CHUNK_SIZE};
 // Chunk payload query
 // ---------------------------------------------------------------------------
 
-pub(super) fn query_chunk_payload_in_node(
+pub fn query_chunk_payload_in_node(
     node: &RegionTreeCore,
     key_pos: ChunkKey,
 ) -> Option<(ResolvedChunkPayload, i8)> {

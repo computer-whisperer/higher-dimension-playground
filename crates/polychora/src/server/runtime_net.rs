@@ -362,17 +362,10 @@ fn dense_blocks_from_region_core_chunk(
 ) -> Vec<voxel::BlockData> {
     use crate::shared::region_tree::chunk_key_i32;
     let ck = chunk_key_i32(chunk_key[0], chunk_key[1], chunk_key[2], chunk_key[3]);
-    let chunk_bounds = Aabb4i::chunk_world_bounds(ck, 0);
-    let chunks = crate::shared::region_tree::collect_non_empty_chunks_from_core_in_bounds(
-        core,
-        chunk_bounds,
-    );
-    for (key, resolved) in chunks {
-        if key == ck {
-            return dense_blocks_from_resolved_payload(&resolved);
-        }
+    match crate::shared::region_tree::query_chunk_payload_in_node(core, ck) {
+        Some((resolved, _)) => dense_blocks_from_resolved_payload(&resolved),
+        None => zero_dense_chunk_blocks(),
     }
-    zero_dense_chunk_blocks()
 }
 
 fn handle_world_chunk_sample_request(

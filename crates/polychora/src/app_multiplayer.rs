@@ -6,7 +6,7 @@ use higher_dimension_playground::render::{
 };
 use polychora::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use polychora::shared::region_tree::{
-    collect_non_empty_chunks_from_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
+    query_chunk_payload_in_node, ChunkKey, RegionNodeKind, RegionTreeCore,
 };
 use polychora::shared::spatial::{Aabb4i, ChunkCoord};
 use polychora::shared::voxel::BlockData;
@@ -236,7 +236,7 @@ fn chunk_payload_has_non_empty_block(payload: &ChunkPayload, block_palette: &[Bl
             .unwrap_or(false)
     };
     match payload {
-        ChunkPayload::Empty => false,
+        ChunkPayload::Empty | ChunkPayload::Virgin => false,
         ChunkPayload::Uniform(idx) => idx_is_solid(*idx),
         ChunkPayload::Dense16 { materials } => materials.iter().any(|idx| idx_is_solid(*idx)),
         ChunkPayload::PalettePacked { .. } => payload
@@ -404,14 +404,8 @@ fn dense_blocks_from_region_core_chunk(
     core: &RegionTreeCore,
     chunk: ChunkKey,
 ) -> Vec<polychora::shared::voxel::BlockData> {
-    let bounds = Aabb4i::chunk_world_bounds(chunk, 0);
-    let chunks = collect_non_empty_chunks_from_core_in_bounds(core, bounds);
-    for (key, resolved) in chunks {
-        if key == chunk {
-            return dense_blocks_from_payload_or_zero(Some(resolved));
-        }
-    }
-    zero_dense_chunk_blocks()
+    let resolved = query_chunk_payload_in_node(core, chunk).map(|(p, _)| p);
+    dense_blocks_from_payload_or_zero(resolved)
 }
 
 fn dense_blocks_hash(blocks: &[polychora::shared::voxel::BlockData]) -> u64 {
@@ -471,6 +465,7 @@ fn summarize_payload_compact(resolved: Option<&ResolvedChunkPayload>) -> String 
     };
     match &resolved.payload {
         ChunkPayload::Empty => "Empty".to_string(),
+        ChunkPayload::Virgin => "Virgin".to_string(),
         ChunkPayload::Uniform(idx) => {
             let block = resolved.block_palette.get(*idx as usize);
             match block {
@@ -1407,12 +1402,8 @@ impl App {
                 .debug_world_tree_chunk_payload(key)
                 .map(|(p, _)| p)
         });
-        let patch_payload = patch_single_chunk_key.and_then(|key| {
-            collect_non_empty_chunks_from_core_in_bounds(&patch, Aabb4i::chunk_world_bounds(key, 0))
-                .into_iter()
-                .find(|(chunk_key, _)| *chunk_key == key)
-                .map(|(_, payload)| payload)
-        });
+        let patch_payload = patch_single_chunk_key
+            .and_then(|key| query_chunk_payload_in_node(&patch, key).map(|(p, _)| p));
         let patch_apply_start = Instant::now();
 
         let scene_patch_start = Instant::now();

@@ -603,6 +603,10 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         self.override_chunks.non_empty_chunk_count()
     }
 
+    pub fn debug_override_root(&self) -> Option<&RegionTreeCore> {
+        self.override_chunks.root()
+    }
+
     pub fn clear_dirty(&mut self) {
         self.clear_dirty_chunks();
         self.dirty_save_chunks.clear();
@@ -1059,7 +1063,7 @@ fn resolved_to_effective(
     } else {
         // Filter out all-air payloads
         match &resolved.payload {
-            ChunkPayload::Empty => None,
+            ChunkPayload::Empty | ChunkPayload::Virgin => None,
             ChunkPayload::Uniform(idx) => {
                 let is_air = resolved
                     .block_palette

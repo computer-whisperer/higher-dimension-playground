@@ -13,7 +13,7 @@ fn resolved_payload_is_all_air(
 ) -> bool {
     use crate::shared::chunk_payload::ChunkPayload;
     match &payload.payload {
-        ChunkPayload::Empty => true,
+        ChunkPayload::Empty | ChunkPayload::Virgin => true,
         ChunkPayload::Uniform(idx) => payload
             .block_palette
             .get(*idx as usize)
