@@ -506,8 +506,10 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 _ => false,
             };
             if safe_for_fast_path {
-                if let Some(payload) = chunk_payload_from_core(&override_core, chunk_key) {
-                    return (payload.dense_blocks(), virgin);
+                if let Some(resolved) = chunk_payload_from_core(&override_core, chunk_key) {
+                    if !matches!(resolved.payload, ChunkPayload::Virgin) {
+                        return (resolved.dense_blocks(), virgin);
+                    }
                 }
                 return (virgin.clone(), virgin);
             }

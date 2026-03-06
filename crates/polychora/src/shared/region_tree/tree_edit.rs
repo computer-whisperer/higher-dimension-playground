@@ -295,6 +295,8 @@ fn carve_leaf_for_chunk_edit(
         if let Ok(source_indices) = chunk_array.decode_dense_indices() {
             let existing_resolved =
                 chunk_array_payload_at_with_dense_indices(chunk_array, &source_indices, key_pos)
+                    // Virgin means "no override here" — treat as absent for comparison
+                    .filter(|p| !matches!(p, ChunkPayload::Virgin))
                     .map(|p| ResolvedChunkPayload {
                         payload: p,
                         block_palette: chunk_array.block_palette.clone(),
@@ -339,10 +341,13 @@ fn carve_leaf_for_chunk_edit(
             }
         } else {
             let existing_resolved =
-                chunk_array_payload_at(chunk_array, key_pos).map(|p| ResolvedChunkPayload {
-                    payload: p,
-                    block_palette: chunk_array.block_palette.clone(),
-                });
+                chunk_array_payload_at(chunk_array, key_pos)
+                    // Virgin means "no override here" — treat as absent for comparison
+                    .filter(|p| !matches!(p, ChunkPayload::Virgin))
+                    .map(|p| ResolvedChunkPayload {
+                        payload: p,
+                        block_palette: chunk_array.block_palette.clone(),
+                    });
             if resolved_option_matches_existing(existing_resolved, payload.as_ref()) {
                 node.kind = source_kind;
                 return None;
