@@ -15,7 +15,9 @@ mod flat_world_generator;
 mod massive_platforms_world_generator;
 
 pub use flat_world_generator::FlatWorldGenerator;
-pub use massive_platforms_world_generator::MassivePlatformsWorldGenerator;
+pub use massive_platforms_world_generator::{
+    MassivePlatformsWorldGenerator, WorldProcgenKind, WorldProcgenPlacement,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QueryDetail {

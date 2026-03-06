@@ -521,21 +521,37 @@ fn keepout_cells_block_generation_for_affected_chunk() {
 
 /// Manual-run seed scanner for finding seeds with structures/mazes near perf suite camera poses.
 ///
+/// Uses the full world generator pipeline (platform iteration, per-platform seed derivation,
+/// coordinate transforms) so results reflect what the game actually loads.
+///
 /// Run: `cargo test -p polychora scan_seeds_for_perf_scenarios -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn scan_seeds_for_perf_scenarios() {
-    let candidate_positions: &[[f32; 4]] = &[
-        [0.0, 8.0, -24.0, -4.0],   // platform-surface
-        [0.0, 64.0, 0.0, -4.0],    // open-sky
-        [96.0, 20.0, 96.0, -4.0],  // corridor
-        [-64.0, 14.0, 32.0, -4.0], // far-oblique
-        [0.0, 8.0, 0.0, 0.0],      // origin area
+    use crate::server::world_field::{MassivePlatformsWorldGenerator, WorldProcgenKind};
+    use crate::shared::voxel::{BaseWorldKind, BlockData};
+
+    let candidate_positions: &[(&str, [f32; 4])] = &[
+        ("platform-surface", [0.0, 8.0, -24.0, -4.0]),
+        ("open-sky", [0.0, 64.0, 0.0, -4.0]),
+        ("corridor", [96.0, 20.0, 96.0, -4.0]),
+        ("far-oblique", [-64.0, 14.0, 32.0, -4.0]),
+        ("origin-area", [0.0, 8.0, 0.0, 0.0]),
     ];
     let scan_radius = 80; // voxels around each position
 
     for seed in 0..10_000u64 {
-        for &pos in candidate_positions {
+        let gen = MassivePlatformsWorldGenerator::from_chunk_payloads(
+            BaseWorldKind::MassivePlatforms {
+                material: BlockData::simple(0, 11),
+            },
+            std::iter::empty(),
+            seed,
+            true,
+            HashSet::new(),
+        );
+
+        for &(label, pos) in candidate_positions {
             let center = [
                 pos[0] as i32,
                 pos[1] as i32,
@@ -558,27 +574,35 @@ fn scan_seeds_for_perf_scenarios() {
                 0,
             );
 
-            let structures =
-                collect_structure_placements_for_chunk_bounds(seed, bounds, None);
-            let mazes = collect_maze_placements_for_chunk_bounds(seed, bounds);
+            let placements = gen.scan_procgen_placements(bounds);
 
-            if !structures.is_empty() || !mazes.is_empty() {
+            if !placements.is_empty() {
                 println!(
-                    "seed={} pos=[{:.0},{:.0},{:.0},{:.0}] structures={} mazes={}",
-                    seed, pos[0], pos[1], pos[2], pos[3],
-                    structures.len(), mazes.len(),
+                    "seed={} pos={} [{:.0},{:.0},{:.0},{:.0}] placements={}",
+                    seed, label, pos[0], pos[1], pos[2], pos[3],
+                    placements.len(),
                 );
-                for s in &structures {
-                    println!(
-                        "  structure: blueprint_idx={} origin={:?} orientation={}",
-                        s.blueprint_idx, s.origin, s.orientation
-                    );
-                }
-                for m in &mazes {
-                    println!(
-                        "  maze: origin={:?} grid_cells={:?}",
-                        m.origin, m.shape.grid_cells
-                    );
+                for p in &placements {
+                    match &p.kind {
+                        WorldProcgenKind::Structure {
+                            blueprint_idx,
+                            orientation,
+                        } => {
+                            println!(
+                                "  structure: blueprint_idx={} orientation={} world_origin={:?} platform_level={} platform_cell={:?}",
+                                blueprint_idx, orientation, p.world_origin, p.platform_level, p.platform_cell,
+                            );
+                        }
+                        WorldProcgenKind::Maze {
+                            grid_cells,
+                            variant_name,
+                        } => {
+                            println!(
+                                "  maze: variant={} grid_cells={:?} world_origin={:?} platform_level={} platform_cell={:?}",
+                                variant_name, grid_cells, p.world_origin, p.platform_level, p.platform_cell,
+                            );
+                        }
+                    }
                 }
             }
         }

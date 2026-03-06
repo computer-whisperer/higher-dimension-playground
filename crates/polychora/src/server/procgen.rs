@@ -597,6 +597,53 @@ pub fn intern_block_into_palette(palette: &mut Vec<BlockData>, block: &BlockData
 }
 
 // ---------------------------------------------------------------------------
+// Placement report types (public API for seed scanning)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct StructurePlacementReport {
+    pub origin: [i32; 4],
+    pub blueprint_idx: usize,
+    pub orientation: u8,
+}
+
+#[derive(Clone, Debug)]
+pub struct MazePlacementReport {
+    pub origin: [i32; 4],
+    pub grid_cells: [i32; 4],
+    pub variant_name: &'static str,
+}
+
+pub fn collect_structure_placement_reports(
+    seed: u64,
+    bounds: Aabb4i,
+    blocked: Option<&HashSet<StructureCell>>,
+) -> Vec<StructurePlacementReport> {
+    collect_structure_placements_for_chunk_bounds(seed, bounds, blocked)
+        .into_iter()
+        .map(|p| StructurePlacementReport {
+            origin: p.origin,
+            blueprint_idx: p.blueprint_idx,
+            orientation: p.orientation,
+        })
+        .collect()
+}
+
+pub fn collect_maze_placement_reports(
+    seed: u64,
+    bounds: Aabb4i,
+) -> Vec<MazePlacementReport> {
+    collect_maze_placements_for_chunk_bounds(seed, bounds)
+        .into_iter()
+        .map(|p| MazePlacementReport {
+            origin: p.origin,
+            grid_cells: p.shape.grid_cells,
+            variant_name: p.shape.variant.name(),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Test-only helpers
 // ---------------------------------------------------------------------------
 

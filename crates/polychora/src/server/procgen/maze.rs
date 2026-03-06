@@ -120,6 +120,14 @@ impl MazeVariant {
             Self::Braided => 0x9f6d_3a1e_6cb5_78d2,
         }
     }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Catacomb => "catacomb",
+            Self::Vertical => "vertical",
+            Self::Braided => "braided",
+        }
+    }
 }
 
 pub(super) fn maze_random_odd(hash: u64, min_value: i32, max_value: i32) -> i32 {

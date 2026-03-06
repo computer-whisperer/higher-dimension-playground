@@ -368,10 +368,11 @@ pub(crate) const PERF_SUITE_SCENARIOS: &[PerfSuiteScenario] = &[
     // NOTE: These scenarios require their specific seed to produce the expected
     // structures. The perf suite runner script iterates seeds; these will only
     // show structure content when run with the matching seed.
+    // Found by: cargo test -p polychora scan_seeds_for_perf_scenarios -- --ignored --nocapture
     // -----------------------------------------------------------------------
-    // seed=23: 2 structures nearby (braided_transit + cross_shrine)
+    // seed=5599: 4 structures + 2 mazes near platform-surface camera
     PerfSuiteScenario {
-        label: "structure-2x-s23",
+        label: "structure-dense-s5599",
         position: [0.0, 8.0, -24.0, -4.0],
         yaw: 1.25,
         pitch: -0.15,
@@ -382,9 +383,9 @@ pub(crate) const PERF_SUITE_SCENARIOS: &[PerfSuiteScenario] = &[
         vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
         setup: None,
     },
-    // seed=40: structure + maze combo (hypercube_frame + 11x3x11x15 maze)
+    // seed=797: 2 structures + catacomb maze at corridor camera
     PerfSuiteScenario {
-        label: "struct+maze-s40",
+        label: "struct+maze-s797",
         position: [96.0, 20.0, 96.0, -4.0],
         yaw: -2.35,
         pitch: -0.22,
@@ -395,9 +396,9 @@ pub(crate) const PERF_SUITE_SCENARIOS: &[PerfSuiteScenario] = &[
         vte_max_trace_distance: Some(PERF_TIER_DEFAULT.1),
         setup: None,
     },
-    // seed=46: large maze (11x7x15x15 grid cells)
+    // seed=709: max-size catacomb maze (15x7x15x15) at origin-area camera
     PerfSuiteScenario {
-        label: "large-maze-s46",
+        label: "large-maze-s709",
         position: [0.0, 8.0, 0.0, 0.0],
         yaw: 0.0,
         pitch: -0.10,

@@ -426,6 +426,129 @@ impl MassivePlatformsWorldGenerator {
             generator_version_hash: 0,
         }))
     }
+
+    /// Scan for procgen placements within the given world-space bounds,
+    /// returning placement metadata without generating voxel data.
+    pub fn scan_procgen_placements(&self, bounds: Aabb4i) -> Vec<WorldProcgenPlacement> {
+        let mut results = Vec::new();
+        if !self.procgen_structures || !bounds.is_valid() {
+            return results;
+        }
+
+        let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
+        let (key_min, key_max) = bounds.to_chunk_lattice_bounds(0);
+        let surface_min = key_min[1] - 1 - local_max_y;
+        let surface_max = key_max[1] - 1 - local_min_y;
+        if surface_min > surface_max {
+            return results;
+        }
+        let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
+        let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
+
+        let overhang_world =
+            ChunkCoord::from_num(procgen::max_structure_overhang_chunks() * CHUNK_SIZE as i32);
+        let search_bounds = Aabb4i::new(
+            [
+                bounds.min[0] - overhang_world,
+                bounds.min[1],
+                bounds.min[2] - overhang_world,
+                bounds.min[3] - overhang_world,
+            ],
+            [
+                bounds.max[0] + overhang_world,
+                bounds.max[1],
+                bounds.max[2] + overhang_world,
+                bounds.max[3] + overhang_world,
+            ],
+        );
+
+        let overhang = procgen::max_structure_overhang_chunks();
+
+        self.for_each_platform_instance_in_bounds(search_bounds, min_cy, max_cy, |platform| {
+            let procgen_frame_offset =
+                procgen_frame_offset_xzw_chunks(self.world_seed, platform);
+            let Some(local_bounds) = query_bounds_local_to_platform(
+                bounds,
+                platform,
+                procgen_frame_offset,
+                overhang,
+            ) else {
+                return;
+            };
+
+            let procgen_seed = hash_platform_cell(
+                self.world_seed,
+                platform.level,
+                platform.cell_x,
+                platform.cell_z,
+                platform.cell_w,
+                PLATFORM_HASH_SALT_PROCGEN_SEED,
+            );
+
+            let y_offset = platform_y_offset(&platform);
+            let cs = CHUNK_SIZE as i32;
+            let frame_voxels = [
+                procgen_frame_offset[0] * cs,
+                procgen_frame_offset[1] * cs,
+                procgen_frame_offset[2] * cs,
+            ];
+            let y_voxels = y_offset * cs;
+
+            for s in procgen::collect_structure_placement_reports(
+                procgen_seed,
+                local_bounds,
+                self.procgen_keepout_cells(),
+            ) {
+                results.push(WorldProcgenPlacement {
+                    world_origin: [
+                        s.origin[0] - frame_voxels[0],
+                        s.origin[1] + y_voxels,
+                        s.origin[2] - frame_voxels[1],
+                        s.origin[3] - frame_voxels[2],
+                    ],
+                    kind: WorldProcgenKind::Structure {
+                        blueprint_idx: s.blueprint_idx,
+                        orientation: s.orientation,
+                    },
+                    platform_level: platform.level,
+                    platform_cell: [platform.cell_x, platform.cell_z, platform.cell_w],
+                });
+            }
+
+            for m in procgen::collect_maze_placement_reports(procgen_seed, local_bounds) {
+                results.push(WorldProcgenPlacement {
+                    world_origin: [
+                        m.origin[0] - frame_voxels[0],
+                        m.origin[1] + y_voxels,
+                        m.origin[2] - frame_voxels[1],
+                        m.origin[3] - frame_voxels[2],
+                    ],
+                    kind: WorldProcgenKind::Maze {
+                        grid_cells: m.grid_cells,
+                        variant_name: m.variant_name,
+                    },
+                    platform_level: platform.level,
+                    platform_cell: [platform.cell_x, platform.cell_z, platform.cell_w],
+                });
+            }
+        });
+
+        results
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WorldProcgenPlacement {
+    pub world_origin: [i32; 4],
+    pub kind: WorldProcgenKind,
+    pub platform_level: i32,
+    pub platform_cell: [i32; 3],
+}
+
+#[derive(Clone, Debug)]
+pub enum WorldProcgenKind {
+    Structure { blueprint_idx: usize, orientation: u8 },
+    Maze { grid_cells: [i32; 4], variant_name: &'static str },
 }
 
 impl WorldField for MassivePlatformsWorldGenerator {

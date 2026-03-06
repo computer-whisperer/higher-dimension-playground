@@ -14,7 +14,7 @@ set -euo pipefail
 #   PERF_REPORT_DIR     Output directory for reports (default: "profiles")
 #   PERF_SPAWN_ENTITIES Entity count for BVH testing (default: 0)
 
-SEEDS="${PERF_SEEDS:-1337 23 40 46}"
+SEEDS="${PERF_SEEDS:-1337 5599 797 709}"
 WORLD_TYPE="${PERF_WORLD_TYPE:-massive-platforms}"
 WARMUP="${PERF_WARMUP:-180}"
 SAMPLE="${PERF_SAMPLE:-600}"
