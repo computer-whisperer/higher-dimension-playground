@@ -13,6 +13,11 @@ fn tex(texture_id: u32) -> TextureRef {
     TextureRef { namespace: 0, texture_id }
 }
 
+/// Helper to create a TextureRef for a plugin (content namespace) texture.
+fn ptex(texture_id: u32) -> TextureRef {
+    TextureRef { namespace: crate::NAMESPACE, texture_id }
+}
+
 /// 6 entity declarations (all non-player entities).
 /// Player entity stays in namespace 0 as an engine internal.
 ///
@@ -92,17 +97,17 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             name: String::from("seeker"),
             category: EntityCategory::Mob,
             default_scale: 0.62,
-            base_material_color: [128, 255, 0], // Yellow-Green
+            base_material_color: [58, 74, 28], // Olive chitin
             model_textures: alloc::vec![
-                tex(TEX_YELLOW_GREEN),  // slot 0
-                tex(TEX_GREEN),         // slot 1
-                tex(TEX_CYAN),          // slot 2
-                tex(TEX_BLUE),          // slot 3
-                tex(TEX_PURPLE),        // slot 4
-                tex(TEX_MAGENTA),       // slot 5
-                tex(TEX_RAINBOW),       // slot 6
-                tex(TEX_BROWN),         // slot 7 (unused)
-                tex(TEX_GRID_FLOOR),    // slot 8
+                ptex(TEX_SEEKER_CHITIN), // slot 0: primary body shell
+                ptex(TEX_SEEKER_JOINT),  // slot 1: dark joint segments
+                ptex(TEX_SEEKER_GLOW),   // slot 2: bioluminescent accents
+                ptex(TEX_SEEKER_BELLY),  // slot 3: lighter underbelly
+                ptex(TEX_SEEKER_SENSOR), // slot 4: sensory organ
+                ptex(TEX_SEEKER_GLOW),   // slot 5: duplicate glow for variety
+                tex(TEX_YELLOW_GREEN),   // slot 6: accent highlight
+                ptex(TEX_SEEKER_JOINT),  // slot 7: duplicate joint
+                ptex(TEX_SEEKER_SENSOR), // slot 8: duplicate sensor
             ],
             spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_SEEKER,
             sim_config: Some(EntitySimConfig {
@@ -121,18 +126,14 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             name: String::from("creeper"),
             category: EntityCategory::Mob,
             default_scale: 0.78,
-            base_material_color: [0, 51, 255], // Blue
+            base_material_color: [30, 51, 38], // Dark mossy green
             model_textures: alloc::vec![
-                tex(TEX_BLUE),          // slot 0
-                tex(TEX_PURPLE),        // slot 1
-                tex(TEX_MAGENTA),       // slot 2
-                tex(TEX_RAINBOW),       // slot 3
-                tex(TEX_BROWN),         // slot 4
-                tex(TEX_GRID_FLOOR),    // slot 5
-                tex(TEX_WHITE),         // slot 6
-                tex(TEX_LIGHT),         // slot 7
-                tex(TEX_MIRROR),        // slot 8 (unused)
-                tex(TEX_LAVA_VEINED_BASALT), // slot 9
+                ptex(TEX_CREEPER_HIDE),  // slot 0: primary body
+                ptex(TEX_CREEPER_DARK),  // slot 1: dark underside/shadows
+                ptex(TEX_CREEPER_BELLY), // slot 2: lighter belly/accents
+                ptex(TEX_CREEPER_EYES),  // slot 3: eyes/face glow
+                ptex(TEX_CREEPER_CORE),  // slot 4: volatile core / charge
+                tex(TEX_LAVA_VEINED_BASALT), // slot 5: charged head effect
             ],
             spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_CREEPER,
             sim_config: Some(EntitySimConfig {
@@ -164,18 +165,18 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             name: String::from("phase_spider"),
             category: EntityCategory::Mob,
             default_scale: 0.86,
-            base_material_color: [180, 180, 180], // Rainbow
+            base_material_color: [48, 28, 88], // Deep indigo
             model_textures: alloc::vec![
-                tex(TEX_RAINBOW),       // slot 0
-                tex(TEX_BROWN),         // slot 1
-                tex(TEX_GRID_FLOOR),    // slot 2
-                tex(TEX_WHITE),         // slot 3
-                tex(TEX_LIGHT),         // slot 4
-                tex(TEX_MIRROR),        // slot 5
-                tex(TEX_LAVA_VEINED_BASALT), // slot 6 (unused)
-                tex(TEX_CRYSTAL_LATTICE), // slot 7
-                tex(TEX_MARBLE),        // slot 8
-                tex(TEX_OXIDIZED_METAL),// slot 9
+                ptex(TEX_SPIDER_CARAPACE), // slot 0: primary body shell
+                ptex(TEX_SPIDER_WEB),      // slot 1: webbing/joints
+                ptex(TEX_SPIDER_PHASE),    // slot 2: phase energy accents
+                ptex(TEX_SPIDER_EYE),      // slot 3: sensory eyes
+                ptex(TEX_SPIDER_CARAPACE), // slot 4: body duplicate
+                ptex(TEX_SPIDER_PHASE),    // slot 5: phase duplicate
+                ptex(TEX_SPIDER_WEB),      // slot 6: webbing duplicate
+                ptex(TEX_SPIDER_CORE),     // slot 7: dimensional core
+                ptex(TEX_SPIDER_CARAPACE), // slot 8: body duplicate
+                ptex(TEX_SPIDER_PHASE),    // slot 9: phase duplicate
             ],
             spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_PHASE_SPIDER,
             sim_config: Some(EntitySimConfig {
