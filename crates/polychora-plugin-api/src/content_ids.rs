@@ -71,6 +71,7 @@ pub const BLOCK_CHRONO_BLOOM: u32 = 0x60c187fc;
 pub const BLOCK_TESSERACT_WEAVE: u32 = 0x76b2bc5b;
 pub const BLOCK_EVENTIDE_ALLOY: u32 = 0x548aaa9e;
 pub const BLOCK_BEACON_MATRIX: u32 = 0x20f1bc81;
+pub const BLOCK_SPAWNER: u32 = 0x7a3e1d5c;
 
 // ---- Entity type IDs (6 entities) ----
 

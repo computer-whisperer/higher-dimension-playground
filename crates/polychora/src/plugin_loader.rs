@@ -184,6 +184,7 @@ pub fn populate_registry_from_plugin(
             block.color_hint,
             material_token,
             block.texture,
+            block.tick_config.clone(),
         );
     }
 

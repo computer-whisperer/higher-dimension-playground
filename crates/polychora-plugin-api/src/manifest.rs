@@ -28,6 +28,19 @@ pub struct BlockDeclaration {
     pub texture: TextureRef,
     pub transparent: bool,
     pub light_emission: u8,
+    /// If set, the server will periodically tick instances of this block type
+    /// via `OP_BLOCK_TICK`.
+    #[serde(default)]
+    pub tick_config: Option<BlockTickConfig>,
+}
+
+/// Configuration for server-side block ticking, declared per block type.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlockTickConfig {
+    /// Minimum interval between ticks for each instance, in milliseconds.
+    pub interval_ms: u64,
+    /// Instances are only ticked when a player is within this distance (in voxels).
+    pub activation_radius: f32,
 }
 
 /// An entity type declared by a plugin.
@@ -112,6 +125,7 @@ mod tests {
     use crate::entity::{MobAbilityParams, MobLocomotionMode, SimulationMode};
     use alloc::string::String;
     use alloc::vec;
+    use super::BlockTickConfig;
 
     #[test]
     fn manifest_postcard_round_trip() {
@@ -130,6 +144,7 @@ mod tests {
                 },
                 transparent: true,
                 light_emission: 15,
+                tick_config: None,
             }],
             entities: vec![EntityDeclaration {
                 type_id: 0xcafebabe,

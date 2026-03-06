@@ -763,9 +763,10 @@ pub(super) fn start_broadcast_thread(
                 player_movement_modifiers,
                 sim_timings,
                 pickup_inventory_syncs,
+                block_tick_spawns,
             ) = {
                 let mut guard = state.lock().expect("server state lock poisoned");
-                let _ = guard.evict_far_mob_nav_cache_chunks(
+                let _ = guard.evict_far_cache_chunks(
                     MOB_NAV_CACHE_KEEP_RADIUS_CHUNKS,
                     MOB_NAV_CACHE_EVICT_BUDGET_PER_TICK,
                 );
@@ -777,6 +778,8 @@ pub(super) fn start_broadcast_thread(
                         &mut next_entity_sim_ms,
                         entity_sim_step_ms,
                     );
+                let block_tick_spawns =
+                    run_block_ticks(&mut guard, &mut wasm_manager, now);
                 let pickup_syncs = pickup_nearby_item_stacks(&mut guard, now);
                 let entity_batches =
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
@@ -786,6 +789,7 @@ pub(super) fn start_broadcast_thread(
                     player_movement_modifiers,
                     sim_timings,
                     pickup_syncs,
+                    block_tick_spawns,
                 )
             };
             // Send inventory syncs for players who picked up items
@@ -795,6 +799,33 @@ pub(super) fn start_broadcast_thread(
                     pickup_client_id,
                     ServerMessage::InventorySync { payload },
                 );
+            }
+            // Execute spawn actions from block ticks (outside the lock).
+            for spawn_action in block_tick_spawns {
+                match spawn_action {
+                    BlockTickSpawnAction::SpawnEntity {
+                        namespace,
+                        entity_type,
+                        position,
+                    } => {
+                        match spawn_entity_from_request(
+                            &state,
+                            namespace,
+                            entity_type,
+                            position,
+                            [0.0, 0.0, 1.0, 0.0],
+                            0.5,
+                            start,
+                        ) {
+                            Ok(_snapshot) => {}
+                            Err(e) => {
+                                eprintln!(
+                                    "[block-tick] failed to spawn entity ({namespace}, {entity_type}): {e}"
+                                );
+                            }
+                        }
+                    }
+                }
             }
             let spawned_count: usize = entity_batches.iter().map(|batch| batch.spawned.len()).sum();
             let transform_count: usize = entity_batches

@@ -1,3 +1,4 @@
+mod block_tick;
 mod config;
 mod core_state;
 mod cpu_profile;
@@ -7,6 +8,7 @@ mod procgen;
 mod runtime_net;
 mod spawn_logic;
 mod types;
+mod world_cache;
 pub mod world_field;
 
 pub use self::config::{LocalConnection, RuntimeConfig, WorldGeneratorKind};
@@ -14,8 +16,10 @@ use self::core_state::{
     allocate_or_reserve_server_object_id, allocate_server_object_id, mark_entity_record_despawned,
     monotonic_ms, record_server_cpu_sample, upsert_entity_record, ServerState, SharedState,
 };
+use self::world_cache::ServerWorldCache;
 use self::cpu_profile::ServerCpuProfile;
 use self::entities::{EntityId, EntityStore};
+use self::block_tick::{run_block_ticks, BlockTickSpawnAction};
 use self::mob_sim::tick_entity_simulation_window;
 use self::runtime_net::{
     handle_message, remove_client, spawn_client_thread, start_broadcast_thread,

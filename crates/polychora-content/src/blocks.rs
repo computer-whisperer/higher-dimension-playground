@@ -2,11 +2,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use polychora_plugin_api::block::BlockCategory;
 use polychora_plugin_api::content_ids::*;
-use polychora_plugin_api::manifest::BlockDeclaration;
+use polychora_plugin_api::manifest::{BlockDeclaration, BlockTickConfig};
 use polychora_plugin_api::texture::builtin_textures::*;
 use polychora_plugin_api::texture::TextureRef;
 
-/// All 68 block declarations for the polychora-content plugin.
+/// All block declarations for the polychora-content plugin.
 ///
 /// Each block references a namespace 0 procedural texture via `TextureRef`,
 /// which the host resolves to the corresponding GPU shader case.
@@ -23,6 +23,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 texture: TextureRef { namespace: $ns, texture_id: $tex },
                 transparent: false,
                 light_emission: 0,
+                tick_config: None,
             }
         };
         ($id:expr, $ns:expr, $tex:expr, $name:expr, $cat:expr, [$r:expr, $g:expr, $b:expr], transparent) => {
@@ -34,6 +35,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 texture: TextureRef { namespace: $ns, texture_id: $tex },
                 transparent: true,
                 light_emission: 0,
+                tick_config: None,
             }
         };
         ($id:expr, $ns:expr, $tex:expr, $name:expr, $cat:expr, [$r:expr, $g:expr, $b:expr], light: $em:expr) => {
@@ -45,6 +47,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 texture: TextureRef { namespace: $ns, texture_id: $tex },
                 transparent: false,
                 light_emission: $em,
+                tick_config: None,
             }
         };
     }
@@ -142,5 +145,20 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
         block!(BLOCK_TESSERACT_WEAVE,   0, TEX_TESSERACT_WEAVE,   "Tesseract Weave",   Special, [170, 132, 255]),
         block!(BLOCK_EVENTIDE_ALLOY,    0, TEX_EVENTIDE_ALLOY,    "Eventide Alloy",    Special, [112, 130, 168]),
         block!(BLOCK_BEACON_MATRIX,     0, TEX_BEACON_MATRIX,     "Beacon Matrix",     Light,   [255, 248, 196], light: 15),
+
+        // Spawner (69) — ticking block that spawns entities
+        BlockDeclaration {
+            type_id: BLOCK_SPAWNER,
+            name: String::from("Spawner"),
+            category: Special,
+            color_hint: [80, 40, 120],
+            texture: TextureRef { namespace: 0, texture_id: TEX_SINGULARITY_CORE },
+            transparent: false,
+            light_emission: 8,
+            tick_config: Some(BlockTickConfig {
+                interval_ms: 5000,
+                activation_radius: 24.0,
+            }),
+        },
     ]
 }

@@ -1,6 +1,7 @@
 #![no_std]
 extern crate alloc;
 
+mod block_tick;
 mod blocks;
 mod entities;
 mod entity_tick;
@@ -17,14 +18,15 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 use alloc::vec::Vec;
+use polychora_plugin_api::block_tick_abi::{BlockTickInput, BlockTickOutput};
 use polychora_plugin_api::entity_tick_abi::{
     EntityAbilityCheck, EntityAbilityResult, EntityTickInput, EntityTickOutput,
 };
 use polychora_plugin_api::manifest::PluginManifest;
 use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput};
 use polychora_plugin_api::opcodes::{
-    ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_ENTITY_ABILITY,
-    OP_ENTITY_MODEL, OP_ENTITY_TICK, OP_GET_MANIFEST, OP_GET_TEXTURES,
+    ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_BLOCK_TICK,
+    OP_ENTITY_ABILITY, OP_ENTITY_MODEL, OP_ENTITY_TICK, OP_GET_MANIFEST, OP_GET_TEXTURES,
 };
 use polychora_plugin_api::texture::GetTexturesResponse;
 
@@ -84,6 +86,7 @@ pub extern "C" fn polychora_call(
         OP_ENTITY_TICK => handle_entity_tick(in_ptr, in_len, out_ptr, out_cap),
         OP_ENTITY_ABILITY => handle_entity_ability(in_ptr, in_len, out_ptr, out_cap),
         OP_ENTITY_MODEL => handle_entity_model(in_ptr, in_len, out_ptr, out_cap),
+        OP_BLOCK_TICK => handle_block_tick(in_ptr, in_len, out_ptr, out_cap),
         _ => ABI_ERR_UNKNOWN_OPCODE,
     }
 }
@@ -130,6 +133,20 @@ fn handle_entity_ability(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -
     };
     let result: EntityAbilityResult = entity_tick::entity_ability_check(&check);
     let bytes = match postcard::to_allocvec(&result) {
+        Ok(bytes) => bytes,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    write_output(&bytes, out_ptr, out_cap)
+}
+
+fn handle_block_tick(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+    let input_bytes = read_input(in_ptr, in_len);
+    let input: BlockTickInput = match postcard::from_bytes(&input_bytes) {
+        Ok(v) => v,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    let output: BlockTickOutput = block_tick::block_tick(&input);
+    let bytes = match postcard::to_allocvec(&output) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,
     };

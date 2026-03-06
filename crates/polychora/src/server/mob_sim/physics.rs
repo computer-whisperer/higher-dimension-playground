@@ -59,7 +59,7 @@ pub(super) fn sample_effective_voxel_for_collision(
         return is_solid;
     }
 
-    if let Some((payload, _scale)) = state.mob_nav_cached_chunk_at(chunk_pos) {
+    if let Some((payload, _scale)) = state.cached_chunk_at(chunk_pos) {
         if resolved_payload_is_all_air(&payload) {
             cache.insert(chunk_pos, CollisionChunkCacheEntry::ExplicitEmpty);
             return false;

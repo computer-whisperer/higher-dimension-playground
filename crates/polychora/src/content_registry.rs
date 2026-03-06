@@ -2,7 +2,7 @@ use crate::shared::voxel::BlockData;
 use polychora_plugin_api::block::BlockCategory;
 use polychora_plugin_api::content_ids;
 use polychora_plugin_api::entity::{EntityCategory, EntitySimConfig};
-use polychora_plugin_api::manifest::{ItemThumbnail, ItemWorldModel};
+use polychora_plugin_api::manifest::{BlockTickConfig, ItemThumbnail, ItemWorldModel};
 use polychora_plugin_api::texture::TextureRef;
 use std::collections::HashMap;
 
@@ -216,6 +216,8 @@ pub struct BlockEntry {
     /// GPU material token (u16) assigned at registration time.
     /// Internal to render system; use MaterialResolver for GPU lookups.
     pub material_token: u16,
+    /// If set, the server ticks instances of this block type periodically.
+    pub tick_config: Option<BlockTickConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +297,6 @@ pub struct ContentRegistry {
     blocks: HashMap<(u32, u32), BlockEntry>,
     // Ordered list of block keys in registration order (for iteration)
     block_order: Vec<(u32, u32)>,
-    // Reverse map: material_token → (namespace, block_type)
-    token_to_block: HashMap<u16, (u32, u32)>,
     // Next procedural material token to assign (starts at 1, 0 = air)
     next_procedural_token: u16,
 
@@ -333,7 +333,6 @@ impl ContentRegistry {
         let mut registry = Self {
             blocks: HashMap::new(),
             block_order: Vec::new(),
-            token_to_block: HashMap::new(),
             next_procedural_token: 1, // 0 = air
             entities: HashMap::new(),
             entity_name_index: HashMap::new(),
@@ -358,9 +357,9 @@ impl ContentRegistry {
                     texture_id: 0,
                 },
                 material_token: 0,
+                tick_config: None,
             },
         );
-        registry.token_to_block.insert(0, (0, 0));
         registry
     }
 
@@ -391,18 +390,15 @@ impl ContentRegistry {
                 texture_id: 0,
             },
             material_token: token,
+            tick_config: None,
         };
         self.blocks.insert((namespace, block_type), entry);
         self.block_order.push((namespace, block_type));
-        self.token_to_block.insert(token, (namespace, block_type));
         token
     }
 
     /// Register a block with a specific (forced) material token and texture reference.
     /// Used for plugin content whose textures have been resolved to GPU tokens.
-    ///
-    /// # Panics
-    /// Panics if `forced_token` is already assigned to a different block.
     pub fn register_block_with_token(
         &mut self,
         namespace: u32,
@@ -412,29 +408,20 @@ impl ContentRegistry {
         color: [u8; 3],
         forced_token: u16,
         texture: TextureRef,
+        tick_config: Option<BlockTickConfig>,
     ) {
-        let name = name.into();
-        if let Some(&existing) = self.token_to_block.get(&forced_token) {
-            if existing != (namespace, block_type) {
-                panic!(
-                    "material token {} already assigned to block ({}, {}), cannot assign to ({}, {}) \"{}\"",
-                    forced_token, existing.0, existing.1, namespace, block_type, name,
-                );
-            }
-        }
         let entry = BlockEntry {
             namespace,
             block_type,
-            name,
+            name: name.into(),
             category,
             color,
             texture,
             material_token: forced_token,
+            tick_config,
         };
         self.blocks.insert((namespace, block_type), entry);
         self.block_order.push((namespace, block_type));
-        self.token_to_block
-            .insert(forced_token, (namespace, block_type));
         // Keep next_procedural_token ahead of any forced token
         if forced_token >= self.next_procedural_token {
             self.next_procedural_token = forced_token + 1;
@@ -695,6 +682,25 @@ impl ContentRegistry {
     pub fn block_icon_texture(&self, namespace: u32, block_type: u32) -> Option<TextureRef> {
         self.resolve_block_entry(namespace, block_type)
             .map(|e| e.texture)
+    }
+
+    /// Get the tick config for a block type, if any.
+    pub fn block_tick_config(&self, namespace: u32, block_type: u32) -> Option<&BlockTickConfig> {
+        self.resolve_block_entry(namespace, block_type)
+            .and_then(|e| e.tick_config.as_ref())
+    }
+
+    /// Returns all block types that have a tick config, as (namespace, block_type, config).
+    pub fn ticking_block_types(&self) -> Vec<(u32, u32, &BlockTickConfig)> {
+        self.blocks
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .tick_config
+                    .as_ref()
+                    .map(|cfg| (entry.namespace, entry.block_type, cfg))
+            })
+            .collect()
     }
 
     // -----------------------------------------------------------------------
