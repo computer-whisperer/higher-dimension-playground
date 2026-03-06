@@ -915,6 +915,9 @@ pub(super) fn bvh_block_data_at_point(
                 return None;
             }
             let (resolved, _) = chunk_array_resolved_payload_at(ca, chunk_key)?;
+            if matches!(resolved.payload, ChunkPayload::Virgin) {
+                return None;
+            }
             Some(resolved.block_at(cell_idx))
         }
 
