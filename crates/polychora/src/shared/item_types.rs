@@ -65,22 +65,14 @@ impl SpawnEggMeta {
 }
 
 // ---------------------------------------------------------------------------
-// BlueprintMeta — postcard schema for blueprint item data
+// BlueprintMeta — CBOR schema for blueprint item data
 // ---------------------------------------------------------------------------
 
-/// A single block placement within a blueprint.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct BlueprintBlock {
-    pub offset: [i32; 4],
-    pub namespace: u32,
-    pub block_type: u32,
-}
-
-/// Blueprint item metadata. Contains a list of block placements that
-/// define the structure.
+/// Blueprint item metadata. Contains a region tree (in plugin-API format for
+/// cross-build CBOR compatibility) that defines the structure to be placed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlueprintMeta {
-    pub blocks: Vec<BlueprintBlock>,
+    pub tree: polychora_plugin_api::region_tree::RegionTreeCore,
 }
 
 impl BlueprintMeta {
@@ -95,6 +87,11 @@ impl BlueprintMeta {
             return None;
         }
         ciborium::from_reader(data).ok()
+    }
+
+    /// Convert the plugin-API tree to the host's internal `RegionTreeCore`.
+    pub fn to_host_tree(&self) -> crate::shared::region_tree::RegionTreeCore {
+        crate::shared::region_tree::region_tree_from_plugin(&self.tree)
     }
 }
 
@@ -170,9 +167,9 @@ impl ItemStack {
         Some((meta.entity_namespace, meta.entity_type))
     }
 
-    /// Create a blueprint item carrying a list of block placements.
-    pub fn blueprint(blocks: Vec<BlueprintBlock>) -> Self {
-        let meta = BlueprintMeta { blocks };
+    /// Create a blueprint item carrying a region tree structure.
+    pub fn blueprint(tree: polychora_plugin_api::region_tree::RegionTreeCore) -> Self {
+        let meta = BlueprintMeta { tree };
         Self {
             item: Item {
                 namespace: ITEM_BLUEPRINT.0,

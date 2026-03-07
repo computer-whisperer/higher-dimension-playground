@@ -1780,6 +1780,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn send_multiplayer_voxel_batch(
         &self,
         edits: Vec<polychora::shared::protocol::VoxelEdit>,
@@ -1808,7 +1809,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)]
     pub(super) fn send_set_tree_core(&self, position: [i64; 4], tree_data: Vec<u8>) {
         if let Some(client) = self.multiplayer.as_ref() {
             client.send(MultiplayerClientMessage::SetTreeCore {

@@ -934,32 +934,16 @@ impl App {
         bp_meta: &polychora::shared::item_types::BlueprintMeta,
         position: [polychora::shared::spatial::ChunkCoord; 4],
     ) {
-        use polychora::shared::voxel::BlockData;
-
         let origin = position.map(|c| c.to_num::<i64>());
+        let host_tree = bp_meta.to_host_tree();
         eprintln!(
-            "Blueprint: placing {} blocks at ({}, {}, {}, {})",
-            bp_meta.blocks.len(),
-            origin[0],
-            origin[1],
-            origin[2],
-            origin[3],
+            "Blueprint: placing tree at ({}, {}, {}, {})",
+            origin[0], origin[1], origin[2], origin[3],
         );
 
-        let edits: Vec<polychora::shared::protocol::VoxelEdit> = bp_meta
-            .blocks
-            .iter()
-            .map(|bp_block| polychora::shared::protocol::VoxelEdit {
-                position: [
-                    origin[0] + bp_block.offset[0] as i64,
-                    origin[1] + bp_block.offset[1] as i64,
-                    origin[2] + bp_block.offset[2] as i64,
-                    origin[3] + bp_block.offset[3] as i64,
-                ],
-                block: BlockData::simple(bp_block.namespace, bp_block.block_type),
-            })
-            .collect();
-        self.send_multiplayer_voxel_batch(edits);
+        // TODO: orient the tree when player orientation is wired up
+        let tree_data = postcard::to_allocvec(&host_tree).expect("postcard serialize tree");
+        self.send_set_tree_core(origin, tree_data);
     }
 
     /// Update WAILA (What Am I Looking At) target based on block and entity

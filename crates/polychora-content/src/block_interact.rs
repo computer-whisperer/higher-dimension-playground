@@ -77,10 +77,36 @@ fn spawner_interact(input: &BlockInteractInput) -> WasmCallResult<BlockInteractO
 }
 
 fn blueprint_dispenser_interact() -> WasmCallResult<BlockInteractOutput> {
-    // Build a 5×5×5×1 hollow frame (edges only) as a block list.
-    const SIZE: i32 = 5;
-    let mut blocks: Vec<BlueprintBlock> = Vec::new();
+    use polychora_plugin_api::region_tree::{
+        Aabb4, BlockData as ApiBlockData, ChunkArrayData as ApiChunkArrayData, ChunkCoord,
+        ChunkPayload as ApiChunkPayload, RegionNodeKind as ApiNodeKind,
+        RegionTreeCore as ApiTreeCore,
+    };
 
+    const CS: usize = 8;
+    const CV: usize = CS * CS * CS * CS;
+
+    // Build a 5×5×5×1 hollow frame (edges only) as a region tree.
+    const SIZE: i32 = 5;
+
+    const SCALE_EXP: i8 = -2;
+
+    let mut block_palette: Vec<ApiBlockData> = alloc::vec![ApiBlockData::AIR];
+    let stone_idx = {
+        let mut b = ApiBlockData::simple(CONTENT_NS, BLOCK_STONE);
+        b.scale_exp = SCALE_EXP;
+        block_palette.push(b);
+        (block_palette.len() - 1) as u16
+    };
+    let light_idx = {
+        let mut b = ApiBlockData::simple(CONTENT_NS, BLOCK_LIGHT);
+        b.scale_exp = SCALE_EXP;
+        block_palette.push(b);
+        (block_palette.len() - 1) as u16
+    };
+
+    // All blocks fit in one chunk (5×5×5×1 < 8^4).
+    let mut materials = alloc::vec![0u16; CV];
     for x in 0..SIZE {
         for y in 0..SIZE {
             for z in 0..SIZE {
@@ -89,22 +115,39 @@ fn blueprint_dispenser_interact() -> WasmCallResult<BlockInteractOutput> {
                     .filter(|&&v| v == 0 || v == SIZE - 1)
                     .count();
                 if edge_count >= 2 {
-                    let (ns, bt) = if edge_count >= 3 {
-                        (CONTENT_NS, BLOCK_LIGHT)
-                    } else {
-                        (CONTENT_NS, BLOCK_STONE)
-                    };
-                    blocks.push(BlueprintBlock {
-                        offset: [x, y, z, 0],
-                        namespace: ns,
-                        block_type: bt,
-                    });
+                    let idx = if edge_count >= 3 { light_idx } else { stone_idx };
+                    let voxel_idx =
+                        (x as usize) + CS * (y as usize) + CS * CS * (z as usize);
+                    // w=0, so lw contribution is 0
+                    materials[voxel_idx] = idx;
                 }
             }
         }
     }
 
-    let blueprint_meta = BlueprintMeta { blocks };
+    // At scale -2, one chunk covers 8 * 2^(-2) = 2 world units per axis.
+    let chunk_world_size = ChunkCoord::from_num(2i32);
+    let bounds = Aabb4 {
+        min: [ChunkCoord::ZERO; 4],
+        max: [chunk_world_size; 4],
+    };
+
+    let tree = ApiTreeCore {
+        bounds,
+        kind: ApiNodeKind::ChunkArray(ApiChunkArrayData {
+            bounds,
+            scale_exp: SCALE_EXP,
+            chunk_palette: alloc::vec![
+                ApiChunkPayload::Empty,
+                ApiChunkPayload::Dense16 { materials },
+            ],
+            dense_indices: alloc::vec![1u16],
+            block_palette,
+        }),
+        generator_version_hash: 0,
+    };
+
+    let blueprint_meta = BlueprintMeta { tree };
     let mut item_data = Vec::new();
     ciborium::into_writer(&blueprint_meta, &mut item_data).unwrap();
 
@@ -119,18 +162,10 @@ fn blueprint_dispenser_interact() -> WasmCallResult<BlockInteractOutput> {
     )
 }
 
-/// A single block placement in a blueprint (must match host's BlueprintBlock).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct BlueprintBlock {
-    offset: [i32; 4],
-    namespace: u32,
-    block_type: u32,
-}
-
 /// Blueprint metadata (must match host's BlueprintMeta).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BlueprintMeta {
-    blocks: Vec<BlueprintBlock>,
+    tree: polychora_plugin_api::region_tree::RegionTreeCore,
 }
 
 fn chest_interact(input: &BlockInteractInput) -> BlockInteractOutput {

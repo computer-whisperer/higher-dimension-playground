@@ -1225,7 +1225,8 @@ pub(super) fn bvh_raycast(
 /// Walk a `RegionTreeCore` and call `callback` for each non-air, non-virgin
 /// block, providing the world-space voxel coordinate and block data.
 ///
-/// This is a naive per-block iteration used for MVP structure placement.
+/// **Note:** assumes scale 0. For trees with non-zero `scale_exp`, use
+/// [`for_each_block_in_tree_scaled`] instead.
 pub fn for_each_block_in_tree(
     tree: &RegionTreeCore,
     callback: &mut impl FnMut([i64; 4], BlockData),
@@ -1265,6 +1266,163 @@ pub fn for_each_block_in_tree(
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Walk a `RegionTreeCore` and call `callback` for each non-air, non-virgin
+/// block, providing the world-space `ChunkCoord` position and block data.
+///
+/// Correctly handles trees at any `scale_exp`.
+pub fn for_each_block_in_tree_scaled(
+    tree: &RegionTreeCore,
+    callback: &mut impl FnMut([ChunkCoord; 4], BlockData),
+) {
+    for_each_block_in_kind_scaled(&tree.kind, tree.bounds, callback);
+}
+
+fn for_each_block_in_kind_scaled(
+    kind: &RegionNodeKind,
+    bounds: Aabb4i,
+    callback: &mut impl FnMut([ChunkCoord; 4], BlockData),
+) {
+    match kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => {}
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() || block.is_virgin() {
+                return;
+            }
+            // Uniform at scale 0: iterate all integer positions in bounds.
+            let (lmin, lmax) = bounds.to_chunk_lattice_bounds(0);
+            let cs = CHUNK_SIZE as i32;
+            for lw in lmin[3]..=lmax[3] {
+                for lz in lmin[2]..=lmax[2] {
+                    for ly in lmin[1]..=lmax[1] {
+                        for lx in lmin[0]..=lmax[0] {
+                            for vw in 0..CHUNK_SIZE {
+                                for vz in 0..CHUNK_SIZE {
+                                    for vy in 0..CHUNK_SIZE {
+                                        for vx in 0..CHUNK_SIZE {
+                                            let wx = lx * cs + vx as i32;
+                                            let wy = ly * cs + vy as i32;
+                                            let wz = lz * cs + vz as i32;
+                                            let ww = lw * cs + vw as i32;
+                                            callback(
+                                                [
+                                                    ChunkCoord::from_num(wx),
+                                                    ChunkCoord::from_num(wy),
+                                                    ChunkCoord::from_num(wz),
+                                                    ChunkCoord::from_num(ww),
+                                                ],
+                                                block.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        RegionNodeKind::ChunkArray(chunk_array) => {
+            let se = chunk_array.scale_exp;
+            let step = step_for_scale(se);
+            let cs_fixed = ChunkCoord::from_num(CHUNK_SIZE as i32);
+            let Ok(indices) = chunk_array.decode_dense_indices() else {
+                return;
+            };
+            let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(se) else {
+                return;
+            };
+            let palette_non_empty = chunk_array_palette_non_empty_mask(chunk_array);
+            let (ca_lmin, ca_lmax) = chunk_array.bounds.to_chunk_lattice_bounds(se);
+            for lw in ca_lmin[3]..=ca_lmax[3] {
+                for lz in ca_lmin[2]..=ca_lmax[2] {
+                    for ly in ca_lmin[1]..=ca_lmax[1] {
+                        for lx in ca_lmin[0]..=ca_lmax[0] {
+                            let local = [
+                                (lx - ca_lmin[0]) as usize,
+                                (ly - ca_lmin[1]) as usize,
+                                (lz - ca_lmin[2]) as usize,
+                                (lw - ca_lmin[3]) as usize,
+                            ];
+                            let linear = linear_cell_index(local, extents);
+                            let Some(&palette_idx) = indices.get(linear) else {
+                                continue;
+                            };
+                            if !palette_non_empty
+                                .get(palette_idx as usize)
+                                .copied()
+                                .unwrap_or(true)
+                            {
+                                continue;
+                            }
+                            let Some(payload) = chunk_array.chunk_palette.get(palette_idx as usize)
+                            else {
+                                continue;
+                            };
+                            if matches!(payload, crate::shared::chunk_payload::ChunkPayload::Virgin)
+                            {
+                                continue;
+                            }
+                            let resolved = crate::shared::chunk_payload::ResolvedChunkPayload {
+                                payload: payload.clone(),
+                                block_palette: chunk_array.block_palette.clone(),
+                            };
+                            let chunk_key = chunk_key_from_lattice([lx, ly, lz, lw], se);
+                            let chunk_world_min: [ChunkCoord; 4] =
+                                chunk_key.map(|k| k.saturating_mul(cs_fixed));
+                            for vw in 0..CHUNK_SIZE {
+                                for vz in 0..CHUNK_SIZE {
+                                    for vy in 0..CHUNK_SIZE {
+                                        for vx in 0..CHUNK_SIZE {
+                                            let voxel_idx = linear_cell_index(
+                                                [vx, vy, vz, vw],
+                                                [CHUNK_SIZE; 4],
+                                            );
+                                            let block = resolved.block_at(voxel_idx);
+                                            if block.is_air() || block.is_virgin() {
+                                                continue;
+                                            }
+                                            callback(
+                                                [
+                                                    chunk_world_min[0].saturating_add(
+                                                        step.saturating_mul(ChunkCoord::from_num(
+                                                            vx as i32,
+                                                        )),
+                                                    ),
+                                                    chunk_world_min[1].saturating_add(
+                                                        step.saturating_mul(ChunkCoord::from_num(
+                                                            vy as i32,
+                                                        )),
+                                                    ),
+                                                    chunk_world_min[2].saturating_add(
+                                                        step.saturating_mul(ChunkCoord::from_num(
+                                                            vz as i32,
+                                                        )),
+                                                    ),
+                                                    chunk_world_min[3].saturating_add(
+                                                        step.saturating_mul(ChunkCoord::from_num(
+                                                            vw as i32,
+                                                        )),
+                                                    ),
+                                                ],
+                                                block,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        RegionNodeKind::Branch(children) => {
+            for child in children {
+                for_each_block_in_kind_scaled(&child.kind, child.bounds, callback);
             }
         }
     }

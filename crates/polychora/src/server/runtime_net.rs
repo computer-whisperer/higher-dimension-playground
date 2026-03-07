@@ -520,14 +520,16 @@ fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8
             return;
         }
     };
+
+    let offset: [ChunkCoord; 4] = position.map(ChunkCoord::from_num);
     let mut count = 0usize;
     let mut guard = state.lock().expect("server state lock poisoned");
-    crate::shared::region_tree::for_each_block_in_tree(&tree, &mut |voxel_pos, block| {
+    crate::shared::region_tree::for_each_block_in_tree_scaled(&tree, &mut |voxel_pos, block| {
         let world_pos = [
-            ChunkCoord::from_num(position[0] + voxel_pos[0]),
-            ChunkCoord::from_num(position[1] + voxel_pos[1]),
-            ChunkCoord::from_num(position[2] + voxel_pos[2]),
-            ChunkCoord::from_num(position[3] + voxel_pos[3]),
+            voxel_pos[0].saturating_add(offset[0]),
+            voxel_pos[1].saturating_add(offset[1]),
+            voxel_pos[2].saturating_add(offset[2]),
+            voxel_pos[3].saturating_add(offset[3]),
         ];
         let scale_exp = block.scale_exp;
         apply_authoritative_voxel_edit(&mut guard, world_pos, block, scale_exp);
