@@ -7,6 +7,7 @@ mod entities;
 mod entity_tick;
 mod math4d;
 mod models;
+mod procgen;
 mod textures;
 
 #[global_allocator]
@@ -27,6 +28,7 @@ use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput};
 use polychora_plugin_api::opcodes::{
     ABI_ERR_OUTPUT_TOO_LARGE, ABI_ERR_SERIALIZE, ABI_ERR_UNKNOWN_OPCODE, OP_BLOCK_TICK,
     OP_ENTITY_ABILITY, OP_ENTITY_MODEL, OP_ENTITY_TICK, OP_GET_MANIFEST, OP_GET_TEXTURES,
+    OP_PROCGEN_GENERATE, OP_PROCGEN_PREPARE,
 };
 use polychora_plugin_api::texture::GetTexturesResponse;
 
@@ -87,6 +89,8 @@ pub extern "C" fn polychora_call(
         OP_ENTITY_ABILITY => handle_entity_ability(in_ptr, in_len, out_ptr, out_cap),
         OP_ENTITY_MODEL => handle_entity_model(in_ptr, in_len, out_ptr, out_cap),
         OP_BLOCK_TICK => handle_block_tick(in_ptr, in_len, out_ptr, out_cap),
+        OP_PROCGEN_PREPARE => handle_procgen_prepare(in_ptr, in_len, out_ptr, out_cap),
+        OP_PROCGEN_GENERATE => handle_procgen_generate(in_ptr, in_len, out_ptr, out_cap),
         _ => ABI_ERR_UNKNOWN_OPCODE,
     }
 }
@@ -195,5 +199,36 @@ fn build_manifest() -> PluginManifest {
         entities: entities::entity_declarations(),
         items: Vec::new(),
         textures: textures::texture_declarations(),
+        structures: procgen::structure_declarations(),
     }
+}
+
+fn handle_procgen_prepare(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+    use polychora_plugin_api::procgen_abi::{ProcgenPrepareInput, ProcgenPrepareOutput};
+    let input_bytes = read_input(in_ptr, in_len);
+    let input: ProcgenPrepareInput = match postcard::from_bytes(&input_bytes) {
+        Ok(v) => v,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    let output: ProcgenPrepareOutput = procgen::prepare(&input);
+    let bytes = match postcard::to_allocvec(&output) {
+        Ok(bytes) => bytes,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    write_output(&bytes, out_ptr, out_cap)
+}
+
+fn handle_procgen_generate(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
+    use polychora_plugin_api::procgen_abi::{ProcgenGenerateInput, ProcgenGenerateOutput};
+    let input_bytes = read_input(in_ptr, in_len);
+    let input: ProcgenGenerateInput = match postcard::from_bytes(&input_bytes) {
+        Ok(v) => v,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    let output: ProcgenGenerateOutput = procgen::generate(&input);
+    let bytes = match postcard::to_allocvec(&output) {
+        Ok(bytes) => bytes,
+        Err(_) => return ABI_ERR_SERIALIZE,
+    };
+    write_output(&bytes, out_ptr, out_cap)
 }

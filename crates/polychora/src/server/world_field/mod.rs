@@ -16,7 +16,7 @@ mod massive_platforms_world_generator;
 
 pub use flat_world_generator::FlatWorldGenerator;
 pub use massive_platforms_world_generator::{
-    MassivePlatformsWorldGenerator, WorldProcgenKind, WorldProcgenPlacement,
+    MassivePlatformsWorldGenerator, WorldProcgenPlacement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -244,25 +244,34 @@ fn build_server_world_field(
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<crate::server::procgen::StructureCell>,
+    procgen_wasm: Option<crate::server::procgen_wasm::ProcgenWasmState>,
 ) -> ServerWorldField {
     match base_kind {
         BaseWorldKind::MassivePlatforms { .. } => {
-            ServerWorldField::MassivePlatforms(MassivePlatformsWorldGenerator::from_chunk_payloads(
+            let mut gen = MassivePlatformsWorldGenerator::from_chunk_payloads(
                 base_kind,
                 Vec::<([i32; 4], ChunkPayload)>::new(),
                 world_seed,
                 procgen_structures,
                 blocked_cells,
-            ))
+            );
+            if let Some(pw) = procgen_wasm {
+                gen.set_procgen_wasm(pw);
+            }
+            ServerWorldField::MassivePlatforms(gen)
         }
         BaseWorldKind::FlatFloor { .. } | BaseWorldKind::Empty => {
-            ServerWorldField::Flat(FlatWorldGenerator::from_chunk_payloads(
+            let mut gen = FlatWorldGenerator::from_chunk_payloads(
                 base_kind,
                 Vec::<([i32; 4], ChunkPayload)>::new(),
                 world_seed,
                 procgen_structures,
                 blocked_cells,
-            ))
+            );
+            if let Some(pw) = procgen_wasm {
+                gen.set_procgen_wasm(pw);
+            }
+            ServerWorldField::Flat(gen)
         }
     }
 }
@@ -280,6 +289,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             world_seed,
             procgen_structures,
             blocked_cells,
+            None,
         );
         Self {
             field,
@@ -303,6 +313,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         procgen_structures: bool,
         blocked_cells: HashSet<crate::server::procgen::StructureCell>,
         now_ms: u64,
+        procgen_wasm: Option<crate::server::procgen_wasm::ProcgenWasmState>,
     ) -> io::Result<Self> {
         let metadata =
             save_v4::load_or_init_state_metadata(root, default_base_kind, world_seed, now_ms)?;
@@ -313,6 +324,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             runtime_world_seed,
             procgen_structures,
             blocked_cells,
+            procgen_wasm,
         );
         Ok(Self {
             field,

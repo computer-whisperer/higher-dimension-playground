@@ -54,5 +54,9 @@ pub use tree::{chunk_spatial_extent, coarsest_aligned_scale, RegionChunkTree};
 pub use tree_edit::{slice_non_empty_region_core_in_bounds, slice_region_core_in_bounds};
 pub use tree_query::{collect_non_empty_chunks_from_core_in_bounds, BvhBlockHit, BvhRayHit};
 
+mod plugin_convert;
+
+pub use plugin_convert::region_tree_from_plugin;
+
 #[cfg(test)]
 mod tests;

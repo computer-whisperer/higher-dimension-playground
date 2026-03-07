@@ -1,4 +1,5 @@
 use crate::content_registry::ContentRegistry;
+use crate::server::procgen_wasm::ProcgenWasmState;
 use crate::shared::protocol::{ClientMessage, ServerMessage};
 use crate::shared::voxel::{BaseWorldKind, BlockData};
 use crate::shared::wasm::WasmPluginManager;
@@ -48,6 +49,9 @@ pub struct RuntimeConfig {
     /// WASM plugin manager for mob steering / ability evaluation.
     /// Taken during `initialize_state` and moved into the broadcast thread.
     pub wasm_manager: Option<WasmPluginManager>,
+    /// WASM-driven procgen state (dedicated manager + caller) for structure/maze generation.
+    /// Taken during `initialize_state` and moved into the world field generators.
+    pub procgen_wasm: Option<ProcgenWasmState>,
 }
 
 impl std::fmt::Debug for RuntimeConfig {
@@ -62,6 +66,7 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("procgen_structures", &self.procgen_structures)
             .field("world_seed", &self.world_seed)
             .field("wasm_manager", &self.wasm_manager.as_ref().map(|_| ".."))
+            .field("procgen_wasm", &self.procgen_wasm.as_ref().map(|_| ".."))
             .finish_non_exhaustive()
     }
 }
@@ -84,6 +89,7 @@ impl RuntimeConfig {
             world_seed: 1337,
             content_registry,
             wasm_manager: None,
+            procgen_wasm: None,
         }
     }
 }

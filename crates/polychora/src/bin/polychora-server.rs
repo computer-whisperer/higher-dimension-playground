@@ -54,7 +54,7 @@ impl WorldGeneratorArg {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    let (registry, wasm_manager, _pending) =
+    let (registry, wasm_manager, procgen_wasm, _pending) =
         polychora::plugin_loader::create_full_registry_with_wasm();
     let content_registry = Arc::new(registry);
     let mut config = RuntimeConfig {
@@ -73,6 +73,7 @@ fn main() -> std::io::Result<()> {
         world_seed: args.world_seed,
         content_registry,
         wasm_manager: Some(wasm_manager),
+        procgen_wasm: Some(procgen_wasm),
     };
     run_tcp_server(&mut config)
 }

@@ -1,17 +1,15 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
+use crate::server::procgen_wasm::{xzw_orientation_to_tesseract, ProcgenWasmState};
 #[cfg(test)]
 use crate::shared::chunk_payload::ResolvedChunkPayload;
-use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload};
-#[cfg(test)]
-use crate::shared::region_tree::ChunkKey;
+use crate::shared::chunk_payload::ChunkPayload;
 use crate::shared::region_tree::{RegionChunkTree, RegionNodeKind, RegionTreeCore};
 use crate::shared::spatial::{Aabb4i, ChunkCoord};
-use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE, CHUNK_VOLUME};
-use std::collections::{HashMap, HashSet};
+use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::sync::Arc;
-
-type DenseChunk = [u16; CHUNK_VOLUME];
 
 // Poisson-disk grid cell sizes.
 const POISSON_CELL_XZW: i32 = 48;
@@ -39,7 +37,7 @@ const PLATFORM_HASH_SALT_PROCGEN_SEED: u64 = 0x2b8a_4e19_9df3_512c;
 const PLATFORM_HASH_SALT_PROCGEN_FRAME: u64 = 0x7a63_1fbc_3d71_2a94;
 const PLATFORM_PROCGEN_FRAME_BASE_OFFSET_CHUNKS: i32 = 4096;
 
-/// Spawn rate boost for structures/mazes on massive platforms: 3/2 = 1.5x the base rate.
+/// Spawn rate boost for structures on massive platforms: 3/2 = 1.5x the base rate.
 const PLATFORM_SPAWN_RATE_SCALE: (u64, u64) = (3, 2);
 
 #[derive(Clone, Copy, Debug)]
@@ -56,6 +54,7 @@ pub struct MassivePlatformsWorldGenerator {
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<procgen::StructureCell>,
+    procgen_wasm: Option<RefCell<ProcgenWasmState>>,
 }
 
 impl std::fmt::Debug for MassivePlatformsWorldGenerator {
@@ -65,6 +64,7 @@ impl std::fmt::Debug for MassivePlatformsWorldGenerator {
             .field("world_seed", &self.world_seed)
             .field("procgen_structures", &self.procgen_structures)
             .field("blocked_cells", &self.blocked_cells)
+            .field("procgen_wasm", &self.procgen_wasm.as_ref().map(|_| ".."))
             .finish()
     }
 }
@@ -82,7 +82,12 @@ impl MassivePlatformsWorldGenerator {
             world_seed,
             procgen_structures,
             blocked_cells,
+            procgen_wasm: None,
         }
+    }
+
+    pub fn set_procgen_wasm(&mut self, state: ProcgenWasmState) {
+        self.procgen_wasm = Some(RefCell::new(state));
     }
 
     fn procgen_keepout_cells(&self) -> Option<&HashSet<procgen::StructureCell>> {
@@ -273,10 +278,14 @@ impl MassivePlatformsWorldGenerator {
         platform: PlatformInstance,
         tree: &mut RegionChunkTree,
     ) {
+        let wasm_cell = match &self.procgen_wasm {
+            Some(cell) => cell,
+            None => return,
+        };
+
         let procgen_frame_offset = procgen_frame_offset_xzw_chunks(self.world_seed, platform);
         let overhang = procgen::max_structure_overhang_chunks();
 
-        // Both structures and mazes use extended bounds so they can overhang the platform edge.
         let structure_local_bounds =
             query_bounds_local_to_platform(query_bounds, platform, procgen_frame_offset, overhang);
         let Some(structure_local_bounds) = structure_local_bounds else {
@@ -292,128 +301,51 @@ impl MassivePlatformsWorldGenerator {
             PLATFORM_HASH_SALT_PROCGEN_SEED,
         );
 
-        let platform_material = self.platform_voxel.as_ref().map(|v| {
-            let mut pal = procgen::block_palette().to_vec();
-            procgen::intern_block_into_palette(&mut pal, v)
-        });
-
-        let y_offset = platform_y_offset(&platform);
-
-        // Only spawn structures/mazes whose origin falls on the platform surface.
         let origin_bounds = Some(platform_origin_bounds_xzw(&platform, procgen_frame_offset));
-
         let spawn_scale = Some(PLATFORM_SPAWN_RATE_SCALE);
 
-        // Generate per-placement structure chunk data (each placement isolated).
-        let placement_data = procgen::generate_structure_placements_for_bounds(
+        let mut wasm = wasm_cell.borrow_mut();
+        let config = wasm.structure_placement_config();
+
+        let cs = CHUNK_SIZE as i32;
+        let y_offset = platform_y_offset(&platform);
+        let tx = [
+            -(procgen_frame_offset[0] as i64) * cs as i64,
+            y_offset as i64 * cs as i64,
+            -(procgen_frame_offset[1] as i64) * cs as i64,
+            -(procgen_frame_offset[2] as i64) * cs as i64,
+        ];
+
+        let reports = procgen::collect_structure_placement_reports(
             procgen_seed,
             structure_local_bounds,
             self.procgen_keepout_cells(),
             origin_bounds,
             spawn_scale,
+            &config,
         );
-
-        for placement in placement_data {
-            if placement.chunks.is_empty() {
+        for report in reports {
+            let decls = wasm.caller.declarations();
+            if report.blueprint_idx >= decls.len() {
                 continue;
             }
-
-            let Some((effective_bounds, palette, indices, block_palette)) =
-                build_chunk_array_from_placement(
-                    &placement.chunks,
-                    &procgen_frame_offset,
-                    y_offset,
-                    platform_material,
-                )
-            else {
-                continue;
-            };
-
-            let chunk_array = match ChunkArrayData::from_dense_indices_with_block_palette(
-                effective_bounds,
-                palette,
-                indices,
-                Some(0), // default = Empty (palette index 0)
-                block_palette,
-                0,
-            ) {
-                Ok(ca) => ca,
-                Err(_) => continue,
-            };
-
-            let core = RegionTreeCore {
-                bounds: effective_bounds,
-                kind: RegionNodeKind::ChunkArray(chunk_array),
-                generator_version_hash: 0,
-            };
-            let _ = tree.splice_non_empty_core_in_bounds(effective_bounds, &core);
-        }
-
-        // Mazes also use extended bounds so they can overhang the platform edge.
-        self.insert_maze_chunks_for_platform(
-            procgen_seed,
-            structure_local_bounds,
-            &platform,
-            procgen_frame_offset,
-            origin_bounds,
-            spawn_scale,
-            tree,
-        );
-    }
-
-    fn insert_maze_chunks_for_platform(
-        &self,
-        procgen_seed: u64,
-        local_query_bounds: Aabb4i,
-        platform: &PlatformInstance,
-        procgen_frame_offset: [i32; 3],
-        origin_bounds: Option<([i32; 3], [i32; 3])>,
-        spawn_rate_scale: Option<(u64, u64)>,
-        tree: &mut RegionChunkTree,
-    ) {
-        let placement_data =
-            procgen::generate_maze_placements_for_bounds(procgen_seed, local_query_bounds, origin_bounds, spawn_rate_scale);
-
-        let platform_material = self.platform_voxel.as_ref().map(|v| {
-            let mut pal = procgen::block_palette().to_vec();
-            procgen::intern_block_into_palette(&mut pal, v)
-        });
-        let y_offset = platform_y_offset(platform);
-
-        for placement in placement_data {
-            if placement.chunks.is_empty() {
-                continue;
+            let structure_id = decls[report.blueprint_idx].id;
+            let orientation = xzw_orientation_to_tesseract(report.orientation);
+            let world_origin = [
+                (report.origin[0] as i64 + tx[0]) as i32,
+                (report.origin[1] as i64 + tx[1]) as i32,
+                (report.origin[2] as i64 + tx[2]) as i32,
+                (report.origin[3] as i64 + tx[3]) as i32,
+            ];
+            match wasm.prepare_and_generate(structure_id, report.cell_hash, orientation, world_origin) {
+                Ok(core) if core.bounds.is_valid() => {
+                    let _ = tree.splice_non_empty_core_in_bounds(core.bounds, &core);
+                }
+                Err(e) => {
+                    eprintln!("procgen WASM error: {e}");
+                }
+                _ => {}
             }
-
-            let Some((effective_bounds, palette, indices, block_palette)) =
-                build_chunk_array_from_placement(
-                    &placement.chunks,
-                    &procgen_frame_offset,
-                    y_offset,
-                    platform_material,
-                )
-            else {
-                continue;
-            };
-
-            let chunk_array = match ChunkArrayData::from_dense_indices_with_block_palette(
-                effective_bounds,
-                palette,
-                indices,
-                Some(0), // default = Empty (palette index 0)
-                block_palette,
-                0,
-            ) {
-                Ok(ca) => ca,
-                Err(_) => continue,
-            };
-
-            let core = RegionTreeCore {
-                bounds: effective_bounds,
-                kind: RegionNodeKind::ChunkArray(chunk_array),
-                generator_version_hash: 0,
-            };
-            let _ = tree.splice_non_empty_core_in_bounds(effective_bounds, &core);
         }
     }
 
@@ -443,7 +375,11 @@ impl MassivePlatformsWorldGenerator {
 
     /// Scan for procgen placements within the given world-space bounds,
     /// returning placement metadata without generating voxel data.
-    pub fn scan_procgen_placements(&self, bounds: Aabb4i) -> Vec<WorldProcgenPlacement> {
+    pub fn scan_procgen_placements(
+        &self,
+        bounds: Aabb4i,
+        config: &procgen::StructurePlacementConfig,
+    ) -> Vec<WorldProcgenPlacement> {
         let mut results = Vec::new();
         if !self.procgen_structures || !bounds.is_valid() {
             return results;
@@ -517,6 +453,7 @@ impl MassivePlatformsWorldGenerator {
                 self.procgen_keepout_cells(),
                 origin_bounds,
                 spawn_scale,
+                config,
             ) {
                 results.push(WorldProcgenPlacement {
                     world_origin: [
@@ -525,27 +462,8 @@ impl MassivePlatformsWorldGenerator {
                         s.origin[2] - frame_voxels[1],
                         s.origin[3] - frame_voxels[2],
                     ],
-                    kind: WorldProcgenKind::Structure {
-                        blueprint_idx: s.blueprint_idx,
-                        orientation: s.orientation,
-                    },
-                    platform_level: platform.level,
-                    platform_cell: [platform.cell_x, platform.cell_z, platform.cell_w],
-                });
-            }
-
-            for m in procgen::collect_maze_placement_reports(procgen_seed, local_bounds, origin_bounds, spawn_scale) {
-                results.push(WorldProcgenPlacement {
-                    world_origin: [
-                        m.origin[0] - frame_voxels[0],
-                        m.origin[1] + y_voxels,
-                        m.origin[2] - frame_voxels[1],
-                        m.origin[3] - frame_voxels[2],
-                    ],
-                    kind: WorldProcgenKind::Maze {
-                        grid_cells: m.grid_cells,
-                        variant_name: m.variant_name,
-                    },
+                    blueprint_idx: s.blueprint_idx,
+                    orientation: s.orientation,
                     platform_level: platform.level,
                     platform_cell: [platform.cell_x, platform.cell_z, platform.cell_w],
                 });
@@ -559,15 +477,10 @@ impl MassivePlatformsWorldGenerator {
 #[derive(Clone, Debug)]
 pub struct WorldProcgenPlacement {
     pub world_origin: [i32; 4],
-    pub kind: WorldProcgenKind,
+    pub blueprint_idx: usize,
+    pub orientation: u8,
     pub platform_level: i32,
     pub platform_cell: [i32; 3],
-}
-
-#[derive(Clone, Debug)]
-pub enum WorldProcgenKind {
-    Structure { blueprint_idx: usize, orientation: u8 },
-    Maze { grid_cells: [i32; 4], variant_name: &'static str },
 }
 
 impl WorldField for MassivePlatformsWorldGenerator {
@@ -714,26 +627,6 @@ fn platform_origin_bounds_xzw(
     )
 }
 
-#[cfg(test)]
-fn chunk_key_from_local_to_platform(
-    local: ChunkKey,
-    platform: &PlatformInstance,
-    procgen_frame_offset_xzw: [i32; 3],
-) -> ChunkKey {
-    use crate::shared::region_tree::chunk_key_i32;
-    let y_offset = platform_y_offset(platform);
-    let lx = local[0].to_num::<i32>();
-    let ly = local[1].to_num::<i32>();
-    let lz = local[2].to_num::<i32>();
-    let lw = local[3].to_num::<i32>();
-    chunk_key_i32(
-        lx.saturating_sub(procgen_frame_offset_xzw[0]),
-        ly + y_offset,
-        lz.saturating_sub(procgen_frame_offset_xzw[1]),
-        lw.saturating_sub(procgen_frame_offset_xzw[2]),
-    )
-}
-
 fn query_bounds_local_to_platform(
     query_bounds: Aabb4i,
     platform: PlatformInstance,
@@ -798,146 +691,12 @@ fn intersects_xzw(a: Aabb4i, b: Aabb4i) -> bool {
         && b.min[3] < a.max[3]
 }
 
-fn payload_from_chunk_compact(chunk: &DenseChunk) -> ChunkPayload {
-    let materials: Vec<u16> = chunk.to_vec();
-    ChunkPayload::from_dense_materials_compact(&materials)
-        .unwrap_or(ChunkPayload::Dense16 { materials })
-}
-
-#[cfg(test)]
-fn canonicalize_payload(resolved: ResolvedChunkPayload) -> ResolvedChunkPayload {
-    let Ok(dense) = resolved.payload.dense_materials() else {
-        return resolved;
-    };
-    if dense.is_empty() {
-        return resolved;
-    }
-    let first = dense[0];
-    if dense.iter().all(|material| *material == first) {
-        let block = resolved
-            .block_palette
-            .get(first as usize)
-            .cloned()
-            .unwrap_or(BlockData::AIR);
-        if block.is_air() {
-            ResolvedChunkPayload::empty()
-        } else {
-            ResolvedChunkPayload::uniform(block)
-        }
-    } else {
-        resolved
-    }
-}
-
-/// Build a ChunkArray from a placement's chunk data.
-///
-/// Converts local chunk positions to world positions, filters out chunks that only contain
-/// the platform material (preserving the Uniform node), computes tight bounds, builds a
-/// deduplicated palette, and returns the data ready for `ChunkArrayData::from_dense_indices`.
-///
-/// Returns `None` if all chunks match the platform uniform or are empty.
-fn build_chunk_array_from_placement(
-    chunks: &HashMap<[i32; 4], DenseChunk>,
-    procgen_frame_offset: &[i32; 3],
-    y_offset: i32,
-    platform_material: Option<u16>,
-) -> Option<(Aabb4i, Vec<ChunkPayload>, Vec<u16>, Vec<BlockData>)> {
-    // Convert local chunk positions to world chunk positions, filtering out chunks
-    // that only contain platform material (or air + platform material).
-    let mut world_chunks: Vec<([i32; 4], ChunkPayload)> = Vec::new();
-    for (local_pos, chunk) in chunks {
-        let world_pos = [
-            local_pos[0].saturating_sub(procgen_frame_offset[0]),
-            local_pos[1] + y_offset,
-            local_pos[2].saturating_sub(procgen_frame_offset[1]),
-            local_pos[3].saturating_sub(procgen_frame_offset[2]),
-        ];
-
-        // Check if this chunk only contains voxels matching the platform material.
-        // If so, skip it — the platform Uniform node already covers it.
-        if let Some(plat_mat) = platform_material {
-            let dominated = chunk.iter().all(|&v| v == 0 || v == plat_mat);
-            if dominated {
-                continue;
-            }
-        }
-
-        let payload = payload_from_chunk_compact(chunk);
-        world_chunks.push((world_pos, payload));
-    }
-
-    if world_chunks.is_empty() {
-        return None;
-    }
-
-    // Compute tight bounding box of remaining world chunk positions.
-    let mut tight_min = [i32::MAX; 4];
-    let mut tight_max = [i32::MIN; 4];
-    for (pos, _) in &world_chunks {
-        for axis in 0..4 {
-            tight_min[axis] = tight_min[axis].min(pos[axis]);
-            tight_max[axis] = tight_max[axis].max(pos[axis]);
-        }
-    }
-    let effective_bounds = Aabb4i::from_lattice_bounds(tight_min, tight_max, 0);
-    if !effective_bounds.is_valid() {
-        return None;
-    }
-
-    // Build deduplicated palette and dense index array.
-    let dims = [
-        (tight_max[0] - tight_min[0] + 1) as usize,
-        (tight_max[1] - tight_min[1] + 1) as usize,
-        (tight_max[2] - tight_min[2] + 1) as usize,
-        (tight_max[3] - tight_min[3] + 1) as usize,
-    ];
-    let cell_count = dims[0] * dims[1] * dims[2] * dims[3];
-
-    // Use an empty/air chunk as the default palette entry (index 0).
-    let mut palette: Vec<ChunkPayload> = vec![ChunkPayload::Empty];
-    let mut palette_map: HashMap<ChunkPayload, u16> = HashMap::new();
-    palette_map.insert(ChunkPayload::Empty, 0);
-
-    let mut indices = vec![0u16; cell_count];
-
-    for (pos, payload) in world_chunks {
-        let rel = [
-            (pos[0] - tight_min[0]) as usize,
-            (pos[1] - tight_min[1]) as usize,
-            (pos[2] - tight_min[2]) as usize,
-            (pos[3] - tight_min[3]) as usize,
-        ];
-        let idx = rel[3] * dims[2] * dims[1] * dims[0]
-            + rel[2] * dims[1] * dims[0]
-            + rel[1] * dims[0]
-            + rel[0];
-
-        let palette_idx = *palette_map.entry(payload.clone()).or_insert_with(|| {
-            let new_idx = palette.len() as u16;
-            palette.push(payload);
-            new_idx
-        });
-        indices[idx] = palette_idx;
-    }
-
-    // The u16 values in the ChunkPayloads are procgen palette indices.
-    // Resolve them to BlockData using the procgen block palette.
-    let procgen_pal = procgen::block_palette();
-    let block_palette: Vec<BlockData> = (0..procgen_pal.len())
-        .map(|i| procgen_pal[i].clone())
-        .collect();
-
-    Some((effective_bounds, palette, indices, block_palette))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shared::region_tree::{
         chunk_key_i32, collect_non_empty_chunks_from_core_in_bounds, ChunkKey,
     };
-    use std::collections::HashMap;
-
     fn payload_at_chunk(
         core: &RegionTreeCore,
         chunk_key: ChunkKey,
@@ -1052,283 +811,6 @@ mod tests {
         assert!(!non_empty
             .iter()
             .any(|(key, _)| *key == chunk_key_i32(0, 1, 0, 0)));
-    }
-
-    #[test]
-    fn origin_anchor_platform_can_host_procgen_structure_chunks() {
-        let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
-            BaseWorldKind::MassivePlatforms {
-                material: BlockData::simple(0, 11),
-            },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
-            1337,
-            true,
-            HashSet::new(),
-        );
-        let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
-        let platform = PlatformInstance {
-            level: 0,
-            cell_x: 0,
-            cell_z: 0,
-            cell_w: 0,
-            bounds: generator
-                .sample_platform_bounds(0, 0, 0, 0)
-                .expect("origin anchor platform must exist"),
-        };
-        let y_off = platform_y_offset(&platform);
-        let cs = CHUNK_SIZE as i32;
-        let probe = Aabb4i::new(
-            [
-                platform.bounds.min[0],
-                ChunkCoord::from_num((y_off + local_min_y) * cs),
-                platform.bounds.min[2],
-                platform.bounds.min[3],
-            ],
-            [
-                platform.bounds.max[0],
-                ChunkCoord::from_num((y_off + local_max_y + 1) * cs),
-                platform.bounds.max[2],
-                platform.bounds.max[3],
-            ],
-        );
-        let local_probe = query_bounds_local_to_platform(
-            probe,
-            platform,
-            procgen_frame_offset_xzw_chunks(generator.world_seed, platform),
-            0,
-        )
-        .expect("origin platform probe should be valid");
-        let procgen_seed = hash_platform_cell(
-            generator.world_seed,
-            platform.level,
-            platform.cell_x,
-            platform.cell_z,
-            platform.cell_w,
-            PLATFORM_HASH_SALT_PROCGEN_SEED,
-        );
-        let candidates = procgen::structure_chunk_positions_for_bounds_with_keepout(
-            procgen_seed,
-            local_probe,
-            None,
-            None,
-            None,
-        );
-        assert!(
-            !candidates.is_empty(),
-            "expected at least one procgen chunk candidate on origin platform"
-        );
-    }
-
-    #[test]
-    fn procgen_structure_spawning_reaches_multiple_y_levels() {
-        let seeded = MassivePlatformsWorldGenerator::from_chunk_payloads(
-            BaseWorldKind::MassivePlatforms {
-                material: BlockData::simple(0, 11),
-            },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
-            1337,
-            true,
-            HashSet::new(),
-        );
-        let no_procgen = MassivePlatformsWorldGenerator::from_chunk_payloads(
-            BaseWorldKind::MassivePlatforms {
-                material: BlockData::simple(0, 11),
-            },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
-            1337,
-            false,
-            HashSet::new(),
-        );
-        let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
-        let search = Aabb4i::from_lattice_bounds([-96, -64, -96, -96], [96, 96, 96, 96], 0);
-        let mut validated = false;
-        // Search cells at cy >= 1 to find platforms above level 0.
-        let min_cy = 1;
-        let max_cy = 8;
-        seeded.for_each_platform_instance_in_bounds(search, min_cy, max_cy, |platform| {
-            if validated {
-                return;
-            }
-            let y_offset = platform_y_offset(&platform);
-            let frame_offset = procgen_frame_offset_xzw_chunks(seeded.world_seed, platform);
-            // Build probe in world coords, then convert to frame-shifted local space.
-            let cs = CHUNK_SIZE as i32;
-            let world_probe = Aabb4i::new(
-                [
-                    platform.bounds.min[0],
-                    ChunkCoord::from_num((y_offset + local_min_y) * cs),
-                    platform.bounds.min[2],
-                    platform.bounds.min[3],
-                ],
-                [
-                    platform.bounds.max[0],
-                    ChunkCoord::from_num((y_offset + local_max_y + 1) * cs),
-                    platform.bounds.max[2],
-                    platform.bounds.max[3],
-                ],
-            );
-            let Some(local_probe) =
-                query_bounds_local_to_platform(world_probe, platform, frame_offset, 0)
-            else {
-                return;
-            };
-            let seed = hash_platform_cell(
-                seeded.world_seed,
-                platform.level,
-                platform.cell_x,
-                platform.cell_z,
-                platform.cell_w,
-                PLATFORM_HASH_SALT_PROCGEN_SEED,
-            );
-            let Some(local_chunk) =
-                procgen::structure_chunk_positions_for_bounds_with_keepout(seed, local_probe, None, None, None)
-                    .into_iter()
-                    .next()
-            else {
-                return;
-            };
-            let global_chunk =
-                chunk_key_from_local_to_platform(local_chunk, &platform, frame_offset);
-            // Verify the global chunk is above the origin platform surface.
-            if global_chunk[1].to_num::<i32>() < POISSON_CELL_Y {
-                return;
-            }
-
-            let chunk_bounds = Aabb4i::chunk_world_bounds(global_chunk, 0);
-            let with_core = seeded.query_region_core(
-                QueryVolume {
-                    bounds: chunk_bounds,
-                },
-                QueryDetail::Exact,
-            );
-            let without_core = no_procgen.query_region_core(
-                QueryVolume {
-                    bounds: chunk_bounds,
-                },
-                QueryDetail::Exact,
-            );
-            let with_chunks =
-                collect_non_empty_chunks_from_core_in_bounds(with_core.as_ref(), chunk_bounds);
-            let without_chunks =
-                collect_non_empty_chunks_from_core_in_bounds(without_core.as_ref(), chunk_bounds);
-            let with_payload = with_chunks.iter().find_map(|(key, payload)| {
-                (*key == global_chunk).then_some(canonicalize_payload(payload.clone()))
-            });
-            let without_payload = without_chunks.iter().find_map(|(key, payload)| {
-                (*key == global_chunk).then_some(canonicalize_payload(payload.clone()))
-            });
-            if with_payload != without_payload {
-                validated = true;
-            }
-        });
-        assert!(validated);
-    }
-
-    #[test]
-    fn procgen_chunks_are_anchored_to_some_platform_volume() {
-        let generator = MassivePlatformsWorldGenerator::from_chunk_payloads(
-            BaseWorldKind::MassivePlatforms {
-                material: BlockData::simple(0, 11),
-            },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
-            1337,
-            true,
-            HashSet::new(),
-        );
-        let no_procgen = MassivePlatformsWorldGenerator::from_chunk_payloads(
-            BaseWorldKind::MassivePlatforms {
-                material: BlockData::simple(0, 11),
-            },
-            Vec::<([i32; 4], ChunkPayload)>::new(),
-            1337,
-            false,
-            HashSet::new(),
-        );
-        let bounds = Aabb4i::from_lattice_bounds([-24, -8, -24, -24], [24, 36, 24, 24], 0);
-        let with_structures =
-            generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
-        let without_structures =
-            no_procgen.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
-
-        let mut with_map = HashMap::new();
-        for (key, payload) in
-            collect_non_empty_chunks_from_core_in_bounds(with_structures.as_ref(), bounds)
-        {
-            with_map.insert(key, canonicalize_payload(payload));
-        }
-        let mut without_map = HashMap::new();
-        for (key, payload) in
-            collect_non_empty_chunks_from_core_in_bounds(without_structures.as_ref(), bounds)
-        {
-            without_map.insert(key, canonicalize_payload(payload));
-        }
-
-        let (local_min_y, local_max_y) = procgen::structure_chunk_y_bounds();
-        let mut changed_keys = Vec::new();
-        for (key, payload) in &with_map {
-            let unchanged = without_map
-                .get(key)
-                .map(|base| base == payload)
-                .unwrap_or(false);
-            if !unchanged {
-                changed_keys.push(*key);
-            }
-        }
-        assert!(!changed_keys.is_empty());
-
-        for key in changed_keys.into_iter().take(64) {
-            let key_bounds = Aabb4i::chunk_world_bounds(key, 0);
-            // Find platforms whose procgen Y extent covers this chunk.
-            // Procgen Y = [y_offset + local_min_y, y_offset + local_max_y]
-            // y_offset = surface + 1, surface = candidate Y.
-            // We need: y_offset + local_min_y <= key[1] <= y_offset + local_max_y
-            // So: surface in [key[1] - 1 - local_max_y, key[1] - 1 - local_min_y]
-            let key_y = key[1].to_num::<i32>();
-            let surface_min = key_y - 1 - local_max_y;
-            let surface_max = key_y - 1 - local_min_y;
-            let min_cy = surface_min.div_euclid(POISSON_CELL_Y);
-            let max_cy = surface_max.div_euclid(POISSON_CELL_Y);
-            let mut anchored = false;
-            let overhang_world =
-                ChunkCoord::from_num(procgen::max_structure_overhang_chunks() * CHUNK_SIZE as i32);
-            let expanded_key_bounds = Aabb4i::new(
-                [
-                    key_bounds.min[0] - overhang_world,
-                    key_bounds.min[1],
-                    key_bounds.min[2] - overhang_world,
-                    key_bounds.min[3] - overhang_world,
-                ],
-                [
-                    key_bounds.max[0] + overhang_world,
-                    key_bounds.max[1],
-                    key_bounds.max[2] + overhang_world,
-                    key_bounds.max[3] + overhang_world,
-                ],
-            );
-            generator.for_each_platform_instance_in_bounds(
-                expanded_key_bounds,
-                min_cy,
-                max_cy,
-                |platform| {
-                    let y_offset = platform_y_offset(&platform);
-                    let chunk_wb = Aabb4i::chunk_world_bounds(key, 0);
-                    // Structures can overhang the platform edge, so expand the
-                    // horizontal check by the overhang margin.
-                    let in_horizontal = chunk_wb.min[0] < platform.bounds.max[0] + overhang_world
-                        && chunk_wb.max[0] > platform.bounds.min[0] - overhang_world
-                        && chunk_wb.min[2] < platform.bounds.max[2] + overhang_world
-                        && chunk_wb.max[2] > platform.bounds.min[2] - overhang_world
-                        && chunk_wb.min[3] < platform.bounds.max[3] + overhang_world
-                        && chunk_wb.max[3] > platform.bounds.min[3] - overhang_world;
-                    let in_vertical =
-                        key_y >= y_offset + local_min_y && key_y <= y_offset + local_max_y;
-                    if in_horizontal && in_vertical {
-                        anchored = true;
-                    }
-                },
-            );
-            assert!(anchored, "unanchored structure chunk at {:?}", key);
-        }
     }
 
     #[test]

@@ -1,9 +1,11 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
-use crate::shared::chunk_payload::{ChunkPayload, ResolvedChunkPayload};
-use crate::shared::region_tree::{ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore};
+use crate::server::procgen_wasm::{xzw_orientation_to_tesseract, ProcgenWasmState};
+use crate::shared::chunk_payload::ChunkPayload;
+use crate::shared::region_tree::{RegionChunkTree, RegionNodeKind, RegionTreeCore};
 use crate::shared::spatial::{Aabb4i, ChunkCoord};
-use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -14,6 +16,7 @@ pub struct FlatWorldGenerator {
     world_seed: u64,
     procgen_structures: bool,
     blocked_cells: HashSet<procgen::StructureCell>,
+    procgen_wasm: Option<RefCell<ProcgenWasmState>>,
 }
 
 impl std::fmt::Debug for FlatWorldGenerator {
@@ -23,6 +26,7 @@ impl std::fmt::Debug for FlatWorldGenerator {
             .field("world_seed", &self.world_seed)
             .field("procgen_structures", &self.procgen_structures)
             .field("blocked_cells", &self.blocked_cells)
+            .field("procgen_wasm", &self.procgen_wasm.as_ref().map(|_| ".."))
             .finish()
     }
 }
@@ -40,7 +44,12 @@ impl FlatWorldGenerator {
             world_seed,
             procgen_structures,
             blocked_cells,
+            procgen_wasm: None,
         }
+    }
+
+    pub fn set_procgen_wasm(&mut self, state: ProcgenWasmState) {
+        self.procgen_wasm = Some(RefCell::new(state));
     }
 
     fn procgen_keepout_cells(&self) -> Option<&HashSet<procgen::StructureCell>> {
@@ -63,18 +72,8 @@ impl FlatWorldGenerator {
             return None;
         }
         let floor_bounds = Aabb4i::new(
-            [
-                bounds.min[0],
-                floor_y_world_min,
-                bounds.min[2],
-                bounds.min[3],
-            ],
-            [
-                bounds.max[0],
-                floor_y_world_max,
-                bounds.max[2],
-                bounds.max[3],
-            ],
+            [bounds.min[0], floor_y_world_min, bounds.min[2], bounds.min[3]],
+            [bounds.max[0], floor_y_world_max, bounds.max[2], bounds.max[3]],
         );
         Some(RegionTreeCore {
             bounds: floor_bounds,
@@ -83,59 +82,41 @@ impl FlatWorldGenerator {
         })
     }
 
-    fn structure_chunk_payload(&self, chunk_key: ChunkKey) -> Option<ResolvedChunkPayload> {
-        if !self.procgen_structures {
-            return None;
-        }
-        let structure_chunk = procgen::generate_structure_chunk_with_keepout(
-            self.world_seed,
-            chunk_key,
-            self.procgen_keepout_cells(),
-        )?;
-
-        // Build palette: start with procgen palette, add floor material if needed.
-        let mut palette = procgen::block_palette().to_vec();
-        let floor_idx = if chunk_key[1] == ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y) {
-            self.flat_floor_voxel
-                .as_ref()
-                .map(|block| procgen::intern_block_into_palette(&mut palette, block))
-        } else {
-            None
-        };
-
-        let base = floor_idx
-            .map(|idx| [idx; CHUNK_VOLUME])
-            .unwrap_or([0u16; CHUNK_VOLUME]);
-        let mut merged = base;
-        merge_non_air_u16(&mut merged, &structure_chunk);
-
-        if merged == base {
-            return None;
-        }
-
-        let payload = payload_from_u16_chunk_compact(&merged);
-        Some(ResolvedChunkPayload {
-            payload,
-            block_palette: palette,
-        })
-    }
-
     fn insert_procgen_chunks_for_bounds(&self, bounds: Aabb4i, tree: &mut RegionChunkTree) {
         if !self.procgen_structures || !bounds.is_valid() {
             return;
         }
-        let candidates = procgen::structure_chunk_positions_for_bounds_with_keepout(
+        let wasm_cell = match &self.procgen_wasm {
+            Some(cell) => cell,
+            None => return,
+        };
+        let mut wasm = wasm_cell.borrow_mut();
+        let config = wasm.structure_placement_config();
+
+        let reports = procgen::collect_structure_placement_reports(
             self.world_seed,
             bounds,
             self.procgen_keepout_cells(),
             None,
             None,
+            &config,
         );
-        for chunk_key in candidates {
-            let Some(resolved) = self.structure_chunk_payload(chunk_key) else {
+        for report in reports {
+            let decls = wasm.caller.declarations();
+            if report.blueprint_idx >= decls.len() {
                 continue;
-            };
-            let _ = tree.set_chunk(chunk_key, Some(resolved));
+            }
+            let structure_id = decls[report.blueprint_idx].id;
+            let orientation = xzw_orientation_to_tesseract(report.orientation);
+            match wasm.prepare_and_generate(structure_id, report.cell_hash, orientation, report.origin) {
+                Ok(core) if core.bounds.is_valid() => {
+                    let _ = tree.splice_non_empty_core_in_bounds(core.bounds, &core);
+                }
+                Err(e) => {
+                    eprintln!("procgen WASM error: {e}");
+                }
+                _ => {}
+            }
         }
     }
 
@@ -178,20 +159,6 @@ fn floor_voxel_from_base_kind(base_kind: BaseWorldKind) -> Option<BlockData> {
         BaseWorldKind::FlatFloor { .. }
         | BaseWorldKind::MassivePlatforms { .. }
         | BaseWorldKind::Empty => None,
-    }
-}
-
-fn payload_from_u16_chunk_compact(chunk: &[u16; CHUNK_VOLUME]) -> ChunkPayload {
-    let materials: Vec<u16> = chunk.to_vec();
-    ChunkPayload::from_dense_materials_compact(&materials)
-        .unwrap_or(ChunkPayload::Dense16 { materials })
-}
-
-fn merge_non_air_u16(dst: &mut [u16; CHUNK_VOLUME], src: &[u16; CHUNK_VOLUME]) {
-    for (idx, &material) in src.iter().enumerate() {
-        if material != 0 {
-            dst[idx] = material;
-        }
     }
 }
 
@@ -247,7 +214,6 @@ mod tests {
         );
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
         let non_empty = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
-        // X: keys -2..2 = 5 chunks, Z: keys -1..3 = 5, W: keys -2..2 = 5
         let expected_count = 5usize * 5 * 5;
         assert_eq!(non_empty.len(), expected_count);
         assert!(non_empty.iter().all(|(key, payload)| key[1]

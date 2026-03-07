@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub enum WasmPluginSlot {
     EntitySimulation,
     ModelLogic,
+    Procgen,
 }
 
 #[derive(Debug)]

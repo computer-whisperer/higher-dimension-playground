@@ -67,7 +67,7 @@ fn seeker_model(input: &EntityModelInput) -> EntityModelOutput {
     let anim_t =
         input.elapsed_s * (2.9 + stride * 4.8) + input.entity_id as f32 * 0.31;
     let bob = (0.02 + 0.035 * stride) * sinf(anim_t * 0.9);
-    let pulse = powf_approx((sinf(anim_t * 1.1) * 0.5 + 0.5), 1.6);
+    let pulse = powf_approx(sinf(anim_t * 1.1) * 0.5 + 0.5 , 1.6);
     // Prow pulses between sensor glow (4) and glow accent (2)
     let pulse_mat: u8 = if pulse > 0.66 { 4 } else { 2 };
 
@@ -135,7 +135,7 @@ fn creeper_model(input: &EntityModelInput) -> EntityModelOutput {
     let anim_t =
         input.elapsed_s * (2.4 + stride * 4.2) + input.entity_id as f32 * 0.29;
     // Pulsing charge effect — core glows brighter periodically
-    let charge = powf_approx((sinf(anim_t * 0.8) * 0.5 + 0.5), 1.8);
+    let charge = powf_approx(sinf(anim_t * 0.8) * 0.5 + 0.5 , 1.8);
     let face_mat: u8 = if charge > 0.70 { 5 } else { 3 }; // lava-veined vs eyes
 
     let bob = 0.03 * sinf(anim_t * 0.7);

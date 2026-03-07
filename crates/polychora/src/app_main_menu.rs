@@ -192,13 +192,17 @@ impl App {
         } else {
             self.main_menu_player_name.trim().to_string()
         };
-        let wasm_manager = polychora::plugin_loader::create_wasm_manager_for_server();
+        let (wasm_manager, procgen_wasm) = match polychora::plugin_loader::create_wasm_manager_for_server() {
+            Some((mgr, pw)) => (Some(mgr), Some(pw)),
+            None => (None, None),
+        };
         let config = build_singleplayer_runtime_config(
             &self.args,
             world_file.clone(),
             world_generator,
             self.content_registry.clone(),
             wasm_manager,
+            procgen_wasm,
         );
         match MultiplayerClient::connect_local(config, player_name.clone()) {
             Ok(client) => {

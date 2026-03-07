@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::BlockCategory;
 use crate::entity::{EntityCategory, EntitySimConfig};
+use crate::procgen_abi::StructureDeclaration;
 use crate::texture::{TextureFormat, TextureRef};
 
 /// Declares a plugin's content to the host at load time.
@@ -16,6 +17,8 @@ pub struct PluginManifest {
     pub entities: Vec<EntityDeclaration>,
     pub items: Vec<ItemDeclaration>,
     pub textures: Vec<TextureDeclaration>,
+    #[serde(default)]
+    pub structures: Vec<StructureDeclaration>,
 }
 
 /// A block type declared by a plugin.
@@ -193,6 +196,7 @@ mod tests {
                     }),
                 },
             }],
+            structures: vec![],
             textures: vec![TextureDeclaration {
                 texture_id: 0xaabbccdd,
                 name: String::from("TestTexture"),

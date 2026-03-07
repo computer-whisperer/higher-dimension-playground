@@ -10,3 +10,4 @@ std = ["serde/std", "postcard/use-std"]
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+fixed = { version = "1", default-features = false, features = ["serde"] }

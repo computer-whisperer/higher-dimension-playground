@@ -1,0 +1,13 @@
+{
+  "name": "portal_axis",
+  "description": "A linear axis gate with hazard-striped footing, tall vertical uprights, and a luminous central core.",
+  "spawn_weight": 1,
+  "ground_offset_y": 1,
+  "fills": [
+    { "min": [-5, 0, 0, -5], "size": [11, 1, 1, 11], "block": {"namespace": 1886350457, "block_type": 2998679343} },
+    { "min": [-5, 1, 0, -5], "size": [1, 8, 1, 11], "block": {"namespace": 1886350457, "block_type": 1794311507} },
+    { "min": [5, 1, 0, -5], "size": [1, 8, 1, 11], "block": {"namespace": 1886350457, "block_type": 1794311507} },
+    { "min": [-5, 8, 0, -5], "size": [11, 1, 1, 11], "block": {"namespace": 1886350457, "block_type": 1794311507} },
+    { "min": [0, 2, 0, 0], "size": [1, 5, 1, 1], "block": {"namespace": 1886350457, "block_type": 465249689} }
+  ]
+}
