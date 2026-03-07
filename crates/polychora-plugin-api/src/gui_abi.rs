@@ -15,6 +15,9 @@ pub struct BlockInteractInput {
     pub metadata: Vec<u8>,
     /// The player's inventory slots, serialized by the host.
     pub player_inventory: Vec<ItemSlot>,
+    /// Index of the player's currently selected hotbar slot.
+    #[serde(default)]
+    pub held_item_index: u32,
 }
 
 /// Output from `OP_BLOCK_INTERACT`.

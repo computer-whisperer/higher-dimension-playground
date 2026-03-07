@@ -695,7 +695,7 @@ impl App {
                             }
                         }
                     } else if place_requested {
-                        // Check if the hit block is interactable (e.g. chest).
+                        // Check if the hit block is interactable (e.g. chest, spawner).
                         let mut handled_interact = false;
                         if let Some(hit_block) = &edit_targets.hit_block {
                             if self
@@ -705,29 +705,40 @@ impl App {
                                 if let Some(hit) = &edit_targets.hit {
                                     let position = hit.origin_i32().map(|c| c as i64);
                                     if let Some(wasm) = self.wasm_model_manager.as_mut() {
-                                        if let Some(session) =
-                                            polychora::block_gui::try_open_block_gui(
+                                        let result =
+                                            polychora::block_gui::try_block_interact(
                                                 wasm,
                                                 hit_block,
                                                 position,
                                                 &self.inventory,
-                                            )
-                                        {
-                                            eprintln!(
-                                                "Opened block GUI: {} at ({}, {}, {}, {})",
-                                                session.title,
-                                                position[0],
-                                                position[1],
-                                                position[2],
-                                                position[3],
+                                                self.hotbar_selected_index as u32,
                                             );
-                                            self.block_gui_session = Some(session);
-                                            if let Some(window) =
-                                                self.rcx.as_ref().and_then(|rcx| rcx.window.clone())
-                                            {
-                                                self.release_mouse(&window);
+                                        match result {
+                                            polychora::block_gui::BlockInteractResult::OpenGui(session) => {
+                                                eprintln!(
+                                                    "Opened block GUI: {} at ({}, {}, {}, {})",
+                                                    session.title,
+                                                    position[0],
+                                                    position[1],
+                                                    position[2],
+                                                    position[3],
+                                                );
+                                                self.block_gui_session = Some(session);
+                                                if let Some(window) =
+                                                    self.rcx.as_ref().and_then(|rcx| rcx.window.clone())
+                                                {
+                                                    self.release_mouse(&window);
+                                                }
+                                                handled_interact = true;
                                             }
-                                            handled_interact = true;
+                                            polychora::block_gui::BlockInteractResult::Handled(effects) => {
+                                                self.process_block_interact_side_effects(
+                                                    &effects.side_effects,
+                                                    hit.origin,
+                                                );
+                                                handled_interact = true;
+                                            }
+                                            polychora::block_gui::BlockInteractResult::Nothing => {}
                                         }
                                     }
                                 }
@@ -831,6 +842,48 @@ impl App {
             self.set_perf_suite_camera_pose(scenario_index);
         }
         self.apply_pending_player_movement_modifiers();
+    }
+
+    /// Process side effects from OP_BLOCK_INTERACT (client-side).
+    ///
+    /// Allowed effects: UpdateBlockMetadata, ConsumeHeldItem.
+    fn process_block_interact_side_effects(
+        &mut self,
+        side_effects: &[polychora_plugin_api::side_effects::SideEffect],
+        block_position: [polychora::shared::spatial::ChunkCoord; 4],
+    ) {
+        use polychora_plugin_api::side_effects::SideEffect;
+        for effect in side_effects {
+            match effect {
+                SideEffect::UpdateBlockMetadata { metadata } => {
+                    let mut block = self.scene.get_block_data(
+                        block_position[0].to_num::<i32>(),
+                        block_position[1].to_num::<i32>(),
+                        block_position[2].to_num::<i32>(),
+                        block_position[3].to_num::<i32>(),
+                    );
+                    block.extra_data = metadata.clone();
+                    self.send_multiplayer_voxel_update(
+                        std::time::Instant::now(),
+                        block_position,
+                        block,
+                    );
+                }
+                SideEffect::ConsumeHeldItem { count } => {
+                    let idx = self.hotbar_selected_index;
+                    for _ in 0..*count {
+                        self.inventory.decrement_slot(idx);
+                    }
+                    self.inventory_dirty = true;
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
+                }
+                SideEffect::SpawnEntity { .. } => {
+                    eprintln!("Warning: SpawnEntity side effect not allowed for OP_BLOCK_INTERACT");
+                }
+            }
+        }
     }
 
     /// Update WAILA (What Am I Looking At) target based on block and entity

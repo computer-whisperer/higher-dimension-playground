@@ -1,7 +1,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
-use polychora_plugin_api::block_tick_abi::{BlockTickAction, BlockTickInput, BlockTickOutput};
+use polychora_plugin_api::block_tick_abi::{BlockTickInput, BlockTickOutput};
 use polychora_plugin_api::content_ids::*;
+use polychora_plugin_api::side_effects::{SideEffect, WasmCallResult};
 
 /// Spawner state serialized into block metadata.
 struct SpawnerState {
@@ -9,29 +10,50 @@ struct SpawnerState {
     last_spawn_ms: u64,
     /// Number of entities spawned so far by this instance.
     spawn_count: u32,
+    /// Entity to spawn (namespace, type). Defaults to seeker if not configured.
+    entity_ns: u32,
+    entity_type: u32,
 }
 
 impl SpawnerState {
     fn decode(bytes: &[u8]) -> Self {
-        if bytes.len() >= 12 {
+        if bytes.len() >= 20 {
+            let last_spawn_ms = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            let spawn_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            let entity_ns = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+            let entity_type = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+            Self {
+                last_spawn_ms,
+                spawn_count,
+                entity_ns,
+                entity_type,
+            }
+        } else if bytes.len() >= 12 {
+            // Legacy format without entity type
             let last_spawn_ms = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
             let spawn_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
             Self {
                 last_spawn_ms,
                 spawn_count,
+                entity_ns: CONTENT_NS,
+                entity_type: ENTITY_SEEKER,
             }
         } else {
             Self {
                 last_spawn_ms: 0,
                 spawn_count: 0,
+                entity_ns: CONTENT_NS,
+                entity_type: ENTITY_SEEKER,
             }
         }
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(12);
+        let mut out = Vec::with_capacity(20);
         out.extend_from_slice(&self.last_spawn_ms.to_le_bytes());
         out.extend_from_slice(&self.spawn_count.to_le_bytes());
+        out.extend_from_slice(&self.entity_ns.to_le_bytes());
+        out.extend_from_slice(&self.entity_type.to_le_bytes());
         out
     }
 }
@@ -39,39 +61,43 @@ impl SpawnerState {
 const SPAWNER_COOLDOWN_MS: u64 = 5000;
 const SPAWNER_MAX_SPAWNS: u32 = 4;
 
-pub fn block_tick(input: &BlockTickInput) -> BlockTickOutput {
+pub fn block_tick(input: &BlockTickInput) -> WasmCallResult<BlockTickOutput> {
     match input.block_type {
         BLOCK_SPAWNER => spawner_tick(input),
-        _ => BlockTickOutput::default(),
+        _ => WasmCallResult::new(BlockTickOutput::default()),
     }
 }
 
-fn spawner_tick(input: &BlockTickInput) -> BlockTickOutput {
+fn spawner_tick(input: &BlockTickInput) -> WasmCallResult<BlockTickOutput> {
     let mut state = SpawnerState::decode(&input.metadata);
 
     if state.spawn_count >= SPAWNER_MAX_SPAWNS {
-        return BlockTickOutput {
+        return WasmCallResult::new(BlockTickOutput {
             metadata: state.encode(),
-            actions: Vec::new(),
-        };
+            ..Default::default()
+        });
     }
 
     if input.now_ms < state.last_spawn_ms + SPAWNER_COOLDOWN_MS {
-        return BlockTickOutput {
+        return WasmCallResult::new(BlockTickOutput {
             metadata: state.encode(),
-            actions: Vec::new(),
-        };
+            ..Default::default()
+        });
     }
 
-    // Spawn a seeker above the spawner block
+    // Spawn the configured entity above the spawner block
     state.last_spawn_ms = input.now_ms;
     state.spawn_count += 1;
 
-    BlockTickOutput {
-        metadata: state.encode(),
-        actions: vec![BlockTickAction::SpawnEntity {
-            entity_type: ENTITY_SEEKER,
+    WasmCallResult::with_effects(
+        BlockTickOutput {
+            metadata: state.encode(),
+            ..Default::default()
+        },
+        vec![SideEffect::SpawnEntity {
+            entity_type_ns: state.entity_ns,
+            entity_type: state.entity_type,
             offset: [0.0, 1.5, 0.0, 0.0],
         }],
-    }
+    )
 }

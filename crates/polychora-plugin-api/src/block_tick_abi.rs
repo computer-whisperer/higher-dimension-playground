@@ -25,25 +25,12 @@ pub struct BlockTickInput {
 }
 
 /// Output from `OP_BLOCK_TICK`.
+///
+/// Side effects (e.g. entity spawning) are returned via `WasmCallResult`
+/// rather than in this struct directly.
 #[derive(Serialize, Deserialize, Default)]
 pub struct BlockTickOutput {
     /// Updated per-instance metadata to write back to the block.
     #[serde(default)]
     pub metadata: Vec<u8>,
-    /// Actions the host should execute on behalf of this block.
-    #[serde(default)]
-    pub actions: Vec<BlockTickAction>,
-}
-
-/// An action returned by a block tick that the host should execute.
-#[derive(Serialize, Deserialize)]
-pub enum BlockTickAction {
-    /// Spawn an entity near this block.
-    SpawnEntity {
-        /// Entity type ID (same namespace as the block).
-        entity_type: u32,
-        /// Offset from the block position (in voxels).
-        #[serde(default)]
-        offset: [f32; 4],
-    },
 }

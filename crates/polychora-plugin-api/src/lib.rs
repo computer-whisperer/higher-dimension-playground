@@ -12,4 +12,5 @@ pub mod model_abi;
 pub mod opcodes;
 pub mod procgen_abi;
 pub mod region_tree;
+pub mod side_effects;
 pub mod texture;

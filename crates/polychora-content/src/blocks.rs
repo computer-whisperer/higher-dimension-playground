@@ -171,7 +171,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
             texture: TextureRef { namespace: 0, texture_id: TEX_SINGULARITY_CORE },
             transparent: false,
             light_emission: 8,
-            interactable: false,
+            interactable: true,
             tick_config: Some(BlockTickConfig {
                 interval_ms: 5000,
                 activation_radius: 24.0,

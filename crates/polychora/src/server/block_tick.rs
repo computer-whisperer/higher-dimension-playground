@@ -2,8 +2,9 @@ use super::*;
 use crate::shared::spatial::ChunkCoord;
 use crate::shared::voxel::{self, BlockData};
 use crate::shared::wasm::{WasmPluginManager, WasmPluginSlot};
-use polychora_plugin_api::block_tick_abi::{BlockTickAction, BlockTickInput, BlockTickOutput};
+use polychora_plugin_api::block_tick_abi::{BlockTickInput, BlockTickOutput};
 use polychora_plugin_api::opcodes::OP_BLOCK_TICK;
+use polychora_plugin_api::side_effects::{SideEffect, WasmCallResult};
 
 /// An action produced by a block tick that the server loop should execute.
 pub(super) enum BlockTickSpawnAction {
@@ -140,30 +141,32 @@ pub(super) fn run_block_ticks(
             Ok(Some(r)) => r,
             _ => continue,
         };
-        let output: BlockTickOutput = match postcard::from_bytes(&result.invocation.output) {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
+        let wrapped: WasmCallResult<BlockTickOutput> =
+            match postcard::from_bytes(&result.invocation.output) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
 
         // Update last_tick_ms in the world cache.
         state.world_cache.update_tick_time(&pos, now_ms);
 
         // Write updated metadata back if changed.
-        if output.metadata != current_block.extra_data {
+        if wrapped.response.metadata != current_block.extra_data {
             let mut updated_block = current_block.clone();
-            updated_block.extra_data = output.metadata;
+            updated_block.extra_data = wrapped.response.metadata;
             let _ = state.apply_world_voxel_edit(pos, updated_block);
         }
 
-        // Collect spawn actions.
-        for action in output.actions {
-            match action {
-                BlockTickAction::SpawnEntity {
+        // Process side effects (whitelist: SpawnEntity only).
+        for effect in wrapped.side_effects {
+            match effect {
+                SideEffect::SpawnEntity {
+                    entity_type_ns,
                     entity_type,
                     offset,
                 } => {
                     actions.push(BlockTickSpawnAction::SpawnEntity {
-                        namespace,
+                        namespace: entity_type_ns,
                         entity_type,
                         position: [
                             block_center[0] + offset[0],
@@ -172,6 +175,15 @@ pub(super) fn run_block_ticks(
                             block_center[3] + offset[3],
                         ],
                     });
+                }
+                _ => {
+                    eprintln!(
+                        "Warning: disallowed side effect from OP_BLOCK_TICK at ({}, {}, {}, {})",
+                        pos[0].to_num::<i32>(),
+                        pos[1].to_num::<i32>(),
+                        pos[2].to_num::<i32>(),
+                        pos[3].to_num::<i32>(),
+                    );
                 }
             }
         }

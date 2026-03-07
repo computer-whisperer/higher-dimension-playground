@@ -35,6 +35,7 @@ use polychora_plugin_api::opcodes::{
     OP_BLOCK_TICK, OP_ENTITY_ABILITY, OP_ENTITY_MODEL, OP_ENTITY_TICK, OP_GET_MANIFEST,
     OP_GET_TEXTURES, OP_GUI_ACTION, OP_GUI_CLOSE, OP_PROCGEN_GENERATE, OP_PROCGEN_PREPARE,
 };
+use polychora_plugin_api::side_effects::WasmCallResult;
 use polychora_plugin_api::texture::GetTexturesResponse;
 
 /// Namespace ID for the first-party polychora-content plugin.
@@ -157,7 +158,7 @@ fn handle_block_tick(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i3
         Ok(v) => v,
         Err(_) => return ABI_ERR_SERIALIZE,
     };
-    let output: BlockTickOutput = block_tick::block_tick(&input);
+    let output: WasmCallResult<BlockTickOutput> = block_tick::block_tick(&input);
     let bytes = match postcard::to_allocvec(&output) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,
@@ -171,7 +172,7 @@ fn handle_block_interact(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -
         Ok(v) => v,
         Err(_) => return ABI_ERR_SERIALIZE,
     };
-    let output: BlockInteractOutput = block_interact::block_interact(&input);
+    let output: WasmCallResult<BlockInteractOutput> = block_interact::block_interact(&input);
     let bytes = match postcard::to_allocvec(&output) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,
@@ -185,7 +186,7 @@ fn handle_gui_action(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i3
         Ok(v) => v,
         Err(_) => return ABI_ERR_SERIALIZE,
     };
-    let output: GuiActionOutput = block_interact::gui_action(&input);
+    let output: WasmCallResult<GuiActionOutput> = block_interact::gui_action(&input);
     let bytes = match postcard::to_allocvec(&output) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,
@@ -199,7 +200,7 @@ fn handle_gui_close(in_ptr: i32, in_len: i32, out_ptr: i32, out_cap: i32) -> i32
         Ok(v) => v,
         Err(_) => return ABI_ERR_SERIALIZE,
     };
-    let output: GuiCloseOutput = block_interact::gui_close(&input);
+    let output: WasmCallResult<GuiCloseOutput> = block_interact::gui_close(&input);
     let bytes = match postcard::to_allocvec(&output) {
         Ok(bytes) => bytes,
         Err(_) => return ABI_ERR_SERIALIZE,

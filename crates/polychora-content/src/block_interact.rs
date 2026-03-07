@@ -2,6 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use polychora_plugin_api::content_ids::*;
 use polychora_plugin_api::gui_abi::*;
+use polychora_plugin_api::side_effects::{SideEffect, WasmCallResult};
 
 const CHEST_SLOTS: u32 = 27;
 const CHEST_COLUMNS: u32 = 9;
@@ -15,11 +16,63 @@ struct ChestGuiState {
     player_slots: Vec<ItemSlot>,
 }
 
-pub fn block_interact(input: &BlockInteractInput) -> BlockInteractOutput {
+// Well-known item type constants (must match host's item_types.rs).
+const ITEM_SPAWN_EGG_NS: u32 = 0;
+const ITEM_SPAWN_EGG_TYPE: u32 = 2;
+
+/// CBOR-encoded spawn egg metadata (must match host's SpawnEggMeta).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SpawnEggMeta {
+    entity_namespace: u32,
+    entity_type: u32,
+}
+
+pub fn block_interact(input: &BlockInteractInput) -> WasmCallResult<BlockInteractOutput> {
     match input.block_type {
-        BLOCK_CHEST => chest_interact(input),
-        _ => BlockInteractOutput::Nothing,
+        BLOCK_CHEST => WasmCallResult::new(chest_interact(input)),
+        BLOCK_SPAWNER => spawner_interact(input),
+        _ => WasmCallResult::new(BlockInteractOutput::Nothing),
     }
+}
+
+fn spawner_interact(input: &BlockInteractInput) -> WasmCallResult<BlockInteractOutput> {
+    // Check if the player is holding a spawn egg
+    let held = input
+        .player_inventory
+        .get(input.held_item_index as usize);
+    let held = match held {
+        Some(slot) if !slot.is_empty() => slot,
+        _ => return WasmCallResult::new(BlockInteractOutput::Nothing),
+    };
+    if held.item_ns != ITEM_SPAWN_EGG_NS || held.item_type != ITEM_SPAWN_EGG_TYPE {
+        return WasmCallResult::new(BlockInteractOutput::Nothing);
+    }
+
+    // Decode spawn egg metadata (CBOR)
+    let meta: SpawnEggMeta = match ciborium::from_reader(held.data.as_slice()) {
+        Ok(m) => m,
+        Err(_) => return WasmCallResult::new(BlockInteractOutput::Nothing),
+    };
+
+    // Build updated spawner metadata: reset spawn count, set entity type
+    let new_metadata = {
+        let mut out = Vec::with_capacity(20);
+        out.extend_from_slice(&0u64.to_le_bytes()); // last_spawn_ms = 0
+        out.extend_from_slice(&0u32.to_le_bytes()); // spawn_count = 0
+        out.extend_from_slice(&meta.entity_namespace.to_le_bytes());
+        out.extend_from_slice(&meta.entity_type.to_le_bytes());
+        out
+    };
+
+    WasmCallResult::with_effects(
+        BlockInteractOutput::Nothing,
+        alloc::vec![
+            SideEffect::UpdateBlockMetadata {
+                metadata: new_metadata,
+            },
+            SideEffect::ConsumeHeldItem { count: 1 },
+        ],
+    )
 }
 
 fn chest_interact(input: &BlockInteractInput) -> BlockInteractOutput {
@@ -57,15 +110,15 @@ fn chest_interact(input: &BlockInteractInput) -> BlockInteractOutput {
     })
 }
 
-pub fn gui_action(input: &GuiActionInput) -> GuiActionOutput {
+pub fn gui_action(input: &GuiActionInput) -> WasmCallResult<GuiActionOutput> {
     let mut state: ChestGuiState = match postcard::from_bytes(&input.gui_state) {
         Ok(s) => s,
         Err(_) => {
-            return GuiActionOutput {
+            return WasmCallResult::new(GuiActionOutput {
                 accepted: false,
                 slots: Vec::new(),
                 gui_state: input.gui_state.clone(),
-            }
+            })
         }
     };
 
@@ -83,11 +136,11 @@ pub fn gui_action(input: &GuiActionInput) -> GuiActionOutput {
             let count = *count;
 
             if from >= all_slots.len() || to >= all_slots.len() || from == to {
-                return GuiActionOutput {
+                return WasmCallResult::new(GuiActionOutput {
                     accepted: false,
                     slots: all_slots,
                     gui_state: input.gui_state.clone(),
-                };
+                });
             }
 
             let accepted = move_items(&mut all_slots, from, to, count);
@@ -98,31 +151,31 @@ pub fn gui_action(input: &GuiActionInput) -> GuiActionOutput {
             state.player_slots = all_slots[chest_end..].to_vec();
 
             let gui_state = postcard::to_allocvec(&state).unwrap_or_default();
-            GuiActionOutput {
+            WasmCallResult::new(GuiActionOutput {
                 accepted,
                 slots: all_slots,
                 gui_state,
-            }
+            })
         }
     }
 }
 
-pub fn gui_close(input: &GuiCloseInput) -> GuiCloseOutput {
+pub fn gui_close(input: &GuiCloseInput) -> WasmCallResult<GuiCloseOutput> {
     let state: ChestGuiState = match postcard::from_bytes(&input.gui_state) {
         Ok(s) => s,
         Err(_) => {
-            return GuiCloseOutput {
+            return WasmCallResult::new(GuiCloseOutput {
                 metadata: Vec::new(),
                 player_inventory: Vec::new(),
-            }
+            })
         }
     };
 
     let metadata = postcard::to_allocvec(&state.chest_slots).unwrap_or_default();
-    GuiCloseOutput {
+    WasmCallResult::new(GuiCloseOutput {
         metadata,
         player_inventory: state.player_slots,
-    }
+    })
 }
 
 /// Move `count` items from `from` to `to` within a flat slot array.
