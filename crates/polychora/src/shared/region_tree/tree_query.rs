@@ -711,6 +711,16 @@ pub(super) fn non_empty_kinds_semantically_equal_in_bounds(
     if lhs_chunks.len() != rhs_chunks.len() {
         return false;
     }
+    // When both sides yield 0 chunks but either has a non-empty kind, the
+    // comparison region is smaller than a full chunk — the chunk-based
+    // comparison is too coarse to prove equality, so bail conservatively.
+    if lhs_chunks.is_empty() {
+        let lhs_non_empty = !matches!(lhs_kind, RegionNodeKind::Empty);
+        let rhs_non_empty = !matches!(rhs_kind, RegionNodeKind::Empty);
+        if lhs_non_empty || rhs_non_empty {
+            return false;
+        }
+    }
     lhs_chunks
         .iter()
         .zip(rhs_chunks.iter())
