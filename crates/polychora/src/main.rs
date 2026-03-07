@@ -717,13 +717,13 @@ fn main() {
 
     // Build content registry; also construct a WASM plugin manager when we'll
     // run an integrated server so mob steering can be evaluated via WASM.
-    let (content_registry, wasm_manager, pending_texture_uploads) =
+    let (content_registry, wasm_manager, procgen_wasm, pending_texture_uploads) =
         if start_with_integrated_singleplayer {
-            let (reg, mgr, pending) = polychora::plugin_loader::create_full_registry_with_wasm();
-            (Arc::new(reg), Some(mgr), pending)
+            let (reg, mgr, pw, pending) = polychora::plugin_loader::create_full_registry_with_wasm();
+            (Arc::new(reg), Some(mgr), Some(pw), pending)
         } else {
             let (reg, pending) = polychora::plugin_loader::create_full_registry();
-            (Arc::new(reg), None, pending)
+            (Arc::new(reg), None, None, pending)
         };
 
     let multiplayer = if let Some(server) = args.server.as_ref() {
@@ -760,6 +760,7 @@ fn main() {
             initial_singleplayer_world_generator,
             content_registry.clone(),
             wasm_manager,
+            procgen_wasm,
         );
         match MultiplayerClient::connect_local(runtime_config, player_name.clone()) {
             Ok(client) => {

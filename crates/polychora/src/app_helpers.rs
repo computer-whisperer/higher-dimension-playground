@@ -77,8 +77,21 @@ pub(super) fn apply_menu_camera_orbit_pose(camera: &mut Camera4D, time_s: f32) {
     let (yaw, pitch, xw_angle, zw_angle) = Camera4D::angles_for_direction_upright(target_dir);
     camera.yaw = yaw;
     camera.pitch = pitch;
-    camera.xw_angle = xw_angle;
-    camera.zw_angle = zw_angle;
+    // The solver can bifurcate when the W-component of the target direction
+    // passes through zero, producing a one-frame angle jump in the hidden-
+    // dimension angles.  Since the orbit is smooth and slow, reject large
+    // jumps and keep the previous value for that frame.
+    const MAX_ANGLE_STEP: f32 = 0.3;
+    let pi = std::f32::consts::PI;
+    let tau = std::f32::consts::TAU;
+    let xw_diff = (xw_angle - camera.xw_angle + pi).rem_euclid(tau) - pi;
+    let zw_diff = (zw_angle - camera.zw_angle + pi).rem_euclid(tau) - pi;
+    if xw_diff.abs() < MAX_ANGLE_STEP || time_s == 0.0 {
+        camera.xw_angle = xw_angle;
+    }
+    if zw_diff.abs() < MAX_ANGLE_STEP || time_s == 0.0 {
+        camera.zw_angle = zw_angle;
+    }
     camera.yw_deviation = 0.0;
 }
 
@@ -88,6 +101,7 @@ pub(super) fn build_singleplayer_runtime_config(
     world_generator: polychora::server::WorldGeneratorKind,
     content_registry: std::sync::Arc<polychora::content_registry::ContentRegistry>,
     wasm_manager: Option<polychora::shared::wasm::WasmPluginManager>,
+    procgen_wasm: Option<polychora::server::procgen_wasm::ProcgenWasmState>,
 ) -> polychora::server::RuntimeConfig {
     polychora::server::RuntimeConfig {
         bind: "127.0.0.1:0".to_string(),
@@ -105,6 +119,7 @@ pub(super) fn build_singleplayer_runtime_config(
         world_seed: args.singleplayer_world_seed,
         content_registry,
         wasm_manager,
+        procgen_wasm,
     }
 }
 

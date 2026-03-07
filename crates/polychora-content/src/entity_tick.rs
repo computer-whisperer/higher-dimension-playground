@@ -246,23 +246,24 @@ fn creeper_tick(input: &EntityTickInput) -> EntityTickOutput {
                 orbit_a[2] * sinf(phase) + orbit_b[2] * cosf(phase),
                 orbit_a[3] * sinf(phase) + orbit_b[3] * cosf(phase),
             ];
-            let too_close = distance < input.preferred_distance * 0.55;
-            let in_lunge_band = distance > input.preferred_distance * 0.80
-                && distance < input.preferred_distance * 1.95;
-            let lunge = in_lunge_band && sinf(phase) > 0.58;
+            // Retreat only when very close to detonation range so the
+            // creeper can actually reach the player.
+            let too_close = distance < input.preferred_distance * 0.25;
+            let in_lunge_band = distance < input.preferred_distance * 2.0;
+            let lunge = in_lunge_band && sinf(phase) > 0.30;
             let pressure = if too_close {
-                -0.72
+                -0.55
             } else if lunge {
                 1.85
             } else {
-                0.68
+                1.15
             };
             let speed = if lunge {
                 1.65
             } else if too_close {
                 0.48
             } else {
-                0.95
+                1.10
             };
 
             let desired = normalize4_or_default(

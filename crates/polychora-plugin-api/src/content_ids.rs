@@ -82,6 +82,30 @@ pub const ENTITY_SEEKER: u32 = 0xa974d75b;
 pub const ENTITY_CREEPER: u32 = 0x3dc5fd3d;
 pub const ENTITY_PHASE_SPIDER: u32 = 0x4af27f80;
 
+// ---- Creeper entity texture IDs (plugin namespace) ----
+
+pub const TEX_CREEPER_HIDE: u32 = 0x1c3a2e01;
+pub const TEX_CREEPER_DARK: u32 = 0x0b1d0f02;
+pub const TEX_CREEPER_BELLY: u32 = 0x2e543803;
+pub const TEX_CREEPER_EYES: u32 = 0x8acc2204;
+pub const TEX_CREEPER_CORE: u32 = 0xcc220005;
+
+// ---- Seeker entity texture IDs (plugin namespace) ----
+
+pub const TEX_SEEKER_CHITIN: u32 = 0x5e3a1101;
+pub const TEX_SEEKER_GLOW: u32 = 0x5e3a1102;
+pub const TEX_SEEKER_JOINT: u32 = 0x5e3a1103;
+pub const TEX_SEEKER_SENSOR: u32 = 0x5e3a1104;
+pub const TEX_SEEKER_BELLY: u32 = 0x5e3a1105;
+
+// ---- Phase Spider entity texture IDs (plugin namespace) ----
+
+pub const TEX_SPIDER_CARAPACE: u32 = 0x7f2a0601;
+pub const TEX_SPIDER_PHASE: u32 = 0x7f2a0602;
+pub const TEX_SPIDER_CORE: u32 = 0x7f2a0603;
+pub const TEX_SPIDER_WEB: u32 = 0x7f2a0604;
+pub const TEX_SPIDER_EYE: u32 = 0x7f2a0605;
+
 // ---- Spawn egg texture IDs (namespace 0) ----
 
 pub const SPAWN_EGG_TEX_CUBE: u32 = 0x3e8a1c47;

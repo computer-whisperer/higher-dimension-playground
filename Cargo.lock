@@ -2556,6 +2556,7 @@ dependencies = [
 name = "polychora-plugin-api"
 version = "0.1.0"
 dependencies = [
+ "fixed",
  "postcard",
  "serde",
 ]

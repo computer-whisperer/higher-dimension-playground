@@ -1,2 +1,3 @@
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-args=--max-memory=4194304"]
+rustflags = ["-C", "link-args=--max-memory=1073741824"]
+# Must match the limit in crates/polychora/build.rs (CARGO_ENCODED_RUSTFLAGS)

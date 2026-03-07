@@ -11,3 +11,5 @@ polychora-plugin-api = { path = "../polychora-plugin-api" }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 dlmalloc = { version = "0.2", features = ["global"] }
 libm = "0.2"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }

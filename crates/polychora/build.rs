@@ -27,8 +27,10 @@ fn build_wasm_plugin() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let wasm_target_dir = PathBuf::from(&out_dir).join("wasm-target");
 
-    // Set max WASM memory to 4MB (64 pages). Without this, the memory section
-    // is unbounded and wasmtime rejects it.
+    // Set max WASM memory to 1GB (16384 pages). Without this, the memory section
+    // is unbounded and wasmtime rejects it. Large limit accommodates procgen
+    // structure/maze generation which builds large region trees and accumulates
+    // allocations across many calls within a single instance.
     let status = Command::new("cargo")
         .arg("build")
         .arg("--release")
@@ -40,7 +42,7 @@ fn build_wasm_plugin() {
         .arg(&wasm_target_dir)
         .env(
             "CARGO_ENCODED_RUSTFLAGS",
-            "-Clink-args=--max-memory=4194304",
+            "-Clink-args=--max-memory=1073741824",
         )
         .status()
         .expect("failed to invoke cargo for polychora-content WASM build");

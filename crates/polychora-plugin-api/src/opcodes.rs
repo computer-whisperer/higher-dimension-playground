@@ -12,6 +12,8 @@ pub const OP_ENTITY_ABILITY: u32 = 0x0101;
 pub const OP_BLOCK_INTERACT: u32 = 0x0200;
 pub const OP_BLOCK_TICK: u32 = 0x0201;
 pub const OP_ENTITY_MODEL: u32 = 0x0300;
+pub const OP_PROCGEN_PREPARE: u32 = 0x0400;
+pub const OP_PROCGEN_GENERATE: u32 = 0x0401;
 
 /// ABI error codes returned by `polychora_call`.
 pub const ABI_ERR_UNKNOWN_OPCODE: i32 = -1;

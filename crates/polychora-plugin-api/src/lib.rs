@@ -9,4 +9,6 @@ pub mod entity_tick_abi;
 pub mod manifest;
 pub mod model_abi;
 pub mod opcodes;
+pub mod procgen_abi;
+pub mod region_tree;
 pub mod texture;

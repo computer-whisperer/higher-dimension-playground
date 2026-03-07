@@ -28,7 +28,7 @@ MaterialProperties sampleMaterial(uint textureId, float4 texturePos, uint timeTi
     if (isTexturePool)
     {
         uint poolIndex = baseTextureId & 0x7FFFu;
-        mat.albedo = texturePool[min(poolIndex, 255u)].SampleLevel(texturePoolSampler, p4.xyz, 0.0);
+        mat.albedo = texturePool[NonUniformResourceIndex(min(poolIndex, 255u))].SampleLevel(texturePoolSampler, p4.xyz, 0.0);
         mat.luminance = basicLuminance;
     }
     else

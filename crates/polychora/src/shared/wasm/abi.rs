@@ -24,6 +24,7 @@ impl WasmExecutionRole {
 pub enum WasmCallOpcode {
     EntitySimulation = 1,
     ModelLogic = 2,
+    Procgen = 3,
 }
 
 impl WasmCallOpcode {
@@ -39,6 +40,7 @@ impl TryFrom<i32> for WasmCallOpcode {
         match value {
             1 => Ok(Self::EntitySimulation),
             2 => Ok(Self::ModelLogic),
+            3 => Ok(Self::Procgen),
             _ => Err(()),
         }
     }

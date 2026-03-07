@@ -66,6 +66,7 @@ fn sample_virgin_chunk_dense_with_query_bounds(
         world_seed,
         procgen_structures,
         HashSet::new(),
+        None,
     );
     assert!(query_bounds.contains_chunk_world_min(chunk_key));
     let core = field.query_region_core(
@@ -450,7 +451,7 @@ fn voxel_edit_different_from_platform_material_produces_dirty_bounds() {
 // ── Cross-scale overlap resolution tests ────────────────────────────
 
 fn make_empty_overlay() -> PassthroughWorldOverlay<ServerWorldField> {
-    let field = build_server_world_field(BaseWorldKind::Empty, 42, false, HashSet::new());
+    let field = build_server_world_field(BaseWorldKind::Empty, 42, false, HashSet::new(), None);
     PassthroughWorldOverlay::new(field, BaseWorldKind::Empty, 42)
 }
 

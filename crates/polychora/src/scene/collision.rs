@@ -10,7 +10,7 @@ impl Scene {
         ];
         let max = [
             pos[0] + PLAYER_RADIUS_XZW,
-            pos[1],
+            pos[1] + PLAYER_HEAD_CLEARANCE,
             pos[2] + PLAYER_RADIUS_XZW,
             pos[3] + PLAYER_RADIUS_XZW,
         ];

@@ -2,6 +2,7 @@ use crate::builtin_content;
 use crate::content_registry::{
     ContentRegistry, EntityEntry, ItemEntry, MATERIAL_TOKEN_TEXTURE_POOL_FLAG,
 };
+use crate::server::procgen_wasm::ProcgenWasmState;
 use crate::shared::wasm::{
     WasmExecutionLimits, WasmExecutionRole, WasmModuleCache, WasmPluginManager, WasmPluginSlot,
     WasmRuntime, WasmRuntimeError, WasmRuntimeInstance,
@@ -77,6 +78,20 @@ impl std::error::Error for PluginLoadError {}
 impl From<WasmRuntimeError> for PluginLoadError {
     fn from(e: WasmRuntimeError) -> Self {
         Self::Wasm(e)
+    }
+}
+
+/// Execution limits used during plugin loading (manifest + texture extraction).
+///
+/// These are more generous than the default per-call limits because loading
+/// triggers one-time initialization inside the plugin (e.g. parsing all
+/// structure blueprint JSON files for procgen declarations).
+fn plugin_load_limits() -> WasmExecutionLimits {
+    WasmExecutionLimits {
+        max_input_bytes: 64 * 1024,
+        max_output_bytes: 256 * 1024,
+        max_memory_pages: 16384,
+        max_fuel: 5_000_000,
     }
 }
 
@@ -263,7 +278,7 @@ pub fn create_full_registry() -> (ContentRegistry, Vec<PendingTextureUpload>) {
     let plugin = load_plugin(
         &runtime,
         include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH")),
-        WasmExecutionLimits::default(),
+        plugin_load_limits(),
     )
     .expect("failed to load polychora-content plugin");
 
@@ -286,6 +301,7 @@ pub fn create_full_registry() -> (ContentRegistry, Vec<PendingTextureUpload>) {
 pub fn create_full_registry_with_wasm() -> (
     ContentRegistry,
     WasmPluginManager,
+    ProcgenWasmState,
     Vec<PendingTextureUpload>,
 ) {
     let mut registry = ContentRegistry::new();
@@ -297,7 +313,7 @@ pub fn create_full_registry_with_wasm() -> (
     );
 
     let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
-    let plugin = load_plugin(&runtime, wasm_bytes, WasmExecutionLimits::default())
+    let plugin = load_plugin(&runtime, wasm_bytes, plugin_load_limits())
         .expect("failed to load polychora-content plugin");
 
     register_pending_texture_tokens(&mut registry, &plugin.pending_texture_uploads);
@@ -307,8 +323,9 @@ pub fn create_full_registry_with_wasm() -> (
 
     let pending = plugin.pending_texture_uploads;
 
+    // Entity simulation manager (goes to the broadcast thread).
     let mut manager =
-        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime, cache);
+        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime.clone(), cache.clone());
     manager
         .activate_slot_from_bytes(
             WasmPluginSlot::EntitySimulation,
@@ -317,7 +334,16 @@ pub fn create_full_registry_with_wasm() -> (
         )
         .expect("failed to activate EntitySimulation WASM slot");
 
-    (registry, manager, pending)
+    // Separate procgen WASM state (goes to the world field generators).
+    let procgen_wasm = ProcgenWasmState::new(
+        runtime,
+        cache,
+        wasm_bytes,
+        plugin.manifest.structures.clone(),
+    )
+    .expect("failed to create procgen WASM state");
+
+    (registry, manager, procgen_wasm, pending)
 }
 
 /// Create a standalone `WasmPluginManager` with the ModelLogic slot activated.
@@ -343,12 +369,17 @@ pub fn create_wasm_manager_for_client() -> Option<WasmPluginManager> {
 ///
 /// Used when creating a new integrated server from the main menu (the content
 /// registry already exists but a fresh WASM manager is needed).
-pub fn create_wasm_manager_for_server() -> Option<WasmPluginManager> {
+pub fn create_wasm_manager_for_server() -> Option<(WasmPluginManager, ProcgenWasmState)> {
     let runtime = Arc::new(WasmRuntime::new().ok()?);
     let cache = Arc::new(WasmModuleCache::new(runtime.clone(), None).ok()?);
     let wasm_bytes: &[u8] = include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"));
+
+    // Load the plugin to extract structure declarations for the procgen caller.
+    let plugin = load_plugin(&runtime, wasm_bytes, plugin_load_limits()).ok()?;
+
+    // Entity simulation manager.
     let mut manager =
-        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime, cache);
+        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime.clone(), cache.clone());
     manager
         .activate_slot_from_bytes(
             WasmPluginSlot::EntitySimulation,
@@ -356,5 +387,14 @@ pub fn create_wasm_manager_for_server() -> Option<WasmPluginManager> {
             WasmExecutionLimits::default(),
         )
         .ok()?;
-    Some(manager)
+
+    // Separate procgen WASM state.
+    let procgen_wasm = ProcgenWasmState::new(
+        runtime,
+        cache,
+        wasm_bytes,
+        plugin.manifest.structures.clone(),
+    )?;
+
+    Some((manager, procgen_wasm))
 }

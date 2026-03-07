@@ -57,5 +57,9 @@ pub use tree_query::{
     BvhRayHit,
 };
 
+mod plugin_convert;
+
+pub use plugin_convert::region_tree_from_plugin;
+
 #[cfg(test)]
 mod tests;

@@ -150,6 +150,19 @@ impl ApplicationHandler for App {
                     self.input.handle_key_event(&event);
                 }
 
+                // Tab toggles inventory regardless of egui consumption.
+                if self.inventory_open
+                    && event.state.is_pressed()
+                    && !event.repeat
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Tab))
+                {
+                    self.inventory_open = false;
+                    if let Some(window) = window.as_ref() {
+                        self.grab_mouse(window);
+                    }
+                    return;
+                }
+
                 if is_escape_pressed(&event) {
                     if self.app_state == AppState::MainMenu {
                         // In main menu, Escape goes back or quits

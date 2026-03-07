@@ -5,6 +5,7 @@ mod cpu_profile;
 mod entities;
 mod mob_sim;
 mod procgen;
+pub mod procgen_wasm;
 mod runtime_net;
 mod spawn_logic;
 mod types;
@@ -283,7 +284,6 @@ fn initialize_state(
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<(SharedState, Instant)> {
     let start = Instant::now();
-    procgen::clear_runtime_maze_layout_cache();
     let requested_world_seed = config.world_seed;
     let base_world_kind = config.world_generator.default_base_world_kind();
     let mut initial_world = ServerWorldOverlay::from_save_root(
@@ -293,6 +293,7 @@ fn initialize_state(
         config.procgen_structures,
         HashSet::new(),
         crate::save_v4::now_unix_ms(),
+        config.procgen_wasm.take(),
     )?;
     let runtime_world_seed = initial_world.world_seed();
     let next_object_id = initial_world.persisted_next_entity_id().max(1);
