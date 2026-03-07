@@ -31,6 +31,10 @@ pub struct BlockDeclaration {
     pub texture: TextureRef,
     pub transparent: bool,
     pub light_emission: u8,
+    /// If true, right-clicking this block calls `OP_BLOCK_INTERACT` instead
+    /// of placing.
+    #[serde(default)]
+    pub interactable: bool,
     /// If set, the server will periodically tick instances of this block type
     /// via `OP_BLOCK_TICK`.
     #[serde(default)]
@@ -147,6 +151,7 @@ mod tests {
                 },
                 transparent: true,
                 light_emission: 15,
+                interactable: false,
                 tick_config: None,
             }],
             entities: vec![EntityDeclaration {

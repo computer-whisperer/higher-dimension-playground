@@ -19,6 +19,39 @@ impl App {
         self.input.clear_mouse_delta();
     }
 
+    /// Close the block GUI, calling OP_GUI_CLOSE to persist state, then re-grab mouse.
+    pub(super) fn close_block_gui(&mut self, window: &Window) {
+        if let Some(session) = self.block_gui_session.take() {
+            if let Some(wasm) = self.wasm_model_manager.as_mut() {
+                if let Some(close_output) = polychora::block_gui::close_gui(wasm, &session) {
+                    // Write updated block metadata back to the world via voxel edit
+                    let pos = session.block_position;
+                    let chunk_pos = pos.map(polychora::shared::spatial::ChunkCoord::from_num);
+                    let mut block =
+                        self.scene.get_block_data(pos[0] as i32, pos[1] as i32, pos[2] as i32, pos[3] as i32);
+                    block.extra_data = close_output.metadata;
+                    self.send_multiplayer_voxel_update(
+                        std::time::Instant::now(),
+                        chunk_pos,
+                        block,
+                    );
+
+                    // Write updated player inventory back
+                    self.inventory = polychora::block_gui::item_slots_to_inventory(
+                        &close_output.player_inventory,
+                    );
+                    self.inventory_dirty = true;
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
+                } else {
+                    eprintln!("Warning: OP_GUI_CLOSE failed, block metadata not persisted");
+                }
+            }
+        }
+        self.grab_mouse(window);
+    }
+
     pub(super) fn toggle_inventory(&mut self) {
         self.inventory_open = !self.inventory_open;
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
@@ -133,7 +166,12 @@ impl App {
     pub(super) fn inject_key_press(&mut self, keycode: KeyCode) {
         match keycode {
             KeyCode::Escape => {
-                if self.teleport_dialog_open {
+                if self.block_gui_session.is_some() {
+                    let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
+                    if let Some(window) = window {
+                        self.close_block_gui(&window);
+                    }
+                } else if self.teleport_dialog_open {
                     self.teleport_dialog_open = false;
                 } else if self.inventory_open {
                     self.inventory_open = false;

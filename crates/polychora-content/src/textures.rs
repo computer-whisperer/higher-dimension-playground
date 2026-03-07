@@ -382,6 +382,65 @@ const ALL_ENTITY_TEXTURES: &[&[EntityTex]] = &[
     SPIDER_TEXTURES,
 ];
 
+/// Block textures: same 4×4×4 3D textures but for blocks, not entities.
+const BLOCK_TEX_SIZE: u32 = 4;
+
+struct BlockTex {
+    id: u32,
+    name: &'static str,
+    gen: fn() -> Vec<u8>,
+}
+
+const BLOCK_TEXTURES: &[BlockTex] = &[
+    BlockTex { id: content_ids::TEX_CHEST, name: "Chest", gen: gen_chest },
+];
+
+/// Chest texture: warm oak planks with darker edge bands and a metal clasp.
+fn gen_chest() -> Vec<u8> {
+    let n = BLOCK_TEX_SIZE;
+    let mut data = Vec::with_capacity((n * n * n * 4) as usize);
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let h = hash3(x, y, z) % 100;
+                // Edge darkening: cells on the boundary of the 4×4×4 cube
+                let on_edge = x == 0 || x == n - 1 || y == 0 || y == n - 1
+                    || z == 0 || z == n - 1;
+                // Metal clasp: center of front face (z==0, x=1..2, y=1..2)
+                let is_clasp = z == 0 && (x == 1 || x == 2) && (y == 1 || y == 2);
+
+                let (r, g, b) = if is_clasp {
+                    // Dull iron/bronze clasp
+                    let v = if h < 40 { 0 } else { 1 };
+                    (
+                        (140 + v * 15) as u8,
+                        (120 + v * 10) as u8,
+                        (70 + v * 10) as u8,
+                    )
+                } else if on_edge {
+                    // Darker wood trim
+                    let v = h.min(30);
+                    (
+                        (95 + v / 3) as u8,
+                        (65 + v / 4) as u8,
+                        (30 + v / 5) as u8,
+                    )
+                } else {
+                    // Warm oak wood body with grain variation
+                    let grain = if h < 30 { 0i32 } else if h < 70 { 8 } else { 16 };
+                    (
+                        (155 + grain) as u8,
+                        (110 + grain * 3 / 4) as u8,
+                        (55 + grain / 2) as u8,
+                    )
+                };
+                data.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+    }
+    data
+}
+
 pub fn texture_declarations() -> Vec<TextureDeclaration> {
     let mut decls: Vec<TextureDeclaration> = SOLID_COLOR_TEXTURES
         .iter()
@@ -405,6 +464,16 @@ pub fn texture_declarations() -> Vec<TextureDeclaration> {
                 format: TextureFormat::Rgba8Srgb,
             });
         }
+    }
+    for bt in BLOCK_TEXTURES {
+        decls.push(TextureDeclaration {
+            texture_id: bt.id,
+            name: String::from(bt.name),
+            width: BLOCK_TEX_SIZE,
+            height: BLOCK_TEX_SIZE,
+            depth: BLOCK_TEX_SIZE,
+            format: TextureFormat::Rgba8Srgb,
+        });
     }
     decls
 }
@@ -432,6 +501,16 @@ pub fn texture_payloads() -> Vec<TexturePayload> {
                 data: (et.gen)(),
             });
         }
+    }
+    for bt in BLOCK_TEXTURES {
+        payloads.push(TexturePayload {
+            texture_id: bt.id,
+            width: BLOCK_TEX_SIZE,
+            height: BLOCK_TEX_SIZE,
+            depth: BLOCK_TEX_SIZE,
+            format: TextureFormat::Rgba8Srgb,
+            data: (bt.gen)(),
+        });
     }
     payloads
 }

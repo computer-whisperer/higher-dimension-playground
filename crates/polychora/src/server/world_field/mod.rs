@@ -690,14 +690,20 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             None
         };
 
-        // 5. Collision check: non-air placements require all target cells to be air.
+        // 5. Collision check: non-air placements require all target cells to be air,
+        //    unless replacing the same block type (e.g. metadata update).
         if !block.is_air() {
             if let Some((base, cells_per_axis)) = multi_cell {
                 if !all_cells_air(&blocks, base, cells_per_axis) {
                     return None;
                 }
             } else if !blocks[voxel_idx].is_air() {
-                return None;
+                let existing = &blocks[voxel_idx];
+                if existing.namespace != block.namespace
+                    || existing.block_type != block.block_type
+                {
+                    return None;
+                }
             }
         }
 

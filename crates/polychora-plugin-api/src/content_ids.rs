@@ -72,6 +72,7 @@ pub const BLOCK_TESSERACT_WEAVE: u32 = 0x76b2bc5b;
 pub const BLOCK_EVENTIDE_ALLOY: u32 = 0x548aaa9e;
 pub const BLOCK_BEACON_MATRIX: u32 = 0x20f1bc81;
 pub const BLOCK_SPAWNER: u32 = 0x7a3e1d5c;
+pub const BLOCK_CHEST: u32 = 0x4c8e2b91;
 
 // ---- Entity type IDs (6 entities) ----
 
@@ -105,6 +106,10 @@ pub const TEX_SPIDER_PHASE: u32 = 0x7f2a0602;
 pub const TEX_SPIDER_CORE: u32 = 0x7f2a0603;
 pub const TEX_SPIDER_WEB: u32 = 0x7f2a0604;
 pub const TEX_SPIDER_EYE: u32 = 0x7f2a0605;
+
+// ---- Block texture IDs (plugin namespace) ----
+
+pub const TEX_CHEST: u32 = 0xc4e57701;
 
 // ---- Spawn egg texture IDs (namespace 0) ----
 

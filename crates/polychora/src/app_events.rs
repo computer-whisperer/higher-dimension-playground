@@ -112,7 +112,8 @@ impl ApplicationHandler for App {
             || self.menu_open
             || self.inventory_open
             || self.teleport_dialog_open
-            || self.dev_console_open;
+            || self.dev_console_open
+            || self.block_gui_session.is_some();
         let egui_consumed = if let (Some(egui_state), Some(window)) =
             (self.egui_winit_state.as_mut(), window.as_ref())
         {
@@ -175,6 +176,10 @@ impl ApplicationHandler for App {
                         }
                     } else if self.dev_console_open {
                         self.close_dev_console();
+                    } else if self.block_gui_session.is_some() {
+                        if let Some(window) = window.as_ref() {
+                            self.close_block_gui(window);
+                        }
                     } else if self.teleport_dialog_open {
                         self.teleport_dialog_open = false;
                         if let Some(window) = window.as_ref() {
@@ -220,6 +225,7 @@ impl ApplicationHandler for App {
                             && !self.inventory_open
                             && !self.teleport_dialog_open
                             && !self.dev_console_open
+                            && self.block_gui_session.is_none()
                         {
                             if let Some(window) = window.as_ref() {
                                 self.grab_mouse(window);

@@ -6,6 +6,7 @@ pub mod block_tick_abi;
 pub mod content_ids;
 pub mod entity;
 pub mod entity_tick_abi;
+pub mod gui_abi;
 pub mod manifest;
 pub mod model_abi;
 pub mod opcodes;

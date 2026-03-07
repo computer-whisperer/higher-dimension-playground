@@ -1201,6 +1201,233 @@ impl App {
         (clicked, right_clicked)
     }
 
+    pub(super) fn draw_egui_block_gui(
+        &mut self,
+        ctx: &egui::Context,
+        close_gui: &mut bool,
+    ) {
+        use polychora_plugin_api::gui_abi::{GuiAction, ItemSlot};
+
+        let Some(session) = &self.block_gui_session else {
+            return;
+        };
+
+        let cell_size = 54.0;
+        let cell_gap = 4.0;
+        let mut clicked_slot: Option<u32> = None;
+        let held = session.held_slot;
+        let mut open = true;
+
+        egui::Window::new(&session.title)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let session = self.block_gui_session.as_ref().unwrap();
+
+                // Draw block GUI slot groups
+                for group in &session.slot_groups {
+                    if let Some(label) = &group.label {
+                        ui.label(label.as_str());
+                    }
+                    let start = group.slot_start as usize;
+                    let end = group.slot_end as usize;
+                    let cols = group.columns as usize;
+
+                    let group_slots = &session.slots[start..end.min(session.slots.len())];
+                    for row in group_slots.chunks(cols) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
+                            for (i, slot) in row.iter().enumerate() {
+                                let global_idx =
+                                    start + (row.as_ptr() as usize - group_slots.as_ptr() as usize)
+                                        / std::mem::size_of::<ItemSlot>()
+                                        + i;
+                                let is_held = held == Some(global_idx as u32);
+                                if self.draw_block_gui_slot(ui, slot, global_idx, cell_size, is_held) {
+                                    clicked_slot = Some(global_idx as u32);
+                                }
+                            }
+                        });
+                    }
+                }
+
+                // Draw player inventory if requested
+                if session.show_player_inventory {
+                    ui.separator();
+                    ui.label("Inventory");
+                    let player_start = session.block_slot_count as usize;
+                    let player_slots = &session.slots[player_start..];
+                    let cols = 9;
+                    for row in player_slots.chunks(cols) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
+                            for (i, slot) in row.iter().enumerate() {
+                                let global_idx =
+                                    player_start
+                                        + (row.as_ptr() as usize
+                                            - player_slots.as_ptr() as usize)
+                                            / std::mem::size_of::<ItemSlot>()
+                                        + i;
+                                let is_held = held == Some(global_idx as u32);
+                                if self.draw_block_gui_slot(ui, slot, global_idx, cell_size, is_held) {
+                                    clicked_slot = Some(global_idx as u32);
+                                }
+                            }
+                        });
+                    }
+                }
+
+                ui.separator();
+                if held.is_some() {
+                    ui.label(
+                        egui::RichText::new("Click a slot to place the item. Esc to close.")
+                            .small()
+                            .color(egui::Color32::from_rgb(200, 200, 100)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("Click a slot to pick up items. Esc to close.")
+                            .small()
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                    );
+                }
+            });
+
+        if !open {
+            *close_gui = true;
+        }
+
+        // Handle click logic: pick up / place
+        if let Some(slot_idx) = clicked_slot {
+            if let Some(held_idx) = held {
+                if held_idx == slot_idx {
+                    // Clicked the held slot again — deselect
+                    if let Some(session) = self.block_gui_session.as_mut() {
+                        session.held_slot = None;
+                    }
+                } else {
+                    // Move from held slot to clicked slot
+                    let from = held_idx;
+                    let count = self
+                        .block_gui_session
+                        .as_ref()
+                        .and_then(|s| s.slots.get(from as usize))
+                        .map(|s| s.count)
+                        .unwrap_or(0);
+                    if count > 0 {
+                        let action = GuiAction::MoveStack {
+                            from_slot: from,
+                            to_slot: slot_idx,
+                            count,
+                        };
+                        if let Some(wasm) = self.wasm_model_manager.as_mut() {
+                            if let Some(session) = self.block_gui_session.as_mut() {
+                                let accepted =
+                                    polychora::block_gui::send_gui_action(wasm, session, action);
+                                if accepted {
+                                    session.held_slot = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Pick up from this slot (if non-empty)
+                let non_empty = self
+                    .block_gui_session
+                    .as_ref()
+                    .and_then(|s| s.slots.get(slot_idx as usize))
+                    .is_some_and(|s| !s.is_empty());
+                if non_empty {
+                    if let Some(session) = self.block_gui_session.as_mut() {
+                        session.held_slot = Some(slot_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw a single slot from the block GUI. Returns true if clicked.
+    fn draw_block_gui_slot(
+        &self,
+        ui: &mut egui::Ui,
+        slot: &polychora_plugin_api::gui_abi::ItemSlot,
+        _global_idx: usize,
+        cell_size: f32,
+        is_held: bool,
+    ) -> bool {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(cell_size, cell_size), egui::Sense::click());
+        let clicked = response.clicked();
+
+        // Background
+        let bg = if is_held {
+            egui::Color32::from_rgba_unmultiplied(60, 60, 40, 200)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200)
+        };
+        ui.painter().rect_filled(rect, 3.0, bg);
+
+        if !slot.is_empty() {
+            let icon_rect = rect.shrink(4.0);
+
+            // Convert ItemSlot to a temporary Item for thumbnail resolution
+            let item = polychora::shared::protocol::Item {
+                namespace: slot.item_ns,
+                item_type: slot.item_type,
+                data: slot.data.clone(),
+            };
+            let tex = self.content_registry.resolve_item_thumbnail_texture(&item);
+            let fallback = self
+                .content_registry
+                .item_color(slot.item_ns, slot.item_type);
+            self.paint_icon(ui.painter(), icon_rect, tex, fallback);
+
+            // Count badge
+            if slot.count > 1 {
+                let badge_pos = rect.right_bottom() + egui::vec2(-4.0, -3.0);
+                ui.painter().text(
+                    badge_pos,
+                    egui::Align2::RIGHT_BOTTOM,
+                    format!("{}", slot.count),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+
+        // Border
+        if is_held {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 255, 100)),
+                egui::epaint::StrokeKind::Outside,
+            );
+        } else if response.hovered() {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(200, 200, 100)),
+                egui::epaint::StrokeKind::Outside,
+            );
+        } else {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(200, 200, 200, 60),
+                ),
+                egui::epaint::StrokeKind::Outside,
+            );
+        }
+
+        clicked
+    }
+
     pub(super) fn draw_egui_controls_dialog(&mut self, ctx: &egui::Context) {
         let mut open = true;
         egui::Window::new("Controls")
@@ -1338,6 +1565,7 @@ impl App {
         let mut teleport_target: Option<[f32; 4]> = None;
         let mut close_teleport = false;
         let mut close_console = false;
+        let mut close_block_gui = false;
         let mut console_command: Option<String> = None;
         let mut transition_to_playing: Option<MainMenuTransition> = None;
         let mut return_to_main_menu = false;
@@ -1361,6 +1589,9 @@ impl App {
                 }
                 if self.dev_console_open {
                     self.draw_egui_dev_console(ctx, &mut console_command, &mut close_console);
+                }
+                if self.block_gui_session.is_some() {
+                    self.draw_egui_block_gui(ctx, &mut close_block_gui);
                 }
                 self.draw_egui_hotbar(ctx);
                 self.draw_egui_orientation_indicator(ctx);
@@ -1393,6 +1624,9 @@ impl App {
         if close_inventory {
             self.inventory_open = false;
             self.grab_mouse(&window);
+        }
+        if close_block_gui {
+            self.close_block_gui(&window);
         }
         if let Some(stack) = inventory_pick {
             self.inventory

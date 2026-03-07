@@ -23,6 +23,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 texture: TextureRef { namespace: $ns, texture_id: $tex },
                 transparent: false,
                 light_emission: 0,
+                interactable: false,
                 tick_config: None,
             }
         };
@@ -35,6 +36,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 texture: TextureRef { namespace: $ns, texture_id: $tex },
                 transparent: true,
                 light_emission: 0,
+                interactable: false,
                 tick_config: None,
             }
         };
@@ -47,6 +49,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 texture: TextureRef { namespace: $ns, texture_id: $tex },
                 transparent: false,
                 light_emission: $em,
+                interactable: false,
                 tick_config: None,
             }
         };
@@ -146,7 +149,20 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
         block!(BLOCK_EVENTIDE_ALLOY,    0, TEX_EVENTIDE_ALLOY,    "Eventide Alloy",    Special, [112, 130, 168]),
         block!(BLOCK_BEACON_MATRIX,     0, TEX_BEACON_MATRIX,     "Beacon Matrix",     Light,   [255, 248, 196], light: 15),
 
-        // Spawner (69) — ticking block that spawns entities
+        // Chest (70) — interactive block with inventory
+        BlockDeclaration {
+            type_id: BLOCK_CHEST,
+            name: String::from("Chest"),
+            category: Special,
+            color_hint: [153, 117, 61],
+            texture: TextureRef { namespace: CONTENT_NS, texture_id: TEX_CHEST },
+            transparent: false,
+            light_emission: 0,
+            interactable: true,
+            tick_config: None,
+        },
+
+        // Spawner (71) — ticking block that spawns entities
         BlockDeclaration {
             type_id: BLOCK_SPAWNER,
             name: String::from("Spawner"),
@@ -155,6 +171,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
             texture: TextureRef { namespace: 0, texture_id: TEX_SINGULARITY_CORE },
             transparent: false,
             light_emission: 8,
+            interactable: false,
             tick_config: Some(BlockTickConfig {
                 interval_ms: 5000,
                 activation_radius: 24.0,

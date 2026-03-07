@@ -1,3 +1,4 @@
+pub mod block_gui;
 pub mod builtin_content;
 pub mod content_registry;
 pub mod migration;

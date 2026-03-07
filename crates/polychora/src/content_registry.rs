@@ -216,6 +216,8 @@ pub struct BlockEntry {
     /// GPU material token (u16) assigned at registration time.
     /// Internal to render system; use MaterialResolver for GPU lookups.
     pub material_token: u16,
+    /// If true, right-clicking this block triggers `OP_BLOCK_INTERACT`.
+    pub interactable: bool,
     /// If set, the server ticks instances of this block type periodically.
     pub tick_config: Option<BlockTickConfig>,
 }
@@ -357,6 +359,7 @@ impl ContentRegistry {
                     texture_id: 0,
                 },
                 material_token: 0,
+                interactable: false,
                 tick_config: None,
             },
         );
@@ -390,6 +393,7 @@ impl ContentRegistry {
                 texture_id: 0,
             },
             material_token: token,
+            interactable: false,
             tick_config: None,
         };
         self.blocks.insert((namespace, block_type), entry);
@@ -408,6 +412,7 @@ impl ContentRegistry {
         color: [u8; 3],
         forced_token: u16,
         texture: TextureRef,
+        interactable: bool,
         tick_config: Option<BlockTickConfig>,
     ) {
         let entry = BlockEntry {
@@ -418,6 +423,7 @@ impl ContentRegistry {
             color,
             texture,
             material_token: forced_token,
+            interactable,
             tick_config,
         };
         self.blocks.insert((namespace, block_type), entry);
@@ -682,6 +688,12 @@ impl ContentRegistry {
     pub fn block_icon_texture(&self, namespace: u32, block_type: u32) -> Option<TextureRef> {
         self.resolve_block_entry(namespace, block_type)
             .map(|e| e.texture)
+    }
+
+    /// Check if a block type is interactable (triggers OP_BLOCK_INTERACT on right-click).
+    pub fn is_block_interactable(&self, namespace: u32, block_type: u32) -> bool {
+        self.resolve_block_entry(namespace, block_type)
+            .is_some_and(|e| e.interactable)
     }
 
     /// Get the tick config for a block type, if any.

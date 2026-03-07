@@ -62,12 +62,7 @@ fn block_data_from_slot(
 ) -> polychora::shared::voxel::BlockData {
     slot.as_ref()
         .and_then(|stack| stack.to_block_data())
-        .unwrap_or_else(|| {
-            polychora::shared::voxel::BlockData::simple(
-                polychora_plugin_api::content_ids::CONTENT_NS,
-                polychora_plugin_api::content_ids::BLOCK_YELLOW_GREEN,
-            )
-        })
+        .unwrap_or(polychora::shared::voxel::BlockData::AIR)
 }
 struct GpuPhaseAccum {
     name: &'static str,
@@ -917,6 +912,7 @@ fn main() {
         ),
         pending_texture_uploads,
         wasm_model_manager: polychora::plugin_loader::create_wasm_manager_for_client(),
+        block_gui_session: None,
         material_icon_sheet: None,
         material_icons_texture_id: None,
         multiplayer,
@@ -1265,6 +1261,7 @@ struct App {
     material_resolver: polychora::content_registry::MaterialResolver,
     pending_texture_uploads: Vec<polychora::plugin_loader::PendingTextureUpload>,
     wasm_model_manager: Option<polychora::shared::wasm::WasmPluginManager>,
+    block_gui_session: Option<polychora::block_gui::BlockGuiSession>,
     material_icon_sheet: Option<material_icons::MaterialIconSheet>,
     material_icons_texture_id: Option<egui::TextureId>,
     multiplayer: Option<MultiplayerClient>,

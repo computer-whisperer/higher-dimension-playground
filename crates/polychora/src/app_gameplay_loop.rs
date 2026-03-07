@@ -159,6 +159,7 @@ impl App {
             || self.inventory_open
             || self.teleport_dialog_open
             || self.dev_console_open
+            || self.block_gui_session.is_some()
         {
             self.drain_gameplay_inputs_while_menu_open();
             return;
@@ -694,6 +695,47 @@ impl App {
                             }
                         }
                     } else if place_requested {
+                        // Check if the hit block is interactable (e.g. chest).
+                        let mut handled_interact = false;
+                        if let Some(hit_block) = &edit_targets.hit_block {
+                            if self
+                                .content_registry
+                                .is_block_interactable(hit_block.namespace, hit_block.block_type)
+                            {
+                                if let Some(hit) = &edit_targets.hit {
+                                    let position = hit.origin_i32().map(|c| c as i64);
+                                    if let Some(wasm) = self.wasm_model_manager.as_mut() {
+                                        if let Some(session) =
+                                            polychora::block_gui::try_open_block_gui(
+                                                wasm,
+                                                hit_block,
+                                                position,
+                                                &self.inventory,
+                                            )
+                                        {
+                                            eprintln!(
+                                                "Opened block GUI: {} at ({}, {}, {}, {})",
+                                                session.title,
+                                                position[0],
+                                                position[1],
+                                                position[2],
+                                                position[3],
+                                            );
+                                            self.block_gui_session = Some(session);
+                                            if let Some(window) =
+                                                self.rcx.as_ref().and_then(|rcx| rcx.window.clone())
+                                            {
+                                                self.release_mouse(&window);
+                                            }
+                                            handled_interact = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if handled_interact {
+                            // Interaction consumed the right-click — skip placement.
+                        } else {
                         // Check if the selected hotbar item is a spawn egg.
                         let egg_key = self
                             .inventory
@@ -729,7 +771,8 @@ impl App {
                                 "Spawn egg used: entity ({:#x}, {:#x}) at ({:.1}, {:.1}, {:.1}, {:.1})",
                                 ens, etype, spawn_pos[0], spawn_pos[1], spawn_pos[2], spawn_pos[3],
                             );
-                        } else if let Some(place) = &edit_targets.place {
+                        } else if !self.selected_block.is_air() {
+                          if let Some(place) = &edit_targets.place {
                             let [x, y, z, w] = place.origin_i32();
                             eprintln!(
                                 "Placed voxel {} ({}) at ({x}, {y}, {z}, {w}) scale={}",
@@ -755,8 +798,10 @@ impl App {
                                     self.inventory.hotbar_slot(self.hotbar_selected_index),
                                 );
                             }
+                          }
                         }
                     }
+                    } // close `else { ... }` for handled_interact
                 }
             } else {
                 self.input.take_remove_block();
