@@ -15,13 +15,9 @@ pub enum SideEffect {
         offset: [f32; 4],
     },
     /// Update the block's metadata (extra_data) at its position.
-    UpdateBlockMetadata {
-        metadata: Vec<u8>,
-    },
+    UpdateBlockMetadata { metadata: Vec<u8> },
     /// Consume items from the player's held hotbar slot.
-    ConsumeHeldItem {
-        count: u32,
-    },
+    ConsumeHeldItem { count: u32 },
     /// Give an item to the player, adding it to their inventory.
     GiveItem {
         item_ns: u32,

@@ -705,16 +705,17 @@ impl App {
                                 if let Some(hit) = &edit_targets.hit {
                                     let position = hit.origin_i32().map(|c| c as i64);
                                     if let Some(wasm) = self.wasm_model_manager.as_mut() {
-                                        let result =
-                                            polychora::block_gui::try_block_interact(
-                                                wasm,
-                                                hit_block,
-                                                position,
-                                                &self.inventory,
-                                                self.hotbar_selected_index as u32,
-                                            );
+                                        let result = polychora::block_gui::try_block_interact(
+                                            wasm,
+                                            hit_block,
+                                            position,
+                                            &self.inventory,
+                                            self.hotbar_selected_index as u32,
+                                        );
                                         match result {
-                                            polychora::block_gui::BlockInteractResult::OpenGui(session) => {
+                                            polychora::block_gui::BlockInteractResult::OpenGui(
+                                                session,
+                                            ) => {
                                                 eprintln!(
                                                     "Opened block GUI: {} at ({}, {}, {}, {})",
                                                     session.title,
@@ -724,14 +725,18 @@ impl App {
                                                     position[3],
                                                 );
                                                 self.block_gui_session = Some(session);
-                                                if let Some(window) =
-                                                    self.rcx.as_ref().and_then(|rcx| rcx.window.clone())
+                                                if let Some(window) = self
+                                                    .rcx
+                                                    .as_ref()
+                                                    .and_then(|rcx| rcx.window.clone())
                                                 {
                                                     self.release_mouse(&window);
                                                 }
                                                 handled_interact = true;
                                             }
-                                            polychora::block_gui::BlockInteractResult::Handled(effects) => {
+                                            polychora::block_gui::BlockInteractResult::Handled(
+                                                effects,
+                                            ) => {
                                                 self.process_block_interact_side_effects(
                                                     &effects.side_effects,
                                                     hit.origin,
@@ -747,79 +752,87 @@ impl App {
                         if handled_interact {
                             // Interaction consumed the right-click — skip placement.
                         } else {
-                        // Check if the selected hotbar item is a spawn egg.
-                        let egg_key = self
-                            .inventory
-                            .slot(self.hotbar_selected_index)
-                            .and_then(|s| s.spawn_egg_entity_key());
-                        if let Some((ens, etype)) = egg_key {
-                            let spawn_pos = if let Some(place) = &edit_targets.place {
-                                let o = place.origin_i32();
-                                [
-                                    o[0] as f32 + 0.5,
-                                    o[1] as f32 + 0.5,
-                                    o[2] as f32 + 0.5,
-                                    o[3] as f32 + 0.5,
-                                ]
-                            } else {
+                            // Check if the selected hotbar item is a spawn egg.
+                            let egg_key = self
+                                .inventory
+                                .slot(self.hotbar_selected_index)
+                                .and_then(|s| s.spawn_egg_entity_key());
+                            if let Some((ens, etype)) = egg_key {
+                                let spawn_pos = if let Some(place) = &edit_targets.place {
+                                    let o = place.origin_i32();
+                                    [
+                                        o[0] as f32 + 0.5,
+                                        o[1] as f32 + 0.5,
+                                        o[2] as f32 + 0.5,
+                                        o[3] as f32 + 0.5,
+                                    ]
+                                } else {
+                                    let look = self.current_look_direction();
+                                    let p = self.camera.position;
+                                    [
+                                        p[0] + look[0] * 3.0,
+                                        p[1] + look[1] * 3.0,
+                                        p[2] + look[2] * 3.0,
+                                        p[3] + look[3] * 3.0,
+                                    ]
+                                };
+                                let scale = self
+                                    .content_registry
+                                    .entity_lookup(ens, etype)
+                                    .map(|e| e.default_scale)
+                                    .unwrap_or(1.0);
                                 let look = self.current_look_direction();
-                                let p = self.camera.position;
-                                [
-                                    p[0] + look[0] * 3.0,
-                                    p[1] + look[1] * 3.0,
-                                    p[2] + look[2] * 3.0,
-                                    p[3] + look[3] * 3.0,
-                                ]
-                            };
-                            let scale = self
-                                .content_registry
-                                .entity_lookup(ens, etype)
-                                .map(|e| e.default_scale)
-                                .unwrap_or(1.0);
-                            let look = self.current_look_direction();
-                            self.send_multiplayer_spawn_entity(ens, etype, spawn_pos, look, scale);
-                            eprintln!(
+                                self.send_multiplayer_spawn_entity(
+                                    ens, etype, spawn_pos, look, scale,
+                                );
+                                eprintln!(
                                 "Spawn egg used: entity ({:#x}, {:#x}) at ({:.1}, {:.1}, {:.1}, {:.1})",
                                 ens, etype, spawn_pos[0], spawn_pos[1], spawn_pos[2], spawn_pos[3],
                             );
-                        } else if let Some(bp_meta) = self
-                            .inventory
-                            .slot(self.hotbar_selected_index)
-                            .and_then(|s| s.blueprint_meta())
-                        {
-                            if let Some(place) = &edit_targets.place {
-                                self.place_blueprint(&bp_meta, place.origin);
+                            } else if let Some(bp_meta) = self
+                                .inventory
+                                .slot(self.hotbar_selected_index)
+                                .and_then(|s| s.blueprint_meta())
+                            {
+                                if let Some(place) = &edit_targets.place {
+                                    self.place_blueprint(&bp_meta, place.origin);
+                                }
+                            } else if !self.selected_block.is_air() {
+                                if let Some(place) = &edit_targets.place {
+                                    let [x, y, z, w] = place.origin_i32();
+                                    eprintln!(
+                                        "Placed voxel {} ({}) at ({x}, {y}, {z}, {w}) scale={}",
+                                        self.selected_block.block_type,
+                                        self.content_registry.block_name(
+                                            self.selected_block.namespace,
+                                            self.selected_block.block_type
+                                        ),
+                                        place.scale_exp,
+                                    );
+                                    self.play_spatial_sound_voxel(
+                                        SoundEffect::Place,
+                                        place.origin_i32(),
+                                        1.0,
+                                    );
+                                    let mut placed_block = self.selected_block.clone();
+                                    placed_block.orientation = self.placement_orientation;
+                                    self.send_multiplayer_voxel_update(
+                                        now,
+                                        place.origin,
+                                        placed_block,
+                                    );
+                                    if self.game_mode
+                                        == polychora::shared::inventory::GameMode::Survival
+                                    {
+                                        self.inventory.decrement_slot(self.hotbar_selected_index);
+                                        self.inventory_dirty = true;
+                                        self.selected_block = block_data_from_slot(
+                                            self.inventory.hotbar_slot(self.hotbar_selected_index),
+                                        );
+                                    }
+                                }
                             }
-                        } else if !self.selected_block.is_air() {
-                          if let Some(place) = &edit_targets.place {
-                            let [x, y, z, w] = place.origin_i32();
-                            eprintln!(
-                                "Placed voxel {} ({}) at ({x}, {y}, {z}, {w}) scale={}",
-                                self.selected_block.block_type,
-                                self.content_registry.block_name(
-                                    self.selected_block.namespace,
-                                    self.selected_block.block_type
-                                ),
-                                place.scale_exp,
-                            );
-                            self.play_spatial_sound_voxel(
-                                SoundEffect::Place,
-                                place.origin_i32(),
-                                1.0,
-                            );
-                            let mut placed_block = self.selected_block.clone();
-                            placed_block.orientation = self.placement_orientation;
-                            self.send_multiplayer_voxel_update(now, place.origin, placed_block);
-                            if self.game_mode == polychora::shared::inventory::GameMode::Survival {
-                                self.inventory.decrement_slot(self.hotbar_selected_index);
-                                self.inventory_dirty = true;
-                                self.selected_block = block_data_from_slot(
-                                    self.inventory.hotbar_slot(self.hotbar_selected_index),
-                                );
-                            }
-                          }
                         }
-                    }
                     } // close `else { ... }` for handled_interact
                 }
             } else {
@@ -921,27 +934,32 @@ impl App {
         bp_meta: &polychora::shared::item_types::BlueprintMeta,
         position: [polychora::shared::spatial::ChunkCoord; 4],
     ) {
-        use polychora::shared::spatial::ChunkCoord;
         use polychora::shared::voxel::BlockData;
 
         let origin = position.map(|c| c.to_num::<i64>());
         eprintln!(
             "Blueprint: placing {} blocks at ({}, {}, {}, {})",
             bp_meta.blocks.len(),
-            origin[0], origin[1], origin[2], origin[3],
+            origin[0],
+            origin[1],
+            origin[2],
+            origin[3],
         );
 
-        let now = std::time::Instant::now();
-        for bp_block in &bp_meta.blocks {
-            let world_pos = [
-                ChunkCoord::from_num(origin[0] + bp_block.offset[0] as i64),
-                ChunkCoord::from_num(origin[1] + bp_block.offset[1] as i64),
-                ChunkCoord::from_num(origin[2] + bp_block.offset[2] as i64),
-                ChunkCoord::from_num(origin[3] + bp_block.offset[3] as i64),
-            ];
-            let block = BlockData::simple(bp_block.namespace, bp_block.block_type);
-            self.send_multiplayer_voxel_update(now, world_pos, block);
-        }
+        let edits: Vec<polychora::shared::protocol::VoxelEdit> = bp_meta
+            .blocks
+            .iter()
+            .map(|bp_block| polychora::shared::protocol::VoxelEdit {
+                position: [
+                    origin[0] + bp_block.offset[0] as i64,
+                    origin[1] + bp_block.offset[1] as i64,
+                    origin[2] + bp_block.offset[2] as i64,
+                    origin[3] + bp_block.offset[3] as i64,
+                ],
+                block: BlockData::simple(bp_block.namespace, bp_block.block_type),
+            })
+            .collect();
+        self.send_multiplayer_voxel_batch(edits);
     }
 
     /// Update WAILA (What Am I Looking At) target based on block and entity
@@ -1630,10 +1648,7 @@ impl App {
             .inventory
             .hotbar_slot(self.hotbar_selected_index)
             .clone();
-        let holding_block = held_item
-            .as_ref()
-            .and_then(|s| s.to_block_data())
-            .is_some();
+        let holding_block = held_item.as_ref().and_then(|s| s.to_block_data()).is_some();
         let preview_instance = held_item.as_ref().map(|stack| {
             build_held_item_preview_instance(
                 &self.camera,

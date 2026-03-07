@@ -1,9 +1,7 @@
 use crate::content_registry::ContentRegistry;
 use crate::shared::chunk_payload::{ChunkArrayData, ChunkPayload, ResolvedChunkPayload};
 use crate::shared::region_tree::{ChunkKey, RegionChunkTree, RegionNodeKind, RegionTreeCore};
-use crate::shared::spatial::{
-    fixed_from_lattice, step_for_scale, Aabb4i, ChunkCoord,
-};
+use crate::shared::spatial::{fixed_from_lattice, step_for_scale, Aabb4i, ChunkCoord};
 use crate::shared::voxel::{linear_cell_index, BlockData, CHUNK_SIZE, CHUNK_VOLUME};
 use std::collections::{HashMap, HashSet};
 
@@ -178,7 +176,10 @@ impl ServerWorldCache {
     }
 
     fn is_ticking_type(&self, block: &BlockData) -> bool {
-        !block.is_air() && self.ticking_types.contains(&(block.namespace, block.block_type))
+        !block.is_air()
+            && self
+                .ticking_types
+                .contains(&(block.namespace, block.block_type))
     }
 
     /// A uniform region of a ticking block. Enumerate all voxel positions.
@@ -216,10 +217,7 @@ impl ServerWorldCache {
         let Ok(indices) = chunk_array.decode_dense_indices() else {
             return;
         };
-        let Some(extents) = chunk_array
-            .bounds
-            .chunk_extents_at_scale(se)
-        else {
+        let Some(extents) = chunk_array.bounds.chunk_extents_at_scale(se) else {
             return;
         };
         let (ca_lmin, ca_lmax) = chunk_array.bounds.to_chunk_lattice_bounds(se);

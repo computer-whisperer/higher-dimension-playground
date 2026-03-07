@@ -111,7 +111,9 @@ fn world_bounds_from_chunk_bounds(bounds: Aabb4i) -> ([i32; 4], [i32; 4]) {
 }
 
 fn placement_allowed(cell: StructureCell, blocked_cells: Option<&HashSet<StructureCell>>) -> bool {
-    blocked_cells.map(|blocked| !blocked.contains(&cell)).unwrap_or(true)
+    blocked_cells
+        .map(|blocked| !blocked.contains(&cell))
+        .unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +155,10 @@ pub fn collect_structure_placement_reports(
     }
 
     let (spawn_num, spawn_den) = if let Some((scale_num, scale_den)) = spawn_rate_scale {
-        (STRUCTURE_SPAWN_NUMERATOR * scale_num, STRUCTURE_SPAWN_DENOMINATOR * scale_den)
+        (
+            STRUCTURE_SPAWN_NUMERATOR * scale_num,
+            STRUCTURE_SPAWN_DENOMINATOR * scale_den,
+        )
     } else {
         (STRUCTURE_SPAWN_NUMERATOR, STRUCTURE_SPAWN_DENOMINATOR)
     };
@@ -171,14 +176,27 @@ pub fn collect_structure_placement_reports(
     for cell_x in cell_min_x..=cell_max_x {
         for cell_z in cell_min_z..=cell_max_z {
             for cell_w in cell_min_w..=cell_max_w {
-                let cell_hash = hash_structure_cell(seed, cell_x, cell_z, cell_w, STRUCTURE_HASH_SALT);
+                let cell_hash =
+                    hash_structure_cell(seed, cell_x, cell_z, cell_w, STRUCTURE_HASH_SALT);
                 if cell_hash % spawn_den >= spawn_num {
                     continue;
                 }
 
-                let origin_x = cell_x * STRUCTURE_CELL_SIZE + jitter_from_hash_with_radius(cell_hash ^ JITTER_X_SALT, STRUCTURE_CELL_JITTER);
-                let origin_z = cell_z * STRUCTURE_CELL_SIZE + jitter_from_hash_with_radius(cell_hash ^ JITTER_Z_SALT, STRUCTURE_CELL_JITTER);
-                let origin_w = cell_w * STRUCTURE_CELL_SIZE + jitter_from_hash_with_radius(cell_hash ^ JITTER_W_SALT, STRUCTURE_CELL_JITTER);
+                let origin_x = cell_x * STRUCTURE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ JITTER_X_SALT,
+                        STRUCTURE_CELL_JITTER,
+                    );
+                let origin_z = cell_z * STRUCTURE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ JITTER_Z_SALT,
+                        STRUCTURE_CELL_JITTER,
+                    );
+                let origin_w = cell_w * STRUCTURE_CELL_SIZE
+                    + jitter_from_hash_with_radius(
+                        cell_hash ^ JITTER_W_SALT,
+                        STRUCTURE_CELL_JITTER,
+                    );
 
                 if origin_x.abs() <= STRUCTURE_ORIGIN_EXCLUSION_RADIUS
                     && origin_z.abs() <= STRUCTURE_ORIGIN_EXCLUSION_RADIUS
@@ -188,9 +206,12 @@ pub fn collect_structure_placement_reports(
                 }
 
                 if let Some((min_xzw, max_xzw)) = origin_bounds_xzw {
-                    if origin_x < min_xzw[0] || origin_x > max_xzw[0]
-                        || origin_z < min_xzw[1] || origin_z > max_xzw[1]
-                        || origin_w < min_xzw[2] || origin_w > max_xzw[2]
+                    if origin_x < min_xzw[0]
+                        || origin_x > max_xzw[0]
+                        || origin_z < min_xzw[1]
+                        || origin_z > max_xzw[1]
+                        || origin_w < min_xzw[2]
+                        || origin_w > max_xzw[2]
                     {
                         continue;
                     }
@@ -203,7 +224,8 @@ pub fn collect_structure_placement_reports(
 
                 let pick_roll = splitmix64(cell_hash ^ STRUCTURE_PICK_SALT) % config.total_weight;
                 let blueprint_idx = config.pick_blueprint_index(pick_roll);
-                let orientation = (splitmix64(cell_hash ^ STRUCTURE_ROTATION_SALT) % ROTATION_VARIANTS) as u8;
+                let orientation =
+                    (splitmix64(cell_hash ^ STRUCTURE_ROTATION_SALT) % ROTATION_VARIANTS) as u8;
                 // Origin Y = 0: the WASM plugin applies per-blueprint Y offsets.
                 let origin = [origin_x, 0, origin_z, origin_w];
 

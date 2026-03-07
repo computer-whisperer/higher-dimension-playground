@@ -1233,7 +1233,10 @@ pub fn for_each_block_in_tree(
     let chunks = collect_non_empty_chunks_from_core_in_bounds(tree, tree.bounds);
     let cs = CHUNK_SIZE as i64;
     for (chunk_key, resolved) in &chunks {
-        if matches!(resolved.payload, crate::shared::chunk_payload::ChunkPayload::Virgin) {
+        if matches!(
+            resolved.payload,
+            crate::shared::chunk_payload::ChunkPayload::Virgin
+        ) {
             continue;
         }
         let chunk_origin: [i64; 4] = [
@@ -1246,10 +1249,7 @@ pub fn for_each_block_in_tree(
             for vy in 0..CHUNK_SIZE {
                 for vz in 0..CHUNK_SIZE {
                     for vw in 0..CHUNK_SIZE {
-                        let voxel_idx = linear_cell_index(
-                            [vx, vy, vz, vw],
-                            [CHUNK_SIZE; 4],
-                        );
+                        let voxel_idx = linear_cell_index([vx, vy, vz, vw], [CHUNK_SIZE; 4]);
                         let block = resolved.block_at(voxel_idx);
                         if block.is_air() || block.is_virgin() {
                             continue;

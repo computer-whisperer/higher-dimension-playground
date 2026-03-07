@@ -30,28 +30,45 @@ fn convert_chunk_payload(src: &api::ChunkPayload) -> ChunkPayload {
             if materials.len() != CHUNK_VOLUME {
                 return ChunkPayload::Empty;
             }
-            ChunkPayload::from_dense_materials_compact(materials)
-                .unwrap_or(ChunkPayload::Dense16 {
-                    materials: materials.clone(),
-                })
+            ChunkPayload::from_dense_materials_compact(materials).unwrap_or(ChunkPayload::Dense16 {
+                materials: materials.clone(),
+            })
         }
     }
 }
 
 fn convert_chunk_array_data(src: &api::ChunkArrayData) -> ChunkArrayData {
-    let chunk_palette: Vec<ChunkPayload> = src.chunk_palette.iter().map(convert_chunk_payload).collect();
+    let chunk_palette: Vec<ChunkPayload> = src
+        .chunk_palette
+        .iter()
+        .map(convert_chunk_payload)
+        .collect();
     let block_palette: Vec<BlockData> = src.block_palette.iter().map(convert_block_data).collect();
     let bounds = convert_aabb4(&src.bounds);
 
     ChunkArrayData::from_dense_indices_with_block_palette(
-        bounds, chunk_palette, src.dense_indices.clone(), Some(0), block_palette, src.scale_exp,
+        bounds,
+        chunk_palette,
+        src.dense_indices.clone(),
+        Some(0),
+        block_palette,
+        src.scale_exp,
     )
     .unwrap_or_else(|_| empty_chunk_array(bounds, vec![BlockData::AIR], src.scale_exp))
 }
 
-fn empty_chunk_array(bounds: Aabb4, block_palette: Vec<BlockData>, scale_exp: i8) -> ChunkArrayData {
+fn empty_chunk_array(
+    bounds: Aabb4,
+    block_palette: Vec<BlockData>,
+    scale_exp: i8,
+) -> ChunkArrayData {
     ChunkArrayData::from_dense_indices_with_block_palette(
-        bounds, vec![ChunkPayload::Empty], vec![0u16; 1], Some(0), block_palette, scale_exp,
+        bounds,
+        vec![ChunkPayload::Empty],
+        vec![0u16; 1],
+        Some(0),
+        block_palette,
+        scale_exp,
     )
     .expect("creating empty chunk array should not fail")
 }
@@ -60,7 +77,9 @@ fn convert_node_kind(src: &api::RegionNodeKind) -> RegionNodeKind {
     match src {
         api::RegionNodeKind::Empty => RegionNodeKind::Empty,
         api::RegionNodeKind::Uniform(block) => RegionNodeKind::Uniform(convert_block_data(block)),
-        api::RegionNodeKind::ChunkArray(data) => RegionNodeKind::ChunkArray(convert_chunk_array_data(data)),
+        api::RegionNodeKind::ChunkArray(data) => {
+            RegionNodeKind::ChunkArray(convert_chunk_array_data(data))
+        }
         api::RegionNodeKind::Branch(children) => {
             RegionNodeKind::Branch(children.iter().map(convert_region_tree).collect())
         }

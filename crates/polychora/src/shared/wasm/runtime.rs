@@ -21,7 +21,7 @@ impl Default for WasmExecutionLimits {
             max_input_bytes: 64 * 1024,
             max_output_bytes: 64 * 1024,
             max_memory_pages: 16384,
-            max_fuel: 200_000,
+            max_fuel: 1_000_000,
         }
     }
 }

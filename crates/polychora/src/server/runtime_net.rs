@@ -274,26 +274,35 @@ fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aab
             .collect::<Vec<_>>()
     };
 
-    let mut recipients_by_clip = HashMap::<Aabb4i, Vec<u64>>::new();
+    // Collect per-client: merge all clipped dirty bounds into one envelope
+    // so we issue a single query_world_subtree per client instead of per-chunk.
+    let mut envelope_by_client = HashMap::<u64, Aabb4i>::new();
     for bounds in unique {
         for (client_id, interest) in &recipients_by_client {
             let Some(clipped) = bounds.intersection(interest) else {
                 continue;
             };
-            recipients_by_clip
-                .entry(clipped)
-                .or_default()
-                .push(*client_id);
+            envelope_by_client
+                .entry(*client_id)
+                .and_modify(|env| *env = env.union(&clipped))
+                .or_insert(clipped);
         }
     }
-    if recipients_by_clip.is_empty() {
+    if envelope_by_client.is_empty() {
         return 0;
     }
 
+    // Group clients that share the same merged envelope to avoid duplicate queries.
+    let mut clients_by_envelope = HashMap::<Aabb4i, Vec<u64>>::new();
+    for (client_id, envelope) in envelope_by_client {
+        clients_by_envelope
+            .entry(envelope)
+            .or_default()
+            .push(client_id);
+    }
+
     let mut sent = 0usize;
-    for (clip_bounds, mut client_ids) in recipients_by_clip {
-        client_ids.sort_unstable();
-        client_ids.dedup();
+    for (clip_bounds, client_ids) in clients_by_envelope {
         let subtree = {
             let mut guard = state.lock().expect("server state lock poisoned");
             guard.query_world_subtree(clip_bounds)
@@ -524,7 +533,10 @@ fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8
         apply_authoritative_voxel_edit(&mut guard, world_pos, block, scale_exp);
         count += 1;
     });
-    eprintln!("SetTreeCore: placed {count} blocks at ({}, {}, {}, {})", position[0], position[1], position[2], position[3]);
+    eprintln!(
+        "SetTreeCore: placed {count} blocks at ({}, {}, {}, {})",
+        position[0], position[1], position[2], position[3]
+    );
 }
 
 fn flush_world_dirty_updates(state: &SharedState) -> usize {
@@ -795,8 +807,7 @@ pub(super) fn start_broadcast_thread(
                         &mut next_entity_sim_ms,
                         entity_sim_step_ms,
                     );
-                let block_tick_spawns =
-                    run_block_ticks(&mut guard, &mut wasm_manager, now);
+                let block_tick_spawns = run_block_ticks(&mut guard, &mut wasm_manager, now);
                 let pickup_syncs = pickup_nearby_item_stacks(&mut guard, now);
                 let entity_batches =
                     build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
@@ -1387,6 +1398,14 @@ pub(super) fn handle_message(
                 apply_authoritative_voxel_edit(&mut guard, pos, block, scale_exp)
             };
         }
+        ClientMessage::SetVoxelBatch { edits } => {
+            let bulk: Vec<_> = edits
+                .into_iter()
+                .map(|e| (e.position.map(ChunkCoord::from_num), e.block))
+                .collect();
+            let mut guard = state.lock().expect("server state lock poisoned");
+            guard.apply_bulk_voxel_edits_scale0(&bulk);
+        }
         ClientMessage::SpawnEntity {
             entity_type_namespace,
             entity_type,
@@ -1616,10 +1635,7 @@ fn spawn_entity(
 
 /// Scan for item stack entities near players and perform magnet pull / pickup.
 /// Returns `Vec<(client_id, inventory_payload)>` for clients whose inventory changed.
-fn pickup_nearby_item_stacks(
-    state: &mut ServerState,
-    now_ms: u64,
-) -> Vec<(u64, Vec<u8>)> {
+fn pickup_nearby_item_stacks(state: &mut ServerState, now_ms: u64) -> Vec<(u64, Vec<u8>)> {
     use crate::shared::entity_types::ENTITY_ITEM_STACK;
     use crate::shared::inventory::Inventory;
     use crate::shared::protocol::ItemStack;
@@ -1643,8 +1659,7 @@ fn pickup_nearby_item_stacks(
         .entity_store
         .iter()
         .filter(|e| {
-            e.entity.namespace == ENTITY_ITEM_STACK.0
-                && e.entity.entity_type == ENTITY_ITEM_STACK.1
+            e.entity.namespace == ENTITY_ITEM_STACK.0 && e.entity.entity_type == ENTITY_ITEM_STACK.1
         })
         .map(|e| (e.entity_id, e.home_position, e.spawn_time_ms))
         .collect();
@@ -1677,7 +1692,11 @@ fn pickup_nearby_item_stacks(
 
         if dist_sq < ITEM_PICKUP_RADIUS_SQ {
             // Pickup: decode item, add to inventory
-            let entity_state = match state.entity_store.iter().find(|e| e.entity_id == *item_entity_id) {
+            let entity_state = match state
+                .entity_store
+                .iter()
+                .find(|e| e.entity_id == *item_entity_id)
+            {
                 Some(e) => e,
                 None => continue,
             };

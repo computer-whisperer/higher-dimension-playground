@@ -1,7 +1,7 @@
 use crate::content_registry::{ContentRegistry, EntityEntry, ItemEntry};
-use polychora_plugin_api::manifest::{ItemThumbnail, ItemWorldModel};
 use crate::shared::entity_types::{EntitySimConfig, SimulationMode, ENTITY_ITEM_STACK_TYPE};
 use polychora_plugin_api::entity::{EntityCategory, MobLocomotionMode};
+use polychora_plugin_api::manifest::{ItemThumbnail, ItemWorldModel};
 use polychora_plugin_api::texture::builtin_textures;
 use polychora_plugin_api::texture::TextureRef;
 

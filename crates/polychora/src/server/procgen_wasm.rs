@@ -131,7 +131,11 @@ impl ProcgenWasmCaller {
             .map_err(|e| ProcgenWasmError::SerializeInput(e.to_string()))?;
 
         let result = manager
-            .call_slot(WasmPluginSlot::Procgen, OP_PROCGEN_PREPARE as i32, &input_bytes)?
+            .call_slot(
+                WasmPluginSlot::Procgen,
+                OP_PROCGEN_PREPARE as i32,
+                &input_bytes,
+            )?
             .ok_or(ProcgenWasmError::SlotNotActive)?;
 
         let output: ProcgenPrepareOutput = postcard::from_bytes(&result.invocation.output)
@@ -171,7 +175,11 @@ impl ProcgenWasmCaller {
             .map_err(|e| ProcgenWasmError::SerializeInput(e.to_string()))?;
 
         let result = manager
-            .call_slot(WasmPluginSlot::Procgen, OP_PROCGEN_GENERATE as i32, &input_bytes)?
+            .call_slot(
+                WasmPluginSlot::Procgen,
+                OP_PROCGEN_GENERATE as i32,
+                &input_bytes,
+            )?
             .ok_or(ProcgenWasmError::SlotNotActive)?;
 
         let output: ProcgenGenerateOutput = postcard::from_bytes(&result.invocation.output)
@@ -225,7 +233,11 @@ impl ProcgenWasmState {
         let mut manager =
             WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime, cache);
         manager
-            .activate_slot_from_bytes(WasmPluginSlot::Procgen, wasm_bytes, PROCGEN_EXECUTION_LIMITS)
+            .activate_slot_from_bytes(
+                WasmPluginSlot::Procgen,
+                wasm_bytes,
+                PROCGEN_EXECUTION_LIMITS,
+            )
             .ok()?;
         Some(Self { manager, caller })
     }
@@ -242,7 +254,12 @@ impl ProcgenWasmState {
 
     /// Build a `StructurePlacementConfig` from the WASM declarations.
     pub fn structure_placement_config(&self) -> StructurePlacementConfig {
-        let weights: Vec<u32> = self.caller.declarations().iter().map(|d| d.spawn_weight).collect();
+        let weights: Vec<u32> = self
+            .caller
+            .declarations()
+            .iter()
+            .map(|d| d.spawn_weight)
+            .collect();
         StructurePlacementConfig::from_weights(&weights)
     }
 

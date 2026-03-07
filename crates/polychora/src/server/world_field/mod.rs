@@ -699,8 +699,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 }
             } else if !blocks[voxel_idx].is_air() {
                 let existing = &blocks[voxel_idx];
-                if existing.namespace != block.namespace
-                    || existing.block_type != block.block_type
+                if existing.namespace != block.namespace || existing.block_type != block.block_type
                 {
                     return None;
                 }
@@ -745,6 +744,88 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             self.dirty_save_chunks.insert(key, se);
         }
         Some(chunk_key)
+    }
+
+    /// Efficiently set multiple voxels at scale 0.
+    ///
+    /// Groups edits by chunk and processes each chunk once: one read, one
+    /// encode, one tree insert, one dirty mark.  Falls back to per-voxel
+    /// edits for the rare case where a chunk contains sub-chunk-scale data.
+    pub fn apply_bulk_voxel_edits_scale0(
+        &mut self,
+        edits: &[([ChunkCoord; 4], BlockData)],
+    ) -> Vec<ChunkKey> {
+        // Group voxel edits by their scale-0 chunk key.
+        let mut by_chunk: HashMap<ChunkKey, Vec<([ChunkCoord; 4], BlockData)>> = HashMap::new();
+        for (pos, block) in edits {
+            let (chunk_key, _) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+            by_chunk
+                .entry(chunk_key)
+                .or_default()
+                .push((*pos, block.clone()));
+        }
+
+        let mut changed = Vec::new();
+        for (chunk_key, chunk_edits) in &by_chunk {
+            let chunk_bounds = Aabb4i::chunk_world_bounds(*chunk_key, 0);
+            if let Err(e) = self.ensure_persisted_bounds_loaded(chunk_bounds) {
+                eprintln!("failed to hydrate spatial region before bulk edit: {e}");
+            }
+
+            let entries = self
+                .override_chunks
+                .collect_chunk_entries_in_bounds(chunk_bounds);
+            if entries.iter().any(|(_, se)| *se != 0) {
+                for (pos, block) in chunk_edits {
+                    if let Some(ck) = self.apply_voxel_edit_at_scale(*pos, block.clone(), 0) {
+                        if !changed.contains(&ck) {
+                            changed.push(ck);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let (mut blocks, virgin_blocks) = self.read_effective_and_virgin_blocks(*chunk_key, 0);
+
+            for (pos, block) in chunk_edits {
+                let (_, voxel_idx) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+                // Collision check: non-air blocks can only replace air or same type.
+                if !block.is_air() && !blocks[voxel_idx].is_air() {
+                    let existing = &blocks[voxel_idx];
+                    if existing.namespace != block.namespace
+                        || existing.block_type != block.block_type
+                    {
+                        continue;
+                    }
+                }
+                blocks[voxel_idx] = block.clone();
+            }
+
+            let should_remove = blocks_match_ignoring_scale(&blocks, &virgin_blocks);
+            let payload = if should_remove {
+                None
+            } else {
+                ResolvedChunkPayload::from_dense_blocks(&blocks).ok()
+            };
+
+            let affected_bounds = self
+                .override_chunks
+                .set_chunk_at_scale(*chunk_key, payload, 0);
+            let Some(affected_bounds) = affected_bounds else {
+                continue;
+            };
+
+            self.mark_dirty_chunk(*chunk_key, 0);
+            for (key, se) in self
+                .override_chunks
+                .collect_chunk_entries_in_bounds(affected_bounds)
+            {
+                self.dirty_save_chunks.insert(key, se);
+            }
+            changed.push(*chunk_key);
+        }
+        changed
     }
 
     /// Efficiently set multiple voxels to AIR at scale 0.

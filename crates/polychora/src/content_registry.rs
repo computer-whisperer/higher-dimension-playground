@@ -572,8 +572,7 @@ impl ContentRegistry {
 
         if key == ITEM_SPAWN_EGG {
             let meta = SpawnEggMeta::decode(&item.data)?;
-            let entity =
-                self.resolve_entity_entry(meta.entity_namespace, meta.entity_type)?;
+            let entity = self.resolve_entity_entry(meta.entity_namespace, meta.entity_type)?;
             if entity.spawn_egg_texture_id != 0 {
                 return Some(TextureRef {
                     namespace: 0,
@@ -584,9 +583,7 @@ impl ContentRegistry {
         }
 
         // Plugin item: use declared thumbnail texture
-        self.items
-            .get(&key)
-            .and_then(|e| e.thumbnail.texture)
+        self.items.get(&key).and_then(|e| e.thumbnail.texture)
     }
 
     // -----------------------------------------------------------------------
@@ -882,11 +879,8 @@ mod tests {
 
         // Verify round-trip for all non-migrated procedural tokens.
         // Procedural tokens for non-migrated blocks: 9, 11, 13, 14, 15..=68
-        let procedural_tokens: Vec<u16> = [9u16, 11, 13, 14]
-            .iter()
-            .copied()
-            .chain(15..=68)
-            .collect();
+        let procedural_tokens: Vec<u16> =
+            [9u16, 11, 13, 14].iter().copied().chain(15..=68).collect();
         for token in procedural_tokens {
             let (ns, bt) = resolver
                 .block_for_gpu_token(token)
@@ -1057,11 +1051,15 @@ mod tests {
     fn builtin_items_registered() {
         let registry = full_registry();
         // Block item
-        let block_item = registry.item_entry(0, 1).expect("ITEM_BLOCK should be registered");
+        let block_item = registry
+            .item_entry(0, 1)
+            .expect("ITEM_BLOCK should be registered");
         assert_eq!(block_item.name, "Block");
         assert_eq!(block_item.max_stack_size, 64);
         // Spawn egg item
-        let egg_item = registry.item_entry(0, 2).expect("ITEM_SPAWN_EGG should be registered");
+        let egg_item = registry
+            .item_entry(0, 2)
+            .expect("ITEM_SPAWN_EGG should be registered");
         assert_eq!(egg_item.name, "Spawn Egg");
         assert_eq!(egg_item.max_stack_size, 1);
         // Name lookups
@@ -1118,7 +1116,10 @@ mod tests {
         // A stone block should resolve its thumbnail to Stone's texture
         let stone_stack = ItemStack::block(content_ids::CONTENT_NS, content_ids::BLOCK_STONE, 1, 0);
         let thumb = registry.resolve_item_thumbnail_texture(&stone_stack.item);
-        assert!(thumb.is_some(), "block item should have a thumbnail texture");
+        assert!(
+            thumb.is_some(),
+            "block item should have a thumbnail texture"
+        );
         assert_eq!(
             thumb.unwrap().texture_id,
             polychora_plugin_api::texture::builtin_textures::TEX_STONE,

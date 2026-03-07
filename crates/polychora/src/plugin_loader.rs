@@ -325,8 +325,11 @@ pub fn create_full_registry_with_wasm() -> (
     let pending = plugin.pending_texture_uploads;
 
     // Entity simulation manager (goes to the broadcast thread).
-    let mut manager =
-        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime.clone(), cache.clone());
+    let mut manager = WasmPluginManager::new(
+        WasmExecutionRole::ServerAuthoritative,
+        runtime.clone(),
+        cache.clone(),
+    );
     manager
         .activate_slot_from_bytes(
             WasmPluginSlot::EntitySimulation,
@@ -379,8 +382,11 @@ pub fn create_wasm_manager_for_server() -> Option<(WasmPluginManager, ProcgenWas
     let plugin = load_plugin(&runtime, wasm_bytes, plugin_load_limits()).ok()?;
 
     // Entity simulation manager.
-    let mut manager =
-        WasmPluginManager::new(WasmExecutionRole::ServerAuthoritative, runtime.clone(), cache.clone());
+    let mut manager = WasmPluginManager::new(
+        WasmExecutionRole::ServerAuthoritative,
+        runtime.clone(),
+        cache.clone(),
+    );
     manager
         .activate_slot_from_bytes(
             WasmPluginSlot::EntitySimulation,

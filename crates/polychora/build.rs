@@ -74,8 +74,14 @@ fn build_wasm_plugin() {
     // are modified.
     println!("cargo:rerun-if-changed={}", content_manifest.display());
     let watch_dirs = [
-        workspace_root.join("crates").join("polychora-content").join("src"),
-        workspace_root.join("crates").join("polychora-plugin-api").join("src"),
+        workspace_root
+            .join("crates")
+            .join("polychora-content")
+            .join("src"),
+        workspace_root
+            .join("crates")
+            .join("polychora-plugin-api")
+            .join("src"),
     ];
     for dir in &watch_dirs {
         watch_dir_recursive(dir);

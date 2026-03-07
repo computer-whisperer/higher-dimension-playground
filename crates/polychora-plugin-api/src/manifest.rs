@@ -128,11 +128,11 @@ pub struct TextureDeclaration {
 #[cfg(test)]
 mod tests {
     extern crate alloc;
+    use super::BlockTickConfig;
     use super::*;
     use crate::entity::{MobAbilityParams, MobLocomotionMode, SimulationMode};
     use alloc::string::String;
     use alloc::vec;
-    use super::BlockTickConfig;
 
     #[test]
     fn manifest_postcard_round_trip() {

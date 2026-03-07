@@ -556,12 +556,7 @@ pub(super) fn build_held_item_preview_instance(
     rotate_basis_plane(&mut basis, 0, 2, time_s * 0.85 + 0.2);
     rotate_basis_plane(&mut basis, 0, 3, time_s * 0.55 + 0.9);
 
-    build_centered_model_instance(
-        anchor,
-        &basis,
-        [0.35, 0.35, 0.38, 0.38],
-        cell_mats,
-    )
+    build_centered_model_instance(anchor, &basis, [0.35, 0.35, 0.38, 0.38], cell_mats)
 }
 
 /// Build a ghost entity instance for the placement preview at the target's

@@ -5121,8 +5121,7 @@ fn place_break_replace_preserves_platform_chunk() {
     let ground = BlockData::simple(0, 1);
 
     // Large thin platform: 16×1×16×16 chunks.
-    let platform =
-        Aabb4i::from_lattice_bounds([0, 0, 0, 0], [15, 0, 15, 15], 0);
+    let platform = Aabb4i::from_lattice_bounds([0, 0, 0, 0], [15, 0, 15, 15], 0);
 
     let mut tree = RegionChunkTree::new();
     let platform_core = RegionTreeCore {
@@ -5198,11 +5197,7 @@ fn place_break_replace_preserves_platform_chunk() {
             let chunk_a_core = make_chunk_with_special_cell(chunk_a_key, placed_block);
             let chunk_a_bounds = chunk_a_core.bounds;
             let r1 = tree.splice_non_empty_core_in_bounds(chunk_a_bounds, &chunk_a_core);
-            assert!(
-                r1.is_some(),
-                "step 1 splice failed for A={:?}",
-                chunk_a_key
-            );
+            assert!(r1.is_some(), "step 1 splice failed for A={:?}", chunk_a_key);
 
             // Step 2: Break ground block at chunk_B (replace with chunk that has air cell).
             let chunk_b_hole = make_chunk_with_special_cell(chunk_b_key, BlockData::AIR);
@@ -5210,7 +5205,8 @@ fn place_break_replace_preserves_platform_chunk() {
             assert!(
                 r2.is_some(),
                 "step 2 splice failed for A={:?} B={:?}",
-                chunk_a_key, chunk_b_key
+                chunk_a_key,
+                chunk_b_key
             );
 
             // Step 3: Replace ground block (restore to uniform ground).
@@ -5223,7 +5219,8 @@ fn place_break_replace_preserves_platform_chunk() {
             assert!(
                 r3.is_some(),
                 "step 3 splice returned None for A={:?} B={:?} — tree failed to detect change",
-                chunk_a_key, chunk_b_key
+                chunk_a_key,
+                chunk_b_key
             );
 
             // Verify: chunk_B should have ground data (Uniform or ChunkArray with all-ground).
@@ -5232,10 +5229,8 @@ fn place_break_replace_preserves_platform_chunk() {
                 RegionNodeKind::Uniform(b) => b == &ground,
                 RegionNodeKind::ChunkArray(_) => {
                     // Check if all cells are ground.
-                    let chunks = collect_non_empty_chunks_from_core_in_bounds(
-                        &slice,
-                        chunk_b_bounds,
-                    );
+                    let chunks =
+                        collect_non_empty_chunks_from_core_in_bounds(&slice, chunk_b_bounds);
                     chunks.iter().all(|(_, resolved)| {
                         resolved
                             .uniform_block()
@@ -5259,7 +5254,8 @@ fn place_break_replace_preserves_platform_chunk() {
             assert!(
                 !matches!(slice_a.kind, RegionNodeKind::Empty),
                 "chunk_A data lost after B-replace! A={:?} B={:?}",
-                chunk_a_key, chunk_b_key,
+                chunk_a_key,
+                chunk_b_key,
             );
 
             // Verify tree integrity.
@@ -5292,9 +5288,7 @@ fn splice_two_non_overlapping_uniform_regions() {
                 slices.push(current);
                 continue;
             }
-            let extents: Vec<_> = (0..4)
-                .map(|a| current.max[a] - current.min[a])
-                .collect();
+            let extents: Vec<_> = (0..4).map(|a| current.max[a] - current.min[a]).collect();
             let split_axis = (0..4).max_by_key(|&a| extents[a]).unwrap_or(0);
             if extents[split_axis] <= crate::shared::spatial::ChunkCoord::ZERO {
                 slices.push(current);
@@ -5349,21 +5343,23 @@ fn splice_two_non_overlapping_uniform_regions() {
     eprintln!("Slices that should cover chunk [0,0,0,8]:");
     for (i, s) in &covering_slices {
         let d = tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, *s);
-        eprintln!("  slice {i}: bounds={:?}->{:?} desired_bounds={:?}->{:?}",
-            s.min, s.max, d.bounds.min, d.bounds.max);
+        eprintln!(
+            "  slice {i}: bounds={:?}->{:?} desired_bounds={:?}->{:?}",
+            s.min, s.max, d.bounds.min, d.bounds.max
+        );
     }
 
     // Apply all slices, with tracing enabled for covering slices.
     let mut tree = RegionChunkTree::new();
     for (i, &slice_bounds) in non_empty_slices.iter().enumerate() {
-        let desired =
-            tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, slice_bounds);
+        let desired = tree_edit::slice_non_empty_region_core_in_bounds(&uniform_core, slice_bounds);
         let is_covering = covering_slices.iter().any(|&(ci, _)| ci == i);
         let result = tree.splice_non_empty_core_in_bounds(slice_bounds, &desired);
         if is_covering {
             eprintln!(
                 "Applied covering slice {i} ({:?}->{:?}): splice_result={:?}",
-                slice_bounds.min, slice_bounds.max,
+                slice_bounds.min,
+                slice_bounds.max,
                 result.map(|b| (b.min, b.max)),
             );
         }
@@ -5375,8 +5371,12 @@ fn splice_two_non_overlapping_uniform_regions() {
         // Check what data IS at the chunk bounds.
         let kb_slice = tree.slice_non_empty_core_in_bounds(kb_bounds);
         eprintln!("After all slices: chunk [0,0,0,8] payload missing");
-        eprintln!("  slice at chunk bounds: kind={:?} bounds={:?}->{:?}",
-            std::mem::discriminant(&kb_slice.kind), kb_slice.bounds.min, kb_slice.bounds.max);
+        eprintln!(
+            "  slice at chunk bounds: kind={:?} bounds={:?}->{:?}",
+            std::mem::discriminant(&kb_slice.kind),
+            kb_slice.bounds.min,
+            kb_slice.bounds.max
+        );
 
         // Check if the covering slices' data regions exist in the tree.
         for &(i, s) in &covering_slices {
@@ -5387,7 +5387,10 @@ fn splice_two_non_overlapping_uniform_regions() {
                 std::mem::discriminant(&tree_slice.kind),
                 tree_slice.bounds.min, tree_slice.bounds.max);
         }
-        panic!("chunk [0,0,0,8] missing after all {} splices", non_empty_slices.len());
+        panic!(
+            "chunk [0,0,0,8] missing after all {} splices",
+            non_empty_slices.len()
+        );
     }
 }
 
@@ -5418,9 +5421,7 @@ fn splice_streaming_patches_populates_all_regions() {
             slices.push(current);
             continue;
         }
-        let extents: Vec<_> = (0..4)
-            .map(|a| current.max[a] - current.min[a])
-            .collect();
+        let extents: Vec<_> = (0..4).map(|a| current.max[a] - current.min[a]).collect();
         let split_axis = (0..4).max_by_key(|&a| extents[a]).unwrap_or(0);
         if extents[split_axis] <= crate::shared::spatial::ChunkCoord::ZERO {
             slices.push(current);
@@ -5464,7 +5465,10 @@ fn splice_streaming_patches_populates_all_regions() {
                 let cb = Aabb4i::chunk_world_bounds(k, 0);
                 let payload = tree.chunk_payload(k);
                 if payload.is_none() {
-                    missing.push(format!("  chunk [{x},0,{z},{w}] bounds={:?}->{:?}", cb.min, cb.max));
+                    missing.push(format!(
+                        "  chunk [{x},0,{z},{w}] bounds={:?}->{:?}",
+                        cb.min, cb.max
+                    ));
                 }
             }
         }
@@ -5474,6 +5478,11 @@ fn splice_streaming_patches_populates_all_regions() {
         "After streaming {} slices, {} platform chunks have no payload:\n{}",
         slices.len(),
         missing.len(),
-        missing.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        missing
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

@@ -27,14 +27,14 @@ impl App {
                     // Write updated block metadata back to the world via voxel edit
                     let pos = session.block_position;
                     let chunk_pos = pos.map(polychora::shared::spatial::ChunkCoord::from_num);
-                    let mut block =
-                        self.scene.get_block_data(pos[0] as i32, pos[1] as i32, pos[2] as i32, pos[3] as i32);
-                    block.extra_data = close_output.metadata;
-                    self.send_multiplayer_voxel_update(
-                        std::time::Instant::now(),
-                        chunk_pos,
-                        block,
+                    let mut block = self.scene.get_block_data(
+                        pos[0] as i32,
+                        pos[1] as i32,
+                        pos[2] as i32,
+                        pos[3] as i32,
                     );
+                    block.extra_data = close_output.metadata;
+                    self.send_multiplayer_voxel_update(std::time::Instant::now(), chunk_pos, block);
 
                     // Write updated player inventory back
                     self.inventory = polychora::block_gui::item_slots_to_inventory(

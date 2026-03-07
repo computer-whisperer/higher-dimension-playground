@@ -1,9 +1,9 @@
 use super::{QueryDetail, QueryVolume, WorldField};
 use crate::server::procgen;
 use crate::server::procgen_wasm::{xzw_orientation_to_tesseract, ProcgenWasmState};
+use crate::shared::chunk_payload::ChunkPayload;
 #[cfg(test)]
 use crate::shared::chunk_payload::ResolvedChunkPayload;
-use crate::shared::chunk_payload::ChunkPayload;
 use crate::shared::region_tree::{RegionChunkTree, RegionNodeKind, RegionTreeCore};
 use crate::shared::spatial::{Aabb4i, ChunkCoord};
 use crate::shared::voxel::{BaseWorldKind, BlockData, CHUNK_SIZE};
@@ -337,7 +337,12 @@ impl MassivePlatformsWorldGenerator {
                 (report.origin[2] as i64 + tx[2]) as i32,
                 (report.origin[3] as i64 + tx[3]) as i32,
             ];
-            match wasm.prepare_and_generate(structure_id, report.cell_hash, orientation, world_origin) {
+            match wasm.prepare_and_generate(
+                structure_id,
+                report.cell_hash,
+                orientation,
+                world_origin,
+            ) {
                 Ok(core) if core.bounds.is_valid() => {
                     let _ = tree.splice_non_empty_core_in_bounds(core.bounds, &core);
                 }
@@ -415,14 +420,10 @@ impl MassivePlatformsWorldGenerator {
         let overhang = procgen::max_structure_overhang_chunks();
 
         self.for_each_platform_instance_in_bounds(search_bounds, min_cy, max_cy, |platform| {
-            let procgen_frame_offset =
-                procgen_frame_offset_xzw_chunks(self.world_seed, platform);
-            let Some(local_bounds) = query_bounds_local_to_platform(
-                bounds,
-                platform,
-                procgen_frame_offset,
-                overhang,
-            ) else {
+            let procgen_frame_offset = procgen_frame_offset_xzw_chunks(self.world_seed, platform);
+            let Some(local_bounds) =
+                query_bounds_local_to_platform(bounds, platform, procgen_frame_offset, overhang)
+            else {
                 return;
             };
 

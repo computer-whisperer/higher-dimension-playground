@@ -192,10 +192,11 @@ impl App {
         } else {
             self.main_menu_player_name.trim().to_string()
         };
-        let (wasm_manager, procgen_wasm) = match polychora::plugin_loader::create_wasm_manager_for_server() {
-            Some((mgr, pw)) => (Some(mgr), Some(pw)),
-            None => (None, None),
-        };
+        let (wasm_manager, procgen_wasm) =
+            match polychora::plugin_loader::create_wasm_manager_for_server() {
+                Some((mgr, pw)) => (Some(mgr), Some(pw)),
+                None => (None, None),
+            };
         let config = build_singleplayer_runtime_config(
             &self.args,
             world_file.clone(),
@@ -242,7 +243,8 @@ impl App {
                 return;
             }
         };
-        if let Err(error) = polychora::migration::legacy_migration::validate_chunk_bounds(min_chunk, max_chunk)
+        if let Err(error) =
+            polychora::migration::legacy_migration::validate_chunk_bounds(min_chunk, max_chunk)
         {
             self.main_menu_migration_status = Some(format!("Error: {error}"));
             return;

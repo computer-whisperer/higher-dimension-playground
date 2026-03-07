@@ -454,17 +454,15 @@ impl App {
                             let tex = self
                                 .content_registry
                                 .resolve_item_thumbnail_texture(&stack.item);
-                            let fallback = self.content_registry.item_color(
-                                stack.item.namespace,
-                                stack.item.item_type,
-                            );
+                            let fallback = self
+                                .content_registry
+                                .item_color(stack.item.namespace, stack.item.item_type);
                             self.paint_icon(ui.painter(), icon_rect, tex, fallback);
 
                             // Scale badge (bottom-left) for block items
                             if let Some(block) = stack.to_block_data() {
                                 if block.scale_exp != 0 {
-                                    let badge_pos =
-                                        rect.left_bottom() + egui::vec2(4.0, -3.0);
+                                    let badge_pos = rect.left_bottom() + egui::vec2(4.0, -3.0);
                                     ui.painter().text(
                                         badge_pos,
                                         egui::Align2::LEFT_BOTTOM,
@@ -475,9 +473,7 @@ impl App {
                                 }
                                 self.content_registry
                                     .block_name(block.namespace, block.block_type)
-                            } else if let Some((ens, etype)) =
-                                stack.spawn_egg_entity_key()
-                            {
+                            } else if let Some((ens, etype)) = stack.spawn_egg_entity_key() {
                                 self.content_registry
                                     .entity_lookup(ens, etype)
                                     .map(|e| e.canonical_name.as_str())
@@ -902,12 +898,7 @@ impl App {
 
                         // Material icon (tesseract image or color fallback)
                         let icon_rect = rect.shrink(4.0);
-                        self.paint_icon(
-                            ui.painter(),
-                            icon_rect,
-                            Some(entry.texture),
-                            entry.color,
-                        );
+                        self.paint_icon(ui.painter(), icon_rect, Some(entry.texture), entry.color);
 
                         // Material name
                         let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
@@ -984,12 +975,7 @@ impl App {
                         } else {
                             None
                         };
-                        self.paint_icon(
-                            ui.painter(),
-                            rect.shrink(8.0),
-                            egg_tex,
-                            entity.base_color,
-                        );
+                        self.paint_icon(ui.painter(), rect.shrink(8.0), egg_tex, entity.base_color);
 
                         // Entity name label
                         let text_pos = egui::pos2(rect.center().x, rect.bottom() - 3.0);
@@ -1048,8 +1034,7 @@ impl App {
                 ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
                 for col in 0..INVENTORY_COLS {
                     let slot_idx = row * INVENTORY_COLS + col;
-                    let (left, right) =
-                        self.draw_inventory_cell(ui, slot_idx, cell_size, false);
+                    let (left, right) = self.draw_inventory_cell(ui, slot_idx, cell_size, false);
                     if left {
                         clicked_slot = Some(slot_idx);
                     }
@@ -1066,12 +1051,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
             for col in 0..HOTBAR_SIZE {
-                let (left, right) = self.draw_inventory_cell(
-                    ui,
-                    col,
-                    cell_size,
-                    col == self.hotbar_selected_index,
-                );
+                let (left, right) =
+                    self.draw_inventory_cell(ui, col, cell_size, col == self.hotbar_selected_index);
                 if left {
                     clicked_slot = Some(col);
                 }
@@ -1201,11 +1182,7 @@ impl App {
         (clicked, right_clicked)
     }
 
-    pub(super) fn draw_egui_block_gui(
-        &mut self,
-        ctx: &egui::Context,
-        close_gui: &mut bool,
-    ) {
+    pub(super) fn draw_egui_block_gui(&mut self, ctx: &egui::Context, close_gui: &mut bool) {
         use polychora_plugin_api::gui_abi::{GuiAction, ItemSlot};
 
         let Some(session) = &self.block_gui_session else {
@@ -1240,12 +1217,14 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
                             for (i, slot) in row.iter().enumerate() {
-                                let global_idx =
-                                    start + (row.as_ptr() as usize - group_slots.as_ptr() as usize)
+                                let global_idx = start
+                                    + (row.as_ptr() as usize - group_slots.as_ptr() as usize)
                                         / std::mem::size_of::<ItemSlot>()
-                                        + i;
+                                    + i;
                                 let is_held = held == Some(global_idx as u32);
-                                if self.draw_block_gui_slot(ui, slot, global_idx, cell_size, is_held) {
+                                if self
+                                    .draw_block_gui_slot(ui, slot, global_idx, cell_size, is_held)
+                                {
                                     clicked_slot = Some(global_idx as u32);
                                 }
                             }
@@ -1264,14 +1243,14 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(cell_gap, cell_gap);
                             for (i, slot) in row.iter().enumerate() {
-                                let global_idx =
-                                    player_start
-                                        + (row.as_ptr() as usize
-                                            - player_slots.as_ptr() as usize)
-                                            / std::mem::size_of::<ItemSlot>()
-                                        + i;
+                                let global_idx = player_start
+                                    + (row.as_ptr() as usize - player_slots.as_ptr() as usize)
+                                        / std::mem::size_of::<ItemSlot>()
+                                    + i;
                                 let is_held = held == Some(global_idx as u32);
-                                if self.draw_block_gui_slot(ui, slot, global_idx, cell_size, is_held) {
+                                if self
+                                    .draw_block_gui_slot(ui, slot, global_idx, cell_size, is_held)
+                                {
                                     clicked_slot = Some(global_idx as u32);
                                 }
                             }

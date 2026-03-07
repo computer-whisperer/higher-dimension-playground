@@ -155,7 +155,9 @@ fn build_bvh_from_render_tree(
                     bvh,
                     RenderBvhNode {
                         bounds: clipped,
-                        kind: RenderBvhNodeKind::Leaf { leaf_index: leaf_id },
+                        kind: RenderBvhNodeKind::Leaf {
+                            leaf_index: leaf_id,
+                        },
                     },
                     delta,
                 )
@@ -177,7 +179,9 @@ fn build_bvh_from_render_tree(
                     bvh,
                     RenderBvhNode {
                         bounds: clipped,
-                        kind: RenderBvhNodeKind::Leaf { leaf_index: leaf_id },
+                        kind: RenderBvhNodeKind::Leaf {
+                            leaf_index: leaf_id,
+                        },
                     },
                     delta,
                 )
@@ -234,7 +238,10 @@ fn binarize_subtree_roots(
 
     // SAH sweep over all 4 axes to find the best binary partition.
     let n = roots.len();
-    let root_bounds: Vec<Aabb4i> = roots.iter().map(|&r| bvh.nodes[r as usize].bounds).collect();
+    let root_bounds: Vec<Aabb4i> = roots
+        .iter()
+        .map(|&r| bvh.nodes[r as usize].bounds)
+        .collect();
 
     let mut best_axis = 0usize;
     let mut best_split = n / 2;

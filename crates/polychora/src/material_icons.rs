@@ -129,8 +129,7 @@ fn render_spawn_egg_icon_rgba(base_color: [u8; 3]) -> Vec<u8> {
                 let rect_alpha = (0.5 - dist_rect).clamp(0.0, 1.0);
 
                 // Check if inside highlight dot
-                let dist_dot =
-                    ((fx - dot_cx).powi(2) + (fy - dot_cy).powi(2)).sqrt() - dot_r;
+                let dist_dot = ((fx - dot_cx).powi(2) + (fy - dot_cy).powi(2)).sqrt() - dot_r;
 
                 let (pr, pg, pb) = if dist_dot < 0.5 {
                     let dot_alpha = (0.5 - dist_dot).clamp(0.0, 1.0);
@@ -281,9 +280,7 @@ pub fn generate_material_icon_sheet_gpu(
         // also need a (0, texture_id) entry so entity model_textures
         // (which use tex() → namespace 0) can resolve to an icon.
         if entry.texture.namespace != 0 {
-            uv_rects
-                .entry((0, entry.texture.texture_id))
-                .or_insert(uv);
+            uv_rects.entry((0, entry.texture.texture_id)).or_insert(uv);
         }
     }
 

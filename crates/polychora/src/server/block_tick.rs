@@ -17,9 +17,8 @@ pub(super) enum BlockTickSpawnAction {
 
 /// Read the block at a scale-0 voxel position from the world.
 fn read_block_at(state: &ServerState, position: [ChunkCoord; 4]) -> Option<BlockData> {
-    let (chunk_key, voxel_index) = voxel::world_to_chunk_at_scale(
-        position[0], position[1], position[2], position[3], 0,
-    );
+    let (chunk_key, voxel_index) =
+        voxel::world_to_chunk_at_scale(position[0], position[1], position[2], position[3], 0);
     if let Some((payload, _scale)) = state.world_chunk_at(chunk_key) {
         return Some(payload.block_at(voxel_index));
     }

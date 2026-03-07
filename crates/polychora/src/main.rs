@@ -1,7 +1,6 @@
 mod app_bootstrap;
 mod app_console;
 mod app_controls;
-mod consts;
 mod app_events;
 mod app_gameplay_loop;
 mod app_helpers;
@@ -15,6 +14,7 @@ mod app_ui;
 mod audio;
 mod audio_synth;
 mod camera;
+mod consts;
 mod input;
 mod material_icons;
 mod multiplayer;
@@ -46,12 +46,12 @@ use winit::{
 
 use app_bootstrap::parse_commands;
 use app_helpers::*;
-use consts::*;
 use audio::{
     AudioEngine, SoundEffect, AUDIO_SPATIAL_FALLOFF_POWER_DEFAULT, AUDIO_SPATIAL_FALLOFF_POWER_MAX,
     AUDIO_SPATIAL_FALLOFF_POWER_MIN,
 };
 use camera::{Camera4D, PLAYER_HEIGHT};
+use consts::*;
 use input::{ControlScheme, InputState, RotationPair};
 use multiplayer::{ClientMessage as MultiplayerClientMessage, MultiplayerClient, MultiplayerEvent};
 use polychora::shared::spatial::Aabb4i;
@@ -714,7 +714,8 @@ fn main() {
     // run an integrated server so mob steering can be evaluated via WASM.
     let (content_registry, wasm_manager, procgen_wasm, pending_texture_uploads) =
         if start_with_integrated_singleplayer {
-            let (reg, mgr, pw, pending) = polychora::plugin_loader::create_full_registry_with_wasm();
+            let (reg, mgr, pw, pending) =
+                polychora::plugin_loader::create_full_registry_with_wasm();
             (Arc::new(reg), Some(mgr), Some(pw), pending)
         } else {
             let (reg, pending) = polychora::plugin_loader::create_full_registry();

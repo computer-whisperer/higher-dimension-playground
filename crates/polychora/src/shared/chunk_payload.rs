@@ -783,10 +783,9 @@ impl ResolvedChunkPayload {
     /// Wrap a raw `ChunkPayload` using the static material-token mapping.
     /// Suitable for debug/diagnostic code that doesn't have a ContentRegistry.
     pub fn from_payload_with_static_palette(payload: ChunkPayload) -> Self {
-        let palette: Vec<BlockData> =
-            (0..=crate::content_registry::LEGACY_MATERIAL_TOKEN_COUNT)
-                .map(crate::content_registry::block_data_from_material_token)
-                .collect();
+        let palette: Vec<BlockData> = (0..=crate::content_registry::LEGACY_MATERIAL_TOKEN_COUNT)
+            .map(crate::content_registry::block_data_from_material_token)
+            .collect();
         Self {
             payload,
             block_palette: palette,

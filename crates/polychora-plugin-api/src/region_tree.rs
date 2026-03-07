@@ -114,7 +114,9 @@ pub struct ChunkArrayData {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChunkPayload {
     Empty,
-    Dense16 { materials: Vec<u16> },
+    Dense16 {
+        materials: Vec<u16>,
+    },
     /// No override — leave existing world content unchanged.
     /// Used in blueprint/structure overlays so that sub-chunk structures
     /// don't erase surrounding terrain.

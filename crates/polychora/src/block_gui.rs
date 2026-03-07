@@ -1,6 +1,6 @@
 use polychora_plugin_api::gui_abi::{
-    BlockInteractInput, BlockInteractOutput, GuiActionInput, GuiCloseInput, GuiCloseOutput,
-    GuiAction, GuiActionOutput, ItemSlot,
+    BlockInteractInput, BlockInteractOutput, GuiAction, GuiActionInput, GuiActionOutput,
+    GuiCloseInput, GuiCloseOutput, ItemSlot,
 };
 use polychora_plugin_api::opcodes::{OP_BLOCK_INTERACT, OP_GUI_ACTION, OP_GUI_CLOSE};
 use polychora_plugin_api::side_effects::{SideEffect, WasmCallResult};

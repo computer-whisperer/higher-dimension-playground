@@ -4,7 +4,9 @@ use super::chunk_array_ops::{
     slice_chunk_array_to_bounds_with_dense_indices, try_coarsen_chunk_array,
 };
 use super::tree::*;
-use super::tree_normalize::{normalize_chunk_node, normalize_chunk_node_override, prune_empty_subtrees};
+use super::tree_normalize::{
+    normalize_chunk_node, normalize_chunk_node_override, prune_empty_subtrees,
+};
 use super::tree_query::{
     kind_has_non_empty_chunk_intersection, non_empty_kinds_semantically_equal_in_bounds,
 };
@@ -340,14 +342,13 @@ fn carve_leaf_for_chunk_edit(
                 );
             }
         } else {
-            let existing_resolved =
-                chunk_array_payload_at(chunk_array, key_pos)
-                    // Virgin means "no override here" — treat as absent for comparison
-                    .filter(|p| !matches!(p, ChunkPayload::Virgin))
-                    .map(|p| ResolvedChunkPayload {
-                        payload: p,
-                        block_palette: chunk_array.block_palette.clone(),
-                    });
+            let existing_resolved = chunk_array_payload_at(chunk_array, key_pos)
+                // Virgin means "no override here" — treat as absent for comparison
+                .filter(|p| !matches!(p, ChunkPayload::Virgin))
+                .map(|p| ResolvedChunkPayload {
+                    payload: p,
+                    block_palette: chunk_array.block_palette.clone(),
+                });
             if resolved_option_matches_existing(existing_resolved, payload.as_ref()) {
                 node.kind = source_kind;
                 return None;

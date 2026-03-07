@@ -72,8 +72,18 @@ impl FlatWorldGenerator {
             return None;
         }
         let floor_bounds = Aabb4i::new(
-            [bounds.min[0], floor_y_world_min, bounds.min[2], bounds.min[3]],
-            [bounds.max[0], floor_y_world_max, bounds.max[2], bounds.max[3]],
+            [
+                bounds.min[0],
+                floor_y_world_min,
+                bounds.min[2],
+                bounds.min[3],
+            ],
+            [
+                bounds.max[0],
+                floor_y_world_max,
+                bounds.max[2],
+                bounds.max[3],
+            ],
         );
         Some(RegionTreeCore {
             bounds: floor_bounds,
@@ -108,7 +118,12 @@ impl FlatWorldGenerator {
             }
             let structure_id = decls[report.blueprint_idx].id;
             let orientation = xzw_orientation_to_tesseract(report.orientation);
-            match wasm.prepare_and_generate(structure_id, report.cell_hash, orientation, report.origin) {
+            match wasm.prepare_and_generate(
+                structure_id,
+                report.cell_hash,
+                orientation,
+                report.origin,
+            ) {
                 Ok(core) if core.bounds.is_valid() => {
                     let _ = tree.splice_non_empty_core_in_bounds(core.bounds, &core);
                 }

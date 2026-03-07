@@ -142,10 +142,7 @@ fn item_stack_tick(state: &EntityState, now_ms: u64) -> ([f32; 4], [f32; 4], f32
         state.home_position[3],
     ];
     let rot = t * 0.55 + state.entity_id as f32 * 0.91;
-    let orientation = normalize4_or_default(
-        [rot.cos(), 0.0, rot.sin(), 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-    );
+    let orientation = normalize4_or_default([rot.cos(), 0.0, rot.sin(), 0.0], [0.0, 0.0, 1.0, 0.0]);
     (position, orientation, state.base_scale)
 }
 

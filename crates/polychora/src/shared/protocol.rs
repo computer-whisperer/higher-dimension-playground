@@ -105,6 +105,13 @@ pub struct WorldSummary {
     pub bounds: WorldBounds,
 }
 
+/// A single voxel placement within a batch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoxelEdit {
+    pub position: [i64; 4],
+    pub block: BlockData,
+}
+
 // ---------------------------------------------------------------------------
 // Client → Server messages
 // ---------------------------------------------------------------------------
@@ -160,6 +167,10 @@ pub enum ClientMessage {
     /// Drop one item from the given inventory slot into the world.
     DropItem {
         slot_index: u8,
+    },
+    /// Place multiple voxels in a single batch.
+    SetVoxelBatch {
+        edits: Vec<VoxelEdit>,
     },
     /// Place a structure (region tree) at a world position.
     /// The tree is serialized as postcard bytes (host RegionTreeCore).

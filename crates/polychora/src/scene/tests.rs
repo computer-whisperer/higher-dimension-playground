@@ -1405,13 +1405,13 @@ fn place_break_replace_via_fast_patch_preserves_chunk() {
     let platform_configs: &[([i32; 4], [i32; 4], [i32; 4])] = &[
         // (platform_min_key, platform_max_key, chunk_a_key)
         // Start with the failing config to get fast feedback.
-        ([0, 0, 0, 0], [3, 0, 3, 3], [1, 0, 1, 1]),       // tiny platform
+        ([0, 0, 0, 0], [3, 0, 3, 3], [1, 0, 1, 1]), // tiny platform
         ([0, 0, 0, 0], [15, 0, 15, 15], [4, 0, 6, 7]),
-        ([0, 0, 0, 0], [15, 1, 15, 15], [4, 0, 6, 7]),   // 2 thick
-        ([-8, -1, -8, -8], [7, 0, 7, 7], [0, 0, 0, 0]),   // centered at origin
-        ([0, 0, 0, 0], [7, 0, 7, 7], [3, 0, 3, 3]),       // smaller platform
+        ([0, 0, 0, 0], [15, 1, 15, 15], [4, 0, 6, 7]), // 2 thick
+        ([-8, -1, -8, -8], [7, 0, 7, 7], [0, 0, 0, 0]), // centered at origin
+        ([0, 0, 0, 0], [7, 0, 7, 7], [3, 0, 3, 3]),    // smaller platform
         ([0, 0, 0, 0], [19, 0, 19, 19], [10, 0, 10, 10]), // non-power-of-2
-        ([5, 0, 5, 5], [14, 0, 14, 14], [8, 0, 8, 8]),    // offset from origin
+        ([5, 0, 5, 5], [14, 0, 14, 14], [8, 0, 8, 8]), // offset from origin
     ];
 
     let b_offsets: &[[i32; 4]] = &[
@@ -1432,203 +1432,216 @@ fn place_break_replace_via_fast_patch_preserves_chunk() {
     ];
 
     // Additional placement positions (simulates "place a few random blocks").
-    let extra_offsets: &[[i32; 4]] = &[
-        [-2, 0, -3, -4],
-        [3, 0, 2, 1],
-    ];
+    let extra_offsets: &[[i32; 4]] = &[[-2, 0, -3, -4], [3, 0, 2, 1]];
 
     for &(pmin, pmax, akey) in platform_configs {
-    let platform = Aabb4i::from_lattice_bounds(pmin, pmax, 0);
-    let platform_core = RegionTreeCore {
-        bounds: platform,
-        kind: RegionNodeKind::Uniform(ground.clone()),
-        generator_version_hash: 0,
-    };
-    let chunk_a_key = chunk_key_i32(akey[0], akey[1], akey[2], akey[3]);
-    let chunk_a_bounds = Aabb4i::chunk_world_bounds(chunk_a_key, 0);
-
-    for offset in b_offsets {
-        let bx = akey[0] + offset[0];
-        let by = akey[1] + offset[1];
-        let bz = akey[2] + offset[2];
-        let bw = akey[3] + offset[3];
-        let chunk_b_key = chunk_key_i32(bx, by, bz, bw);
-        let chunk_b_bounds = Aabb4i::chunk_world_bounds(chunk_b_key, 0);
-        if !platform.contains_bounds(&chunk_b_bounds) || chunk_b_key == chunk_a_key {
-            continue;
-        }
-        let extra_placements: Vec<[i32; 4]> = extra_offsets
-            .iter()
-            .map(|eo| [akey[0] + eo[0], akey[1] + eo[1], akey[2] + eo[2], akey[3] + eo[3]])
-            .collect();
-
-        // Fresh scene for each position.
-        let mut scene = Scene::new(ScenePreset::Empty);
-        scene.apply_region_patch_fast(platform, &platform_core);
-
-        // --- Build override trees as the server would ---
-
-        // A override: ground with one placed block (realistic Dense16 — as if a
-        // single block was placed in an otherwise-ground chunk).
-        let a_block_palette = vec![BlockData::AIR, ground.clone(), placed.clone()];
-        let mut a_dense = vec![1u16; CHUNK_VOLUME]; // all ground
-        a_dense[0] = 2; // placed block at cell 0
-        let a_ca = ChunkArrayData::from_dense_indices_with_block_palette(
-            chunk_a_bounds,
-            vec![ChunkPayload::Dense16 { materials: a_dense }],
-            vec![0],
-            None,
-            a_block_palette,
-            0,
-        )
-        .expect("chunk array A");
-        let a_core = RegionTreeCore {
-            bounds: chunk_a_bounds,
-            kind: RegionNodeKind::ChunkArray(a_ca),
+        let platform = Aabb4i::from_lattice_bounds(pmin, pmax, 0);
+        let platform_core = RegionTreeCore {
+            bounds: platform,
+            kind: RegionNodeKind::Uniform(ground.clone()),
             generator_version_hash: 0,
         };
+        let chunk_a_key = chunk_key_i32(akey[0], akey[1], akey[2], akey[3]);
+        let chunk_a_bounds = Aabb4i::chunk_world_bounds(chunk_a_key, 0);
 
-        // Build extra placement overrides (simulates "place a few random blocks").
-        let mut extra_cores: Vec<(Aabb4i, RegionTreeCore)> = Vec::new();
-        for ep in &extra_placements {
-            let ek = chunk_key_i32(ep[0], ep[1], ep[2], ep[3]);
-            let eb = Aabb4i::chunk_world_bounds(ek, 0);
-            if !platform.contains_bounds(&eb) || ek == chunk_a_key || ek == chunk_b_key {
+        for offset in b_offsets {
+            let bx = akey[0] + offset[0];
+            let by = akey[1] + offset[1];
+            let bz = akey[2] + offset[2];
+            let bw = akey[3] + offset[3];
+            let chunk_b_key = chunk_key_i32(bx, by, bz, bw);
+            let chunk_b_bounds = Aabb4i::chunk_world_bounds(chunk_b_key, 0);
+            if !platform.contains_bounds(&chunk_b_bounds) || chunk_b_key == chunk_a_key {
                 continue;
             }
-            let ep_palette = vec![BlockData::AIR, placed.clone()];
-            let ep_ca = ChunkArrayData::from_dense_indices_with_block_palette(
-                eb,
-                vec![ChunkPayload::Uniform(1)],
+            let extra_placements: Vec<[i32; 4]> = extra_offsets
+                .iter()
+                .map(|eo| {
+                    [
+                        akey[0] + eo[0],
+                        akey[1] + eo[1],
+                        akey[2] + eo[2],
+                        akey[3] + eo[3],
+                    ]
+                })
+                .collect();
+
+            // Fresh scene for each position.
+            let mut scene = Scene::new(ScenePreset::Empty);
+            scene.apply_region_patch_fast(platform, &platform_core);
+
+            // --- Build override trees as the server would ---
+
+            // A override: ground with one placed block (realistic Dense16 — as if a
+            // single block was placed in an otherwise-ground chunk).
+            let a_block_palette = vec![BlockData::AIR, ground.clone(), placed.clone()];
+            let mut a_dense = vec![1u16; CHUNK_VOLUME]; // all ground
+            a_dense[0] = 2; // placed block at cell 0
+            let a_ca = ChunkArrayData::from_dense_indices_with_block_palette(
+                chunk_a_bounds,
+                vec![ChunkPayload::Dense16 { materials: a_dense }],
                 vec![0],
                 None,
-                ep_palette,
+                a_block_palette,
                 0,
             )
-            .expect("extra placement");
-            extra_cores.push((
-                eb,
-                RegionTreeCore {
-                    bounds: eb,
-                    kind: RegionNodeKind::ChunkArray(ep_ca),
-                    generator_version_hash: 0,
-                },
-            ));
-        }
+            .expect("chunk array A");
+            let a_core = RegionTreeCore {
+                bounds: chunk_a_bounds,
+                kind: RegionNodeKind::ChunkArray(a_ca),
+                generator_version_hash: 0,
+            };
 
-        // B override: ground with one hole.
-        let b_block_palette = vec![BlockData::AIR, ground.clone()];
-        let mut b_dense = vec![1u16; CHUNK_VOLUME];
-        b_dense[0] = 0; // air at cell 0
-        let b_ca = ChunkArrayData::from_dense_indices_with_block_palette(
-            chunk_b_bounds,
-            vec![ChunkPayload::Dense16 {
-                materials: b_dense,
-            }],
-            vec![0],
-            None,
-            b_block_palette,
-            0,
-        )
-        .expect("chunk array B");
-        let b_core = RegionTreeCore {
-            bounds: chunk_b_bounds,
-            kind: RegionNodeKind::ChunkArray(b_ca),
-            generator_version_hash: 0,
-        };
+            // Build extra placement overrides (simulates "place a few random blocks").
+            let mut extra_cores: Vec<(Aabb4i, RegionTreeCore)> = Vec::new();
+            for ep in &extra_placements {
+                let ek = chunk_key_i32(ep[0], ep[1], ep[2], ep[3]);
+                let eb = Aabb4i::chunk_world_bounds(ek, 0);
+                if !platform.contains_bounds(&eb) || ek == chunk_a_key || ek == chunk_b_key {
+                    continue;
+                }
+                let ep_palette = vec![BlockData::AIR, placed.clone()];
+                let ep_ca = ChunkArrayData::from_dense_indices_with_block_palette(
+                    eb,
+                    vec![ChunkPayload::Uniform(1)],
+                    vec![0],
+                    None,
+                    ep_palette,
+                    0,
+                )
+                .expect("extra placement");
+                extra_cores.push((
+                    eb,
+                    RegionTreeCore {
+                        bounds: eb,
+                        kind: RegionNodeKind::ChunkArray(ep_ca),
+                        generator_version_hash: 0,
+                    },
+                ));
+            }
 
-        // Helper: add all persistent overrides (A + extras) to an override tree.
-        let add_persistent_overrides =
-            |tree: &mut RegionChunkTree| {
+            // B override: ground with one hole.
+            let b_block_palette = vec![BlockData::AIR, ground.clone()];
+            let mut b_dense = vec![1u16; CHUNK_VOLUME];
+            b_dense[0] = 0; // air at cell 0
+            let b_ca = ChunkArrayData::from_dense_indices_with_block_palette(
+                chunk_b_bounds,
+                vec![ChunkPayload::Dense16 { materials: b_dense }],
+                vec![0],
+                None,
+                b_block_palette,
+                0,
+            )
+            .expect("chunk array B");
+            let b_core = RegionTreeCore {
+                bounds: chunk_b_bounds,
+                kind: RegionNodeKind::ChunkArray(b_ca),
+                generator_version_hash: 0,
+            };
+
+            // Helper: add all persistent overrides (A + extras) to an override tree.
+            let add_persistent_overrides = |tree: &mut RegionChunkTree| {
                 tree.splice_non_empty_core_in_bounds(chunk_a_bounds, &a_core);
                 for (eb, ec) in &extra_cores {
                     tree.splice_non_empty_core_in_bounds(*eb, ec);
                 }
             };
 
-        // --- Step 0: apply extra placements to client scene ---
-        for (eb, ec) in &extra_cores {
-            let mut ov = RegionChunkTree::new();
-            add_persistent_overrides(&mut ov);
-            let st = compose_server_subtree(platform, &platform_core, &ov);
-            scene.apply_region_patch_fast(*eb, &st);
-        }
+            // --- Step 0: apply extra placements to client scene ---
+            for (eb, ec) in &extra_cores {
+                let mut ov = RegionChunkTree::new();
+                add_persistent_overrides(&mut ov);
+                let st = compose_server_subtree(platform, &platform_core, &ov);
+                scene.apply_region_patch_fast(*eb, &st);
+            }
 
-        // --- Step 1: place block at A ---
-        let mut overrides1 = RegionChunkTree::new();
-        add_persistent_overrides(&mut overrides1);
-        let subtree1 = compose_server_subtree(platform, &platform_core, &overrides1);
-        let stats1 = scene.apply_region_patch_fast(chunk_a_bounds, &subtree1);
-        assert!(
-            stats1.changed_chunks > 0,
-            "step 1 no change for offset {:?}",
-            offset
-        );
+            // --- Step 1: place block at A ---
+            let mut overrides1 = RegionChunkTree::new();
+            add_persistent_overrides(&mut overrides1);
+            let subtree1 = compose_server_subtree(platform, &platform_core, &overrides1);
+            let stats1 = scene.apply_region_patch_fast(chunk_a_bounds, &subtree1);
+            assert!(
+                stats1.changed_chunks > 0,
+                "step 1 no change for offset {:?}",
+                offset
+            );
 
-        // --- Step 2: break ground at B ---
-        let mut overrides2 = RegionChunkTree::new();
-        add_persistent_overrides(&mut overrides2);
-        overrides2.splice_non_empty_core_in_bounds(chunk_b_bounds, &b_core);
-        let subtree2 = compose_server_subtree(platform, &platform_core, &overrides2);
-        let stats2 = scene.apply_region_patch_fast(chunk_b_bounds, &subtree2);
-        assert!(
-            stats2.changed_chunks > 0,
-            "step 2 no change for offset {:?}",
-            offset
-        );
+            // --- Step 2: break ground at B ---
+            let mut overrides2 = RegionChunkTree::new();
+            add_persistent_overrides(&mut overrides2);
+            overrides2.splice_non_empty_core_in_bounds(chunk_b_bounds, &b_core);
+            let subtree2 = compose_server_subtree(platform, &platform_core, &overrides2);
+            let stats2 = scene.apply_region_patch_fast(chunk_b_bounds, &subtree2);
+            assert!(
+                stats2.changed_chunks > 0,
+                "step 2 no change for offset {:?}",
+                offset
+            );
 
-        // --- Step 3: replace ground at B (restore virgin) ---
-        let mut overrides3 = RegionChunkTree::new();
-        add_persistent_overrides(&mut overrides3);
-        let subtree3 = compose_server_subtree(platform, &platform_core, &overrides3);
-        let stats3 = scene.apply_region_patch_fast(chunk_b_bounds, &subtree3);
-        assert!(
+            // --- Step 3: replace ground at B (restore virgin) ---
+            let mut overrides3 = RegionChunkTree::new();
+            add_persistent_overrides(&mut overrides3);
+            let subtree3 = compose_server_subtree(platform, &platform_core, &overrides3);
+            let stats3 = scene.apply_region_patch_fast(chunk_b_bounds, &subtree3);
+            assert!(
             stats3.changed_chunks > 0,
             "step 3 no change for pmin={:?} pmax={:?} akey={:?} offset={:?} — splice missed the data change",
             pmin, pmax, akey, offset
         );
 
-        // Verify chunk B has ground data (not air/empty).
-        let b_block = scene.get_block_data(bx * 8, by * 8, bz * 8, bw * 8);
-        assert_eq!(
-            b_block, ground,
-            "chunk B data wrong after replace! offset={:?} got={:?}",
-            offset, b_block,
-        );
-
-        // Verify chunk A still has placed data.
-        let a_block = scene.get_block_data(akey[0] * 8, akey[1] * 8, akey[2] * 8, akey[3] * 8);
-        assert!(
-            !a_block.is_air(),
-            "chunk A data lost after B-replace! pmin={:?} pmax={:?} akey={:?} offset={:?}",
-            pmin, pmax, akey, offset,
-        );
-
-        // Verify other platform chunks not involved are still ground.
-        let extra_keys: Vec<_> = extra_cores.iter().map(|(eb, _)| eb.chunk_key_from_world_bounds()).collect();
-        // Use chunk A position as a reference for nearby check positions.
-        let check_positions = [
-            [pmin[0], pmin[1], pmin[2], pmin[3]],
-            [pmax[0], pmax[1], pmax[2], pmax[3]],
-            [(pmin[0] + pmax[0]) / 2, pmin[1], (pmin[2] + pmax[2]) / 2, (pmin[3] + pmax[3]) / 2],
-        ];
-        for check in check_positions {
-            let ck = chunk_key_i32(check[0], check[1], check[2], check[3]);
-            if ck == chunk_a_key || ck == chunk_b_key || extra_keys.contains(&ck) {
-                continue;
-            }
-            let cb = Aabb4i::chunk_world_bounds(ck, 0);
-            if !platform.contains_bounds(&cb) {
-                continue;
-            }
-            let b = scene.get_block_data(check[0] * 8, check[1] * 8, check[2] * 8, check[3] * 8);
+            // Verify chunk B has ground data (not air/empty).
+            let b_block = scene.get_block_data(bx * 8, by * 8, bz * 8, bw * 8);
             assert_eq!(
-                b, ground,
-                "platform chunk {:?} data wrong! pmin={:?} pmax={:?} offset={:?} got={:?}",
-                check, pmin, pmax, offset, b
+                b_block, ground,
+                "chunk B data wrong after replace! offset={:?} got={:?}",
+                offset, b_block,
             );
-        }
-    } // b_offsets
+
+            // Verify chunk A still has placed data.
+            let a_block = scene.get_block_data(akey[0] * 8, akey[1] * 8, akey[2] * 8, akey[3] * 8);
+            assert!(
+                !a_block.is_air(),
+                "chunk A data lost after B-replace! pmin={:?} pmax={:?} akey={:?} offset={:?}",
+                pmin,
+                pmax,
+                akey,
+                offset,
+            );
+
+            // Verify other platform chunks not involved are still ground.
+            let extra_keys: Vec<_> = extra_cores
+                .iter()
+                .map(|(eb, _)| eb.chunk_key_from_world_bounds())
+                .collect();
+            // Use chunk A position as a reference for nearby check positions.
+            let check_positions = [
+                [pmin[0], pmin[1], pmin[2], pmin[3]],
+                [pmax[0], pmax[1], pmax[2], pmax[3]],
+                [
+                    (pmin[0] + pmax[0]) / 2,
+                    pmin[1],
+                    (pmin[2] + pmax[2]) / 2,
+                    (pmin[3] + pmax[3]) / 2,
+                ],
+            ];
+            for check in check_positions {
+                let ck = chunk_key_i32(check[0], check[1], check[2], check[3]);
+                if ck == chunk_a_key || ck == chunk_b_key || extra_keys.contains(&ck) {
+                    continue;
+                }
+                let cb = Aabb4i::chunk_world_bounds(ck, 0);
+                if !platform.contains_bounds(&cb) {
+                    continue;
+                }
+                let b =
+                    scene.get_block_data(check[0] * 8, check[1] * 8, check[2] * 8, check[3] * 8);
+                assert_eq!(
+                    b, ground,
+                    "platform chunk {:?} data wrong! pmin={:?} pmax={:?} offset={:?} got={:?}",
+                    check, pmin, pmax, offset, b
+                );
+            }
+        } // b_offsets
     } // platform_configs
 }
 
@@ -1668,9 +1681,7 @@ fn place_break_replace_with_streamed_initial_world() {
         let mut out = Vec::new();
         let mut stack = vec![bounds];
         while let Some(current) = stack.pop() {
-            let cell_count = current
-                .chunk_cell_count_at_scale(0)
-                .unwrap_or(0);
+            let cell_count = current.chunk_cell_count_at_scale(0).unwrap_or(0);
             if cell_count <= max_cells || out.len() + stack.len() + 1 >= 256 {
                 out.push(current);
                 continue;
@@ -1688,8 +1699,12 @@ fn place_break_replace_with_streamed_initial_world() {
             let mut right = current;
             left.max[split_axis] = mid;
             right.min[split_axis] = mid;
-            if left.is_valid() { stack.push(left); }
-            if right.is_valid() { stack.push(right); }
+            if left.is_valid() {
+                stack.push(left);
+            }
+            if right.is_valid() {
+                stack.push(right);
+            }
         }
         out
     }
@@ -1697,15 +1712,50 @@ fn place_break_replace_with_streamed_initial_world() {
     // Test configs: (platform_min, platform_max, interest_bounds, chunk_a, chunk_b)
     let configs: &[([i32; 4], [i32; 4], [i32; 4], [i32; 4], [i32; 4], [i32; 4])] = &[
         // Small platform, interest larger than platform
-        ([0, 0, 0, 0], [3, 0, 3, 3], [-2, -2, -2, -2], [5, 2, 5, 5], [1, 0, 1, 1], [2, 0, 1, 1]),
+        (
+            [0, 0, 0, 0],
+            [3, 0, 3, 3],
+            [-2, -2, -2, -2],
+            [5, 2, 5, 5],
+            [1, 0, 1, 1],
+            [2, 0, 1, 1],
+        ),
         // Large platform that requires splitting
-        ([0, 0, 0, 0], [15, 0, 15, 15], [-4, -4, -4, -4], [19, 4, 19, 19], [4, 0, 6, 7], [5, 0, 6, 7]),
+        (
+            [0, 0, 0, 0],
+            [15, 0, 15, 15],
+            [-4, -4, -4, -4],
+            [19, 4, 19, 19],
+            [4, 0, 6, 7],
+            [5, 0, 6, 7],
+        ),
         // Platform offset from origin
-        ([5, 0, 5, 5], [14, 0, 14, 14], [0, -4, 0, 0], [19, 4, 19, 19], [8, 0, 8, 8], [9, 0, 8, 8]),
+        (
+            [5, 0, 5, 5],
+            [14, 0, 14, 14],
+            [0, -4, 0, 0],
+            [19, 4, 19, 19],
+            [8, 0, 8, 8],
+            [9, 0, 8, 8],
+        ),
         // Tiny platform, big interest
-        ([0, 0, 0, 0], [1, 0, 1, 1], [-5, -5, -5, -5], [6, 5, 6, 6], [0, 0, 0, 0], [1, 0, 0, 0]),
+        (
+            [0, 0, 0, 0],
+            [1, 0, 1, 1],
+            [-5, -5, -5, -5],
+            [6, 5, 6, 6],
+            [0, 0, 0, 0],
+            [1, 0, 0, 0],
+        ),
         // A and B far apart
-        ([0, 0, 0, 0], [15, 0, 15, 15], [-2, -2, -2, -2], [17, 2, 17, 17], [1, 0, 1, 1], [14, 0, 14, 14]),
+        (
+            [0, 0, 0, 0],
+            [15, 0, 15, 15],
+            [-2, -2, -2, -2],
+            [17, 2, 17, 17],
+            [1, 0, 1, 1],
+            [14, 0, 14, 14],
+        ),
     ];
 
     for &(pmin, pmax, imin, imax, akey, bkey) in configs {
@@ -1722,8 +1772,14 @@ fn place_break_replace_with_streamed_initial_world() {
         let chunk_b_key = chunk_key_i32(bkey[0], bkey[1], bkey[2], bkey[3]);
         let chunk_b_bounds = Aabb4i::chunk_world_bounds(chunk_b_key, 0);
 
-        assert!(platform.contains_bounds(&chunk_a_bounds), "A outside platform");
-        assert!(platform.contains_bounds(&chunk_b_bounds), "B outside platform");
+        assert!(
+            platform.contains_bounds(&chunk_a_bounds),
+            "A outside platform"
+        );
+        assert!(
+            platform.contains_bounds(&chunk_b_bounds),
+            "B outside platform"
+        );
         assert_ne!(chunk_a_key, chunk_b_key, "A == B");
 
         // --- Initial world loading via streaming patches ---
@@ -1737,9 +1793,15 @@ fn place_break_replace_with_streamed_initial_world() {
 
         // Verify initial state: A and B should be ground
         let a0 = scene.get_block_data(akey[0] * 8, akey[1] * 8, akey[2] * 8, akey[3] * 8);
-        assert_eq!(a0, ground, "A should be ground after streaming load, config pmin={pmin:?}");
+        assert_eq!(
+            a0, ground,
+            "A should be ground after streaming load, config pmin={pmin:?}"
+        );
         let b0 = scene.get_block_data(bkey[0] * 8, bkey[1] * 8, bkey[2] * 8, bkey[3] * 8);
-        assert_eq!(b0, ground, "B should be ground after streaming load, config pmin={pmin:?}");
+        assert_eq!(
+            b0, ground,
+            "B should be ground after streaming load, config pmin={pmin:?}"
+        );
 
         // --- A override: ground with one placed block ---
         let a_bp = vec![BlockData::AIR, ground.clone(), placed.clone()];
@@ -1751,8 +1813,12 @@ fn place_break_replace_with_streamed_initial_world() {
                 ChunkArrayData::from_dense_indices_with_block_palette(
                     chunk_a_bounds,
                     vec![ChunkPayload::Dense16 { materials: a_dense }],
-                    vec![0], None, a_bp, 0,
-                ).unwrap(),
+                    vec![0],
+                    None,
+                    a_bp,
+                    0,
+                )
+                .unwrap(),
             ),
             generator_version_hash: 0,
         };
@@ -1767,8 +1833,12 @@ fn place_break_replace_with_streamed_initial_world() {
                 ChunkArrayData::from_dense_indices_with_block_palette(
                     chunk_b_bounds,
                     vec![ChunkPayload::Dense16 { materials: b_dense }],
-                    vec![0], None, b_bp, 0,
-                ).unwrap(),
+                    vec![0],
+                    None,
+                    b_bp,
+                    0,
+                )
+                .unwrap(),
             ),
             generator_version_hash: 0,
         };
@@ -1778,9 +1848,15 @@ fn place_break_replace_with_streamed_initial_world() {
         ov1.splice_non_empty_core_in_bounds(chunk_a_bounds, &a_core);
         let st1 = compose(platform, &platform_core, &ov1);
         let stats1 = scene.apply_region_patch_fast(chunk_a_bounds, &st1);
-        assert!(stats1.changed_chunks > 0, "step 1 no change, config pmin={pmin:?}");
+        assert!(
+            stats1.changed_chunks > 0,
+            "step 1 no change, config pmin={pmin:?}"
+        );
         let a1 = scene.get_block_data(akey[0] * 8, akey[1] * 8, akey[2] * 8, akey[3] * 8);
-        assert_eq!(a1, placed, "A should be placed after step 1, config pmin={pmin:?}");
+        assert_eq!(
+            a1, placed,
+            "A should be placed after step 1, config pmin={pmin:?}"
+        );
 
         // Step 2: break at B
         let mut ov2 = RegionChunkTree::new();
@@ -1788,29 +1864,55 @@ fn place_break_replace_with_streamed_initial_world() {
         ov2.splice_non_empty_core_in_bounds(chunk_b_bounds, &b_core);
         let st2 = compose(platform, &platform_core, &ov2);
         let stats2 = scene.apply_region_patch_fast(chunk_b_bounds, &st2);
-        assert!(stats2.changed_chunks > 0, "step 2 no change, config pmin={pmin:?}");
+        assert!(
+            stats2.changed_chunks > 0,
+            "step 2 no change, config pmin={pmin:?}"
+        );
 
         // Step 3: replace at B (restore virgin)
         let mut ov3 = RegionChunkTree::new();
         ov3.splice_non_empty_core_in_bounds(chunk_a_bounds, &a_core);
         let st3 = compose(platform, &platform_core, &ov3);
         let stats3 = scene.apply_region_patch_fast(chunk_b_bounds, &st3);
-        assert!(stats3.changed_chunks > 0, "step 3 no change — splice missed data change, config pmin={pmin:?}");
+        assert!(
+            stats3.changed_chunks > 0,
+            "step 3 no change — splice missed data change, config pmin={pmin:?}"
+        );
 
         // Verify: B should be ground, A should still be placed
         let b3 = scene.get_block_data(bkey[0] * 8, bkey[1] * 8, bkey[2] * 8, bkey[3] * 8);
-        assert_eq!(b3, ground, "B should be ground after restore, config pmin={pmin:?} got={b3:?}");
+        assert_eq!(
+            b3, ground,
+            "B should be ground after restore, config pmin={pmin:?} got={b3:?}"
+        );
 
         let a3 = scene.get_block_data(akey[0] * 8, akey[1] * 8, akey[2] * 8, akey[3] * 8);
-        assert_eq!(a3, placed, "A data lost after B restore! config pmin={pmin:?} got={a3:?}");
+        assert_eq!(
+            a3, placed,
+            "A data lost after B restore! config pmin={pmin:?} got={a3:?}"
+        );
 
         // Spot-check other platform chunks
-        for check in [pmin, pmax, [(pmin[0]+pmax[0])/2, pmin[1], (pmin[2]+pmax[2])/2, (pmin[3]+pmax[3])/2]] {
+        for check in [
+            pmin,
+            pmax,
+            [
+                (pmin[0] + pmax[0]) / 2,
+                pmin[1],
+                (pmin[2] + pmax[2]) / 2,
+                (pmin[3] + pmax[3]) / 2,
+            ],
+        ] {
             let ck = chunk_key_i32(check[0], check[1], check[2], check[3]);
             let cb = Aabb4i::chunk_world_bounds(ck, 0);
-            if ck == chunk_a_key || ck == chunk_b_key || !platform.contains_bounds(&cb) { continue; }
-            let b = scene.get_block_data(check[0]*8, check[1]*8, check[2]*8, check[3]*8);
-            assert_eq!(b, ground, "platform chunk {check:?} wrong after restore, config pmin={pmin:?} got={b:?}");
+            if ck == chunk_a_key || ck == chunk_b_key || !platform.contains_bounds(&cb) {
+                continue;
+            }
+            let b = scene.get_block_data(check[0] * 8, check[1] * 8, check[2] * 8, check[3] * 8);
+            assert_eq!(
+                b, ground,
+                "platform chunk {check:?} wrong after restore, config pmin={pmin:?} got={b:?}"
+            );
         }
     }
 }
@@ -1923,14 +2025,26 @@ fn place_break_replace_minimal_repro() {
 
     // Dump tree state before step 3.
     eprintln!("=== Before step 3 ===");
-    eprintln!("  subtree3 root: kind={:?} bounds={:?}->{:?}",
-        std::mem::discriminant(&st3.kind), st3.bounds.min, st3.bounds.max);
+    eprintln!(
+        "  subtree3 root: kind={:?} bounds={:?}->{:?}",
+        std::mem::discriminant(&st3.kind),
+        st3.bounds.min,
+        st3.bounds.max
+    );
     let sliced = slice_non_empty_region_core_in_bounds(&st3, chunk_b_b);
-    eprintln!("  subtree3 sliced to B: kind={:?} bounds={:?}->{:?}",
-        std::mem::discriminant(&sliced.kind), sliced.bounds.min, sliced.bounds.max);
+    eprintln!(
+        "  subtree3 sliced to B: kind={:?} bounds={:?}->{:?}",
+        std::mem::discriminant(&sliced.kind),
+        sliced.bounds.min,
+        sliced.bounds.max
+    );
     let prev = scene.world_tree.slice_non_empty_core_in_bounds(chunk_b_b);
-    eprintln!("  client prev at B: kind={:?} bounds={:?}->{:?}",
-        std::mem::discriminant(&prev.kind), prev.bounds.min, prev.bounds.max);
+    eprintln!(
+        "  client prev at B: kind={:?} bounds={:?}->{:?}",
+        std::mem::discriminant(&prev.kind),
+        prev.bounds.min,
+        prev.bounds.max
+    );
 
     let stats3 = scene.apply_region_patch_fast(chunk_b_b, &st3);
     eprintln!("  step3 stats: changed_chunks={}", stats3.changed_chunks);
@@ -1940,7 +2054,11 @@ fn place_break_replace_minimal_repro() {
     assert_eq!(b3, ground, "B should be ground after step 3, got {:?}", b3);
 
     let a3 = scene.get_block_data(1 * 8, 0, 1 * 8, 1 * 8);
-    assert_eq!(a3, placed, "A should still be placed after step 3, got {:?}", a3);
+    assert_eq!(
+        a3, placed,
+        "A should still be placed after step 3, got {:?}",
+        a3
+    );
 }
 
 /// Regression test matching the EXACT runtime flow from the bug log:
@@ -2018,7 +2136,10 @@ fn place_break_replace_runtime_exact_flow() {
 
     // Verify ground is present at the break location
     let ground_check = scene.get_block_data(6, 7, -12, -4);
-    assert_eq!(ground_check, ground, "ground should be present after welcome");
+    assert_eq!(
+        ground_check, ground,
+        "ground should be present after welcome"
+    );
 
     // Step 2: Place green block at (7,8,-8,-4)
     // Server sends: authoritative=[0,8,-8,-8]->[8,16,0,0] subtree=[0,8,-8,-8]->[8,16,0,0]
@@ -2028,12 +2149,14 @@ fn place_break_replace_runtime_exact_flow() {
     );
     // Create a ChunkArray with the green block placed at (7,8,-8,-4)
     let mut green_dense = vec![0u16; CHUNK_VOLUME]; // mostly air (above platform)
-    // Voxel (7,8,-8,-4) in chunk [0,8,-8,-8] → local coords (7,0,0,4)
+                                                    // Voxel (7,8,-8,-4) in chunk [0,8,-8,-8] → local coords (7,0,0,4)
     let green_local_idx = 7 + 0 * 8 + 0 * 64 + 4 * 512;
     green_dense[green_local_idx] = 1;
     let green_ca = ChunkArrayData::from_dense_indices_with_block_palette(
         green_chunk_bounds,
-        vec![ChunkPayload::Dense16 { materials: green_dense }],
+        vec![ChunkPayload::Dense16 {
+            materials: green_dense,
+        }],
         vec![0],
         None,
         vec![BlockData::AIR, green.clone()],
@@ -2059,12 +2182,14 @@ fn place_break_replace_runtime_exact_flow() {
     // Compose server-side: base Uniform + override with break
     let mut break_override_tree = RegionChunkTree::new();
     let mut break_dense = vec![1u16; CHUNK_VOLUME]; // all ground
-    // Voxel (6,7,-12,-4) in chunk [0,0,-16,-8] → local coords (6,7,4,4)
+                                                    // Voxel (6,7,-12,-4) in chunk [0,0,-16,-8] → local coords (6,7,4,4)
     let break_local_idx = 6 + 7 * 8 + 4 * 64 + 4 * 512;
     break_dense[break_local_idx] = 0; // air (broken)
     let break_ca = ChunkArrayData::from_dense_indices_with_block_palette(
         break_chunk_bounds,
-        vec![ChunkPayload::Dense16 { materials: break_dense }],
+        vec![ChunkPayload::Dense16 {
+            materials: break_dense,
+        }],
         vec![0],
         None,
         vec![BlockData::AIR, ground.clone()],
@@ -2093,7 +2218,11 @@ fn place_break_replace_runtime_exact_flow() {
 
     // Verify break worked
     let break_check = scene.get_block_data(6, 7, -12, -4);
-    assert!(break_check.is_air(), "broken block should be air, got {:?}", break_check);
+    assert!(
+        break_check.is_air(),
+        "broken block should be air, got {:?}",
+        break_check
+    );
 
     // Dump tree after break
     if let Some(root) = scene.world_tree.root() {
@@ -2127,7 +2256,9 @@ fn place_break_replace_runtime_exact_flow() {
     );
 
     // Verify the tree at break_chunk_bounds is Uniform, not ChunkArray
-    let post_slice = scene.world_tree.slice_non_empty_core_in_bounds(break_chunk_bounds);
+    let post_slice = scene
+        .world_tree
+        .slice_non_empty_core_in_bounds(break_chunk_bounds);
     assert!(
         matches!(post_slice.kind, RegionNodeKind::Uniform(_)),
         "chunk at break location should be Uniform after replace, got {:?}",
@@ -2155,7 +2286,10 @@ fn place_break_replace_with_real_generator() {
 
     let mut overlay = ServerWorldOverlay::from_chunk_payloads(
         base_kind.clone(),
-        Vec::<([i32; 4], polychora::shared::chunk_payload::ResolvedChunkPayload)>::new(),
+        Vec::<(
+            [i32; 4],
+            polychora::shared::chunk_payload::ResolvedChunkPayload,
+        )>::new(),
         1337,
         true,
         HashSet::new(),
@@ -2200,10 +2334,7 @@ fn place_break_replace_with_real_generator() {
     overlay.apply_voxel_edit(cc4(green_pos), green_block.clone());
     let green_dirty = overlay.take_dirty_bounds();
     for db in &green_dirty {
-        let green_sub = overlay.query_region_core(
-            QueryVolume { bounds: *db },
-            QueryDetail::Exact,
-        );
+        let green_sub = overlay.query_region_core(QueryVolume { bounds: *db }, QueryDetail::Exact);
         scene.apply_region_patch_fast(*db, &green_sub);
     }
 
@@ -2215,10 +2346,7 @@ fn place_break_replace_with_real_generator() {
     for db in &break_dirty {
         eprintln!("  dirty: {:?}->{:?}", db.min, db.max);
         let clip = db.intersection(&welcome_auth).unwrap_or(*db);
-        let break_sub = overlay.query_region_core(
-            QueryVolume { bounds: clip },
-            QueryDetail::Exact,
-        );
+        let break_sub = overlay.query_region_core(QueryVolume { bounds: clip }, QueryDetail::Exact);
         eprintln!(
             "  subtree: bounds={:?}->{:?}",
             break_sub.bounds.min, break_sub.bounds.max
@@ -2258,7 +2386,10 @@ fn place_break_replace_with_real_generator() {
         "\n=== Server query at break chunk after replace edit ===\n{}",
         dump_tree_structure(&full_platform_query, 0)
     );
-    eprintln!("Override non-empty chunks: {}", overlay.non_empty_chunk_count());
+    eprintln!(
+        "Override non-empty chunks: {}",
+        overlay.non_empty_chunk_count()
+    );
     if let Some(ov_root) = overlay.debug_override_root() {
         eprintln!("Override tree:\n{}", dump_tree_structure(ov_root, 0));
     }
@@ -2268,10 +2399,8 @@ fn place_break_replace_with_real_generator() {
     for db in &replace_dirty {
         eprintln!("  dirty: {:?}->{:?}", db.min, db.max);
         let clip = db.intersection(&welcome_auth).unwrap_or(*db);
-        let replace_sub = overlay.query_region_core(
-            QueryVolume { bounds: clip },
-            QueryDetail::Exact,
-        );
+        let replace_sub =
+            overlay.query_region_core(QueryVolume { bounds: clip }, QueryDetail::Exact);
         eprintln!(
             "  subtree: bounds={:?}->{:?} kind={}",
             replace_sub.bounds.min,
@@ -2308,7 +2437,9 @@ fn place_break_replace_with_real_generator() {
         [0, 0, -16, -8].map(|v| ChunkCoord::from_num(v)),
         [8, 8, -8, 0].map(|v| ChunkCoord::from_num(v)),
     );
-    let post_slice = scene.world_tree.slice_non_empty_core_in_bounds(break_chunk_bounds);
+    let post_slice = scene
+        .world_tree
+        .slice_non_empty_core_in_bounds(break_chunk_bounds);
     assert!(
         matches!(post_slice.kind, RegionNodeKind::Uniform(_)),
         "chunk at break location should be Uniform after replace, got {:?}",
