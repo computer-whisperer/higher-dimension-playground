@@ -194,6 +194,14 @@ impl ServerState {
         self.world.apply_bulk_voxel_edits_scale0(edits)
     }
 
+    pub(super) fn apply_bulk_voxel_edits(
+        &mut self,
+        edits: &[([ChunkCoord; 4], BlockData)],
+        scale_exp: i8,
+    ) -> Vec<ChunkKey> {
+        self.world.apply_bulk_voxel_edits(edits, scale_exp)
+    }
+
     pub(super) fn apply_bulk_air_edits_scale0(
         &mut self,
         positions: &[[ChunkCoord; 4]],

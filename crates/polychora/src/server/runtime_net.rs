@@ -521,9 +521,9 @@ fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8
         }
     };
 
+    // Collect all blocks, grouped by scale_exp for bulk insertion.
     let offset: [ChunkCoord; 4] = position.map(ChunkCoord::from_num);
-    let mut count = 0usize;
-    let mut guard = state.lock().expect("server state lock poisoned");
+    let mut by_scale: HashMap<i8, Vec<([ChunkCoord; 4], BlockData)>> = HashMap::new();
     crate::shared::region_tree::for_each_block_in_tree_scaled(&tree, &mut |voxel_pos, block| {
         let world_pos = [
             voxel_pos[0].saturating_add(offset[0]),
@@ -531,10 +531,17 @@ fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8
             voxel_pos[2].saturating_add(offset[2]),
             voxel_pos[3].saturating_add(offset[3]),
         ];
-        let scale_exp = block.scale_exp;
-        apply_authoritative_voxel_edit(&mut guard, world_pos, block, scale_exp);
-        count += 1;
+        by_scale
+            .entry(block.scale_exp)
+            .or_default()
+            .push((world_pos, block));
     });
+
+    let count: usize = by_scale.values().map(|v| v.len()).sum();
+    let mut guard = state.lock().expect("server state lock poisoned");
+    for (scale_exp, edits) in &by_scale {
+        guard.apply_bulk_voxel_edits(edits, *scale_exp);
+    }
     eprintln!(
         "SetTreeCore: placed {count} blocks at ({}, {}, {}, {})",
         position[0], position[1], position[2], position[3]

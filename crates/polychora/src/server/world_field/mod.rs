@@ -755,10 +755,22 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         &mut self,
         edits: &[([ChunkCoord; 4], BlockData)],
     ) -> Vec<ChunkKey> {
-        // Group voxel edits by their scale-0 chunk key.
+        self.apply_bulk_voxel_edits(edits, 0)
+    }
+
+    /// Efficiently apply multiple voxel edits at a given scale.
+    ///
+    /// Groups edits by chunk and processes each chunk once: one read,
+    /// batch modifications, one write. Falls back to per-voxel edits
+    /// when chunks at other scales overlap.
+    pub fn apply_bulk_voxel_edits(
+        &mut self,
+        edits: &[([ChunkCoord; 4], BlockData)],
+        scale_exp: i8,
+    ) -> Vec<ChunkKey> {
         let mut by_chunk: HashMap<ChunkKey, Vec<([ChunkCoord; 4], BlockData)>> = HashMap::new();
         for (pos, block) in edits {
-            let (chunk_key, _) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+            let (chunk_key, _) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], scale_exp);
             by_chunk
                 .entry(chunk_key)
                 .or_default()
@@ -767,7 +779,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
 
         let mut changed = Vec::new();
         for (chunk_key, chunk_edits) in &by_chunk {
-            let chunk_bounds = Aabb4i::chunk_world_bounds(*chunk_key, 0);
+            let chunk_bounds = Aabb4i::chunk_world_bounds(*chunk_key, scale_exp);
             if let Err(e) = self.ensure_persisted_bounds_loaded(chunk_bounds) {
                 eprintln!("failed to hydrate spatial region before bulk edit: {e}");
             }
@@ -775,9 +787,10 @@ impl PassthroughWorldOverlay<ServerWorldField> {
             let entries = self
                 .override_chunks
                 .collect_chunk_entries_in_bounds(chunk_bounds);
-            if entries.iter().any(|(_, se)| *se != 0) {
+            if entries.iter().any(|(_, se)| *se != scale_exp) {
                 for (pos, block) in chunk_edits {
-                    if let Some(ck) = self.apply_voxel_edit_at_scale(*pos, block.clone(), 0) {
+                    if let Some(ck) = self.apply_voxel_edit_at_scale(*pos, block.clone(), scale_exp)
+                    {
                         if !changed.contains(&ck) {
                             changed.push(ck);
                         }
@@ -786,10 +799,12 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 continue;
             }
 
-            let (mut blocks, virgin_blocks) = self.read_effective_and_virgin_blocks(*chunk_key, 0);
+            let (mut blocks, virgin_blocks) =
+                self.read_effective_and_virgin_blocks(*chunk_key, scale_exp);
 
             for (pos, block) in chunk_edits {
-                let (_, voxel_idx) = world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], 0);
+                let (_, voxel_idx) =
+                    world_to_chunk_at_scale(pos[0], pos[1], pos[2], pos[3], scale_exp);
                 // Collision check: non-air blocks can only replace air or same type.
                 if !block.is_air() && !blocks[voxel_idx].is_air() {
                     let existing = &blocks[voxel_idx];
@@ -811,12 +826,12 @@ impl PassthroughWorldOverlay<ServerWorldField> {
 
             let affected_bounds = self
                 .override_chunks
-                .set_chunk_at_scale(*chunk_key, payload, 0);
+                .set_chunk_at_scale(*chunk_key, payload, scale_exp);
             let Some(affected_bounds) = affected_bounds else {
                 continue;
             };
 
-            self.mark_dirty_chunk(*chunk_key, 0);
+            self.mark_dirty_chunk(*chunk_key, scale_exp);
             for (key, se) in self
                 .override_chunks
                 .collect_chunk_entries_in_bounds(affected_bounds)
