@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub const ITEM_BLOCK: (u32, u32) = (0, 1);
 pub const ITEM_SPAWN_EGG: (u32, u32) = (0, 2);
+pub const ITEM_BLUEPRINT: (u32, u32) = (0, 3);
 
 // ---------------------------------------------------------------------------
 // BlockItemMeta — CBOR schema for block_stack item data
@@ -49,6 +50,40 @@ pub struct SpawnEggMeta {
 }
 
 impl SpawnEggMeta {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf).expect("CBOR encode should not fail");
+        buf
+    }
+
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.is_empty() {
+            return None;
+        }
+        ciborium::from_reader(data).ok()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BlueprintMeta — postcard schema for blueprint item data
+// ---------------------------------------------------------------------------
+
+/// A single block placement within a blueprint.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlueprintBlock {
+    pub offset: [i32; 4],
+    pub namespace: u32,
+    pub block_type: u32,
+}
+
+/// Blueprint item metadata. Contains a list of block placements that
+/// define the structure.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlueprintMeta {
+    pub blocks: Vec<BlueprintBlock>,
+}
+
+impl BlueprintMeta {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf).expect("CBOR encode should not fail");
@@ -133,6 +168,27 @@ impl ItemStack {
         }
         let meta = SpawnEggMeta::decode(&self.item.data)?;
         Some((meta.entity_namespace, meta.entity_type))
+    }
+
+    /// Create a blueprint item carrying a list of block placements.
+    pub fn blueprint(blocks: Vec<BlueprintBlock>) -> Self {
+        let meta = BlueprintMeta { blocks };
+        Self {
+            item: Item {
+                namespace: ITEM_BLUEPRINT.0,
+                item_type: ITEM_BLUEPRINT.1,
+                data: meta.encode(),
+            },
+            count: 1,
+        }
+    }
+
+    /// If this is a blueprint item, decode the metadata.
+    pub fn blueprint_meta(&self) -> Option<BlueprintMeta> {
+        if (self.item.namespace, self.item.item_type) != ITEM_BLUEPRINT {
+            return None;
+        }
+        BlueprintMeta::decode(&self.item.data)
     }
 
     /// Encode an `ItemStack` to CBOR bytes (for entity data serialization).

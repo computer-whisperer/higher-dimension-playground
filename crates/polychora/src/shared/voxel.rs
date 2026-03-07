@@ -169,6 +169,17 @@ impl BlockData {
         scale_exp: 0,
     };
 
+    /// Sentinel value meaning "no override — leave existing world data".
+    /// Used in blueprint/structure block palettes for voxels that should
+    /// not overwrite the surrounding terrain.
+    pub const VIRGIN: Self = Self {
+        namespace: u32::MAX,
+        block_type: u32::MAX,
+        orientation: TesseractOrientation::IDENTITY,
+        extra_data: Vec::new(),
+        scale_exp: 0,
+    };
+
     pub fn simple(namespace: u32, block_type: u32) -> Self {
         Self {
             namespace,
@@ -186,6 +197,11 @@ impl BlockData {
 
     pub fn is_air(&self) -> bool {
         self.namespace == 0 && self.block_type == 0
+    }
+
+    /// Returns true if this block is the "virgin" sentinel (no override).
+    pub fn is_virgin(&self) -> bool {
+        self.namespace == u32::MAX && self.block_type == u32::MAX
     }
 
     /// Compare two blocks ignoring `scale_exp`.

@@ -22,6 +22,13 @@ pub enum SideEffect {
     ConsumeHeldItem {
         count: u32,
     },
+    /// Give an item to the player, adding it to their inventory.
+    GiveItem {
+        item_ns: u32,
+        item_type: u32,
+        item_data: Vec<u8>,
+        count: u32,
+    },
 }
 
 /// Generic wrapper for all WASM opcode outputs.

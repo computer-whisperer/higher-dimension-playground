@@ -56,6 +56,15 @@ impl BlockData {
         scale_exp: 0,
     };
 
+    /// Sentinel value meaning "no override — leave existing world data".
+    pub const VIRGIN: Self = Self {
+        namespace: u32::MAX,
+        block_type: u32::MAX,
+        orientation: TesseractOrientation::IDENTITY,
+        extra_data: Vec::new(),
+        scale_exp: 0,
+    };
+
     pub fn simple(namespace: u32, block_type: u32) -> Self {
         Self {
             namespace,
@@ -68,6 +77,10 @@ impl BlockData {
 
     pub fn is_air(&self) -> bool {
         self.namespace == 0 && self.block_type == 0
+    }
+
+    pub fn is_virgin(&self) -> bool {
+        self.namespace == u32::MAX && self.block_type == u32::MAX
     }
 }
 
@@ -102,4 +115,8 @@ pub struct ChunkArrayData {
 pub enum ChunkPayload {
     Empty,
     Dense16 { materials: Vec<u16> },
+    /// No override — leave existing world content unchanged.
+    /// Used in blueprint/structure overlays so that sub-chunk structures
+    /// don't erase surrounding terrain.
+    Virgin,
 }

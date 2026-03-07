@@ -53,8 +53,8 @@ pub use integrity::{
 pub use tree::{chunk_spatial_extent, coarsest_aligned_scale, RegionChunkTree};
 pub use tree_edit::{slice_non_empty_region_core_in_bounds, slice_region_core_in_bounds};
 pub use tree_query::{
-    collect_non_empty_chunks_from_core_in_bounds, query_chunk_payload_in_node, BvhBlockHit,
-    BvhRayHit,
+    collect_non_empty_chunks_from_core_in_bounds, for_each_block_in_tree,
+    query_chunk_payload_in_node, BvhBlockHit, BvhRayHit,
 };
 
 mod plugin_convert;

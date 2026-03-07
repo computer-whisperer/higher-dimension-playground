@@ -1799,6 +1799,20 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
+    pub(super) fn send_set_tree_core(
+        &self,
+        position: [i64; 4],
+        tree_data: Vec<u8>,
+    ) {
+        if let Some(client) = self.multiplayer.as_ref() {
+            client.send(MultiplayerClientMessage::SetTreeCore {
+                position,
+                tree_data,
+            });
+        }
+    }
+
     pub(super) fn send_multiplayer_console_command(&self, command: &str) -> bool {
         let Some(client) = self.multiplayer.as_ref() else {
             return false;

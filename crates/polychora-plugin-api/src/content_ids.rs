@@ -73,6 +73,7 @@ pub const BLOCK_EVENTIDE_ALLOY: u32 = 0x548aaa9e;
 pub const BLOCK_BEACON_MATRIX: u32 = 0x20f1bc81;
 pub const BLOCK_SPAWNER: u32 = 0x7a3e1d5c;
 pub const BLOCK_CHEST: u32 = 0x4c8e2b91;
+pub const BLOCK_BLUEPRINT_DISPENSER: u32 = 0x5d9f3ca2;
 
 // ---- Entity type IDs (6 entities) ----
 

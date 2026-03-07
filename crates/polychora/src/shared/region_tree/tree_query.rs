@@ -1218,6 +1218,58 @@ pub(super) fn bvh_raycast(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Block enumeration — iterate over individual voxels in a tree
+// ---------------------------------------------------------------------------
+
+/// Walk a `RegionTreeCore` and call `callback` for each non-air, non-virgin
+/// block, providing the world-space voxel coordinate and block data.
+///
+/// This is a naive per-block iteration used for MVP structure placement.
+pub fn for_each_block_in_tree(
+    tree: &RegionTreeCore,
+    callback: &mut impl FnMut([i64; 4], BlockData),
+) {
+    let chunks = collect_non_empty_chunks_from_core_in_bounds(tree, tree.bounds);
+    let cs = CHUNK_SIZE as i64;
+    for (chunk_key, resolved) in &chunks {
+        if matches!(resolved.payload, crate::shared::chunk_payload::ChunkPayload::Virgin) {
+            continue;
+        }
+        let chunk_origin: [i64; 4] = [
+            chunk_key[0].to_num::<i64>() * cs,
+            chunk_key[1].to_num::<i64>() * cs,
+            chunk_key[2].to_num::<i64>() * cs,
+            chunk_key[3].to_num::<i64>() * cs,
+        ];
+        for vx in 0..CHUNK_SIZE {
+            for vy in 0..CHUNK_SIZE {
+                for vz in 0..CHUNK_SIZE {
+                    for vw in 0..CHUNK_SIZE {
+                        let voxel_idx = linear_cell_index(
+                            [vx, vy, vz, vw],
+                            [CHUNK_SIZE; 4],
+                        );
+                        let block = resolved.block_at(voxel_idx);
+                        if block.is_air() || block.is_virgin() {
+                            continue;
+                        }
+                        callback(
+                            [
+                                chunk_origin[0] + vx as i64,
+                                chunk_origin[1] + vy as i64,
+                                chunk_origin[2] + vz as i64,
+                                chunk_origin[3] + vw as i64,
+                            ],
+                            block,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod ray_aabb_tests {
     use super::*;

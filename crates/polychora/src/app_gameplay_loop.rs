@@ -782,6 +782,14 @@ impl App {
                                 "Spawn egg used: entity ({:#x}, {:#x}) at ({:.1}, {:.1}, {:.1}, {:.1})",
                                 ens, etype, spawn_pos[0], spawn_pos[1], spawn_pos[2], spawn_pos[3],
                             );
+                        } else if let Some(bp_meta) = self
+                            .inventory
+                            .slot(self.hotbar_selected_index)
+                            .and_then(|s| s.blueprint_meta())
+                        {
+                            if let Some(place) = &edit_targets.place {
+                                self.place_blueprint(&bp_meta, place.origin);
+                            }
                         } else if !self.selected_block.is_air() {
                           if let Some(place) = &edit_targets.place {
                             let [x, y, z, w] = place.origin_i32();
@@ -879,10 +887,60 @@ impl App {
                         self.inventory.hotbar_slot(self.hotbar_selected_index),
                     );
                 }
+                SideEffect::GiveItem {
+                    item_ns,
+                    item_type,
+                    item_data,
+                    count,
+                } => {
+                    use polychora::shared::protocol::{Item, ItemStack};
+                    let stack = ItemStack {
+                        item: Item {
+                            namespace: *item_ns,
+                            item_type: *item_type,
+                            data: item_data.clone(),
+                        },
+                        count: *count,
+                    };
+                    let _remainder = self.inventory.try_add(stack);
+                    self.inventory_dirty = true;
+                    self.selected_block = block_data_from_slot(
+                        self.inventory.hotbar_slot(self.hotbar_selected_index),
+                    );
+                }
                 SideEffect::SpawnEntity { .. } => {
                     eprintln!("Warning: SpawnEntity side effect not allowed for OP_BLOCK_INTERACT");
                 }
             }
+        }
+    }
+
+    /// Place a blueprint structure at the given position.
+    fn place_blueprint(
+        &mut self,
+        bp_meta: &polychora::shared::item_types::BlueprintMeta,
+        position: [polychora::shared::spatial::ChunkCoord; 4],
+    ) {
+        use polychora::shared::spatial::ChunkCoord;
+        use polychora::shared::voxel::BlockData;
+
+        let origin = position.map(|c| c.to_num::<i64>());
+        eprintln!(
+            "Blueprint: placing {} blocks at ({}, {}, {}, {})",
+            bp_meta.blocks.len(),
+            origin[0], origin[1], origin[2], origin[3],
+        );
+
+        let now = std::time::Instant::now();
+        for bp_block in &bp_meta.blocks {
+            let world_pos = [
+                ChunkCoord::from_num(origin[0] + bp_block.offset[0] as i64),
+                ChunkCoord::from_num(origin[1] + bp_block.offset[1] as i64),
+                ChunkCoord::from_num(origin[2] + bp_block.offset[2] as i64),
+                ChunkCoord::from_num(origin[3] + bp_block.offset[3] as i64),
+            ];
+            let block = BlockData::simple(bp_block.namespace, bp_block.block_type);
+            self.send_multiplayer_voxel_update(now, world_pos, block);
         }
     }
 

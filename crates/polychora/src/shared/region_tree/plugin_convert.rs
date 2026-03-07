@@ -25,6 +25,7 @@ fn convert_block_data(src: &api::BlockData) -> BlockData {
 fn convert_chunk_payload(src: &api::ChunkPayload) -> ChunkPayload {
     match src {
         api::ChunkPayload::Empty => ChunkPayload::Empty,
+        api::ChunkPayload::Virgin => ChunkPayload::Virgin,
         api::ChunkPayload::Dense16 { materials } => {
             if materials.len() != CHUNK_VOLUME {
                 return ChunkPayload::Empty;

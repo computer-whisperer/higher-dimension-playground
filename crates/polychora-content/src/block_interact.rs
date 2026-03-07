@@ -31,6 +31,7 @@ pub fn block_interact(input: &BlockInteractInput) -> WasmCallResult<BlockInterac
     match input.block_type {
         BLOCK_CHEST => WasmCallResult::new(chest_interact(input)),
         BLOCK_SPAWNER => spawner_interact(input),
+        BLOCK_BLUEPRINT_DISPENSER => blueprint_dispenser_interact(),
         _ => WasmCallResult::new(BlockInteractOutput::Nothing),
     }
 }
@@ -73,6 +74,63 @@ fn spawner_interact(input: &BlockInteractInput) -> WasmCallResult<BlockInteractO
             SideEffect::ConsumeHeldItem { count: 1 },
         ],
     )
+}
+
+fn blueprint_dispenser_interact() -> WasmCallResult<BlockInteractOutput> {
+    // Build a 5×5×5×1 hollow frame (edges only) as a block list.
+    const SIZE: i32 = 5;
+    let mut blocks: Vec<BlueprintBlock> = Vec::new();
+
+    for x in 0..SIZE {
+        for y in 0..SIZE {
+            for z in 0..SIZE {
+                let edge_count = [x, y, z]
+                    .iter()
+                    .filter(|&&v| v == 0 || v == SIZE - 1)
+                    .count();
+                if edge_count >= 2 {
+                    let (ns, bt) = if edge_count >= 3 {
+                        (CONTENT_NS, BLOCK_LIGHT)
+                    } else {
+                        (CONTENT_NS, BLOCK_STONE)
+                    };
+                    blocks.push(BlueprintBlock {
+                        offset: [x, y, z, 0],
+                        namespace: ns,
+                        block_type: bt,
+                    });
+                }
+            }
+        }
+    }
+
+    let blueprint_meta = BlueprintMeta { blocks };
+    let mut item_data = Vec::new();
+    ciborium::into_writer(&blueprint_meta, &mut item_data).unwrap();
+
+    WasmCallResult::with_effects(
+        BlockInteractOutput::Nothing,
+        alloc::vec![SideEffect::GiveItem {
+            item_ns: 0,
+            item_type: 3,
+            item_data,
+            count: 1,
+        }],
+    )
+}
+
+/// A single block placement in a blueprint (must match host's BlueprintBlock).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlueprintBlock {
+    offset: [i32; 4],
+    namespace: u32,
+    block_type: u32,
+}
+
+/// Blueprint metadata (must match host's BlueprintMeta).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlueprintMeta {
+    blocks: Vec<BlueprintBlock>,
 }
 
 fn chest_interact(input: &BlockInteractInput) -> BlockInteractOutput {

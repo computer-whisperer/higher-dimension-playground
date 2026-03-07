@@ -68,17 +68,30 @@ fn build_wasm_plugin() {
         wasm_path.display()
     );
 
-    // Rerun if the WASM plugin sources change
-    let content_src = workspace_root
-        .join("crates")
-        .join("polychora-content")
-        .join("src");
-    println!("cargo:rerun-if-changed={}", content_src.display());
+    // Rerun if the WASM plugin sources change.
+    // Watch individual files, not directories — `cargo:rerun-if-changed` on a
+    // directory only fires when files are added/removed, not when existing files
+    // are modified.
     println!("cargo:rerun-if-changed={}", content_manifest.display());
-    // Also rerun if plugin-api changes (shared types)
-    let plugin_api_src = workspace_root
-        .join("crates")
-        .join("polychora-plugin-api")
-        .join("src");
-    println!("cargo:rerun-if-changed={}", plugin_api_src.display());
+    let watch_dirs = [
+        workspace_root.join("crates").join("polychora-content").join("src"),
+        workspace_root.join("crates").join("polychora-plugin-api").join("src"),
+    ];
+    for dir in &watch_dirs {
+        watch_dir_recursive(dir);
+    }
+}
+
+fn watch_dir_recursive(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            watch_dir_recursive(&path);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }

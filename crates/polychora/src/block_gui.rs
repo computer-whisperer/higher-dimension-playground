@@ -109,13 +109,26 @@ pub fn try_block_interact(
         &input_bytes,
     ) {
         Ok(Some(r)) => r,
-        _ => return BlockInteractResult::Nothing,
+        Ok(None) => {
+            eprintln!("OP_BLOCK_INTERACT: WASM call returned None (no plugin loaded?)");
+            return BlockInteractResult::Nothing;
+        }
+        Err(e) => {
+            eprintln!("OP_BLOCK_INTERACT: WASM call failed: {e}");
+            return BlockInteractResult::Nothing;
+        }
     };
 
     let wrapped: WasmCallResult<BlockInteractOutput> =
         match postcard::from_bytes(&result.invocation.output) {
             Ok(o) => o,
-            Err(_) => return BlockInteractResult::Nothing,
+            Err(e) => {
+                eprintln!(
+                    "OP_BLOCK_INTERACT: failed to deserialize output ({} bytes): {e}",
+                    result.invocation.output.len(),
+                );
+                return BlockInteractResult::Nothing;
+            }
         };
 
     match wrapped.response {

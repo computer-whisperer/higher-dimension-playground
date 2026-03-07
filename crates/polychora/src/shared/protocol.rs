@@ -161,6 +161,14 @@ pub enum ClientMessage {
     DropItem {
         slot_index: u8,
     },
+    /// Place a structure (region tree) at a world position.
+    /// The tree is serialized as postcard bytes (host RegionTreeCore).
+    SetTreeCore {
+        /// World-space origin for the structure.
+        position: [i64; 4],
+        /// Postcard-serialized RegionTreeCore.
+        tree_data: Vec<u8>,
+    },
 }
 
 // ---------------------------------------------------------------------------

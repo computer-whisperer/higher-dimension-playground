@@ -177,5 +177,18 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 activation_radius: 24.0,
             }),
         },
+
+        // Blueprint dispenser (72) — gives player a blueprint item on interact
+        BlockDeclaration {
+            type_id: BLOCK_BLUEPRINT_DISPENSER,
+            name: String::from("Blueprint Dispenser"),
+            category: Special,
+            color_hint: [64, 180, 220],
+            texture: TextureRef { namespace: 0, texture_id: TEX_CIRCUIT_WEAVE },
+            transparent: false,
+            light_emission: 4,
+            interactable: true,
+            tick_config: None,
+        },
     ]
 }

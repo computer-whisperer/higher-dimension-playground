@@ -503,6 +503,30 @@ fn apply_authoritative_voxel_edit(
     state.apply_world_voxel_edit_at_scale(position, block, scale_exp)
 }
 
+fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8]) {
+    let tree: crate::shared::region_tree::RegionTreeCore = match postcard::from_bytes(tree_data) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("SetTreeCore: failed to deserialize tree: {e}");
+            return;
+        }
+    };
+    let mut count = 0usize;
+    let mut guard = state.lock().expect("server state lock poisoned");
+    crate::shared::region_tree::for_each_block_in_tree(&tree, &mut |voxel_pos, block| {
+        let world_pos = [
+            ChunkCoord::from_num(position[0] + voxel_pos[0]),
+            ChunkCoord::from_num(position[1] + voxel_pos[1]),
+            ChunkCoord::from_num(position[2] + voxel_pos[2]),
+            ChunkCoord::from_num(position[3] + voxel_pos[3]),
+        ];
+        let scale_exp = block.scale_exp;
+        apply_authoritative_voxel_edit(&mut guard, world_pos, block, scale_exp);
+        count += 1;
+    });
+    eprintln!("SetTreeCore: placed {count} blocks at ({}, {}, {}, {})", position[0], position[1], position[2], position[3]);
+}
+
 fn flush_world_dirty_updates(state: &SharedState) -> usize {
     let dirty_bounds = {
         let mut guard = state.lock().expect("server state lock poisoned");
@@ -1423,6 +1447,12 @@ pub(super) fn handle_message(
         }
         ClientMessage::DropItem { slot_index } => {
             handle_drop_item(state, client_id, slot_index, start);
+        }
+        ClientMessage::SetTreeCore {
+            position,
+            tree_data,
+        } => {
+            handle_set_tree_core(state, position, &tree_data);
         }
     }
     record_server_cpu_sample(state, Some(message_cpu_start.elapsed()), None, None);
