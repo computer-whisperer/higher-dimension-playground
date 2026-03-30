@@ -347,10 +347,7 @@ impl Scene {
             self.active_config.pending_render_bvh_rebuild = true;
         }
 
-        let dirty_regions = self.take_voxel_scene_dirty_regions_in_bounds(
-            bounds,
-            VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET,
-        );
+        let dirty_regions = self.take_voxel_scene_dirty_regions_in_bounds(bounds);
         if std::env::var_os("R4D_EDIT_RENDER_SYNC_DIAG").is_some()
             && dirty_regions.is_empty()
             && !self.voxel_pending_scene_dirty_regions.is_empty()
@@ -475,21 +472,14 @@ impl Scene {
             .retain(|pending| !pending.intersects(&bounds));
     }
 
-    fn take_voxel_scene_dirty_regions_in_bounds(
-        &mut self,
-        bounds: Aabb4i,
-        max_regions: usize,
-    ) -> Vec<Aabb4i> {
-        if !bounds.is_valid()
-            || max_regions == 0
-            || self.voxel_pending_scene_dirty_regions.is_empty()
-        {
+    fn take_voxel_scene_dirty_regions_in_bounds(&mut self, bounds: Aabb4i) -> Vec<Aabb4i> {
+        if !bounds.is_valid() || self.voxel_pending_scene_dirty_regions.is_empty() {
             return Vec::new();
         }
 
         let mut taken = Vec::<Aabb4i>::new();
         self.voxel_pending_scene_dirty_regions.retain(|pending| {
-            if taken.len() < max_regions && pending.intersects(&bounds) {
+            if pending.intersects(&bounds) {
                 taken.push(*pending);
                 false
             } else {

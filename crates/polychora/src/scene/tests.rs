@@ -797,7 +797,7 @@ fn voxel_scene_dirty_tracking_offscreen_edits_do_not_invalidate_local_cache() {
 }
 
 #[test]
-fn voxel_scene_dirty_budget_limits_chunks_per_rebuild() {
+fn voxel_scene_dirty_regions_all_consumed_in_single_pass() {
     let mut scene = Scene::new(ScenePreset::Empty);
     let bounds = Aabb4i::from_i32([-16, -16, -16, -16], [1608, 24, 24, 24]);
 
@@ -805,26 +805,16 @@ fn voxel_scene_dirty_budget_limits_chunks_per_rebuild() {
     scene.prime_render_bvh_cache_for_bounds(bounds);
     assert_eq!(scene.active_config.render_bvh_cache_bounds, Some(bounds));
 
-    // Mark more dirty chunks than per-frame budget.
-    let dirty_count = VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET + 5;
+    // Mark many dirty regions.
+    let dirty_count = 9;
     for i in 0..dirty_count {
         let wx = (i as i32) * CHUNK_SIZE as i32;
         scene.world_set_block(wx, 0, 0, 0, BlockData::simple(0, 7));
     }
     assert_eq!(scene.voxel_pending_scene_dirty_regions.len(), dirty_count);
 
-    // One rebuild pass should only consume the budgeted amount.
+    // A single rebuild pass should consume all dirty regions.
     scene.ensure_render_bvh_cache_for_bounds(bounds);
-    let expected_remaining = dirty_count.saturating_sub(VOXEL_SCENE_DIRTY_REGION_UPDATE_BUDGET);
-    assert_eq!(
-        scene.voxel_pending_scene_dirty_regions.len(),
-        expected_remaining
-    );
-
-    // Additional passes should eventually consume the remainder.
-    while !scene.voxel_pending_scene_dirty_regions.is_empty() {
-        scene.ensure_render_bvh_cache_for_bounds(bounds);
-    }
     assert!(scene.voxel_pending_scene_dirty_regions.is_empty());
 }
 
