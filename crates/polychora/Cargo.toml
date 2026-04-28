@@ -25,8 +25,8 @@ serde_json = "1.0"
 flate2 = "1.0"
 postcard = { version = "1", features = ["use-std"] }
 fixed = { version = "1", features = ["serde"] }
-egui = "0.33.3"
-egui-winit = { version = "0.33.3", default-features = false, features = ["links", "wayland", "x11"] }
+egui = "0.34"
+egui-winit = { version = "0.34", default-features = false, features = ["links", "wayland", "x11"] }
 rodio = "0.20"
 ciborium = "0.2"
 crc32fast = "1.4"
