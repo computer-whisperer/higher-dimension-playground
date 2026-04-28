@@ -8,7 +8,7 @@ bytemuck = { version = "1.18", features=["derive"] }
 glam = {version = "0.24", features=["bytemuck"]}
 
 
-ndarray = {version="0.16.0", default-features=false, optional=true}
+ndarray = {version="0.17", default-features=false, optional=true}
 nalgebra = {version="0.34", default-features=false, optional=true}
 
 [features]

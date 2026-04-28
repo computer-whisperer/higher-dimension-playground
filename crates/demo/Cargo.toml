@@ -9,5 +9,5 @@ common = { path = "../../common", features = ["ndarray", "nalgebra"] }
 vulkano = "0.35"
 winit = "0.30"
 clap = { version = "4.6", features = ["derive"] }
-ndarray = "0.16.0"
+ndarray = "0.17"
 image = { version = "0.25", features = ["rayon"] }
