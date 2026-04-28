@@ -1,5 +1,6 @@
 use crate::audio_synth;
-use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink, SpatialSink};
+use rodio::{buffer::SamplesBuffer, nz, DeviceSinkBuilder, MixerDeviceSink, Player, SpatialPlayer};
+use std::num::NonZero;
 use std::sync::Arc;
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
@@ -41,8 +42,7 @@ impl SoundEffect {
 }
 
 struct AudioOutput {
-    _stream: OutputStream,
-    handle: OutputStreamHandle,
+    sink: MixerDeviceSink,
 }
 
 /// A set of sample variations for a single sound effect.
@@ -80,11 +80,8 @@ impl AudioEngine {
         let sample_rate = AUDIO_SAMPLE_RATE;
         let effects = build_effect_table(sample_rate);
         let output = if enabled {
-            match OutputStream::try_default() {
-                Ok((stream, handle)) => Some(AudioOutput {
-                    _stream: stream,
-                    handle,
-                }),
+            match DeviceSinkBuilder::open_default_sink() {
+                Ok(sink) => Some(AudioOutput { sink }),
                 Err(error) => {
                     eprintln!("Audio output unavailable: {error}");
                     None
@@ -127,12 +124,10 @@ impl AudioEngine {
             return;
         };
 
-        let Ok(sink) = Sink::try_new(&output.handle) else {
-            return;
-        };
-        sink.set_volume(gain);
-        sink.append(self.pick_samples(idx));
-        sink.detach();
+        let player = Player::connect_new(output.sink.mixer());
+        player.set_volume(gain);
+        player.append(self.pick_samples(idx));
+        player.detach();
     }
 
     pub fn play_spatial_scaled(
@@ -160,13 +155,10 @@ impl AudioEngine {
         let left_ear = [-half_ear, 0.0, 0.0];
         let right_ear = [half_ear, 0.0, 0.0];
 
-        let Ok(sink) = SpatialSink::try_new(&output.handle, emitter, left_ear, right_ear) else {
-            self.play_scaled(effect, scale);
-            return;
-        };
-        sink.set_volume(gain);
-        sink.append(self.pick_samples(idx));
-        sink.detach();
+        let player = SpatialPlayer::connect_new(output.sink.mixer(), emitter, left_ear, right_ear);
+        player.set_volume(gain);
+        player.append(self.pick_samples(idx));
+        player.detach();
     }
 
     pub fn play_spatial_voxel_scaled(
@@ -195,11 +187,12 @@ impl AudioEngine {
         Some((idx, gain))
     }
 
-    fn pick_samples(&self, effect_idx: usize) -> SamplesBuffer<f32> {
+    fn pick_samples(&self, effect_idx: usize) -> SamplesBuffer {
         let mut rng = self.rng_state.get();
         let samples = self.effects[effect_idx].pick(&mut rng).to_vec();
         self.rng_state.set(rng);
-        SamplesBuffer::new(1, self.sample_rate, samples)
+        let sample_rate = NonZero::new(self.sample_rate).unwrap_or(nz!(44_100));
+        SamplesBuffer::new(nz!(1), sample_rate, samples)
     }
 }
 
