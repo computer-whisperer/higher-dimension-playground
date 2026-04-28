@@ -1548,33 +1548,38 @@ impl App {
         let mut console_command: Option<String> = None;
         let mut transition_to_playing: Option<MainMenuTransition> = None;
         let mut return_to_main_menu = false;
-        let full_output = egui_ctx.run(raw_input, |ctx| {
+        let full_output = egui_ctx.run_ui(raw_input, |ui| {
             if self.app_state == AppState::MainMenu {
-                self.draw_egui_main_menu(ctx, &mut transition_to_playing);
+                self.draw_egui_main_menu(ui.ctx(), &mut transition_to_playing);
             } else if !self.world_ready {
-                self.draw_egui_loading_screen(ctx);
+                self.draw_egui_loading_screen(ui);
             } else {
+                let ctx = ui.ctx().clone();
                 if self.menu_open {
-                    self.draw_egui_pause_menu(ctx, &mut close_menu, &mut return_to_main_menu);
+                    self.draw_egui_pause_menu(&ctx, &mut close_menu, &mut return_to_main_menu);
                 }
                 if self.inventory_open {
-                    self.draw_egui_inventory(ctx, &mut close_inventory, &mut inventory_pick);
+                    self.draw_egui_inventory(&ctx, &mut close_inventory, &mut inventory_pick);
                 }
                 if self.teleport_dialog_open {
-                    self.draw_egui_teleport_dialog(ctx, &mut teleport_target, &mut close_teleport);
+                    self.draw_egui_teleport_dialog(
+                        &ctx,
+                        &mut teleport_target,
+                        &mut close_teleport,
+                    );
                 }
                 if self.controls_dialog_open {
-                    self.draw_egui_controls_dialog(ctx);
+                    self.draw_egui_controls_dialog(&ctx);
                 }
                 if self.dev_console_open {
-                    self.draw_egui_dev_console(ctx, &mut console_command, &mut close_console);
+                    self.draw_egui_dev_console(&ctx, &mut console_command, &mut close_console);
                 }
                 if self.block_gui_session.is_some() {
-                    self.draw_egui_block_gui(ctx, &mut close_block_gui);
+                    self.draw_egui_block_gui(&ctx, &mut close_block_gui);
                 }
-                self.draw_egui_hotbar(ctx);
-                self.draw_egui_orientation_indicator(ctx);
-                self.draw_egui_waila(ctx);
+                self.draw_egui_hotbar(&ctx);
+                self.draw_egui_orientation_indicator(&ctx);
+                self.draw_egui_waila(&ctx);
             }
         });
 

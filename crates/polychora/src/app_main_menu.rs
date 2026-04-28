@@ -497,12 +497,10 @@ impl App {
         }
     }
 
-    pub(super) fn draw_egui_loading_screen(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.4);
-                ui.heading("Loading world...");
-            });
+    pub(super) fn draw_egui_loading_screen(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.4);
+            ui.heading("Loading world...");
         });
     }
 
