@@ -635,7 +635,7 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.24.2",
+ "glam 0.32.1",
  "nalgebra",
  "ndarray",
 ]
@@ -1570,9 +1570,6 @@ name = "glam"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5418c17512bdf42730f9032c74e1ae39afc408745ebb2acf72fbc4691c17945"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "glam"
@@ -1615,6 +1612,9 @@ name = "glam"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "half"
@@ -1711,7 +1711,7 @@ dependencies = [
  "bytemuck",
  "common",
  "exr",
- "glam 0.24.2",
+ "glam 0.32.1",
  "image",
  "nalgebra",
  "ndarray",
