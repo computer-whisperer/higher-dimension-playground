@@ -1,76 +1,137 @@
 use aetna_core::prelude::{
     badge, button, card, card_content, card_header, card_title, column, image as aetna_image, mono,
-    row, spacer, stack, text, tokens, Align, Axis, Color, Cursor, El, ImageFit, Justify, Rect,
-    Size,
+    render_bundle, row, spacer, stack, text, tokens, write_bundle, Align, Axis, Color, Cursor, El,
+    Image, ImageFit, Justify, Rect, Size,
 };
+use std::path::Path;
 
 use super::{block_data_from_slot, format_cbor_for_display, App, WailaTarget};
 
 const HOTBAR_SLOT_KEY_PREFIX: &str = "aetna_hotbar_slot_";
 const ORIENTATION_KEY_PREFIX: &str = "aetna_orientation_";
 
-impl App {
-    pub(super) fn build_aetna_overlay(&self) -> Option<El> {
-        let mut children = vec![
-            self.build_aetna_hotbar(),
-            self.build_aetna_orientation_controls(),
-        ];
-        if let Some(waila) = self.build_aetna_waila_panel() {
-            children.push(waila);
-        }
+struct HotbarSlotView {
+    name: String,
+    count: u32,
+    color: Color,
+    icon: Option<Image>,
+    selected: bool,
+}
 
-        Some(stack(children).fill_size().layout(|cx| {
-            let (hotbar_w, hotbar_h) = (cx.measure)(&cx.children[0]);
-            let hotbar_x = cx.container.x + ((cx.container.w - hotbar_w) * 0.5).max(12.0);
-            let hotbar_y = cx.container.bottom() - hotbar_h - 12.0;
-            let hotbar_rect = Rect::new(hotbar_x, hotbar_y, hotbar_w, hotbar_h);
+pub(super) fn dump_fixture_aetna_overlay_bundle(
+    width: u32,
+    height: u32,
+    out_dir: &Path,
+) -> std::io::Result<()> {
+    let slots = [
+        ("Orange", Color::rgb(218, 159, 22)),
+        ("Grid Floor", Color::rgb(86, 92, 108)),
+        ("Cyan", Color::rgb(24, 184, 181)),
+        ("Red", Color::rgb(194, 16, 18)),
+        ("Blue", Color::rgb(24, 46, 196)),
+        ("Purple", Color::rgb(102, 34, 206)),
+        ("Magenta", Color::rgb(197, 16, 166)),
+        ("Crystal Lattice", Color::rgb(20, 128, 151)),
+        ("Red", Color::rgb(194, 16, 18)),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (name, color))| {
+        build_aetna_hotbar_slot_view(
+            index,
+            HotbarSlotView {
+                name: name.to_string(),
+                count: 1,
+                color,
+                icon: Some(fixture_icon(color)),
+                selected: index == 1,
+            },
+        )
+    });
+    let hotbar = build_aetna_hotbar_from_slots(slots);
+    let mut overlay = build_aetna_overlay_shell(
+        hotbar,
+        build_aetna_orientation_controls_view("Ori: 0".to_string(), false),
+        None,
+    );
+    write_aetna_bundle(&mut overlay, width, height, out_dir, "aetna_hud")
+}
 
-            let mut rects = Vec::with_capacity(cx.children.len());
-            for (index, child) in cx.children.iter().enumerate() {
-                let (measured_w, measured_h) = (cx.measure)(child);
-                let rect = match index {
-                    0 => hotbar_rect,
-                    1 => {
-                        let left_x = hotbar_rect.x - measured_w - 10.0;
-                        if left_x >= cx.container.x + 12.0 {
-                            Rect::new(
-                                left_x,
-                                hotbar_rect.y + (hotbar_rect.h - measured_h) * 0.5,
-                                measured_w,
-                                measured_h,
-                            )
-                        } else {
-                            Rect::new(
-                                cx.container.x + ((cx.container.w - measured_w) * 0.5).max(12.0),
-                                (hotbar_rect.y - measured_h - 10.0).max(cx.container.y + 12.0),
-                                measured_w,
-                                measured_h,
-                            )
-                        }
-                    }
-                    _ => {
-                        let width = measured_w.min((cx.container.w - 24.0).max(260.0));
-                        Rect::new(
-                            cx.container.x + ((cx.container.w - width) * 0.5).max(12.0),
-                            cx.container.y + 30.0,
-                            width,
-                            measured_h,
-                        )
-                    }
+fn fixture_icon(color: Color) -> Image {
+    let (r, g, b) = (color.r, color.g, color.b);
+    let mut pixels = vec![0; 64 * 64 * 4];
+    for y in 0..64usize {
+        for x in 0..64usize {
+            let dx = x as i32 - 32;
+            let dy = y as i32 - 34;
+            let diamond = dx.abs() * 2 + dy.abs() * 3 <= 70;
+            if diamond {
+                let i = (y * 64 + x) * 4;
+                let shade = if dy < -4 {
+                    38
+                } else if dx < 0 {
+                    0
+                } else {
+                    18
                 };
-                rects.push(rect);
+                pixels[i] = r.saturating_add(shade);
+                pixels[i + 1] = g.saturating_add(shade);
+                pixels[i + 2] = b.saturating_add(shade);
+                pixels[i + 3] = 255;
             }
-            rects
-        }))
+        }
+    }
+    Image::from_rgba8(64, 64, pixels)
+}
+
+fn write_aetna_bundle(
+    overlay: &mut El,
+    width: u32,
+    height: u32,
+    out_dir: &Path,
+    name: &str,
+) -> std::io::Result<()> {
+    let viewport = Rect::new(0.0, 0.0, width as f32, height as f32);
+    let bundle = render_bundle(overlay, viewport, Some(env!("CARGO_PKG_NAME")));
+    let written = write_bundle(&bundle, out_dir, name)?;
+    eprintln!("Wrote Aetna HUD bundle artifacts to {}", out_dir.display());
+    for path in written {
+        eprintln!("  {}", path.display());
+    }
+    if !bundle.lint.findings.is_empty() {
+        eprintln!("\nAetna lint findings ({}):", bundle.lint.findings.len());
+        eprint!("{}", bundle.lint.text());
+    }
+    Ok(())
+}
+
+impl App {
+    pub(super) fn dump_aetna_overlay_bundle(&self) -> std::io::Result<()> {
+        let Some(mut overlay) = self.build_aetna_overlay() else {
+            return Ok(());
+        };
+        write_aetna_bundle(
+            &mut overlay,
+            self.args.width,
+            self.args.height,
+            &self.args.aetna_bundle_dir,
+            "aetna_hud",
+        )
+    }
+
+    pub(super) fn build_aetna_overlay(&self) -> Option<El> {
+        let hotbar = self.build_aetna_hotbar();
+        let orientation = self.build_aetna_orientation_controls();
+        Some(build_aetna_overlay_shell(
+            hotbar,
+            orientation,
+            self.build_aetna_waila_panel(),
+        ))
     }
 
     fn build_aetna_hotbar(&self) -> El {
         let slots = (0..9).map(|i| self.build_aetna_hotbar_slot(i));
-        row(slots)
-            .gap(tokens::SPACE_2)
-            .align(Align::Center)
-            .height(Size::Hug)
-            .width(Size::Hug)
+        build_aetna_hotbar_from_slots(slots)
     }
 
     fn build_aetna_hotbar_slot(&self, index: usize) -> El {
@@ -120,59 +181,16 @@ impl App {
                 (name, stack.count, color, icon)
             })
             .unwrap_or_else(|| ("Empty".to_string(), 0, Color::rgb(44, 48, 58), None));
-        let selected = index == self.hotbar_selected_index;
-        let label = short_label(name);
-        let icon = if let Some(icon) = icon {
-            aetna_image(icon)
-                .image_fit(ImageFit::Contain)
-                .width(Size::Fixed(44.0))
-                .height(Size::Fixed(34.0))
-                .radius(4.0)
-        } else {
-            column(std::iter::empty::<El>())
-                .width(Size::Fixed(44.0))
-                .height(Size::Fixed(34.0))
-                .fill(color)
-                .radius(4.0)
-        };
-
-        column([
-            row([
-                text(format!("{}", index + 1)).caption().muted(),
-                spacer(),
-                if count > 1 {
-                    badge(format!("{}", count)).muted()
-                } else {
-                    text("")
-                },
-            ])
-            .width(Size::Fill(1.0))
-            .align(Align::Center),
-            icon,
-            text(label)
-                .caption()
-                .center_text()
-                .ellipsis()
-                .max_lines(1)
-                .width(Size::Fill(1.0)),
-        ])
-        .key(format!("aetna_hotbar_slot_{index}"))
-        .focusable()
-        .cursor(Cursor::Pointer)
-        .width(Size::Fixed(76.0))
-        .height(Size::Fixed(82.0))
-        .padding(tokens::SPACE_2)
-        .gap(tokens::SPACE_1)
-        .align(Align::Center)
-        .fill(tokens::CARD.with_alpha(205))
-        .stroke(if selected {
-            Color::rgb(250, 246, 140)
-        } else {
-            tokens::BORDER.with_alpha(180)
-        })
-        .stroke_width(if selected { 2.5 } else { 1.0 })
-        .radius(6.0)
-        .shadow(if selected { tokens::SHADOW_MD } else { 0.0 })
+        build_aetna_hotbar_slot_view(
+            index,
+            HotbarSlotView {
+                name,
+                count,
+                color,
+                icon,
+                selected: index == self.hotbar_selected_index,
+            },
+        )
     }
 
     fn build_aetna_orientation_controls(&self) -> El {
@@ -185,55 +203,7 @@ impl App {
             "Ori: 0".to_string()
         };
 
-        row([
-            column([
-                row([
-                    orientation_button("XZ", "xz", "Z key: rotate in XZ plane"),
-                    orientation_button("YZ", "yz", "X key: rotate in YZ plane"),
-                    orientation_button("XW", "xw", "C key: rotate in XW plane"),
-                ])
-                .gap(tokens::SPACE_1),
-                row([
-                    orientation_button("XY", "xy", "Rotate in XY plane"),
-                    orientation_button("YW", "yw", "Rotate in YW plane"),
-                    orientation_button("ZW", "zw", "Rotate in ZW plane"),
-                ])
-                .gap(tokens::SPACE_1),
-            ])
-            .gap(tokens::SPACE_1),
-            column([
-                button("Reset")
-                    .key(format!("{ORIENTATION_KEY_PREFIX}reset"))
-                    .tooltip("Reset orientation")
-                    .secondary()
-                    .width(Size::Fixed(60.0))
-                    .height(Size::Fixed(24.0))
-                    .padding(0.0),
-                text(label)
-                    .caption()
-                    .center_text()
-                    .width(Size::Fixed(60.0))
-                    .color(if is_rotated {
-                        Color::rgb(210, 196, 255)
-                    } else {
-                        tokens::MUTED_FOREGROUND
-                    }),
-            ])
-            .gap(tokens::SPACE_1),
-        ])
-        .width(Size::Fixed(218.0))
-        .height(Size::Hug)
-        .padding(tokens::SPACE_2)
-        .gap(tokens::SPACE_2)
-        .align(Align::Center)
-        .fill(if is_rotated {
-            Color::rgba(42, 34, 76, 210)
-        } else {
-            tokens::CARD.with_alpha(205)
-        })
-        .stroke(tokens::BORDER.with_alpha(170))
-        .radius(6.0)
-        .shadow(tokens::SHADOW_MD)
+        build_aetna_orientation_controls_view(label, is_rotated)
     }
 
     fn build_aetna_waila_panel(&self) -> Option<El> {
@@ -329,6 +299,176 @@ impl App {
 
         Some(panel)
     }
+}
+
+fn build_aetna_overlay_shell(hotbar: El, orientation: El, waila: Option<El>) -> El {
+    let mut children = vec![hotbar, orientation];
+    if let Some(waila) = waila {
+        children.push(waila);
+    }
+
+    stack(children).fill_size().layout(|cx| {
+        let (hotbar_w, hotbar_h) = (cx.measure)(&cx.children[0]);
+        let hotbar_x = cx.container.x + ((cx.container.w - hotbar_w) * 0.5).max(12.0);
+        let hotbar_y = cx.container.bottom() - hotbar_h - 12.0;
+        let hotbar_rect = Rect::new(hotbar_x, hotbar_y, hotbar_w, hotbar_h);
+
+        let mut rects = Vec::with_capacity(cx.children.len());
+        for (index, child) in cx.children.iter().enumerate() {
+            let (measured_w, measured_h) = (cx.measure)(child);
+            let rect = match index {
+                0 => hotbar_rect,
+                1 => {
+                    let left_x = hotbar_rect.x - measured_w - 10.0;
+                    if left_x >= cx.container.x + 12.0 {
+                        Rect::new(
+                            left_x,
+                            hotbar_rect.y + (hotbar_rect.h - measured_h) * 0.5,
+                            measured_w,
+                            measured_h,
+                        )
+                    } else {
+                        Rect::new(
+                            cx.container.x + ((cx.container.w - measured_w) * 0.5).max(12.0),
+                            (hotbar_rect.y - measured_h - 10.0).max(cx.container.y + 12.0),
+                            measured_w,
+                            measured_h,
+                        )
+                    }
+                }
+                _ => {
+                    let width = measured_w.min((cx.container.w - 24.0).max(260.0));
+                    Rect::new(
+                        cx.container.x + ((cx.container.w - width) * 0.5).max(12.0),
+                        cx.container.y + 30.0,
+                        width,
+                        measured_h,
+                    )
+                }
+            };
+            rects.push(rect);
+        }
+        rects
+    })
+}
+
+fn build_aetna_hotbar_from_slots(slots: impl IntoIterator<Item = El>) -> El {
+    row(slots)
+        .gap(tokens::SPACE_2)
+        .align(Align::Center)
+        .height(Size::Hug)
+        .width(Size::Hug)
+}
+
+fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
+    let label = short_label(slot.name);
+    let icon = if let Some(icon) = slot.icon {
+        aetna_image(icon)
+            .image_fit(ImageFit::Contain)
+            .width(Size::Fixed(44.0))
+            .height(Size::Fixed(30.0))
+            .radius(4.0)
+    } else {
+        column(std::iter::empty::<El>())
+            .width(Size::Fixed(44.0))
+            .height(Size::Fixed(30.0))
+            .fill(slot.color)
+            .radius(4.0)
+    };
+
+    column([
+        row([
+            text(format!("{}", index + 1)).caption().muted(),
+            spacer(),
+            if slot.count > 1 {
+                badge(format!("{}", slot.count)).muted()
+            } else {
+                text("")
+            },
+        ])
+        .width(Size::Fill(1.0))
+        .align(Align::Center),
+        icon,
+        text(label)
+            .caption()
+            .center_text()
+            .ellipsis()
+            .max_lines(1)
+            .width(Size::Fill(1.0)),
+    ])
+    .key(format!("aetna_hotbar_slot_{index}"))
+    .focusable()
+    .cursor(Cursor::Pointer)
+    .width(Size::Fixed(76.0))
+    .height(Size::Fixed(82.0))
+    .padding(6.0)
+    .gap(2.0)
+    .align(Align::Center)
+    .fill(tokens::CARD.with_alpha(205))
+    .stroke(if slot.selected {
+        Color::rgb(250, 246, 140)
+    } else {
+        tokens::BORDER.with_alpha(180)
+    })
+    .stroke_width(if slot.selected { 2.5 } else { 1.0 })
+    .radius(6.0)
+    .shadow(if slot.selected {
+        tokens::SHADOW_MD
+    } else {
+        0.0
+    })
+}
+
+fn build_aetna_orientation_controls_view(label: String, is_rotated: bool) -> El {
+    row([
+        column([
+            row([
+                orientation_button("XZ", "xz", "Z key: rotate in XZ plane"),
+                orientation_button("YZ", "yz", "X key: rotate in YZ plane"),
+                orientation_button("XW", "xw", "C key: rotate in XW plane"),
+            ])
+            .gap(tokens::SPACE_1),
+            row([
+                orientation_button("XY", "xy", "Rotate in XY plane"),
+                orientation_button("YW", "yw", "Rotate in YW plane"),
+                orientation_button("ZW", "zw", "Rotate in ZW plane"),
+            ])
+            .gap(tokens::SPACE_1),
+        ])
+        .gap(tokens::SPACE_1),
+        column([
+            button("Reset")
+                .key(format!("{ORIENTATION_KEY_PREFIX}reset"))
+                .tooltip("Reset orientation")
+                .secondary()
+                .width(Size::Fixed(60.0))
+                .height(Size::Fixed(24.0))
+                .padding(0.0),
+            text(label)
+                .caption()
+                .center_text()
+                .width(Size::Fixed(60.0))
+                .color(if is_rotated {
+                    Color::rgb(210, 196, 255)
+                } else {
+                    tokens::MUTED_FOREGROUND
+                }),
+        ])
+        .gap(tokens::SPACE_1),
+    ])
+    .width(Size::Fixed(218.0))
+    .height(Size::Hug)
+    .padding(tokens::SPACE_2)
+    .gap(tokens::SPACE_2)
+    .align(Align::Center)
+    .fill(if is_rotated {
+        Color::rgba(42, 34, 76, 210)
+    } else {
+        tokens::CARD.with_alpha(205)
+    })
+    .stroke(tokens::BORDER.with_alpha(170))
+    .radius(6.0)
+    .shadow(tokens::SHADOW_MD)
 }
 
 fn short_label(name: String) -> String {

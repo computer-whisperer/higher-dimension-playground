@@ -429,6 +429,14 @@ struct Args {
     #[arg(long)]
     no_hud: bool,
 
+    /// Dump Aetna HUD bundle artifacts and exit.
+    #[arg(long)]
+    aetna_bundle_dump: bool,
+
+    /// Output directory for --aetna-bundle-dump.
+    #[arg(long, default_value = "crates/polychora/out")]
+    aetna_bundle_dir: PathBuf,
+
     /// Automated command sequence (semicolon-separated).
     /// Commands: press:<key>, wait:<frames>, screenshot
     #[arg(long)]
@@ -589,6 +597,17 @@ fn main() {
     let loaded_settings = app_settings::load_settings(&settings_file_path);
     if let Some(settings) = loaded_settings.as_ref() {
         app_settings::apply_settings_to_args(&mut args, settings, cli_overrides);
+    }
+    if args.aetna_bundle_dump {
+        if let Err(error) = app_aetna_ui::dump_fixture_aetna_overlay_bundle(
+            args.width,
+            args.height,
+            &args.aetna_bundle_dir,
+        ) {
+            eprintln!("Failed to dump Aetna HUD bundle: {error}");
+            std::process::exit(1);
+        }
+        return;
     }
     let initial_singleplayer_world_generator = args.singleplayer_world_type.to_runtime();
 

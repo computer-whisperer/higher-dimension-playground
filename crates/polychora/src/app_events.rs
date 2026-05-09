@@ -92,6 +92,14 @@ impl ApplicationHandler for App {
             self.material_icons_texture_id = Some(egui::TextureId::User(1));
         }
 
+        if self.args.aetna_bundle_dump {
+            if let Err(error) = self.dump_aetna_overlay_bundle() {
+                eprintln!("Failed to dump Aetna HUD bundle: {error}");
+            }
+            event_loop.exit();
+            return;
+        }
+
         // Upload any pending plugin textures to the GPU texture pool.
         self.process_pending_texture_uploads();
 
