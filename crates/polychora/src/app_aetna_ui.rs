@@ -69,7 +69,7 @@ fn write_aetna_bundle(
     name: &str,
 ) -> std::io::Result<()> {
     let viewport = Rect::new(0.0, 0.0, width as f32, height as f32);
-    let bundle = render_bundle(overlay, viewport, Some(env!("CARGO_PKG_NAME")));
+    let bundle = render_bundle(overlay, viewport);
     let written = write_bundle(&bundle, out_dir, name)?;
     eprintln!("Wrote Aetna HUD bundle artifacts to {}", out_dir.display());
     for path in written {
