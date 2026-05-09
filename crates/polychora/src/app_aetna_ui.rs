@@ -1,9 +1,9 @@
 use aetna_core::prelude::{
     badge, button, card, card_content, card_header, card_title, column, image as aetna_image, mono,
     render_bundle, row, spacer, stack, text, tokens, write_bundle, Align, Axis, Color, Cursor, El,
-    Image, ImageFit, Justify, Rect, Size,
+    Image, ImageFit, Justify, Kind, Rect, Size, StyleProfile, SurfaceRole,
 };
-use std::path::Path;
+use std::{panic::Location, path::Path};
 
 use super::{block_data_from_slot, format_cbor_for_display, App, WailaTarget};
 
@@ -360,6 +360,7 @@ fn build_aetna_hotbar_from_slots(slots: impl IntoIterator<Item = El>) -> El {
         .width(Size::Hug)
 }
 
+#[track_caller]
 fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
     let label = short_label(slot.name);
     let icon = if let Some(icon) = slot.icon {
@@ -376,99 +377,110 @@ fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
             .radius(4.0)
     };
 
-    column([
-        row([
-            text(format!("{}", index + 1)).caption().muted(),
-            spacer(),
-            if slot.count > 1 {
-                badge(format!("{}", slot.count)).muted()
-            } else {
-                text("")
-            },
-        ])
-        .width(Size::Fill(1.0))
-        .align(Align::Center),
-        icon,
-        text(label)
-            .caption()
-            .center_text()
-            .ellipsis()
-            .max_lines(1)
-            .width(Size::Fill(1.0)),
-    ])
-    .key(format!("aetna_hotbar_slot_{index}"))
-    .focusable()
-    .cursor(Cursor::Pointer)
-    .width(Size::Fixed(76.0))
-    .height(Size::Fixed(82.0))
-    .padding(6.0)
-    .gap(2.0)
-    .align(Align::Center)
-    .fill(tokens::CARD.with_alpha(205))
-    .stroke(if slot.selected {
-        Color::rgb(250, 246, 140)
-    } else {
-        tokens::BORDER.with_alpha(180)
-    })
-    .stroke_width(if slot.selected { 2.5 } else { 1.0 })
-    .radius(6.0)
-    .shadow(if slot.selected {
-        tokens::SHADOW_MD
-    } else {
-        0.0
-    })
-}
-
-fn build_aetna_orientation_controls_view(label: String, is_rotated: bool) -> El {
-    row([
-        column([
+    El::new(Kind::Custom("polychora_hotbar_slot"))
+        .at_loc(Location::caller())
+        .style_profile(StyleProfile::Surface)
+        .surface_role(SurfaceRole::Panel)
+        .axis(Axis::Column)
+        .children([
             row([
-                orientation_button("XZ", "xz", "Z key: rotate in XZ plane"),
-                orientation_button("YZ", "yz", "X key: rotate in YZ plane"),
-                orientation_button("XW", "xw", "C key: rotate in XW plane"),
+                text(format!("{}", index + 1)).caption().muted(),
+                spacer(),
+                if slot.count > 1 {
+                    badge(format!("{}", slot.count)).muted()
+                } else {
+                    text("")
+                },
             ])
-            .gap(tokens::SPACE_1),
-            row([
-                orientation_button("XY", "xy", "Rotate in XY plane"),
-                orientation_button("YW", "yw", "Rotate in YW plane"),
-                orientation_button("ZW", "zw", "Rotate in ZW plane"),
-            ])
-            .gap(tokens::SPACE_1),
-        ])
-        .gap(tokens::SPACE_1),
-        column([
-            button("Reset")
-                .key(format!("{ORIENTATION_KEY_PREFIX}reset"))
-                .tooltip("Reset orientation")
-                .secondary()
-                .width(Size::Fixed(60.0))
-                .height(Size::Fixed(24.0))
-                .padding(0.0),
+            .width(Size::Fill(1.0))
+            .align(Align::Center),
+            icon,
             text(label)
                 .caption()
                 .center_text()
-                .width(Size::Fixed(60.0))
-                .color(if is_rotated {
-                    Color::rgb(210, 196, 255)
-                } else {
-                    tokens::MUTED_FOREGROUND
-                }),
+                .ellipsis()
+                .max_lines(1)
+                .width(Size::Fill(1.0)),
         ])
-        .gap(tokens::SPACE_1),
-    ])
-    .width(Size::Fixed(218.0))
-    .height(Size::Hug)
-    .padding(tokens::SPACE_2)
-    .gap(tokens::SPACE_2)
-    .align(Align::Center)
-    .fill(if is_rotated {
-        Color::rgba(42, 34, 76, 210)
-    } else {
-        tokens::CARD.with_alpha(205)
-    })
-    .stroke(tokens::BORDER.with_alpha(170))
-    .radius(6.0)
-    .shadow(tokens::SHADOW_MD)
+        .key(format!("aetna_hotbar_slot_{index}"))
+        .focusable()
+        .cursor(Cursor::Pointer)
+        .width(Size::Fixed(76.0))
+        .height(Size::Fixed(82.0))
+        .padding(6.0)
+        .gap(2.0)
+        .align(Align::Center)
+        .fill(tokens::CARD.with_alpha(205))
+        .stroke(if slot.selected {
+            tokens::WARNING
+        } else {
+            tokens::BORDER.with_alpha(180)
+        })
+        .stroke_width(if slot.selected { 2.5 } else { 1.0 })
+        .radius(6.0)
+        .shadow(if slot.selected {
+            tokens::SHADOW_MD
+        } else {
+            0.0
+        })
+}
+
+#[track_caller]
+fn build_aetna_orientation_controls_view(label: String, is_rotated: bool) -> El {
+    El::new(Kind::Custom("polychora_orientation_controls"))
+        .at_loc(Location::caller())
+        .style_profile(StyleProfile::Surface)
+        .surface_role(SurfaceRole::Panel)
+        .axis(Axis::Row)
+        .children([
+            column([
+                row([
+                    orientation_button("XZ", "xz", "Z key: rotate in XZ plane"),
+                    orientation_button("YZ", "yz", "X key: rotate in YZ plane"),
+                    orientation_button("XW", "xw", "C key: rotate in XW plane"),
+                ])
+                .gap(tokens::SPACE_1),
+                row([
+                    orientation_button("XY", "xy", "Rotate in XY plane"),
+                    orientation_button("YW", "yw", "Rotate in YW plane"),
+                    orientation_button("ZW", "zw", "Rotate in ZW plane"),
+                ])
+                .gap(tokens::SPACE_1),
+            ])
+            .gap(tokens::SPACE_1),
+            column([
+                button("Reset")
+                    .key(format!("{ORIENTATION_KEY_PREFIX}reset"))
+                    .tooltip("Reset orientation")
+                    .secondary()
+                    .width(Size::Fixed(60.0))
+                    .height(Size::Fixed(24.0))
+                    .padding(0.0),
+                text(label)
+                    .caption()
+                    .center_text()
+                    .width(Size::Fixed(60.0))
+                    .color(if is_rotated {
+                        Color::rgb(210, 196, 255)
+                    } else {
+                        tokens::MUTED_FOREGROUND
+                    }),
+            ])
+            .gap(tokens::SPACE_1),
+        ])
+        .width(Size::Fixed(218.0))
+        .height(Size::Hug)
+        .padding(tokens::SPACE_2)
+        .gap(tokens::SPACE_2)
+        .align(Align::Center)
+        .fill(if is_rotated {
+            Color::rgba(42, 34, 76, 210)
+        } else {
+            tokens::CARD.with_alpha(205)
+        })
+        .stroke(tokens::BORDER.with_alpha(170))
+        .radius(6.0)
+        .shadow(tokens::SHADOW_MD)
 }
 
 fn short_label(name: String) -> String {
