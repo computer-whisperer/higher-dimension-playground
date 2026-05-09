@@ -3,12 +3,18 @@ use aetna_core::prelude::{
     render_bundle, row, spacer, stack, text, tokens, write_bundle, Align, Axis, Color, Cursor, El,
     Image, ImageFit, Justify, Kind, Rect, Size, StyleProfile, SurfaceRole,
 };
+use higher_dimension_playground::vulkan_setup::vulkan_setup;
+use polychora::content_registry::ContentRegistry;
+use polychora::shared::inventory::Inventory;
+use polychora::shared::protocol::ItemStack;
 use std::{panic::Location, path::Path};
 
 use super::{block_data_from_slot, format_cbor_for_display, App, WailaTarget};
+use crate::material_icons::{self, MaterialIconSheet};
 
 const HOTBAR_SLOT_KEY_PREFIX: &str = "aetna_hotbar_slot_";
 const ORIENTATION_KEY_PREFIX: &str = "aetna_orientation_";
+const NAV_HUD_BOTTOM_LEFT_RESERVED_WIDTH: f32 = 150.0;
 
 struct HotbarSlotView {
     name: String,
@@ -18,34 +24,32 @@ struct HotbarSlotView {
     selected: bool,
 }
 
-pub(super) fn dump_fixture_aetna_overlay_bundle(
+pub(super) fn dump_headless_aetna_overlay_bundle(
     width: u32,
     height: u32,
     out_dir: &Path,
 ) -> std::io::Result<()> {
-    let slots = [
-        ("Orange", Color::rgb(218, 159, 22)),
-        ("Grid Floor", Color::rgb(86, 92, 108)),
-        ("Cyan", Color::rgb(24, 184, 181)),
-        ("Red", Color::rgb(194, 16, 18)),
-        ("Blue", Color::rgb(24, 46, 196)),
-        ("Purple", Color::rgb(102, 34, 206)),
-        ("Magenta", Color::rgb(197, 16, 166)),
-        ("Crystal Lattice", Color::rgb(20, 128, 151)),
-        ("Red", Color::rgb(194, 16, 18)),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, (name, color))| {
-        build_aetna_hotbar_slot_view(
+    let (content_registry, pending_texture_uploads) =
+        polychora::plugin_loader::create_full_registry();
+    let material_resolver =
+        polychora::content_registry::MaterialResolver::from_registry(&content_registry);
+    let (instance, device, queue) = vulkan_setup(None);
+    let material_icon_sheet = material_icons::generate_material_icon_sheet_gpu(
+        device,
+        queue,
+        instance,
+        &content_registry,
+        &material_resolver,
+        &pending_texture_uploads,
+    );
+    let inventory = Inventory::default_creative();
+    let slots = (0..9).map(|index| {
+        build_aetna_hotbar_slot_for_stack(
+            &content_registry,
+            material_icon_sheet.as_ref(),
             index,
-            HotbarSlotView {
-                name: name.to_string(),
-                count: 1,
-                color,
-                icon: Some(fixture_icon(color)),
-                selected: index == 1,
-            },
+            inventory.hotbar_slot(index),
+            index == 0,
         )
     });
     let hotbar = build_aetna_hotbar_from_slots(slots);
@@ -55,33 +59,6 @@ pub(super) fn dump_fixture_aetna_overlay_bundle(
         None,
     );
     write_aetna_bundle(&mut overlay, width, height, out_dir, "aetna_hud")
-}
-
-fn fixture_icon(color: Color) -> Image {
-    let (r, g, b) = (color.r, color.g, color.b);
-    let mut pixels = vec![0; 64 * 64 * 4];
-    for y in 0..64usize {
-        for x in 0..64usize {
-            let dx = x as i32 - 32;
-            let dy = y as i32 - 34;
-            let diamond = dx.abs() * 2 + dy.abs() * 3 <= 70;
-            if diamond {
-                let i = (y * 64 + x) * 4;
-                let shade = if dy < -4 {
-                    38
-                } else if dx < 0 {
-                    0
-                } else {
-                    18
-                };
-                pixels[i] = r.saturating_add(shade);
-                pixels[i + 1] = g.saturating_add(shade);
-                pixels[i + 2] = b.saturating_add(shade);
-                pixels[i + 3] = 255;
-            }
-        }
-    }
-    Image::from_rgba8(64, 64, pixels)
 }
 
 fn write_aetna_bundle(
@@ -135,61 +112,12 @@ impl App {
     }
 
     fn build_aetna_hotbar_slot(&self, index: usize) -> El {
-        let stack = self.inventory.hotbar_slot(index);
-        let (name, count, color, icon) = stack
-            .as_ref()
-            .map(|stack| {
-                let tex = self
-                    .content_registry
-                    .resolve_item_thumbnail_texture(&stack.item);
-                let icon = tex.and_then(|tex| {
-                    self.material_icon_sheet
-                        .as_ref()?
-                        .aetna_image(tex.namespace, tex.texture_id)
-                });
-
-                let (name, color) = if let Some(block) = stack.to_block_data() {
-                    let entry = self
-                        .content_registry
-                        .block_entry(block.namespace, block.block_type);
-                    let name = entry
-                        .map(|entry| entry.name.clone())
-                        .unwrap_or_else(|| "Unknown".to_string());
-                    let [r, g, b] = entry.map(|entry| entry.color).unwrap_or([128, 128, 128]);
-                    (name, Color::rgb(r, g, b))
-                } else if let Some((entity_ns, entity_type)) = stack.spawn_egg_entity_key() {
-                    let entry = self.content_registry.entity_lookup(entity_ns, entity_type);
-                    let name = entry
-                        .map(|entry| entry.canonical_name.clone())
-                        .unwrap_or_else(|| "Unknown".to_string());
-                    let [r, g, b] = entry
-                        .map(|entry| entry.base_color)
-                        .unwrap_or([128, 128, 128]);
-                    (name, Color::rgb(r, g, b))
-                } else {
-                    let [r, g, b] = self
-                        .content_registry
-                        .item_color(stack.item.namespace, stack.item.item_type);
-                    (
-                        self.content_registry
-                            .item_name(stack.item.namespace, stack.item.item_type)
-                            .to_string(),
-                        Color::rgb(r, g, b),
-                    )
-                };
-
-                (name, stack.count, color, icon)
-            })
-            .unwrap_or_else(|| ("Empty".to_string(), 0, Color::rgb(44, 48, 58), None));
-        build_aetna_hotbar_slot_view(
+        build_aetna_hotbar_slot_for_stack(
+            &self.content_registry,
+            self.material_icon_sheet.as_ref(),
             index,
-            HotbarSlotView {
-                name,
-                count,
-                color,
-                icon,
-                selected: index == self.hotbar_selected_index,
-            },
+            self.inventory.hotbar_slot(index),
+            index == self.hotbar_selected_index,
         )
     }
 
@@ -309,7 +237,10 @@ fn build_aetna_overlay_shell(hotbar: El, orientation: El, waila: Option<El>) -> 
 
     stack(children).fill_size().layout(|cx| {
         let (hotbar_w, hotbar_h) = (cx.measure)(&cx.children[0]);
-        let hotbar_x = cx.container.x + ((cx.container.w - hotbar_w) * 0.5).max(12.0);
+        let centered_hotbar_x = cx.container.x + (cx.container.w - hotbar_w) * 0.5;
+        let max_hotbar_x = (cx.container.right() - hotbar_w - 12.0).max(cx.container.x + 12.0);
+        let min_hotbar_x = (cx.container.x + NAV_HUD_BOTTOM_LEFT_RESERVED_WIDTH).min(max_hotbar_x);
+        let hotbar_x = centered_hotbar_x.clamp(min_hotbar_x, max_hotbar_x);
         let hotbar_y = cx.container.bottom() - hotbar_h - 12.0;
         let hotbar_rect = Rect::new(hotbar_x, hotbar_y, hotbar_w, hotbar_h);
 
@@ -358,6 +289,63 @@ fn build_aetna_hotbar_from_slots(slots: impl IntoIterator<Item = El>) -> El {
         .align(Align::Center)
         .height(Size::Hug)
         .width(Size::Hug)
+}
+
+fn build_aetna_hotbar_slot_for_stack(
+    content_registry: &ContentRegistry,
+    material_icon_sheet: Option<&MaterialIconSheet>,
+    index: usize,
+    stack: &Option<ItemStack>,
+    selected: bool,
+) -> El {
+    let (name, count, color, icon) = stack
+        .as_ref()
+        .map(|stack| {
+            let tex = content_registry.resolve_item_thumbnail_texture(&stack.item);
+            let icon =
+                tex.and_then(|tex| material_icon_sheet?.aetna_image(tex.namespace, tex.texture_id));
+
+            let (name, color) = if let Some(block) = stack.to_block_data() {
+                let entry = content_registry.block_entry(block.namespace, block.block_type);
+                let name = entry
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let [r, g, b] = entry.map(|entry| entry.color).unwrap_or([128, 128, 128]);
+                (name, Color::rgb(r, g, b))
+            } else if let Some((entity_ns, entity_type)) = stack.spawn_egg_entity_key() {
+                let entry = content_registry.entity_lookup(entity_ns, entity_type);
+                let name = entry
+                    .map(|entry| entry.canonical_name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let [r, g, b] = entry
+                    .map(|entry| entry.base_color)
+                    .unwrap_or([128, 128, 128]);
+                (name, Color::rgb(r, g, b))
+            } else {
+                let [r, g, b] =
+                    content_registry.item_color(stack.item.namespace, stack.item.item_type);
+                (
+                    content_registry
+                        .item_name(stack.item.namespace, stack.item.item_type)
+                        .to_string(),
+                    Color::rgb(r, g, b),
+                )
+            };
+
+            (name, stack.count, color, icon)
+        })
+        .unwrap_or_else(|| ("Empty".to_string(), 0, Color::rgb(44, 48, 58), None));
+
+    build_aetna_hotbar_slot_view(
+        index,
+        HotbarSlotView {
+            name,
+            count,
+            color,
+            icon,
+            selected,
+        },
+    )
 }
 
 #[track_caller]

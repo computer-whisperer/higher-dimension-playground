@@ -599,7 +599,7 @@ fn main() {
         app_settings::apply_settings_to_args(&mut args, settings, cli_overrides);
     }
     if args.aetna_bundle_dump {
-        if let Err(error) = app_aetna_ui::dump_fixture_aetna_overlay_bundle(
+        if let Err(error) = app_aetna_ui::dump_headless_aetna_overlay_bundle(
             args.width,
             args.height,
             &args.aetna_bundle_dir,
