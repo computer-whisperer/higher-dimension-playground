@@ -2,14 +2,13 @@ use aetna_core::prelude::{
     badge, button, card, card_content, card_header, card_title, column, image as aetna_image, mono,
     render_bundle, row, scroll, spacer, spinner, stack, table, table_body, table_cell, table_head,
     table_header, table_row, tabs, tabs_list, text, text_input_with, toggle, tokens, write_bundle,
-    Align, Axis, Color, Cursor, El, Image, ImageFit, Justify, Kind, Rect, Size, StyleProfile,
-    SurfaceRole, TextInputOpts, UiEventKind,
+    Align, Axis, Color, Cursor, El, Image, ImageFit, Justify, Kind, Rect, Sides, Size,
+    StyleProfile, SurfaceRole, TextInputOpts, UiEventKind,
 };
 use aetna_core::widgets::slider as aetna_slider;
 use aetna_core::widgets::text_input as aetna_text_input;
-use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use polychora::content_registry::ContentRegistry;
-use polychora::shared::inventory::{Inventory, InventoryTab, HOTBAR_SIZE, INVENTORY_COLS};
+use polychora::shared::inventory::{InventoryTab, HOTBAR_SIZE, INVENTORY_COLS};
 use polychora::shared::protocol::ItemStack;
 use std::{panic::Location, path::Path};
 
@@ -26,7 +25,7 @@ use crate::consts::{
     ZW_ANGLE_COLOR_SHIFT_STRENGTH_MAX, ZW_ANGLE_COLOR_SHIFT_STRENGTH_MIN,
 };
 use crate::input::ControlScheme;
-use crate::material_icons::{self, MaterialIconSheet};
+use crate::material_icons::MaterialIconSheet;
 
 const HOTBAR_SLOT_KEY_PREFIX: &str = "aetna_hotbar_slot_";
 const ORIENTATION_KEY_PREFIX: &str = "aetna_orientation_";
@@ -117,46 +116,6 @@ struct HotbarSlotView {
     selected: bool,
 }
 
-pub(super) fn dump_headless_aetna_overlay_bundle(
-    width: u32,
-    height: u32,
-    out_dir: &Path,
-) -> std::io::Result<()> {
-    let (content_registry, pending_texture_uploads) =
-        polychora::plugin_loader::create_full_registry();
-    let material_resolver =
-        polychora::content_registry::MaterialResolver::from_registry(&content_registry);
-    let (instance, device, queue) = vulkan_setup(None);
-    let material_icon_sheet = material_icons::generate_material_icon_sheet_gpu(
-        device,
-        queue,
-        instance,
-        &content_registry,
-        &material_resolver,
-        &pending_texture_uploads,
-    );
-    let inventory = Inventory::default_creative();
-    let slots = (0..9).map(|index| {
-        build_aetna_hotbar_slot_for_stack(
-            &content_registry,
-            material_icon_sheet.as_ref(),
-            index,
-            inventory.hotbar_slot(index),
-            index == 0,
-        )
-    });
-    let hotbar = build_aetna_hotbar_from_slots(slots);
-    let mut overlay = build_aetna_overlay_shell(
-        hotbar,
-        build_aetna_orientation_controls_view("Ori: 0".to_string(), false),
-        None,
-        None,
-        None,
-        None,
-    );
-    write_aetna_bundle(&mut overlay, width, height, out_dir, "aetna_hud")
-}
-
 fn write_aetna_bundle(
     overlay: &mut El,
     width: u32,
@@ -167,7 +126,11 @@ fn write_aetna_bundle(
     let viewport = Rect::new(0.0, 0.0, width as f32, height as f32);
     let bundle = render_bundle(overlay, viewport);
     let written = write_bundle(&bundle, out_dir, name)?;
-    eprintln!("Wrote Aetna HUD bundle artifacts to {}", out_dir.display());
+    eprintln!(
+        "Wrote Aetna overlay bundle '{}' artifacts to {}",
+        name,
+        out_dir.display()
+    );
     for path in written {
         eprintln!("  {}", path.display());
     }
@@ -179,17 +142,101 @@ fn write_aetna_bundle(
 }
 
 impl App {
-    pub(super) fn dump_aetna_overlay_bundle(&self) -> std::io::Result<()> {
-        let Some(mut overlay) = self.build_aetna_overlay(None) else {
-            return Ok(());
-        };
+    fn write_aetna_named_bundle(&self, name: &str, mut overlay: El) -> std::io::Result<()> {
         write_aetna_bundle(
             &mut overlay,
             self.args.width,
             self.args.height,
             &self.args.aetna_bundle_dir,
-            "aetna_hud",
+            name,
         )
+    }
+
+    pub(super) fn dump_aetna_overlay_bundle(&mut self) -> std::io::Result<()> {
+        let saved_menu_open = self.menu_open;
+        let saved_controls_dialog_open = self.controls_dialog_open;
+        let saved_inventory_open = self.inventory_open;
+        let saved_teleport_dialog_open = self.teleport_dialog_open;
+        let saved_dev_console_open = self.dev_console_open;
+        let saved_settings_page = self.settings_page;
+        let saved_main_menu_page = self.main_menu_page.clone();
+
+        self.menu_open = false;
+        self.controls_dialog_open = false;
+        self.inventory_open = false;
+        self.teleport_dialog_open = false;
+        self.dev_console_open = false;
+
+        if let Some(overlay) = self.build_aetna_overlay(None) {
+            self.write_aetna_named_bundle("aetna_hud", overlay)?;
+        }
+        self.write_aetna_named_bundle("aetna_loading", self.build_aetna_loading_overlay())?;
+
+        self.inventory_open = true;
+        if let Some(overlay) = self.build_aetna_overlay(None) {
+            self.write_aetna_named_bundle("aetna_inventory", overlay)?;
+        }
+        self.inventory_open = false;
+
+        self.teleport_dialog_open = true;
+        if let Some(overlay) = self.build_aetna_overlay(None) {
+            self.write_aetna_named_bundle("aetna_teleport", overlay)?;
+        }
+        self.teleport_dialog_open = false;
+
+        self.dev_console_open = true;
+        if let Some(overlay) = self.build_aetna_overlay(None) {
+            self.write_aetna_named_bundle("aetna_dev_console", overlay)?;
+        }
+        self.dev_console_open = false;
+
+        self.menu_open = true;
+        self.controls_dialog_open = false;
+        for page in SettingsPage::ALL {
+            self.settings_page = page;
+            if let Some(overlay) = self.build_aetna_overlay(None) {
+                let name = format!("aetna_pause_settings_{}", settings_page_token(page));
+                self.write_aetna_named_bundle(&name, overlay)?;
+            }
+        }
+
+        self.controls_dialog_open = true;
+        if let Some(overlay) = self.build_aetna_overlay(None) {
+            self.write_aetna_named_bundle("aetna_pause_controls", overlay)?;
+        }
+        self.menu_open = false;
+        self.controls_dialog_open = false;
+
+        for (page, name) in [
+            (MainMenuPage::Root, "aetna_main_menu_root"),
+            (MainMenuPage::Singleplayer, "aetna_main_menu_singleplayer"),
+            (
+                MainMenuPage::SingleplayerMigrations,
+                "aetna_main_menu_migrations",
+            ),
+            (
+                MainMenuPage::SingleplayerMigrationLegacyTrim,
+                "aetna_main_menu_migrate_legacy_trim",
+            ),
+            (
+                MainMenuPage::SingleplayerMigrationV3ToV4,
+                "aetna_main_menu_migrate_v3_to_v4",
+            ),
+            (MainMenuPage::Multiplayer, "aetna_main_menu_multiplayer"),
+        ] {
+            self.main_menu_page = page;
+            self.write_aetna_named_bundle(name, self.build_aetna_main_menu())?;
+        }
+
+        self.menu_open = saved_menu_open;
+        self.controls_dialog_open = saved_controls_dialog_open;
+        self.inventory_open = saved_inventory_open;
+        self.teleport_dialog_open = saved_teleport_dialog_open;
+        self.dev_console_open = saved_dev_console_open;
+        self.settings_page = saved_settings_page;
+        self.main_menu_page = saved_main_menu_page;
+
+        Ok(())
     }
 
     pub(super) fn build_aetna_main_menu(&self) -> El {
@@ -260,7 +307,7 @@ impl App {
                         .key(format!("{MAIN_MENU_WORLD_KEY_PREFIX}{index}"))
                         .width(Size::Fill(1.0))
                         .height(Size::Fixed(32.0))
-                        .padding(tokens::SPACE_2);
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0));
                     if self.main_menu_selected_world == Some(index) {
                         item.primary()
                     } else {
@@ -274,7 +321,7 @@ impl App {
             .key(MAIN_MENU_LOAD_SELECTED_KEY)
             .primary()
             .height(Size::Fixed(32.0))
-            .padding(tokens::SPACE_2);
+            .padding(Sides::xy(tokens::SPACE_2, 0.0));
         if self.main_menu_selected_world.is_none() {
             load_button = load_button.disabled();
         }
@@ -284,7 +331,7 @@ impl App {
                 "Saved Worlds",
                 scroll(world_rows)
                     .key("aetna_main_worlds_scroll")
-                    .height(Size::Fixed(220.0))
+                    .height(Size::Fixed(160.0))
                     .width(Size::Fill(1.0)),
             ),
             main_menu_status(self.main_menu_connect_error.as_deref()),
@@ -306,17 +353,17 @@ impl App {
                     .key(MAIN_MENU_CREATE_WORLD_KEY)
                     .secondary()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 button("Migrations")
                     .key(MAIN_MENU_MIGRATIONS_KEY)
                     .secondary()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 button("Back")
                     .key(MAIN_MENU_BACK_KEY)
                     .ghost()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
             ])
             .gap(tokens::SPACE_2)
             .align(Align::Center)
@@ -325,13 +372,7 @@ impl App {
         .gap(tokens::SPACE_3)
         .width(Size::Fill(1.0));
 
-        main_menu_page_panel(
-            "Singleplayer",
-            "Local worlds",
-            body,
-            690.0,
-            Size::Fixed(500.0),
-        )
+        main_menu_page_panel("Singleplayer", "Local worlds", body, 690.0, Size::Hug)
     }
 
     fn build_aetna_main_menu_singleplayer_migrations(&self) -> El {
@@ -351,7 +392,7 @@ impl App {
                 .key(MAIN_MENU_BACK_KEY)
                 .ghost()
                 .height(Size::Fixed(32.0))
-                .padding(tokens::SPACE_2)])
+                .padding(Sides::xy(tokens::SPACE_2, 0.0))])
             .width(Size::Fill(1.0)),
         ])
         .gap(tokens::SPACE_3)
@@ -408,12 +449,12 @@ impl App {
                     .key(MAIN_MENU_TRIM_RUN_KEY)
                     .primary()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 button("Back")
                     .key(MAIN_MENU_BACK_KEY)
                     .ghost()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
             ])
             .gap(tokens::SPACE_2)
             .width(Size::Fill(1.0)),
@@ -452,19 +493,19 @@ impl App {
                 "Overwrite output directory",
             )
             .height(Size::Fixed(30.0))
-            .padding(tokens::SPACE_2),
+            .padding(Sides::xy(tokens::SPACE_2, 0.0)),
             main_menu_status(self.main_menu_migration_status.as_deref()),
             row([
                 button("Run Migration")
                     .key(MAIN_MENU_V3_RUN_KEY)
                     .primary()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 button("Back")
                     .key(MAIN_MENU_BACK_KEY)
                     .ghost()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
             ])
             .gap(tokens::SPACE_2)
             .width(Size::Fill(1.0)),
@@ -503,12 +544,12 @@ impl App {
                     .key(MAIN_MENU_CONNECT_KEY)
                     .primary()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 button("Back")
                     .key(MAIN_MENU_BACK_KEY)
                     .ghost()
                     .height(Size::Fixed(32.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
             ])
             .gap(tokens::SPACE_2)
             .width(Size::Fill(1.0)),
@@ -732,7 +773,7 @@ impl App {
                         .key(INVENTORY_CLOSE_KEY)
                         .secondary()
                         .height(Size::Fixed(28.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 ])
                 .align(Align::Center)
                 .gap(tokens::SPACE_2)
@@ -740,7 +781,8 @@ impl App {
                 content,
                 text("Tab or Esc closes inventory. Right-click a survival slot to drop one item.")
                     .caption()
-                    .muted(),
+                    .muted()
+                    .width(Size::Fill(1.0)),
             ])
             .width(Size::Fixed(742.0))
             .height(Size::Fixed(520.0))
@@ -809,7 +851,7 @@ impl App {
 
         scroll(rows)
             .key("aetna_inventory_creative_scroll")
-            .height(Size::Fixed(410.0))
+            .height(Size::Fixed(380.0))
             .width(Size::Fill(1.0))
     }
 
@@ -951,7 +993,7 @@ impl App {
                         .key(format!("{TELEPORT_PLAYER_KEY_PREFIX}{entity_id}"))
                         .secondary()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2)
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0))
                         .width(Size::Fill(1.0)),
                     )
                 })
@@ -976,7 +1018,7 @@ impl App {
                         .key(TELEPORT_CLOSE_KEY)
                         .ghost()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 ])
                 .align(Align::Center)
                 .gap(tokens::SPACE_2)
@@ -989,12 +1031,12 @@ impl App {
                         .key(TELEPORT_APPLY_KEY)
                         .primary()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                     button("Go to Origin")
                         .key(TELEPORT_ORIGIN_KEY)
                         .secondary()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 ])
                 .gap(tokens::SPACE_2)
                 .width(Size::Hug),
@@ -1002,7 +1044,7 @@ impl App {
                     "Players",
                     scroll(player_rows)
                         .key("aetna_teleport_players_scroll")
-                        .height(Size::Fixed(132.0))
+                        .height(Size::Fixed(120.0))
                         .width(Size::Fill(1.0)),
                 ),
             ])
@@ -1045,7 +1087,7 @@ impl App {
                         .key(DEV_CONSOLE_CLOSE_KEY)
                         .ghost()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 ])
                 .align(Align::Center)
                 .gap(tokens::SPACE_2)
@@ -1066,7 +1108,7 @@ impl App {
                         .key(DEV_CONSOLE_RUN_KEY)
                         .primary()
                         .height(Size::Fixed(34.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 ])
                 .align(Align::Center)
                 .gap(tokens::SPACE_2)
@@ -1142,7 +1184,7 @@ impl App {
                         .key(BLOCK_GUI_CLOSE_KEY)
                         .ghost()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 ])
                 .align(Align::Center)
                 .gap(tokens::SPACE_2)
@@ -1249,17 +1291,17 @@ impl App {
                         .key(PAUSE_RESUME_KEY)
                         .primary()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                     button("Main Menu")
                         .key(PAUSE_MAIN_MENU_KEY)
                         .secondary()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                     button("Quit")
                         .key(PAUSE_QUIT_KEY)
                         .ghost()
                         .height(Size::Fixed(30.0))
-                        .padding(tokens::SPACE_2),
+                        .padding(Sides::xy(tokens::SPACE_2, 0.0)),
                 ])
                 .align(Align::Center)
                 .gap(tokens::SPACE_2)
@@ -1646,7 +1688,7 @@ impl App {
                     .key(PAUSE_DUMP_TREES_KEY)
                     .secondary()
                     .height(Size::Fixed(30.0))
-                    .padding(tokens::SPACE_2),
+                    .padding(Sides::xy(tokens::SPACE_2, 0.0)),
             ),
         ])
         .gap(tokens::SPACE_3)
@@ -1801,7 +1843,7 @@ fn main_menu_action_card(title: &str, description: &str, key: &str) -> El {
                 .key(key)
                 .secondary()
                 .height(Size::Fixed(30.0))
-                .padding(tokens::SPACE_2),
+                .padding(Sides::xy(tokens::SPACE_2, 0.0)),
         ])
         .align(Align::Center)
         .width(Size::Fill(1.0))
@@ -1846,7 +1888,9 @@ fn main_menu_status(status: Option<&str>) -> El {
                 Color::rgb(130, 220, 150)
             })
     } else {
-        text("").height(Size::Fixed(0.0))
+        column(std::iter::empty::<El>())
+            .height(Size::Fixed(0.0))
+            .width(Size::Fill(1.0))
     }
 }
 
@@ -1866,7 +1910,7 @@ fn setting_choice_tile(key: String, label: &str, selected: bool) -> El {
 fn setting_toggle(key: &str, pressed: bool, label: &str) -> El {
     toggle(key, pressed, label)
         .height(Size::Fixed(28.0))
-        .padding(tokens::SPACE_2)
+        .padding(Sides::xy(tokens::SPACE_2, 0.0))
 }
 
 fn setting_slider(label: &str, value_label: String, key: &str, value: f32) -> El {
@@ -2140,12 +2184,16 @@ fn build_aetna_overlay_shell(
                         measured_h,
                     )
                 }
-                index if Some(index) == inventory_index => Rect::new(
-                    cx.container.x + ((cx.container.w - measured_w) * 0.5).max(12.0),
-                    cx.container.y + ((cx.container.h - measured_h) * 0.5).max(12.0),
-                    measured_w,
-                    measured_h,
-                ),
+                index if Some(index) == inventory_index => {
+                    let width = measured_w.min((cx.container.w - 24.0).max(280.0));
+                    let height = measured_h.min((cx.container.h - 24.0).max(280.0));
+                    Rect::new(
+                        cx.container.x + ((cx.container.w - width) * 0.5).max(12.0),
+                        cx.container.y + ((cx.container.h - height) * 0.5).max(12.0),
+                        width,
+                        height,
+                    )
+                }
                 index if Some(index) == console_index => {
                     let width = measured_w.min((cx.container.w - 24.0).max(280.0));
                     Rect::new(
@@ -2296,6 +2344,11 @@ fn inventory_item_tile(
             .height(Size::Fixed(28.0))
             .radius(4.0)
     } else {
+        let color = if color == Color::rgb(220, 220, 220) {
+            tokens::MUTED
+        } else {
+            color
+        };
         column(std::iter::empty::<El>())
             .width(Size::Fixed(42.0))
             .height(Size::Fixed(28.0))
@@ -2309,12 +2362,16 @@ fn inventory_item_tile(
         .axis(Axis::Column)
         .children([
             row([
-                text(meta.into()).caption().muted().ellipsis().max_lines(1),
-                spacer(),
+                text(meta.into())
+                    .caption()
+                    .muted()
+                    .ellipsis()
+                    .max_lines(1)
+                    .width(Size::Fill(1.0)),
                 if let Some(count) = count {
                     badge(format!("{count}")).muted()
                 } else {
-                    text("")
+                    column(std::iter::empty::<El>()).width(Size::Fixed(0.0))
                 },
             ])
             .width(Size::Fill(1.0)),
@@ -2324,13 +2381,13 @@ fn inventory_item_tile(
                 .center_text()
                 .ellipsis()
                 .max_lines(1)
-                .width(Size::Fill(1.0)),
+                .width(Size::Fixed(64.0)),
         ])
         .key(key)
         .focusable()
         .cursor(Cursor::Pointer)
         .width(Size::Fixed(84.0))
-        .height(Size::Fixed(72.0))
+        .height(Size::Fixed(76.0))
         .padding(5.0)
         .gap(2.0)
         .align(Align::Center)
@@ -2454,7 +2511,7 @@ fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
         .key(format!("aetna_hotbar_slot_{index}"))
         .focusable()
         .cursor(Cursor::Pointer)
-        .width(Size::Fixed(76.0))
+        .width(Size::Fixed(80.0))
         .height(Size::Fixed(82.0))
         .padding(6.0)
         .gap(2.0)

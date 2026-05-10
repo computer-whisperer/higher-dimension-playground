@@ -77,7 +77,7 @@ impl ApplicationHandler for App {
         }
         if self.args.aetna_bundle_dump {
             if let Err(error) = self.dump_aetna_overlay_bundle() {
-                eprintln!("Failed to dump Aetna HUD bundle: {error}");
+                eprintln!("Failed to dump Aetna overlay bundles: {error}");
             }
             event_loop.exit();
             return;
