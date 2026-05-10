@@ -224,7 +224,7 @@ mod tests {
         );
         let cs = CHUNK_SIZE as i32;
         let bounds = Aabb4i::from_i32(
-            [-2 * cs, -3 * cs, -1 * cs, -2 * cs],
+            [-2 * cs, -3 * cs, -cs, -2 * cs],
             [3 * cs, 2 * cs, 4 * cs, 3 * cs],
         );
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
@@ -247,7 +247,7 @@ mod tests {
         );
         let cs = CHUNK_SIZE as i32;
         let bounds = Aabb4i::from_i32(
-            [-2 * cs, -3 * cs, -1 * cs, -2 * cs],
+            [-2 * cs, -3 * cs, -cs, -2 * cs],
             [3 * cs, 2 * cs, 4 * cs, 3 * cs],
         );
         let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);

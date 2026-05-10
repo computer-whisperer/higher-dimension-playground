@@ -69,9 +69,7 @@ impl Scene {
                         leaf,
                         resolver,
                     )?;
-                    voxel_frame_data
-                        .leaf_chunk_entries
-                        .extend(entries.into_iter());
+                    voxel_frame_data.leaf_chunk_entries.extend(entries);
                     voxel_frame_data.leaf_headers.push(GpuVoxelLeafHeader {
                         min_chunk_coord: lat_min,
                         max_chunk_coord: lat_max,

@@ -94,39 +94,6 @@ pub enum HudReadoutMode {
     CompactVectors,
 }
 
-#[derive(Clone, Debug)]
-pub struct EguiPaintVertex {
-    pub position_px: [f32; 2],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EguiTextureSlot {
-    EguiAtlas,
-    MaterialIcons,
-}
-
-#[derive(Clone, Debug)]
-pub struct EguiPaintMesh {
-    pub clip_rect_px: [f32; 4],
-    pub vertices: Vec<EguiPaintVertex>,
-    pub texture_slot: EguiTextureSlot,
-}
-
-#[derive(Clone, Debug)]
-pub struct EguiTextureUpdate {
-    pub size: [u32; 2],
-    pub pos: Option<[u32; 2]>,
-    pub pixels: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct EguiPaintData {
-    pub texture_updates: Vec<EguiTextureUpdate>,
-    pub meshes: Vec<EguiPaintMesh>,
-}
-
 pub fn generate_tesseract_tetrahedrons() -> Vec<ModelTetrahedron> {
     super::geometry::generate_tesseract_tetrahedrons()
 }
@@ -171,7 +138,6 @@ pub struct RenderOptions {
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
     pub hud_player_tags: Vec<HudPlayerTag>,
-    pub egui_paint: Option<EguiPaintData>,
     pub aetna_ui: Option<aetna_core::El>,
 }
 
@@ -213,7 +179,6 @@ impl Default for RenderOptions {
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
             hud_player_tags: Vec::new(),
-            egui_paint: None,
             aetna_ui: None,
         }
     }

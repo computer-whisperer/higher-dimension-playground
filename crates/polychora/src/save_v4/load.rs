@@ -329,10 +329,11 @@ pub(super) fn materialize_world_chunk_payloads_from_index_filtered(
         &mut payload_cache,
         &mut out,
     )?;
-    out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
+    out.sort_unstable_by_key(|(ka, sa, _)| (*sa, *ka));
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_world_chunk_payloads_from_node_filtered(
     root: &Path,
     node_by_id: &HashMap<u32, &IndexNode>,

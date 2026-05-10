@@ -23,6 +23,7 @@ fn default_spawn_weight() -> u32 {
 struct StructureBlueprintFile {
     name: String,
     #[serde(default)]
+    #[allow(dead_code)]
     description: Option<String>,
     #[serde(default = "default_spawn_weight")]
     spawn_weight: u32,

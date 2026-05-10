@@ -1663,24 +1663,7 @@ impl App {
         let (take_screenshot, auto_screenshot) =
             self.resolve_screenshot_request(command_screenshot_requested);
         let vte_sweep_status = self.vte_sweep_status_string();
-        let needs_egui_paint = self.app_state == AppState::MainMenu
-            || !self.world_ready
-            || self.menu_open
-            || self.inventory_open
-            || self.teleport_dialog_open
-            || self.controls_dialog_open
-            || self.dev_console_open
-            || self.block_gui_session.is_some();
-        let egui_paint = if needs_egui_paint {
-            self.run_egui_frame()
-        } else {
-            None
-        };
-        let aetna_ui = if self.args.no_hud {
-            None
-        } else {
-            self.build_aetna_overlay()
-        };
+        let aetna_loading_open = !self.world_ready && !self.args.no_hud;
         let mut do_navigation_hud =
             !self.menu_open && !self.dev_console_open && self.info_panel_mode != InfoPanelMode::Off;
         if self.args.no_hud {
@@ -1696,7 +1679,7 @@ impl App {
         } else {
             HudReadoutMode::Full
         };
-        let hud_rotation_label = self.current_info_hud_text(
+        let hud_info_readout = self.current_info_hud_text(
             pair,
             look_dir,
             edit_reach,
@@ -1707,10 +1690,17 @@ impl App {
             scene_data.hud_stream_first_node_desc.as_deref(),
             scene_data.hud_stream_final_solid_leaf_desc.as_deref(),
         );
-        let hud_rotation_label = if self.args.no_hud {
+        let aetna_ui = if self.args.no_hud {
+            None
+        } else if aetna_loading_open {
+            Some(self.build_aetna_loading_overlay())
+        } else {
+            self.build_aetna_overlay(hud_info_readout.as_deref())
+        };
+        let hud_rotation_label = if self.args.no_hud || aetna_ui.is_some() {
             None
         } else {
-            hud_rotation_label
+            hud_info_readout
         };
 
         let render_options = RenderOptions {
@@ -1765,7 +1755,6 @@ impl App {
             } else {
                 scene_data.hud_player_tags
             },
-            egui_paint,
             aetna_ui,
             ..Default::default()
         };

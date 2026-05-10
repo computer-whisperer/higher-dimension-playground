@@ -37,268 +37,8 @@ impl RenderContext {
         [origin_x, origin_y, width.max(1), height.max(1)]
     }
 
-    pub(super) fn refresh_egui_descriptor_sets(&mut self) {
-        let Some(present_ctx) = self.present_pipeline.as_ref() else {
-            return;
-        };
-        let Some(egui_resources) = self.egui_resources.as_ref() else {
-            return;
-        };
-        let descriptor_set_layout = present_ctx
-            .hud_pipeline_layout
-            .set_layouts()
-            .first()
-            .unwrap()
-            .clone();
-
-        for frame in &mut self.frames_in_flight {
-            frame.egui_descriptor_set = frame.hud_vertex_buffer.as_ref().map(|hud_buffer| {
-                create_hud_descriptor_set(
-                    self.descriptor_set_allocator.clone(),
-                    descriptor_set_layout.clone(),
-                    hud_buffer.clone(),
-                    egui_resources.atlas_view.clone(),
-                    egui_resources.atlas_sampler.clone(),
-                )
-            });
-        }
-    }
-
-    /// Upload a material icons sprite sheet and create descriptor sets so it can
-    /// be used as a separate texture in the HUD/egui rendering pipeline.
-    pub fn upload_material_icons_texture(
-        &mut self,
-        queue: Arc<Queue>,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
-    ) {
-        let view = create_rgba8_srgb_texture_view(
-            self.memory_allocator.clone(),
-            self.command_buffer_allocator.clone(),
-            queue.clone(),
-            width,
-            height,
-            pixels,
-        );
-        let sampler = Sampler::new(
-            queue.device().clone(),
-            SamplerCreateInfo {
-                mag_filter: Filter::Nearest,
-                min_filter: Filter::Nearest,
-                address_mode: [SamplerAddressMode::ClampToEdge; 3],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        self.material_icons_view = Some(view.clone());
-        self.material_icons_sampler = Some(sampler.clone());
-
-        // Create descriptor sets for all frames in flight
-        if let Some(present_ctx) = self.present_pipeline.as_ref() {
-            let descriptor_set_layout = present_ctx
-                .hud_pipeline_layout
-                .set_layouts()
-                .first()
-                .unwrap()
-                .clone();
-
-            for frame in &mut self.frames_in_flight {
-                frame.material_icons_descriptor_set =
-                    frame.hud_vertex_buffer.as_ref().map(|hud_buffer| {
-                        create_hud_descriptor_set(
-                            self.descriptor_set_allocator.clone(),
-                            descriptor_set_layout.clone(),
-                            hud_buffer.clone(),
-                            view.clone(),
-                            sampler.clone(),
-                        )
-                    });
-            }
-        }
-    }
-
-    pub(super) fn apply_egui_texture_updates(
-        &mut self,
-        queue: Arc<Queue>,
-        updates: &[EguiTextureUpdate],
-    ) {
-        if updates.is_empty() {
-            return;
-        }
-
-        let (new_size, new_pixels) = {
-            let Some(egui_resources) = self.egui_resources.as_mut() else {
-                return;
-            };
-            let mut did_change = false;
-            for update in updates {
-                let width = update.size[0].max(1);
-                let height = update.size[1].max(1);
-                let expected_len = (width as usize)
-                    .saturating_mul(height as usize)
-                    .saturating_mul(4);
-                if update.pixels.len() != expected_len {
-                    continue;
-                }
-
-                match update.pos {
-                    None => {
-                        egui_resources.texture_size = [width, height];
-                        egui_resources.texture_pixels.clear();
-                        egui_resources
-                            .texture_pixels
-                            .extend_from_slice(&update.pixels);
-                        did_change = true;
-                    }
-                    Some([x, y]) => {
-                        let atlas_w = egui_resources.texture_size[0].max(1);
-                        let atlas_h = egui_resources.texture_size[1].max(1);
-                        if egui_resources.texture_pixels.len()
-                            != (atlas_w as usize)
-                                .saturating_mul(atlas_h as usize)
-                                .saturating_mul(4)
-                        {
-                            continue;
-                        }
-                        if x + width > atlas_w || y + height > atlas_h {
-                            continue;
-                        }
-
-                        for row in 0..height as usize {
-                            let src_start = row * width as usize * 4;
-                            let src_end = src_start + width as usize * 4;
-                            let dst_start =
-                                ((y as usize + row) * atlas_w as usize + x as usize) * 4;
-                            let dst_end = dst_start + width as usize * 4;
-                            egui_resources.texture_pixels[dst_start..dst_end]
-                                .copy_from_slice(&update.pixels[src_start..src_end]);
-                        }
-                        did_change = true;
-                    }
-                }
-            }
-
-            if !did_change {
-                return;
-            }
-            (
-                egui_resources.texture_size,
-                egui_resources.texture_pixels.clone(),
-            )
-        };
-
-        let new_view = create_rgba8_srgb_texture_view(
-            self.memory_allocator.clone(),
-            self.command_buffer_allocator.clone(),
-            queue,
-            new_size[0],
-            new_size[1],
-            &new_pixels,
-        );
-        if let Some(egui_resources) = self.egui_resources.as_mut() {
-            let old_view = std::mem::replace(&mut egui_resources.atlas_view, new_view);
-            egui_resources
-                .retired_atlas_views
-                .push((old_view, self.frames_rendered));
-            egui_resources
-                .retired_atlas_views
-                .retain(|&(_, retired_frame)| {
-                    self.frames_rendered.saturating_sub(retired_frame) < FRAMES_IN_FLIGHT
-                });
-        }
-        self.refresh_egui_descriptor_sets();
-    }
-
-    pub(super) fn write_egui_overlay(
-        &mut self,
-        frame_idx: usize,
-        base_hud_vertex: usize,
-        meshes: &[EguiPaintMesh],
-    ) -> (usize, Vec<HudDrawBatch>) {
-        let Some(hud_buf) = self.frames_in_flight[frame_idx].hud_vertex_buffer.as_ref() else {
-            return (0, Vec::new());
-        };
-        if meshes.is_empty() || base_hud_vertex >= HUD_VERTEX_CAPACITY {
-            return (0, Vec::new());
-        }
-
-        let present_size = match self.window.as_ref() {
-            Some(window) => {
-                let size = window.inner_size();
-                [size.width.max(1), size.height.max(1)]
-            }
-            None => [
-                self.sized_buffers.render_dimensions[0].max(1),
-                self.sized_buffers.render_dimensions[1].max(1),
-            ],
-        };
-        let present_w = present_size[0] as f32;
-        let present_h = present_size[1] as f32;
-        let mut writer = hud_buf.write().unwrap();
-        let mut batches = Vec::with_capacity(meshes.len());
-        let mut cursor = base_hud_vertex;
-
-        for mesh in meshes {
-            if cursor >= HUD_VERTEX_CAPACITY || mesh.vertices.is_empty() {
-                break;
-            }
-
-            let clip_min_x = mesh.clip_rect_px[0].clamp(0.0, present_w);
-            let clip_min_y = mesh.clip_rect_px[1].clamp(0.0, present_h);
-            let clip_max_x = mesh.clip_rect_px[2].clamp(0.0, present_w);
-            let clip_max_y = mesh.clip_rect_px[3].clamp(0.0, present_h);
-            if clip_max_x <= clip_min_x || clip_max_y <= clip_min_y {
-                continue;
-            }
-
-            let scissor_x = clip_min_x.floor() as u32;
-            let scissor_y = clip_min_y.floor() as u32;
-            let scissor_w = (clip_max_x.ceil() as u32).saturating_sub(scissor_x);
-            let scissor_h = (clip_max_y.ceil() as u32).saturating_sub(scissor_y);
-            if scissor_w == 0 || scissor_h == 0 {
-                continue;
-            }
-
-            let first_vertex = cursor;
-            for v in &mesh.vertices {
-                if cursor >= HUD_VERTEX_CAPACITY {
-                    break;
-                }
-                let position = pixels_to_ndc(
-                    Vec2::new(v.position_px[0], present_h - v.position_px[1]),
-                    present_size,
-                );
-                writer[cursor] = HudVertex::new(
-                    position,
-                    Vec2::new(v.uv[0], v.uv[1]),
-                    Vec4::new(v.color[0], v.color[1], v.color[2], v.color[3]),
-                );
-                cursor += 1;
-            }
-
-            let vertex_count = cursor.saturating_sub(first_vertex);
-            if vertex_count > 0 {
-                batches.push(HudDrawBatch {
-                    first_vertex: first_vertex as u32,
-                    vertex_count: vertex_count as u32,
-                    scissor: Scissor {
-                        offset: [scissor_x, scissor_y],
-                        extent: [scissor_w, scissor_h],
-                    },
-                    texture_slot: match mesh.texture_slot {
-                        EguiTextureSlot::MaterialIcons => HudTextureSlot::MaterialIcons,
-                        EguiTextureSlot::EguiAtlas => HudTextureSlot::EguiAtlas,
-                    },
-                });
-            }
-        }
-
-        (cursor.saturating_sub(base_hud_vertex), batches)
-    }
-
     /// Returns (line_count, hud_vertex_count)
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn write_navigation_hud_overlay(
         &mut self,
         frame_idx: usize,
@@ -1237,9 +977,9 @@ impl RenderContext {
                     readout_text.push_str(&format!("\n {}:{:.1}", name, ms));
                 }
             }
-        } else if readout_text.is_empty() {
-            readout_text.push_str("vectors");
         }
+        let draw_readout_text = !readout_text.is_empty();
+
         // Top-left text panel in Vulkan NDC (+Y is down), anchored in pixel space.
         let text_margin_px = Vec2::new(18.0, 18.0) * hud_scale;
         let readout_bg_min = px_top_left_to_ndc(text_margin_px);
@@ -1286,14 +1026,16 @@ impl RenderContext {
                 panel_bg,
             );
 
-            // Darker background behind text readout
-            push_filled_rect_quads(
-                &mut hud_quads,
-                &hud_res.font_atlas,
-                readout_bg_min,
-                readout_bg_max,
-                text_panel_bg,
-            );
+            if draw_readout_text {
+                // Darker background behind text readout
+                push_filled_rect_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    readout_bg_min,
+                    readout_bg_max,
+                    text_panel_bg,
+                );
+            }
 
             // Accent border on panels (top edge highlight)
             let border_h = px_delta_to_ndc(Vec2::new(0.0, 1.0 * hud_scale)).y;
@@ -1311,35 +1053,39 @@ impl RenderContext {
                 Vec2::new(yw_max.x, yw_min.y + border_h),
                 Vec4::new(yw_frame_color.x, yw_frame_color.y, yw_frame_color.z, 0.35),
             );
-            push_filled_rect_quads(
-                &mut hud_quads,
-                &hud_res.font_atlas,
-                Vec2::new(readout_bg_min.x, readout_bg_min.y),
-                Vec2::new(readout_bg_max.x, readout_bg_min.y + border_h),
-                Vec4::new(0.45, 0.50, 0.60, 0.40),
-            );
+            if draw_readout_text {
+                push_filled_rect_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    Vec2::new(readout_bg_min.x, readout_bg_min.y),
+                    Vec2::new(readout_bg_max.x, readout_bg_min.y + border_h),
+                    Vec4::new(0.45, 0.50, 0.60, 0.40),
+                );
 
-            let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
-            push_text_quads(
-                &mut hud_quads,
-                &hud_res.font_atlas,
-                &readout_text,
-                readout_anchor_px,
-                readout_text_size,
-                text_color,
-                present_size,
-            );
+                let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
+                push_text_quads(
+                    &mut hud_quads,
+                    &hud_res.font_atlas,
+                    &readout_text,
+                    readout_anchor_px,
+                    readout_text_size,
+                    text_color,
+                    present_size,
+                );
+            }
         } else if let Some(font) = self.hud_font.as_ref() {
-            let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
-            push_text_lines(
-                &mut lines,
-                font,
-                &readout_text,
-                readout_anchor_px,
-                readout_text_size,
-                text_color,
-                present_size,
-            );
+            if draw_readout_text {
+                let readout_anchor_px = ndc_to_pixels(readout_anchor_ndc, present_size);
+                push_text_lines(
+                    &mut lines,
+                    font,
+                    &readout_text,
+                    readout_anchor_px,
+                    readout_text_size,
+                    text_color,
+                    present_size,
+                );
+            }
         }
 
         if let Some(hud_res) = self.hud_resources.as_ref() {

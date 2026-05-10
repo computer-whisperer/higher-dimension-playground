@@ -172,7 +172,7 @@ fn world_chunk_payloads(world: &RegionChunkWorld) -> Vec<(ChunkKey, i8, Resolved
             )
         })
         .collect();
-    chunk_payloads.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
+    chunk_payloads.sort_unstable_by_key(|(ka, sa, _)| (*sa, *ka));
     chunk_payloads
 }
 
@@ -286,6 +286,7 @@ pub fn migrate_legacy_world_to_v4(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_v3_migration_equivalence(
     output_root: &Path,
     expected_chunk_payloads: Vec<(ChunkKey, i8, ResolvedChunkPayload)>,

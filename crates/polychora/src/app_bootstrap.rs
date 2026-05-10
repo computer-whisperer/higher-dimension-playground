@@ -13,6 +13,7 @@ fn parse_keycode(key: &str) -> Option<KeyCode> {
         "r" => Some(KeyCode::KeyR),
         "f" => Some(KeyCode::KeyF),
         "g" => Some(KeyCode::KeyG),
+        "t" => Some(KeyCode::KeyT),
         "tab" => Some(KeyCode::Tab),
         "space" => Some(KeyCode::Space),
         "shift" => Some(KeyCode::ShiftLeft),
@@ -34,6 +35,7 @@ fn parse_keycode(key: &str) -> Option<KeyCode> {
         "right" => Some(KeyCode::ArrowRight),
         "lbracket" => Some(KeyCode::BracketLeft),
         "rbracket" => Some(KeyCode::BracketRight),
+        "backquote" | "`" => Some(KeyCode::Backquote),
         _ => None,
     }
 }

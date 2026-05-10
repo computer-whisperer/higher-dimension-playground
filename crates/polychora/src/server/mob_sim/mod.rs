@@ -93,6 +93,7 @@ fn nearest_position_to(position: [f32; 4], candidates: &[[f32; 4]]) -> Option<[f
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attempt_phase_spider_blink(
     state: &ServerState,
     cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,

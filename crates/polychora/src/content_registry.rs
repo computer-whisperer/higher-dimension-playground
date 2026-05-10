@@ -403,6 +403,7 @@ impl ContentRegistry {
 
     /// Register a block with a specific (forced) material token and texture reference.
     /// Used for plugin content whose textures have been resolved to GPU tokens.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_block_with_token(
         &mut self,
         namespace: u32,
@@ -861,7 +862,7 @@ mod tests {
         };
 
         // Migrated blocks: texture pool tokens 0x8000..0x8009
-        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 0, "Red");
+        check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG, "Red");
         check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 1, "Orange");
         check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 2, "Yellow-Green");
         check_name(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 3, "Green");
@@ -981,7 +982,7 @@ mod tests {
         };
         assert_eq!(
             registry.resolve_texture_token(&tex),
-            Some(MATERIAL_TOKEN_TEXTURE_POOL_FLAG | 0),
+            Some(MATERIAL_TOKEN_TEXTURE_POOL_FLAG),
         );
 
         // Unknown texture returns None

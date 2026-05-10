@@ -175,13 +175,13 @@ fn main() {
     std::fs::create_dir_all(&spirv_out_dir).expect("Failed to create SPIR-V output directory");
 
     // Track all source files for rerun-if-changed
-    for entry in std::fs::read_dir(shader_src_dir).expect("Failed to read shader source directory")
+    for entry in std::fs::read_dir(shader_src_dir)
+        .expect("Failed to read shader source directory")
+        .flatten()
     {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "slang") {
-                println!("cargo:rerun-if-changed={}", path.display());
-            }
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "slang") {
+            println!("cargo:rerun-if-changed={}", path.display());
         }
     }
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_VTE_DIAGNOSTICS");

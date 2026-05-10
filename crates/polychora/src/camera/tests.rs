@@ -165,12 +165,12 @@ fn upright_forward_movement_matches_center_look_direction() {
 
     let expected = Camera4D::normalize_xzw(cam.look_direction_upright());
     cam.apply_movement_upright(1.0, 0.0, 0.0, 0.0, 1.0, 1.0);
-    for axis in 0..4 {
+    for (axis, expected_axis) in expected.iter().enumerate() {
         assert!(
-            (cam.position[axis] - expected[axis]).abs() < 1e-4,
+            (cam.position[axis] - expected_axis).abs() < 1e-4,
             "axis={axis} got={} expected={}",
             cam.position[axis],
-            expected[axis]
+            expected_axis
         );
     }
 }

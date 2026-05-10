@@ -16,7 +16,7 @@ use self::buffers::{LiveBuffers, OneTimeBuffers, SizedBuffers};
 pub use self::buffers::{VoxelBufferCapacities, VoxelGpuBuffers};
 use self::geometry::{mat5_mul_vec5, project_view_point_to_ndc, transform_model_point};
 use self::hud::{
-    build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, pixels_to_ndc, push_cross,
+    build_font_atlas, load_hud_font, map_to_panel, ndc_to_pixels, push_cross,
     push_filled_rect_quads, push_line, push_minecraft_crosshair, push_rect, push_text_lines,
     push_text_quads, HudResources, HudVertex, LineVertex, OverlayLine, HUD_VERTEX_CAPACITY,
 };
@@ -268,8 +268,6 @@ struct FrameInFlight {
     line_vertexes_buffer: Subbuffer<[LineVertex]>,
     hud_vertex_buffer: Option<Subbuffer<[HudVertex]>>,
     hud_descriptor_set: Option<Arc<DescriptorSet>>,
-    egui_descriptor_set: Option<Arc<DescriptorSet>>,
-    material_icons_descriptor_set: Option<Arc<DescriptorSet>>,
     sized_descriptor_set: Arc<DescriptorSet>,
     cpu_clipped_tet_count_buffer: Subbuffer<[u32]>,
     query_pool: Arc<QueryPool>,
@@ -286,19 +284,9 @@ struct AetnaOverlay {
     runner: aetna_vulkano::Runner,
 }
 
-struct EguiResources {
-    atlas_view: Arc<ImageView>,
-    atlas_sampler: Arc<Sampler>,
-    texture_size: [u32; 2],
-    texture_pixels: Vec<u8>,
-    retired_atlas_views: Vec<(Arc<ImageView>, usize)>,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HudTextureSlot {
     Hud,
-    EguiAtlas,
-    MaterialIcons,
 }
 
 #[derive(Clone, Copy)]
@@ -853,6 +841,7 @@ fn vte_cpu_advance_dda4(
     best
 }
 
+#[allow(clippy::too_many_arguments)]
 fn vte_cpu_trace_voxels_in_chunk(
     ray_origin: [f32; 4],
     ray_dir: [f32; 4],
@@ -1042,6 +1031,7 @@ fn vte_cpu_trace_voxels_in_chunk(
 // CHUNK_SIZE=8 for chunk DDA and voxel size=1.0). It will produce incorrect
 // results for non-zero-scale leaves, causing false diagnostic mismatches when
 // `vte_reference_compare` is enabled on multi-scale worlds.
+#[allow(clippy::too_many_arguments)]
 fn vte_cpu_trace_ray_linear(
     ray_origin: [f32; 4],
     ray_dir: [f32; 4],
@@ -1256,6 +1246,7 @@ fn vte_cpu_trace_ray_linear(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn vte_world_ray_direction_for_pixel_layer(
     pixel_x: u32,
     pixel_y: u32,
@@ -1429,9 +1420,6 @@ pub struct RenderContext {
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
     hud_resources: Option<HudResources>,
-    egui_resources: Option<EguiResources>,
-    material_icons_view: Option<Arc<ImageView>>,
-    material_icons_sampler: Option<Arc<Sampler>>,
     aetna_overlay: Option<AetnaOverlay>,
     hud_breadcrumbs: VecDeque<[f32; 4]>,
     hud_previous_camera: Option<[f32; 4]>,
@@ -1858,6 +1846,24 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             .as_mut()
             .map(|aetna| aetna.runner.pointer_wheel(x, y, dy))
             .unwrap_or(false)
+    }
+
+    pub fn aetna_key_down(
+        &mut self,
+        key: aetna_core::UiKey,
+        modifiers: aetna_core::KeyModifiers,
+        repeat: bool,
+    ) -> Vec<aetna_core::UiEvent> {
+        self.aetna_overlay
+            .as_mut()
+            .map(|aetna| aetna.runner.key_down(key, modifiers, repeat))
+            .unwrap_or_default()
+    }
+
+    pub fn aetna_text_input(&mut self, text: String) -> Option<aetna_core::UiEvent> {
+        self.aetna_overlay
+            .as_mut()
+            .and_then(|aetna| aetna.runner.text_input(text))
     }
 
     pub fn aetna_set_modifiers(&mut self, modifiers: aetna_core::KeyModifiers) {
@@ -2628,11 +2634,10 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             .voxel_capacities();
         if let Some(input) = voxel_input {
             let ceil_div = |value: usize, divisor: usize| -> usize {
-                if divisor == 0 {
-                    0
-                } else {
-                    value.saturating_add(divisor - 1) / divisor
-                }
+                value
+                    .saturating_add(divisor.saturating_sub(1))
+                    .checked_div(divisor)
+                    .unwrap_or(0)
             };
             let dense_required = input
                 .chunk_headers
@@ -4016,62 +4021,56 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                 .bind_pipeline_compute(self.compute_pipeline.edge_pipeline.clone())
                 .unwrap();
 
-            if model_edge_count > 0 {
-                if do_edges {
-                    let available_lines = max_lines.saturating_sub(line_render_count);
-                    let max_instances = available_lines / model_edge_count;
-                    let edge_instance_count = used_instance_count.min(max_instances);
-                    if edge_instance_count > 0 {
-                        let edge_line_count = edge_instance_count * model_edge_count;
-                        let edge_push_data: [u32; 4] = [
+            if do_edges {
+                let available_lines = max_lines.saturating_sub(line_render_count);
+                let max_instances = available_lines.checked_div(model_edge_count).unwrap_or(0);
+                let edge_instance_count = used_instance_count.min(max_instances);
+                if edge_instance_count > 0 {
+                    let edge_line_count = edge_instance_count * model_edge_count;
+                    let edge_push_data: [u32; 4] = [
+                        0,
+                        edge_instance_count.min(u32::MAX as usize) as u32,
+                        line_render_count.min(u32::MAX as usize) as u32,
+                        0,
+                    ];
+                    builder
+                        .push_constants(
+                            self.compute_pipeline.pipeline_layout.clone(),
                             0,
-                            edge_instance_count.min(u32::MAX as usize) as u32,
-                            line_render_count.min(u32::MAX as usize) as u32,
-                            0,
-                        ];
-                        builder
-                            .push_constants(
-                                self.compute_pipeline.pipeline_layout.clone(),
-                                0,
-                                edge_push_data,
-                            )
-                            .unwrap();
-                        unsafe {
-                            builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
-                        }
+                            edge_push_data,
+                        )
                         .unwrap();
-                        line_render_count += edge_line_count;
-                        dispatched_any_edges = true;
-                    }
+                    unsafe { builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1]) }
+                        .unwrap();
+                    line_render_count += edge_line_count;
+                    dispatched_any_edges = true;
                 }
+            }
 
-                if custom_overlay_edge_used_instance_count > 0 {
-                    let available_lines = max_lines.saturating_sub(line_render_count);
-                    let max_instances = available_lines / model_edge_count;
-                    let edge_overlay_instance_count =
-                        custom_overlay_edge_used_instance_count.min(max_instances);
-                    if edge_overlay_instance_count > 0 {
-                        let edge_line_count = edge_overlay_instance_count * model_edge_count;
-                        let edge_push_data: [u32; 4] = [
-                            custom_overlay_edge_instance_base.min(u32::MAX as usize) as u32,
-                            edge_overlay_instance_count.min(u32::MAX as usize) as u32,
-                            line_render_count.min(u32::MAX as usize) as u32,
+            if custom_overlay_edge_used_instance_count > 0 {
+                let available_lines = max_lines.saturating_sub(line_render_count);
+                let max_instances = available_lines.checked_div(model_edge_count).unwrap_or(0);
+                let edge_overlay_instance_count =
+                    custom_overlay_edge_used_instance_count.min(max_instances);
+                if edge_overlay_instance_count > 0 {
+                    let edge_line_count = edge_overlay_instance_count * model_edge_count;
+                    let edge_push_data: [u32; 4] = [
+                        custom_overlay_edge_instance_base.min(u32::MAX as usize) as u32,
+                        edge_overlay_instance_count.min(u32::MAX as usize) as u32,
+                        line_render_count.min(u32::MAX as usize) as u32,
+                        0,
+                    ];
+                    builder
+                        .push_constants(
+                            self.compute_pipeline.pipeline_layout.clone(),
                             0,
-                        ];
-                        builder
-                            .push_constants(
-                                self.compute_pipeline.pipeline_layout.clone(),
-                                0,
-                                edge_push_data,
-                            )
-                            .unwrap();
-                        unsafe {
-                            builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1])
-                        }
+                            edge_push_data,
+                        )
                         .unwrap();
-                        line_render_count += edge_line_count;
-                        dispatched_any_edges = true;
-                    }
+                    unsafe { builder.dispatch([(edge_line_count as u32).div_ceil(64u32), 1, 1]) }
+                        .unwrap();
+                    line_render_count += edge_line_count;
+                    dispatched_any_edges = true;
                 }
             }
 
@@ -4559,16 +4558,6 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             }
         }
 
-        if let Some(egui_paint) = render_options.egui_paint.as_ref() {
-            if !egui_paint.texture_updates.is_empty() {
-                self.apply_egui_texture_updates(queue.clone(), &egui_paint.texture_updates);
-            }
-            let (egui_vertex_count, mut egui_batches) =
-                self.write_egui_overlay(frame_idx, hud_vertex_count, &egui_paint.meshes);
-            hud_vertex_count += egui_vertex_count;
-            hud_batches.append(&mut egui_batches);
-        }
-
         let aetna_draw_ready =
             if let (Some(tree), Some(aetna)) = (aetna_ui.as_mut(), self.aetna_overlay.as_mut()) {
                 let (present_size, scale_factor) = match self.window.as_ref() {
@@ -4716,11 +4705,6 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             let frame = &self.frames_in_flight[frame_idx];
                             let descriptor_set = match batch.texture_slot {
                                 HudTextureSlot::Hud => frame.hud_descriptor_set.as_ref(),
-                                HudTextureSlot::EguiAtlas => frame.egui_descriptor_set.as_ref(),
-                                HudTextureSlot::MaterialIcons => frame
-                                    .material_icons_descriptor_set
-                                    .as_ref()
-                                    .or(frame.egui_descriptor_set.as_ref()),
                             };
                             let Some(descriptor_set) = descriptor_set else {
                                 continue;

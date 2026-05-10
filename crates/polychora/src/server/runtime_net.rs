@@ -768,6 +768,7 @@ pub(super) fn apply_explosion_impulse(
     (persistent_motion, queued_player_modifiers)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_broadcast_thread(
     state: SharedState,
     tick_hz: f32,
@@ -1688,10 +1689,10 @@ fn pickup_nearby_item_stacks(state: &mut ServerState, now_ms: u64) -> Vec<(u64, 
         let mut nearest: Option<(u64, f32, [f32; 4])> = None;
         for &(client_id, _player_entity_id, player_pos) in &players {
             let dist_sq = distance4_sq(*item_pos, player_pos);
-            if dist_sq < ITEM_MAGNET_RADIUS_SQ {
-                if nearest.is_none() || dist_sq < nearest.unwrap().1 {
-                    nearest = Some((client_id, dist_sq, player_pos));
-                }
+            if dist_sq < ITEM_MAGNET_RADIUS_SQ
+                && (nearest.is_none() || dist_sq < nearest.unwrap().1)
+            {
+                nearest = Some((client_id, dist_sq, player_pos));
             }
         }
 
@@ -1861,6 +1862,7 @@ fn handle_drop_item(state: &SharedState, client_id: u64, slot_index: u8, start: 
     send_to_client(state, client_id, slot_update_msg);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_mob_entity(
     state: &SharedState,
     entity: Entity,

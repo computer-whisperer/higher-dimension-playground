@@ -47,16 +47,6 @@ pub(super) struct HudVertex {
     color: Vec4,
 }
 
-impl HudVertex {
-    pub(super) fn new(position: Vec2, texcoord: Vec2, color: Vec4) -> Self {
-        Self {
-            position,
-            texcoord,
-            color,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct GlyphInfo {
     uv_min: Vec2,

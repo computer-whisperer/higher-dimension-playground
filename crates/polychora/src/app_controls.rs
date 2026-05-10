@@ -182,6 +182,12 @@ impl App {
             KeyCode::KeyI => {
                 self.inventory_open = !self.inventory_open;
             }
+            KeyCode::KeyT => {
+                self.toggle_teleport_dialog();
+            }
+            KeyCode::Backquote => {
+                self.toggle_dev_console();
+            }
             KeyCode::Digit1 => self.hotbar_selected_index = 0,
             KeyCode::Digit2 => self.hotbar_selected_index = 1,
             KeyCode::Digit3 => self.hotbar_selected_index = 2,

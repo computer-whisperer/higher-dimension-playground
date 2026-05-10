@@ -1446,9 +1446,9 @@ mod ray_aabb_tests {
         for axis in 0..4u8 {
             for &(sign, start_val, expected_face_sign) in &[(-1i8, 2, 1i8), (1i8, -1, -1i8)] {
                 let mut origin = [cc(0); 4];
-                for a in 0..4 {
+                for (a, coordinate) in origin.iter_mut().enumerate() {
                     if a != axis as usize {
-                        origin[a] = ChunkCoord::from_num(0.5f32);
+                        *coordinate = ChunkCoord::from_num(0.5f32);
                     }
                 }
                 origin[axis as usize] = cc(start_val);

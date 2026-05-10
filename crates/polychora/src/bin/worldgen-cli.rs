@@ -401,6 +401,7 @@ fn create_auto_backup(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_migrate(
     input: PathBuf,
     output: Option<PathBuf>,

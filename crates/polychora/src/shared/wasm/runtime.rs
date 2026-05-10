@@ -548,8 +548,10 @@ mod tests {
                 .compile_module(&valid_runtime_module())
                 .expect("module should compile"),
         );
-        let mut limits = WasmExecutionLimits::default();
-        limits.max_input_bytes = 2;
+        let limits = WasmExecutionLimits {
+            max_input_bytes: 2,
+            ..Default::default()
+        };
         let mut instance = runtime
             .instantiate_module(compiled, WasmExecutionRole::ServerAuthoritative, limits)
             .expect("module should instantiate");

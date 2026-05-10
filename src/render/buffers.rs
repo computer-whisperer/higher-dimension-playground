@@ -663,6 +663,7 @@ impl VoxelGpuBuffers {
 
     /// Create GPU buffers pre-populated with the given CPU data.
     /// Used by the background rebuild thread to build GPU buffers off the main thread.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_data(
         memory_allocator: Arc<dyn MemoryAllocator>,
         chunk_headers: &[GpuVoxelChunkHeader],

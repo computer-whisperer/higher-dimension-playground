@@ -1119,7 +1119,7 @@ fn determine_chunk_scale_respects_existing_blocks() {
     overlay.apply_voxel_edit_at_scale(cc4([16, 0, 0, 0]), BlockData::simple(0, 7), 1);
     let chosen_coarse = overlay.determine_chunk_scale(cc4([17, 0, 0, 0]), 0);
     assert!(
-        chosen_coarse >= -3 && chosen_coarse <= 0,
+        (-3..=0).contains(&chosen_coarse),
         "scale 1 blocks should be representable at scale 0, got {chosen_coarse}"
     );
 }

@@ -1,3 +1,10 @@
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::erasing_op,
+    clippy::identity_op,
+    clippy::type_complexity
+)]
+
 use super::*;
 use polychora::content_registry::{ContentRegistry, MaterialResolver};
 use polychora::shared::region_tree::chunk_key_i32;
@@ -587,7 +594,7 @@ fn apply_region_patch_semantic_noop_skips_splice() {
     let seed_core = seed_tree.slice_non_empty_core_in_bounds(bounds);
     let _ = scene.apply_region_patch(bounds, &seed_core);
     let _ = scene.world_drain_pending_chunk_updates();
-    let before = scene.world_tree.root().cloned();
+    let _before = scene.world_tree.root().cloned();
 
     let patch_block_palette = vec![
         BlockData::AIR,
@@ -1538,7 +1545,7 @@ fn place_break_replace_via_fast_patch_preserves_chunk() {
             };
 
             // --- Step 0: apply extra placements to client scene ---
-            for (eb, ec) in &extra_cores {
+            for (eb, _ec) in &extra_cores {
                 let mut ov = RegionChunkTree::new();
                 add_persistent_overrides(&mut ov);
                 let st = compose_server_subtree(platform, &platform_core, &ov);

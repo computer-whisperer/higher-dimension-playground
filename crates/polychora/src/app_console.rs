@@ -19,6 +19,7 @@ impl App {
         self.teleport_dialog_open = false;
         self.controls_dialog_open = false;
         self.dev_console_focus_input = true;
+        self.focus_aetna_dev_console_input();
         if self.dev_console_log.is_empty() {
             self.append_dev_console_log_line(
                 "Developer console ready. Use /help for available commands.",
@@ -45,60 +46,6 @@ impl App {
             if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
                 self.grab_mouse(&window);
             }
-        }
-    }
-
-    pub(super) fn draw_egui_dev_console(
-        &mut self,
-        ctx: &egui::Context,
-        submitted_command: &mut Option<String>,
-        close_console: &mut bool,
-    ) {
-        let mut open = true;
-        egui::Window::new("Developer Console")
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_TOP, [0.0, 14.0])
-            .resizable(false)
-            .collapsible(false)
-            .default_width(760.0)
-            .show(ctx, |ui| {
-                ui.label("Commands: /help, /tp, /spawn");
-                ui.add_space(2.0);
-                egui::ScrollArea::vertical()
-                    .max_height(170.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.dev_console_log {
-                            ui.monospace(line);
-                        }
-                    });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let run_clicked = ui.button("Run").clicked();
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.dev_console_input)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("e.g. /tp 0 8 0 0"),
-                    );
-                    if self.dev_console_focus_input {
-                        response.request_focus();
-                        self.dev_console_focus_input = false;
-                    }
-                    let enter_pressed =
-                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if run_clicked || enter_pressed {
-                        let command = self.dev_console_input.trim().to_string();
-                        self.dev_console_input.clear();
-                        if !command.is_empty() {
-                            *submitted_command = Some(command);
-                            self.dev_console_focus_input = true;
-                        }
-                    }
-                });
-            });
-
-        if !open {
-            *close_console = true;
         }
     }
 

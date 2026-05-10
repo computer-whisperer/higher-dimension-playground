@@ -9,8 +9,6 @@ use super::load::{
 use super::*;
 
 #[cfg(test)]
-use crate::migration::legacy_voxel::RegionChunkWorld;
-#[cfg(test)]
 use crate::shared::region_tree::chunk_key_i32;
 
 #[cfg(test)]
@@ -468,7 +466,7 @@ fn resolve_world_chunk_payloads_for_save(
     if dirty_block_regions.is_empty() {
         let mut out: Vec<(ChunkKey, i8, ResolvedChunkPayload)> =
             merged.into_iter().map(|(k, (se, p))| (k, se, p)).collect();
-        out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
+        out.sort_unstable_by_key(|(ka, sa, _)| (*sa, *ka));
         return out;
     }
 
@@ -489,7 +487,7 @@ fn resolve_world_chunk_payloads_for_save(
 
     let mut out: Vec<(ChunkKey, i8, ResolvedChunkPayload)> =
         merged.into_iter().map(|(k, (se, p))| (k, se, p)).collect();
-    out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
+    out.sort_unstable_by_key(|(ka, sa, _)| (*sa, *ka));
     out
 }
 
@@ -515,7 +513,7 @@ fn normalize_chunk_payloads_latest_wins(
         .into_iter()
         .map(|(key, (_, se, payload))| (key, se, payload))
         .collect();
-    out.sort_unstable_by(|(ka, sa, _), (kb, sb, _)| (*sa, *ka).cmp(&(*sb, *kb)));
+    out.sort_unstable_by_key(|(ka, sa, _)| (*sa, *ka));
     out
 }
 

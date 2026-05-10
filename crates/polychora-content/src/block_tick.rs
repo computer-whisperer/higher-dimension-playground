@@ -74,14 +74,12 @@ fn spawner_tick(input: &BlockTickInput) -> WasmCallResult<BlockTickOutput> {
     if state.spawn_count >= SPAWNER_MAX_SPAWNS {
         return WasmCallResult::new(BlockTickOutput {
             metadata: state.encode(),
-            ..Default::default()
         });
     }
 
     if input.now_ms < state.last_spawn_ms + SPAWNER_COOLDOWN_MS {
         return WasmCallResult::new(BlockTickOutput {
             metadata: state.encode(),
-            ..Default::default()
         });
     }
 
@@ -92,7 +90,6 @@ fn spawner_tick(input: &BlockTickInput) -> WasmCallResult<BlockTickOutput> {
     WasmCallResult::with_effects(
         BlockTickOutput {
             metadata: state.encode(),
-            ..Default::default()
         },
         vec![SideEffect::SpawnEntity {
             entity_type_ns: state.entity_ns,

@@ -351,6 +351,7 @@ fn mob_nav_debug_log(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn update_mob_navigation_state(
     state: &ServerState,
     cache: &mut HashMap<ChunkKey, CollisionChunkCacheEntry>,

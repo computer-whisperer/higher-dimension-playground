@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_match)]
+
 use super::*;
 
 impl ApplicationHandler for App {
@@ -24,14 +26,6 @@ impl ApplicationHandler for App {
             }
         };
         let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
-        self.egui_winit_state = Some(egui_winit::State::new(
-            self.egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            window.as_ref(),
-            Some(window.scale_factor() as f32),
-            window.theme(),
-            None,
-        ));
 
         if self.app_state == AppState::Playing && !self.perf_suite_active() {
             self.grab_mouse(&window);
@@ -81,17 +75,6 @@ impl ApplicationHandler for App {
                 );
             }
         }
-        if let (Some(rcx), Some(sheet)) = (self.rcx.as_mut(), self.material_icon_sheet.as_ref()) {
-            rcx.upload_material_icons_texture(
-                self.queue.clone(),
-                sheet.width,
-                sheet.height,
-                &sheet.pixels,
-            );
-            // Use User(1) as the egui texture ID for material icons
-            self.material_icons_texture_id = Some(egui::TextureId::User(1));
-        }
-
         if self.args.aetna_bundle_dump {
             if let Err(error) = self.dump_aetna_overlay_bundle() {
                 eprintln!("Failed to dump Aetna HUD bundle: {error}");
@@ -116,26 +99,30 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
-        let show_egui_overlay = self.app_state == AppState::MainMenu
-            || self.menu_open
-            || self.inventory_open
-            || self.teleport_dialog_open
-            || self.dev_console_open
-            || self.controls_dialog_open
-            || self.block_gui_session.is_some();
-        let egui_consumed = if let (Some(egui_state), Some(window)) =
-            (self.egui_winit_state.as_mut(), window.as_ref())
-        {
-            show_egui_overlay && egui_state.on_window_event(window, &event).consumed
-        } else {
-            false
-        };
+        let aetna_inventory_open =
+            self.app_state == AppState::Playing && self.inventory_open && !self.args.no_hud;
+        let aetna_pause_open =
+            self.app_state == AppState::Playing && self.menu_open && !self.args.no_hud;
+        let aetna_teleport_open =
+            self.app_state == AppState::Playing && self.teleport_dialog_open && !self.args.no_hud;
+        let aetna_dev_console_open =
+            self.app_state == AppState::Playing && self.dev_console_open && !self.args.no_hud;
+        let aetna_block_gui_open = self.app_state == AppState::Playing
+            && self.block_gui_session.is_some()
+            && !self.args.no_hud;
+        let aetna_main_menu_open = self.app_state == AppState::MainMenu && !self.args.no_hud;
         let perf_suite_input_locked = self.perf_suite_active();
-        let route_aetna_overlay = self.app_state == AppState::Playing
-            && !self.args.no_hud
-            && !self.mouse_grabbed
-            && !show_egui_overlay
-            && !perf_suite_input_locked;
+        let route_aetna_overlay = !self.args.no_hud
+            && !perf_suite_input_locked
+            && (aetna_main_menu_open
+                || (self.app_state == AppState::Playing
+                    && !self.mouse_grabbed
+                    && (aetna_pause_open
+                        || aetna_teleport_open
+                        || aetna_dev_console_open
+                        || aetna_block_gui_open
+                        || aetna_inventory_open
+                        || !self.inventory_open)));
 
         match event {
             WindowEvent::CloseRequested => {
@@ -161,11 +148,7 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if !egui_consumed {
-                    self.input.handle_key_event(&event);
-                }
-
-                // Tab toggles inventory regardless of egui consumption.
+                // Tab toggles inventory regardless of overlay focus.
                 if self.inventory_open
                     && event.state.is_pressed()
                     && !event.repeat
@@ -218,6 +201,53 @@ impl ApplicationHandler for App {
                         self.persist_settings_if_needed(true);
                         event_loop.exit();
                     }
+                    return;
+                }
+
+                if route_aetna_overlay && event.state.is_pressed() {
+                    if let Some(key) = aetna_ui_key(&event) {
+                        let mut events = self
+                            .rcx
+                            .as_mut()
+                            .map(|rcx| {
+                                rcx.aetna_key_down(key.clone(), self.aetna_modifiers, event.repeat)
+                            })
+                            .unwrap_or_default();
+                        if let Some(text) = event.text.as_ref() {
+                            if let Some(text_event) = self
+                                .rcx
+                                .as_mut()
+                                .and_then(|rcx| rcx.aetna_text_input(text.to_string()))
+                            {
+                                events.push(text_event);
+                            }
+                        }
+                        let consumed = self.handle_aetna_ui_events(events);
+                        if consumed {
+                            if let Some(window) = window.as_ref() {
+                                window.request_redraw();
+                            }
+                            return;
+                        }
+
+                        if aetna_dev_console_open
+                            && self.handle_aetna_dev_console_key_fallback(
+                                Some(key),
+                                event.text.as_ref().map(ToString::to_string),
+                                self.aetna_modifiers,
+                                event.repeat,
+                            )
+                        {
+                            if let Some(window) = window.as_ref() {
+                                window.request_redraw();
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                if self.app_state != AppState::MainMenu {
+                    self.input.handle_key_event(&event);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -253,8 +283,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
+                self.aetna_modifiers = aetna_key_modifiers(modifiers.state());
                 if let Some(rcx) = self.rcx.as_mut() {
-                    rcx.aetna_set_modifiers(aetna_key_modifiers(modifiers.state()));
+                    rcx.aetna_set_modifiers(self.aetna_modifiers);
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => match button {
@@ -262,7 +293,7 @@ impl ApplicationHandler for App {
                     if perf_suite_input_locked {
                         return;
                     }
-                    if route_aetna_overlay && !egui_consumed {
+                    if route_aetna_overlay {
                         if let (Some(button), Some((x, y))) =
                             (aetna_pointer_button(button), self.aetna_last_pointer)
                         {
@@ -288,12 +319,10 @@ impl ApplicationHandler for App {
                     }
                     if state.is_pressed() {
                         if self.app_state == AppState::MainMenu {
-                            // Don't grab mouse in main menu -- egui handles clicks
+                            // Don't grab mouse in main menu.
                         } else if self.mouse_grabbed {
-                            if !egui_consumed {
-                                self.input.handle_mouse_button(button, state);
-                            }
-                        } else if self.teleport_dialog_open && !egui_consumed {
+                            self.input.handle_mouse_button(button, state);
+                        } else if self.teleport_dialog_open {
                             // Click outside teleport dialog — close it and grab mouse
                             self.toggle_teleport_dialog();
                         } else if !self.menu_open
@@ -316,7 +345,7 @@ impl ApplicationHandler for App {
                     if perf_suite_input_locked {
                         return;
                     }
-                    if route_aetna_overlay && !egui_consumed {
+                    if route_aetna_overlay {
                         if let (Some(button), Some((x, y))) =
                             (aetna_pointer_button(button), self.aetna_last_pointer)
                         {
@@ -340,7 +369,7 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
-                    if !egui_consumed {
+                    if self.app_state != AppState::MainMenu {
                         self.input.handle_mouse_button(button, state);
                     }
                 }
@@ -350,7 +379,7 @@ impl ApplicationHandler for App {
                 if perf_suite_input_locked {
                     return;
                 }
-                if route_aetna_overlay && !egui_consumed {
+                if route_aetna_overlay {
                     if let Some((x, y)) = self.aetna_last_pointer {
                         let scale = window
                             .as_ref()
@@ -375,7 +404,7 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
-                if !egui_consumed {
+                if self.app_state != AppState::MainMenu {
                     let y = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                         winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 40.0,
@@ -449,6 +478,37 @@ fn aetna_key_modifiers(mods: winit::keyboard::ModifiersState) -> aetna_core::Key
         ctrl: mods.control_key(),
         alt: mods.alt_key(),
         logo: mods.super_key(),
+    }
+}
+
+fn aetna_ui_key(event: &winit::event::KeyEvent) -> Option<aetna_core::UiKey> {
+    match &event.logical_key {
+        Key::Named(named) => match named {
+            NamedKey::Enter => Some(aetna_core::UiKey::Enter),
+            NamedKey::Escape => Some(aetna_core::UiKey::Escape),
+            NamedKey::Tab => Some(aetna_core::UiKey::Tab),
+            NamedKey::Space => Some(aetna_core::UiKey::Space),
+            NamedKey::ArrowUp => Some(aetna_core::UiKey::ArrowUp),
+            NamedKey::ArrowDown => Some(aetna_core::UiKey::ArrowDown),
+            NamedKey::ArrowLeft => Some(aetna_core::UiKey::ArrowLeft),
+            NamedKey::ArrowRight => Some(aetna_core::UiKey::ArrowRight),
+            NamedKey::Backspace => Some(aetna_core::UiKey::Backspace),
+            NamedKey::Delete => Some(aetna_core::UiKey::Delete),
+            NamedKey::Home => Some(aetna_core::UiKey::Home),
+            NamedKey::End => Some(aetna_core::UiKey::End),
+            NamedKey::PageUp => Some(aetna_core::UiKey::PageUp),
+            NamedKey::PageDown => Some(aetna_core::UiKey::PageDown),
+            _ => Some(aetna_core::UiKey::Other(format!("{named:?}"))),
+        },
+        Key::Character(text) => Some(aetna_core::UiKey::Character(text.to_string())),
+        Key::Unidentified(_) => {
+            if let PhysicalKey::Code(code) = event.physical_key {
+                Some(aetna_core::UiKey::Other(format!("{code:?}")))
+            } else {
+                None
+            }
+        }
+        Key::Dead(dead) => Some(aetna_core::UiKey::Other(format!("{dead:?}"))),
     }
 }
 

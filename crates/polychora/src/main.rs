@@ -11,7 +11,6 @@ mod app_multiplayer;
 mod app_perf;
 mod app_runtime;
 mod app_settings;
-mod app_ui;
 mod audio;
 mod audio_synth;
 mod camera;
@@ -23,11 +22,9 @@ mod scene;
 mod voxel;
 
 use clap::{ArgAction, Parser, ValueEnum};
-use egui::RichText;
 use higher_dimension_playground::render::{
-    EguiPaintData, EguiPaintMesh, EguiPaintVertex, EguiTextureSlot, EguiTextureUpdate, FrameParams,
-    HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext, RenderOptions, TetraFrameInput,
-    VteDisplayMode,
+    FrameParams, HudPlayerTag, HudReadoutMode, RenderBackend, RenderContext, RenderOptions,
+    TetraFrameInput, VteDisplayMode,
 };
 use higher_dimension_playground::vulkan_setup::vulkan_setup;
 use std::collections::{HashMap, VecDeque};
@@ -920,14 +917,14 @@ fn main() {
             "0".to_string(),
             "0".to_string(),
         ],
+        aetna_selection: aetna_core::Selection::default(),
+        aetna_modifiers: aetna_core::KeyModifiers::default(),
         dev_console_open: false,
         dev_console_input: String::new(),
         dev_console_log: VecDeque::new(),
         dev_console_focus_input: false,
         controls_dialog_open: false,
         menu_open: false,
-        egui_ctx: egui::Context::default(),
-        egui_winit_state: None,
         content_registry: content_registry.clone(),
         material_resolver: polychora::content_registry::MaterialResolver::from_registry(
             &content_registry,
@@ -936,7 +933,6 @@ fn main() {
         wasm_model_manager: polychora::plugin_loader::create_wasm_manager_for_client(),
         block_gui_session: None,
         material_icon_sheet: None,
-        material_icons_texture_id: None,
         multiplayer,
         multiplayer_self_id: None,
         multiplayer_last_world_request_center_chunk: None,
@@ -1272,21 +1268,20 @@ struct App {
     inventory_dirty: bool,
     teleport_dialog_open: bool,
     teleport_coords: [String; 4],
+    aetna_selection: aetna_core::Selection,
+    aetna_modifiers: aetna_core::KeyModifiers,
     dev_console_open: bool,
     dev_console_input: String,
     dev_console_log: VecDeque<String>,
     dev_console_focus_input: bool,
     controls_dialog_open: bool,
     menu_open: bool,
-    egui_ctx: egui::Context,
-    egui_winit_state: Option<egui_winit::State>,
     content_registry: Arc<polychora::content_registry::ContentRegistry>,
     material_resolver: polychora::content_registry::MaterialResolver,
     pending_texture_uploads: Vec<polychora::plugin_loader::PendingTextureUpload>,
     wasm_model_manager: Option<polychora::shared::wasm::WasmPluginManager>,
     block_gui_session: Option<polychora::block_gui::BlockGuiSession>,
     material_icon_sheet: Option<material_icons::MaterialIconSheet>,
-    material_icons_texture_id: Option<egui::TextureId>,
     multiplayer: Option<MultiplayerClient>,
     multiplayer_self_id: Option<u64>,
     multiplayer_last_world_request_center_chunk: Option<polychora::shared::region_tree::ChunkKey>,

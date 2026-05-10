@@ -162,7 +162,7 @@ fn merge_adjacent_children_once(children: &mut Vec<RegionTreeCore>) -> bool {
         let mut rebuilt = passthrough;
         for (_key, mut group) in grouped {
             if group.len() < 2 {
-                rebuilt.extend(group.into_iter());
+                rebuilt.extend(group);
                 continue;
             }
 

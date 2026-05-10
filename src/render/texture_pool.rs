@@ -213,6 +213,7 @@ fn create_dummy_3d_texture_view(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_3d_texture_view(
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,

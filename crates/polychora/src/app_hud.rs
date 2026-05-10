@@ -1,6 +1,7 @@
 use super::*;
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn current_info_hud_text(
         &self,
         pair: RotationPair,
@@ -183,6 +184,7 @@ impl App {
         text
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn full_info_hud_text(
         &self,
         pair: RotationPair,

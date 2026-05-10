@@ -428,38 +428,6 @@ impl RenderContext {
             _ => None,
         };
 
-        let egui_resources = match &present_pipeline {
-            Some(_) => {
-                let texture_pixels = vec![255u8, 255, 255, 255];
-                let atlas_view = create_rgba8_srgb_texture_view(
-                    memory_allocator.clone(),
-                    command_buffer_allocator.clone(),
-                    queue.clone(),
-                    1,
-                    1,
-                    &texture_pixels,
-                );
-                let atlas_sampler = Sampler::new(
-                    device.clone(),
-                    SamplerCreateInfo {
-                        mag_filter: Filter::Linear,
-                        min_filter: Filter::Linear,
-                        address_mode: [SamplerAddressMode::ClampToEdge; 3],
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-                Some(EguiResources {
-                    atlas_view,
-                    atlas_sampler,
-                    texture_size: [1, 1],
-                    texture_pixels,
-                    retired_atlas_views: Vec::new(),
-                })
-            }
-            None => None,
-        };
-
         let hud_descriptor_set_layout = present_pipeline.as_ref().map(|present_ctx| {
             present_ctx
                 .hud_pipeline_layout
@@ -514,51 +482,37 @@ impl RenderContext {
             )
             .unwrap();
 
-            let (hud_vertex_buffer, hud_descriptor_set, egui_descriptor_set) =
-                match hud_descriptor_set_layout.as_ref() {
-                    Some(layout) => {
-                        let hud_vertex_buffer = Buffer::from_iter(
-                            memory_allocator.clone(),
-                            BufferCreateInfo {
-                                usage: BufferUsage::STORAGE_BUFFER,
-                                ..Default::default()
-                            },
-                            AllocationCreateInfo {
-                                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                                ..Default::default()
-                            },
-                            vec![HudVertex::zeroed(); HUD_VERTEX_CAPACITY],
-                        )
-                        .unwrap();
+            let (hud_vertex_buffer, hud_descriptor_set) = match hud_descriptor_set_layout.as_ref() {
+                Some(layout) => {
+                    let hud_vertex_buffer = Buffer::from_iter(
+                        memory_allocator.clone(),
+                        BufferCreateInfo {
+                            usage: BufferUsage::STORAGE_BUFFER,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo {
+                            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                            ..Default::default()
+                        },
+                        vec![HudVertex::zeroed(); HUD_VERTEX_CAPACITY],
+                    )
+                    .unwrap();
 
-                        let hud_descriptor_set = hud_resources.as_ref().map(|hud_res| {
-                            create_hud_descriptor_set(
-                                descriptor_set_allocator.clone(),
-                                layout.clone(),
-                                hud_vertex_buffer.clone(),
-                                hud_res.atlas_view.clone(),
-                                hud_res.atlas_sampler.clone(),
-                            )
-                        });
-                        let egui_descriptor_set = egui_resources.as_ref().map(|egui_res| {
-                            create_hud_descriptor_set(
-                                descriptor_set_allocator.clone(),
-                                layout.clone(),
-                                hud_vertex_buffer.clone(),
-                                egui_res.atlas_view.clone(),
-                                egui_res.atlas_sampler.clone(),
-                            )
-                        });
-
-                        (
-                            Some(hud_vertex_buffer),
-                            hud_descriptor_set,
-                            egui_descriptor_set,
+                    let hud_descriptor_set = hud_resources.as_ref().map(|hud_res| {
+                        create_hud_descriptor_set(
+                            descriptor_set_allocator.clone(),
+                            layout.clone(),
+                            hud_vertex_buffer.clone(),
+                            hud_res.atlas_view.clone(),
+                            hud_res.atlas_sampler.clone(),
                         )
-                    }
-                    None => (None, None, None),
-                };
+                    });
+
+                    (Some(hud_vertex_buffer), hud_descriptor_set)
+                }
+                None => (None, None),
+            };
 
             let query_pool = GpuProfiler::create_query_pool(&device);
 
@@ -567,8 +521,6 @@ impl RenderContext {
                 line_vertexes_buffer,
                 hud_vertex_buffer,
                 hud_descriptor_set,
-                egui_descriptor_set,
-                material_icons_descriptor_set: None,
                 sized_descriptor_set,
                 cpu_clipped_tet_count_buffer,
                 query_pool,
@@ -659,9 +611,6 @@ impl RenderContext {
             profiler,
             hud_font,
             hud_resources,
-            egui_resources,
-            material_icons_view: None,
-            material_icons_sampler: None,
             aetna_overlay,
             hud_breadcrumbs: VecDeque::new(),
             hud_previous_camera: None,

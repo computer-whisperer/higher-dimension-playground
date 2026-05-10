@@ -152,6 +152,7 @@ impl GpuProfiler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record_scene_stats(
         &mut self,
         is_vte: bool,

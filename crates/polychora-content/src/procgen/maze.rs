@@ -376,15 +376,16 @@ fn maze_gate_band(cell_idx: i32, stride: i32) -> (i32, i32) {
     (start, start + stride.saturating_sub(2))
 }
 
-fn maze_gate_open(
-    u0: i32, u1: i32, u2: i32,
-    gate0: i32, gate1: i32, gate2: i32,
-    stride0: i32, stride1: i32, stride2: i32,
-) -> bool {
-    let (g0_min, g0_max) = maze_gate_band(gate0, stride0);
-    let (g1_min, g1_max) = maze_gate_band(gate1, stride1);
-    let (g2_min, g2_max) = maze_gate_band(gate2, stride2);
-    u0 >= g0_min && u0 <= g0_max && u1 >= g1_min && u1 <= g1_max && u2 >= g2_min && u2 <= g2_max
+fn maze_gate_open(u: [i32; 3], gate: [i32; 3], stride: [i32; 3]) -> bool {
+    let (g0_min, g0_max) = maze_gate_band(gate[0], stride[0]);
+    let (g1_min, g1_max) = maze_gate_band(gate[1], stride[1]);
+    let (g2_min, g2_max) = maze_gate_band(gate[2], stride[2]);
+    u[0] >= g0_min
+        && u[0] <= g0_max
+        && u[1] >= g1_min
+        && u[1] <= g1_max
+        && u[2] >= g2_min
+        && u[2] <= g2_max
 }
 
 fn maze_layout_seed(seed: u64, origin: [i32; 4], shape: MazeShape) -> u64 {
@@ -524,7 +525,7 @@ fn deserialize_state(data: &[u8]) -> DeserializedState {
     fn unpack_bools(data: &[u8], pos: &mut usize) -> Vec<bool> {
         let len = u32::from_le_bytes([data[*pos], data[*pos+1], data[*pos+2], data[*pos+3]]) as usize;
         *pos += 4;
-        let byte_count = (len + 7) / 8;
+        let byte_count = len.div_ceil(8);
         let mut bools = Vec::with_capacity(len);
         for i in 0..len {
             let byte_idx = i / 8;
@@ -564,16 +565,29 @@ fn deserialize_state(data: &[u8]) -> DeserializedState {
 
 // -- Rasterization --
 
+#[derive(Copy, Clone)]
+struct MazeMaterialIndices {
+    floor: u16,
+    ceiling: u16,
+    wall: u16,
+    gate_frame: u16,
+    beacon: u16,
+}
+
+struct InteriorVoxelContext<'a> {
+    shape: MazeShape,
+    topology: &'a MazeTopology,
+    layout: &'a CompiledLayout,
+    center_u: [i32; 4],
+    materials: MazeMaterialIndices,
+}
+
 fn rasterize_maze(
     origin: [i32; 4],
     shape: MazeShape,
     layout: &CompiledLayout,
     block_palette: &[BlockData],
-    floor_idx: u16,
-    ceiling_idx: u16,
-    wall_idx: u16,
-    gate_frame_idx: u16,
-    beacon_idx: u16,
+    materials: MazeMaterialIndices,
 ) -> RegionTreeCore {
     let maze_min = [
         origin[0] - shape.half_span_xzw[0],
@@ -615,6 +629,13 @@ fn rasterize_maze(
 
     let topology = &layout.topology;
     let center_u = layout.center_u;
+    let interior_context = InteriorVoxelContext {
+        shape,
+        topology,
+        layout,
+        center_u,
+        materials,
+    };
 
     for wx in maze_min[0]..=maze_max[0] {
         for wy in maze_min[1]..=maze_max[1] {
@@ -625,15 +646,12 @@ fn rasterize_maze(
                     let uz = wz - maze_min[2];
                     let uw = ww - maze_min[3];
 
-                    let material: Option<u16> = if uy == 0 {
-                        Some(floor_idx)
+                    let material = if uy == 0 {
+                        Some(materials.floor)
                     } else if uy == shape.span[1] - 1 {
-                        Some(ceiling_idx)
+                        Some(materials.ceiling)
                     } else {
-                        classify_interior_voxel(
-                            ux, uy, uz, uw, shape, topology, layout, center_u,
-                            wall_idx, gate_frame_idx, beacon_idx,
-                        )
+                        classify_interior_voxel([ux, uy, uz, uw], &interior_context)
                     };
 
                     let Some(mat) = material else { continue; };
@@ -700,14 +718,14 @@ fn rasterize_maze(
     }
 }
 
-fn classify_interior_voxel(
-    ux: i32, uy: i32, uz: i32, uw: i32,
-    shape: MazeShape,
-    topology: &MazeTopology,
-    layout: &CompiledLayout,
-    center_u: [i32; 4],
-    wall_idx: u16, gate_frame_idx: u16, beacon_idx: u16,
-) -> Option<u16> {
+fn classify_interior_voxel(u: [i32; 4], context: &InteriorVoxelContext<'_>) -> Option<u16> {
+    let [ux, uy, uz, uw] = u;
+    let shape = context.shape;
+    let topology = context.topology;
+    let layout = context.layout;
+    let center_u = context.center_u;
+    let materials = context.materials;
+
     let on_x_neg = ux == 0;
     let on_x_pos = ux == shape.span[0] - 1;
     let on_z_neg = uz == 0;
@@ -717,19 +735,47 @@ fn classify_interior_voxel(
 
     if on_x_neg || on_x_pos || on_z_neg || on_z_pos || on_w_neg || on_w_pos {
         let gate_open = if on_x_neg {
-            maze_gate_open(uy, uz, uw, layout.x_neg_gate[0], layout.x_neg_gate[1], layout.x_neg_gate[2], MAZE_LEVEL_HEIGHT, MAZE_STRIDE, MAZE_STRIDE)
+            maze_gate_open(
+                [uy, uz, uw],
+                layout.x_neg_gate,
+                [MAZE_LEVEL_HEIGHT, MAZE_STRIDE, MAZE_STRIDE],
+            )
         } else if on_x_pos {
-            maze_gate_open(uy, uz, uw, layout.x_pos_gate[0], layout.x_pos_gate[1], layout.x_pos_gate[2], MAZE_LEVEL_HEIGHT, MAZE_STRIDE, MAZE_STRIDE)
+            maze_gate_open(
+                [uy, uz, uw],
+                layout.x_pos_gate,
+                [MAZE_LEVEL_HEIGHT, MAZE_STRIDE, MAZE_STRIDE],
+            )
         } else if on_z_neg {
-            maze_gate_open(ux, uy, uw, layout.z_neg_gate[0], layout.z_neg_gate[1], layout.z_neg_gate[2], MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE)
+            maze_gate_open(
+                [ux, uy, uw],
+                layout.z_neg_gate,
+                [MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE],
+            )
         } else if on_z_pos {
-            maze_gate_open(ux, uy, uw, layout.z_pos_gate[0], layout.z_pos_gate[1], layout.z_pos_gate[2], MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE)
+            maze_gate_open(
+                [ux, uy, uw],
+                layout.z_pos_gate,
+                [MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE],
+            )
         } else if on_w_neg {
-            maze_gate_open(ux, uy, uz, layout.w_neg_gate[0], layout.w_neg_gate[1], layout.w_neg_gate[2], MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE)
+            maze_gate_open(
+                [ux, uy, uz],
+                layout.w_neg_gate,
+                [MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE],
+            )
         } else {
-            maze_gate_open(ux, uy, uz, layout.w_pos_gate[0], layout.w_pos_gate[1], layout.w_pos_gate[2], MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE)
+            maze_gate_open(
+                [ux, uy, uz],
+                layout.w_pos_gate,
+                [MAZE_STRIDE, MAZE_LEVEL_HEIGHT, MAZE_STRIDE],
+            )
         };
-        if gate_open { None } else { Some(gate_frame_idx) }
+        if gate_open {
+            None
+        } else {
+            Some(materials.gate_frame)
+        }
     } else {
         let wall_x = ux % MAZE_STRIDE == 0;
         let wall_y = uy % MAZE_LEVEL_HEIGHT == 0;
@@ -739,40 +785,56 @@ fn classify_interior_voxel(
 
         if wall_count == 0 {
             if ux == center_u[0] && uy == center_u[1] && uz == center_u[2] && uw == center_u[3] {
-                Some(beacon_idx)
+                Some(materials.beacon)
             } else {
                 None
             }
         } else if wall_count > 1 {
-            Some(wall_idx)
+            Some(materials.wall)
         } else if wall_x {
             let left = ux / MAZE_STRIDE - 1;
             let right = left + 1;
             let cy = uy / MAZE_LEVEL_HEIGHT;
             let cz = uz / MAZE_STRIDE;
             let cw = uw / MAZE_STRIDE;
-            if topology.edge_open([left, cy, cz, cw], [right, cy, cz, cw]) { None } else { Some(wall_idx) }
+            if topology.edge_open([left, cy, cz, cw], [right, cy, cz, cw]) {
+                None
+            } else {
+                Some(materials.wall)
+            }
         } else if wall_y {
             let lower = uy / MAZE_LEVEL_HEIGHT - 1;
             let upper = lower + 1;
             let cx = ux / MAZE_STRIDE;
             let cz = uz / MAZE_STRIDE;
             let cw = uw / MAZE_STRIDE;
-            if topology.edge_open([cx, lower, cz, cw], [cx, upper, cz, cw]) { None } else { Some(wall_idx) }
+            if topology.edge_open([cx, lower, cz, cw], [cx, upper, cz, cw]) {
+                None
+            } else {
+                Some(materials.wall)
+            }
         } else if wall_z {
             let near = uz / MAZE_STRIDE - 1;
             let far = near + 1;
             let cx = ux / MAZE_STRIDE;
             let cy = uy / MAZE_LEVEL_HEIGHT;
             let cw = uw / MAZE_STRIDE;
-            if topology.edge_open([cx, cy, near, cw], [cx, cy, far, cw]) { None } else { Some(wall_idx) }
+            if topology.edge_open([cx, cy, near, cw], [cx, cy, far, cw]) {
+                None
+            } else {
+                Some(materials.wall)
+            }
         } else {
             let near = uw / MAZE_STRIDE - 1;
             let far = near + 1;
             let cx = ux / MAZE_STRIDE;
             let cy = uy / MAZE_LEVEL_HEIGHT;
             let cz = uz / MAZE_STRIDE;
-            if topology.edge_open([cx, cy, cz, near], [cx, cy, cz, far]) { None } else { Some(wall_idx) }
+            if topology.edge_open([cx, cy, cz, near], [cx, cy, cz, far]) {
+                None
+            } else {
+                Some(materials.wall)
+            }
         }
     }
 }
@@ -842,11 +904,13 @@ impl MazeGenerator {
             ds.shape,
             &ds.layout,
             &self.block_palette,
-            self.floor_idx,
-            self.ceiling_idx,
-            self.wall_idx,
-            self.gate_frame_idx,
-            self.beacon_idx,
+            MazeMaterialIndices {
+                floor: self.floor_idx,
+                ceiling: self.ceiling_idx,
+                wall: self.wall_idx,
+                gate_frame: self.gate_frame_idx,
+                beacon: self.beacon_idx,
+            },
         );
         ProcgenGenerateOutput { tree }
     }

@@ -9,6 +9,7 @@ pub use polychora::shared::entity_types;
 pub use polychora::shared::protocol::EntitySnapshot;
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum MultiplayerEvent {
     Message(ServerMessage),
     Disconnected(String),

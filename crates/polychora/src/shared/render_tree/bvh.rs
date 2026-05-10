@@ -132,9 +132,7 @@ fn build_bvh_from_render_tree(
     bvh: &mut RenderBvh,
     delta: &mut RenderBvhChunkMutationDelta,
 ) -> Option<u32> {
-    let Some(clipped) = core.bounds.intersection(&bounds) else {
-        return None;
-    };
+    let clipped = core.bounds.intersection(&bounds)?;
     match &core.kind {
         RenderNodeKind::Empty => None,
         RenderNodeKind::Uniform(block) => {

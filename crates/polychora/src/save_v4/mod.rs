@@ -38,8 +38,6 @@ use crate::shared::chunk_payload::{
 use crate::shared::protocol::Entity;
 #[cfg(test)]
 use crate::shared::protocol::EntityPose;
-#[cfg(test)]
-use crate::shared::region_tree::chunk_key_i32;
 use crate::shared::region_tree::{
     slice_region_core_in_bounds, ChunkKey, RegionNodeKind, RegionTreeCore,
 };

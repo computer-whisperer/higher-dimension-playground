@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_match)]
+
 use std::time::Instant;
 use winit::event::{ElementState, KeyEvent, MouseButton};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};

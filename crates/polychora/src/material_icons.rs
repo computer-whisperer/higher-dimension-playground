@@ -105,7 +105,7 @@ fn render_spawn_egg_icon_rgba(base_color: [u8; 3]) -> Vec<u8> {
     let half = size as f32 / 2.0;
     let rounding = half * 0.4;
 
-    // Dot center and radius (matching the egui version)
+    // Dot center and radius.
     let dot_cx = center_x;
     let dot_cy = center_y - half * 0.15;
     let dot_r = half * 0.12;
@@ -155,30 +155,18 @@ fn render_spawn_egg_icon_rgba(base_color: [u8; 3]) -> Vec<u8> {
 }
 
 /// A sprite sheet containing all material and spawn egg icons packed into a
-/// single texture.  Keyed exclusively by `(namespace, texture_id)` — callers
-/// convert block/entity identity to a `TextureRef` first, then look up the UV.
+/// single texture, plus per-texture Aetna images keyed by `(namespace, texture_id)`.
 pub struct MaterialIconSheet {
-    /// RGBA pixel data for the entire sprite sheet
-    pub pixels: Vec<u8>,
     /// Width of the sprite sheet in pixels
     pub width: u32,
     /// Height of the sprite sheet in pixels
     pub height: u32,
-    /// Map from (texture_namespace, texture_id) to UV rectangle
-    /// [u_min, v_min, u_max, v_max].
-    uv_rects: HashMap<(u32, u32), [f32; 4]>,
     /// Per-texture images for Aetna. Aetna owns GPU upload/cache for these,
-    /// so callers do not need to route through the legacy egui sprite sheet.
+    /// so UI callers do not need to route through the packed sprite sheet.
     aetna_images: HashMap<(u32, u32), aetna_core::image::Image>,
 }
 
 impl MaterialIconSheet {
-    /// Get the UV rectangle for a texture by (namespace, texture_id), or None
-    /// if not found.
-    pub fn uv_rect(&self, namespace: u32, texture_id: u32) -> Option<[f32; 4]> {
-        self.uv_rects.get(&(namespace, texture_id)).copied()
-    }
-
     /// Get an Aetna image for a texture by (namespace, texture_id), or None
     /// if not found.
     pub fn aetna_image(&self, namespace: u32, texture_id: u32) -> Option<aetna_core::image::Image> {
@@ -208,8 +196,6 @@ pub fn generate_material_icon_sheet_gpu(
     let sheet_w = SHEET_COLUMNS * ICON_SIZE;
     let sheet_h = rows * ICON_SIZE;
 
-    let mut pixels = vec![0u8; (sheet_w * sheet_h * 4) as usize];
-    let mut uv_rects = HashMap::new();
     let mut aetna_images = HashMap::new();
     let icon_pixel_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
 
@@ -236,9 +222,7 @@ pub fn generate_material_icon_sheet_gpu(
     let view_matrix: ndarray::Array2<f32> = icon_view_matrix().into();
 
     // Phase 1: GPU-rendered block icons
-    for (idx, entry) in content_registry.all_blocks_ordered().enumerate() {
-        let col = (idx as u32) % SHEET_COLUMNS;
-        let row = (idx as u32) / SHEET_COLUMNS;
+    for entry in content_registry.all_blocks_ordered() {
         let token = material_resolver.resolve_block(entry.namespace, entry.block_type);
 
         let model_instance = [ModelInstance {
@@ -278,13 +262,7 @@ pub fn generate_material_icon_sheet_gpu(
             return None;
         }
 
-        copy_icon_to_sheet(&mut pixels, &raw, col, row, sheet_w);
-
-        let uv = compute_uv(col, row, sheet_w, sheet_h);
         let aetna_image = aetna_core::image::Image::from_rgba8(ICON_SIZE, ICON_SIZE, raw);
-        uv_rects
-            .entry((entry.texture.namespace, entry.texture.texture_id))
-            .or_insert(uv);
         aetna_images
             .entry((entry.texture.namespace, entry.texture.texture_id))
             .or_insert_with(|| aetna_image.clone());
@@ -294,7 +272,6 @@ pub fn generate_material_icon_sheet_gpu(
         // also need a (0, texture_id) entry so entity model_textures
         // (which use tex() → namespace 0) can resolve to an icon.
         if entry.texture.namespace != 0 {
-            uv_rects.entry((0, entry.texture.texture_id)).or_insert(uv);
             aetna_images
                 .entry((0, entry.texture.texture_id))
                 .or_insert_with(|| aetna_image.clone());
@@ -302,58 +279,22 @@ pub fn generate_material_icon_sheet_gpu(
     }
 
     // Phase 2: CPU-rendered spawn egg icons
-    let mut egg_idx = num_blocks;
     for entity in content_registry.spawnable_entities() {
         if entity.spawn_egg_texture_id == 0 {
-            egg_idx += 1;
             continue;
         }
 
-        let col = egg_idx % SHEET_COLUMNS;
-        let row = egg_idx / SHEET_COLUMNS;
-
         let raw = render_spawn_egg_icon_rgba(entity.base_color);
 
-        copy_icon_to_sheet(&mut pixels, &raw, col, row, sheet_w);
-
-        let uv = compute_uv(col, row, sheet_w, sheet_h);
         let aetna_image = aetna_core::image::Image::from_rgba8(ICON_SIZE, ICON_SIZE, raw);
-        uv_rects
-            .entry((0, entity.spawn_egg_texture_id))
-            .or_insert(uv);
         aetna_images
             .entry((0, entity.spawn_egg_texture_id))
             .or_insert(aetna_image);
-
-        egg_idx += 1;
     }
 
     Some(MaterialIconSheet {
-        pixels,
         width: sheet_w,
         height: sheet_h,
-        uv_rects,
         aetna_images,
     })
-}
-
-fn copy_icon_to_sheet(pixels: &mut [u8], raw: &[u8], col: u32, row: u32, sheet_w: u32) {
-    let dst_x = col * ICON_SIZE;
-    let dst_y = row * ICON_SIZE;
-    for py in 0..ICON_SIZE {
-        let src_offset = (py * ICON_SIZE * 4) as usize;
-        let dst_offset = ((dst_y + py) * sheet_w + dst_x) as usize * 4;
-        pixels[dst_offset..dst_offset + (ICON_SIZE * 4) as usize]
-            .copy_from_slice(&raw[src_offset..src_offset + (ICON_SIZE * 4) as usize]);
-    }
-}
-
-fn compute_uv(col: u32, row: u32, sheet_w: u32, sheet_h: u32) -> [f32; 4] {
-    let dst_x = col * ICON_SIZE;
-    let dst_y = row * ICON_SIZE;
-    let u_min = dst_x as f32 / sheet_w as f32;
-    let v_min = dst_y as f32 / sheet_h as f32;
-    let u_max = (dst_x + ICON_SIZE) as f32 / sheet_w as f32;
-    let v_max = (dst_y + ICON_SIZE) as f32 / sheet_h as f32;
-    [u_min, v_min, u_max, v_max]
 }
