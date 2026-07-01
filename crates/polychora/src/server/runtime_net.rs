@@ -985,6 +985,25 @@ pub(super) fn start_broadcast_thread(
                 last_save_tick = Instant::now();
             }
         }
+
+        // Final save on shutdown so the last partial interval isn't lost.
+        // Best-effort: this thread is detached, so a quit that exits the
+        // process immediately (or SIGINT on the dedicated server, which has
+        // no handler) can still race past it. Reliable quit-time saving
+        // needs the client to join server shutdown; loss is bounded by
+        // save_interval either way.
+        let final_save = {
+            let mut guard = state.lock().expect("server state lock poisoned");
+            guard.persist_world_if_dirty(crate::save_v4::now_unix_ms())
+        };
+        match final_save {
+            Ok(Some(result)) => eprintln!(
+                "persisted v4 world save on shutdown generation={} block_regions={} entity_regions={}",
+                result.generation, result.saved_block_regions, result.saved_entity_regions
+            ),
+            Ok(None) => {}
+            Err(error) => eprintln!("failed final v4 world save on shutdown: {}", error),
+        }
     });
 }
 
@@ -1623,7 +1642,7 @@ pub(super) fn spawn_client_thread(
     });
 }
 
-fn spawn_entity(
+pub(super) fn spawn_entity(
     state: &SharedState,
     entity: Entity,
     display_name: Option<String>,
@@ -1870,7 +1889,7 @@ fn handle_drop_item(state: &SharedState, client_id: u64, slot_index: u8, start: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_mob_entity(
+pub(super) fn spawn_mob_entity(
     state: &SharedState,
     entity: Entity,
     entity_ns: u32,

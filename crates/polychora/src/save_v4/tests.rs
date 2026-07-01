@@ -686,6 +686,7 @@ fn save_state_from_chunk_payload_patch_persists_without_overlapping_children() {
     let patched = save_state_from_chunk_payload_patch(
         &root,
         SaveChunkPayloadPatchRequest {
+            entities: None,
             base_world_kind: BaseWorldKind::Empty,
             dirty_chunk_payloads: vec![(
                 chunk_key_from_i32([1, 0, 0, 0]),
@@ -1506,6 +1507,7 @@ fn patch_save_cluster_edits_preserve_non_dirty_chunks() {
     let patch1 = save_state_from_chunk_payload_patch(
         &root,
         SaveChunkPayloadPatchRequest {
+            entities: None,
             base_world_kind: BaseWorldKind::Empty,
             dirty_chunk_payloads: patch1_dirty,
             world_seed: 99,
@@ -1560,6 +1562,7 @@ fn patch_save_cluster_edits_preserve_non_dirty_chunks() {
     let patch2 = save_state_from_chunk_payload_patch(
         &root,
         SaveChunkPayloadPatchRequest {
+            entities: None,
             base_world_kind: BaseWorldKind::Empty,
             dirty_chunk_payloads: patch2_dirty,
             world_seed: 99,
@@ -1613,6 +1616,7 @@ fn patch_save_cluster_edits_preserve_non_dirty_chunks() {
     let patch3 = save_state_from_chunk_payload_patch(
         &root,
         SaveChunkPayloadPatchRequest {
+            entities: None,
             base_world_kind: BaseWorldKind::Empty,
             dirty_chunk_payloads: vec![(chunk_key_from_i32([3, 0, 0, 0]), 0i8, None)],
             world_seed: 99,
@@ -1804,6 +1808,7 @@ fn patch_save_carved_uniform_materializes_correctly() {
     let patch = save_state_from_chunk_payload_patch(
         &root,
         SaveChunkPayloadPatchRequest {
+            entities: None,
             base_world_kind: BaseWorldKind::Empty,
             dirty_chunk_payloads: vec![(key_fine, -2, Some(payload_b))],
             world_seed: 42,
@@ -1945,6 +1950,7 @@ fn patch_save_preserves_uniform_with_mismatched_block_scale() {
     let patch = save_state_from_chunk_payload_patch(
         &root,
         SaveChunkPayloadPatchRequest {
+            entities: None,
             base_world_kind: BaseWorldKind::Empty,
             dirty_chunk_payloads: vec![(key_upper, 1, Some(payload_upper))],
             world_seed: 42,
@@ -2016,6 +2022,113 @@ fn patch_save_preserves_uniform_with_mismatched_block_scale() {
         find_uniform_in_core(&loaded_core, 1),
         "streaming load must include the bottom Uniform block"
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn patch_save_rewrites_and_preserves_entity_subtree() {
+    let root = test_root("patch-entities");
+    let now_ms = 1_000;
+
+    save_state_from_chunk_payloads(
+        &root,
+        SaveChunkPayloadRequest {
+            base_world_kind: BaseWorldKind::Empty,
+            chunk_payloads: vec![(
+                chunk_key_from_i32([0, 0, 0, 0]),
+                0i8,
+                ResolvedChunkPayload::uniform(BlockData::simple(0, 5)),
+            )],
+            entities: &[test_entity(1, [1.0, 2.0, 3.0, 4.0], vec![7])],
+            players: &[],
+            world_seed: 7,
+            next_entity_id: 2,
+            dirty_block_regions: &HashSet::new(),
+            dirty_entity_regions: &HashSet::new(),
+            force_full_blocks: true,
+            force_full_entities: true,
+            player_entity_hints: None,
+            custom_global_payload: None,
+            disable_block_persistence: false,
+            now_ms,
+        },
+    )
+    .expect("initial save");
+
+    // entities: None carries the existing subtree forward unchanged.
+    save_state_from_chunk_payload_patch(
+        &root,
+        SaveChunkPayloadPatchRequest {
+            entities: None,
+            base_world_kind: BaseWorldKind::Empty,
+            dirty_chunk_payloads: vec![(
+                chunk_key_from_i32([1, 0, 0, 0]),
+                0i8,
+                Some(ResolvedChunkPayload::uniform(BlockData::simple(0, 9))),
+            )],
+            world_seed: 7,
+            next_entity_id: 2,
+            player_entity_hints: None,
+            custom_global_payload: None,
+            players: None,
+            now_ms: now_ms + 1,
+        },
+    )
+    .expect("patch save without entities")
+    .expect("chunk patch should produce a save");
+    let loaded = load_all_entities(&root).expect("load entities");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].entity_id, 1);
+    assert_eq!(loaded[0].entity.pose.position, [1.0, 2.0, 3.0, 4.0]);
+
+    // entities: Some rewrites the subtree (entities-only save, no dirty chunks).
+    let result = save_state_from_chunk_payload_patch(
+        &root,
+        SaveChunkPayloadPatchRequest {
+            entities: Some(vec![
+                test_entity(1, [9.0, 2.0, 3.0, 4.0], vec![7]),
+                test_entity(2, [40.0, 0.0, 0.0, 0.0], Vec::new()),
+            ]),
+            base_world_kind: BaseWorldKind::Empty,
+            dirty_chunk_payloads: Vec::new(),
+            world_seed: 7,
+            next_entity_id: 3,
+            player_entity_hints: None,
+            custom_global_payload: None,
+            players: None,
+            now_ms: now_ms + 2,
+        },
+    )
+    .expect("entities-only patch save")
+    .expect("entities-only save should produce a save");
+    assert!(result.saved_entity_regions >= 1);
+    let loaded = load_all_entities(&root).expect("load entities");
+    assert_eq!(
+        loaded.iter().map(|e| e.entity_id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(loaded[0].entity.pose.position, [9.0, 2.0, 3.0, 4.0]);
+
+    // An empty set deletes every persisted entity.
+    save_state_from_chunk_payload_patch(
+        &root,
+        SaveChunkPayloadPatchRequest {
+            entities: Some(Vec::new()),
+            base_world_kind: BaseWorldKind::Empty,
+            dirty_chunk_payloads: Vec::new(),
+            world_seed: 7,
+            next_entity_id: 3,
+            player_entity_hints: None,
+            custom_global_payload: None,
+            players: None,
+            now_ms: now_ms + 3,
+        },
+    )
+    .expect("empty entities patch save")
+    .expect("empty entity save should produce a save");
+    let loaded = load_all_entities(&root).expect("load entities");
+    assert!(loaded.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }

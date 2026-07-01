@@ -148,11 +148,21 @@ Fixes landed after this review was written:
 - **Transform gating (finding 4)**: `EntityTransforms` include only entities whose pose changed
   bitwise since the last broadcast, with a keepalive resend every 10th tick.
 
+- **Entity persistence gap** (discovered during this work): the runtime tick-loop save
+  persisted chunks and players only, and startup never loaded entities — spawned mobs/accents
+  were lost on restart. Fixed: startup loads and respawns all persisted entities (unknown
+  types are retained un-respawned so a plugin-less session can't erase them);
+  `persistent_entities_dirty` (spawn/despawn/pose change) triggers an entity-subtree rewrite
+  in the interval save; a best-effort final save runs when the broadcast loop exits.
+  Known limits: quit-to-desktop can exit the process before the detached final save runs
+  (loss bounded by `save_interval`), and the dedicated server has no signal handler; reliable
+  quit-time saving needs the client to join server shutdown. Item stacks remain intentionally
+  transient. Parametric accents whose pose animates server-side (rotor/drifter) keep the
+  entity subtree perpetually dirty — one entity-blob rewrite per save interval; the semantic
+  fix would be persisting `home_position` instead of the animated pose.
+
 Still open: transport-layer items (finding 5: per-client re-serialization, flush-per-message,
-unbounded send queues), the global-mutex lock scope (finding 3), and a gap discovered during
-this work: **the runtime tick-loop save persists chunks and players only** —
-`resolve_entities_for_save` is reached only from migration/worldgen full saves, so live
-sessions do not persist non-player entities (persistent item drops/mobs are lost on restart).
+unbounded send queues) and the global-mutex lock scope (finding 3).
 
 ## Dependency note: Aetna → Damascene
 

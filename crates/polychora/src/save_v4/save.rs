@@ -98,12 +98,13 @@ pub fn save_state_from_chunk_payload_patch(
     for (key, scale_exp, payload) in request.dirty_chunk_payloads {
         dirty_chunk_payloads.insert(key, (scale_exp, payload));
     }
-    if dirty_chunk_payloads.is_empty() && request.players.is_none() {
+    if dirty_chunk_payloads.is_empty() && request.players.is_none() && request.entities.is_none()
+    {
         return Ok(None);
     }
 
     // Players-only save: update only the players payload file without touching chunks.
-    if dirty_chunk_payloads.is_empty() {
+    if dirty_chunk_payloads.is_empty() && request.entities.is_none() {
         if let Some(player_records) = request.players {
             let next_generation = manifest.current_generation.saturating_add(1);
             let next_players_file = players_generation_path(next_generation);
@@ -168,12 +169,23 @@ pub fn save_state_from_chunk_payload_patch(
         .unwrap_or_else(|| make_empty_branch_root(empty_wb.min, empty_wb.max));
     canonicalize_temp_tree(&mut world_temp);
 
-    let mut entity_temp = match loaded_index.entity_root_node_id {
-        Some(entity_root) => Some(build_temp_tree_from_index_subtree(
-            &node_by_id,
-            entity_root,
-        )?),
-        None => None,
+    let mut saved_entity_regions = 0usize;
+    let mut entity_temp = match request.entities {
+        // Rewrite the entity subtree from the provided complete record set.
+        Some(entities) => {
+            let entity_leaves =
+                build_entity_leaf_descriptors(root, &mut manifest, &mut reuse_index, entities)?;
+            saved_entity_regions = entity_leaves.len();
+            build_temp_tree_from_leaves(&entity_leaves)
+        }
+        // Carry the existing entity subtree forward unchanged.
+        None => match loaded_index.entity_root_node_id {
+            Some(entity_root) => Some(build_temp_tree_from_index_subtree(
+                &node_by_id,
+                entity_root,
+            )?),
+            None => None,
+        },
     };
     if let Some(node) = entity_temp.as_mut() {
         canonicalize_temp_tree(node);
@@ -243,7 +255,7 @@ pub fn save_state_from_chunk_payload_patch(
     Ok(Some(SaveResult {
         generation: next_generation,
         saved_block_regions: world_leaves.len(),
-        saved_entity_regions: 0,
+        saved_entity_regions,
     }))
 }
 
@@ -326,52 +338,8 @@ fn save_state_internal(
         common.force_full_entities,
     );
 
-    let mut entities_by_chunk = HashMap::<[i32; 4], Vec<PersistedEntityRecord>>::new();
-    for entity in effective_entities {
-        let chunk = chunk_from_world_position(entity.entity.pose.position);
-        entities_by_chunk.entry(chunk).or_default().push(entity);
-    }
-    for entities in entities_by_chunk.values_mut() {
-        entities.sort_unstable_by_key(|entity| entity.entity_id);
-    }
-
-    let mut entity_chunks: Vec<[i32; 4]> = entities_by_chunk.keys().copied().collect();
-    entity_chunks.sort_unstable();
-
-    let mut entity_leaves = Vec::<LeafDescriptor>::new();
-    for chunk in entity_chunks {
-        let entities = entities_by_chunk.remove(&chunk).unwrap_or_default();
-        if entities.is_empty() {
-            continue;
-        }
-
-        let entity_blob = EntityBlob {
-            volume_min_chunk: chunk,
-            volume_max_chunk: chunk,
-            entities,
-        };
-        let entity_blob_bytes = postcard::to_stdvec(&entity_blob)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let entity_ref = append_or_reuse_blob_record(
-            root,
-            &mut manifest,
-            &mut reuse_index,
-            BLOB_KIND_ENTITY,
-            ENTITY_BLOB_VERSION,
-            &entity_blob_bytes,
-        )?;
-
-        let ck = chunk.map(ChunkCoord::from_num);
-        let entity_wb = Aabb4i::chunk_world_bounds(ck, 0);
-        entity_leaves.push(LeafDescriptor {
-            min: entity_wb.min,
-            max: entity_wb.max,
-            scale_exp: 0,
-            kind: IndexNodeKind::LeafChunkArray {
-                chunk_array_ref: entity_ref,
-            },
-        });
-    }
+    let entity_leaves =
+        build_entity_leaf_descriptors(root, &mut manifest, &mut reuse_index, effective_entities)?;
 
     let empty_wb = Aabb4i::chunk_world_bounds([ChunkCoord::ZERO; 4], 0);
     let mut world_temp = build_temp_tree_from_leaves(&world_leaves)
@@ -515,6 +483,64 @@ fn normalize_chunk_payloads_latest_wins(
         .collect();
     out.sort_unstable_by_key(|(ka, sa, _)| (*sa, *ka));
     out
+}
+
+/// Group entity records by chunk and write them as per-chunk entity blobs,
+/// returning the index leaf descriptors. Shared by the full save and the
+/// runtime chunk-patch save.
+pub(super) fn build_entity_leaf_descriptors(
+    root: &Path,
+    manifest: &mut Manifest,
+    reuse_index: &mut BlobReuseIndex,
+    entities: Vec<PersistedEntityRecord>,
+) -> io::Result<Vec<LeafDescriptor>> {
+    let mut entities_by_chunk = HashMap::<[i32; 4], Vec<PersistedEntityRecord>>::new();
+    for entity in entities {
+        let chunk = chunk_from_world_position(entity.entity.pose.position);
+        entities_by_chunk.entry(chunk).or_default().push(entity);
+    }
+    for entities in entities_by_chunk.values_mut() {
+        entities.sort_unstable_by_key(|entity| entity.entity_id);
+    }
+
+    let mut entity_chunks: Vec<[i32; 4]> = entities_by_chunk.keys().copied().collect();
+    entity_chunks.sort_unstable();
+
+    let mut entity_leaves = Vec::<LeafDescriptor>::new();
+    for chunk in entity_chunks {
+        let entities = entities_by_chunk.remove(&chunk).unwrap_or_default();
+        if entities.is_empty() {
+            continue;
+        }
+
+        let entity_blob = EntityBlob {
+            volume_min_chunk: chunk,
+            volume_max_chunk: chunk,
+            entities,
+        };
+        let entity_blob_bytes = postcard::to_stdvec(&entity_blob)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let entity_ref = append_or_reuse_blob_record(
+            root,
+            manifest,
+            reuse_index,
+            BLOB_KIND_ENTITY,
+            ENTITY_BLOB_VERSION,
+            &entity_blob_bytes,
+        )?;
+
+        let ck = chunk.map(ChunkCoord::from_num);
+        let entity_wb = Aabb4i::chunk_world_bounds(ck, 0);
+        entity_leaves.push(LeafDescriptor {
+            min: entity_wb.min,
+            max: entity_wb.max,
+            scale_exp: 0,
+            kind: IndexNodeKind::LeafChunkArray {
+                chunk_array_ref: entity_ref,
+            },
+        });
+    }
+    Ok(entity_leaves)
 }
 
 pub(super) fn build_world_leaf_descriptors_from_payloads(

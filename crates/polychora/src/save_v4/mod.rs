@@ -10,7 +10,7 @@ mod tests;
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
-pub use entity_io::load_entities_for_regions;
+pub use entity_io::{load_all_entities, load_entities_for_regions};
 pub use load::{
     load_or_init_state, load_or_init_state_metadata, load_state, load_state_metadata,
     load_world_chunk_payloads_for_bounds, load_world_chunk_payloads_for_bounds_from_index,
@@ -391,6 +391,9 @@ pub struct SaveChunkPayloadRequest<'a> {
 pub struct SaveChunkPayloadPatchRequest {
     pub base_world_kind: BaseWorldKind,
     pub dirty_chunk_payloads: Vec<(ChunkKey, i8, Option<ResolvedChunkPayload>)>,
+    /// `Some(records)` rewrites the entity subtree from this complete set;
+    /// `None` carries the existing entity subtree forward unchanged.
+    pub entities: Option<Vec<PersistedEntityRecord>>,
     pub world_seed: u64,
     pub next_entity_id: u64,
     pub player_entity_hints: Option<Vec<PlayerEntityHint>>,

@@ -11,6 +11,13 @@ pub fn load_entities_for_regions(
     materialize_entities_from_index_filtered(root, &index, Some(regions), true)
 }
 
+/// Load every persisted entity record in the save (all regions).
+pub fn load_all_entities(root: &Path) -> io::Result<Vec<PersistedEntityRecord>> {
+    let manifest = load_manifest(root)?;
+    let index = read_index_file(root.join(&manifest.index_file))?;
+    materialize_entities_from_index(root, &index)
+}
+
 pub(super) fn materialize_entities_from_index(
     root: &Path,
     index: &IndexPayload,

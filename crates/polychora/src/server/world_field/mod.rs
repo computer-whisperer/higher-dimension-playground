@@ -913,11 +913,25 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         changed
     }
 
+    pub fn has_save_backing(&self) -> bool {
+        self.save_stream.is_some()
+    }
+
+    /// Load every persisted entity record from the save stream (all regions).
+    /// Returns an empty list when the world has no save backing.
+    pub fn load_persisted_entities(&self) -> io::Result<Vec<save_v4::PersistedEntityRecord>> {
+        let Some(stream) = self.save_stream.as_ref() else {
+            return Ok(Vec::new());
+        };
+        save_v4::load_all_entities(&stream.root)
+    }
+
     pub fn persist_dirty_overrides_with_players(
         &mut self,
         next_entity_id: u64,
         now_ms: u64,
         players: Vec<save_v4::PlayerRecord>,
+        entities: Option<Vec<save_v4::PersistedEntityRecord>>,
     ) -> io::Result<Option<save_v4::SaveResult>> {
         let players_opt = if players.is_empty() {
             None
@@ -927,7 +941,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
         if self.save_stream.is_none() {
             return Ok(None);
         }
-        if self.dirty_save_chunks.is_empty() && players_opt.is_none() {
+        if self.dirty_save_chunks.is_empty() && players_opt.is_none() && entities.is_none() {
             if let Some(stream) = self.save_stream.as_mut() {
                 stream.next_entity_id = stream.next_entity_id.max(next_entity_id).max(1);
             }
@@ -965,6 +979,7 @@ impl PassthroughWorldOverlay<ServerWorldField> {
                 SaveChunkPayloadPatchRequest {
                     base_world_kind: self.base_world_kind.clone(),
                     dirty_chunk_payloads,
+                    entities,
                     world_seed: self.world_seed,
                     next_entity_id: next_entity_id.max(stream.next_entity_id).max(1),
                     player_entity_hints: None,

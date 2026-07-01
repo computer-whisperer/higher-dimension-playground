@@ -22,7 +22,8 @@ use self::cpu_profile::ServerCpuProfile;
 use self::entities::{EntityId, EntityStore};
 use self::mob_sim::tick_entity_simulation_window;
 use self::runtime_net::{
-    handle_message, remove_client, spawn_client_thread, start_broadcast_thread,
+    handle_message, remove_client, spawn_client_thread, spawn_entity, spawn_mob_entity,
+    start_broadcast_thread,
 };
 use self::spawn_logic::{
     default_spawn_pose_for_client, entity_type_entry_for_token, env_flag_enabled, parse_spawn_vec4,
@@ -209,6 +210,16 @@ fn build_entity_replication_batches(
                 entry.pose_changed = true;
             }
         }
+        if entry.pose_changed
+            && state
+                .entity_records
+                .get(&entry.entity_id)
+                .is_some_and(|record| {
+                    record.persistent && record.category != EntityCategory::Player
+                })
+        {
+            state.persistent_entities_dirty = true;
+        }
     }
 
     let mut player_chunk_by_client =
@@ -306,6 +317,101 @@ fn build_entity_replication_batches(
     result
 }
 
+/// Respawn entities loaded from the save at server startup. Ids are
+/// reserved through `allocate_or_reserve_server_object_id`, so freshly
+/// spawned entities can never collide with persisted ones.
+fn respawn_persisted_entities(
+    state: &SharedState,
+    records: Vec<crate::save_v4::PersistedEntityRecord>,
+    registry: &crate::content_registry::ContentRegistry,
+    start: Instant,
+) {
+    use polychora_plugin_api::entity::SimulationMode;
+
+    let mut respawned = 0usize;
+    let mut dropped = 0usize;
+    // Records we can't respawn this session (unknown type, unsupported sim
+    // mode) are retained and merged back into every save — a session with a
+    // content plugin disabled must not erase that plugin's entities.
+    let mut unloaded = Vec::new();
+    for record in records {
+        let namespace = record.entity.namespace;
+        let entity_type = record.entity.entity_type;
+        if (namespace, entity_type) == ENTITY_PLAYER_AVATAR {
+            dropped += 1;
+            continue;
+        }
+        if !record.entity.pose.position.iter().all(|v| v.is_finite()) {
+            eprintln!(
+                "dropping persisted entity {} with non-finite position",
+                record.entity_id
+            );
+            dropped += 1;
+            continue;
+        }
+        let Some(entry) = registry.entity_lookup(namespace, entity_type) else {
+            eprintln!(
+                "retaining persisted entity {} without respawning: unknown type ({}, {})",
+                record.entity_id, namespace, entity_type
+            );
+            unloaded.push(record);
+            continue;
+        };
+        match (entry.category, entry.sim_config.as_ref().map(|c| c.mode)) {
+            (EntityCategory::Mob, Some(SimulationMode::PhysicsDriven)) => {
+                let config = entry.sim_config.as_ref().expect("mode implies config");
+                let _ = spawn_mob_entity(
+                    state,
+                    record.entity,
+                    namespace,
+                    entity_type,
+                    config,
+                    record.display_name,
+                    true,
+                    None,
+                    Some(record.entity_id),
+                    start,
+                );
+                respawned += 1;
+            }
+            (EntityCategory::Accent, _) => {
+                let _ = spawn_entity(
+                    state,
+                    record.entity,
+                    record.display_name,
+                    true,
+                    Some(record.entity_id),
+                    start,
+                );
+                respawned += 1;
+            }
+            (category, sim_mode) => {
+                eprintln!(
+                    "retaining persisted entity {} without respawning: unsupported (category={:?}, sim_mode={:?})",
+                    record.entity_id, category, sim_mode
+                );
+                unloaded.push(record);
+            }
+        }
+    }
+    let unloaded_count = unloaded.len();
+    if unloaded_count > 0 {
+        let mut guard = state.lock().expect("server state lock poisoned");
+        // Reserve their ids so fresh spawns can't collide with records that
+        // may respawn in a future session.
+        for record in &unloaded {
+            let _ = allocate_or_reserve_server_object_id(&mut guard, Some(record.entity_id));
+        }
+        guard.unloaded_persisted_entities = unloaded;
+    }
+    if respawned > 0 || unloaded_count > 0 || dropped > 0 {
+        eprintln!(
+            "respawned {} persisted entities ({} retained unloaded, {} dropped)",
+            respawned, unloaded_count, dropped
+        );
+    }
+}
+
 fn initialize_state(
     config: &mut RuntimeConfig,
     shutdown: Arc<AtomicBool>,
@@ -364,6 +470,17 @@ fn initialize_state(
         config.content_registry.clone(),
         persisted_players,
     )));
+
+    let persisted_entities = {
+        let guard = state.lock().expect("server state lock poisoned");
+        guard.world_load_persisted_entities()
+    };
+    match persisted_entities {
+        Ok(records) => {
+            respawn_persisted_entities(&state, records, &config.content_registry, start)
+        }
+        Err(error) => eprintln!("failed to load persisted entities: {}", error),
+    }
 
     let entity_interest_radius_chunks = config.procgen_far_chunk_radius.max(1)
         * STREAM_FAR_LOD_SCALE
@@ -589,6 +706,179 @@ mod replication_tests {
 
         assert!(!state.entity_records.contains_key(&100));
         assert!(!state.entity_last_broadcast_pose.contains_key(&100));
+    }
+
+    #[test]
+    fn persistent_entities_survive_server_restart() {
+        use crate::shared::entity_types::ENTITY_TEST_CUBE;
+
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "polychora-entity-persist-{}-{:x}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create test save root");
+
+        let registry = {
+            let (registry, _pending) = crate::plugin_loader::create_full_registry();
+            Arc::new(registry)
+        };
+        let make_state = |registry: &Arc<crate::content_registry::ContentRegistry>| {
+            let world = ServerWorldOverlay::from_save_root(
+                &root,
+                voxel::BaseWorldKind::Empty,
+                7,
+                false,
+                HashSet::new(),
+                crate::save_v4::now_unix_ms(),
+                None,
+            )
+            .expect("create save-backed world");
+            let next_object_id = world.persisted_next_entity_id().max(1);
+            Arc::new(Mutex::new(ServerState::new(
+                world,
+                next_object_id,
+                false,
+                false,
+                Instant::now(),
+                registry.clone(),
+                Vec::new(),
+            )))
+        };
+
+        // Session 1: spawn a persistent accent and save.
+        let start = Instant::now();
+        let shared = make_state(&registry);
+        let mut entity = Entity::simple(ENTITY_TEST_CUBE.0, ENTITY_TEST_CUBE.1);
+        entity.pose.position = [3.0, 4.0, 5.0, 6.0];
+        let snapshot = super::runtime_net::spawn_entity(
+            &shared,
+            entity,
+            Some("keeper".to_string()),
+            true,
+            None,
+            start,
+        );
+        {
+            let mut guard = shared.lock().unwrap();
+            assert!(guard.persistent_entities_dirty);
+            let result = guard
+                .persist_world_if_dirty(crate::save_v4::now_unix_ms())
+                .expect("persist");
+            assert!(result.is_some(), "entity spawn should trigger a save");
+            assert!(!guard.persistent_entities_dirty);
+        }
+        drop(shared);
+
+        // Session 2: fresh state from the same root respawns the entity.
+        let shared = make_state(&registry);
+        let records = {
+            let guard = shared.lock().unwrap();
+            guard.world_load_persisted_entities().expect("load entities")
+        };
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].entity_id, snapshot.entity_id);
+        assert_eq!(records[0].entity.pose.position, [3.0, 4.0, 5.0, 6.0]);
+        respawn_persisted_entities(&shared, records, &registry, start);
+        {
+            let mut guard = shared.lock().unwrap();
+            let state = guard
+                .entity_store
+                .get(snapshot.entity_id)
+                .expect("entity respawned into store");
+            assert_eq!(state.entity.pose.position, [3.0, 4.0, 5.0, 6.0]);
+            let record = guard
+                .entity_records
+                .get(&snapshot.entity_id)
+                .expect("record recreated");
+            assert!(record.persistent);
+            assert_eq!(record.display_name.as_deref(), Some("keeper"));
+            // Reserved ids can't collide with fresh spawns.
+            let fresh_id = allocate_server_object_id(&mut guard);
+            assert!(fresh_id > snapshot.entity_id);
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unknown_persisted_entities_survive_entity_saves() {
+        use crate::shared::entity_types::ENTITY_TEST_CUBE;
+
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "polychora-entity-retain-{}-{:x}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create test save root");
+
+        let registry = {
+            let (registry, _pending) = crate::plugin_loader::create_full_registry();
+            Arc::new(registry)
+        };
+        let world = ServerWorldOverlay::from_save_root(
+            &root,
+            voxel::BaseWorldKind::Empty,
+            7,
+            false,
+            HashSet::new(),
+            crate::save_v4::now_unix_ms(),
+            None,
+        )
+        .expect("create save-backed world");
+        let shared = Arc::new(Mutex::new(ServerState::new(
+            world,
+            1,
+            false,
+            false,
+            Instant::now(),
+            registry.clone(),
+            Vec::new(),
+        )));
+
+        // One record from an unknown plugin type: retained, not respawned.
+        let mut alien = Entity::simple(9999, 42);
+        alien.pose.position = [10.0, 0.0, 0.0, 0.0];
+        let alien_record = crate::save_v4::PersistedEntityRecord {
+            entity_id: 500,
+            entity: alien,
+            display_name: Some("alien".to_string()),
+            tags: Vec::new(),
+            last_saved_ms: 3,
+        };
+        let start = Instant::now();
+        respawn_persisted_entities(&shared, vec![alien_record], &registry, start);
+        {
+            let guard = shared.lock().unwrap();
+            assert_eq!(guard.unloaded_persisted_entities.len(), 1);
+            assert!(guard.entity_store.get(500).is_none());
+        }
+
+        // A fresh spawn dirties the entity subtree; the save must merge the
+        // retained record back in rather than erasing it.
+        let mut entity = Entity::simple(ENTITY_TEST_CUBE.0, ENTITY_TEST_CUBE.1);
+        entity.pose.position = [1.0, 2.0, 3.0, 4.0];
+        let spawned =
+            super::runtime_net::spawn_entity(&shared, entity, None, true, None, start);
+        assert_ne!(spawned.entity_id, 500, "unloaded ids must stay reserved");
+        {
+            let mut guard = shared.lock().unwrap();
+            guard
+                .persist_world_if_dirty(crate::save_v4::now_unix_ms())
+                .expect("persist")
+                .expect("entity spawn should trigger a save");
+        }
+
+        let loaded = crate::save_v4::load_all_entities(&root).expect("load entities");
+        let ids: Vec<u64> = loaded.iter().map(|record| record.entity_id).collect();
+        assert!(ids.contains(&500), "unknown entity erased by save: {ids:?}");
+        assert!(ids.contains(&spawned.entity_id));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

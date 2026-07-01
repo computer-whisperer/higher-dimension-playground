@@ -29,6 +29,14 @@ pub(super) struct ServerState {
     pub(super) persisted_player_records: Vec<crate::save_v4::PlayerRecord>,
     /// Set when a player's inventory_payload is updated and needs persisting.
     pub(super) player_inventory_dirty: bool,
+    /// Set when a persistent entity spawned, despawned, or moved; the next
+    /// save rewrites the entity subtree from the in-memory set.
+    pub(super) persistent_entities_dirty: bool,
+    /// Persisted entity records that could not be respawned this session
+    /// (unknown type, unsupported sim mode). Carried through every save so
+    /// that e.g. one session with a content plugin disabled does not erase
+    /// that plugin's entities from the world.
+    pub(super) unloaded_persisted_entities: Vec<crate::save_v4::PersistedEntityRecord>,
 }
 
 impl ServerState {
@@ -60,6 +68,8 @@ impl ServerState {
             content_registry,
             persisted_player_records,
             player_inventory_dirty: false,
+            persistent_entities_dirty: false,
+            unloaded_persisted_entities: Vec::new(),
         }
     }
 
@@ -217,6 +227,12 @@ impl ServerState {
         self.world.take_dirty_bounds()
     }
 
+    pub(super) fn world_load_persisted_entities(
+        &self,
+    ) -> io::Result<Vec<crate::save_v4::PersistedEntityRecord>> {
+        self.world.load_persisted_entities()
+    }
+
     pub(super) fn persist_world_if_dirty(
         &mut self,
         now_ms: u64,
@@ -227,8 +243,51 @@ impl ServerState {
         } else {
             Vec::new()
         };
-        self.world
-            .persist_dirty_overrides_with_players(self.next_object_id, now_ms, player_records)
+        let entity_records = if self.persistent_entities_dirty && self.world.has_save_backing() {
+            Some(self.build_persisted_entity_records())
+        } else {
+            None
+        };
+        let had_entities = entity_records.is_some();
+        let result = self.world.persist_dirty_overrides_with_players(
+            self.next_object_id,
+            now_ms,
+            player_records,
+            entity_records,
+        );
+        // Only clear entity dirtiness once the records actually hit disk;
+        // a failed save retries on the next interval.
+        if had_entities && matches!(result, Ok(Some(_))) {
+            self.persistent_entities_dirty = false;
+        }
+        result
+    }
+
+    /// Snapshot every persistent non-player entity for the save, plus any
+    /// loaded-but-not-respawned records so they survive the session.
+    /// Records are stamped with the entity's own `last_update_ms` (not wall
+    /// time) so unchanged entities produce byte-identical blobs and the
+    /// blob-reuse index can dedupe them.
+    fn build_persisted_entity_records(&self) -> Vec<crate::save_v4::PersistedEntityRecord> {
+        let mut records = Vec::new();
+        for record in self.entity_records.values() {
+            if !record.persistent || record.category == EntityCategory::Player {
+                continue;
+            }
+            let Some(entity_state) = self.entity_store.get(record.entity_id) else {
+                continue;
+            };
+            records.push(crate::save_v4::PersistedEntityRecord {
+                entity_id: record.entity_id,
+                entity: entity_state.entity.clone(),
+                display_name: record.display_name.clone(),
+                tags: Vec::new(),
+                last_saved_ms: entity_state.last_update_ms,
+            });
+        }
+        records.extend(self.unloaded_persisted_entities.iter().cloned());
+        records.sort_unstable_by_key(|record| record.entity_id);
+        records
     }
 
     /// Build current player records for persistence.
@@ -320,10 +379,17 @@ pub(super) fn upsert_entity_record(
     if display_name.is_some() || category != EntityCategory::Player {
         record.display_name = display_name;
     }
+    if persistent && category != EntityCategory::Player {
+        state.persistent_entities_dirty = true;
+    }
 }
 
 pub(super) fn remove_entity_record(state: &mut ServerState, entity_id: u64) {
-    state.entity_records.remove(&entity_id);
+    if let Some(record) = state.entity_records.remove(&entity_id) {
+        if record.persistent && record.category != EntityCategory::Player {
+            state.persistent_entities_dirty = true;
+        }
+    }
     state.entity_last_broadcast_pose.remove(&entity_id);
 }
 
