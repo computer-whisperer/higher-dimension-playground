@@ -155,22 +155,22 @@ fn render_spawn_egg_icon_rgba(base_color: [u8; 3]) -> Vec<u8> {
 }
 
 /// A sprite sheet containing all material and spawn egg icons packed into a
-/// single texture, plus per-texture Aetna images keyed by `(namespace, texture_id)`.
+/// single texture, plus per-texture Damascene images keyed by `(namespace, texture_id)`.
 pub struct MaterialIconSheet {
     /// Width of the sprite sheet in pixels
     pub width: u32,
     /// Height of the sprite sheet in pixels
     pub height: u32,
-    /// Per-texture images for Aetna. Aetna owns GPU upload/cache for these,
+    /// Per-texture images for Damascene. Damascene owns GPU upload/cache for these,
     /// so UI callers do not need to route through the packed sprite sheet.
-    aetna_images: HashMap<(u32, u32), aetna_core::image::Image>,
+    damascene_images: HashMap<(u32, u32), damascene_core::image::Image>,
 }
 
 impl MaterialIconSheet {
-    /// Get an Aetna image for a texture by (namespace, texture_id), or None
+    /// Get an Damascene image for a texture by (namespace, texture_id), or None
     /// if not found.
-    pub fn aetna_image(&self, namespace: u32, texture_id: u32) -> Option<aetna_core::image::Image> {
-        self.aetna_images.get(&(namespace, texture_id)).cloned()
+    pub fn damascene_image(&self, namespace: u32, texture_id: u32) -> Option<damascene_core::image::Image> {
+        self.damascene_images.get(&(namespace, texture_id)).cloned()
     }
 }
 
@@ -196,7 +196,7 @@ pub fn generate_material_icon_sheet_gpu(
     let sheet_w = SHEET_COLUMNS * ICON_SIZE;
     let sheet_h = rows * ICON_SIZE;
 
-    let mut aetna_images = HashMap::new();
+    let mut damascene_images = HashMap::new();
     let icon_pixel_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
 
     let mut offscreen = RenderContext::new(
@@ -262,19 +262,19 @@ pub fn generate_material_icon_sheet_gpu(
             return None;
         }
 
-        let aetna_image = aetna_core::image::Image::from_rgba8(ICON_SIZE, ICON_SIZE, raw);
-        aetna_images
+        let damascene_image = damascene_core::image::Image::from_rgba8(ICON_SIZE, ICON_SIZE, raw);
+        damascene_images
             .entry((entry.texture.namespace, entry.texture.texture_id))
-            .or_insert_with(|| aetna_image.clone());
+            .or_insert_with(|| damascene_image.clone());
 
         // Phase 3 inline: namespace-0 aliases for migrated blocks.
         // Blocks whose texture uses a plugin namespace (e.g. 0x706f6c79)
         // also need a (0, texture_id) entry so entity model_textures
         // (which use tex() → namespace 0) can resolve to an icon.
         if entry.texture.namespace != 0 {
-            aetna_images
+            damascene_images
                 .entry((0, entry.texture.texture_id))
-                .or_insert_with(|| aetna_image.clone());
+                .or_insert_with(|| damascene_image.clone());
         }
     }
 
@@ -286,15 +286,15 @@ pub fn generate_material_icon_sheet_gpu(
 
         let raw = render_spawn_egg_icon_rgba(entity.base_color);
 
-        let aetna_image = aetna_core::image::Image::from_rgba8(ICON_SIZE, ICON_SIZE, raw);
-        aetna_images
+        let damascene_image = damascene_core::image::Image::from_rgba8(ICON_SIZE, ICON_SIZE, raw);
+        damascene_images
             .entry((0, entity.spawn_egg_texture_id))
-            .or_insert(aetna_image);
+            .or_insert(damascene_image);
     }
 
     Some(MaterialIconSheet {
         width: sheet_w,
         height: sheet_h,
-        aetna_images,
+        damascene_images,
     })
 }

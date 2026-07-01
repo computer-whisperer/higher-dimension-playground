@@ -280,8 +280,8 @@ struct FrameInFlight {
     vte_entity_diag_non_voxel_tet_count: usize,
 }
 
-struct AetnaOverlay {
-    runner: aetna_vulkano::Runner,
+struct DamasceneOverlay {
+    runner: damascene_vulkano::Runner,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1420,7 +1420,7 @@ pub struct RenderContext {
     profiler: GpuProfiler,
     hud_font: Option<FontArc>,
     hud_resources: Option<HudResources>,
-    aetna_overlay: Option<AetnaOverlay>,
+    damascene_overlay: Option<DamasceneOverlay>,
     hud_breadcrumbs: VecDeque<[f32; 4]>,
     hud_previous_camera: Option<[f32; 4]>,
     hud_previous_sample_time: Option<Instant>,
@@ -1803,72 +1803,82 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
         self.recreate_swapchain = true;
     }
 
-    pub fn aetna_pointer_moved(&mut self, x: f32, y: f32) -> (bool, Vec<aetna_core::UiEvent>) {
-        let Some(aetna) = self.aetna_overlay.as_mut() else {
+    pub fn damascene_pointer_moved(&mut self, x: f32, y: f32) -> (bool, Vec<damascene_core::UiEvent>) {
+        let Some(damascene) = self.damascene_overlay.as_mut() else {
             return (false, Vec::new());
         };
-        let moved = aetna.runner.pointer_moved(x, y);
+        let moved = damascene
+            .runner
+            .pointer_moved(damascene_core::Pointer::moving(x, y));
         (moved.needs_redraw, moved.events)
     }
 
-    pub fn aetna_pointer_left(&mut self) {
-        if let Some(aetna) = self.aetna_overlay.as_mut() {
-            aetna.runner.pointer_left();
+    pub fn damascene_pointer_left(&mut self) {
+        if let Some(damascene) = self.damascene_overlay.as_mut() {
+            damascene.runner.pointer_left();
         }
     }
 
-    pub fn aetna_pointer_down(
+    pub fn damascene_pointer_down(
         &mut self,
         x: f32,
         y: f32,
-        button: aetna_core::PointerButton,
-    ) -> Vec<aetna_core::UiEvent> {
-        self.aetna_overlay
+        button: damascene_core::PointerButton,
+    ) -> Vec<damascene_core::UiEvent> {
+        self.damascene_overlay
             .as_mut()
-            .map(|aetna| aetna.runner.pointer_down(x, y, button))
+            .map(|damascene| {
+                damascene
+                    .runner
+                    .pointer_down(damascene_core::Pointer::mouse(x, y, button))
+            })
             .unwrap_or_default()
     }
 
-    pub fn aetna_pointer_up(
+    pub fn damascene_pointer_up(
         &mut self,
         x: f32,
         y: f32,
-        button: aetna_core::PointerButton,
-    ) -> Vec<aetna_core::UiEvent> {
-        self.aetna_overlay
+        button: damascene_core::PointerButton,
+    ) -> Vec<damascene_core::UiEvent> {
+        self.damascene_overlay
             .as_mut()
-            .map(|aetna| aetna.runner.pointer_up(x, y, button))
+            .map(|damascene| {
+                damascene
+                    .runner
+                    .pointer_up(damascene_core::Pointer::mouse(x, y, button))
+            })
             .unwrap_or_default()
     }
 
-    pub fn aetna_pointer_wheel(&mut self, x: f32, y: f32, dy: f32) -> bool {
-        self.aetna_overlay
+    pub fn damascene_pointer_wheel(&mut self, x: f32, y: f32, dy: f32) -> bool {
+        self.damascene_overlay
             .as_mut()
-            .map(|aetna| aetna.runner.pointer_wheel(x, y, dy))
+            .map(|damascene| damascene.runner.pointer_wheel(x, y, dy))
             .unwrap_or(false)
     }
 
-    pub fn aetna_key_down(
+    pub fn damascene_key_down(
         &mut self,
-        key: aetna_core::UiKey,
-        modifiers: aetna_core::KeyModifiers,
+        key: damascene_core::UiKey,
+        modifiers: damascene_core::KeyModifiers,
         repeat: bool,
-    ) -> Vec<aetna_core::UiEvent> {
-        self.aetna_overlay
+    ) -> Vec<damascene_core::UiEvent> {
+        self.damascene_overlay
             .as_mut()
-            .map(|aetna| aetna.runner.key_down(key, modifiers, repeat))
+            .map(|damascene| damascene.runner.key_down(key, modifiers, repeat))
             .unwrap_or_default()
     }
 
-    pub fn aetna_text_input(&mut self, text: String) -> Option<aetna_core::UiEvent> {
-        self.aetna_overlay
+    pub fn damascene_text_input(&mut self, text: String) -> Option<damascene_core::UiEvent> {
+        self.damascene_overlay
             .as_mut()
-            .and_then(|aetna| aetna.runner.text_input(text))
+            .and_then(|damascene| damascene.runner.text_input(text))
     }
 
-    pub fn aetna_set_modifiers(&mut self, modifiers: aetna_core::KeyModifiers) {
-        if let Some(aetna) = self.aetna_overlay.as_mut() {
-            aetna.runner.set_modifiers(modifiers);
+    pub fn damascene_set_modifiers(&mut self, modifiers: damascene_core::KeyModifiers) {
+        if let Some(damascene) = self.damascene_overlay.as_mut() {
+            damascene.runner.set_modifiers(modifiers);
         }
     }
 
@@ -2213,7 +2223,7 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
             focal_length_zw,
             mut render_options,
         } = frame_params;
-        let mut aetna_ui = render_options.aetna_ui.take();
+        let mut damascene_ui = render_options.damascene_ui.take();
         let view_matrix_view = view_matrix.into_owned();
 
         // Guard against non-finite transforms/material data poisoning shared
@@ -2327,8 +2337,8 @@ gpu(px={},py={},l={},hit={},mat={},chunk={:?},t={:.6},reason={},steps={},rem={},
                             Some(window_size_dependent_setup(&new_images, &render_pass));
 
                         self.viewport.extent = window_size.into();
-                        if let Some(aetna) = self.aetna_overlay.as_mut() {
-                            aetna.runner.set_surface_size(
+                        if let Some(damascene) = self.damascene_overlay.as_mut() {
+                            damascene.runner.set_surface_size(
                                 window_size.width.max(1),
                                 window_size.height.max(1),
                             );
@@ -4558,8 +4568,8 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
             }
         }
 
-        let aetna_draw_ready =
-            if let (Some(tree), Some(aetna)) = (aetna_ui.as_mut(), self.aetna_overlay.as_mut()) {
+        let damascene_draw_ready =
+            if let (Some(tree), Some(damascene)) = (damascene_ui.as_mut(), self.damascene_overlay.as_mut()) {
                 let (present_size, scale_factor) = match self.window.as_ref() {
                     Some(window) => {
                         let size = window.inner_size();
@@ -4576,19 +4586,19 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                         1.0,
                     ),
                 };
-                aetna
+                damascene
                     .runner
                     .set_surface_size(present_size[0], present_size[1]);
-                aetna
+                damascene
                     .runner
-                    .set_theme(aetna_core::Theme::radix_slate_blue_dark());
-                let viewport = aetna_core::Rect::new(
+                    .set_theme(damascene_core::Theme::radix_slate_blue_dark());
+                let viewport = damascene_core::Rect::new(
                     0.0,
                     0.0,
                     present_size[0] as f32 / scale_factor,
                     present_size[1] as f32 / scale_factor,
                 );
-                let _ = aetna.runner.prepare(tree, viewport, scale_factor);
+                let _ = damascene.runner.prepare(tree, viewport, scale_factor);
                 true
             } else {
                 false
@@ -4735,9 +4745,9 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                             unsafe { builder.draw(batch.vertex_count, 1, 0, 0) }.unwrap();
                         }
                     }
-                    if aetna_draw_ready {
-                        if let Some(aetna) = self.aetna_overlay.as_ref() {
-                            aetna.runner.draw(&mut builder);
+                    if damascene_draw_ready {
+                        if let Some(damascene) = self.damascene_overlay.as_ref() {
+                            damascene.runner.draw(&mut builder);
                         }
                     }
                     {

@@ -51,7 +51,7 @@ pub fn vulkan_setup(
         shader_sampled_image_array_non_uniform_indexing: true,
         ..Default::default()
     };
-    device_features |= aetna_vulkano::required_device_features();
+    device_features |= damascene_vulkano::required_device_features();
 
     let (physical_device, queue_family_index) = instance
         .enumerate_physical_devices()

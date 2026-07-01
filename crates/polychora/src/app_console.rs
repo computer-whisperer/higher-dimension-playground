@@ -19,7 +19,7 @@ impl App {
         self.teleport_dialog_open = false;
         self.controls_dialog_open = false;
         self.dev_console_focus_input = true;
-        self.focus_aetna_dev_console_input();
+        self.focus_damascene_dev_console_input();
         if self.dev_console_log.is_empty() {
             self.append_dev_console_log_line(
                 "Developer console ready. Use /help for available commands.",

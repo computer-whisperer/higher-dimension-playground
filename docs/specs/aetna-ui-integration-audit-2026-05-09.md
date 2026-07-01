@@ -2,6 +2,10 @@
 
 Date: 2026-05-09
 
+> Historical note (2026-07-01): the integration described here has since completed — egui is
+> fully removed — and Aetna was renamed upstream to **Damascene** (now consumed from crates.io
+> as `damascene-core`/`damascene-vulkano`; UI module is `app_damascene_ui.rs`).
+
 ## Verdict
 
 Aetna is ready for an incremental Polychora integration, but not for a wholesale

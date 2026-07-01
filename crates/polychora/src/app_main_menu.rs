@@ -419,7 +419,7 @@ impl App {
         self.menu_time += dt.min(0.1);
         apply_menu_camera_orbit_pose(&mut self.menu_camera, self.menu_time);
 
-        let aetna_ui = (!self.args.no_hud).then(|| self.build_aetna_main_menu());
+        let damascene_ui = (!self.args.no_hud).then(|| self.build_damascene_main_menu());
 
         let view_matrix = self.menu_camera.view_matrix_upright();
         let backend = self.args.backend.to_render_backend();
@@ -442,7 +442,7 @@ impl App {
             zw_angle_color_shift_enabled: self.zw_angle_color_shift_enabled,
             zw_angle_color_shift_strength: self.zw_angle_color_shift_strength,
             do_navigation_hud: false,
-            aetna_ui,
+            damascene_ui,
             ..Default::default()
         };
 

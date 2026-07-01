@@ -134,7 +134,6 @@ cargo run -p demo --release -- --headless
 | Tab / I | Toggle inventory |
 | T | Toggle teleport dialog |
 | Escape | Open / close menu |
-| F5 / F9 | Save/load world (`--world-file`) |
 | F12 | Screenshot |
 | Click | Re-grab mouse (when menu is open) |
 
@@ -153,8 +152,8 @@ Core runtime options:
 | `-W, --width` / `-H, --height` | Render size |
 | `--layers` | Hidden-dimension sample layers |
 | `--edit-reach` | Max block remove/place/highlight reach |
-| `--world-file <path>` | Save/load file path for `F5`/`F9` |
-| `--load-world` | Load `--world-file` at startup |
+| `--world-file <path>` | World save directory for the integrated server (save-v4 format) |
+| `--load-world` | Skip the main menu and load `--world-file` at startup |
 | `--server <ip[:port]>` | Connect to multiplayer server (`:4000` default if omitted) |
 | `--player-name <name>` | Multiplayer display name for `--server` |
 
@@ -232,15 +231,19 @@ Server CLI options:
 | Flag | Effect |
 |------|--------|
 | `--bind <addr:port>` | TCP listen address |
-| `--world-file <path>` | Load/save world state in `.v4dw` format |
-| `--tick-hz <hz>` | Player position broadcast rate |
+| `--world-file <path>` | Save directory (save-v4 format; default `saves/world`) |
+| `--world-generator <flat\|massive-platforms>` | Virgin-world generator |
+| `--world-seed <n>` | World generation seed |
+| `--tick-hz <hz>` | Broadcast/replication tick rate (default 10) |
+| `--entity-sim-hz <hz>` | Entity simulation rate (default 30) |
 | `--save-interval-secs <n>` | Autosave cadence (`0` disables autosave) |
-| `--snapshot-on-join <bool>` | Send full world snapshot (base64 `.v4dw`) on `hello` |
+| `--procgen-*` | Procedural structure placement controls |
 
-Message protocol is line-delimited JSON:
+Message protocol is length-prefixed [postcard](https://docs.rs/postcard) binary, defined in
+`crates/polychora/src/shared/protocol.rs`:
 
-- Client -> server: `hello`, `update_player`, `set_voxel`, `request_world_snapshot`, `ping`
-- Server -> client: `welcome`, `player_joined`, `player_left`, `player_positions`, `world_voxel_set`, `world_snapshot`, `pong`, `error`
+- Client -> server: `Hello`, `UpdatePlayer`, `SetVoxel`/`SetVoxelBatch`, `SpawnEntity`, `ConsoleCommand`, `WorldInterestUpdate`, `InventorySync`, `DropItem`, `Ping`, ...
+- Server -> client: `Welcome`, `WorldSubtreePatch`, `EntitySpawned`/`EntityDestroyed`/`EntityTransforms`, `Explosion`, `InventorySync`, `Pong`, `Error`, ...
 
 
 ## Acknowledgments

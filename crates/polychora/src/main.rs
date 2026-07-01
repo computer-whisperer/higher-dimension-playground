@@ -1,4 +1,4 @@
-mod app_aetna_ui;
+mod app_damascene_ui;
 mod app_bootstrap;
 mod app_console;
 mod app_controls;
@@ -426,13 +426,13 @@ struct Args {
     #[arg(long)]
     no_hud: bool,
 
-    /// Dump Aetna HUD bundle artifacts and exit.
+    /// Dump Damascene HUD bundle artifacts and exit.
     #[arg(long)]
-    aetna_bundle_dump: bool,
+    damascene_bundle_dump: bool,
 
-    /// Output directory for --aetna-bundle-dump.
+    /// Output directory for --damascene-bundle-dump.
     #[arg(long, default_value = "crates/polychora/out")]
-    aetna_bundle_dir: PathBuf,
+    damascene_bundle_dir: PathBuf,
 
     /// Automated command sequence (semicolon-separated).
     /// Commands: press:<key>, wait:<frames>, screenshot
@@ -855,7 +855,7 @@ fn main() {
         start_time: Instant::now(),
         last_frame: Instant::now(),
         mouse_grabbed: false,
-        aetna_last_pointer: None,
+        damascene_last_pointer: None,
         should_exit_after_render: false,
         gpu_screenshot_countdown: if gpu_screenshot && args.commands.is_none() {
             match args.gpu_screenshot_source {
@@ -906,8 +906,8 @@ fn main() {
             "0".to_string(),
             "0".to_string(),
         ],
-        aetna_selection: aetna_core::Selection::default(),
-        aetna_modifiers: aetna_core::KeyModifiers::default(),
+        damascene_selection: damascene_core::Selection::default(),
+        damascene_modifiers: damascene_core::KeyModifiers::default(),
         dev_console_open: false,
         dev_console_input: String::new(),
         dev_console_log: VecDeque::new(),
@@ -1221,7 +1221,7 @@ struct App {
     start_time: Instant,
     last_frame: Instant,
     mouse_grabbed: bool,
-    aetna_last_pointer: Option<(f32, f32)>,
+    damascene_last_pointer: Option<(f32, f32)>,
     should_exit_after_render: bool,
     gpu_screenshot_countdown: u32,
     args: Args,
@@ -1257,8 +1257,8 @@ struct App {
     inventory_dirty: bool,
     teleport_dialog_open: bool,
     teleport_coords: [String; 4],
-    aetna_selection: aetna_core::Selection,
-    aetna_modifiers: aetna_core::KeyModifiers,
+    damascene_selection: damascene_core::Selection,
+    damascene_modifiers: damascene_core::KeyModifiers,
     dev_console_open: bool,
     dev_console_input: String,
     dev_console_log: VecDeque<String>,

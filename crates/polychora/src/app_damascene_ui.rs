@@ -1,12 +1,12 @@
-use aetna_core::prelude::{
-    badge, button, card, card_content, card_header, card_title, column, image as aetna_image, mono,
+use damascene_core::prelude::{
+    badge, button, card, card_content, card_header, card_title, column, image as damascene_image, mono,
     render_bundle, row, scroll, spacer, spinner, stack, table, table_body, table_cell, table_head,
     table_header, table_row, tabs, tabs_list, text, text_input_with, toggle, tokens, write_bundle,
     Align, Axis, Color, Cursor, El, Image, ImageFit, Justify, Kind, Rect, Sides, Size,
     StyleProfile, SurfaceRole, TextInputOpts, UiEventKind,
 };
-use aetna_core::widgets::slider as aetna_slider;
-use aetna_core::widgets::text_input as aetna_text_input;
+use damascene_core::widgets::slider as damascene_slider;
+use damascene_core::widgets::text_input as damascene_text_input;
 use polychora::content_registry::ContentRegistry;
 use polychora::shared::inventory::{InventoryTab, HOTBAR_SIZE, INVENTORY_COLS};
 use polychora::shared::protocol::ItemStack;
@@ -27,96 +27,97 @@ use crate::consts::{
 use crate::input::ControlScheme;
 use crate::material_icons::MaterialIconSheet;
 
-const HOTBAR_SLOT_KEY_PREFIX: &str = "aetna_hotbar_slot_";
-const ORIENTATION_KEY_PREFIX: &str = "aetna_orientation_";
-const INVENTORY_TABS_KEY: &str = "aetna_inventory_tabs";
-const INVENTORY_BLOCK_KEY_PREFIX: &str = "aetna_inventory_block_";
-const INVENTORY_ENTITY_KEY_PREFIX: &str = "aetna_inventory_entity_";
-const INVENTORY_SLOT_KEY_PREFIX: &str = "aetna_inventory_slot_";
-const INVENTORY_CLOSE_KEY: &str = "aetna_inventory_close";
-const PAUSE_RESUME_KEY: &str = "aetna_pause_resume";
-const PAUSE_MAIN_MENU_KEY: &str = "aetna_pause_main_menu";
-const PAUSE_QUIT_KEY: &str = "aetna_pause_quit";
-const PAUSE_MENU_MODE_TABS_KEY: &str = "aetna_pause_mode_tabs";
-const PAUSE_SETTINGS_TABS_KEY: &str = "aetna_pause_settings_tabs";
-const PAUSE_CONTROL_SCHEME_KEY_PREFIX: &str = "aetna_pause_control_scheme_";
-const PAUSE_INFO_PANEL_KEY_PREFIX: &str = "aetna_pause_info_panel_";
-const PAUSE_PLACEMENT_PREVIEW_KEY_PREFIX: &str = "aetna_pause_placement_preview_";
-const PAUSE_TOGGLE_PREVIEW_HIDE_CAMERA_KEY: &str = "aetna_pause_preview_hide_camera";
-const PAUSE_TOGGLE_PREVIEW_HIDE_SAME_SCALE_KEY: &str = "aetna_pause_preview_hide_same_scale";
-const PAUSE_TOGGLE_ZW_SHIFT_KEY: &str = "aetna_pause_zw_shift";
-const PAUSE_TOGGLE_INTEGRAL_SKY_KEY: &str = "aetna_pause_integral_sky";
-const PAUSE_TOGGLE_LOG_MERGE_KEY: &str = "aetna_pause_log_merge";
-const PAUSE_TOGGLE_STREAM_TREE_BOUNDS_KEY: &str = "aetna_pause_stream_tree_bounds";
-const PAUSE_TOGGLE_STREAM_COMPARE_BOUNDS_KEY: &str = "aetna_pause_stream_compare_bounds";
-const PAUSE_TOGGLE_STREAM_LABELS_KEY: &str = "aetna_pause_stream_labels";
-const PAUSE_TOGGLE_STREAM_NON_EMPTY_KEY: &str = "aetna_pause_stream_non_empty";
-const PAUSE_TOGGLE_STREAM_BRANCH_KEY: &str = "aetna_pause_stream_branch";
-const PAUSE_TOGGLE_STREAM_UNIFORM_KEY: &str = "aetna_pause_stream_uniform";
-const PAUSE_TOGGLE_STREAM_CHUNK_ARRAY_KEY: &str = "aetna_pause_stream_chunk_array";
-const PAUSE_TOGGLE_STREAM_PROCEDURAL_KEY: &str = "aetna_pause_stream_procedural";
-const PAUSE_TOGGLE_STREAM_EMPTY_KEY: &str = "aetna_pause_stream_empty";
-const PAUSE_TOGGLE_SAMPLE_RAY_BOUNDS_KEY: &str = "aetna_pause_sample_ray_bounds";
-const PAUSE_DUMP_TREES_KEY: &str = "aetna_pause_dump_trees";
-const PAUSE_SLIDER_MASTER_VOLUME_KEY: &str = "aetna_pause_slider_master_volume";
-const PAUSE_SLIDER_SPATIAL_FALLOFF_KEY: &str = "aetna_pause_slider_spatial_falloff";
-const PAUSE_SLIDER_FOCAL_XY_KEY: &str = "aetna_pause_slider_focal_xy";
-const PAUSE_SLIDER_FOCAL_ZW_KEY: &str = "aetna_pause_slider_focal_zw";
-const PAUSE_SLIDER_ZW_SHIFT_KEY: &str = "aetna_pause_slider_zw_shift";
-const PAUSE_SLIDER_TRACE_STEPS_KEY: &str = "aetna_pause_slider_trace_steps";
-const PAUSE_SLIDER_TRACE_DISTANCE_KEY: &str = "aetna_pause_slider_trace_distance";
-const PAUSE_SLIDER_SKY_SCALE_KEY: &str = "aetna_pause_slider_sky_scale";
-const PAUSE_SLIDER_HIT_EMISSIVE_KEY: &str = "aetna_pause_slider_hit_emissive";
-const PAUSE_SLIDER_LOG_MERGE_KEY: &str = "aetna_pause_slider_log_merge";
-const PAUSE_SLIDER_STREAM_MAX_NODES_KEY: &str = "aetna_pause_slider_stream_max_nodes";
-const PAUSE_SLIDER_SAMPLE_RAY_MAX_NODES_KEY: &str = "aetna_pause_slider_sample_ray_max_nodes";
-const PAUSE_SLIDER_LABEL_MAX_COUNT_KEY: &str = "aetna_pause_slider_label_max_count";
-const PAUSE_SLIDER_COMPARE_MAX_CHUNKS_KEY: &str = "aetna_pause_slider_compare_max_chunks";
-const PAUSE_SLIDER_COMPARE_LOG_INTERVAL_KEY: &str = "aetna_pause_slider_compare_log_interval";
-const TELEPORT_FIELD_KEY_PREFIX: &str = "aetna_teleport_coord_";
-const TELEPORT_APPLY_KEY: &str = "aetna_teleport_apply";
-const TELEPORT_ORIGIN_KEY: &str = "aetna_teleport_origin";
-const TELEPORT_CLOSE_KEY: &str = "aetna_teleport_close";
-const TELEPORT_PLAYER_KEY_PREFIX: &str = "aetna_teleport_player_";
-const DEV_CONSOLE_INPUT_KEY: &str = "aetna_dev_console_input";
-const DEV_CONSOLE_RUN_KEY: &str = "aetna_dev_console_run";
-const DEV_CONSOLE_CLOSE_KEY: &str = "aetna_dev_console_close";
-const BLOCK_GUI_CLOSE_KEY: &str = "aetna_block_gui_close";
-const BLOCK_GUI_SLOT_KEY_PREFIX: &str = "aetna_block_gui_slot_";
-const MAIN_MENU_SINGLEPLAYER_KEY: &str = "aetna_main_singleplayer";
-const MAIN_MENU_MULTIPLAYER_KEY: &str = "aetna_main_multiplayer";
-const MAIN_MENU_QUIT_KEY: &str = "aetna_main_quit";
-const MAIN_MENU_BACK_KEY: &str = "aetna_main_back";
-const MAIN_MENU_WORLD_KEY_PREFIX: &str = "aetna_main_world_";
-const MAIN_MENU_LOAD_SELECTED_KEY: &str = "aetna_main_load_selected";
-const MAIN_MENU_CREATE_WORLD_KEY: &str = "aetna_main_create_world";
-const MAIN_MENU_MIGRATIONS_KEY: &str = "aetna_main_migrations";
-const MAIN_MENU_WORLD_TYPE_TABS_KEY: &str = "aetna_main_world_type_tabs";
-const MAIN_MENU_PLAYER_NAME_KEY: &str = "aetna_main_player_name";
-const MAIN_MENU_SERVER_ADDRESS_KEY: &str = "aetna_main_server_address";
-const MAIN_MENU_CONNECT_KEY: &str = "aetna_main_connect";
-const MAIN_MENU_MIGRATE_LEGACY_KEY: &str = "aetna_main_migrate_legacy";
-const MAIN_MENU_MIGRATE_V3_KEY: &str = "aetna_main_migrate_v3";
-const MAIN_MENU_TRIM_INPUT_KEY: &str = "aetna_main_trim_input";
-const MAIN_MENU_TRIM_OUTPUT_KEY: &str = "aetna_main_trim_output";
-const MAIN_MENU_TRIM_MIN_KEY: &str = "aetna_main_trim_min";
-const MAIN_MENU_TRIM_MAX_KEY: &str = "aetna_main_trim_max";
-const MAIN_MENU_TRIM_RUN_KEY: &str = "aetna_main_trim_run";
-const MAIN_MENU_V3_INPUT_KEY: &str = "aetna_main_v3_input";
-const MAIN_MENU_V4_OUTPUT_KEY: &str = "aetna_main_v4_output";
-const MAIN_MENU_V3_OVERWRITE_KEY: &str = "aetna_main_v3_overwrite";
-const MAIN_MENU_V3_RUN_KEY: &str = "aetna_main_v3_run";
+const HOTBAR_SLOT_KEY_PREFIX: &str = "damascene_hotbar_slot_";
+const ORIENTATION_KEY_PREFIX: &str = "damascene_orientation_";
+const INVENTORY_TABS_KEY: &str = "damascene_inventory_tabs";
+const INVENTORY_BLOCK_KEY_PREFIX: &str = "damascene_inventory_block_";
+const INVENTORY_ENTITY_KEY_PREFIX: &str = "damascene_inventory_entity_";
+const INVENTORY_SLOT_KEY_PREFIX: &str = "damascene_inventory_slot_";
+const INVENTORY_CLOSE_KEY: &str = "damascene_inventory_close";
+const PAUSE_RESUME_KEY: &str = "damascene_pause_resume";
+const PAUSE_MAIN_MENU_KEY: &str = "damascene_pause_main_menu";
+const PAUSE_QUIT_KEY: &str = "damascene_pause_quit";
+const PAUSE_MENU_MODE_TABS_KEY: &str = "damascene_pause_mode_tabs";
+const PAUSE_SETTINGS_TABS_KEY: &str = "damascene_pause_settings_tabs";
+const PAUSE_CONTROL_SCHEME_KEY_PREFIX: &str = "damascene_pause_control_scheme_";
+const PAUSE_INFO_PANEL_KEY_PREFIX: &str = "damascene_pause_info_panel_";
+const PAUSE_PLACEMENT_PREVIEW_KEY_PREFIX: &str = "damascene_pause_placement_preview_";
+const PAUSE_TOGGLE_PREVIEW_HIDE_CAMERA_KEY: &str = "damascene_pause_preview_hide_camera";
+const PAUSE_TOGGLE_PREVIEW_HIDE_SAME_SCALE_KEY: &str = "damascene_pause_preview_hide_same_scale";
+const PAUSE_TOGGLE_ZW_SHIFT_KEY: &str = "damascene_pause_zw_shift";
+const PAUSE_TOGGLE_INTEGRAL_SKY_KEY: &str = "damascene_pause_integral_sky";
+const PAUSE_TOGGLE_LOG_MERGE_KEY: &str = "damascene_pause_log_merge";
+const PAUSE_TOGGLE_STREAM_TREE_BOUNDS_KEY: &str = "damascene_pause_stream_tree_bounds";
+const PAUSE_TOGGLE_STREAM_COMPARE_BOUNDS_KEY: &str = "damascene_pause_stream_compare_bounds";
+const PAUSE_TOGGLE_STREAM_LABELS_KEY: &str = "damascene_pause_stream_labels";
+const PAUSE_TOGGLE_STREAM_NON_EMPTY_KEY: &str = "damascene_pause_stream_non_empty";
+const PAUSE_TOGGLE_STREAM_BRANCH_KEY: &str = "damascene_pause_stream_branch";
+const PAUSE_TOGGLE_STREAM_UNIFORM_KEY: &str = "damascene_pause_stream_uniform";
+const PAUSE_TOGGLE_STREAM_CHUNK_ARRAY_KEY: &str = "damascene_pause_stream_chunk_array";
+const PAUSE_TOGGLE_STREAM_PROCEDURAL_KEY: &str = "damascene_pause_stream_procedural";
+const PAUSE_TOGGLE_STREAM_EMPTY_KEY: &str = "damascene_pause_stream_empty";
+const PAUSE_TOGGLE_SAMPLE_RAY_BOUNDS_KEY: &str = "damascene_pause_sample_ray_bounds";
+const PAUSE_DUMP_TREES_KEY: &str = "damascene_pause_dump_trees";
+const PAUSE_SLIDER_MASTER_VOLUME_KEY: &str = "damascene_pause_slider_master_volume";
+const PAUSE_SLIDER_SPATIAL_FALLOFF_KEY: &str = "damascene_pause_slider_spatial_falloff";
+const PAUSE_SLIDER_FOCAL_XY_KEY: &str = "damascene_pause_slider_focal_xy";
+const PAUSE_SLIDER_FOCAL_ZW_KEY: &str = "damascene_pause_slider_focal_zw";
+const PAUSE_SLIDER_ZW_SHIFT_KEY: &str = "damascene_pause_slider_zw_shift";
+const PAUSE_SLIDER_TRACE_STEPS_KEY: &str = "damascene_pause_slider_trace_steps";
+const PAUSE_SLIDER_TRACE_DISTANCE_KEY: &str = "damascene_pause_slider_trace_distance";
+const PAUSE_SLIDER_SKY_SCALE_KEY: &str = "damascene_pause_slider_sky_scale";
+const PAUSE_SLIDER_HIT_EMISSIVE_KEY: &str = "damascene_pause_slider_hit_emissive";
+const PAUSE_SLIDER_LOG_MERGE_KEY: &str = "damascene_pause_slider_log_merge";
+const PAUSE_SLIDER_STREAM_MAX_NODES_KEY: &str = "damascene_pause_slider_stream_max_nodes";
+const PAUSE_SLIDER_SAMPLE_RAY_MAX_NODES_KEY: &str = "damascene_pause_slider_sample_ray_max_nodes";
+const PAUSE_SLIDER_LABEL_MAX_COUNT_KEY: &str = "damascene_pause_slider_label_max_count";
+const PAUSE_SLIDER_COMPARE_MAX_CHUNKS_KEY: &str = "damascene_pause_slider_compare_max_chunks";
+const PAUSE_SLIDER_COMPARE_LOG_INTERVAL_KEY: &str = "damascene_pause_slider_compare_log_interval";
+const TELEPORT_FIELD_KEY_PREFIX: &str = "damascene_teleport_coord_";
+const TELEPORT_APPLY_KEY: &str = "damascene_teleport_apply";
+const TELEPORT_ORIGIN_KEY: &str = "damascene_teleport_origin";
+const TELEPORT_CLOSE_KEY: &str = "damascene_teleport_close";
+const TELEPORT_PLAYER_KEY_PREFIX: &str = "damascene_teleport_player_";
+const DEV_CONSOLE_INPUT_KEY: &str = "damascene_dev_console_input";
+const DEV_CONSOLE_RUN_KEY: &str = "damascene_dev_console_run";
+const DEV_CONSOLE_CLOSE_KEY: &str = "damascene_dev_console_close";
+const BLOCK_GUI_CLOSE_KEY: &str = "damascene_block_gui_close";
+const BLOCK_GUI_SLOT_KEY_PREFIX: &str = "damascene_block_gui_slot_";
+const MAIN_MENU_SINGLEPLAYER_KEY: &str = "damascene_main_singleplayer";
+const MAIN_MENU_MULTIPLAYER_KEY: &str = "damascene_main_multiplayer";
+const MAIN_MENU_QUIT_KEY: &str = "damascene_main_quit";
+const MAIN_MENU_BACK_KEY: &str = "damascene_main_back";
+const MAIN_MENU_WORLD_KEY_PREFIX: &str = "damascene_main_world_";
+const MAIN_MENU_LOAD_SELECTED_KEY: &str = "damascene_main_load_selected";
+const MAIN_MENU_CREATE_WORLD_KEY: &str = "damascene_main_create_world";
+const MAIN_MENU_MIGRATIONS_KEY: &str = "damascene_main_migrations";
+const MAIN_MENU_WORLD_TYPE_TABS_KEY: &str = "damascene_main_world_type_tabs";
+const MAIN_MENU_PLAYER_NAME_KEY: &str = "damascene_main_player_name";
+const MAIN_MENU_SERVER_ADDRESS_KEY: &str = "damascene_main_server_address";
+const MAIN_MENU_CONNECT_KEY: &str = "damascene_main_connect";
+const MAIN_MENU_MIGRATE_LEGACY_KEY: &str = "damascene_main_migrate_legacy";
+const MAIN_MENU_MIGRATE_V3_KEY: &str = "damascene_main_migrate_v3";
+const MAIN_MENU_TRIM_INPUT_KEY: &str = "damascene_main_trim_input";
+const MAIN_MENU_TRIM_OUTPUT_KEY: &str = "damascene_main_trim_output";
+const MAIN_MENU_TRIM_MIN_KEY: &str = "damascene_main_trim_min";
+const MAIN_MENU_TRIM_MAX_KEY: &str = "damascene_main_trim_max";
+const MAIN_MENU_TRIM_RUN_KEY: &str = "damascene_main_trim_run";
+const MAIN_MENU_V3_INPUT_KEY: &str = "damascene_main_v3_input";
+const MAIN_MENU_V4_OUTPUT_KEY: &str = "damascene_main_v4_output";
+const MAIN_MENU_V3_OVERWRITE_KEY: &str = "damascene_main_v3_overwrite";
+const MAIN_MENU_V3_RUN_KEY: &str = "damascene_main_v3_run";
 const NAV_HUD_BOTTOM_LEFT_RESERVED_WIDTH: f32 = 150.0;
 
 struct HotbarSlotView {
     name: String,
     count: u32,
+    scale_label: Option<String>,
     color: Color,
     icon: Option<Image>,
     selected: bool,
 }
 
-fn write_aetna_bundle(
+fn write_damascene_bundle(
     overlay: &mut El,
     width: u32,
     height: u32,
@@ -127,7 +128,7 @@ fn write_aetna_bundle(
     let bundle = render_bundle(overlay, viewport);
     let written = write_bundle(&bundle, out_dir, name)?;
     eprintln!(
-        "Wrote Aetna overlay bundle '{}' artifacts to {}",
+        "Wrote Damascene overlay bundle '{}' artifacts to {}",
         name,
         out_dir.display()
     );
@@ -135,24 +136,24 @@ fn write_aetna_bundle(
         eprintln!("  {}", path.display());
     }
     if !bundle.lint.findings.is_empty() {
-        eprintln!("\nAetna lint findings ({}):", bundle.lint.findings.len());
+        eprintln!("\nDamascene lint findings ({}):", bundle.lint.findings.len());
         eprint!("{}", bundle.lint.text());
     }
     Ok(())
 }
 
 impl App {
-    fn write_aetna_named_bundle(&self, name: &str, mut overlay: El) -> std::io::Result<()> {
-        write_aetna_bundle(
+    fn write_damascene_named_bundle(&self, name: &str, mut overlay: El) -> std::io::Result<()> {
+        write_damascene_bundle(
             &mut overlay,
             self.args.width,
             self.args.height,
-            &self.args.aetna_bundle_dir,
+            &self.args.damascene_bundle_dir,
             name,
         )
     }
 
-    pub(super) fn dump_aetna_overlay_bundle(&mut self) -> std::io::Result<()> {
+    pub(super) fn dump_damascene_overlay_bundle(&mut self) -> std::io::Result<()> {
         let saved_menu_open = self.menu_open;
         let saved_controls_dialog_open = self.controls_dialog_open;
         let saved_inventory_open = self.inventory_open;
@@ -167,26 +168,26 @@ impl App {
         self.teleport_dialog_open = false;
         self.dev_console_open = false;
 
-        if let Some(overlay) = self.build_aetna_overlay(None) {
-            self.write_aetna_named_bundle("aetna_hud", overlay)?;
+        if let Some(overlay) = self.build_damascene_overlay(None) {
+            self.write_damascene_named_bundle("damascene_hud", overlay)?;
         }
-        self.write_aetna_named_bundle("aetna_loading", self.build_aetna_loading_overlay())?;
+        self.write_damascene_named_bundle("damascene_loading", self.build_damascene_loading_overlay())?;
 
         self.inventory_open = true;
-        if let Some(overlay) = self.build_aetna_overlay(None) {
-            self.write_aetna_named_bundle("aetna_inventory", overlay)?;
+        if let Some(overlay) = self.build_damascene_overlay(None) {
+            self.write_damascene_named_bundle("damascene_inventory", overlay)?;
         }
         self.inventory_open = false;
 
         self.teleport_dialog_open = true;
-        if let Some(overlay) = self.build_aetna_overlay(None) {
-            self.write_aetna_named_bundle("aetna_teleport", overlay)?;
+        if let Some(overlay) = self.build_damascene_overlay(None) {
+            self.write_damascene_named_bundle("damascene_teleport", overlay)?;
         }
         self.teleport_dialog_open = false;
 
         self.dev_console_open = true;
-        if let Some(overlay) = self.build_aetna_overlay(None) {
-            self.write_aetna_named_bundle("aetna_dev_console", overlay)?;
+        if let Some(overlay) = self.build_damascene_overlay(None) {
+            self.write_damascene_named_bundle("damascene_dev_console", overlay)?;
         }
         self.dev_console_open = false;
 
@@ -194,38 +195,38 @@ impl App {
         self.controls_dialog_open = false;
         for page in SettingsPage::ALL {
             self.settings_page = page;
-            if let Some(overlay) = self.build_aetna_overlay(None) {
-                let name = format!("aetna_pause_settings_{}", settings_page_token(page));
-                self.write_aetna_named_bundle(&name, overlay)?;
+            if let Some(overlay) = self.build_damascene_overlay(None) {
+                let name = format!("damascene_pause_settings_{}", settings_page_token(page));
+                self.write_damascene_named_bundle(&name, overlay)?;
             }
         }
 
         self.controls_dialog_open = true;
-        if let Some(overlay) = self.build_aetna_overlay(None) {
-            self.write_aetna_named_bundle("aetna_pause_controls", overlay)?;
+        if let Some(overlay) = self.build_damascene_overlay(None) {
+            self.write_damascene_named_bundle("damascene_pause_controls", overlay)?;
         }
         self.menu_open = false;
         self.controls_dialog_open = false;
 
         for (page, name) in [
-            (MainMenuPage::Root, "aetna_main_menu_root"),
-            (MainMenuPage::Singleplayer, "aetna_main_menu_singleplayer"),
+            (MainMenuPage::Root, "damascene_main_menu_root"),
+            (MainMenuPage::Singleplayer, "damascene_main_menu_singleplayer"),
             (
                 MainMenuPage::SingleplayerMigrations,
-                "aetna_main_menu_migrations",
+                "damascene_main_menu_migrations",
             ),
             (
                 MainMenuPage::SingleplayerMigrationLegacyTrim,
-                "aetna_main_menu_migrate_legacy_trim",
+                "damascene_main_menu_migrate_legacy_trim",
             ),
             (
                 MainMenuPage::SingleplayerMigrationV3ToV4,
-                "aetna_main_menu_migrate_v3_to_v4",
+                "damascene_main_menu_migrate_v3_to_v4",
             ),
-            (MainMenuPage::Multiplayer, "aetna_main_menu_multiplayer"),
+            (MainMenuPage::Multiplayer, "damascene_main_menu_multiplayer"),
         ] {
             self.main_menu_page = page;
-            self.write_aetna_named_bundle(name, self.build_aetna_main_menu())?;
+            self.write_damascene_named_bundle(name, self.build_damascene_main_menu())?;
         }
 
         self.menu_open = saved_menu_open;
@@ -239,25 +240,25 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn build_aetna_main_menu(&self) -> El {
+    pub(super) fn build_damascene_main_menu(&self) -> El {
         let panel = match self.main_menu_page {
-            MainMenuPage::Root => self.build_aetna_main_menu_root(),
-            MainMenuPage::Singleplayer => self.build_aetna_main_menu_singleplayer(),
+            MainMenuPage::Root => self.build_damascene_main_menu_root(),
+            MainMenuPage::Singleplayer => self.build_damascene_main_menu_singleplayer(),
             MainMenuPage::SingleplayerMigrations => {
-                self.build_aetna_main_menu_singleplayer_migrations()
+                self.build_damascene_main_menu_singleplayer_migrations()
             }
             MainMenuPage::SingleplayerMigrationLegacyTrim => {
-                self.build_aetna_main_menu_migrate_legacy_trim()
+                self.build_damascene_main_menu_migrate_legacy_trim()
             }
             MainMenuPage::SingleplayerMigrationV3ToV4 => {
-                self.build_aetna_main_menu_migrate_v3_to_v4()
+                self.build_damascene_main_menu_migrate_v3_to_v4()
             }
-            MainMenuPage::Multiplayer => self.build_aetna_main_menu_multiplayer(),
+            MainMenuPage::Multiplayer => self.build_damascene_main_menu_multiplayer(),
         };
-        build_aetna_center_modal_shell(panel, false)
+        build_damascene_center_modal_shell(panel, false)
     }
 
-    fn build_aetna_main_menu_root(&self) -> El {
+    fn build_damascene_main_menu_root(&self) -> El {
         main_menu_panel(
             [
                 text("Polychora").display().bold(),
@@ -285,7 +286,7 @@ impl App {
         )
     }
 
-    fn build_aetna_main_menu_singleplayer(&self) -> El {
+    fn build_damascene_main_menu_singleplayer(&self) -> El {
         let world_rows: Vec<El> = if self.main_menu_world_files.is_empty() {
             vec![
                 text("No v4 world save directories found in saves/ or the current directory.")
@@ -330,7 +331,7 @@ impl App {
             main_menu_section(
                 "Saved Worlds",
                 scroll(world_rows)
-                    .key("aetna_main_worlds_scroll")
+                    .key("damascene_main_worlds_scroll")
                     .height(Size::Fixed(160.0))
                     .width(Size::Fill(1.0)),
             ),
@@ -375,7 +376,7 @@ impl App {
         main_menu_page_panel("Singleplayer", "Local worlds", body, 690.0, Size::Hug)
     }
 
-    fn build_aetna_main_menu_singleplayer_migrations(&self) -> El {
+    fn build_damascene_main_menu_singleplayer_migrations(&self) -> El {
         let body = column([
             main_menu_action_card(
                 "Legacy .v4dw Keep-Bounds Trim",
@@ -407,19 +408,19 @@ impl App {
         )
     }
 
-    fn build_aetna_main_menu_migrate_legacy_trim(&self) -> El {
+    fn build_damascene_main_menu_migrate_legacy_trim(&self) -> El {
         let body = column([
             main_menu_input(
                 "Input .v4dw",
                 &self.main_menu_migrate_trim_input,
-                &self.aetna_selection,
+                &self.damascene_selection,
                 MAIN_MENU_TRIM_INPUT_KEY,
                 "saves/world.v4dw",
             ),
             main_menu_input(
                 "Output .v4dw",
                 &self.main_menu_migrate_trim_output,
-                &self.aetna_selection,
+                &self.damascene_selection,
                 MAIN_MENU_TRIM_OUTPUT_KEY,
                 "saves/world.migrated.v4dw",
             ),
@@ -427,7 +428,7 @@ impl App {
                 main_menu_input(
                     "Keep Min Chunk",
                     &self.main_menu_migrate_trim_keep_min,
-                    &self.aetna_selection,
+                    &self.damascene_selection,
                     MAIN_MENU_TRIM_MIN_KEY,
                     "0 -2 -2 -2",
                 )
@@ -435,7 +436,7 @@ impl App {
                 main_menu_input(
                     "Keep Max Chunk",
                     &self.main_menu_migrate_trim_keep_max,
-                    &self.aetna_selection,
+                    &self.damascene_selection,
                     MAIN_MENU_TRIM_MAX_KEY,
                     "0 0 2 2",
                 )
@@ -471,19 +472,19 @@ impl App {
         )
     }
 
-    fn build_aetna_main_menu_migrate_v3_to_v4(&self) -> El {
+    fn build_damascene_main_menu_migrate_v3_to_v4(&self) -> El {
         let body = column([
             main_menu_input(
                 "Input v3 save root directory",
                 &self.main_menu_migrate_v3_input,
-                &self.aetna_selection,
+                &self.damascene_selection,
                 MAIN_MENU_V3_INPUT_KEY,
                 "saves/world-v3",
             ),
             main_menu_input(
                 "Output v4 save root directory",
                 &self.main_menu_migrate_v3_output,
-                &self.aetna_selection,
+                &self.damascene_selection,
                 MAIN_MENU_V4_OUTPUT_KEY,
                 "saves/world-migrated-v4",
             ),
@@ -522,19 +523,19 @@ impl App {
         )
     }
 
-    fn build_aetna_main_menu_multiplayer(&self) -> El {
+    fn build_damascene_main_menu_multiplayer(&self) -> El {
         let body = column([
             main_menu_input(
                 "Player name",
                 &self.main_menu_player_name,
-                &self.aetna_selection,
+                &self.damascene_selection,
                 MAIN_MENU_PLAYER_NAME_KEY,
                 "Player",
             ),
             main_menu_input(
                 "Server address",
                 &self.main_menu_server_address,
-                &self.aetna_selection,
+                &self.damascene_selection,
                 MAIN_MENU_SERVER_ADDRESS_KEY,
                 "host:4000",
             ),
@@ -560,7 +561,7 @@ impl App {
         main_menu_page_panel("Multiplayer", "Remote server", body, 460.0, Size::Hug)
     }
 
-    pub(super) fn build_aetna_loading_overlay(&self) -> El {
+    pub(super) fn build_damascene_loading_overlay(&self) -> El {
         let panel = El::new(Kind::Custom("polychora_loading_panel"))
             .style_profile(StyleProfile::Surface)
             .surface_role(SurfaceRole::Popover)
@@ -581,58 +582,58 @@ impl App {
             .width(Size::Fixed(320.0))
             .height(Size::Hug)
             .padding(tokens::SPACE_4)
-            .fill(tokens::POPOVER.with_alpha(244))
+            .fill(tokens::POPOVER.with_alpha_u8(244))
             .stroke(tokens::BORDER)
             .radius(8.0)
             .shadow(tokens::SHADOW_LG);
-        build_aetna_center_modal_shell(panel, false)
+        build_damascene_center_modal_shell(panel, false)
     }
 
-    pub(super) fn build_aetna_overlay(&self, info_readout: Option<&str>) -> Option<El> {
+    pub(super) fn build_damascene_overlay(&self, info_readout: Option<&str>) -> Option<El> {
         if self.menu_open {
-            return Some(build_aetna_center_modal_shell(
-                self.build_aetna_pause_menu_panel(),
+            return Some(build_damascene_center_modal_shell(
+                self.build_damascene_pause_menu_panel(),
                 true,
             ));
         }
         if self.teleport_dialog_open {
-            return Some(build_aetna_center_modal_shell(
-                self.build_aetna_teleport_panel(),
+            return Some(build_damascene_center_modal_shell(
+                self.build_damascene_teleport_panel(),
                 false,
             ));
         }
         if self.block_gui_session.is_some() {
-            return Some(build_aetna_center_modal_shell(
-                self.build_aetna_block_gui_panel(),
+            return Some(build_damascene_center_modal_shell(
+                self.build_damascene_block_gui_panel(),
                 false,
             ));
         }
 
-        let hotbar = self.build_aetna_hotbar();
-        let orientation = self.build_aetna_orientation_controls();
+        let hotbar = self.build_damascene_hotbar();
+        let orientation = self.build_damascene_orientation_controls();
         let modal = self
             .inventory_open
-            .then(|| self.build_aetna_inventory_panel());
+            .then(|| self.build_damascene_inventory_panel());
         let console = self
             .dev_console_open
-            .then(|| self.build_aetna_dev_console_panel());
-        Some(build_aetna_overlay_shell(
+            .then(|| self.build_damascene_dev_console_panel());
+        Some(build_damascene_overlay_shell(
             hotbar,
             orientation,
-            self.build_aetna_waila_panel(),
-            info_readout.map(build_aetna_info_readout_panel),
+            self.build_damascene_waila_panel(),
+            info_readout.map(build_damascene_info_readout_panel),
             modal,
             console,
         ))
     }
 
-    fn build_aetna_hotbar(&self) -> El {
-        let slots = (0..9).map(|i| self.build_aetna_hotbar_slot(i));
-        build_aetna_hotbar_from_slots(slots)
+    fn build_damascene_hotbar(&self) -> El {
+        let slots = (0..9).map(|i| self.build_damascene_hotbar_slot(i));
+        build_damascene_hotbar_from_slots(slots)
     }
 
-    fn build_aetna_hotbar_slot(&self, index: usize) -> El {
-        build_aetna_hotbar_slot_for_stack(
+    fn build_damascene_hotbar_slot(&self, index: usize) -> El {
+        build_damascene_hotbar_slot_for_stack(
             &self.content_registry,
             self.material_icon_sheet.as_ref(),
             index,
@@ -641,7 +642,7 @@ impl App {
         )
     }
 
-    fn build_aetna_orientation_controls(&self) -> El {
+    fn build_damascene_orientation_controls(&self) -> El {
         use polychora::shared::voxel::TesseractOrientation;
 
         let is_rotated = self.placement_orientation != TesseractOrientation::IDENTITY;
@@ -651,10 +652,10 @@ impl App {
             "Ori: 0".to_string()
         };
 
-        build_aetna_orientation_controls_view(label, is_rotated)
+        build_damascene_orientation_controls_view(label, is_rotated)
     }
 
-    fn build_aetna_waila_panel(&self) -> Option<El> {
+    fn build_damascene_waila_panel(&self) -> Option<El> {
         let target = self.waila_target.as_ref()?;
         let panel = match target {
             WailaTarget::Block { coords, block } => {
@@ -748,10 +749,10 @@ impl App {
         Some(panel)
     }
 
-    fn build_aetna_inventory_panel(&self) -> El {
+    fn build_damascene_inventory_panel(&self) -> El {
         let content = match self.inventory_tab {
-            InventoryTab::Creative => self.build_aetna_creative_inventory(),
-            InventoryTab::Survival => self.build_aetna_survival_inventory(),
+            InventoryTab::Creative => self.build_damascene_creative_inventory(),
+            InventoryTab::Survival => self.build_damascene_survival_inventory(),
         };
 
         El::new(Kind::Custom("polychora_inventory_panel"))
@@ -788,19 +789,19 @@ impl App {
             .height(Size::Fixed(520.0))
             .padding(tokens::SPACE_3)
             .gap(tokens::SPACE_3)
-            .fill(tokens::POPOVER.with_alpha(238))
+            .fill(tokens::POPOVER.with_alpha_u8(238))
             .stroke(tokens::BORDER)
             .radius(8.0)
             .shadow(tokens::SHADOW_LG)
             .block_pointer()
     }
 
-    fn build_aetna_creative_inventory(&self) -> El {
+    fn build_damascene_creative_inventory(&self) -> El {
         let mut rows = Vec::new();
         let mut block_tiles = Vec::new();
         for entry in self.content_registry.all_blocks_ordered() {
             let icon = self.material_icon_sheet.as_ref().and_then(|sheet| {
-                sheet.aetna_image(entry.texture.namespace, entry.texture.texture_id)
+                sheet.damascene_image(entry.texture.namespace, entry.texture.texture_id)
             });
             block_tiles.push(inventory_item_tile(
                 format!(
@@ -809,7 +810,7 @@ impl App {
                 ),
                 entry.name.clone(),
                 entry.category.label(),
-                Color::rgb(entry.color[0], entry.color[1], entry.color[2]),
+                Color::srgb_u8(entry.color[0], entry.color[1], entry.color[2]),
                 icon,
                 None,
                 false,
@@ -827,7 +828,7 @@ impl App {
                 .and_then(|_| {
                     self.material_icon_sheet
                         .as_ref()
-                        .and_then(|sheet| sheet.aetna_image(0, entity.spawn_egg_texture_id))
+                        .and_then(|sheet| sheet.damascene_image(0, entity.spawn_egg_texture_id))
                 });
             entity_tiles.push(inventory_item_tile(
                 format!(
@@ -836,7 +837,7 @@ impl App {
                 ),
                 entity.canonical_name.clone(),
                 entity.category.label(),
-                Color::rgb(
+                Color::srgb_u8(
                     entity.base_color[0],
                     entity.base_color[1],
                     entity.base_color[2],
@@ -850,19 +851,19 @@ impl App {
         rows.extend(tile_rows(entity_tiles, 8));
 
         scroll(rows)
-            .key("aetna_inventory_creative_scroll")
+            .key("damascene_inventory_creative_scroll")
             .height(Size::Fixed(380.0))
             .width(Size::Fill(1.0))
     }
 
-    fn build_aetna_survival_inventory(&self) -> El {
+    fn build_damascene_survival_inventory(&self) -> El {
         let mut rows = Vec::new();
 
         for row_index in (1..4).rev() {
             let mut cells = Vec::new();
             for col in 0..INVENTORY_COLS {
                 let slot_idx = row_index * INVENTORY_COLS + col;
-                cells.push(self.build_aetna_inventory_slot(slot_idx, false));
+                cells.push(self.build_damascene_inventory_slot(slot_idx, false));
             }
             rows.push(row(cells).gap(tokens::SPACE_1).width(Size::Hug));
         }
@@ -870,7 +871,7 @@ impl App {
         rows.push(text("Hotbar").caption().muted());
         let mut hotbar = Vec::new();
         for col in 0..HOTBAR_SIZE {
-            hotbar.push(self.build_aetna_inventory_slot(col, col == self.hotbar_selected_index));
+            hotbar.push(self.build_damascene_inventory_slot(col, col == self.hotbar_selected_index));
         }
         rows.push(row(hotbar).gap(tokens::SPACE_1).width(Size::Hug));
 
@@ -881,12 +882,12 @@ impl App {
             .height(Size::Fixed(410.0))
     }
 
-    fn build_aetna_inventory_slot(&self, slot_idx: usize, selected: bool) -> El {
+    fn build_damascene_inventory_slot(&self, slot_idx: usize, selected: bool) -> El {
         let (name, color, icon, count) = self
             .inventory
             .slot(slot_idx)
             .map(|stack| self.inventory_stack_view(stack))
-            .unwrap_or_else(|| ("Empty".to_string(), Color::rgb(32, 34, 40), None, 0));
+            .unwrap_or_else(|| ("Empty".to_string(), Color::srgb_u8(32, 34, 40), None, 0));
 
         inventory_item_tile(
             format!("{INVENTORY_SLOT_KEY_PREFIX}{slot_idx}"),
@@ -911,7 +912,7 @@ impl App {
         let icon = tex.and_then(|tex| {
             self.material_icon_sheet
                 .as_ref()?
-                .aetna_image(tex.namespace, tex.texture_id)
+                .damascene_image(tex.namespace, tex.texture_id)
         });
 
         let (name, color) = if let Some(block) = stack.to_block_data() {
@@ -922,7 +923,7 @@ impl App {
                 .map(|entry| entry.name.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
             let [r, g, b] = entry.map(|entry| entry.color).unwrap_or([128, 128, 128]);
-            (name, Color::rgb(r, g, b))
+            (name, Color::srgb_u8(r, g, b))
         } else if let Some((entity_ns, entity_type)) = stack.spawn_egg_entity_key() {
             let entry = self.content_registry.entity_lookup(entity_ns, entity_type);
             let name = entry
@@ -931,7 +932,7 @@ impl App {
             let [r, g, b] = entry
                 .map(|entry| entry.base_color)
                 .unwrap_or([128, 128, 128]);
-            (name, Color::rgb(r, g, b))
+            (name, Color::srgb_u8(r, g, b))
         } else {
             let [r, g, b] = self
                 .content_registry
@@ -940,14 +941,14 @@ impl App {
                 self.content_registry
                     .item_name(stack.item.namespace, stack.item.item_type)
                     .to_string(),
-                Color::rgb(r, g, b),
+                Color::srgb_u8(r, g, b),
             )
         };
 
         (name, color, icon, stack.count)
     }
 
-    fn build_aetna_teleport_panel(&self) -> El {
+    fn build_damascene_teleport_panel(&self) -> El {
         let coord_rows = ["X", "Y", "Z", "W"]
             .into_iter()
             .enumerate()
@@ -956,9 +957,9 @@ impl App {
                 row([
                     text(label).width(Size::Fixed(24.0)),
                     text_input_with(
-                        &self.teleport_coords[i],
-                        &self.aetna_selection,
                         &key,
+                        &self.teleport_coords[i],
+                        &self.damascene_selection,
                         TextInputOpts::default().placeholder("0.0"),
                     )
                     .width(Size::Fixed(150.0)),
@@ -1043,7 +1044,7 @@ impl App {
                 settings_section(
                     "Players",
                     scroll(player_rows)
-                        .key("aetna_teleport_players_scroll")
+                        .key("damascene_teleport_players_scroll")
                         .height(Size::Fixed(120.0))
                         .width(Size::Fill(1.0)),
                 ),
@@ -1052,14 +1053,14 @@ impl App {
             .height(Size::Hug)
             .padding(tokens::SPACE_4)
             .gap(tokens::SPACE_3)
-            .fill(tokens::POPOVER.with_alpha(244))
+            .fill(tokens::POPOVER.with_alpha_u8(244))
             .stroke(tokens::BORDER)
             .radius(8.0)
             .shadow(tokens::SHADOW_LG)
             .block_pointer()
     }
 
-    fn build_aetna_dev_console_panel(&self) -> El {
+    fn build_damascene_dev_console_panel(&self) -> El {
         let log_lines: Vec<El> = self
             .dev_console_log
             .iter()
@@ -1093,14 +1094,14 @@ impl App {
                 .gap(tokens::SPACE_2)
                 .width(Size::Fill(1.0)),
                 scroll(log_lines)
-                    .key("aetna_dev_console_log_scroll")
+                    .key("damascene_dev_console_log_scroll")
                     .height(Size::Fixed(178.0))
                     .width(Size::Fill(1.0)),
                 row([
                     text_input_with(
-                        &self.dev_console_input,
-                        &self.aetna_selection,
                         DEV_CONSOLE_INPUT_KEY,
+                        &self.dev_console_input,
+                        &self.damascene_selection,
                         TextInputOpts::default().placeholder("e.g. /tp 0 8 0 0"),
                     )
                     .width(Size::Fill(1.0)),
@@ -1118,14 +1119,14 @@ impl App {
             .height(Size::Hug)
             .padding(tokens::SPACE_3)
             .gap(tokens::SPACE_2)
-            .fill(tokens::POPOVER.with_alpha(244))
+            .fill(tokens::POPOVER.with_alpha_u8(244))
             .stroke(tokens::BORDER)
             .radius(8.0)
             .shadow(tokens::SHADOW_LG)
             .block_pointer()
     }
 
-    fn build_aetna_block_gui_panel(&self) -> El {
+    fn build_damascene_block_gui_panel(&self) -> El {
         let Some(session) = &self.block_gui_session else {
             return column(std::iter::empty::<El>());
         };
@@ -1146,7 +1147,7 @@ impl App {
             for (row_index, row_slots) in session.slots[start..end].chunks(columns).enumerate() {
                 let cells = row_slots.iter().enumerate().map(|(slot_offset, slot)| {
                     let global_idx = start + row_index * columns + slot_offset;
-                    self.build_aetna_block_gui_slot(slot, global_idx)
+                    self.build_damascene_block_gui_slot(slot, global_idx)
                 });
                 body.push(row(cells).gap(tokens::SPACE_1).width(Size::Hug));
             }
@@ -1159,7 +1160,7 @@ impl App {
                 for (row_index, row_slots) in session.slots[player_start..].chunks(9).enumerate() {
                     let cells = row_slots.iter().enumerate().map(|(slot_offset, slot)| {
                         let global_idx = player_start + row_index * 9 + slot_offset;
-                        self.build_aetna_block_gui_slot(slot, global_idx)
+                        self.build_damascene_block_gui_slot(slot, global_idx)
                     });
                     body.push(row(cells).gap(tokens::SPACE_1).width(Size::Hug));
                 }
@@ -1190,7 +1191,7 @@ impl App {
                 .gap(tokens::SPACE_2)
                 .width(Size::Fill(1.0)),
                 scroll(body)
-                    .key("aetna_block_gui_slots_scroll")
+                    .key("damascene_block_gui_slots_scroll")
                     .height(Size::Fixed(420.0))
                     .width(Size::Fill(1.0)),
                 text(hint).caption().muted(),
@@ -1199,14 +1200,14 @@ impl App {
             .height(Size::Hug)
             .padding(tokens::SPACE_3)
             .gap(tokens::SPACE_2)
-            .fill(tokens::POPOVER.with_alpha(244))
+            .fill(tokens::POPOVER.with_alpha_u8(244))
             .stroke(tokens::BORDER)
             .radius(8.0)
             .shadow(tokens::SHADOW_LG)
             .block_pointer()
     }
 
-    fn build_aetna_block_gui_slot(
+    fn build_damascene_block_gui_slot(
         &self,
         slot: &polychora_plugin_api::gui_abi::ItemSlot,
         global_idx: usize,
@@ -1216,7 +1217,7 @@ impl App {
             .as_ref()
             .is_some_and(|session| session.held_slot == Some(global_idx as u32));
         let (name, color, icon) = if slot.is_empty() {
-            ("Empty".to_string(), Color::rgb(32, 34, 40), None)
+            ("Empty".to_string(), Color::srgb_u8(32, 34, 40), None)
         } else {
             let item = polychora::shared::protocol::Item {
                 namespace: slot.item_ns,
@@ -1227,7 +1228,7 @@ impl App {
             let icon = tex.and_then(|tex| {
                 self.material_icon_sheet
                     .as_ref()?
-                    .aetna_image(tex.namespace, tex.texture_id)
+                    .damascene_image(tex.namespace, tex.texture_id)
             });
             let [r, g, b] = self
                 .content_registry
@@ -1236,7 +1237,7 @@ impl App {
                 self.content_registry
                     .item_name(slot.item_ns, slot.item_type)
                     .to_string(),
-                Color::rgb(r, g, b),
+                Color::srgb_u8(r, g, b),
                 icon,
             )
         };
@@ -1253,9 +1254,9 @@ impl App {
         .width(Size::Fixed(72.0))
     }
 
-    fn build_aetna_pause_menu_panel(&self) -> El {
+    fn build_damascene_pause_menu_panel(&self) -> El {
         let body = if self.controls_dialog_open {
-            self.build_aetna_controls_panel()
+            self.build_damascene_controls_panel()
         } else {
             column([
                 tabs_list(
@@ -1263,8 +1264,8 @@ impl App {
                     &settings_page_token(self.settings_page),
                     SettingsPage::ALL.map(|page| (settings_page_token(page), page.label())),
                 ),
-                scroll([self.build_aetna_settings_page()])
-                    .key("aetna_pause_settings_scroll")
+                scroll([self.build_damascene_settings_page()])
+                    .key("damascene_pause_settings_scroll")
                     .height(Size::Fill(1.0))
                     .width(Size::Fill(1.0)),
             ])
@@ -1312,23 +1313,23 @@ impl App {
             .height(Size::Fixed(520.0))
             .padding(tokens::SPACE_4)
             .gap(tokens::SPACE_3)
-            .fill(tokens::POPOVER.with_alpha(244))
+            .fill(tokens::POPOVER.with_alpha_u8(244))
             .stroke(tokens::BORDER)
             .radius(8.0)
             .shadow(tokens::SHADOW_LG)
             .block_pointer()
     }
 
-    fn build_aetna_settings_page(&self) -> El {
+    fn build_damascene_settings_page(&self) -> El {
         match self.settings_page {
-            SettingsPage::Gameplay => self.build_aetna_gameplay_settings(),
-            SettingsPage::Rendering => self.build_aetna_rendering_settings(),
-            SettingsPage::Advanced => self.build_aetna_advanced_settings(),
-            SettingsPage::Debug => self.build_aetna_debug_settings(),
+            SettingsPage::Gameplay => self.build_damascene_gameplay_settings(),
+            SettingsPage::Rendering => self.build_damascene_rendering_settings(),
+            SettingsPage::Advanced => self.build_damascene_advanced_settings(),
+            SettingsPage::Debug => self.build_damascene_debug_settings(),
         }
     }
 
-    fn build_aetna_gameplay_settings(&self) -> El {
+    fn build_damascene_gameplay_settings(&self) -> El {
         let control_scheme_rows = tile_rows(
             control_scheme_options()
                 .map(|(scheme, token)| {
@@ -1419,7 +1420,7 @@ impl App {
         .width(Size::Fill(1.0))
     }
 
-    fn build_aetna_rendering_settings(&self) -> El {
+    fn build_damascene_rendering_settings(&self) -> El {
         column([
             settings_section(
                 "Projection",
@@ -1500,7 +1501,7 @@ impl App {
         .width(Size::Fill(1.0))
     }
 
-    fn build_aetna_advanced_settings(&self) -> El {
+    fn build_damascene_advanced_settings(&self) -> El {
         column([
             settings_section(
                 "Integral Sky + Emissive",
@@ -1561,7 +1562,7 @@ impl App {
         .width(Size::Fill(1.0))
     }
 
-    fn build_aetna_debug_settings(&self) -> El {
+    fn build_damascene_debug_settings(&self) -> El {
         column([
             settings_section(
                 "Region-Tree Bounds",
@@ -1695,7 +1696,7 @@ impl App {
         .width(Size::Fill(1.0))
     }
 
-    fn build_aetna_controls_panel(&self) -> El {
+    fn build_damascene_controls_panel(&self) -> El {
         scroll([
             controls_section(
                 "Movement",
@@ -1737,7 +1738,7 @@ impl App {
                 ],
             ),
         ])
-        .key("aetna_pause_controls_scroll")
+        .key("damascene_pause_controls_scroll")
         .height(Size::Fill(1.0))
         .width(Size::Fill(1.0))
     }
@@ -1753,8 +1754,8 @@ fn settings_section(title: &str, content: El) -> El {
         .height(Size::Hug)
         .padding(tokens::SPACE_3)
         .gap(tokens::SPACE_2)
-        .fill(tokens::CARD.with_alpha(170))
-        .stroke(tokens::BORDER.with_alpha(160))
+        .fill(tokens::CARD.with_alpha_u8(170))
+        .stroke(tokens::BORDER.with_alpha_u8(160))
         .radius(6.0)
 }
 
@@ -1783,7 +1784,7 @@ fn main_menu_panel(
         .padding(tokens::SPACE_5)
         .gap(tokens::SPACE_4)
         .align(Align::Center)
-        .fill(tokens::POPOVER.with_alpha(244))
+        .fill(tokens::POPOVER.with_alpha_u8(244))
         .stroke(tokens::BORDER)
         .radius(8.0)
         .shadow(tokens::SHADOW_LG)
@@ -1808,7 +1809,7 @@ fn main_menu_page_panel(title: &str, subtitle: &str, body: El, width: f32, heigh
         .height(height)
         .padding(tokens::SPACE_4)
         .gap(tokens::SPACE_3)
-        .fill(tokens::POPOVER.with_alpha(244))
+        .fill(tokens::POPOVER.with_alpha_u8(244))
         .stroke(tokens::BORDER)
         .radius(8.0)
         .shadow(tokens::SHADOW_LG)
@@ -1825,8 +1826,8 @@ fn main_menu_section(title: &str, body: El) -> El {
         .height(Size::Hug)
         .padding(tokens::SPACE_3)
         .gap(tokens::SPACE_2)
-        .fill(tokens::CARD.with_alpha(205))
-        .stroke(tokens::BORDER.with_alpha(170))
+        .fill(tokens::CARD.with_alpha_u8(205))
+        .stroke(tokens::BORDER.with_alpha_u8(170))
         .radius(6.0)
 }
 
@@ -1850,24 +1851,24 @@ fn main_menu_action_card(title: &str, description: &str, key: &str) -> El {
         .height(Size::Hug)
         .padding(tokens::SPACE_3)
         .gap(tokens::SPACE_3)
-        .fill(tokens::CARD.with_alpha(205))
-        .stroke(tokens::BORDER.with_alpha(170))
+        .fill(tokens::CARD.with_alpha_u8(205))
+        .stroke(tokens::BORDER.with_alpha_u8(170))
         .radius(6.0)
 }
 
 fn main_menu_input(
     label: &str,
     value: &str,
-    selection: &aetna_core::Selection,
+    selection: &damascene_core::Selection,
     key: &str,
     placeholder: &str,
 ) -> El {
     column([
         text(label).caption().muted(),
         text_input_with(
+            key,
             value,
             selection,
-            key,
             TextInputOpts::default().placeholder(placeholder),
         )
         .width(Size::Fill(1.0)),
@@ -1883,9 +1884,9 @@ fn main_menu_status(status: Option<&str>) -> El {
             .caption()
             .width(Size::Fill(1.0))
             .color(if is_error {
-                Color::rgb(255, 120, 120)
+                Color::srgb_u8(255, 120, 120)
             } else {
-                Color::rgb(130, 220, 150)
+                Color::srgb_u8(130, 220, 150)
             })
     } else {
         column(std::iter::empty::<El>())
@@ -1921,8 +1922,7 @@ fn setting_slider(label: &str, value_label: String, key: &str, value: f32) -> El
         ])
         .gap(1.0)
         .width(Size::Fixed(150.0)),
-        aetna_slider::slider(value, tokens::PRIMARY)
-            .key(key)
+        damascene_slider::slider(key, value)
             .height(Size::Fixed(24.0))
             .width(Size::Fill(1.0)),
     ])
@@ -2084,7 +2084,7 @@ fn placement_preview_from_token(token: &str) -> Option<PlacementPreviewMode> {
         .map(|(mode, _)| mode)
 }
 
-fn build_aetna_center_modal_shell(modal: El, roomy: bool) -> El {
+fn build_damascene_center_modal_shell(modal: El, roomy: bool) -> El {
     stack([modal]).fill_size().layout(move |cx| {
         let (measured_w, measured_h) = (cx.measure)(&cx.children[0]);
         let margin_x = 24.0_f32.min(cx.container.w * 0.08);
@@ -2112,7 +2112,7 @@ fn build_aetna_center_modal_shell(modal: El, roomy: bool) -> El {
     })
 }
 
-fn build_aetna_overlay_shell(
+fn build_damascene_overlay_shell(
     hotbar: El,
     orientation: El,
     waila: Option<El>,
@@ -2219,8 +2219,8 @@ fn build_aetna_overlay_shell(
     })
 }
 
-fn build_aetna_info_readout_panel(readout: &str) -> El {
-    if let Some(table) = build_aetna_vector_readout_table(readout) {
+fn build_damascene_info_readout_panel(readout: &str) -> El {
+    if let Some(table) = build_damascene_vector_readout_table(readout) {
         return table;
     }
 
@@ -2238,13 +2238,13 @@ fn build_aetna_info_readout_panel(readout: &str) -> El {
         .height(Size::Hug)
         .padding(tokens::SPACE_2)
         .gap(tokens::SPACE_1)
-        .fill(tokens::CARD.with_alpha(190))
-        .stroke(tokens::BORDER.with_alpha(150))
+        .fill(tokens::CARD.with_alpha_u8(190))
+        .stroke(tokens::BORDER.with_alpha_u8(150))
         .radius(6.0)
         .shadow(tokens::SHADOW_SM)
 }
 
-fn build_aetna_vector_readout_table(readout: &str) -> Option<El> {
+fn build_damascene_vector_readout_table(readout: &str) -> Option<El> {
     let mut lines = readout.lines().filter(|line| !line.trim().is_empty());
     let header_line = lines.next()?;
     let headers = split_vector_table_line(header_line)?;
@@ -2303,8 +2303,8 @@ fn build_aetna_vector_readout_table(readout: &str) -> Option<El> {
             .height(Size::Hug)
             .padding(tokens::SPACE_2)
             .gap(tokens::SPACE_1)
-            .fill(tokens::CARD.with_alpha(190))
-            .stroke(tokens::BORDER.with_alpha(150))
+            .fill(tokens::CARD.with_alpha_u8(190))
+            .stroke(tokens::BORDER.with_alpha_u8(150))
             .radius(6.0)
             .shadow(tokens::SHADOW_SM),
     )
@@ -2338,13 +2338,13 @@ fn inventory_item_tile(
     selected: bool,
 ) -> El {
     let icon = if let Some(icon) = icon {
-        aetna_image(icon)
+        damascene_image(icon)
             .image_fit(ImageFit::Contain)
             .width(Size::Fixed(42.0))
             .height(Size::Fixed(28.0))
             .radius(4.0)
     } else {
-        let color = if color == Color::rgb(220, 220, 220) {
+        let color = if color == Color::srgb_u8(220, 220, 220) {
             tokens::MUTED
         } else {
             color
@@ -2391,17 +2391,17 @@ fn inventory_item_tile(
         .padding(5.0)
         .gap(2.0)
         .align(Align::Center)
-        .fill(tokens::CARD.with_alpha(205))
+        .fill(tokens::CARD.with_alpha_u8(205))
         .stroke(if selected {
             tokens::WARNING
         } else {
-            tokens::BORDER.with_alpha(170)
+            tokens::BORDER.with_alpha_u8(170)
         })
         .stroke_width(if selected { 2.0 } else { 1.0 })
         .radius(6.0)
 }
 
-fn build_aetna_hotbar_from_slots(slots: impl IntoIterator<Item = El>) -> El {
+fn build_damascene_hotbar_from_slots(slots: impl IntoIterator<Item = El>) -> El {
     row(slots)
         .gap(tokens::SPACE_2)
         .align(Align::Center)
@@ -2409,27 +2409,28 @@ fn build_aetna_hotbar_from_slots(slots: impl IntoIterator<Item = El>) -> El {
         .width(Size::Hug)
 }
 
-fn build_aetna_hotbar_slot_for_stack(
+fn build_damascene_hotbar_slot_for_stack(
     content_registry: &ContentRegistry,
     material_icon_sheet: Option<&MaterialIconSheet>,
     index: usize,
     stack: &Option<ItemStack>,
     selected: bool,
 ) -> El {
-    let (name, count, color, icon) = stack
+    let (name, count, scale_label, color, icon) = stack
         .as_ref()
         .map(|stack| {
             let tex = content_registry.resolve_item_thumbnail_texture(&stack.item);
             let icon =
-                tex.and_then(|tex| material_icon_sheet?.aetna_image(tex.namespace, tex.texture_id));
+                tex.and_then(|tex| material_icon_sheet?.damascene_image(tex.namespace, tex.texture_id));
 
-            let (name, color) = if let Some(block) = stack.to_block_data() {
+            let (name, scale_label, color) = if let Some(block) = stack.to_block_data() {
                 let entry = content_registry.block_entry(block.namespace, block.block_type);
                 let name = entry
                     .map(|entry| entry.name.clone())
                     .unwrap_or_else(|| "Unknown".to_string());
+                let scale_label = (block.scale_exp != 0).then(|| format!("s{}", block.scale_exp));
                 let [r, g, b] = entry.map(|entry| entry.color).unwrap_or([128, 128, 128]);
-                (name, Color::rgb(r, g, b))
+                (name, scale_label, Color::srgb_u8(r, g, b))
             } else if let Some((entity_ns, entity_type)) = stack.spawn_egg_entity_key() {
                 let entry = content_registry.entity_lookup(entity_ns, entity_type);
                 let name = entry
@@ -2438,7 +2439,7 @@ fn build_aetna_hotbar_slot_for_stack(
                 let [r, g, b] = entry
                     .map(|entry| entry.base_color)
                     .unwrap_or([128, 128, 128]);
-                (name, Color::rgb(r, g, b))
+                (name, None, Color::srgb_u8(r, g, b))
             } else {
                 let [r, g, b] =
                     content_registry.item_color(stack.item.namespace, stack.item.item_type);
@@ -2446,19 +2447,21 @@ fn build_aetna_hotbar_slot_for_stack(
                     content_registry
                         .item_name(stack.item.namespace, stack.item.item_type)
                         .to_string(),
-                    Color::rgb(r, g, b),
+                    None,
+                    Color::srgb_u8(r, g, b),
                 )
             };
 
-            (name, stack.count, color, icon)
+            (name, stack.count, scale_label, color, icon)
         })
-        .unwrap_or_else(|| ("Empty".to_string(), 0, Color::rgb(44, 48, 58), None));
+        .unwrap_or_else(|| ("Empty".to_string(), 0, None, Color::srgb_u8(44, 48, 58), None));
 
-    build_aetna_hotbar_slot_view(
+    build_damascene_hotbar_slot_view(
         index,
         HotbarSlotView {
             name,
             count,
+            scale_label,
             color,
             icon,
             selected,
@@ -2467,10 +2470,11 @@ fn build_aetna_hotbar_slot_for_stack(
 }
 
 #[track_caller]
-fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
+fn build_damascene_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
     let label = short_label(slot.name);
+    let scale_label = slot.scale_label.unwrap_or_default();
     let icon = if let Some(icon) = slot.icon {
-        aetna_image(icon)
+        damascene_image(icon)
             .image_fit(ImageFit::Contain)
             .width(Size::Fixed(44.0))
             .height(Size::Fixed(30.0))
@@ -2483,7 +2487,7 @@ fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
             .radius(4.0)
     };
 
-    El::new(Kind::Custom("polychora_hotbar_slot"))
+    let slot_body = El::new(Kind::Custom("polychora_hotbar_slot_body"))
         .at_loc(Location::caller())
         .style_profile(StyleProfile::Surface)
         .surface_role(SurfaceRole::Panel)
@@ -2501,29 +2505,59 @@ fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
             .width(Size::Fill(1.0))
             .align(Align::Center),
             icon,
-            text(label)
-                .caption()
-                .center_text()
-                .ellipsis()
-                .max_lines(1)
-                .width(Size::Fill(1.0)),
+            row([
+                text(scale_label)
+                    .caption()
+                    .color(Color::srgb_u8(140, 200, 255))
+                    .max_lines(1)
+                    .width(Size::Fixed(22.0)),
+                text(label)
+                    .caption()
+                    .center_text()
+                    .ellipsis()
+                    .max_lines(1)
+                    .width(Size::Fill(1.0)),
+                column(std::iter::empty::<El>()).width(Size::Fixed(22.0)),
+            ])
+            .width(Size::Fill(1.0))
+            .align(Align::Center),
         ])
-        .key(format!("aetna_hotbar_slot_{index}"))
-        .focusable()
-        .cursor(Cursor::Pointer)
         .width(Size::Fixed(80.0))
         .height(Size::Fixed(82.0))
         .padding(6.0)
         .gap(2.0)
         .align(Align::Center)
-        .fill(tokens::CARD.with_alpha(205))
+        .fill(tokens::CARD.with_alpha_u8(205))
+        .stroke(if slot.selected {
+            tokens::WARNING.with_alpha_u8(155)
+        } else {
+            tokens::BORDER.with_alpha_u8(180)
+        })
+        .stroke_width(1.0)
+        .radius(6.0);
+
+    El::new(Kind::Custom("polychora_hotbar_slot"))
+        .at_loc(Location::caller())
+        .style_profile(StyleProfile::Surface)
+        .surface_role(SurfaceRole::Panel)
+        .axis(Axis::Column)
+        .children([slot_body])
+        .key(format!("damascene_hotbar_slot_{index}"))
+        .focusable()
+        .cursor(Cursor::Pointer)
+        .width(Size::Fixed(80.0))
+        .height(Size::Fixed(82.0))
+        .padding(0.0)
+        .align(Align::Center)
+        .fill(Color::srgb_u8a(0, 0, 0, 0))
         .stroke(if slot.selected {
             tokens::WARNING
         } else {
-            tokens::BORDER.with_alpha(180)
+            Color::srgb_u8a(0, 0, 0, 0)
         })
-        .stroke_width(if slot.selected { 2.5 } else { 1.0 })
-        .radius(6.0)
+        .stroke_width(if slot.selected { 2.5 } else { 0.0 })
+        .paint_overflow(Sides::all(4.0))
+        .radius(8.0)
         .shadow(if slot.selected {
             tokens::SHADOW_MD
         } else {
@@ -2532,7 +2566,7 @@ fn build_aetna_hotbar_slot_view(index: usize, slot: HotbarSlotView) -> El {
 }
 
 #[track_caller]
-fn build_aetna_orientation_controls_view(label: String, is_rotated: bool) -> El {
+fn build_damascene_orientation_controls_view(label: String, is_rotated: bool) -> El {
     El::new(Kind::Custom("polychora_orientation_controls"))
         .at_loc(Location::caller())
         .style_profile(StyleProfile::Surface)
@@ -2567,7 +2601,7 @@ fn build_aetna_orientation_controls_view(label: String, is_rotated: bool) -> El 
                     .center_text()
                     .width(Size::Fixed(60.0))
                     .color(if is_rotated {
-                        Color::rgb(210, 196, 255)
+                        Color::srgb_u8(210, 196, 255)
                     } else {
                         tokens::MUTED_FOREGROUND
                     }),
@@ -2580,11 +2614,11 @@ fn build_aetna_orientation_controls_view(label: String, is_rotated: bool) -> El 
         .gap(tokens::SPACE_2)
         .align(Align::Center)
         .fill(if is_rotated {
-            Color::rgba(42, 34, 76, 210)
+            Color::srgb_u8a(42, 34, 76, 210)
         } else {
-            tokens::CARD.with_alpha(205)
+            tokens::CARD.with_alpha_u8(205)
         })
-        .stroke(tokens::BORDER.with_alpha(170))
+        .stroke(tokens::BORDER.with_alpha_u8(170))
         .radius(6.0)
         .shadow(tokens::SHADOW_MD)
 }
@@ -2636,11 +2670,11 @@ fn waila_panel(
 }
 
 impl App {
-    pub(super) fn handle_aetna_ui_events(&mut self, events: Vec<aetna_core::UiEvent>) -> bool {
+    pub(super) fn handle_damascene_ui_events(&mut self, events: Vec<damascene_core::UiEvent>) -> bool {
         let mut consumed = false;
         for event in events {
             if let Some(selection) = event.selection.clone() {
-                self.aetna_selection = selection;
+                self.damascene_selection = selection;
                 consumed = true;
             }
             let Some(route) = event.route() else {
@@ -2684,7 +2718,7 @@ impl App {
                         MainMenuPage::Root => {}
                     }
                 }
-            } else if let Some(world_index) = aetna_main_menu_world_index(route) {
+            } else if let Some(world_index) = damascene_main_menu_world_index(route) {
                 consumed = true;
                 if event.is_click_or_activate(route)
                     && world_index < self.main_menu_world_files.len()
@@ -2698,7 +2732,7 @@ impl App {
                         .main_menu_selected_world
                         .and_then(|idx| self.main_menu_world_files.get(idx))
                     {
-                        self.handle_aetna_main_menu_transition(MainMenuTransition::LoadWorld(
+                        self.handle_damascene_main_menu_transition(MainMenuTransition::LoadWorld(
                             entry.path.clone(),
                         ));
                     }
@@ -2706,7 +2740,7 @@ impl App {
             } else if route == MAIN_MENU_CREATE_WORLD_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.handle_aetna_main_menu_transition(MainMenuTransition::NewWorld(
+                    self.handle_damascene_main_menu_transition(MainMenuTransition::NewWorld(
                         self.main_menu_new_world_generator,
                     ));
                 }
@@ -2725,30 +2759,30 @@ impl App {
                 consumed = true;
             } else if route == MAIN_MENU_PLAYER_NAME_KEY {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.main_menu_player_name,
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == MAIN_MENU_SERVER_ADDRESS_KEY {
                 consumed = true;
-                if is_aetna_enter_key(&event) {
-                    self.handle_aetna_main_menu_transition(MainMenuTransition::ConnectMultiplayer(
+                if is_damascene_enter_key(&event) {
+                    self.handle_damascene_main_menu_transition(MainMenuTransition::ConnectMultiplayer(
                         self.main_menu_server_address.clone(),
                     ));
                 } else {
-                    aetna_text_input::apply_event(
+                    damascene_text_input::apply_event(
                         &mut self.main_menu_server_address,
-                        &mut self.aetna_selection,
-                        route,
+                        &mut self.damascene_selection,
                         &event,
+                        route,
                     );
                 }
             } else if route == MAIN_MENU_CONNECT_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.handle_aetna_main_menu_transition(MainMenuTransition::ConnectMultiplayer(
+                    self.handle_damascene_main_menu_transition(MainMenuTransition::ConnectMultiplayer(
                         self.main_menu_server_address.clone(),
                     ));
                 }
@@ -2764,35 +2798,35 @@ impl App {
                 }
             } else if route == MAIN_MENU_TRIM_INPUT_KEY {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.main_menu_migrate_trim_input,
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == MAIN_MENU_TRIM_OUTPUT_KEY {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.main_menu_migrate_trim_output,
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == MAIN_MENU_TRIM_MIN_KEY {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.main_menu_migrate_trim_keep_min,
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == MAIN_MENU_TRIM_MAX_KEY {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.main_menu_migrate_trim_keep_max,
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == MAIN_MENU_TRIM_RUN_KEY {
                 consumed = true;
@@ -2801,19 +2835,19 @@ impl App {
                 }
             } else if route == MAIN_MENU_V3_INPUT_KEY {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.main_menu_migrate_v3_input,
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == MAIN_MENU_V4_OUTPUT_KEY {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.main_menu_migrate_v3_output,
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == MAIN_MENU_V3_OVERWRITE_KEY {
                 consumed = true;
@@ -2827,20 +2861,20 @@ impl App {
                 }
             } else if route == DEV_CONSOLE_INPUT_KEY {
                 consumed = true;
-                if is_aetna_enter_key(&event) {
-                    self.submit_aetna_dev_console_input();
+                if is_damascene_enter_key(&event) {
+                    self.submit_damascene_dev_console_input();
                 } else {
-                    aetna_text_input::apply_event(
+                    damascene_text_input::apply_event(
                         &mut self.dev_console_input,
-                        &mut self.aetna_selection,
-                        route,
+                        &mut self.damascene_selection,
                         &event,
+                        route,
                     );
                 }
             } else if route == DEV_CONSOLE_RUN_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.submit_aetna_dev_console_input();
+                    self.submit_damascene_dev_console_input();
                 }
             } else if route == DEV_CONSOLE_CLOSE_KEY {
                 consumed = true;
@@ -2854,47 +2888,47 @@ impl App {
                         self.close_block_gui(&window);
                     }
                 }
-            } else if let Some(slot_index) = aetna_block_gui_slot_index(route) {
+            } else if let Some(slot_index) = damascene_block_gui_slot_index(route) {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.handle_aetna_block_gui_slot_click(slot_index);
+                    self.handle_damascene_block_gui_slot_click(slot_index);
                 }
-            } else if let Some(index) = aetna_teleport_field_index(route) {
+            } else if let Some(index) = damascene_teleport_field_index(route) {
                 consumed = true;
-                aetna_text_input::apply_event(
+                damascene_text_input::apply_event(
                     &mut self.teleport_coords[index],
-                    &mut self.aetna_selection,
-                    route,
+                    &mut self.damascene_selection,
                     &event,
+                    route,
                 );
             } else if route == TELEPORT_APPLY_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    if let Some(pos) = self.parse_aetna_teleport_coords() {
-                        self.apply_aetna_teleport_target(pos);
+                    if let Some(pos) = self.parse_damascene_teleport_coords() {
+                        self.apply_damascene_teleport_target(pos);
                     }
                 }
             } else if route == TELEPORT_ORIGIN_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.apply_aetna_teleport_target([0.0, 0.0, 0.0, 0.0]);
+                    self.apply_damascene_teleport_target([0.0, 0.0, 0.0, 0.0]);
                 }
             } else if route == TELEPORT_CLOSE_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.close_aetna_teleport_dialog();
+                    self.close_damascene_teleport_dialog();
                 }
-            } else if let Some(entity_id) = aetna_teleport_player_id(route) {
+            } else if let Some(entity_id) = damascene_teleport_player_id(route) {
                 consumed = true;
                 if event.is_click_or_activate(route) {
                     if let Some(player) = self.remote_players.get(&entity_id) {
-                        self.apply_aetna_teleport_target(player.position);
+                        self.apply_damascene_teleport_target(player.position);
                     }
                 }
             } else if route == PAUSE_RESUME_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.resume_aetna_pause_menu();
+                    self.resume_damascene_pause_menu();
                 }
             } else if tabs::apply_event(
                 &mut self.controls_dialog_open,
@@ -3202,7 +3236,7 @@ impl App {
                     0.02,
                     0.10,
                 );
-            } else if let Some(slot_index) = aetna_hotbar_slot_index(route) {
+            } else if let Some(slot_index) = damascene_hotbar_slot_index(route) {
                 consumed = true;
                 if event.is_click_or_activate(route) {
                     self.hotbar_selected_index = slot_index;
@@ -3213,7 +3247,7 @@ impl App {
             } else if route == INVENTORY_CLOSE_KEY {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.close_aetna_inventory();
+                    self.close_damascene_inventory();
                 }
             } else if tabs::apply_event(
                 &mut self.inventory_tab,
@@ -3223,7 +3257,7 @@ impl App {
             ) {
                 consumed = true;
             } else if let Some((namespace, block_type)) =
-                aetna_inventory_key_pair(route, INVENTORY_BLOCK_KEY_PREFIX)
+                damascene_inventory_key_pair(route, INVENTORY_BLOCK_KEY_PREFIX)
             {
                 consumed = true;
                 if event.is_click_or_activate(route) {
@@ -3237,7 +3271,7 @@ impl App {
                     );
                 }
             } else if let Some((namespace, entity_type)) =
-                aetna_inventory_key_pair(route, INVENTORY_ENTITY_KEY_PREFIX)
+                damascene_inventory_key_pair(route, INVENTORY_ENTITY_KEY_PREFIX)
             {
                 consumed = true;
                 if event.is_click_or_activate(route) {
@@ -3250,7 +3284,7 @@ impl App {
                         self.inventory.hotbar_slot(self.hotbar_selected_index),
                     );
                 }
-            } else if let Some(slot_index) = aetna_inventory_slot_index(route) {
+            } else if let Some(slot_index) = damascene_inventory_slot_index(route) {
                 consumed = true;
                 if event.is_click_or_activate(route) {
                     if slot_index != self.hotbar_selected_index {
@@ -3278,27 +3312,27 @@ impl App {
             } else if let Some(action) = route.strip_prefix(ORIENTATION_KEY_PREFIX) {
                 consumed = true;
                 if event.is_click_or_activate(route) {
-                    self.apply_aetna_orientation_action(action);
+                    self.apply_damascene_orientation_action(action);
                 }
             }
         }
         consumed
     }
 
-    fn handle_aetna_main_menu_transition(&mut self, transition: MainMenuTransition) {
+    fn handle_damascene_main_menu_transition(&mut self, transition: MainMenuTransition) {
         if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
             self.handle_main_menu_transition(transition, &window);
         }
     }
 
-    fn close_aetna_inventory(&mut self) {
+    fn close_damascene_inventory(&mut self) {
         self.inventory_open = false;
         if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
             self.grab_mouse(&window);
         }
     }
 
-    fn resume_aetna_pause_menu(&mut self) {
+    fn resume_damascene_pause_menu(&mut self) {
         self.menu_open = false;
         self.controls_dialog_open = false;
         if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
@@ -3306,7 +3340,7 @@ impl App {
         }
     }
 
-    fn parse_aetna_teleport_coords(&self) -> Option<[f32; 4]> {
+    fn parse_damascene_teleport_coords(&self) -> Option<[f32; 4]> {
         Some([
             self.teleport_coords[0].parse().ok()?,
             self.teleport_coords[1].parse().ok()?,
@@ -3315,7 +3349,7 @@ impl App {
         ])
     }
 
-    fn apply_aetna_teleport_target(&mut self, pos: [f32; 4]) {
+    fn apply_damascene_teleport_target(&mut self, pos: [f32; 4]) {
         self.camera.position = pos;
         self.teleport_dialog_open = false;
         if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
@@ -3327,40 +3361,40 @@ impl App {
         );
     }
 
-    fn close_aetna_teleport_dialog(&mut self) {
+    fn close_damascene_teleport_dialog(&mut self) {
         self.teleport_dialog_open = false;
         if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
             self.grab_mouse(&window);
         }
     }
 
-    pub(super) fn focus_aetna_dev_console_input(&mut self) {
-        self.aetna_selection =
-            aetna_core::Selection::caret(DEV_CONSOLE_INPUT_KEY, self.dev_console_input.len());
+    pub(super) fn focus_damascene_dev_console_input(&mut self) {
+        self.damascene_selection =
+            damascene_core::Selection::caret(DEV_CONSOLE_INPUT_KEY, self.dev_console_input.len());
     }
 
-    pub(super) fn handle_aetna_dev_console_key_fallback(
+    pub(super) fn handle_damascene_dev_console_key_fallback(
         &mut self,
-        key: Option<aetna_core::UiKey>,
+        key: Option<damascene_core::UiKey>,
         text: Option<String>,
-        modifiers: aetna_core::KeyModifiers,
+        modifiers: damascene_core::KeyModifiers,
         _repeat: bool,
     ) -> bool {
         if !self.dev_console_open {
             return false;
         }
 
-        if !self.aetna_selection.is_within(DEV_CONSOLE_INPUT_KEY) {
-            self.focus_aetna_dev_console_input();
+        if !self.damascene_selection.is_within(DEV_CONSOLE_INPUT_KEY) {
+            self.focus_damascene_dev_console_input();
         }
 
-        if matches!(key, Some(aetna_core::UiKey::Enter)) {
-            self.submit_aetna_dev_console_input();
+        if matches!(key, Some(damascene_core::UiKey::Enter)) {
+            self.submit_damascene_dev_console_input();
             return true;
         }
-        if matches!(key, Some(aetna_core::UiKey::Backspace)) {
+        if matches!(key, Some(damascene_core::UiKey::Backspace)) {
             self.dev_console_input.pop();
-            self.focus_aetna_dev_console_input();
+            self.focus_damascene_dev_console_input();
             return true;
         }
 
@@ -3373,21 +3407,21 @@ impl App {
         let filtered: String = text.chars().filter(|ch| !ch.is_control()).collect();
         if !filtered.is_empty() {
             self.dev_console_input.push_str(&filtered);
-            self.focus_aetna_dev_console_input();
+            self.focus_damascene_dev_console_input();
         }
         true
     }
 
-    fn submit_aetna_dev_console_input(&mut self) {
+    fn submit_damascene_dev_console_input(&mut self) {
         let command = self.dev_console_input.trim().to_string();
         self.dev_console_input.clear();
         if !command.is_empty() {
             self.execute_dev_console_command(&command);
         }
-        self.focus_aetna_dev_console_input();
+        self.focus_damascene_dev_console_input();
     }
 
-    fn handle_aetna_block_gui_slot_click(&mut self, slot_idx: u32) {
+    fn handle_damascene_block_gui_slot_click(&mut self, slot_idx: u32) {
         let Some(held_idx) = self
             .block_gui_session
             .as_ref()
@@ -3439,7 +3473,7 @@ impl App {
         }
     }
 
-    fn apply_aetna_orientation_action(&mut self, action: &str) {
+    fn apply_damascene_orientation_action(&mut self, action: &str) {
         use polychora::shared::voxel::TesseractOrientation;
 
         self.placement_orientation = match action {
@@ -3457,7 +3491,7 @@ impl App {
 
 fn apply_slider_to_f32(
     value: &mut f32,
-    event: &aetna_core::UiEvent,
+    event: &damascene_core::UiEvent,
     key: &str,
     min: f32,
     max: f32,
@@ -3465,7 +3499,7 @@ fn apply_slider_to_f32(
     page_step: f32,
 ) -> bool {
     let mut normalized = normalize_range(*value, min, max);
-    if aetna_slider::apply_input(&mut normalized, event, key, step, page_step) {
+    if damascene_slider::apply_event(&mut normalized, event, key, step, page_step) {
         *value = denormalize_range(normalized, min, max);
         true
     } else {
@@ -3475,7 +3509,7 @@ fn apply_slider_to_f32(
 
 fn apply_slider_to_u32(
     value: &mut u32,
-    event: &aetna_core::UiEvent,
+    event: &damascene_core::UiEvent,
     key: &str,
     min: u32,
     max: u32,
@@ -3483,7 +3517,7 @@ fn apply_slider_to_u32(
     page_step: f32,
 ) -> bool {
     let mut normalized = normalize_range(*value as f32, min as f32, max as f32);
-    if aetna_slider::apply_input(&mut normalized, event, key, step, page_step) {
+    if damascene_slider::apply_event(&mut normalized, event, key, step, page_step) {
         *value = denormalize_range(normalized, min as f32, max as f32).round() as u32;
         true
     } else {
@@ -3493,7 +3527,7 @@ fn apply_slider_to_u32(
 
 fn apply_slider_to_usize(
     value: &mut usize,
-    event: &aetna_core::UiEvent,
+    event: &damascene_core::UiEvent,
     key: &str,
     min: usize,
     max: usize,
@@ -3501,7 +3535,7 @@ fn apply_slider_to_usize(
     page_step: f32,
 ) -> bool {
     let mut normalized = normalize_range(*value as f32, min as f32, max as f32);
-    if aetna_slider::apply_input(&mut normalized, event, key, step, page_step) {
+    if damascene_slider::apply_event(&mut normalized, event, key, step, page_step) {
         *value = denormalize_range(normalized, min as f32, max as f32).round() as usize;
         true
     } else {
@@ -3509,45 +3543,45 @@ fn apply_slider_to_usize(
     }
 }
 
-fn is_aetna_enter_key(event: &aetna_core::UiEvent) -> bool {
+fn is_damascene_enter_key(event: &damascene_core::UiEvent) -> bool {
     event.kind == UiEventKind::KeyDown
         && event
             .key_press
             .as_ref()
-            .is_some_and(|key_press| matches!(key_press.key, aetna_core::UiKey::Enter))
+            .is_some_and(|key_press| matches!(key_press.key, damascene_core::UiKey::Enter))
 }
 
-fn aetna_hotbar_slot_index(route: &str) -> Option<usize> {
+fn damascene_hotbar_slot_index(route: &str) -> Option<usize> {
     let suffix = route.strip_prefix(HOTBAR_SLOT_KEY_PREFIX)?;
     let index = suffix.parse::<usize>().ok()?;
     (index < 9).then_some(index)
 }
 
-fn aetna_main_menu_world_index(route: &str) -> Option<usize> {
+fn damascene_main_menu_world_index(route: &str) -> Option<usize> {
     route.strip_prefix(MAIN_MENU_WORLD_KEY_PREFIX)?.parse().ok()
 }
 
-fn aetna_inventory_slot_index(route: &str) -> Option<usize> {
+fn damascene_inventory_slot_index(route: &str) -> Option<usize> {
     let suffix = route.strip_prefix(INVENTORY_SLOT_KEY_PREFIX)?;
     let index = suffix.parse::<usize>().ok()?;
     (index < polychora::shared::inventory::INVENTORY_SIZE).then_some(index)
 }
 
-fn aetna_teleport_field_index(route: &str) -> Option<usize> {
+fn damascene_teleport_field_index(route: &str) -> Option<usize> {
     let suffix = route.strip_prefix(TELEPORT_FIELD_KEY_PREFIX)?;
     let index = suffix.parse::<usize>().ok()?;
     (index < 4).then_some(index)
 }
 
-fn aetna_teleport_player_id(route: &str) -> Option<u64> {
+fn damascene_teleport_player_id(route: &str) -> Option<u64> {
     route.strip_prefix(TELEPORT_PLAYER_KEY_PREFIX)?.parse().ok()
 }
 
-fn aetna_block_gui_slot_index(route: &str) -> Option<u32> {
+fn damascene_block_gui_slot_index(route: &str) -> Option<u32> {
     route.strip_prefix(BLOCK_GUI_SLOT_KEY_PREFIX)?.parse().ok()
 }
 
-fn aetna_inventory_key_pair(route: &str, prefix: &str) -> Option<(u32, u32)> {
+fn damascene_inventory_key_pair(route: &str, prefix: &str) -> Option<(u32, u32)> {
     let suffix = route.strip_prefix(prefix)?;
     let (namespace, value) = suffix.split_once('_')?;
     Some((namespace.parse().ok()?, value.parse().ok()?))

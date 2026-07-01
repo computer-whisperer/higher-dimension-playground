@@ -138,7 +138,7 @@ pub struct RenderOptions {
     pub hud_target_hit_voxel: Option<[i32; 4]>,
     pub hud_target_hit_face: Option<[i32; 4]>,
     pub hud_player_tags: Vec<HudPlayerTag>,
-    pub aetna_ui: Option<aetna_core::El>,
+    pub damascene_ui: Option<damascene_core::El>,
 }
 
 impl Default for RenderOptions {
@@ -179,7 +179,7 @@ impl Default for RenderOptions {
             hud_target_hit_voxel: None,
             hud_target_hit_face: None,
             hud_player_tags: Vec::new(),
-            aetna_ui: None,
+            damascene_ui: None,
         }
     }
 }

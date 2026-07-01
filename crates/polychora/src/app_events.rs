@@ -75,9 +75,9 @@ impl ApplicationHandler for App {
                 );
             }
         }
-        if self.args.aetna_bundle_dump {
-            if let Err(error) = self.dump_aetna_overlay_bundle() {
-                eprintln!("Failed to dump Aetna overlay bundles: {error}");
+        if self.args.damascene_bundle_dump {
+            if let Err(error) = self.dump_damascene_overlay_bundle() {
+                eprintln!("Failed to dump Damascene overlay bundles: {error}");
             }
             event_loop.exit();
             return;
@@ -99,29 +99,29 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let window = self.rcx.as_ref().and_then(|rcx| rcx.window.clone());
-        let aetna_inventory_open =
+        let damascene_inventory_open =
             self.app_state == AppState::Playing && self.inventory_open && !self.args.no_hud;
-        let aetna_pause_open =
+        let damascene_pause_open =
             self.app_state == AppState::Playing && self.menu_open && !self.args.no_hud;
-        let aetna_teleport_open =
+        let damascene_teleport_open =
             self.app_state == AppState::Playing && self.teleport_dialog_open && !self.args.no_hud;
-        let aetna_dev_console_open =
+        let damascene_dev_console_open =
             self.app_state == AppState::Playing && self.dev_console_open && !self.args.no_hud;
-        let aetna_block_gui_open = self.app_state == AppState::Playing
+        let damascene_block_gui_open = self.app_state == AppState::Playing
             && self.block_gui_session.is_some()
             && !self.args.no_hud;
-        let aetna_main_menu_open = self.app_state == AppState::MainMenu && !self.args.no_hud;
+        let damascene_main_menu_open = self.app_state == AppState::MainMenu && !self.args.no_hud;
         let perf_suite_input_locked = self.perf_suite_active();
-        let route_aetna_overlay = !self.args.no_hud
+        let route_damascene_overlay = !self.args.no_hud
             && !perf_suite_input_locked
-            && (aetna_main_menu_open
+            && (damascene_main_menu_open
                 || (self.app_state == AppState::Playing
                     && !self.mouse_grabbed
-                    && (aetna_pause_open
-                        || aetna_teleport_open
-                        || aetna_dev_console_open
-                        || aetna_block_gui_open
-                        || aetna_inventory_open
+                    && (damascene_pause_open
+                        || damascene_teleport_open
+                        || damascene_dev_console_open
+                        || damascene_block_gui_open
+                        || damascene_inventory_open
                         || !self.inventory_open)));
 
         match event {
@@ -204,25 +204,25 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if route_aetna_overlay && event.state.is_pressed() {
-                    if let Some(key) = aetna_ui_key(&event) {
+                if route_damascene_overlay && event.state.is_pressed() {
+                    if let Some(key) = damascene_ui_key(&event) {
                         let mut events = self
                             .rcx
                             .as_mut()
                             .map(|rcx| {
-                                rcx.aetna_key_down(key.clone(), self.aetna_modifiers, event.repeat)
+                                rcx.damascene_key_down(key.clone(), self.damascene_modifiers, event.repeat)
                             })
                             .unwrap_or_default();
                         if let Some(text) = event.text.as_ref() {
                             if let Some(text_event) = self
                                 .rcx
                                 .as_mut()
-                                .and_then(|rcx| rcx.aetna_text_input(text.to_string()))
+                                .and_then(|rcx| rcx.damascene_text_input(text.to_string()))
                             {
                                 events.push(text_event);
                             }
                         }
-                        let consumed = self.handle_aetna_ui_events(events);
+                        let consumed = self.handle_damascene_ui_events(events);
                         if consumed {
                             if let Some(window) = window.as_ref() {
                                 window.request_redraw();
@@ -230,11 +230,11 @@ impl ApplicationHandler for App {
                             return;
                         }
 
-                        if aetna_dev_console_open
-                            && self.handle_aetna_dev_console_key_fallback(
+                        if damascene_dev_console_open
+                            && self.handle_damascene_dev_console_key_fallback(
                                 Some(key),
                                 event.text.as_ref().map(ToString::to_string),
-                                self.aetna_modifiers,
+                                self.damascene_modifiers,
                                 event.repeat,
                             )
                         {
@@ -251,19 +251,19 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if route_aetna_overlay {
+                if route_damascene_overlay {
                     let scale = window
                         .as_ref()
                         .map(|window| window.scale_factor() as f32)
                         .unwrap_or(1.0);
                     let point = (position.x as f32 / scale, position.y as f32 / scale);
-                    self.aetna_last_pointer = Some(point);
+                    self.damascene_last_pointer = Some(point);
                     let (needs_redraw, events) = self
                         .rcx
                         .as_mut()
-                        .map(|rcx| rcx.aetna_pointer_moved(point.0, point.1))
+                        .map(|rcx| rcx.damascene_pointer_moved(point.0, point.1))
                         .unwrap_or_default();
-                    let consumed = self.handle_aetna_ui_events(events);
+                    let consumed = self.handle_damascene_ui_events(events);
                     if needs_redraw || consumed {
                         if let Some(window) = window.as_ref() {
                             window.request_redraw();
@@ -272,10 +272,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
-                self.aetna_last_pointer = None;
-                if route_aetna_overlay {
+                self.damascene_last_pointer = None;
+                if route_damascene_overlay {
                     if let Some(rcx) = self.rcx.as_mut() {
-                        rcx.aetna_pointer_left();
+                        rcx.damascene_pointer_left();
                     }
                     if let Some(window) = window.as_ref() {
                         window.request_redraw();
@@ -283,9 +283,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.aetna_modifiers = aetna_key_modifiers(modifiers.state());
+                self.damascene_modifiers = damascene_key_modifiers(modifiers.state());
                 if let Some(rcx) = self.rcx.as_mut() {
-                    rcx.aetna_set_modifiers(self.aetna_modifiers);
+                    rcx.damascene_set_modifiers(self.damascene_modifiers);
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => match button {
@@ -293,23 +293,23 @@ impl ApplicationHandler for App {
                     if perf_suite_input_locked {
                         return;
                     }
-                    if route_aetna_overlay {
+                    if route_damascene_overlay {
                         if let (Some(button), Some((x, y))) =
-                            (aetna_pointer_button(button), self.aetna_last_pointer)
+                            (damascene_pointer_button(button), self.damascene_last_pointer)
                         {
                             let events = match state {
                                 winit::event::ElementState::Pressed => self
                                     .rcx
                                     .as_mut()
-                                    .map(|rcx| rcx.aetna_pointer_down(x, y, button))
+                                    .map(|rcx| rcx.damascene_pointer_down(x, y, button))
                                     .unwrap_or_default(),
                                 winit::event::ElementState::Released => self
                                     .rcx
                                     .as_mut()
-                                    .map(|rcx| rcx.aetna_pointer_up(x, y, button))
+                                    .map(|rcx| rcx.damascene_pointer_up(x, y, button))
                                     .unwrap_or_default(),
                             };
-                            if self.handle_aetna_ui_events(events) {
+                            if self.handle_damascene_ui_events(events) {
                                 if let Some(window) = window.as_ref() {
                                     window.request_redraw();
                                 }
@@ -345,23 +345,23 @@ impl ApplicationHandler for App {
                     if perf_suite_input_locked {
                         return;
                     }
-                    if route_aetna_overlay {
+                    if route_damascene_overlay {
                         if let (Some(button), Some((x, y))) =
-                            (aetna_pointer_button(button), self.aetna_last_pointer)
+                            (damascene_pointer_button(button), self.damascene_last_pointer)
                         {
                             let events = match state {
                                 winit::event::ElementState::Pressed => self
                                     .rcx
                                     .as_mut()
-                                    .map(|rcx| rcx.aetna_pointer_down(x, y, button))
+                                    .map(|rcx| rcx.damascene_pointer_down(x, y, button))
                                     .unwrap_or_default(),
                                 winit::event::ElementState::Released => self
                                     .rcx
                                     .as_mut()
-                                    .map(|rcx| rcx.aetna_pointer_up(x, y, button))
+                                    .map(|rcx| rcx.damascene_pointer_up(x, y, button))
                                     .unwrap_or_default(),
                             };
-                            if self.handle_aetna_ui_events(events) {
+                            if self.handle_damascene_ui_events(events) {
                                 if let Some(window) = window.as_ref() {
                                     window.request_redraw();
                                 }
@@ -379,8 +379,8 @@ impl ApplicationHandler for App {
                 if perf_suite_input_locked {
                     return;
                 }
-                if route_aetna_overlay {
-                    if let Some((x, y)) = self.aetna_last_pointer {
+                if route_damascene_overlay {
+                    if let Some((x, y)) = self.damascene_last_pointer {
                         let scale = window
                             .as_ref()
                             .map(|window| window.scale_factor() as f32)
@@ -394,7 +394,7 @@ impl ApplicationHandler for App {
                         if self
                             .rcx
                             .as_mut()
-                            .map(|rcx| rcx.aetna_pointer_wheel(x, y, dy))
+                            .map(|rcx| rcx.damascene_pointer_wheel(x, y, dy))
                             .unwrap_or(false)
                         {
                             if let Some(window) = window.as_ref() {
@@ -463,17 +463,17 @@ impl ApplicationHandler for App {
     }
 }
 
-fn aetna_pointer_button(button: MouseButton) -> Option<aetna_core::PointerButton> {
+fn damascene_pointer_button(button: MouseButton) -> Option<damascene_core::PointerButton> {
     match button {
-        MouseButton::Left => Some(aetna_core::PointerButton::Primary),
-        MouseButton::Right => Some(aetna_core::PointerButton::Secondary),
-        MouseButton::Middle => Some(aetna_core::PointerButton::Middle),
+        MouseButton::Left => Some(damascene_core::PointerButton::Primary),
+        MouseButton::Right => Some(damascene_core::PointerButton::Secondary),
+        MouseButton::Middle => Some(damascene_core::PointerButton::Middle),
         _ => None,
     }
 }
 
-fn aetna_key_modifiers(mods: winit::keyboard::ModifiersState) -> aetna_core::KeyModifiers {
-    aetna_core::KeyModifiers {
+fn damascene_key_modifiers(mods: winit::keyboard::ModifiersState) -> damascene_core::KeyModifiers {
+    damascene_core::KeyModifiers {
         shift: mods.shift_key(),
         ctrl: mods.control_key(),
         alt: mods.alt_key(),
@@ -481,34 +481,34 @@ fn aetna_key_modifiers(mods: winit::keyboard::ModifiersState) -> aetna_core::Key
     }
 }
 
-fn aetna_ui_key(event: &winit::event::KeyEvent) -> Option<aetna_core::UiKey> {
+fn damascene_ui_key(event: &winit::event::KeyEvent) -> Option<damascene_core::UiKey> {
     match &event.logical_key {
         Key::Named(named) => match named {
-            NamedKey::Enter => Some(aetna_core::UiKey::Enter),
-            NamedKey::Escape => Some(aetna_core::UiKey::Escape),
-            NamedKey::Tab => Some(aetna_core::UiKey::Tab),
-            NamedKey::Space => Some(aetna_core::UiKey::Space),
-            NamedKey::ArrowUp => Some(aetna_core::UiKey::ArrowUp),
-            NamedKey::ArrowDown => Some(aetna_core::UiKey::ArrowDown),
-            NamedKey::ArrowLeft => Some(aetna_core::UiKey::ArrowLeft),
-            NamedKey::ArrowRight => Some(aetna_core::UiKey::ArrowRight),
-            NamedKey::Backspace => Some(aetna_core::UiKey::Backspace),
-            NamedKey::Delete => Some(aetna_core::UiKey::Delete),
-            NamedKey::Home => Some(aetna_core::UiKey::Home),
-            NamedKey::End => Some(aetna_core::UiKey::End),
-            NamedKey::PageUp => Some(aetna_core::UiKey::PageUp),
-            NamedKey::PageDown => Some(aetna_core::UiKey::PageDown),
-            _ => Some(aetna_core::UiKey::Other(format!("{named:?}"))),
+            NamedKey::Enter => Some(damascene_core::UiKey::Enter),
+            NamedKey::Escape => Some(damascene_core::UiKey::Escape),
+            NamedKey::Tab => Some(damascene_core::UiKey::Tab),
+            NamedKey::Space => Some(damascene_core::UiKey::Space),
+            NamedKey::ArrowUp => Some(damascene_core::UiKey::ArrowUp),
+            NamedKey::ArrowDown => Some(damascene_core::UiKey::ArrowDown),
+            NamedKey::ArrowLeft => Some(damascene_core::UiKey::ArrowLeft),
+            NamedKey::ArrowRight => Some(damascene_core::UiKey::ArrowRight),
+            NamedKey::Backspace => Some(damascene_core::UiKey::Backspace),
+            NamedKey::Delete => Some(damascene_core::UiKey::Delete),
+            NamedKey::Home => Some(damascene_core::UiKey::Home),
+            NamedKey::End => Some(damascene_core::UiKey::End),
+            NamedKey::PageUp => Some(damascene_core::UiKey::PageUp),
+            NamedKey::PageDown => Some(damascene_core::UiKey::PageDown),
+            _ => Some(damascene_core::UiKey::Other(format!("{named:?}"))),
         },
-        Key::Character(text) => Some(aetna_core::UiKey::Character(text.to_string())),
+        Key::Character(text) => Some(damascene_core::UiKey::Character(text.to_string())),
         Key::Unidentified(_) => {
             if let PhysicalKey::Code(code) = event.physical_key {
-                Some(aetna_core::UiKey::Other(format!("{code:?}")))
+                Some(damascene_core::UiKey::Other(format!("{code:?}")))
             } else {
                 None
             }
         }
-        Key::Dead(dead) => Some(aetna_core::UiKey::Other(format!("{dead:?}"))),
+        Key::Dead(dead) => Some(damascene_core::UiKey::Other(format!("{dead:?}"))),
     }
 }
 

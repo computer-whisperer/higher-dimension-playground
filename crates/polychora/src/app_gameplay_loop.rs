@@ -1663,7 +1663,7 @@ impl App {
         let (take_screenshot, auto_screenshot) =
             self.resolve_screenshot_request(command_screenshot_requested);
         let vte_sweep_status = self.vte_sweep_status_string();
-        let aetna_loading_open = !self.world_ready && !self.args.no_hud;
+        let damascene_loading_open = !self.world_ready && !self.args.no_hud;
         let mut do_navigation_hud =
             !self.menu_open && !self.dev_console_open && self.info_panel_mode != InfoPanelMode::Off;
         if self.args.no_hud {
@@ -1690,14 +1690,14 @@ impl App {
             scene_data.hud_stream_first_node_desc.as_deref(),
             scene_data.hud_stream_final_solid_leaf_desc.as_deref(),
         );
-        let aetna_ui = if self.args.no_hud {
+        let damascene_ui = if self.args.no_hud {
             None
-        } else if aetna_loading_open {
-            Some(self.build_aetna_loading_overlay())
+        } else if damascene_loading_open {
+            Some(self.build_damascene_loading_overlay())
         } else {
-            self.build_aetna_overlay(hud_info_readout.as_deref())
+            self.build_damascene_overlay(hud_info_readout.as_deref())
         };
-        let hud_rotation_label = if self.args.no_hud || aetna_ui.is_some() {
+        let hud_rotation_label = if self.args.no_hud || damascene_ui.is_some() {
             None
         } else {
             hud_info_readout
@@ -1755,7 +1755,7 @@ impl App {
             } else {
                 scene_data.hud_player_tags
             },
-            aetna_ui,
+            damascene_ui,
             ..Default::default()
         };
 

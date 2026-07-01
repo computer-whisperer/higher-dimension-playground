@@ -34,66 +34,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aetna-core"
-version = "0.3.1"
-dependencies = [
- "aetna-fonts",
- "bytemuck",
- "cosmic-text",
- "fdsm",
- "fdsm-ttf-parser",
- "image",
- "kurbo",
- "lru",
- "lyon_tessellation",
- "nalgebra",
- "rustc-hash 2.1.2",
- "swash",
- "ttf-parser",
- "usvg",
- "web-time",
-]
-
-[[package]]
-name = "aetna-fonts"
-version = "0.3.1"
-dependencies = [
- "aetna-fonts-emoji",
- "aetna-fonts-inter",
- "aetna-fonts-jetbrains-mono",
- "aetna-fonts-symbols",
-]
-
-[[package]]
-name = "aetna-fonts-emoji"
-version = "0.1.0"
-
-[[package]]
-name = "aetna-fonts-inter"
-version = "0.1.0"
-
-[[package]]
-name = "aetna-fonts-jetbrains-mono"
-version = "0.1.0"
-
-[[package]]
-name = "aetna-fonts-symbols"
-version = "0.1.0"
-
-[[package]]
-name = "aetna-vulkano"
-version = "0.3.1"
-dependencies = [
- "aetna-core",
- "bytemuck",
- "cosmic-text",
- "naga",
- "smallvec",
- "ttf-parser",
- "vulkano",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1079,6 +1019,86 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "damascene-core"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b224c7d9bb8316a09393dc472231f2e481677c4c033f6a58fc8636ae4f2a1f9"
+dependencies = [
+ "bytemuck",
+ "cosmic-text",
+ "damascene-fonts",
+ "fdsm",
+ "fdsm-ttf-parser",
+ "glam 0.33.2",
+ "half",
+ "image",
+ "kurbo",
+ "log",
+ "lru",
+ "lyon_tessellation",
+ "naga",
+ "nalgebra",
+ "roxmltree 0.21.1",
+ "rustc-hash 2.1.2",
+ "swash",
+ "ttf-parser",
+ "usvg",
+ "web-time",
+]
+
+[[package]]
+name = "damascene-fonts"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75fef582e0137131d26b9f5fbe4d90242b5f1a05788ba36f03c1fa425826ebc3"
+dependencies = [
+ "damascene-fonts-emoji",
+ "damascene-fonts-inter",
+ "damascene-fonts-jetbrains-mono",
+ "damascene-fonts-symbols",
+]
+
+[[package]]
+name = "damascene-fonts-emoji"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae1de66882e6a31d3e40da0494c558b80f24bf07cf0a7900ddf442a7eefa5434"
+
+[[package]]
+name = "damascene-fonts-inter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d084c112dab32387b62226e862f0c13fda21b380da54abdb2cc7a35ec22fffe"
+
+[[package]]
+name = "damascene-fonts-jetbrains-mono"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfd4c719004dc049baa73e4e869cca40c02532f5327ac118b3bb4fcc43a57cdc"
+
+[[package]]
+name = "damascene-fonts-symbols"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0d8aa98fba560c659beac4f4a798cb002bfe908c8c26c3a8eb3195ab9ee0776"
+
+[[package]]
+name = "damascene-vulkano"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a530fba5c6570e57f7b87f02d0635632b6359b7d832b9a462f7f8b25716b3fee"
+dependencies = [
+ "bytemuck",
+ "cosmic-text",
+ "damascene-core",
+ "log",
+ "naga",
+ "smallvec",
+ "ttf-parser",
+ "vulkano",
+]
+
+[[package]]
 name = "dasp_sample"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1728,6 +1748,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.33.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f22fb22f065b308be0d8724e3706c7fa3fc2a6c7d6899df4cad7860e7a75436"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1836,10 +1862,10 @@ name = "higher-dimension-playground"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
- "aetna-core",
- "aetna-vulkano",
  "bytemuck",
  "common",
+ "damascene-core",
+ "damascene-vulkano",
  "exr",
  "glam 0.32.1",
  "image",
@@ -3031,11 +3057,11 @@ dependencies = [
 name = "polychora"
 version = "0.1.0"
 dependencies = [
- "aetna-core",
  "ciborium",
  "clap",
  "common",
  "crc32fast",
+ "damascene-core",
  "fixed",
  "flate2",
  "higher-dimension-playground",
