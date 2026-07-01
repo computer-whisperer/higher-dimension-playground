@@ -23,7 +23,7 @@ pub struct EntityModelOutput {
 }
 
 /// A single tesseract part in entity-local space.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct EntityModelPart {
     /// Position offset in entity-local space (Y = up).
     #[serde(default)]

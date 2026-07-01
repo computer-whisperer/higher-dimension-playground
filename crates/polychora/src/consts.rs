@@ -76,6 +76,12 @@ pub(crate) const REMOTE_PLAYER_TAG_MAX_COUNT: usize = 32;
 pub(crate) const REMOTE_ENTITY_POSITION_SMOOTH_HZ: f32 = 12.0;
 pub(crate) const REMOTE_ENTITY_ORIENTATION_SMOOTH_HZ: f32 = 16.0;
 pub(crate) const REMOTE_ENTITY_TELEPORT_SNAP_DISTANCE: f32 = 20.0;
+// Entity model shapes come from a WASM call; poses interpolate every frame
+// regardless, so sub-animation (gait, pulses) only needs ~30 Hz. The per-frame
+// cap amortizes spawn bursts; never-evaluated entities are served first.
+pub(crate) const REMOTE_ENTITY_MODEL_EVAL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(33);
+pub(crate) const REMOTE_ENTITY_MODEL_MAX_EVALS_PER_FRAME: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Menu orbit camera

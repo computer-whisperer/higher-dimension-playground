@@ -1393,6 +1393,19 @@ struct RemoteEntityState {
     render_orientation: [f32; 4],
     last_received_at: Instant,
     data: Vec<u8>,
+    /// Animation clock origin. Set once when the entity first appears and
+    /// survives transform updates and interest re-entry — model animation
+    /// phase is derived from it, so it must not reset on network traffic.
+    spawned_at: Instant,
+    /// Texture palette resolved to GPU material tokens; the registry and
+    /// resolver are immutable for the session, so this only invalidates
+    /// when `data` changes (item stacks carry their textures in `data`).
+    gpu_materials: Option<[u32; 10]>,
+    /// Last successful `OP_ENTITY_MODEL` output. `None` until the first
+    /// successful evaluation; `Some(empty)` is a model that drew nothing.
+    model_parts: Option<Vec<polychora_plugin_api::model_abi::EntityModelPart>>,
+    /// When the model was last (re)evaluated, successful or not.
+    model_evaluated_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]

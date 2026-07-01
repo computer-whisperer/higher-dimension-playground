@@ -1617,24 +1617,57 @@ impl App {
                             fallback_orientation,
                         );
                         let sanitized_scale = sanitize_remote_scale(entity.entity.pose.scale, 1.0);
-                        self.remote_entities.insert(
-                            entity.entity_id,
-                            RemoteEntityState {
-                                entity_type_ns: entity.entity.namespace,
-                                entity_type: entity.entity.entity_type,
-                                position: sanitized_position,
-                                orientation: sanitized_orientation,
-                                velocity: sanitize_remote_velocity(
-                                    entity.entity.pose.velocity,
-                                    REMOTE_PLAYER_MAX_PREDICTED_SPEED,
-                                ),
-                                scale: sanitized_scale,
-                                render_position: sanitized_position,
-                                render_orientation: sanitized_orientation,
-                                last_received_at: received_at,
-                                data: entity.entity.data.clone(),
-                            },
+                        let sanitized_velocity = sanitize_remote_velocity(
+                            entity.entity.pose.velocity,
+                            REMOTE_PLAYER_MAX_PREDICTED_SPEED,
                         );
+                        match self.remote_entities.get_mut(&entity.entity_id) {
+                            // Re-announced entity (interest re-entry / resync):
+                            // snap pose, but keep the animation clock and the
+                            // material/model caches unless `data` changed.
+                            Some(existing)
+                                if existing.entity_type_ns == entity.entity.namespace
+                                    && existing.entity_type == entity.entity.entity_type =>
+                            {
+                                existing.position = sanitized_position;
+                                existing.orientation = sanitized_orientation;
+                                existing.velocity = sanitized_velocity;
+                                existing.scale = sanitized_scale;
+                                existing.render_position = sanitized_position;
+                                existing.render_orientation = sanitized_orientation;
+                                existing.last_received_at = received_at;
+                                if existing.data != entity.entity.data {
+                                    existing.data = entity.entity.data.clone();
+                                    // Invalidate the caches but keep the old
+                                    // parts visible until the re-evaluation
+                                    // lands (never-evaluated is prioritized,
+                                    // so normally the same frame).
+                                    existing.gpu_materials = None;
+                                    existing.model_evaluated_at = None;
+                                }
+                            }
+                            _ => {
+                                self.remote_entities.insert(
+                                    entity.entity_id,
+                                    RemoteEntityState {
+                                        entity_type_ns: entity.entity.namespace,
+                                        entity_type: entity.entity.entity_type,
+                                        position: sanitized_position,
+                                        orientation: sanitized_orientation,
+                                        velocity: sanitized_velocity,
+                                        scale: sanitized_scale,
+                                        render_position: sanitized_position,
+                                        render_orientation: sanitized_orientation,
+                                        last_received_at: received_at,
+                                        data: entity.entity.data.clone(),
+                                        spawned_at: received_at,
+                                        gpu_materials: None,
+                                        model_parts: None,
+                                        model_evaluated_at: None,
+                                    },
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1857,11 +1890,46 @@ impl App {
         use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput};
         use polychora_plugin_api::opcodes::OP_ENTITY_MODEL;
 
+        let now = Instant::now();
+
         let mut ids: Vec<u64> = self.remote_entities.keys().copied().collect();
         ids.sort_unstable();
+
+        // Pick which entities get a WASM model evaluation this frame:
+        // never-evaluated entities first, then stalest, capped per frame.
+        // Everything else renders from its cached parts at the current
+        // interpolated pose, so movement stays smooth at full framerate.
+        let mut eval_candidates: Vec<(u64, Option<Instant>)> = Vec::new();
+        for (&entity_id, entity) in &self.remote_entities {
+            if (entity.entity_type_ns, entity.entity_type) == ENTITY_PLAYER_AVATAR {
+                continue;
+            }
+            // Mirror the render loop's finiteness filter: a skipped entity
+            // must not win (and waste) an eval slot every frame.
+            if !vec4_is_finite(entity.render_position)
+                || !vec4_is_finite(entity.render_orientation)
+                || !entity.scale.is_finite()
+            {
+                continue;
+            }
+            match entity.model_evaluated_at {
+                None => eval_candidates.push((entity_id, None)),
+                Some(at) if now.duration_since(at) >= REMOTE_ENTITY_MODEL_EVAL_INTERVAL => {
+                    eval_candidates.push((entity_id, Some(at)))
+                }
+                Some(_) => {}
+            }
+        }
+        eval_candidates.sort_unstable_by_key(|&(entity_id, evaluated_at)| (evaluated_at, entity_id));
+        let eval_now: HashSet<u64> = eval_candidates
+            .iter()
+            .take(REMOTE_ENTITY_MODEL_MAX_EVALS_PER_FRAME)
+            .map(|&(entity_id, _)| entity_id)
+            .collect();
+
         let mut instances = Vec::with_capacity(ids.len() * 18);
         for entity_id in ids {
-            let Some(entity) = self.remote_entities.get(&entity_id) else {
+            let Some(entity) = self.remote_entities.get_mut(&entity_id) else {
                 continue;
             };
             if !vec4_is_finite(entity.render_position)
@@ -1875,80 +1943,95 @@ impl App {
                 continue;
             }
 
-            // Resolve entity texture palette to GPU material tokens.
-            // For item stack entities, decode the contained ItemStack and resolve
-            // its textures through the item visual pipeline instead.
-            let gpu_mats: [u32; 10] = {
-                let textures: Vec<polychora_plugin_api::texture::TextureRef> =
-                    if type_key == ENTITY_ITEM_STACK {
-                        // Decode ItemStack from entity data and resolve item textures
-                        polychora::shared::protocol::ItemStack::decode_from_cbor(&entity.data)
-                            .map(|stack| {
-                                self.content_registry
-                                    .resolve_item_world_textures(&stack.item)
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        self.content_registry
-                            .entity_lookup(entity.entity_type_ns, entity.entity_type)
-                            .map(|e| e.model_textures.clone())
-                            .unwrap_or_default()
-                    };
-                let mut mats = [7u32; 10]; // fallback to Purple for all slots
-                for (i, t) in textures.iter().enumerate().take(10) {
-                    mats[i] = self
-                        .material_resolver
-                        .resolve_texture(t.namespace, t.texture_id)
-                        .unwrap_or(7) as u32;
+            // Resolve entity texture palette to GPU material tokens, cached
+            // for the entity's lifetime (invalidated when `data` changes).
+            // For item stack entities, decode the contained ItemStack and
+            // resolve its textures through the item visual pipeline instead.
+            let gpu_mats: [u32; 10] = match entity.gpu_materials {
+                Some(mats) => mats,
+                None => {
+                    let textures: Vec<polychora_plugin_api::texture::TextureRef> =
+                        if type_key == ENTITY_ITEM_STACK {
+                            polychora::shared::protocol::ItemStack::decode_from_cbor(&entity.data)
+                                .map(|stack| {
+                                    self.content_registry
+                                        .resolve_item_world_textures(&stack.item)
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            self.content_registry
+                                .entity_lookup(entity.entity_type_ns, entity.entity_type)
+                                .map(|e| e.model_textures.clone())
+                                .unwrap_or_default()
+                        };
+                    let mut mats = [7u32; 10]; // fallback to Purple for all slots
+                    for (i, t) in textures.iter().enumerate().take(10) {
+                        mats[i] = self
+                            .material_resolver
+                            .resolve_texture(t.namespace, t.texture_id)
+                            .unwrap_or(7) as u32;
+                    }
+                    entity.gpu_materials = Some(mats);
+                    mats
                 }
-                mats
             };
 
             let basis = orthonormal_basis_from_forward(entity.render_orientation);
 
-            // Build WASM input.
-            let model_input = EntityModelInput {
-                entity_ns: entity.entity_type_ns,
-                entity_type: entity.entity_type,
-                entity_id,
-                elapsed_s: entity.last_received_at.elapsed().as_secs_f32(),
-                speed_xzw: remote_entity_speed_xzw(entity),
-                scale: entity.scale,
-            };
+            if eval_now.contains(&entity_id) {
+                let model_input = EntityModelInput {
+                    entity_ns: entity.entity_type_ns,
+                    entity_type: entity.entity_type,
+                    entity_id,
+                    elapsed_s: now.duration_since(entity.spawned_at).as_secs_f32(),
+                    speed_xzw: remote_entity_speed_xzw(entity),
+                    scale: entity.scale,
+                };
+                let model_output = self.wasm_model_manager.as_mut().and_then(|mgr| {
+                    let input_bytes = postcard::to_allocvec(&model_input).ok()?;
+                    let result = mgr
+                        .call_slot(
+                            WasmPluginSlot::ModelLogic,
+                            OP_ENTITY_MODEL as i32,
+                            &input_bytes,
+                        )
+                        .ok()??;
+                    postcard::from_bytes::<EntityModelOutput>(&result.invocation.output).ok()
+                });
+                entity.model_evaluated_at = Some(now);
+                if let Some(output) = model_output {
+                    entity.model_parts = Some(output.parts);
+                }
+            }
 
-            // Try WASM call.
-            let model_output = self.wasm_model_manager.as_mut().and_then(|mgr| {
-                let input_bytes = postcard::to_allocvec(&model_input).ok()?;
-                let result = mgr
-                    .call_slot(
-                        WasmPluginSlot::ModelLogic,
-                        OP_ENTITY_MODEL as i32,
-                        &input_bytes,
-                    )
-                    .ok()??;
-                postcard::from_bytes::<EntityModelOutput>(&result.invocation.output).ok()
-            });
-
-            if let Some(output) = model_output {
-                for part in &output.parts {
-                    let center =
-                        offset_point_along_basis(entity.render_position, &basis, part.offset);
-                    let cell_mats = part.cell_materials.map(|idx| gpu_mats[idx.min(9) as usize]);
+            match &entity.model_parts {
+                Some(parts) => {
+                    for part in parts {
+                        let center =
+                            offset_point_along_basis(entity.render_position, &basis, part.offset);
+                        let cell_mats =
+                            part.cell_materials.map(|idx| gpu_mats[idx.min(9) as usize]);
+                        instances.push(build_centered_model_instance(
+                            center,
+                            &basis,
+                            part.half_extents,
+                            cell_mats,
+                        ));
+                    }
+                }
+                // Evaluation was attempted (or no WASM plugin is loaded) and
+                // never succeeded: render as a generic cube.
+                None if entity.model_evaluated_at.is_some() || self.wasm_model_manager.is_none() => {
                     instances.push(build_centered_model_instance(
-                        center,
+                        entity.render_position,
                         &basis,
-                        part.half_extents,
-                        cell_mats,
+                        [entity.scale; 4],
+                        [gpu_mats[0]; 8],
                     ));
                 }
-            } else {
-                // Fallback: render as a generic cube if WASM is unavailable.
-                instances.push(build_centered_model_instance(
-                    entity.render_position,
-                    &basis,
-                    [entity.scale; 4],
-                    [gpu_mats[0]; 8],
-                ));
+                // First evaluation still pending under the per-frame budget:
+                // skip a frame rather than flash a wrong-shape cube.
+                None => {}
             }
         }
         instances
