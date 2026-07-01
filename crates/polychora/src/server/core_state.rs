@@ -16,7 +16,7 @@ pub(super) struct ServerState {
     pub(super) mobs: HashMap<u64, MobState>,
     pub(super) mob_nav_debug: bool,
     pub(super) mob_nav_simple_steer: bool,
-    pub(super) clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
+    pub(super) clients: HashMap<u64, super::runtime_net::ClientSink>,
     pub(super) client_world_interest_bounds: HashMap<u64, Aabb4i>,
     pub(super) client_visible_entities: HashMap<u64, HashSet<u64>>,
     /// Pose (bitwise) each entity last broadcast in `EntityTransforms`;

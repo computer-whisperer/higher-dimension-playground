@@ -508,7 +508,9 @@ pub fn connect_local_client(config: &mut RuntimeConfig) -> io::Result<LocalConne
     let client_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let id = allocate_server_object_id(&mut guard);
-        guard.clients.insert(id, server_to_client_tx);
+        guard
+            .clients
+            .insert(id, runtime_net::ClientSink::Local(server_to_client_tx));
         id
     };
 
@@ -608,7 +610,9 @@ mod replication_tests {
         position: [f32; 4],
     ) -> mpsc::Receiver<ServerMessage> {
         let (tx, rx) = mpsc::channel();
-        state.clients.insert(client_id, tx);
+        state
+            .clients
+            .insert(client_id, super::runtime_net::ClientSink::Local(tx));
         let mut entity = Entity::simple(0, 0);
         entity.pose.position = position;
         state.entity_store.spawn(client_id, entity, 0);

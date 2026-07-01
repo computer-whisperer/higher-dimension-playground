@@ -161,8 +161,20 @@ Fixes landed after this review was written:
   entity subtree perpetually dirty — one entity-blob rewrite per save interval; the semantic
   fix would be persisting `home_position` instead of the animated pose.
 
-Still open: transport-layer items (finding 5: per-client re-serialization, flush-per-message,
-unbounded send queues) and the global-mutex lock scope (finding 3).
+- **Transport (finding 5)**: TCP clients now receive pre-encoded frames (`ClientSink::Tcp`)
+  so broadcasts and world-patch envelope groups encode once and share one `Arc<[u8]>` across
+  recipients; local (singleplayer) clients keep their zero-serialization channel
+  (`ClientSink::Local`). The writer thread flushes once per burst instead of per message.
+  Send queues are byte-capped at 256 MiB per client (exact reserve-then-refund accounting);
+  a client exceeding it is disconnected and can rejoin fresh. Note: a *single* frame larger
+  than the cap would disconnect every interested client on each sync attempt — frames that
+  size were already pathological (previously unbounded memory instead).
+
+Still open: the global-mutex lock scope (finding 3) — before redesigning, gather evidence
+from the server's `profile server-cpu` output (`msg_avg`/`tick_max`) in a real session with
+mobs active. Separate pre-existing bug found during transport smoke-testing: the content
+plugin's `MazeGenerator::generate` traps in WASM (`memcmp` backtrace) during procgen on a
+flat-worldgen dedicated server; procgen structures near spawn silently fail to place.
 
 ## Dependency note: Aetna → Damascene
 

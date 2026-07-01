@@ -26,13 +26,123 @@ fn summarize_region_kind(kind: &crate::shared::region_tree::RegionNodeKind) -> &
     }
 }
 
+/// Per-client outbound queue cap. A syncing client can legitimately queue
+/// tens of MB of world patches; the cap only exists so a connected-but-dead
+/// socket cannot grow server memory without bound.
+const CLIENT_SEND_QUEUE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Sink for messages to one client. Local (in-process) clients receive
+/// `ServerMessage`s directly with no serialization; TCP clients receive
+/// pre-encoded postcard frames, so broadcasts encode once and queued bytes
+/// are accounted exactly.
+#[derive(Clone)]
+pub(super) enum ClientSink {
+    Local(mpsc::Sender<ServerMessage>),
+    Tcp(TcpClientSink),
+}
+
+#[derive(Clone)]
+pub(super) struct TcpClientSink {
+    frames: mpsc::Sender<Arc<[u8]>>,
+    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+enum SinkSendError {
+    Disconnected,
+    Overflow,
+}
+
+fn encode_server_message(client_id: u64, message: &ServerMessage) -> Option<Arc<[u8]>> {
+    match postcard::to_stdvec(message) {
+        Ok(encoded) => Some(Arc::from(encoded.into_boxed_slice())),
+        Err(error) => {
+            match message {
+                ServerMessage::WorldSubtreePatch {
+                    authoritative_bounds,
+                    subtree,
+                } => {
+                    eprintln!(
+                        "failed to encode world subtree patch for client {} authoritative={:?}->{:?} subtree={:?}->{:?}: {}",
+                        client_id,
+                        authoritative_bounds.min,
+                        authoritative_bounds.max,
+                        subtree.bounds.min,
+                        subtree.bounds.max,
+                        error
+                    );
+                }
+                _ => {
+                    eprintln!(
+                        "failed to encode server message for client {}: {}",
+                        client_id, error
+                    );
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Deliver one message to a sink. `cached_frame` lets a caller fanning the
+/// same message out to many TCP clients encode it exactly once. An encode
+/// failure drops the message (logged) without penalizing the client.
+fn deliver_to_sink(
+    sink: &ClientSink,
+    client_id: u64,
+    message: &ServerMessage,
+    cached_frame: &mut Option<Arc<[u8]>>,
+) -> Result<(), SinkSendError> {
+    match sink {
+        ClientSink::Local(tx) => tx
+            .send(message.clone())
+            .map_err(|_| SinkSendError::Disconnected),
+        ClientSink::Tcp(tcp) => {
+            let frame = match cached_frame {
+                Some(frame) => frame.clone(),
+                None => {
+                    let Some(frame) = encode_server_message(client_id, message) else {
+                        return Ok(());
+                    };
+                    *cached_frame = Some(frame.clone());
+                    frame
+                }
+            };
+            // Reserve-then-refund keeps the cap exact under concurrent
+            // senders (reader threads, tick thread, resync threads).
+            let prior = tcp.queued_bytes.fetch_add(frame.len(), Ordering::Relaxed);
+            if prior.saturating_add(frame.len()) > CLIENT_SEND_QUEUE_MAX_BYTES {
+                tcp.queued_bytes.fetch_sub(frame.len(), Ordering::Relaxed);
+                return Err(SinkSendError::Overflow);
+            }
+            tcp.frames.send(frame).map_err(|error| {
+                tcp.queued_bytes.fetch_sub(error.0.len(), Ordering::Relaxed);
+                SinkSendError::Disconnected
+            })
+        }
+    }
+}
+
 fn send_to_client(state: &SharedState, client_id: u64, message: ServerMessage) {
-    let sender = {
+    let sink = {
         let guard = state.lock().expect("server state lock poisoned");
         guard.clients.get(&client_id).cloned()
     };
-    if let Some(tx) = sender {
-        let _ = tx.send(message);
+    let Some(sink) = sink else {
+        return;
+    };
+    let mut cached_frame = None;
+    match deliver_to_sink(&sink, client_id, &message, &mut cached_frame) {
+        Ok(()) => {}
+        // Channel gone: the client's own threads handle cleanup, as before.
+        Err(SinkSendError::Disconnected) => {}
+        Err(SinkSendError::Overflow) => {
+            eprintln!(
+                "client {} exceeded {} MiB of queued outbound data; disconnecting",
+                client_id,
+                CLIENT_SEND_QUEUE_MAX_BYTES / (1024 * 1024)
+            );
+            prune_stale_clients(state, vec![client_id], true);
+        }
     }
 }
 
@@ -67,14 +177,24 @@ fn broadcast(state: &SharedState, message: ServerMessage) {
         guard
             .clients
             .iter()
-            .map(|(&client_id, tx)| (client_id, tx.clone()))
+            .map(|(&client_id, sink)| (client_id, sink.clone()))
             .collect()
     };
 
+    let mut cached_frame = None;
     let mut stale = Vec::new();
-    for (client_id, tx) in clients {
-        if tx.send(message.clone()).is_err() {
-            stale.push(client_id);
+    for (client_id, sink) in clients {
+        match deliver_to_sink(&sink, client_id, &message, &mut cached_frame) {
+            Ok(()) => {}
+            Err(SinkSendError::Disconnected) => stale.push(client_id),
+            Err(SinkSendError::Overflow) => {
+                eprintln!(
+                    "client {} exceeded {} MiB of queued outbound data; disconnecting",
+                    client_id,
+                    CLIENT_SEND_QUEUE_MAX_BYTES / (1024 * 1024)
+                );
+                stale.push(client_id);
+            }
         }
     }
 
@@ -307,16 +427,43 @@ fn broadcast_world_dirty_bounds_updates(state: &SharedState, dirty_bounds: &[Aab
             let mut guard = state.lock().expect("server state lock poisoned");
             guard.query_world_subtree(clip_bounds)
         };
-        for client_id in client_ids {
-            send_to_client(
-                state,
-                client_id,
-                ServerMessage::WorldSubtreePatch {
-                    authoritative_bounds: clip_bounds,
-                    subtree: (*subtree).clone(),
-                },
-            );
-            sent = sent.saturating_add(1);
+        // One subtree clone + at most one encode for the whole group;
+        // deliver_to_sink shares the frame across all TCP recipients.
+        let message = ServerMessage::WorldSubtreePatch {
+            authoritative_bounds: clip_bounds,
+            subtree: (*subtree).clone(),
+        };
+        let sinks: Vec<_> = {
+            let guard = state.lock().expect("server state lock poisoned");
+            client_ids
+                .iter()
+                .filter_map(|client_id| {
+                    guard
+                        .clients
+                        .get(client_id)
+                        .cloned()
+                        .map(|sink| (*client_id, sink))
+                })
+                .collect()
+        };
+        let mut cached_frame = None;
+        let mut overflowed = Vec::new();
+        for (client_id, sink) in sinks {
+            match deliver_to_sink(&sink, client_id, &message, &mut cached_frame) {
+                Ok(()) => sent = sent.saturating_add(1),
+                Err(SinkSendError::Disconnected) => {}
+                Err(SinkSendError::Overflow) => overflowed.push(client_id),
+            }
+        }
+        if !overflowed.is_empty() {
+            for client_id in &overflowed {
+                eprintln!(
+                    "client {} exceeded {} MiB of queued outbound data; disconnecting",
+                    client_id,
+                    CLIENT_SEND_QUEUE_MAX_BYTES / (1024 * 1024)
+                );
+            }
+            prune_stale_clients(state, overflowed, true);
         }
     }
     sent
@@ -1523,12 +1670,20 @@ pub(super) fn spawn_client_thread(
         .peer_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "<unknown>".to_string());
-    let (tx, rx) = mpsc::channel::<ServerMessage>();
+    let (tx, rx) = mpsc::channel::<Arc<[u8]>>();
+    let queued_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let queued_bytes_for_writer = queued_bytes.clone();
 
     let client_id = {
         let mut guard = state.lock().expect("server state lock poisoned");
         let id = allocate_server_object_id(&mut guard);
-        guard.clients.insert(id, tx.clone());
+        guard.clients.insert(
+            id,
+            ClientSink::Tcp(TcpClientSink {
+                frames: tx,
+                queued_bytes,
+            }),
+        );
         id
     };
 
@@ -1543,41 +1698,24 @@ pub(super) fn spawn_client_thread(
 
     thread::spawn(move || {
         let mut writer = BufWriter::new(writer_stream);
-        while let Ok(message) = rx.recv() {
-            let encoded = match postcard::to_stdvec(&message) {
-                Ok(encoded) => encoded,
-                Err(error) => {
-                    match &message {
-                        ServerMessage::WorldSubtreePatch {
-                            authoritative_bounds,
-                            subtree,
-                        } => {
-                            eprintln!(
-                                "failed to encode world subtree patch for client {} authoritative={:?}->{:?} subtree={:?}->{:?}: {}",
-                                client_id,
-                                authoritative_bounds.min,
-                                authoritative_bounds.max,
-                                subtree.bounds.min,
-                                subtree.bounds.max,
-                                error
-                            );
-                        }
-                        _ => {
-                            eprintln!(
-                                "failed to encode server message for client {}: {}",
-                                client_id, error
-                            );
-                        }
-                    }
-                    continue;
+        fn write_frame(writer: &mut BufWriter<TcpStream>, frame: &[u8]) -> bool {
+            let len = (frame.len() as u32).to_le_bytes();
+            writer.write_all(&len).is_ok() && writer.write_all(frame).is_ok()
+        }
+        'connection: while let Ok(mut frame) = rx.recv() {
+            // Drain everything already queued before paying the flush, so a
+            // tick's burst of messages costs one syscall flush, not one per
+            // message. A lone message still flushes immediately.
+            loop {
+                let ok = write_frame(&mut writer, &frame);
+                queued_bytes_for_writer.fetch_sub(frame.len(), Ordering::Relaxed);
+                if !ok {
+                    break 'connection;
                 }
-            };
-            let len = (encoded.len() as u32).to_le_bytes();
-            if writer.write_all(&len).is_err() {
-                break;
-            }
-            if writer.write_all(&encoded).is_err() {
-                break;
+                match rx.try_recv() {
+                    Ok(next) => frame = next,
+                    Err(_) => break,
+                }
             }
             if writer.flush().is_err() {
                 break;
@@ -2004,5 +2142,68 @@ mod tests {
                 patch.max
             );
         }
+    }
+
+    #[test]
+    fn deliver_to_sink_encodes_once_for_tcp_fanout() {
+        let (tx_a, rx_a) = mpsc::channel::<Arc<[u8]>>();
+        let (tx_b, rx_b) = mpsc::channel::<Arc<[u8]>>();
+        let queued_a = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queued_b = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink_a = ClientSink::Tcp(TcpClientSink {
+            frames: tx_a,
+            queued_bytes: queued_a.clone(),
+        });
+        let sink_b = ClientSink::Tcp(TcpClientSink {
+            frames: tx_b,
+            queued_bytes: queued_b.clone(),
+        });
+
+        let message = ServerMessage::Pong { nonce: 7 };
+        let mut cached_frame = None;
+        deliver_to_sink(&sink_a, 1, &message, &mut cached_frame).ok().unwrap();
+        deliver_to_sink(&sink_b, 2, &message, &mut cached_frame).ok().unwrap();
+
+        let frame_a = rx_a.try_recv().expect("frame for a");
+        let frame_b = rx_b.try_recv().expect("frame for b");
+        assert!(Arc::ptr_eq(&frame_a, &frame_b), "fanout must share one encode");
+        assert_eq!(queued_a.load(Ordering::Relaxed), frame_a.len());
+        assert_eq!(queued_b.load(Ordering::Relaxed), frame_b.len());
+        assert_eq!(
+            postcard::from_bytes::<ServerMessage>(&frame_a).ok().map(|m| matches!(m, ServerMessage::Pong { nonce: 7 })),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn deliver_to_sink_reports_overflow_at_queue_cap() {
+        let (tx, _rx) = mpsc::channel::<Arc<[u8]>>();
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(
+            CLIENT_SEND_QUEUE_MAX_BYTES,
+        ));
+        let sink = ClientSink::Tcp(TcpClientSink {
+            frames: tx,
+            queued_bytes: queued.clone(),
+        });
+        let mut cached_frame = None;
+        let result = deliver_to_sink(&sink, 1, &ServerMessage::Pong { nonce: 1 }, &mut cached_frame);
+        assert!(matches!(result, Err(SinkSendError::Overflow)));
+        // Counter untouched on rejection.
+        assert_eq!(queued.load(Ordering::Relaxed), CLIENT_SEND_QUEUE_MAX_BYTES);
+    }
+
+    #[test]
+    fn deliver_to_sink_passes_messages_through_local_unserialized() {
+        let (tx, rx) = mpsc::channel::<ServerMessage>();
+        let sink = ClientSink::Local(tx);
+        let mut cached_frame = None;
+        deliver_to_sink(&sink, 1, &ServerMessage::Pong { nonce: 3 }, &mut cached_frame)
+            .ok()
+            .unwrap();
+        assert!(cached_frame.is_none(), "local delivery must not encode");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMessage::Pong { nonce: 3 })
+        ));
     }
 }
