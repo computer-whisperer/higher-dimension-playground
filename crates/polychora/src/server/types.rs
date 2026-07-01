@@ -1,6 +1,6 @@
 use crate::shared::chunk_payload::ResolvedChunkPayload;
 use crate::shared::entity_types::EntityCategory;
-use crate::shared::protocol::{EntitySnapshot, EntityTransform};
+use crate::shared::protocol::{EntityPose, EntitySnapshot, EntityTransform};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -55,12 +55,6 @@ pub(super) struct PersistedMobEntry {
     pub(super) tangent_weight: f32,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) enum EntityLifecycle {
-    Live,
-    Despawned,
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct EntityRecord {
     pub(super) entity_id: u64,
@@ -68,9 +62,6 @@ pub(super) struct EntityRecord {
     pub(super) owner_client_id: Option<u64>,
     pub(super) display_name: Option<String>,
     pub(super) persistent: bool,
-    pub(super) spawned_at_ms: u64,
-    pub(super) lifecycle: EntityLifecycle,
-    pub(super) despawned_at_ms: Option<u64>,
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -81,14 +72,28 @@ pub(super) struct EntityRecordSummary {
     pub(super) live_mobs: usize,
     pub(super) live_persistent: usize,
     pub(super) live_owned: usize,
-    pub(super) tombstones: usize,
+}
+
+/// Per-entity replication data gathered once per tick. Deliberately holds
+/// only the pose-sized fields every client needs every tick — full
+/// `EntitySnapshot`s (with `data` and display name) are cloned only for
+/// entities newly entering a client's visible set.
+#[derive(Clone, Debug)]
+pub(super) struct ReplicationEntry {
+    pub(super) entity_id: u64,
+    pub(super) chunk: [i32; 4],
+    pub(super) pose: EntityPose,
+    pub(super) last_update_ms: u64,
+    /// Pose differs (bitwise) from the last broadcast tick. Unchanged
+    /// entities are skipped in `EntityTransforms` except on keepalive ticks.
+    pub(super) pose_changed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct LiveReplicationFrame {
-    pub(super) player_entities: Vec<EntitySnapshot>,
-    pub(super) player_chunks: Vec<(u64, [i32; 4])>,
-    pub(super) non_player_entities: Vec<(EntitySnapshot, [i32; 4])>,
+    /// `(owner client id, entry)` for player avatars.
+    pub(super) player_entries: Vec<(u64, ReplicationEntry)>,
+    pub(super) non_player_entries: Vec<ReplicationEntry>,
 }
 
 #[derive(Clone, Debug, Default)]

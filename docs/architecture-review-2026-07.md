@@ -134,6 +134,26 @@ most visibly — evaluating entity models through a WASM boundary once per entit
 with zero reuse. None of these require re-architecting the protocol; they are targeted fixes
 in `server/mod.rs`'s replication pass and the client's instance builder.
 
+## Status update (2026-07-01)
+
+Fixes landed after this review was written:
+
+- **Client WASM path (finding 6)**: model evaluations cached and rate-limited to 30 Hz with a
+  64-evals-per-frame cap; material tables cached per entity lifetime; the animation clock bug
+  (`elapsed_s` resetting every network tick) fixed via a per-entity `spawned_at`.
+- **Server clones (finding 1)**: the replication frame now carries pose-sized entries; full
+  `EntitySnapshot`s are cloned only for entities newly entering a client's visible set.
+- **Tombstones (finding 2)**: removed entirely — despawn deletes the `EntityRecord`
+  (`remove_entity_record`); nothing consumed tombstones.
+- **Transform gating (finding 4)**: `EntityTransforms` include only entities whose pose changed
+  bitwise since the last broadcast, with a keepalive resend every 10th tick.
+
+Still open: transport-layer items (finding 5: per-client re-serialization, flush-per-message,
+unbounded send queues), the global-mutex lock scope (finding 3), and a gap discovered during
+this work: **the runtime tick-loop save persists chunks and players only** —
+`resolve_entities_for_save` is reached only from migration/worldgen full saves, so live
+sessions do not persist non-player entities (persistent item drops/mobs are lost on restart).
+
 ## Dependency note: Aetna → Damascene
 
 The UI framework was originally consumed as *path* dependencies on a sibling "Aetna" repo,

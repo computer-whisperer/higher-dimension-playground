@@ -19,6 +19,9 @@ pub(super) struct ServerState {
     pub(super) clients: HashMap<u64, mpsc::Sender<ServerMessage>>,
     pub(super) client_world_interest_bounds: HashMap<u64, Aabb4i>,
     pub(super) client_visible_entities: HashMap<u64, HashSet<u64>>,
+    /// Pose (bitwise) each entity last broadcast in `EntityTransforms`;
+    /// used to skip transforms for entities that have not moved.
+    pub(super) entity_last_broadcast_pose: HashMap<u64, EntityPose>,
     pub(super) cpu_profile: ServerCpuProfile,
     pub(super) content_registry: Arc<ContentRegistry>,
     /// Persisted player records loaded from save file at startup.
@@ -52,6 +55,7 @@ impl ServerState {
             clients: HashMap::new(),
             client_world_interest_bounds: HashMap::new(),
             client_visible_entities: HashMap::new(),
+            entity_last_broadcast_pose: HashMap::new(),
             cpu_profile: ServerCpuProfile::new(start),
             content_registry,
             persisted_player_records,
@@ -297,7 +301,7 @@ pub(super) fn upsert_entity_record(
     owner_client_id: Option<u64>,
     display_name: Option<String>,
     persistent: bool,
-    now_ms: u64,
+    _now_ms: u64,
 ) {
     let display_name_for_insert = display_name.clone();
     let record = state
@@ -309,9 +313,6 @@ pub(super) fn upsert_entity_record(
             owner_client_id,
             display_name: display_name_for_insert,
             persistent,
-            spawned_at_ms: now_ms,
-            lifecycle: EntityLifecycle::Live,
-            despawned_at_ms: None,
         });
     record.category = category;
     record.owner_client_id = owner_client_id;
@@ -319,53 +320,32 @@ pub(super) fn upsert_entity_record(
     if display_name.is_some() || category != EntityCategory::Player {
         record.display_name = display_name;
     }
-    if record.lifecycle == EntityLifecycle::Despawned {
-        record.spawned_at_ms = now_ms;
-        record.lifecycle = EntityLifecycle::Live;
-        record.despawned_at_ms = None;
-    }
 }
 
-pub(super) fn mark_entity_record_despawned(
-    state: &mut ServerState,
-    entity_id: u64,
-    now_ms: Option<u64>,
-) {
-    let Some(record) = state.entity_records.get_mut(&entity_id) else {
-        return;
-    };
-    record.lifecycle = EntityLifecycle::Despawned;
-    if record.despawned_at_ms.is_none() {
-        record.despawned_at_ms = now_ms;
-    }
+pub(super) fn remove_entity_record(state: &mut ServerState, entity_id: u64) {
+    state.entity_records.remove(&entity_id);
+    state.entity_last_broadcast_pose.remove(&entity_id);
 }
 
 pub(super) fn summarize_entity_records(state: &ServerState) -> EntityRecordSummary {
     let mut summary = EntityRecordSummary::default();
     for (&record_id, record) in &state.entity_records {
         debug_assert_eq!(record.entity_id, record_id);
-        match record.lifecycle {
-            EntityLifecycle::Live => {
-                summary.live_total = summary.live_total.saturating_add(1);
-                if record.persistent {
-                    summary.live_persistent = summary.live_persistent.saturating_add(1);
-                }
-                if record.owner_client_id.is_some() {
-                    summary.live_owned = summary.live_owned.saturating_add(1);
-                }
-                match record.category {
-                    EntityCategory::Player => {
-                        summary.live_players = summary.live_players.saturating_add(1)
-                    }
-                    EntityCategory::Accent => {
-                        summary.live_accents = summary.live_accents.saturating_add(1)
-                    }
-                    EntityCategory::Mob => summary.live_mobs = summary.live_mobs.saturating_add(1),
-                }
+        summary.live_total = summary.live_total.saturating_add(1);
+        if record.persistent {
+            summary.live_persistent = summary.live_persistent.saturating_add(1);
+        }
+        if record.owner_client_id.is_some() {
+            summary.live_owned = summary.live_owned.saturating_add(1);
+        }
+        match record.category {
+            EntityCategory::Player => {
+                summary.live_players = summary.live_players.saturating_add(1)
             }
-            EntityLifecycle::Despawned => {
-                summary.tombstones = summary.tombstones.saturating_add(1);
+            EntityCategory::Accent => {
+                summary.live_accents = summary.live_accents.saturating_add(1)
             }
+            EntityCategory::Mob => summary.live_mobs = summary.live_mobs.saturating_add(1),
         }
     }
     summary
@@ -453,7 +433,7 @@ pub(super) fn record_server_cpu_sample(
     let collision_ms_max = report.tick_collision_us_max as f64 / 1000.0;
 
     eprintln!(
-        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_sim_steps_avg={:.1} tick_sim_steps_max={} tick_wasm_ms_avg={:.3} tick_wasm_ms_max={:.3} tick_nav_ms_avg={:.3} tick_nav_ms_max={:.3} tick_collision_ms_avg={:.3} tick_collision_ms_max={:.3} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_persistent={} rec_owned={} rec_tombstones={}",
+        "profile server-cpu msg_avg={:.3}ms msg_max={:.3}ms msg_samples={} tick_avg={:.3}ms tick_max={:.3}ms tick_samples={} tick_sim_steps_avg={:.1} tick_sim_steps_max={} tick_wasm_ms_avg={:.3} tick_wasm_ms_max={:.3} tick_nav_ms_avg={:.3} tick_nav_ms_max={:.3} tick_collision_ms_avg={:.3} tick_collision_ms_max={:.3} tick_players_avg={:.1} tick_players_max={} tick_entities_avg={:.1} tick_entities_max={} players={} entities={} rec_live={} rec_players={} rec_accents={} rec_mobs={} rec_persistent={} rec_owned={}",
         msg_avg_ms,
         report.message_cpu_ms_max,
         report.message_samples,
@@ -480,6 +460,5 @@ pub(super) fn record_server_cpu_sample(
         entity_records.live_mobs,
         entity_records.live_persistent,
         entity_records.live_owned,
-        entity_records.tombstones,
     );
 }

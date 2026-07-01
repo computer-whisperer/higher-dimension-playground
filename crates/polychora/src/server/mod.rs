@@ -15,7 +15,7 @@ pub mod world_field;
 use self::block_tick::{run_block_ticks, BlockTickSpawnAction};
 pub use self::config::{LocalConnection, RuntimeConfig, WorldGeneratorKind};
 use self::core_state::{
-    allocate_or_reserve_server_object_id, allocate_server_object_id, mark_entity_record_despawned,
+    allocate_or_reserve_server_object_id, allocate_server_object_id, remove_entity_record,
     monotonic_ms, record_server_cpu_sample, upsert_entity_record, ServerState, SharedState,
 };
 use self::cpu_profile::ServerCpuProfile;
@@ -29,8 +29,8 @@ use self::spawn_logic::{
     phase_spider_next_phase_deadline, sanitize_player_name, spawn_usage_string,
 };
 use self::types::{
-    ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityLifecycle, EntityRecord,
-    EntityRecordSummary, LiveReplicationFrame, MobNavPathResult, MobNavigationState, MobState,
+    ClientEntityReplicationBatch, CollisionChunkCacheEntry, EntityRecord, EntityRecordSummary,
+    LiveReplicationFrame, MobNavPathResult, MobNavigationState, MobState, ReplicationEntry,
     PersistedMobEntry, PlayerState, QueuedExplosionEvent, QueuedPlayerMovementModifier,
 };
 use self::world_cache::ServerWorldCache;
@@ -57,6 +57,9 @@ const STREAM_FAR_LOD_SCALE: i32 = 4;
 const SERVER_CPU_PROFILE_INTERVAL: Duration = Duration::from_secs(2);
 const ENTITY_INTEREST_RADIUS_PADDING_CHUNKS: i32 = 2;
 const ENTITY_SIM_STEP_MAX_PER_BROADCAST: usize = 3;
+// Unmoved entities are skipped in EntityTransforms; every Nth tick resends
+// all visible poses as drift insurance (1 s at the default 10 Hz tick).
+const TRANSFORM_KEEPALIVE_TICKS: u64 = 10;
 const MOB_COLLISION_RADIUS_SCALE: f32 = 0.42;
 const MOB_COLLISION_RADIUS_MIN: f32 = 0.20;
 const MOB_COLLISION_RADIUS_MAX: f32 = 0.55;
@@ -96,24 +99,20 @@ fn entity_snapshot_from_record(
     Some((snapshot, chunk))
 }
 
-fn entity_transform_from_snapshot(snapshot: &EntitySnapshot) -> EntityTransform {
-    EntityTransform {
-        entity_id: snapshot.entity_id,
-        pose: snapshot.entity.pose.clone(),
-        last_update_ms: snapshot.last_update_ms,
-    }
-}
-
 fn collect_live_replication_frame(state: &ServerState) -> LiveReplicationFrame {
-    let mut live_records: Vec<&EntityRecord> = state
-        .entity_records
-        .values()
-        .filter(|record| record.lifecycle == EntityLifecycle::Live)
-        .collect();
-    live_records.sort_unstable_by_key(|record| record.entity_id);
-
     let mut frame = LiveReplicationFrame::default();
-    for record in live_records {
+    for record in state.entity_records.values() {
+        let Some(entity_state) = state.entity_store.get(record.entity_id) else {
+            continue;
+        };
+        let pose = entity_state.entity.pose.clone();
+        let entry = ReplicationEntry {
+            entity_id: record.entity_id,
+            chunk: world_chunk_from_position(pose.position),
+            pose,
+            last_update_ms: entity_state.last_update_ms,
+            pose_changed: false,
+        };
         match record.category {
             EntityCategory::Player => {
                 let Some(client_id) = record.owner_client_id else {
@@ -125,30 +124,34 @@ fn collect_live_replication_frame(state: &ServerState) -> LiveReplicationFrame {
                 if player.entity_id != record.entity_id {
                     continue;
                 }
-                let Some((snapshot, chunk)) = entity_snapshot_from_record(state, record) else {
-                    continue;
-                };
-                frame.player_entities.push(snapshot);
-                frame.player_chunks.push((client_id, chunk));
+                frame.player_entries.push((client_id, entry));
             }
             EntityCategory::Accent | EntityCategory::Mob => {
-                if let Some((snapshot, chunk)) = entity_snapshot_from_record(state, record) {
-                    frame.non_player_entities.push((snapshot, chunk));
-                }
+                frame.non_player_entries.push(entry);
             }
         }
     }
 
     frame
-        .player_entities
-        .sort_unstable_by_key(|snapshot| snapshot.entity_id);
+        .player_entries
+        .sort_unstable_by_key(|(_, entry)| entry.entity_id);
     frame
-        .player_chunks
-        .sort_unstable_by_key(|(client_id, _)| *client_id);
+        .non_player_entries
+        .sort_unstable_by_key(|entry| entry.entity_id);
     frame
-        .non_player_entities
-        .sort_unstable_by_key(|(snapshot, _)| snapshot.entity_id);
-    frame
+}
+
+/// Bitwise pose equality. Poses are sanitized on ingest, so identical bits
+/// mean clients already hold exactly this pose; float tolerance would only
+/// risk suppressing genuine drift.
+fn pose_bits_eq(a: &EntityPose, b: &EntityPose) -> bool {
+    fn bits(v: [f32; 4]) -> [u32; 4] {
+        v.map(f32::to_bits)
+    }
+    bits(a.position) == bits(b.position)
+        && bits(a.orientation) == bits(b.orientation)
+        && bits(a.velocity) == bits(b.velocity)
+        && a.scale.to_bits() == b.scale.to_bits()
 }
 
 fn world_chunk_from_position(position: [f32; 4]) -> [i32; 4] {
@@ -182,23 +185,36 @@ fn distance4_sq(a: [f32; 4], b: [f32; 4]) -> f32 {
 fn build_entity_replication_batches(
     state: &mut ServerState,
     entity_interest_radius_sq: i64,
+    force_all_transforms: bool,
 ) -> Vec<ClientEntityReplicationBatch> {
-    let frame = collect_live_replication_frame(state);
-    let mut player_chunk_by_client =
-        HashMap::<u64, [i32; 4]>::with_capacity(frame.player_chunks.len());
-    for (client_id, chunk) in frame.player_chunks {
-        player_chunk_by_client.insert(client_id, chunk);
+    let mut frame = collect_live_replication_frame(state);
+
+    // Mark entries whose pose changed since the last broadcast; unchanged
+    // entities are omitted from `EntityTransforms` except on keepalive ticks.
+    for entry in frame
+        .player_entries
+        .iter_mut()
+        .map(|(_, entry)| entry)
+        .chain(frame.non_player_entries.iter_mut())
+    {
+        match state.entity_last_broadcast_pose.entry(entry.entity_id) {
+            Entry::Occupied(mut prev) => {
+                if !pose_bits_eq(prev.get(), &entry.pose) {
+                    prev.insert(entry.pose.clone());
+                    entry.pose_changed = true;
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(entry.pose.clone());
+                entry.pose_changed = true;
+            }
+        }
     }
 
-    let mut player_entities_with_chunks = Vec::with_capacity(frame.player_entities.len());
-    for entity in frame.player_entities {
-        let Some(owner_client_id) = entity.owner_client_id else {
-            continue;
-        };
-        let Some(owner_chunk) = player_chunk_by_client.get(&owner_client_id).copied() else {
-            continue;
-        };
-        player_entities_with_chunks.push((entity, owner_chunk));
+    let mut player_chunk_by_client =
+        HashMap::<u64, [i32; 4]>::with_capacity(frame.player_entries.len());
+    for (client_id, entry) in &frame.player_entries {
+        player_chunk_by_client.insert(*client_id, entry.chunk);
     }
 
     let connected_client_ids: HashSet<u64> = state.clients.keys().copied().collect();
@@ -215,25 +231,25 @@ fn build_entity_replication_batches(
             continue;
         };
 
-        let mut visible_entities =
-            Vec::with_capacity(player_entities_with_chunks.len() + frame.non_player_entities.len());
-        for (entity, owner_chunk) in &player_entities_with_chunks {
-            if entity.owner_client_id == Some(client_id) {
+        let mut visible_entries: Vec<&ReplicationEntry> =
+            Vec::with_capacity(frame.player_entries.len() + frame.non_player_entries.len());
+        for (owner_client_id, entry) in &frame.player_entries {
+            if *owner_client_id == client_id {
                 continue;
             }
-            if chunk_distance2(*owner_chunk, player_chunk) <= entity_interest_radius_sq {
-                visible_entities.push(entity.clone());
+            if chunk_distance2(entry.chunk, player_chunk) <= entity_interest_radius_sq {
+                visible_entries.push(entry);
             }
         }
-        for (entity, entity_chunk) in &frame.non_player_entities {
-            if chunk_distance2(*entity_chunk, player_chunk) <= entity_interest_radius_sq {
-                visible_entities.push(entity.clone());
+        for entry in &frame.non_player_entries {
+            if chunk_distance2(entry.chunk, player_chunk) <= entity_interest_radius_sq {
+                visible_entries.push(entry);
             }
         }
-        visible_entities.sort_unstable_by_key(|entity| entity.entity_id);
-        let current_visible_ids: HashSet<u64> = visible_entities
+        visible_entries.sort_unstable_by_key(|entry| entry.entity_id);
+        let current_visible_ids: HashSet<u64> = visible_entries
             .iter()
-            .map(|entity| entity.entity_id)
+            .map(|entry| entry.entity_id)
             .collect();
         let previous_visible_ids = state.client_visible_entities.entry(client_id).or_default();
 
@@ -251,32 +267,43 @@ fn build_entity_replication_batches(
 
         *previous_visible_ids = current_visible_ids;
 
-        let transforms: Vec<EntityTransform> = visible_entities
+        let transforms: Vec<EntityTransform> = visible_entries
             .iter()
-            .map(entity_transform_from_snapshot)
+            .filter(|entry| force_all_transforms || entry.pose_changed)
+            .map(|entry| EntityTransform {
+                entity_id: entry.entity_id,
+                pose: entry.pose.clone(),
+                last_update_ms: entry.last_update_ms,
+            })
             .collect();
-        let snapshot_by_id: HashMap<u64, EntitySnapshot> = visible_entities
-            .into_iter()
-            .map(|entity| (entity.entity_id, entity))
-            .collect();
-        let mut spawned = Vec::with_capacity(spawned_ids.len());
-        for entity_id in spawned_ids {
-            if let Some(entity) = snapshot_by_id.get(&entity_id) {
-                spawned.push(entity.clone());
-            }
-        }
 
-        if spawned.is_empty() && despawned.is_empty() && transforms.is_empty() {
+        if spawned_ids.is_empty() && despawned.is_empty() && transforms.is_empty() {
             continue;
         }
-        batches.push(ClientEntityReplicationBatch {
+        batches.push((client_id, spawned_ids, despawned, transforms));
+    }
+
+    // Full snapshots (entity `data`, display name) are cloned only for
+    // entities newly entering a client's visible set.
+    let mut result = Vec::with_capacity(batches.len());
+    for (client_id, spawned_ids, despawned, transforms) in batches {
+        let mut spawned = Vec::with_capacity(spawned_ids.len());
+        for entity_id in &spawned_ids {
+            let Some(record) = state.entity_records.get(entity_id) else {
+                continue;
+            };
+            if let Some((snapshot, _)) = entity_snapshot_from_record(state, record) {
+                spawned.push(snapshot);
+            }
+        }
+        result.push(ClientEntityReplicationBatch {
             client_id,
             spawned,
             despawned,
             transforms,
         });
     }
-    batches
+    result
 }
 
 fn initialize_state(
@@ -427,4 +454,175 @@ pub fn run_tcp_server(config: &mut RuntimeConfig) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod replication_tests {
+    use super::core_state::{remove_entity_record, upsert_entity_record};
+    use super::types::PlayerState;
+    use super::*;
+
+    const BIG_INTEREST_RADIUS_SQ: i64 = 1_000_000;
+
+    fn test_state() -> ServerState {
+        let world = ServerWorldOverlay::from_chunk_payloads(
+            crate::shared::voxel::BaseWorldKind::Empty,
+            Vec::<([i32; 4], crate::shared::chunk_payload::ResolvedChunkPayload)>::new(),
+            0,
+            false,
+            HashSet::new(),
+        );
+        let (registry, _pending) = crate::plugin_loader::create_full_registry();
+        ServerState::new(
+            world,
+            1,
+            false,
+            false,
+            Instant::now(),
+            Arc::new(registry),
+            Vec::new(),
+        )
+    }
+
+    /// Returns the receiver so the client channel stays open for the test.
+    fn add_player(
+        state: &mut ServerState,
+        client_id: u64,
+        position: [f32; 4],
+    ) -> mpsc::Receiver<ServerMessage> {
+        let (tx, rx) = mpsc::channel();
+        state.clients.insert(client_id, tx);
+        let mut entity = Entity::simple(0, 0);
+        entity.pose.position = position;
+        state.entity_store.spawn(client_id, entity, 0);
+        state.players.insert(
+            client_id,
+            PlayerState {
+                entity_id: client_id,
+                inventory_payload: Vec::new(),
+            },
+        );
+        upsert_entity_record(
+            state,
+            client_id,
+            EntityCategory::Player,
+            Some(client_id),
+            Some("player".to_string()),
+            false,
+            0,
+        );
+        rx
+    }
+
+    fn add_accent(state: &mut ServerState, entity_id: u64, position: [f32; 4]) {
+        let mut entity = Entity::simple(7, 42);
+        entity.pose.position = position;
+        state.entity_store.spawn(entity_id, entity, 0);
+        upsert_entity_record(state, entity_id, EntityCategory::Accent, None, None, false, 0);
+    }
+
+    #[test]
+    fn unmoved_entities_are_gated_and_keepalive_resends() {
+        let mut state = test_state();
+        let _rx = add_player(&mut state, 1, [0.0; 4]);
+        add_accent(&mut state, 100, [2.0, 0.0, 0.0, 0.0]);
+
+        // First tick: newly visible -> full snapshot + transform.
+        let batches = build_entity_replication_batches(&mut state, BIG_INTEREST_RADIUS_SQ, false);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].client_id, 1);
+        assert_eq!(
+            batches[0]
+                .spawned
+                .iter()
+                .map(|s| s.entity_id)
+                .collect::<Vec<_>>(),
+            vec![100]
+        );
+        assert!(batches[0].transforms.iter().any(|t| t.entity_id == 100));
+
+        // Second tick, nothing moved: no batch at all.
+        let batches = build_entity_replication_batches(&mut state, BIG_INTEREST_RADIUS_SQ, false);
+        assert!(batches.is_empty(), "unmoved entities should be gated");
+
+        // Keepalive tick resends all visible poses.
+        let batches = build_entity_replication_batches(&mut state, BIG_INTEREST_RADIUS_SQ, true);
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].spawned.is_empty());
+        assert!(batches[0].transforms.iter().any(|t| t.entity_id == 100));
+
+        // Moving the entity produces a transform on a normal tick again.
+        state
+            .entity_store
+            .get_mut(100)
+            .expect("accent exists")
+            .entity
+            .pose
+            .position[0] = 5.0;
+        let batches = build_entity_replication_batches(&mut state, BIG_INTEREST_RADIUS_SQ, false);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0]
+                .transforms
+                .iter()
+                .map(|t| t.entity_id)
+                .collect::<Vec<_>>(),
+            vec![100]
+        );
+    }
+
+    #[test]
+    fn despawn_emits_destroy_and_leaves_no_tombstone_state() {
+        let mut state = test_state();
+        let _rx = add_player(&mut state, 1, [0.0; 4]);
+        add_accent(&mut state, 100, [2.0, 0.0, 0.0, 0.0]);
+
+        let _ = build_entity_replication_batches(&mut state, BIG_INTEREST_RADIUS_SQ, false);
+
+        state.entity_store.despawn(100);
+        remove_entity_record(&mut state, 100);
+
+        let batches = build_entity_replication_batches(&mut state, BIG_INTEREST_RADIUS_SQ, false);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].despawned, vec![100]);
+        assert!(batches[0].spawned.is_empty());
+
+        assert!(!state.entity_records.contains_key(&100));
+        assert!(!state.entity_last_broadcast_pose.contains_key(&100));
+    }
+
+    #[test]
+    fn interest_radius_drives_spawn_despawn_cycle() {
+        let mut state = test_state();
+        let _rx = add_player(&mut state, 1, [0.0; 4]);
+        // ~50 chunks away on X (chunk edge 8): outside a radius^2 of 100.
+        add_accent(&mut state, 100, [400.0, 0.0, 0.0, 0.0]);
+
+        let batches = build_entity_replication_batches(&mut state, 100, false);
+        assert!(batches.is_empty(), "far entity should not replicate");
+
+        // Move it next to the player: spawned.
+        state
+            .entity_store
+            .get_mut(100)
+            .expect("accent exists")
+            .entity
+            .pose
+            .position = [2.0, 0.0, 0.0, 0.0];
+        let batches = build_entity_replication_batches(&mut state, 100, false);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].spawned.len(), 1);
+
+        // Move it far away again: destroyed.
+        state
+            .entity_store
+            .get_mut(100)
+            .expect("accent exists")
+            .entity
+            .pose
+            .position = [400.0, 0.0, 0.0, 0.0];
+        let batches = build_entity_replication_batches(&mut state, 100, false);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].despawned, vec![100]);
+    }
 }

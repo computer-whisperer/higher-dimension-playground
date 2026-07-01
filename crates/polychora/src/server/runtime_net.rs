@@ -48,7 +48,7 @@ fn prune_stale_clients(state: &SharedState, stale: Vec<u64>, notify_entity_destr
             guard.client_world_interest_bounds.remove(&client_id);
             guard.client_visible_entities.remove(&client_id);
             if let Some(player) = guard.players.remove(&client_id) {
-                mark_entity_record_despawned(&mut guard, player.entity_id, None);
+                remove_entity_record(&mut guard, player.entity_id);
                 let _ = guard.entity_store.despawn(player.entity_id);
                 disconnected_entity_ids.push(player.entity_id);
             }
@@ -635,7 +635,7 @@ pub(super) fn apply_explosion_impulse(
     let mut pending_impulses = Vec::new();
     let mut queued_player_modifiers = Vec::new();
     for record in state.entity_records.values() {
-        if record.lifecycle != EntityLifecycle::Live || record.entity_id == source_entity_id {
+        if record.entity_id == source_entity_id {
             continue;
         }
         let Some(snapshot) = state.entity_store.snapshot(record.entity_id) else {
@@ -788,6 +788,7 @@ pub(super) fn start_broadcast_thread(
     };
     let mut next_entity_sim_ms = 0u64;
     let mut last_save_tick = Instant::now();
+    let mut broadcast_tick_index: u64 = 0;
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             thread::sleep(interval);
@@ -819,8 +820,14 @@ pub(super) fn start_broadcast_thread(
                     );
                 let block_tick_spawns = run_block_ticks(&mut guard, &mut wasm_manager, now);
                 let pickup_syncs = pickup_nearby_item_stacks(&mut guard, now);
-                let entity_batches =
-                    build_entity_replication_batches(&mut guard, entity_interest_radius_sq);
+                let force_all_transforms =
+                    broadcast_tick_index % TRANSFORM_KEEPALIVE_TICKS == 0;
+                broadcast_tick_index = broadcast_tick_index.wrapping_add(1);
+                let entity_batches = build_entity_replication_batches(
+                    &mut guard,
+                    entity_interest_radius_sq,
+                    force_all_transforms,
+                );
                 (
                     entity_batches,
                     explosion_events,
@@ -989,7 +996,7 @@ pub(super) fn remove_client(state: &SharedState, client_id: u64) {
         guard.client_visible_entities.remove(&client_id);
         match guard.players.remove(&client_id) {
             Some(player) => {
-                mark_entity_record_despawned(&mut guard, player.entity_id, None);
+                remove_entity_record(&mut guard, player.entity_id);
                 let _ = guard.entity_store.despawn(player.entity_id);
                 Some(player.entity_id)
             }
@@ -1758,7 +1765,7 @@ fn pickup_nearby_item_stacks(state: &mut ServerState, now_ms: u64) -> Vec<(u64, 
     // Despawn fully picked-up entities
     for entity_id in entities_to_despawn {
         state.entity_store.despawn(entity_id);
-        mark_entity_record_despawned(state, entity_id, None);
+        remove_entity_record(state, entity_id);
     }
 
     // Serialize changed inventories back and collect sync messages

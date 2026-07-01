@@ -394,7 +394,7 @@ fn simulate_mobs(
     stale.dedup();
     for entity_id in stale {
         state.mobs.remove(&entity_id);
-        mark_entity_record_despawned(state, entity_id, Some(now_ms));
+        remove_entity_record(state, entity_id);
         let _ = state.entity_store.despawn(entity_id);
     }
 
@@ -442,7 +442,7 @@ fn simulate_mobs(
         }
         queued_player_modifiers.append(&mut player_modifiers);
         state.mobs.remove(&entity_id);
-        mark_entity_record_despawned(state, entity_id, Some(now_ms));
+        remove_entity_record(state, entity_id);
         let _ = state.entity_store.despawn(entity_id);
     }
 

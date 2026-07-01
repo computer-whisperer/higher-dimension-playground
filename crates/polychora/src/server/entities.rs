@@ -245,6 +245,11 @@ impl EntityStore {
         self.entities.values()
     }
 
+    /// Get entity state by ID without cloning.
+    pub fn get(&self, entity_id: EntityId) -> Option<&EntityState> {
+        self.entities.get(&entity_id)
+    }
+
     /// Get mutable entity state by ID (for modifying home_position during magnet pull).
     pub fn get_mut(&mut self, entity_id: EntityId) -> Option<&mut EntityState> {
         self.entities.get_mut(&entity_id)
