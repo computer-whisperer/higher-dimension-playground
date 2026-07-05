@@ -176,6 +176,15 @@ mobs active. Separate pre-existing bug found during transport smoke-testing: the
 plugin's `MazeGenerator::generate` traps in WASM (`memcmp` backtrace) during procgen on a
 flat-worldgen dedicated server; procgen structures near spawn silently fail to place.
 
+## Regression found in play-testing (2026-07-05)
+
+Blank hotbar/inventory thumbnails after the Damascene swap: Damascene 0.4's `Runner::draw()`
+host contract requires `record_uploads(&mut builder)` between `prepare()` and
+`begin_render_pass` (Aetna 0.3 uploaded image textures eagerly inside prepare). Without it,
+image widgets sample uninitialized GPU textures and render blank. Fixed in `src/render.rs`;
+verified via automated screenshot. A `console:<server command>` auto-command was added to
+`--commands` for scripted repros (spawn entities etc. without manual input).
+
 ## Dependency note: Aetna → Damascene
 
 The UI framework was originally consumed as *path* dependencies on a sibling "Aetna" repo,

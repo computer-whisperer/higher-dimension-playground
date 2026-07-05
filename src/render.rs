@@ -4599,6 +4599,11 @@ this reduced-storage configuration currently supports only '--backend voxel-trav
                     present_size[1] as f32 / scale_factor,
                 );
                 let _ = damascene.runner.prepare(tree, viewport, scale_factor);
+                // The draw()-path host contract (unlike `Runner::render`)
+                // requires recording staged image uploads before the render
+                // pass begins; otherwise image widgets sample uninitialized
+                // textures and render blank.
+                damascene.runner.record_uploads(&mut builder);
                 true
             } else {
                 false

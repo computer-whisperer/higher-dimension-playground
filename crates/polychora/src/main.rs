@@ -222,6 +222,7 @@ enum AutoCommand {
     Press(KeyCode),
     Wait(u32),
     Screenshot,
+    Console(String),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -435,7 +436,7 @@ struct Args {
     damascene_bundle_dir: PathBuf,
 
     /// Automated command sequence (semicolon-separated).
-    /// Commands: press:<key>, wait:<frames>, screenshot
+    /// Commands: press:<key>, wait:<frames>, screenshot, console:<server command>
     #[arg(long)]
     commands: Option<String>,
 

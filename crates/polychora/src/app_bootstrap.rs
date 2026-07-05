@@ -63,6 +63,9 @@ pub(super) fn parse_commands(input: &str) -> Vec<AutoCommand> {
                         eprintln!("Warning: invalid wait frames '{}'", arg.trim());
                     }
                 }
+                "console" => {
+                    commands.push(AutoCommand::Console(arg.trim().to_string()));
+                }
                 _ => {
                     eprintln!("Warning: unknown command type '{}'", cmd_type.trim());
                 }

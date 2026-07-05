@@ -140,6 +140,11 @@ impl App {
                 AutoCommand::Screenshot => {
                     return true;
                 }
+                AutoCommand::Console(cmd) => {
+                    if !self.send_multiplayer_console_command(&cmd) {
+                        eprintln!("Warning: console auto-command '{cmd}' not sent (no server connection)");
+                    }
+                }
             }
         } else if !self.command_queue.is_empty() || self.command_wait_frames > 0 {
             // Still processing commands
