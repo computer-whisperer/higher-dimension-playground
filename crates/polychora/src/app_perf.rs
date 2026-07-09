@@ -13,6 +13,13 @@ impl App {
         self.perf_suite_state.is_some()
     }
 
+    /// True when real user input must be ignored: either the perf suite is
+    /// driving the app, or `--automation` mode is on (scripted `--commands`
+    /// runs that must not be disturbed by stray clicks/keypresses).
+    pub(super) fn user_input_locked(&self) -> bool {
+        self.perf_suite_active() || self.args.automation
+    }
+
     pub(super) fn perf_suite_scenario(&self, scenario_index: usize) -> PerfSuiteScenario {
         PERF_SUITE_SCENARIOS[scenario_index % PERF_SUITE_SCENARIOS.len()]
     }

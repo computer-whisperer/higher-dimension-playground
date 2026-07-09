@@ -2,6 +2,13 @@ use super::*;
 
 impl App {
     pub(super) fn grab_mouse(&mut self, window: &Window) {
+        // Automation mode never captures the real cursor; game logic still
+        // sees the grabbed state so scripted input routes normally.
+        if self.args.automation {
+            self.mouse_grabbed = true;
+            self.input.clear_mouse_delta();
+            return;
+        }
         let result = window
             .set_cursor_grab(CursorGrabMode::Locked)
             .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
@@ -13,8 +20,10 @@ impl App {
     }
 
     pub(super) fn release_mouse(&mut self, window: &Window) {
-        let _ = window.set_cursor_grab(CursorGrabMode::None);
-        window.set_cursor_visible(true);
+        if !self.args.automation {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+        }
         self.mouse_grabbed = false;
         self.input.clear_mouse_delta();
     }

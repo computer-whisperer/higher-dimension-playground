@@ -111,9 +111,9 @@ impl ApplicationHandler for App {
             && self.block_gui_session.is_some()
             && !self.args.no_hud;
         let damascene_main_menu_open = self.app_state == AppState::MainMenu && !self.args.no_hud;
-        let perf_suite_input_locked = self.perf_suite_active();
+        let user_input_locked = self.user_input_locked();
         let route_damascene_overlay = !self.args.no_hud
-            && !perf_suite_input_locked
+            && !user_input_locked
             && (damascene_main_menu_open
                 || (self.app_state == AppState::Playing
                     && !self.mouse_grabbed
@@ -135,7 +135,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if perf_suite_input_locked {
+                if user_input_locked {
                     return;
                 }
 
@@ -290,7 +290,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { button, state, .. } => match button {
                 MouseButton::Left => {
-                    if perf_suite_input_locked {
+                    if user_input_locked {
                         return;
                     }
                     if route_damascene_overlay {
@@ -342,7 +342,7 @@ impl ApplicationHandler for App {
                 | MouseButton::Right
                 | MouseButton::Back
                 | MouseButton::Forward => {
-                    if perf_suite_input_locked {
+                    if user_input_locked {
                         return;
                     }
                     if route_damascene_overlay {
@@ -376,7 +376,7 @@ impl ApplicationHandler for App {
                 _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } => {
-                if perf_suite_input_locked {
+                if user_input_locked {
                     return;
                 }
                 if route_damascene_overlay {
@@ -413,7 +413,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => {
-                if perf_suite_input_locked {
+                if user_input_locked {
                     return;
                 }
                 if self.mouse_grabbed {
@@ -439,7 +439,7 @@ impl ApplicationHandler for App {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
-        if self.perf_suite_active() {
+        if self.user_input_locked() {
             return;
         }
         if let DeviceEvent::MouseMotion { delta } = event {

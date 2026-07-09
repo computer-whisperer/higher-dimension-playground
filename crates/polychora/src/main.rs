@@ -440,6 +440,12 @@ struct Args {
     #[arg(long)]
     commands: Option<String>,
 
+    /// Automation mode: ignore all real keyboard/mouse input and never grab
+    /// the cursor, so scripted `--commands` runs can't be disturbed by a
+    /// stray click or keypress on the window
+    #[arg(long)]
+    automation: bool,
+
     /// Run deterministic built-in performance scenario suite.
     /// Input is ignored while active.
     #[arg(long, action = ArgAction::Set, default_value_t = false)]
