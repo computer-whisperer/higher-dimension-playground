@@ -10,6 +10,13 @@ use std::sync::OnceLock;
 /// and a two-axis diagonal costs 14 (~= 10 * sqrt(2)).
 pub(super) const MOB_NAV_CARDINAL_STEP_COST: i32 = 10;
 pub(super) const MOB_NAV_DIAGONAL_STEP_COST: i32 = 14;
+// The pairing heuristic is admissible only while one diagonal is at least as
+// cheap as a cardinal and no cheaper than two; outside that band it silently
+// overestimates and A* stops returning optimal paths.
+const _: () = assert!(
+    MOB_NAV_DIAGONAL_STEP_COST >= MOB_NAV_CARDINAL_STEP_COST
+        && MOB_NAV_DIAGONAL_STEP_COST <= 2 * MOB_NAV_CARDINAL_STEP_COST
+);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MobNavStep {
@@ -255,6 +262,14 @@ pub(super) fn mob_nav_cell_is_walkable(
 }
 
 /// L1 shells around a cell, nearest first, out to the goal-adjust radius.
+///
+/// The nearest-first early exit in the goal snap below assumes a nearer shell
+/// always beats a farther one under the legacy scoring 16*ring + L1(origin).
+/// Two candidates at rings r1 < r2 differ in origin distance by at most
+/// r1 + r2, so divergence needs 16*(r2 - r1) < r1 + r2, first possible at
+/// r1 = 8, r2 = 9. Guard the assumption if the radius is ever raised.
+const _: () = assert!(MOB_NAV_PATH_GOAL_ADJUST_RADIUS_CELLS <= 8);
+
 fn mob_nav_goal_adjust_rings() -> &'static [Vec<MobNavCell>] {
     static RINGS: OnceLock<Vec<Vec<MobNavCell>>> = OnceLock::new();
     RINGS.get_or_init(|| {
@@ -292,8 +307,8 @@ pub(super) fn mob_nav_find_walkable_goal_cell(
 
     // Scan shells nearest-first and stop at the first one holding a walkable
     // cell, breaking ties within a shell toward the origin. A farther shell
-    // can never win: candidates within the adjust radius differ in origin
-    // distance by at most twice the radius, less than one shell's weight.
+    // can never win at the current adjust radius (see the assertion on the
+    // ring table above).
     for ring_offsets in mob_nav_goal_adjust_rings() {
         let mut best: Option<(i32, MobNavCell)> = None;
         for offset in ring_offsets {
@@ -376,7 +391,9 @@ pub(super) fn mob_nav_find_path(
         return None;
     }
 
-    let mut open = BinaryHeap::<(Reverse<i32>, Reverse<i32>, MobNavCell)>::new();
+    // Min-f, then max-g: among equal-f candidates prefer the deepest, so the
+    // goal pops before the rest of an optimal-cost plateau gets expanded.
+    let mut open = BinaryHeap::<(Reverse<i32>, i32, MobNavCell)>::new();
     let mut g_scores = HashMap::<MobNavCell, i32>::new();
     let mut came_from = HashMap::<MobNavCell, MobNavCell>::new();
     let mut best_cell = start;
@@ -384,10 +401,10 @@ pub(super) fn mob_nav_find_path(
     let mut best_g = 0i32;
 
     g_scores.insert(start, 0);
-    open.push((Reverse(best_h), Reverse(0), start));
+    open.push((Reverse(best_h), 0, start));
 
     let mut visited_steps = 0usize;
-    while let Some((_f_score, Reverse(g_cost), cell)) = open.pop() {
+    while let Some((_f_score, g_cost, cell)) = open.pop() {
         let current_best = g_scores.get(&cell).copied().unwrap_or(i32::MAX);
         if g_cost > current_best {
             continue;
@@ -460,7 +477,7 @@ pub(super) fn mob_nav_find_path(
             let h_cost = mob_nav_heuristic_cost(next, goal, locomotion);
             open.push((
                 Reverse(tentative_g.saturating_add(h_cost)),
-                Reverse(tentative_g),
+                tentative_g,
                 next,
             ));
         }
