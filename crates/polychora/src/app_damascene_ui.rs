@@ -1713,6 +1713,7 @@ impl App {
                 "Movement",
                 [
                     ("W / A / S / D", "Move forward / left / backward / right"),
+                    ("W W (double-tap)", "Toggle sprint"),
                     ("Space", "Jump (double-tap to toggle fly mode)"),
                     ("Shift", "Descend / Crouch"),
                     ("Q / E", "Move in 4D (W-axis negative / positive)"),
@@ -1737,6 +1738,7 @@ impl App {
                     ("Z / X / C", "Rotate block: XZ / YZ / XW"),
                     ("Scroll Wheel", "Cycle hotbar slot"),
                     ("1-9, 0", "Select hotbar slot"),
+                    ("B", "Drop held item"),
                 ],
             ),
             controls_section(
@@ -1746,6 +1748,8 @@ impl App {
                     ("Tab / I", "Toggle inventory"),
                     ("T", "Toggle teleport dialog"),
                     ("`", "Toggle developer console"),
+                    ("F12", "Save screenshot"),
+                    ("F8 / F10 / F11", "VTE dev toggles (sweep / sky / log-merge)"),
                 ],
             ),
         ])
