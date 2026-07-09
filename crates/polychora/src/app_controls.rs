@@ -96,6 +96,7 @@ impl App {
     pub(super) fn cycle_control_scheme(&mut self) {
         let previous_scheme = self.control_scheme;
         self.control_scheme = self.control_scheme.next();
+        self.set_hud_status(format!("Controls: {}", self.control_scheme.label()));
         self.scroll_cycle_pair = RotationPair::Standard;
         if self.control_scheme.is_upright_primary() {
             self.camera.enforce_upright_constraints();
@@ -197,15 +198,17 @@ impl App {
             KeyCode::Backquote => {
                 self.toggle_dev_console();
             }
-            KeyCode::Digit1 => self.hotbar_selected_index = 0,
-            KeyCode::Digit2 => self.hotbar_selected_index = 1,
-            KeyCode::Digit3 => self.hotbar_selected_index = 2,
-            KeyCode::Digit4 => self.hotbar_selected_index = 3,
-            KeyCode::Digit5 => self.hotbar_selected_index = 4,
-            KeyCode::Digit6 => self.hotbar_selected_index = 5,
-            KeyCode::Digit7 => self.hotbar_selected_index = 6,
-            KeyCode::Digit8 => self.hotbar_selected_index = 7,
-            KeyCode::Digit9 => self.hotbar_selected_index = 8,
+            KeyCode::Digit1 => self.input.request_place_material_digit(1),
+            KeyCode::Digit2 => self.input.request_place_material_digit(2),
+            KeyCode::Digit3 => self.input.request_place_material_digit(3),
+            KeyCode::Digit4 => self.input.request_place_material_digit(4),
+            KeyCode::Digit5 => self.input.request_place_material_digit(5),
+            KeyCode::Digit6 => self.input.request_place_material_digit(6),
+            KeyCode::Digit7 => self.input.request_place_material_digit(7),
+            KeyCode::Digit8 => self.input.request_place_material_digit(8),
+            KeyCode::Digit9 => self.input.request_place_material_digit(9),
+            KeyCode::BracketLeft => self.input.request_place_material_prev(),
+            KeyCode::BracketRight => self.input.request_place_material_next(),
             KeyCode::F12 => {
                 // Screenshot will be handled by setting the flag
             }

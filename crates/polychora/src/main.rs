@@ -922,6 +922,7 @@ fn main() {
         dev_console_history: Vec::new(),
         dev_console_history_pos: None,
         dev_console_history_stash: String::new(),
+        hud_status: None,
         controls_dialog_open: false,
         menu_open: false,
         content_registry: content_registry.clone(),
@@ -1278,6 +1279,8 @@ struct App {
     dev_console_history_pos: Option<usize>,
     /// The in-progress line stashed while browsing history.
     dev_console_history_stash: String,
+    /// Transient HUD status toast: message + expiry.
+    hud_status: Option<(String, Instant)>,
     controls_dialog_open: bool,
     menu_open: bool,
     content_registry: Arc<polychora::content_registry::ContentRegistry>,

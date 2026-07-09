@@ -604,6 +604,18 @@ impl InputState {
         self.look_at_requested = true;
     }
 
+    pub fn request_place_material_prev(&mut self) {
+        self.place_material_prev_requested = true;
+    }
+
+    pub fn request_place_material_next(&mut self) {
+        self.place_material_next_requested = true;
+    }
+
+    pub fn request_place_material_digit(&mut self, digit: u8) {
+        self.place_material_digit_requested = Some(digit);
+    }
+
     pub fn take_look_at(&mut self) -> bool {
         let v = self.look_at_requested;
         self.look_at_requested = false;

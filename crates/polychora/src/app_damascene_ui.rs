@@ -617,6 +617,13 @@ impl App {
         let console = self
             .dev_console_open
             .then(|| self.build_damascene_dev_console_panel());
+        let crosshair = (!self.inventory_open && !self.dev_console_open)
+            .then(build_damascene_crosshair);
+        let status = self
+            .hud_status
+            .as_ref()
+            .filter(|(_, until)| std::time::Instant::now() < *until)
+            .map(|(message, _)| build_damascene_hud_status(message));
         Some(build_damascene_overlay_shell(
             hotbar,
             orientation,
@@ -624,6 +631,8 @@ impl App {
             info_readout.map(build_damascene_info_readout_panel),
             modal,
             console,
+            crosshair,
+            status,
         ))
     }
 
@@ -2121,11 +2130,15 @@ fn build_damascene_overlay_shell(
     info: Option<El>,
     inventory: Option<El>,
     console: Option<El>,
+    crosshair: Option<El>,
+    status: Option<El>,
 ) -> El {
     let has_waila = waila.is_some();
     let has_info = info.is_some();
     let has_inventory = inventory.is_some();
     let has_console = console.is_some();
+    let has_crosshair = crosshair.is_some();
+    let has_status = status.is_some();
     let mut children = vec![hotbar, orientation];
     if let Some(waila) = waila {
         children.push(waila);
@@ -2139,11 +2152,30 @@ fn build_damascene_overlay_shell(
     if let Some(console) = console {
         children.push(console);
     }
+    if let Some(crosshair) = crosshair {
+        children.push(crosshair);
+    }
+    if let Some(status) = status {
+        children.push(status);
+    }
     let info_index = has_info.then_some(2 + usize::from(has_waila));
     let inventory_index =
         has_inventory.then_some(2 + usize::from(has_waila) + usize::from(has_info));
     let console_index = has_console
         .then_some(2 + usize::from(has_waila) + usize::from(has_info) + usize::from(has_inventory));
+    let crosshair_index = has_crosshair.then_some(
+        2 + usize::from(has_waila)
+            + usize::from(has_info)
+            + usize::from(has_inventory)
+            + usize::from(has_console),
+    );
+    let status_index = has_status.then_some(
+        2 + usize::from(has_waila)
+            + usize::from(has_info)
+            + usize::from(has_inventory)
+            + usize::from(has_console)
+            + usize::from(has_crosshair),
+    );
 
     stack(children).fill_size().layout(move |cx| {
         let (hotbar_w, hotbar_h) = (cx.measure)(&cx.children[0]);
@@ -2205,6 +2237,27 @@ fn build_damascene_overlay_shell(
                         measured_h,
                     )
                 }
+                index if Some(index) == crosshair_index => Rect::new(
+                    cx.container.x + (cx.container.w - measured_w) * 0.5,
+                    cx.container.y + (cx.container.h - measured_h) * 0.5,
+                    measured_w,
+                    measured_h,
+                ),
+                index if Some(index) == status_index => {
+                    // Sit above the hotbar and the orientation panel (which
+                    // falls back to centered-above-hotbar in narrow windows).
+                    let anchor_y = rects
+                        .get(1)
+                        .map(|rect: &Rect| rect.y)
+                        .unwrap_or(hotbar_rect.y)
+                        .min(hotbar_rect.y);
+                    Rect::new(
+                        cx.container.x + (cx.container.w - measured_w) * 0.5,
+                        (anchor_y - measured_h - 10.0).max(cx.container.y + 12.0),
+                        measured_w,
+                        measured_h,
+                    )
+                }
                 _ => {
                     let width = measured_w.min((cx.container.w - 24.0).max(260.0));
                     Rect::new(
@@ -2219,6 +2272,49 @@ fn build_damascene_overlay_shell(
         }
         rects
     })
+}
+
+/// Small center-screen aim reticle: a plus sign of two translucent bars.
+fn build_damascene_crosshair() -> El {
+    let bar = |w: f32, h: f32| {
+        El::new(Kind::Group)
+            .width(Size::Fixed(w))
+            .height(Size::Fixed(h))
+            .fill(Color::srgb_u8(235, 240, 245).with_alpha_u8(190))
+    };
+    stack([bar(16.0, 2.0), bar(2.0, 16.0)])
+        .width(Size::Fixed(16.0))
+        .height(Size::Fixed(16.0))
+        .layout(|cx| {
+            cx.children
+                .iter()
+                .map(|child| {
+                    let (w, h) = (cx.measure)(child);
+                    Rect::new(
+                        cx.container.x + (cx.container.w - w) * 0.5,
+                        cx.container.y + (cx.container.h - h) * 0.5,
+                        w,
+                        h,
+                    )
+                })
+                .collect()
+        })
+}
+
+/// Transient status toast shown above the hotbar (sprint/scale/scheme changes).
+fn build_damascene_hud_status(message: &str) -> El {
+    El::new(Kind::Custom("polychora_hud_status"))
+        .style_profile(StyleProfile::Surface)
+        .surface_role(SurfaceRole::Panel)
+        .axis(Axis::Row)
+        .children([text(message).caption()])
+        .width(Size::Hug)
+        .height(Size::Hug)
+        .padding(Sides::xy(tokens::SPACE_2, tokens::SPACE_1))
+        .fill(tokens::CARD.with_alpha_u8(205))
+        .stroke(tokens::BORDER.with_alpha_u8(150))
+        .radius(6.0)
+        .shadow(tokens::SHADOW_SM)
 }
 
 fn build_damascene_info_readout_panel(readout: &str) -> El {

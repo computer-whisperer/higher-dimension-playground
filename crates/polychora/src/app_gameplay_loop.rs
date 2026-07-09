@@ -422,10 +422,15 @@ impl App {
         // Toggle flight mode on double-tap space
         if self.input.take_fly_toggle() {
             self.camera.toggle_flying();
+            self.set_hud_status(if self.camera.is_flying {
+                "Flight: on"
+            } else {
+                "Flight: off"
+            });
         }
         if self.input.take_sprint_toggle() && !self.sprint_enabled {
             self.sprint_enabled = true;
-            eprintln!("Sprint: on");
+            self.set_hud_status("Sprint: on");
         }
 
         // Bracket keys adjust placement scale.
@@ -435,6 +440,7 @@ impl App {
             self.inventory
                 .update_slot_scale(self.hotbar_selected_index, new_scale);
             self.inventory_dirty = true;
+            self.set_hud_status(format!("Placement scale: 2^{new_scale}"));
         }
         if self.input.take_place_material_next() {
             let new_scale = (self.selected_block.scale_exp + 1).min(3);
@@ -442,6 +448,7 @@ impl App {
             self.inventory
                 .update_slot_scale(self.hotbar_selected_index, new_scale);
             self.inventory_dirty = true;
+            self.set_hud_status(format!("Placement scale: 2^{new_scale}"));
         }
         // Number keys 1-9 select hotbar slot.
         if let Some(digit) = self.input.take_place_material_digit() {
@@ -449,15 +456,14 @@ impl App {
                 self.hotbar_selected_index = (digit - 1) as usize;
                 self.selected_block =
                     block_data_from_slot(self.inventory.hotbar_slot(self.hotbar_selected_index));
-                eprintln!(
-                    "Hotbar slot {} selected: {} ({})",
-                    digit,
-                    self.selected_block.block_type,
+                self.set_hud_status(format!(
+                    "{} (slot {})",
                     self.content_registry.block_name(
                         self.selected_block.namespace,
                         self.selected_block.block_type
                     ),
-                );
+                    digit,
+                ));
             }
         }
         // I key toggles inventory.

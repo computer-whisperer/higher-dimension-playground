@@ -1,6 +1,16 @@
 use super::*;
 
 impl App {
+    /// Show a transient status toast above the hotbar (~2.5 s).
+    pub(super) fn set_hud_status(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        eprintln!("{message}");
+        self.hud_status = Some((
+            message,
+            Instant::now() + std::time::Duration::from_millis(2500),
+        ));
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn current_info_hud_text(
         &self,
@@ -239,7 +249,7 @@ impl App {
                  look:{:+.2} {:+.2} {:+.2} {:+.2}\n\
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                 mat:[ ]/wheel cycle, 1-0 direct\n\
+                 scale:[ ] hotbar:wheel/1-9\n\
                  target:{} face:{}\n\
                  stream-first-node:{}\n\
                  stream-final-solid:{}\n\
@@ -294,7 +304,7 @@ impl App {
                  yaw:{:+.0} pit:{:+.0} xw:{:+.0} zw:{:+.0} yw:{:+.1}\n\
                  lens:xy:{:.2} zw:{:.2} trace:{} dist:{:.0}\n\
                  edit:LMB- RMB+ mat:{} reach:{:.1} hl:{}\n\
-                 mat:[ ]/wheel cycle, 1-0 direct\n\
+                 scale:[ ] hotbar:wheel/1-9\n\
                  target:{} face:{}\n\
                  stream-first-node:{}\n\
                  stream-final-solid:{}\n\
