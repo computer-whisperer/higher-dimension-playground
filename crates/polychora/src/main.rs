@@ -919,6 +919,9 @@ fn main() {
         dev_console_input: String::new(),
         dev_console_log: VecDeque::new(),
         dev_console_focus_input: false,
+        dev_console_history: Vec::new(),
+        dev_console_history_pos: None,
+        dev_console_history_stash: String::new(),
         controls_dialog_open: false,
         menu_open: false,
         content_registry: content_registry.clone(),
@@ -1270,6 +1273,11 @@ struct App {
     dev_console_input: String,
     dev_console_log: VecDeque<String>,
     dev_console_focus_input: bool,
+    dev_console_history: Vec<String>,
+    /// None = editing a fresh line; Some(i) = browsing history entry i.
+    dev_console_history_pos: Option<usize>,
+    /// The in-progress line stashed while browsing history.
+    dev_console_history_stash: String,
     controls_dialog_open: bool,
     menu_open: bool,
     content_registry: Arc<polychora::content_registry::ContentRegistry>,

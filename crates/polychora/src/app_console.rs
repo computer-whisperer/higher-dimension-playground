@@ -81,6 +81,12 @@ impl App {
             self.append_dev_console_log_line(
                 "  /check   -- run world + render tree integrity check",
             );
+            self.append_dev_console_log_line(
+                "  /explode <x y z w> [radius]  -- server-side explosion",
+            );
+            self.append_dev_console_log_line(
+                "Other /commands are forwarded to the server. Up/Down recalls history.",
+            );
             return;
         }
 
@@ -253,10 +259,57 @@ impl App {
             return;
         }
 
-        self.append_dev_console_log_line(format!(
-            "Unknown command '{}'. Use /help for command list.",
-            command_name
-        ));
+        // Not a client command: forward to the server console (which answers
+        // unknown commands with its own supported list via ServerMessage::Error).
+        if self.send_multiplayer_console_command(raw_command) {
+            self.append_dev_console_log_line(format!("Sent to server: {raw_command}"));
+        } else {
+            self.append_dev_console_log_line(format!(
+                "Unknown command '{}'. Use /help for command list.",
+                command_name
+            ));
+        }
+    }
+
+    /// Record a submitted command for Up/Down-arrow recall.
+    pub(super) fn dev_console_history_push(&mut self, command: &str) {
+        if self.dev_console_history.last().map(String::as_str) != Some(command) {
+            self.dev_console_history.push(command.to_string());
+        }
+        self.dev_console_history_pos = None;
+        self.dev_console_history_stash.clear();
+    }
+
+    /// Up arrow: step back through history, stashing the in-progress line.
+    pub(super) fn dev_console_history_prev(&mut self) {
+        if self.dev_console_history.is_empty() {
+            return;
+        }
+        let pos = match self.dev_console_history_pos {
+            None => {
+                self.dev_console_history_stash = self.dev_console_input.clone();
+                self.dev_console_history.len() - 1
+            }
+            Some(pos) => pos.saturating_sub(1),
+        };
+        self.dev_console_history_pos = Some(pos);
+        self.dev_console_input = self.dev_console_history[pos].clone();
+        self.focus_damascene_dev_console_input();
+    }
+
+    /// Down arrow: step forward through history, back to the stashed line.
+    pub(super) fn dev_console_history_next(&mut self) {
+        let Some(pos) = self.dev_console_history_pos else {
+            return;
+        };
+        if pos + 1 < self.dev_console_history.len() {
+            self.dev_console_history_pos = Some(pos + 1);
+            self.dev_console_input = self.dev_console_history[pos + 1].clone();
+        } else {
+            self.dev_console_history_pos = None;
+            self.dev_console_input = std::mem::take(&mut self.dev_console_history_stash);
+        }
+        self.focus_damascene_dev_console_input();
     }
 
     pub(super) fn append_dev_console_log_line(&mut self, line: impl Into<String>) {

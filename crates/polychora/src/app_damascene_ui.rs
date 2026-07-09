@@ -1080,7 +1080,9 @@ impl App {
                 row([
                     column([
                         text("Developer Console").bold(),
-                        text("Commands: /help, /tp, /spawn").caption().muted(),
+                        text("Commands: /help, /tp, /spawn, /explode -- Up/Down: history")
+                            .caption()
+                            .muted(),
                     ])
                     .gap(1.0),
                     spacer(),
@@ -2863,6 +2865,10 @@ impl App {
                 consumed = true;
                 if is_damascene_enter_key(&event) {
                     self.submit_damascene_dev_console_input();
+                } else if is_damascene_key_down(&event, damascene_core::UiKey::ArrowUp) {
+                    self.dev_console_history_prev();
+                } else if is_damascene_key_down(&event, damascene_core::UiKey::ArrowDown) {
+                    self.dev_console_history_next();
                 } else {
                     damascene_text_input::apply_event(
                         &mut self.dev_console_input,
@@ -3397,6 +3403,14 @@ impl App {
             self.focus_damascene_dev_console_input();
             return true;
         }
+        if matches!(key, Some(damascene_core::UiKey::ArrowUp)) {
+            self.dev_console_history_prev();
+            return true;
+        }
+        if matches!(key, Some(damascene_core::UiKey::ArrowDown)) {
+            self.dev_console_history_next();
+            return true;
+        }
 
         let Some(text) = text else {
             return key.is_some();
@@ -3416,6 +3430,7 @@ impl App {
         let command = self.dev_console_input.trim().to_string();
         self.dev_console_input.clear();
         if !command.is_empty() {
+            self.dev_console_history_push(&command);
             self.execute_dev_console_command(&command);
         }
         self.focus_damascene_dev_console_input();
@@ -3544,11 +3559,15 @@ fn apply_slider_to_usize(
 }
 
 fn is_damascene_enter_key(event: &damascene_core::UiEvent) -> bool {
+    is_damascene_key_down(event, damascene_core::UiKey::Enter)
+}
+
+fn is_damascene_key_down(event: &damascene_core::UiEvent, key: damascene_core::UiKey) -> bool {
     event.kind == UiEventKind::KeyDown
         && event
             .key_press
             .as_ref()
-            .is_some_and(|key_press| matches!(key_press.key, damascene_core::UiKey::Enter))
+            .is_some_and(|key_press| key_press.key == key)
 }
 
 fn damascene_hotbar_slot_index(route: &str) -> Option<usize> {
