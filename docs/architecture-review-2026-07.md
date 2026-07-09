@@ -176,6 +176,18 @@ mobs active. Separate pre-existing bug found during transport smoke-testing: the
 plugin's `MazeGenerator::generate` traps in WASM (`memcmp` backtrace) during procgen on a
 flat-worldgen dedicated server; procgen structures near spawn silently fail to place.
 
+- **Maze WASM trap (2026-07-09)**: root cause was fuel exhaustion ("all fuel consumed"),
+  reproduced via a WASM-level test — 23/24 maze seeds trapped; the sole survivor used 436M
+  of the 500M fuel budget and 1.72 MB of the 2 MB output cap. Fixed on both sides: the
+  content plugin's chunk dedup went from an O(chunks²) 8 KB-memcmp linear scan to
+  hash-bucketed dedup (shared by maze + blueprint structures), maze rasterization became
+  chunk-major (no per-voxel div/rem), and `PROCGEN_EXECUTION_LIMITS` rose to 4B fuel /
+  64 MB output. Largest maze now: ~1.8B fuel, 9.4 MB output, ~90 ms. A generate-output LRU
+  (8 entries, keyed by structure/seed/orientation/origin) was added to `ProcgenWasmCaller`
+  since world queries re-generate overlapping structures each time; WASM guest errors now
+  keep their anyhow cause chain. Regression tests: `maze_prepare_and_generate_many_seeds`
+  (procgen_wasm.rs), `procgen_structures_place_near_spawn` (flat_world_generator.rs).
+
 ## Regression found in play-testing (2026-07-05)
 
 Blank hotbar/inventory thumbnails after the Damascene swap: Damascene 0.4's `Runner::draw()`

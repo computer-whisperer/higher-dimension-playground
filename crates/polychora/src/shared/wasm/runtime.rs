@@ -355,7 +355,9 @@ impl WasmRuntimeInstance {
             }
             Err(error) => Err(WasmRuntimeError::GuestFunctionError {
                 function: WASM_ABI_EXPORT_CALL,
-                message: error.to_string(),
+                // {:#} keeps the anyhow cause chain (e.g. "wasm trap: all fuel
+                // consumed"), which plain Display drops.
+                message: format!("{error:#}"),
             }),
         };
 

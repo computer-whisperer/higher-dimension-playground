@@ -289,33 +289,7 @@ impl StructureBlueprint {
             );
         }
 
-        // Convert to ChunkArrayData — deduplicate by linear scan to avoid
-        // cloning full chunk vectors into a BTreeMap.
-        let mut chunk_palette: Vec<ChunkPayload> = vec![ChunkPayload::Empty];
-        let empty_chunk = vec![0u16; CHUNK_VOLUME];
-        let mut dense_indices = Vec::with_capacity(total_chunks);
-
-        for chunk in chunk_data.drain(..) {
-            if chunk == empty_chunk {
-                dense_indices.push(0u16);
-                continue;
-            }
-            let mut found = false;
-            for (idx, existing) in chunk_palette.iter().enumerate() {
-                if let ChunkPayload::Dense16 { materials } = existing {
-                    if materials == &chunk {
-                        dense_indices.push(idx as u16);
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found {
-                let idx = chunk_palette.len() as u16;
-                chunk_palette.push(ChunkPayload::Dense16 { materials: chunk });
-                dense_indices.push(idx);
-            }
-        }
+        let (chunk_palette, dense_indices) = dedup_chunks_to_palette(chunk_data);
 
         // Check if everything is empty
         if dense_indices.iter().all(|&idx| idx == 0) {
@@ -368,6 +342,69 @@ fn set_voxel(
     let voxel_idx =
         lw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE + ly * CHUNK_SIZE + lx;
     chunk_data[chunk_idx][voxel_idx] = material;
+}
+
+fn hash_chunk_materials(chunk: &[u16]) -> u64 {
+    // FNV-1a over four u16 lanes at a time. Chunk dedup runs under the WASM
+    // fuel meter, so this must stay a short straight-line loop.
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for quad in chunk.chunks_exact(4) {
+        let word = (quad[0] as u64)
+            | ((quad[1] as u64) << 16)
+            | ((quad[2] as u64) << 32)
+            | ((quad[3] as u64) << 48);
+        hash ^= word;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Deduplicate dense chunks into a `ChunkPayload` palette plus per-chunk
+/// palette indices (index 0 = empty). Chunks are grouped by content hash so
+/// full comparisons only happen on hash collisions; the previous linear-scan
+/// memcmp dedup was O(chunks²) over 8 KB buffers and exhausted the WASM fuel
+/// budget on large structures (mazes).
+pub(crate) fn dedup_chunks_to_palette(
+    chunk_data: Vec<Vec<u16>>,
+) -> (Vec<ChunkPayload>, Vec<u16>) {
+    use alloc::collections::BTreeMap;
+
+    let empty_chunk = vec![0u16; CHUNK_VOLUME];
+    let mut palette: Vec<ChunkPayload> = vec![ChunkPayload::Empty];
+    let mut dense_indices = Vec::with_capacity(chunk_data.len());
+    // content hash -> palette indices whose chunks carry that hash
+    let mut buckets: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
+    buckets.insert(hash_chunk_materials(&empty_chunk), vec![0u16]);
+
+    for chunk in chunk_data {
+        let hash = hash_chunk_materials(&chunk);
+        let bucket = buckets.entry(hash).or_default();
+        let mut found = None;
+        for &idx in bucket.iter() {
+            let matches = if idx == 0 {
+                chunk == empty_chunk
+            } else if let ChunkPayload::Dense16 { materials } = &palette[idx as usize] {
+                materials == &chunk
+            } else {
+                false
+            };
+            if matches {
+                found = Some(idx);
+                break;
+            }
+        }
+        match found {
+            Some(idx) => dense_indices.push(idx),
+            None => {
+                let idx = palette.len() as u16;
+                palette.push(ChunkPayload::Dense16 { materials: chunk });
+                bucket.push(idx);
+                dense_indices.push(idx);
+            }
+        }
+    }
+
+    (palette, dense_indices)
 }
 
 pub(crate) fn aabb4_from_chunk_lattice(chunk_min: [i32; 4], chunk_max: [i32; 4]) -> Aabb4 {

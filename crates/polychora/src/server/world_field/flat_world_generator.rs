@@ -125,7 +125,7 @@ impl FlatWorldGenerator {
                 report.origin,
             ) {
                 Ok(core) if core.bounds.is_valid() => {
-                    let _ = tree.splice_non_empty_core_in_bounds(core.bounds, &core);
+                    let _ = tree.splice_non_empty_core_in_bounds(core.bounds, core.as_ref());
                 }
                 Err(e) => {
                     eprintln!("procgen WASM error: {e}");
@@ -234,6 +234,46 @@ mod tests {
         assert!(non_empty.iter().all(|(key, payload)| key[1]
             == ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y)
             && payload.uniform_block() == Some(&floor)));
+    }
+
+    /// End-to-end procgen placement through the real content WASM: build the
+    /// generator exactly as the dedicated server does and assert structures
+    /// actually appear near spawn. Guards against the fuel-exhaustion
+    /// regression where every structure silently failed to place.
+    #[test]
+    fn procgen_structures_place_near_spawn() {
+        let (_registry, _manager, procgen_wasm, _pending) =
+            crate::plugin_loader::create_full_registry_with_wasm();
+        let floor = grid_floor_block();
+        let mut generator = FlatWorldGenerator::from_chunk_payloads(
+            BaseWorldKind::FlatFloor {
+                material: floor.clone(),
+            },
+            Vec::<([i32; 4], ChunkPayload)>::new(),
+            1337,
+            true,
+            HashSet::new(),
+        );
+        generator.set_procgen_wasm(procgen_wasm);
+
+        let cs = CHUNK_SIZE as i32;
+        let bounds = Aabb4i::from_i32(
+            [-20 * cs, -2 * cs, -20 * cs, -20 * cs],
+            [20 * cs, 10 * cs, 20 * cs, 20 * cs],
+        );
+        let core = generator.query_region_core(QueryVolume { bounds }, QueryDetail::Exact);
+        let non_empty = collect_non_empty_chunks_from_core_in_bounds(core.as_ref(), bounds);
+        let structure_chunks = non_empty
+            .iter()
+            .filter(|(key, payload)| {
+                key[1] != ChunkCoord::from_num(FLAT_FLOOR_CHUNK_Y)
+                    || payload.uniform_block() != Some(&floor)
+            })
+            .count();
+        assert!(
+            structure_chunks > 0,
+            "no procgen structure chunks appeared near spawn"
+        );
     }
 
     #[test]

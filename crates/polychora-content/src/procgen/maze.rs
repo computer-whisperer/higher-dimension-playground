@@ -8,7 +8,7 @@ use polychora_plugin_api::region_tree::{
     BlockData, ChunkArrayData, ChunkPayload, RegionNodeKind, RegionTreeCore,
 };
 
-use super::structures::aabb4_from_chunk_lattice;
+use super::structures::{aabb4_from_chunk_lattice, dedup_chunks_to_palette};
 
 const CHUNK_SIZE: usize = 8;
 const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
@@ -637,69 +637,69 @@ fn rasterize_maze(
         materials,
     };
 
-    for wx in maze_min[0]..=maze_max[0] {
-        for wy in maze_min[1]..=maze_max[1] {
-            for wz in maze_min[2]..=maze_max[2] {
-                for ww in maze_min[3]..=maze_max[3] {
-                    let ux = wx - maze_min[0];
-                    let uy = wy - maze_min[1];
-                    let uz = wz - maze_min[2];
-                    let uw = ww - maze_min[3];
-
-                    let material = if uy == 0 {
-                        Some(materials.floor)
-                    } else if uy == shape.span[1] - 1 {
-                        Some(materials.ceiling)
-                    } else {
-                        classify_interior_voxel([ux, uy, uz, uw], &interior_context)
-                    };
-
-                    let Some(mat) = material else { continue; };
-                    let cx = (wx.div_euclid(cs) - chunk_min[0]) as usize;
-                    let cy = (wy.div_euclid(cs) - chunk_min[1]) as usize;
-                    let cz = (wz.div_euclid(cs) - chunk_min[2]) as usize;
-                    let cw = (ww.div_euclid(cs) - chunk_min[3]) as usize;
+    // Chunk-major rasterization: iterating each chunk's local voxels keeps
+    // the chunk index and world/local coordinate math out of the inner loop
+    // (no div_euclid/rem_euclid per voxel) — this runs under the WASM fuel
+    // meter, so per-voxel constant factors matter.
+    let ceiling_uy = shape.span[1] - 1;
+    for cw in 0..dims[3] {
+        for cz in 0..dims[2] {
+            for cy in 0..dims[1] {
+                for cx in 0..dims[0] {
                     let chunk_idx = cx + dims[0] * (cy + dims[1] * (cz + dims[2] * cw));
-                    let lx = wx.rem_euclid(cs) as usize;
-                    let ly = wy.rem_euclid(cs) as usize;
-                    let lz = wz.rem_euclid(cs) as usize;
-                    let lw = ww.rem_euclid(cs) as usize;
-                    let voxel_idx = lw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
-                        + lz * CHUNK_SIZE * CHUNK_SIZE
-                        + ly * CHUNK_SIZE + lx;
-                    chunk_data[chunk_idx][voxel_idx] = mat;
+                    let chunk = &mut chunk_data[chunk_idx];
+                    let base = [
+                        (chunk_min[0] + cx as i32) * cs,
+                        (chunk_min[1] + cy as i32) * cs,
+                        (chunk_min[2] + cz as i32) * cs,
+                        (chunk_min[3] + cw as i32) * cs,
+                    ];
+                    for lw in 0..CHUNK_SIZE {
+                        let uw = base[3] + lw as i32 - maze_min[3];
+                        if uw < 0 || uw > maze_max[3] - maze_min[3] {
+                            continue;
+                        }
+                        for lz in 0..CHUNK_SIZE {
+                            let uz = base[2] + lz as i32 - maze_min[2];
+                            if uz < 0 || uz > maze_max[2] - maze_min[2] {
+                                continue;
+                            }
+                            for ly in 0..CHUNK_SIZE {
+                                let uy = base[1] + ly as i32 - maze_min[1];
+                                if uy < 0 || uy > ceiling_uy {
+                                    continue;
+                                }
+                                let row_base = lw * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+                                    + lz * CHUNK_SIZE * CHUNK_SIZE
+                                    + ly * CHUNK_SIZE;
+                                for lx in 0..CHUNK_SIZE {
+                                    let ux = base[0] + lx as i32 - maze_min[0];
+                                    if ux < 0 || ux > maze_max[0] - maze_min[0] {
+                                        continue;
+                                    }
+                                    let material = if uy == 0 {
+                                        Some(materials.floor)
+                                    } else if uy == ceiling_uy {
+                                        Some(materials.ceiling)
+                                    } else {
+                                        classify_interior_voxel(
+                                            [ux, uy, uz, uw],
+                                            &interior_context,
+                                        )
+                                    };
+                                    if let Some(mat) = material {
+                                        chunk[row_base + lx] = mat;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Build ChunkArrayData — deduplicate chunks by linear scan to avoid
-    // cloning full 8KB chunk vectors into a BTreeMap.
-    let mut palette: Vec<ChunkPayload> = vec![ChunkPayload::Empty];
-    let mut dense_indices = Vec::with_capacity(total_chunks);
-    let empty_chunk = vec![0u16; CHUNK_VOLUME];
-    for chunk in chunk_data.drain(..) {
-        if chunk == empty_chunk {
-            dense_indices.push(0u16);
-            continue;
-        }
-        // Linear scan for deduplication (few unique chunks in practice)
-        let mut found = false;
-        for (idx, existing) in palette.iter().enumerate() {
-            if let ChunkPayload::Dense16 { materials } = existing {
-                if materials == &chunk {
-                    dense_indices.push(idx as u16);
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if !found {
-            let idx = palette.len() as u16;
-            palette.push(ChunkPayload::Dense16 { materials: chunk });
-            dense_indices.push(idx);
-        }
-    }
+    let (palette, dense_indices) = dedup_chunks_to_palette(chunk_data);
 
     if dense_indices.iter().all(|&idx| idx == 0) {
         return RegionTreeCore { bounds, kind: RegionNodeKind::Empty, generator_version_hash: 0 };

@@ -344,7 +344,7 @@ impl MassivePlatformsWorldGenerator {
                 world_origin,
             ) {
                 Ok(core) if core.bounds.is_valid() => {
-                    let _ = tree.splice_non_empty_core_in_bounds(core.bounds, &core);
+                    let _ = tree.splice_non_empty_core_in_bounds(core.bounds, core.as_ref());
                 }
                 Err(e) => {
                     eprintln!("procgen WASM error: {e}");

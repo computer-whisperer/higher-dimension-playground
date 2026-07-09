@@ -14,12 +14,14 @@ use std::fmt;
 use std::sync::Arc;
 
 /// Higher execution limits for the procgen slot: structures produce large
-/// region trees that exceed the default 64 KB I/O budget.
+/// region trees that exceed the default 64 KB I/O budget. The largest maze
+/// (15x7x15x15 cells) rasterizes ~6.5M voxels across ~3.6k chunks: generate
+/// needs low-billions of fuel and tens of MB of output headroom.
 pub const PROCGEN_EXECUTION_LIMITS: WasmExecutionLimits = WasmExecutionLimits {
     max_input_bytes: 128 * 1024,
-    max_output_bytes: 2 * 1024 * 1024,
+    max_output_bytes: 64 * 1024 * 1024,
     max_memory_pages: 16384,
-    max_fuel: 500_000_000,
+    max_fuel: 4_000_000_000,
 };
 
 const LRU_CACHE_CAPACITY: usize = 64;
@@ -62,13 +64,32 @@ struct LruEntry {
     value: ProcgenPrepareOutput,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GenerateCacheKey {
+    structure_id: u32,
+    seed: u64,
+    orientation: u16,
+    origin: [i32; 4],
+}
+
+struct GenerateLruEntry {
+    key: GenerateCacheKey,
+    value: Arc<RegionTreeCore>,
+}
+
+/// Structure generation re-runs on every world query intersecting a structure
+/// cell; large structures (mazes) cost ~100 ms per WASM generate and multiple
+/// MB per tree, so keep a small number of full results hot.
+const GENERATE_LRU_CAPACITY: usize = 8;
+
 /// Host-side caller for procgen WASM operations.
 ///
-/// Holds structure declarations from the plugin manifest, an LRU cache of
-/// prepare results, and calls the Procgen WASM slot for prepare/generate.
+/// Holds structure declarations from the plugin manifest, LRU caches of
+/// prepare and generate results, and calls the Procgen WASM slot.
 pub struct ProcgenWasmCaller {
     declarations: Vec<StructureDeclaration>,
     prepare_cache: Vec<LruEntry>,
+    generate_cache: Vec<GenerateLruEntry>,
 }
 
 impl ProcgenWasmCaller {
@@ -76,6 +97,7 @@ impl ProcgenWasmCaller {
         Self {
             declarations,
             prepare_cache: Vec::with_capacity(LRU_CACHE_CAPACITY),
+            generate_cache: Vec::with_capacity(GENERATE_LRU_CAPACITY),
         }
     }
 
@@ -154,16 +176,34 @@ impl ProcgenWasmCaller {
     }
 
     /// Call OP_PROCGEN_GENERATE via WASM and convert the returned plugin
-    /// RegionTreeCore to the host's internal type.
+    /// RegionTreeCore to the host's internal type. Results are cached by
+    /// (structure_id, seed, orientation, origin).
     pub fn generate(
-        &self,
+        &mut self,
         manager: &mut WasmPluginManager,
         structure_id: u32,
         seed: u64,
         orientation: TesseractOrientation,
         origin: [i32; 4],
         state: Vec<u8>,
-    ) -> Result<RegionTreeCore, ProcgenWasmError> {
+    ) -> Result<Arc<RegionTreeCore>, ProcgenWasmError> {
+        let cache_key = GenerateCacheKey {
+            structure_id,
+            seed,
+            orientation: orientation.0,
+            origin,
+        };
+        if let Some(pos) = self
+            .generate_cache
+            .iter()
+            .position(|e| e.key == cache_key)
+        {
+            let entry = self.generate_cache.remove(pos);
+            let result = entry.value.clone();
+            self.generate_cache.push(entry);
+            return Ok(result);
+        }
+
         let input = ProcgenGenerateInput {
             structure_id,
             seed,
@@ -185,7 +225,15 @@ impl ProcgenWasmCaller {
         let output: ProcgenGenerateOutput = postcard::from_bytes(&result.invocation.output)
             .map_err(|e| ProcgenWasmError::DeserializeOutput(e.to_string()))?;
 
-        Ok(region_tree_from_plugin(&output.tree))
+        let tree = Arc::new(region_tree_from_plugin(&output.tree));
+        if self.generate_cache.len() >= GENERATE_LRU_CAPACITY {
+            self.generate_cache.remove(0);
+        }
+        self.generate_cache.push(GenerateLruEntry {
+            key: cache_key,
+            value: tree.clone(),
+        });
+        Ok(tree)
     }
 
     /// Convenience: prepare + generate in one call.
@@ -196,7 +244,7 @@ impl ProcgenWasmCaller {
         seed: u64,
         orientation: TesseractOrientation,
         origin: [i32; 4],
-    ) -> Result<(ProcgenPrepareOutput, RegionTreeCore), ProcgenWasmError> {
+    ) -> Result<(ProcgenPrepareOutput, Arc<RegionTreeCore>), ProcgenWasmError> {
         let prepared = self.prepare(manager, structure_id, seed, orientation, origin)?;
         let tree = self.generate(
             manager,
@@ -211,6 +259,7 @@ impl ProcgenWasmCaller {
 
     pub fn clear_cache(&mut self) {
         self.prepare_cache.clear();
+        self.generate_cache.clear();
     }
 }
 
@@ -270,7 +319,7 @@ impl ProcgenWasmState {
         seed: u64,
         orientation: TesseractOrientation,
         origin: [i32; 4],
-    ) -> Result<RegionTreeCore, ProcgenWasmError> {
+    ) -> Result<Arc<RegionTreeCore>, ProcgenWasmError> {
         let (_prepared, tree) = self.caller.prepare_and_generate(
             &mut self.manager,
             structure_id,
@@ -279,6 +328,82 @@ impl ProcgenWasmState {
             origin,
         )?;
         Ok(tree)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAZE_STRUCTURE_ID: u32 = 0xFFFF_0001;
+
+    fn content_wasm() -> &'static [u8] {
+        include_bytes!(env!("POLYCHORA_CONTENT_WASM_PATH"))
+    }
+
+    /// Drive the maze structure through the real WASM procgen path across many
+    /// seeds. Reproduces the trap reported in docs/architecture-review-2026-07.md
+    /// ("MazeGenerator::generate traps in WASM (memcmp backtrace)").
+    #[test]
+    fn maze_prepare_and_generate_many_seeds() {
+        let mut state = ProcgenWasmState::new_standalone(content_wasm(), Vec::new())
+            .expect("procgen wasm state");
+        let mut failures = Vec::new();
+        for seed in 0..24u64 {
+            let origin = [((seed as i32) % 5) * 64 - 128, 0, 37, -53];
+            let prep_input = ProcgenPrepareInput {
+                structure_id: MAZE_STRUCTURE_ID,
+                seed,
+                orientation: TesseractOrientation(0),
+                origin,
+            };
+            let prep_bytes = postcard::to_allocvec(&prep_input).unwrap();
+            let prep = match state.manager.call_slot(
+                WasmPluginSlot::Procgen,
+                OP_PROCGEN_PREPARE as i32,
+                &prep_bytes,
+            ) {
+                Ok(Some(r)) => r,
+                other => {
+                    failures.push((seed, format!("prepare failed: {other:?}")));
+                    continue;
+                }
+            };
+            let prep_out: ProcgenPrepareOutput =
+                postcard::from_bytes(&prep.invocation.output).unwrap();
+            let gen_input = ProcgenGenerateInput {
+                structure_id: MAZE_STRUCTURE_ID,
+                seed,
+                orientation: TesseractOrientation(0),
+                origin,
+                state: prep_out.state,
+            };
+            let gen_bytes = postcard::to_allocvec(&gen_input).unwrap();
+            match state.manager.call_slot(
+                WasmPluginSlot::Procgen,
+                OP_PROCGEN_GENERATE as i32,
+                &gen_bytes,
+            ) {
+                Ok(Some(r)) => {
+                    eprintln!(
+                        "seed {seed}: prepare fuel {:?}, generate fuel {:?}, output {} bytes",
+                        prep.invocation.fuel_used,
+                        r.invocation.fuel_used,
+                        r.invocation.output.len()
+                    );
+                }
+                other => {
+                    failures.push((
+                        seed,
+                        format!(
+                            "generate failed (prepare fuel {:?}): {other:?}",
+                            prep.invocation.fuel_used
+                        ),
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "maze failures: {failures:#?}");
     }
 }
 
