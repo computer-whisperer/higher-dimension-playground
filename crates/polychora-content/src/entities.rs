@@ -33,7 +33,9 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             default_scale: 0.50,
             base_material_color: [128, 0, 255], // Purple
             model_textures: alloc::vec![
-                tex(TEX_PURPLE),        // slot 0
+                tex(TEX_PURPLE),          // slot 0: corner shells
+                tex(TEX_CRYSTAL_LATTICE), // slot 1: core body
+                tex(TEX_LIGHT),           // slot 2: core pulse
             ],
             spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_CUBE,
             sim_config: Some(EntitySimConfig {
@@ -76,9 +78,9 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
             default_scale: 0.48,
             base_material_color: [210, 214, 224], // Marble
             model_textures: alloc::vec![
-                tex(TEX_MARBLE),        // slot 0
-                tex(TEX_OXIDIZED_METAL),// slot 1 (unused but keeps alignment)
-                tex(TEX_BIO_SPORE_MOSS),// slot 2
+                tex(TEX_MARBLE),        // slot 0: hull
+                tex(TEX_OXIDIZED_METAL),// slot 1: keel band
+                tex(TEX_BIO_SPORE_MOSS),// slot 2: fins + tail
             ],
             spawn_egg_texture_id: content_ids::SPAWN_EGG_TEX_DRIFTER,
             sim_config: Some(EntitySimConfig {

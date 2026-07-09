@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use libm::{cosf, sinf};
+use libm::{cosf, fabsf, sinf};
 use polychora_plugin_api::content_ids;
 use polychora_plugin_api::model_abi::{EntityModelInput, EntityModelOutput, EntityModelPart};
 
@@ -32,32 +32,146 @@ fn fallback_cube(input: &EntityModelInput) -> EntityModelOutput {
 }
 
 fn cube_model(input: &EntityModelInput) -> EntityModelOutput {
+    // Puzzle-cube accent: a crystal core with eight corner cubelets that
+    // breathe along the XZW diagonals and shear in W, so the 4D-ness reads
+    // at a glance.
     let s = input.scale;
-    EntityModelOutput {
-        parts: alloc::vec![part([0.0; 4], [s; 4], [0; 8])],
+    let anim_t = input.elapsed_s * 1.7 + input.entity_id as f32 * 0.41;
+    let breathe = 0.30 + 0.10 * sinf(anim_t);
+    let w_shear = 0.08 * sinf(anim_t * 0.63 + 1.1);
+    let glow = sinf(anim_t * 1.3) * 0.5 + 0.5;
+    let core_mat: u8 = if glow > 0.72 { 2 } else { 1 };
+
+    let mut parts = Vec::with_capacity(9);
+
+    // Core — crystal lattice with pulsing light on Y and W faces
+    parts.push(part(
+        [0.0; 4],
+        [s * 0.42, s * 0.42, s * 0.42, s * 0.42],
+        [1, 1, core_mat, core_mat, 1, 1, core_mat, core_mat],
+    ));
+
+    // Corner cubelets — purple shells on the eight XZW diagonals
+    for xs in [1.0f32, -1.0] {
+        for zs in [1.0f32, -1.0] {
+            for ws in [1.0f32, -1.0] {
+                let bob = 0.04 * sinf(anim_t * 1.9 + xs + 2.0 * zs + 3.0 * ws);
+                parts.push(part(
+                    [xs * breathe, bob, zs * breathe, ws * breathe + w_shear],
+                    [s * 0.16, s * 0.16, s * 0.16, s * 0.16],
+                    [0; 8],
+                ));
+            }
+        }
     }
+
+    EntityModelOutput { parts }
 }
 
 fn rotor_model(input: &EntityModelInput) -> EntityModelOutput {
+    // Gyroscope accent: white axle and hub, four glow vanes orbiting in the
+    // XZ plane, and two counter-orbiting stabilizers in ZW (the 4D tell).
     let s = input.scale;
-    EntityModelOutput {
-        parts: alloc::vec![part(
-            [0.0; 4],
-            [s * 0.56, s * 0.56, s * 1.35, s * 0.82],
-            [0, 0, 0, 1, 0, 1, 0, 1],
-        )],
+    let anim_t = input.elapsed_s * 2.2 + input.entity_id as f32 * 0.37;
+
+    let mut parts = Vec::with_capacity(8);
+
+    // Axle — slim vertical spine
+    parts.push(part(
+        [0.0; 4],
+        [s * 0.10, s * 0.72, s * 0.10, s * 0.10],
+        [0; 8],
+    ));
+
+    // Hub — squat white drum with light rims on Y and W faces
+    parts.push(part(
+        [0.0; 4],
+        [s * 0.34, s * 0.20, s * 0.34, s * 0.30],
+        [0, 0, 1, 1, 0, 0, 1, 1],
+    ));
+
+    // Vanes — orbit the hub in XZ, stretched along their direction of travel
+    for k in 0..4 {
+        let theta = anim_t + k as f32 * core::f32::consts::FRAC_PI_2;
+        let (sin_th, cos_th) = (sinf(theta), cosf(theta));
+        let r = 0.46;
+        parts.push(part(
+            [r * cos_th, 0.0, r * sin_th, 0.0],
+            [
+                s * (0.10 + 0.16 * fabsf(sin_th)),
+                s * 0.08,
+                s * (0.10 + 0.16 * fabsf(cos_th)),
+                s * 0.08,
+            ],
+            [1, 1, 0, 0, 1, 1, 0, 0],
+        ));
     }
+
+    // Stabilizers — counter-orbit above the hub in the ZW plane
+    for k in 0..2 {
+        let theta = -anim_t * 1.6 + k as f32 * core::f32::consts::PI;
+        parts.push(part(
+            [0.0, 0.30, 0.38 * cosf(theta), 0.38 * sinf(theta)],
+            [s * 0.09, s * 0.09, s * 0.09, s * 0.09],
+            [1; 8],
+        ));
+    }
+
+    EntityModelOutput { parts }
 }
 
 fn drifter_model(input: &EntityModelInput) -> EntityModelOutput {
+    // Drifting gondola: marble hull, oxidized keel band, mossy fins on ±X and
+    // ±W paddling out of phase, and a tail bead riding the wake.
     let s = input.scale;
-    EntityModelOutput {
-        parts: alloc::vec![part(
-            [0.0; 4],
-            [s * 1.15, s * 0.44, s * 0.72, s * 1.05],
-            [2, 0, 0, 0, 0, 2, 0, 0],
-        )],
+    let anim_t = input.elapsed_s * 1.15 + input.entity_id as f32 * 0.53;
+    let sway = 0.05 * sinf(anim_t);
+
+    let mut parts = Vec::with_capacity(7);
+
+    // Hull — long marble body
+    parts.push(part(
+        [0.0, sway, 0.0, 0.0],
+        [s * 1.02, s * 0.34, s * 0.54, s * 0.78],
+        [0; 8],
+    ));
+
+    // Keel band — oxidized metal strip under the hull
+    parts.push(part(
+        [0.0, sway - 0.30, 0.0, 0.0],
+        [s * 0.72, s * 0.10, s * 0.38, s * 0.52],
+        [1; 8],
+    ));
+
+    // Fins — moss paddles; X fins thin in X, W fins thin in W
+    let fin_specs: [([f32; 4], [f32; 4]); 4] = [
+        ([0.92, 0.0, -0.10, 0.0], [0.12, 0.08, 0.34, 0.34]),
+        ([-0.92, 0.0, -0.10, 0.0], [0.12, 0.08, 0.34, 0.34]),
+        ([0.0, 0.0, -0.10, 0.72], [0.34, 0.08, 0.34, 0.12]),
+        ([0.0, 0.0, -0.10, -0.72], [0.34, 0.08, 0.34, 0.12]),
+    ];
+    for (i, (base_offset, extents)) in fin_specs.iter().enumerate() {
+        let paddle = sinf(anim_t * 1.8 + i as f32 * core::f32::consts::FRAC_PI_2);
+        parts.push(part(
+            [
+                base_offset[0],
+                sway + 0.10 * paddle,
+                base_offset[2],
+                base_offset[3],
+            ],
+            [s * extents[0], s * extents[1], s * extents[2], s * extents[3]],
+            [2; 8],
+        ));
     }
+
+    // Tail bead — lags behind the hull
+    parts.push(part(
+        [0.0, sway + 0.06 * sinf(anim_t * 1.3 - 1.2), -0.72, 0.0],
+        [s * 0.14, s * 0.14, s * 0.18, s * 0.14],
+        [2, 1, 2, 1, 2, 1, 2, 1],
+    ));
+
+    EntityModelOutput { parts }
 }
 
 fn seeker_model(input: &EntityModelInput) -> EntityModelOutput {
