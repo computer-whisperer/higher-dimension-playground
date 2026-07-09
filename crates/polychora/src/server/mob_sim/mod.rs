@@ -489,10 +489,15 @@ pub(super) fn tick_entity_simulation_window(
 
 #[cfg(test)]
 mod tests {
-    use super::navigation::{mob_nav_find_path, mob_nav_has_line_of_sight, mob_nav_neighbor_steps};
+    use super::navigation::{
+        mob_nav_find_path, mob_nav_find_walkable_goal_cell, mob_nav_has_line_of_sight,
+        mob_nav_neighbor_steps, MobNavWalkabilityMemo, MOB_NAV_CARDINAL_STEP_COST,
+        MOB_NAV_DIAGONAL_STEP_COST,
+    };
     use super::physics::{
         resolve_mob_collision, resolve_walking_collision_with_steps, stick_mob_to_ground,
     };
+    use super::super::types::MobNavCell;
     use super::*;
     use crate::content_registry::ContentRegistry;
     use crate::shared::spatial::ChunkCoord;
@@ -534,13 +539,58 @@ mod tests {
         );
     }
 
+    fn set_solid_floor(state: &mut ServerState, x: std::ops::RangeInclusive<i32>, z: std::ops::RangeInclusive<i32>, w: std::ops::RangeInclusive<i32>) {
+        for wx in x {
+            for wz in z.clone() {
+                for ww in w.clone() {
+                    set_solid_voxel(state, wx, 0, wz, ww);
+                }
+            }
+        }
+    }
+
+    /// Recompute a path's cost from its cells using the step cost model.
+    fn path_cost_from_cells(start: MobNavCell, cells: &[MobNavCell]) -> i32 {
+        let mut cost = 0;
+        let mut cursor = start;
+        for cell in cells {
+            let horizontal_changed = [0usize, 2, 3]
+                .iter()
+                .filter(|&&axis| cell[axis] != cursor[axis])
+                .count();
+            cost += match horizontal_changed {
+                1 => MOB_NAV_CARDINAL_STEP_COST,
+                2 => MOB_NAV_DIAGONAL_STEP_COST,
+                other => panic!("unexpected step touching {other} horizontal axes"),
+            };
+            cursor = *cell;
+        }
+        cost
+    }
+
     #[test]
-    fn walking_neighbor_steps_include_elevation_transitions() {
+    fn walking_neighbor_steps_include_elevation_and_flat_diagonals() {
         let steps = mob_nav_neighbor_steps(MobLocomotionMode::Walking);
-        assert!(steps.contains(&[1, 1, 0, 0]));
-        assert!(steps.contains(&[1, -1, 0, 0]));
-        assert!(steps.contains(&[0, 1, 1, 0]));
-        assert!(!steps.contains(&[0, 1, 0, 0]));
+        let deltas: Vec<MobNavCell> = steps.iter().map(|step| step.delta).collect();
+        assert!(deltas.contains(&[1, 1, 0, 0]));
+        assert!(deltas.contains(&[1, -1, 0, 0]));
+        assert!(deltas.contains(&[0, 1, 1, 0]));
+        assert!(!deltas.contains(&[0, 1, 0, 0]), "no pure vertical move for walkers");
+
+        for delta in [[1, 0, 1, 0], [1, 0, 0, -1], [0, 0, 1, 1]] {
+            let step = steps
+                .iter()
+                .find(|step| step.delta == delta)
+                .expect("flat horizontal diagonals should exist");
+            assert_eq!(step.cost, MOB_NAV_DIAGONAL_STEP_COST);
+            assert!(step.corner_checks.is_some());
+        }
+        assert!(
+            !deltas.contains(&[1, 1, 1, 0]),
+            "diagonals must not ride elevation changes"
+        );
+        assert_eq!(steps.len(), 30);
+        assert_eq!(mob_nav_neighbor_steps(MobLocomotionMode::Flying).len(), 32);
     }
 
     #[test]
@@ -550,11 +600,13 @@ mod tests {
         set_solid_voxel(&mut state, 2, 1, 0, 0);
 
         let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
+        let mut memo = MobNavWalkabilityMemo::default();
         let from = [0.0, 2.2, 0.0, 0.0];
         let to = [2.0, 2.2, 0.0, 0.0];
         assert!(!mob_nav_has_line_of_sight(
             &state,
             &mut cache,
+            &mut memo,
             from,
             to,
             0.2,
@@ -563,9 +615,11 @@ mod tests {
 
         set_solid_voxel(&mut state, 1, 1, 0, 0);
         cache.clear();
+        let mut memo = MobNavWalkabilityMemo::default();
         assert!(mob_nav_has_line_of_sight(
             &state,
             &mut cache,
+            &mut memo,
             from,
             to,
             0.2,
@@ -583,9 +637,11 @@ mod tests {
         let start = [0, 3, 0, 0];
         let goal = [2, 4, 0, 0];
         let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
+        let mut memo = MobNavWalkabilityMemo::default();
         let path = mob_nav_find_path(
             &state,
             &mut cache,
+            &mut memo,
             start,
             goal,
             0.2,
@@ -607,6 +663,136 @@ mod tests {
             saw_vertical_step,
             "walking path should include an elevation transition"
         );
+    }
+
+    #[test]
+    fn walking_path_moves_diagonally_across_open_floor() {
+        let mut state = test_server_state_with_world();
+        set_solid_floor(&mut state, -2..=8, -2..=8, 0..=0);
+
+        let start = [0, 2, 0, 0];
+        let goal = [6, 2, 6, 0];
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
+        let mut memo = MobNavWalkabilityMemo::default();
+        let path = mob_nav_find_path(
+            &state,
+            &mut cache,
+            &mut memo,
+            start,
+            goal,
+            0.2,
+            MobLocomotionMode::Walking,
+        )
+        .expect("open floor path");
+        assert!(path.reached_goal);
+        assert_eq!(
+            path.path_cells.len(),
+            6,
+            "diagonal route should take 6 steps, not a 12-step zigzag"
+        );
+    }
+
+    #[test]
+    fn walking_path_cost_is_optimal_on_open_floor() {
+        let mut state = test_server_state_with_world();
+        set_solid_floor(&mut state, -2..=9, -2..=5, -2..=4);
+
+        let start = [0, 2, 0, 0];
+        let goal = [7, 2, 3, 2];
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
+        let mut memo = MobNavWalkabilityMemo::default();
+        let path = mob_nav_find_path(
+            &state,
+            &mut cache,
+            &mut memo,
+            start,
+            goal,
+            0.2,
+            MobLocomotionMode::Walking,
+        )
+        .expect("open floor path");
+        assert!(path.reached_goal);
+        // Deltas (7, 3, 2): five diagonal pairings + two cardinals.
+        assert_eq!(
+            path_cost_from_cells(start, &path.path_cells),
+            5 * MOB_NAV_DIAGONAL_STEP_COST + 2 * MOB_NAV_CARDINAL_STEP_COST
+        );
+    }
+
+    #[test]
+    fn walking_diagonal_rejected_when_flank_is_blocked() {
+        let mut state = test_server_state_with_world();
+        set_solid_floor(&mut state, -2..=4, -2..=4, 0..=0);
+        // Wall that blocks the +x flank cell (1,2,0,0) without touching the
+        // collision boxes of the start or goal cells.
+        set_solid_voxel(&mut state, 1, 2, -1, 0);
+
+        let start = [0, 2, 0, 0];
+        let goal = [1, 2, 1, 0];
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
+        let mut memo = MobNavWalkabilityMemo::default();
+        let path = mob_nav_find_path(
+            &state,
+            &mut cache,
+            &mut memo,
+            start,
+            goal,
+            0.2,
+            MobLocomotionMode::Walking,
+        )
+        .expect("path around blocked corner");
+        assert!(path.reached_goal);
+        assert_eq!(
+            path.path_cells.len(),
+            2,
+            "diagonal through a blocked corner must fall back to two cardinal steps"
+        );
+    }
+
+    #[test]
+    fn flying_path_uses_diagonals_in_open_space() {
+        let state = test_server_state_with_world();
+        let start = [0, 10, 0, 0];
+        let goal = [4, 14, 0, 0];
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
+        let mut memo = MobNavWalkabilityMemo::default();
+        let path = mob_nav_find_path(
+            &state,
+            &mut cache,
+            &mut memo,
+            start,
+            goal,
+            0.2,
+            MobLocomotionMode::Flying,
+        )
+        .expect("open space path");
+        assert!(path.reached_goal);
+        assert_eq!(
+            path.path_cells.len(),
+            4,
+            "flyers should pair x/y movement into diagonal steps"
+        );
+    }
+
+    #[test]
+    fn goal_snap_walks_down_to_supported_cell() {
+        let mut state = test_server_state_with_world();
+        set_solid_floor(&mut state, 0..=6, 0..=6, 0..=0);
+
+        let desired = [3, 5, 3, 0]; // mid-air above the floor
+        let origin = [0, 2, 0, 0];
+        let mut cache = HashMap::<ChunkKey, CollisionChunkCacheEntry>::new();
+        let mut memo = MobNavWalkabilityMemo::default();
+        let snapped = mob_nav_find_walkable_goal_cell(
+            &state,
+            &mut cache,
+            &mut memo,
+            desired,
+            origin,
+            0.2,
+            MobLocomotionMode::Walking,
+        );
+        assert_eq!(snapped, Some([3, 2, 3, 0]));
     }
 
     #[test]
