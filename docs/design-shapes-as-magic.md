@@ -1,6 +1,12 @@
 # Design: Shapes-as-Magic
 
-Status: vision captured 2026-07-10 (from project owner); prototypes in progress.
+Status: vision captured 2026-07-10 (from project owner); both prototypes landed
+and runtime-verified 2026-07-10 (commits `d5de01c`, `e58a0a3` + infra fix
+`8052905`). Working today: build a sigil around a Resonator (or stamp one from
+a dispenser blueprint), interact to cast; Gate teleports along +w, Beacon
+erects a light pillar, Summon calls seekers; the same sigil at scale −1 casts
+at tier ×2. Everything below the Vision section now describes shipped
+prototype behavior plus the still-open design questions.
 This document records a core piece of the original project vision that predates the
 repo's documentation, plus the concept-proving work derived from it. Treat the
 "Vision" section as authoritative user intent; everything after it is
