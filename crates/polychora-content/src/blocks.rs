@@ -25,6 +25,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 light_emission: 0,
                 interactable: false,
                 tick_config: None,
+                structure_scan_radius: 0,
             }
         };
         ($id:expr, $ns:expr, $tex:expr, $name:expr, $cat:expr, [$r:expr, $g:expr, $b:expr], transparent) => {
@@ -38,6 +39,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 light_emission: 0,
                 interactable: false,
                 tick_config: None,
+                structure_scan_radius: 0,
             }
         };
         ($id:expr, $ns:expr, $tex:expr, $name:expr, $cat:expr, [$r:expr, $g:expr, $b:expr], light: $em:expr) => {
@@ -51,6 +53,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 light_emission: $em,
                 interactable: false,
                 tick_config: None,
+                structure_scan_radius: 0,
             }
         };
     }
@@ -160,6 +163,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
             light_emission: 0,
             interactable: true,
             tick_config: None,
+            structure_scan_radius: 0,
         },
 
         // Spawner (71) — ticking block that spawns entities
@@ -176,6 +180,7 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
                 interval_ms: 5000,
                 activation_radius: 24.0,
             }),
+            structure_scan_radius: 0,
         },
 
         // Blueprint dispenser (72) — gives player a blueprint item on interact
@@ -189,6 +194,22 @@ pub fn block_declarations() -> Vec<BlockDeclaration> {
             light_emission: 4,
             interactable: true,
             tick_config: None,
+            structure_scan_radius: 0,
+        },
+
+        // Resonator (73) — sigil catalyst: interact scans the surrounding
+        // structure and casts a recognized sigil (shapes-as-magic prototype).
+        BlockDeclaration {
+            type_id: BLOCK_RESONATOR,
+            name: String::from("Resonator"),
+            category: Special,
+            color_hint: [140, 146, 158],
+            texture: TextureRef { namespace: 0, texture_id: TEX_RUNIC_ALLOY },
+            transparent: false,
+            light_emission: 6,
+            interactable: true,
+            tick_config: None,
+            structure_scan_radius: 2,
         },
     ]
 }

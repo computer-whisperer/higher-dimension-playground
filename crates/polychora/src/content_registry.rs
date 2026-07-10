@@ -220,6 +220,9 @@ pub struct BlockEntry {
     pub interactable: bool,
     /// If set, the server ticks instances of this block type periodically.
     pub tick_config: Option<BlockTickConfig>,
+    /// If nonzero, OP_BLOCK_INTERACT includes a structure snapshot of the
+    /// surrounding blocks within this radius (in cells of the block's scale).
+    pub structure_scan_radius: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +364,7 @@ impl ContentRegistry {
                 material_token: 0,
                 interactable: false,
                 tick_config: None,
+                structure_scan_radius: 0,
             },
         );
         registry
@@ -395,6 +399,7 @@ impl ContentRegistry {
             material_token: token,
             interactable: false,
             tick_config: None,
+            structure_scan_radius: 0,
         };
         self.blocks.insert((namespace, block_type), entry);
         self.block_order.push((namespace, block_type));
@@ -415,6 +420,7 @@ impl ContentRegistry {
         texture: TextureRef,
         interactable: bool,
         tick_config: Option<BlockTickConfig>,
+        structure_scan_radius: u8,
     ) {
         let entry = BlockEntry {
             namespace,
@@ -426,6 +432,7 @@ impl ContentRegistry {
             material_token: forced_token,
             interactable,
             tick_config,
+            structure_scan_radius,
         };
         self.blocks.insert((namespace, block_type), entry);
         self.block_order.push((namespace, block_type));
@@ -692,6 +699,25 @@ impl ContentRegistry {
     pub fn is_block_interactable(&self, namespace: u32, block_type: u32) -> bool {
         self.resolve_block_entry(namespace, block_type)
             .is_some_and(|e| e.interactable)
+    }
+
+    /// Look up a block by display name (normalized: case/punctuation
+    /// insensitive, e.g. "crystal_lattice" matches "Crystal Lattice").
+    /// Linear scan — intended for console/dev use.
+    pub fn block_lookup_by_name(&self, name: &str) -> Option<&BlockEntry> {
+        let normalized = normalize_token(name);
+        if normalized.is_empty() {
+            return None;
+        }
+        self.blocks
+            .values()
+            .find(|e| normalize_token(&e.name) == normalized)
+    }
+
+    /// Structure scan radius for OP_BLOCK_INTERACT (0 = no snapshot).
+    pub fn block_structure_scan_radius(&self, namespace: u32, block_type: u32) -> u8 {
+        self.resolve_block_entry(namespace, block_type)
+            .map_or(0, |e| e.structure_scan_radius)
     }
 
     /// Get the tick config for a block type, if any.

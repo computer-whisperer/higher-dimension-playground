@@ -85,8 +85,109 @@ impl App {
                 "  /explode <x y z w> [radius]  -- server-side explosion",
             );
             self.append_dev_console_log_line(
+                "  /setblock <x y z w> <block-name|air> [scale_exp]",
+            );
+            self.append_dev_console_log_line(
+                "  /interact <x y z w> [scale_exp]  -- interact with block (chest/resonator/...)",
+            );
+            self.append_dev_console_log_line(
                 "Other /commands are forwarded to the server. Up/Down recalls history.",
             );
+            return;
+        }
+
+        if command_name.eq_ignore_ascii_case("setblock") {
+            if args.len() < 5 || args.len() > 6 {
+                self.append_dev_console_log_line(
+                    "Usage: /setblock <x> <y> <z> <w> <block-name|air> [scale_exp]",
+                );
+                return;
+            }
+            let Ok(pos) = Self::parse_console_vec4(&args[0..4]) else {
+                self.append_dev_console_log_line("setblock: invalid coordinates");
+                return;
+            };
+            let scale_exp = if args.len() == 6 {
+                match args[5].parse::<i8>() {
+                    Ok(s) if (-4..=4).contains(&s) => s,
+                    _ => {
+                        self.append_dev_console_log_line(
+                            "setblock: scale_exp must be an integer in -4..=4",
+                        );
+                        return;
+                    }
+                }
+            } else {
+                0
+            };
+            let block = if args[4].eq_ignore_ascii_case("air") {
+                polychora::shared::voxel::BlockData::AIR.at_scale(scale_exp)
+            } else {
+                let Some(entry) = self.content_registry.block_lookup_by_name(args[4]) else {
+                    self.append_dev_console_log_line(format!(
+                        "setblock: unknown block '{}'",
+                        args[4]
+                    ));
+                    return;
+                };
+                polychora::shared::voxel::BlockData::simple(entry.namespace, entry.block_type)
+                    .at_scale(scale_exp)
+            };
+            let cell_min = Self::snap_to_scale_lattice(pos, scale_exp);
+            self.send_multiplayer_voxel_update(Instant::now(), cell_min, block.clone());
+            self.append_dev_console_log_line(format!(
+                "setblock: {} at ({}, {}, {}, {}) scale={}",
+                if block.is_air() { "air" } else { args[4] },
+                cell_min[0],
+                cell_min[1],
+                cell_min[2],
+                cell_min[3],
+                scale_exp,
+            ));
+            return;
+        }
+
+        if command_name.eq_ignore_ascii_case("interact") {
+            if args.len() < 4 || args.len() > 5 {
+                self.append_dev_console_log_line("Usage: /interact <x> <y> <z> <w> [scale_exp]");
+                return;
+            }
+            let Ok(pos) = Self::parse_console_vec4(&args[0..4]) else {
+                self.append_dev_console_log_line("interact: invalid coordinates");
+                return;
+            };
+            let scale_exp = if args.len() == 5 {
+                match args[4].parse::<i8>() {
+                    Ok(s) if (-4..=4).contains(&s) => s,
+                    _ => {
+                        self.append_dev_console_log_line(
+                            "interact: scale_exp must be an integer in -4..=4",
+                        );
+                        return;
+                    }
+                }
+            } else {
+                0
+            };
+            let cell_min = Self::snap_to_scale_lattice(pos, scale_exp);
+            let Some(block) = self.scene.block_exactly_filling_cell(cell_min, scale_exp) else {
+                self.append_dev_console_log_line(format!(
+                    "interact: no exact-fit block at ({}, {}, {}, {}) scale={}",
+                    cell_min[0], cell_min[1], cell_min[2], cell_min[3], scale_exp,
+                ));
+                return;
+            };
+            let handled = self.run_block_interaction(&block, cell_min, scale_exp);
+            self.append_dev_console_log_line(format!(
+                "interact: {} at ({}, {}, {}, {}) -> {}",
+                self.content_registry
+                    .block_name(block.namespace, block.block_type),
+                cell_min[0],
+                cell_min[1],
+                cell_min[2],
+                cell_min[3],
+                if handled { "handled" } else { "no effect" },
+            ));
             return;
         }
 
@@ -313,7 +414,13 @@ impl App {
     }
 
     pub(super) fn append_dev_console_log_line(&mut self, line: impl Into<String>) {
-        self.dev_console_log.push_back(line.into());
+        let line = line.into();
+        // Mirror to stderr in automation mode so scripted runs can verify
+        // console command results from the log.
+        if self.args.automation {
+            eprintln!("[console] {line}");
+        }
+        self.dev_console_log.push_back(line);
         while self.dev_console_log.len() > DEV_CONSOLE_MAX_LOG_LINES {
             self.dev_console_log.pop_front();
         }
@@ -328,5 +435,18 @@ impl App {
         let z = args[2].parse::<f32>().map_err(|_| ())?;
         let w = args[3].parse::<f32>().map_err(|_| ())?;
         Ok([x, y, z, w])
+    }
+
+    /// Snap a world position down to the minimum corner of the cell that
+    /// contains it on the scale-`scale_exp` lattice.
+    fn snap_to_scale_lattice(
+        pos: [f32; 4],
+        scale_exp: i8,
+    ) -> [polychora::shared::spatial::ChunkCoord; 4] {
+        let cell = 2f64.powi(scale_exp as i32);
+        pos.map(|v| {
+            let snapped = ((v as f64) / cell).floor() * cell;
+            polychora::shared::spatial::ChunkCoord::from_num(snapped)
+        })
     }
 }

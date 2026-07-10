@@ -201,6 +201,7 @@ pub fn populate_registry_from_plugin(
             block.texture,
             block.interactable,
             block.tick_config.clone(),
+            block.structure_scan_radius,
         );
     }
 

@@ -141,9 +141,10 @@ impl App {
                     return true;
                 }
                 AutoCommand::Console(cmd) => {
-                    if !self.send_multiplayer_console_command(&cmd) {
-                        eprintln!("Warning: console auto-command '{cmd}' not sent (no server connection)");
-                    }
+                    // Route through the dev console so client-side commands
+                    // (/setblock, /interact, /tp, ...) work from automation;
+                    // unknown commands still forward to the server.
+                    self.execute_dev_console_command(&cmd);
                 }
             }
         } else if !self.command_queue.is_empty() || self.command_wait_frames > 0 {
@@ -708,57 +709,14 @@ impl App {
                     } else if place_requested {
                         // Check if the hit block is interactable (e.g. chest, spawner).
                         let mut handled_interact = false;
-                        if let Some(hit_block) = &edit_targets.hit_block {
-                            if self
-                                .content_registry
-                                .is_block_interactable(hit_block.namespace, hit_block.block_type)
-                            {
-                                if let Some(hit) = &edit_targets.hit {
-                                    let position = hit.origin_i32().map(|c| c as i64);
-                                    if let Some(wasm) = self.wasm_model_manager.as_mut() {
-                                        let result = polychora::block_gui::try_block_interact(
-                                            wasm,
-                                            hit_block,
-                                            position,
-                                            &self.inventory,
-                                            self.hotbar_selected_index as u32,
-                                        );
-                                        match result {
-                                            polychora::block_gui::BlockInteractResult::OpenGui(
-                                                session,
-                                            ) => {
-                                                eprintln!(
-                                                    "Opened block GUI: {} at ({}, {}, {}, {})",
-                                                    session.title,
-                                                    position[0],
-                                                    position[1],
-                                                    position[2],
-                                                    position[3],
-                                                );
-                                                self.block_gui_session = Some(session);
-                                                if let Some(window) = self
-                                                    .rcx
-                                                    .as_ref()
-                                                    .and_then(|rcx| rcx.window.clone())
-                                                {
-                                                    self.release_mouse(&window);
-                                                }
-                                                handled_interact = true;
-                                            }
-                                            polychora::block_gui::BlockInteractResult::Handled(
-                                                effects,
-                                            ) => {
-                                                self.process_block_interact_side_effects(
-                                                    &effects.side_effects,
-                                                    hit.origin,
-                                                );
-                                                handled_interact = true;
-                                            }
-                                            polychora::block_gui::BlockInteractResult::Nothing => {}
-                                        }
-                                    }
-                                }
-                            }
+                        if let (Some(hit_block), Some(hit)) =
+                            (&edit_targets.hit_block, &edit_targets.hit)
+                        {
+                            let block = hit_block.clone();
+                            let origin = hit.origin;
+                            let scale_exp = hit.scale_exp;
+                            handled_interact =
+                                self.run_block_interaction(&block, origin, scale_exp);
                         }
                         if handled_interact {
                             // Interaction consumed the right-click — skip placement.
@@ -876,15 +834,77 @@ impl App {
         self.apply_pending_player_movement_modifiers();
     }
 
+    /// Run OP_BLOCK_INTERACT against `block` occupying the cell at `origin` /
+    /// `scale_exp`. Returns true if the interaction was handled (a GUI opened
+    /// or side effects ran). Non-interactable blocks return false.
+    pub(super) fn run_block_interaction(
+        &mut self,
+        block: &polychora::shared::voxel::BlockData,
+        origin: [polychora::shared::spatial::ChunkCoord; 4],
+        scale_exp: i8,
+    ) -> bool {
+        if !self
+            .content_registry
+            .is_block_interactable(block.namespace, block.block_type)
+        {
+            return false;
+        }
+        let position = origin.map(|c| c.to_num::<i64>());
+        let scan_radius = self
+            .content_registry
+            .block_structure_scan_radius(block.namespace, block.block_type);
+        let structure_snapshot = if scan_radius > 0 {
+            build_structure_snapshot(&self.scene, origin, scale_exp, scan_radius)
+        } else {
+            Vec::new()
+        };
+        let now_ms = self.start_time.elapsed().as_millis() as u64;
+        let Some(wasm) = self.wasm_model_manager.as_mut() else {
+            return false;
+        };
+        let result = polychora::block_gui::try_block_interact(
+            wasm,
+            block,
+            position,
+            &self.inventory,
+            self.hotbar_selected_index as u32,
+            now_ms,
+            scale_exp,
+            structure_snapshot,
+        );
+        match result {
+            polychora::block_gui::BlockInteractResult::OpenGui(session) => {
+                eprintln!(
+                    "Opened block GUI: {} at ({}, {}, {}, {})",
+                    session.title, position[0], position[1], position[2], position[3],
+                );
+                self.block_gui_session = Some(session);
+                if let Some(window) = self.rcx.as_ref().and_then(|rcx| rcx.window.clone()) {
+                    self.release_mouse(&window);
+                }
+                true
+            }
+            polychora::block_gui::BlockInteractResult::Handled(effects) => {
+                self.process_block_interact_side_effects(
+                    &effects.side_effects,
+                    origin,
+                    scale_exp,
+                );
+                true
+            }
+            polychora::block_gui::BlockInteractResult::Nothing => false,
+        }
+    }
+
     /// Process side effects from OP_BLOCK_INTERACT (client-side).
-    ///
-    /// Allowed effects: UpdateBlockMetadata, ConsumeHeldItem.
     fn process_block_interact_side_effects(
         &mut self,
         side_effects: &[polychora_plugin_api::side_effects::SideEffect],
         block_position: [polychora::shared::spatial::ChunkCoord; 4],
+        block_scale_exp: i8,
     ) {
         use polychora_plugin_api::side_effects::SideEffect;
+        let cell = polychora::shared::spatial::step_for_scale(block_scale_exp);
         for effect in side_effects {
             match effect {
                 SideEffect::UpdateBlockMetadata { metadata } => {
@@ -932,8 +952,68 @@ impl App {
                         self.inventory.hotbar_slot(self.hotbar_selected_index),
                     );
                 }
-                SideEffect::SpawnEntity { .. } => {
-                    eprintln!("Warning: SpawnEntity side effect not allowed for OP_BLOCK_INTERACT");
+                SideEffect::SpawnEntity {
+                    entity_type_ns,
+                    entity_type,
+                    offset,
+                } => {
+                    let half = cell.to_num::<f32>() * 0.5;
+                    let spawn_pos = [
+                        block_position[0].to_num::<f32>() + half + offset[0],
+                        block_position[1].to_num::<f32>() + half + offset[1],
+                        block_position[2].to_num::<f32>() + half + offset[2],
+                        block_position[3].to_num::<f32>() + half + offset[3],
+                    ];
+                    let scale = self
+                        .content_registry
+                        .entity_lookup(*entity_type_ns, *entity_type)
+                        .map(|e| e.default_scale)
+                        .unwrap_or(1.0);
+                    let look = self.current_look_direction();
+                    self.send_multiplayer_spawn_entity(
+                        *entity_type_ns,
+                        *entity_type,
+                        spawn_pos,
+                        look,
+                        scale,
+                    );
+                }
+                SideEffect::EditWorldTree { offset_cells, tree } => {
+                    let origin = [
+                        block_position[0].saturating_add(cell.saturating_mul(
+                            polychora::shared::spatial::ChunkCoord::from_num(offset_cells[0]),
+                        )),
+                        block_position[1].saturating_add(cell.saturating_mul(
+                            polychora::shared::spatial::ChunkCoord::from_num(offset_cells[1]),
+                        )),
+                        block_position[2].saturating_add(cell.saturating_mul(
+                            polychora::shared::spatial::ChunkCoord::from_num(offset_cells[2]),
+                        )),
+                        block_position[3].saturating_add(cell.saturating_mul(
+                            polychora::shared::spatial::ChunkCoord::from_num(offset_cells[3]),
+                        )),
+                    ];
+                    let host_tree =
+                        polychora::shared::region_tree::region_tree_from_plugin(tree);
+                    match postcard::to_allocvec(&host_tree) {
+                        Ok(tree_data) => self.send_set_tree_core(origin, tree_data),
+                        Err(e) => eprintln!("EditWorldTree: failed to serialize tree: {e}"),
+                    }
+                }
+                SideEffect::TeleportPlayer { delta } => {
+                    for (axis, d) in delta.iter().enumerate() {
+                        if d.is_finite() {
+                            self.camera.position[axis] += d;
+                        }
+                    }
+                    eprintln!(
+                        "TeleportPlayer: shifted by ({:+.1}, {:+.1}, {:+.1}, {:+.1})",
+                        delta[0], delta[1], delta[2], delta[3]
+                    );
+                }
+                SideEffect::StatusMessage { text } => {
+                    eprintln!("[status] {text}");
+                    self.set_hud_status(text.clone());
                 }
             }
         }
@@ -1804,4 +1884,53 @@ impl App {
         }
         self.persist_settings_if_needed(false);
     }
+}
+
+/// Snapshot the exact-fit blocks around a catalyst block for OP_BLOCK_INTERACT.
+///
+/// Offsets are in cells of the catalyst's own scale, relative to its cell;
+/// only blocks that exactly fill a cell at that scale are included (see
+/// `SnapshotBlock`). Cost is (2r+1)^4 point queries, paid only on interact
+/// with a block whose declaration requests a scan.
+fn build_structure_snapshot(
+    scene: &Scene,
+    origin: [polychora::shared::spatial::ChunkCoord; 4],
+    scale_exp: i8,
+    radius: u8,
+) -> Vec<polychora_plugin_api::gui_abi::SnapshotBlock> {
+    use polychora::shared::spatial::{step_for_scale, ChunkCoord};
+    let cell = step_for_scale(scale_exp);
+    if cell == ChunkCoord::ZERO {
+        return Vec::new();
+    }
+    let r = radius as i32;
+    let mut snapshot = Vec::new();
+    for dx in -r..=r {
+        for dy in -r..=r {
+            for dz in -r..=r {
+                for dw in -r..=r {
+                    let offset = [dx, dy, dz, dw];
+                    let cell_min = [
+                        origin[0].saturating_add(cell.saturating_mul(ChunkCoord::from_num(dx))),
+                        origin[1].saturating_add(cell.saturating_mul(ChunkCoord::from_num(dy))),
+                        origin[2].saturating_add(cell.saturating_mul(ChunkCoord::from_num(dz))),
+                        origin[3].saturating_add(cell.saturating_mul(ChunkCoord::from_num(dw))),
+                    ];
+                    let Some(block) = scene.block_exactly_filling_cell(cell_min, scale_exp)
+                    else {
+                        continue;
+                    };
+                    if block.is_air() {
+                        continue;
+                    }
+                    snapshot.push(polychora_plugin_api::gui_abi::SnapshotBlock {
+                        offset,
+                        namespace: block.namespace,
+                        block_type: block.block_type,
+                    });
+                }
+            }
+        }
+    }
+    snapshot
 }

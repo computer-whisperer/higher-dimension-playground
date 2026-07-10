@@ -1,5 +1,8 @@
+use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
+
+use crate::region_tree::RegionTreeCore;
 
 /// A side effect returned by a WASM plugin call that the host should execute.
 ///
@@ -25,6 +28,18 @@ pub enum SideEffect {
         item_data: Vec<u8>,
         count: u32,
     },
+    /// Splice a region tree into the world near the block.
+    ///
+    /// `offset_cells` is relative to the block's cell, in cells of the
+    /// block's own scale (matching `SnapshotBlock::offset` semantics).
+    EditWorldTree {
+        offset_cells: [i32; 4],
+        tree: RegionTreeCore,
+    },
+    /// Teleport the interacting player by a world-space delta.
+    TeleportPlayer { delta: [f32; 4] },
+    /// Show a transient status message to the interacting player.
+    StatusMessage { text: String },
 }
 
 /// Generic wrapper for all WASM opcode outputs.

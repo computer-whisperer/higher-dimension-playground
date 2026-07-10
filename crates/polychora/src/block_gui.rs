@@ -83,12 +83,16 @@ pub enum BlockInteractResult {
 }
 
 /// Try to interact with a block by calling OP_BLOCK_INTERACT.
+#[allow(clippy::too_many_arguments)]
 pub fn try_block_interact(
     wasm: &mut WasmPluginManager,
     block: &BlockData,
     position: [i64; 4],
     inventory: &Inventory,
     held_item_index: u32,
+    now_ms: u64,
+    block_scale_exp: i8,
+    structure_snapshot: Vec<polychora_plugin_api::gui_abi::SnapshotBlock>,
 ) -> BlockInteractResult {
     let input = BlockInteractInput {
         block_ns: block.namespace,
@@ -97,6 +101,9 @@ pub fn try_block_interact(
         metadata: block.extra_data.clone(),
         player_inventory: inventory_to_item_slots(inventory),
         held_item_index,
+        now_ms,
+        block_scale_exp,
+        structure_snapshot,
     };
 
     let input_bytes = match postcard::to_allocvec(&input) {

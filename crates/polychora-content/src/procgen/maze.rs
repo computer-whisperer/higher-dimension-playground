@@ -5,7 +5,7 @@ use polychora_plugin_api::procgen_abi::{
     ProcgenGenerateInput, ProcgenGenerateOutput, ProcgenPrepareInput, ProcgenPrepareOutput,
 };
 use polychora_plugin_api::region_tree::{
-    BlockData, ChunkArrayData, ChunkPayload, RegionNodeKind, RegionTreeCore,
+    BlockData, ChunkArrayData, RegionNodeKind, RegionTreeCore,
 };
 
 use super::structures::{aabb4_from_chunk_lattice, dedup_chunks_to_palette};

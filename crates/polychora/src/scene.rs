@@ -514,6 +514,29 @@ impl Scene {
         self.world_tree.block_at(pos)
     }
 
+    /// Look up the block that exactly fills the cell whose minimum corner is
+    /// `cell_min` at `scale_exp`. Returns `None` if the position is air or the
+    /// covering block's extent differs from the cell (coarser or finer, or
+    /// misaligned). Used for structure snapshots around catalyst blocks.
+    pub fn block_exactly_filling_cell(
+        &self,
+        cell_min: [ChunkCoord; 4],
+        scale_exp: i8,
+    ) -> Option<BlockData> {
+        let cell = step_for_scale(scale_exp);
+        if cell == ChunkCoord::ZERO {
+            return None;
+        }
+        let half = cell >> 1;
+        let center = cell_min.map(|c| c.saturating_add(half));
+        let hit = self.world_tree.block_and_bounds_at(center)?;
+        let exact = (0..4).all(|axis| {
+            hit.bounds.min[axis] == cell_min[axis]
+                && hit.bounds.max[axis] == cell_min[axis].saturating_add(cell)
+        });
+        exact.then_some(hit.block)
+    }
+
     pub fn debug_world_tree_chunk_payload(
         &self,
         chunk_key: ChunkKey,

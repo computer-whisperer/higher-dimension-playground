@@ -39,6 +39,11 @@ pub struct BlockDeclaration {
     /// via `OP_BLOCK_TICK`.
     #[serde(default)]
     pub tick_config: Option<BlockTickConfig>,
+    /// If nonzero, `OP_BLOCK_INTERACT` for this block includes a structure
+    /// snapshot of the surrounding blocks within this radius (in cells of the
+    /// block's own scale). Used by catalyst blocks that recognize sigils.
+    #[serde(default)]
+    pub structure_scan_radius: u8,
 }
 
 /// Configuration for server-side block ticking, declared per block type.
@@ -153,6 +158,7 @@ mod tests {
                 light_emission: 15,
                 interactable: false,
                 tick_config: None,
+                structure_scan_radius: 2,
             }],
             entities: vec![EntityDeclaration {
                 type_id: 0xcafebabe,

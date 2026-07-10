@@ -32,6 +32,7 @@ pub fn block_interact(input: &BlockInteractInput) -> WasmCallResult<BlockInterac
         BLOCK_CHEST => WasmCallResult::new(chest_interact(input)),
         BLOCK_SPAWNER => spawner_interact(input),
         BLOCK_BLUEPRINT_DISPENSER => blueprint_dispenser_interact(),
+        BLOCK_RESONATOR => crate::sigils::resonator_interact(input),
         _ => WasmCallResult::new(BlockInteractOutput::Nothing),
     }
 }

@@ -6,6 +6,18 @@ use serde::{Deserialize, Serialize};
 // OP_BLOCK_INTERACT
 // ---------------------------------------------------------------------------
 
+/// A block captured in the structure snapshot around an interacted block.
+///
+/// `offset` is in cells of the interacted block's own scale, relative to the
+/// interacted block's cell. Only blocks that exactly fill a cell at that
+/// scale are included; coarser or finer neighbors are omitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotBlock {
+    pub offset: [i32; 4],
+    pub namespace: u32,
+    pub block_type: u32,
+}
+
 /// Input to `OP_BLOCK_INTERACT` — sent when a player interacts with a block.
 #[derive(Serialize, Deserialize, Default)]
 pub struct BlockInteractInput {
@@ -18,6 +30,17 @@ pub struct BlockInteractInput {
     /// Index of the player's currently selected hotbar slot.
     #[serde(default)]
     pub held_item_index: u32,
+    /// Host time in milliseconds (for cooldowns).
+    #[serde(default)]
+    pub now_ms: u64,
+    /// Scale exponent of the interacted block's cell (0 = unit voxel,
+    /// -1 = half scale, ...). Sigil tier derives from this.
+    #[serde(default)]
+    pub block_scale_exp: i8,
+    /// Blocks surrounding the interacted block, present only when the block's
+    /// declaration sets `structure_scan_radius > 0`.
+    #[serde(default)]
+    pub structure_snapshot: Vec<SnapshotBlock>,
 }
 
 /// Output from `OP_BLOCK_INTERACT`.

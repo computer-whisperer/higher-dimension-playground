@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
 mod block_interact;
@@ -9,11 +9,14 @@ mod entity_tick;
 mod math4d;
 mod models;
 mod procgen;
+mod sigils;
 mod textures;
 
+#[cfg(all(target_arch = "wasm32", not(test)))]
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
+#[cfg(all(target_arch = "wasm32", not(test)))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
