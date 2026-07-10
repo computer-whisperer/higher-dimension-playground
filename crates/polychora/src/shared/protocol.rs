@@ -175,7 +175,8 @@ pub enum ClientMessage {
     /// Place a structure (region tree) at a world position.
     /// The tree is serialized as postcard bytes (host RegionTreeCore).
     SetTreeCore {
-        /// World-space origin for the structure.
+        /// World-space origin for the structure, as fixed-point ChunkCoord
+        /// bits (same convention as `SetVoxel::position`).
         position: [i64; 4],
         /// Postcard-serialized RegionTreeCore.
         tree_data: Vec<u8>,

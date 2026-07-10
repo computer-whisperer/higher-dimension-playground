@@ -945,16 +945,15 @@ impl App {
         bp_meta: &polychora::shared::item_types::BlueprintMeta,
         position: [polychora::shared::spatial::ChunkCoord; 4],
     ) {
-        let origin = position.map(|c| c.to_num::<i64>());
         let host_tree = bp_meta.to_host_tree();
         eprintln!(
             "Blueprint: placing tree at ({}, {}, {}, {})",
-            origin[0], origin[1], origin[2], origin[3],
+            position[0], position[1], position[2], position[3],
         );
 
         // TODO: orient the tree when player orientation is wired up
         let tree_data = postcard::to_allocvec(&host_tree).expect("postcard serialize tree");
-        self.send_set_tree_core(origin, tree_data);
+        self.send_set_tree_core(position, tree_data);
     }
 
     /// Update WAILA (What Am I Looking At) target based on block and entity

@@ -669,7 +669,8 @@ fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8
     };
 
     // Collect all blocks, grouped by scale_exp for bulk insertion.
-    let offset: [ChunkCoord; 4] = position.map(ChunkCoord::from_num);
+    // `position` carries fixed-point ChunkCoord bits (same as SetVoxel).
+    let offset: [ChunkCoord; 4] = position.map(ChunkCoord::from_bits);
     let mut by_scale: HashMap<i8, Vec<([ChunkCoord; 4], BlockData)>> = HashMap::new();
     crate::shared::region_tree::for_each_block_in_tree_scaled(&tree, &mut |voxel_pos, block| {
         let world_pos = [
@@ -691,7 +692,7 @@ fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8
     }
     eprintln!(
         "SetTreeCore: placed {count} blocks at ({}, {}, {}, {})",
-        position[0], position[1], position[2], position[3]
+        offset[0], offset[1], offset[2], offset[3]
     );
 }
 

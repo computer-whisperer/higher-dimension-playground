@@ -1293,34 +1293,29 @@ fn for_each_block_in_kind_scaled(
             if block.is_air() || block.is_virgin() {
                 return;
             }
-            // Uniform at scale 0: iterate all integer positions in bounds.
-            let (lmin, lmax) = bounds.to_chunk_lattice_bounds(0);
-            let cs = CHUNK_SIZE as i32;
-            for lw in lmin[3]..=lmax[3] {
-                for lz in lmin[2]..=lmax[2] {
-                    for ly in lmin[1]..=lmax[1] {
-                        for lx in lmin[0]..=lmax[0] {
-                            for vw in 0..CHUNK_SIZE {
-                                for vz in 0..CHUNK_SIZE {
-                                    for vy in 0..CHUNK_SIZE {
-                                        for vx in 0..CHUNK_SIZE {
-                                            let wx = lx * cs + vx as i32;
-                                            let wy = ly * cs + vy as i32;
-                                            let wz = lz * cs + vz as i32;
-                                            let ww = lw * cs + vw as i32;
-                                            callback(
-                                                [
-                                                    ChunkCoord::from_num(wx),
-                                                    ChunkCoord::from_num(wy),
-                                                    ChunkCoord::from_num(wz),
-                                                    ChunkCoord::from_num(ww),
-                                                ],
-                                                block.clone(),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+            // Iterate the cell lattice at the block's own scale, clipped to
+            // `bounds`. Bounds need not be chunk-aligned (e.g. a small
+            // uniform box from a plugin EditWorldTree effect).
+            let se = block.scale_exp;
+            if step_for_scale(se) == ChunkCoord::ZERO {
+                return;
+            }
+            let cmin: [i32; 4] = std::array::from_fn(|i| lattice_from_fixed(bounds.min[i], se));
+            let cmax: [i32; 4] =
+                std::array::from_fn(|i| lattice_from_fixed(bounds.max[i], se) - 1);
+            for cw in cmin[3]..=cmax[3] {
+                for cz in cmin[2]..=cmax[2] {
+                    for cy in cmin[1]..=cmax[1] {
+                        for cx in cmin[0]..=cmax[0] {
+                            callback(
+                                [
+                                    fixed_from_lattice(cx, se),
+                                    fixed_from_lattice(cy, se),
+                                    fixed_from_lattice(cz, se),
+                                    fixed_from_lattice(cw, se),
+                                ],
+                                block.clone(),
+                            );
                         }
                     }
                 }

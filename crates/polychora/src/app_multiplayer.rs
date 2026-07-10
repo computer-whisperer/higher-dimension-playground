@@ -1842,8 +1842,13 @@ impl App {
         }
     }
 
-    pub(super) fn send_set_tree_core(&self, position: [i64; 4], tree_data: Vec<u8>) {
+    pub(super) fn send_set_tree_core(
+        &self,
+        position: [polychora::shared::spatial::ChunkCoord; 4],
+        tree_data: Vec<u8>,
+    ) {
         if let Some(client) = self.multiplayer.as_ref() {
+            let position = position.map(|c| c.to_bits());
             client.send(MultiplayerClientMessage::SetTreeCore {
                 position,
                 tree_data,

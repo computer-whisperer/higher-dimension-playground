@@ -5486,3 +5486,57 @@ fn splice_streaming_patches_populates_all_regions() {
             .join("\n")
     );
 }
+
+#[test]
+fn for_each_block_iterates_sub_chunk_uniform_at_block_scale() {
+    use crate::shared::spatial::ChunkCoord;
+
+    // A 1x8x1x1-cell uniform pillar at scale -1 (half-unit cells), with
+    // bounds far smaller than a chunk and not chunk-aligned.
+    let mut block = BlockData::simple(7, 42);
+    block.scale_exp = -1;
+    let half = ChunkCoord::from_num(0.5f32);
+    let tree = RegionTreeCore {
+        bounds: Aabb4i {
+            min: [ChunkCoord::ZERO; 4],
+            max: [
+                half,
+                ChunkCoord::from_num(4),
+                half,
+                half,
+            ],
+        },
+        kind: RegionNodeKind::Uniform(block.clone()),
+        generator_version_hash: 0,
+    };
+
+    let mut positions = Vec::new();
+    for_each_block_in_tree_scaled(&tree, &mut |pos, b| {
+        assert_eq!(b.block_type, 42);
+        assert_eq!(b.scale_exp, -1);
+        positions.push(pos);
+    });
+
+    // 8 half-unit cells stacked in y: y = 0.0, 0.5, ..., 3.5.
+    assert_eq!(positions.len(), 8);
+    for (i, pos) in positions.iter().enumerate() {
+        assert_eq!(pos[0], ChunkCoord::ZERO);
+        assert_eq!(pos[2], ChunkCoord::ZERO);
+        assert_eq!(pos[3], ChunkCoord::ZERO);
+        assert_eq!(pos[1], half * ChunkCoord::from_num(i as i32));
+    }
+}
+
+#[test]
+fn for_each_block_iterates_chunk_aligned_uniform_at_scale_zero() {
+    // A chunk-aligned scale-0 uniform region still emits every cell.
+    let block = BlockData::simple(7, 43);
+    let tree = RegionTreeCore {
+        bounds: Aabb4i::from_i32([0, 0, 0, 0], [8, 8, 8, 8]),
+        kind: RegionNodeKind::Uniform(block),
+        generator_version_hash: 0,
+    };
+    let mut count = 0usize;
+    for_each_block_in_tree_scaled(&tree, &mut |_, _| count += 1);
+    assert_eq!(count, 8 * 8 * 8 * 8);
+}
